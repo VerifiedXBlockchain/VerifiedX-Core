@@ -193,15 +193,8 @@ namespace VerifiedXCore.P2P
                     blockSize = Block.Size;
                     if (Block.Height == height)
                     {
-                        // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
-                        BlockDownloadService.BlockDict.AddOrUpdate(
-                            height,
-                            new List<(Block, string)> { (Block, node.NodeIP) },
-                            (key, existingList) =>
-                            {
-                                existingList.Add((Block, node.NodeIP));
-                                return existingList;
-                            });
+                        // VX-19: de-duplicated staging (a reply to our own request).
+                        BlockStaging.Stage(Block, node.NodeIP);
                         return true;
                     }
                 }

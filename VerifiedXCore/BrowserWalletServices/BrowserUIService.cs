@@ -950,7 +950,7 @@ function renderTokens(tokens){
       '<td><div style=""display:flex;align-items:center;gap:10px""><div class=""tok-icon"">'+esc(initials)+'</div><div><div style=""font-weight:600"">'+esc(t.name)+'</div><div class=""muted"" style=""font-size:11px"">'+esc(t.ticker)+'</div></div></div></td>'+
       '<td class=""grn"" style=""font-weight:700;font-variant-numeric:tabular-nums"">'+fmtTok(t.balance,t.decimals)+'</td>'+
       '<td class=""muted"" style=""font-variant-numeric:tabular-nums"">'+fmtTok(t.lockedBalance,t.decimals)+'</td>'+
-      '<td><button class=""act-btn prim"" onclick=""openSendToken(\''+esc(t.scUID)+'\',\''+esc(t.name)+'\',\''+esc(t.ticker)+'\')"">&rarr; Send</button></td>'+
+      '<td><button class=""act-btn prim"" onclick=""openSendToken('+jsa(t.scUID)+','+jsa(t.name)+','+jsa(t.ticker)+')"">&rarr; Send</button></td>'+
       '</tr>';
   }).join('');
   c.innerHTML='<div class=""tbl-wrap""><table class=""dtbl""><thead><tr><th>Token</th><th>Balance</th><th>Locked</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>';
@@ -978,10 +978,10 @@ function renderNFTs(nfts){
       '<div class=""nft-icon"">'+icon+'</div>'+
       '<div class=""nft-name"">'+esc(n.name||'Unnamed')+'</div>'+
       '<div style=""display:flex;gap:6px;flex-wrap:wrap"">'+badge+pubBadge+'</div>'+
-      '<div class=""nft-uid"" title=""'+esc(n.scUID)+'"">'+uid+'</div>'+
+      '<div class=""nft-uid"" title=""'+esc(n.scUID)+'"">'+esc(uid)+'</div>'+
       (n.minterName?'<div class=""muted"" style=""font-size:11px"">By: '+esc(n.minterName)+'</div>':'')+
       '<div class=""nft-actions"">'+
-      '<button class=""act-btn prim"" onclick=""openTransferNFT(\''+esc(n.scUID)+'\',\''+esc(n.name||'Unnamed')+'\')"">&rarr; Transfer</button>'+
+      '<button class=""act-btn prim"" onclick=""openTransferNFT('+jsa(n.scUID)+','+jsa(n.name||'Unnamed')+')"">&rarr; Transfer</button>'+
       '</div>'+
       '</div>';
   }).join('');
@@ -1006,17 +1006,17 @@ function renderVBTC(contracts){
     var canRequest=c.balance>0&&(c.withdrawalStatus==='None'||c.withdrawalStatus==='Completed');
     var canComplete=c.withdrawalStatus==='Requested';
     var btns='<div class=""nft-actions"" style=""margin-top:6px"">';
-    if(c.balance>0)btns+='<button class=""act-btn prim"" onclick=""openVBTCTx(\''+esc(c.scUID)+'\','+c.balance+')"">&rarr; Send vBTC</button>';
-    if(c.balance>0)btns+='<button class=""act-btn prim"" style=""background:rgba(88,166,255,.15);border-color:rgba(88,166,255,.4)"" onclick=""openBridge(\''+esc(c.scUID)+'\',\''+esc(c.ownerAddress)+'\','+c.balance+')"">&#127881; Bridge to Base</button>';
-    if(canRequest)btns+='<button class=""act-btn prim"" onclick=""openWD(\''+esc(c.scUID)+'\',\''+esc(c.ownerAddress)+'\','+c.balance+')"">&darr; Withdraw</button>';
-    if(canComplete)btns+='<button class=""act-btn sec"" onclick=""openWDC(\''+esc(c.scUID)+'\','+c.activeWithdrawalAmount+',\''+esc(c.activeWithdrawalDest||'')+'\')"">&check; Complete Withdrawal</button>';
+    if(c.balance>0)btns+='<button class=""act-btn prim"" onclick=""openVBTCTx('+jsa(c.scUID)+','+Number(c.balance)+')"">&rarr; Send vBTC</button>';
+    if(c.balance>0)btns+='<button class=""act-btn prim"" style=""background:rgba(88,166,255,.15);border-color:rgba(88,166,255,.4)"" onclick=""openBridge('+jsa(c.scUID)+','+jsa(c.ownerAddress)+','+Number(c.balance)+')"">&#127881; Bridge to Base</button>';
+    if(canRequest)btns+='<button class=""act-btn prim"" onclick=""openWD('+jsa(c.scUID)+','+jsa(c.ownerAddress)+','+Number(c.balance)+')"">&darr; Withdraw</button>';
+    if(canComplete)btns+='<button class=""act-btn sec"" onclick=""openWDC('+jsa(c.scUID)+','+Number(c.activeWithdrawalAmount)+','+jsa(c.activeWithdrawalDest||'')+')"">&check; Complete Withdrawal</button>';
     btns+='</div>';
     return '<div class=""vbtc-card"">'+
       '<div class=""muted"" style=""font-size:11px;font-family:monospace"">'+esc(c.scUID||'')+'</div>'+
       '<div class=""vbtc-bal"">'+fmtBal(c.balance)+'<span>vBTC</span></div>'+
       '<div class=""vbtc-row""><span class=""k"">BTC Deposit</span><span class=""v"">'+esc(c.depositAddress||'N/A')+'</span></div>'+
       '<div class=""vbtc-row""><span class=""k"">Withdrawal Status</span><span class=""badge '+statusCls+'"">'+esc(c.withdrawalStatus)+'</span></div>'+
-      (c.activeWithdrawalAmount?'<div class=""vbtc-row""><span class=""k"">Pending Withdrawal</span><span class=""v org"">'+c.activeWithdrawalAmount+' BTC &rarr; '+esc(c.activeWithdrawalDest||'')+'</span></div>':'')+
+      (c.activeWithdrawalAmount?'<div class=""vbtc-row""><span class=""k"">Pending Withdrawal</span><span class=""v org"">'+Number(c.activeWithdrawalAmount)+' BTC &rarr; '+esc(c.activeWithdrawalDest||'')+'</span></div>':'')+
       '<div class=""vbtc-row""><span class=""k"">Validators</span><span class=""v"">'+c.totalValidators+' (threshold: '+c.requiredThreshold+')</span></div>'+
       '<div class=""vbtc-row""><span class=""k"">Proof Block</span><span class=""v"">#'+c.proofBlockHeight+'</span></div>'+
       btns+
@@ -1121,13 +1121,13 @@ function loadBridgeHistory(){
       var lid=lk.LockId||lk.lockId||'';
       var actCol='--';
       if(!finalStatuses[st]){
-        actCol='<button class=""act-btn sec"" style=""padding:4px 10px;font-size:11px"" onclick=""doForceRetryBridge(\''+esc(lid)+'\')""  title=""Force retry: re-collect attestations and re-submit mint"">&#128260; Retry</button>';
+        actCol='<button class=""act-btn sec"" style=""padding:4px 10px;font-size:11px"" onclick=""doForceRetryBridge('+jsa(lid)+')""  title=""Force retry: re-collect attestations and re-submit mint"">&#128260; Retry</button>';
       }
-      return '<tr><td><code class=""muted"" style=""cursor:pointer;word-break:break-all"" title=""Click to copy"" onclick=""navigator.clipboard.writeText(this.textContent)"">'+lid+'</code></td>'+
+      return '<tr><td><code class=""muted"" style=""cursor:pointer;word-break:break-all"" title=""Click to copy"" onclick=""navigator.clipboard.writeText(this.textContent)"">'+esc(lid)+'</code></td>'+
         '<td>'+fmtBal(lk.Amount||lk.amount||0)+' vBTC</td>'+
-        '<td><code class=""muted"" title=""'+esc(lk.EvmDestination||lk.evmDestination||'')+'"">'+ shn(lk.EvmDestination||lk.evmDestination||'',14)+'</code></td>'+
+        '<td><code class=""muted"" title=""'+esc(lk.EvmDestination||lk.evmDestination||'')+'"">'+ esc(shn(lk.EvmDestination||lk.evmDestination||'',14))+'</code></td>'+
         '<td><span class=""badge '+sCls+'"">'+esc(st)+'</span></td>'+
-        '<td>'+(lk.BaseTxHash||lk.baseTxHash?'<code class=""muted"">'+shn(lk.BaseTxHash||lk.baseTxHash,12)+'</code>':'--')+'</td>'+
+        '<td>'+(lk.BaseTxHash||lk.baseTxHash?'<code class=""muted"">'+esc(shn(lk.BaseTxHash||lk.baseTxHash,12))+'</code>':'--')+'</td>'+
         '<td>'+actCol+'</td></tr>';
     }).join('');
     el('bridge-hist-content').innerHTML='<div class=""tbl-wrap""><table class=""dtbl""><thead><tr><th>Lock ID</th><th>Amount</th><th>EVM Dest</th><th>Status</th><th>Base TX</th><th>Actions</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
@@ -1243,8 +1243,8 @@ function renderBTC(accs){
       (a.adnr?'<div class=""muted"" style=""font-size:12px"">'+esc(a.adnr)+'</div>':'')+
       baseHtml+
       '<div class=""nft-actions"" style=""margin-top:8px;display:flex;flex-wrap:wrap;gap:6px"">'+
-      '<button class=""act-btn prim"" onclick=""openSendBTC(\''+esc(a.address)+'\')"">&rarr; Send BTC</button>'+
-      '<button class=""act-btn sec"" onclick=""linkBtcEvm(\''+esc(a.address)+'\')"">Link Base EVM</button>'+
+      '<button class=""act-btn prim"" onclick=""openSendBTC('+jsa(a.address)+')"">&rarr; Send BTC</button>'+
+      '<button class=""act-btn sec"" onclick=""linkBtcEvm('+jsa(a.address)+')"">Link Base EVM</button>'+
       '</div>'+
       '</div>';
   }).join('');
@@ -1275,7 +1275,7 @@ function renderHistory(txs){
       '<td><code class=""muted"">'+hashShort+'</code></td>'+
       '<td>'+dirLbl+'</td>'+
       '<td><span class=""badge badge-tok"" style=""font-size:10px"">'+tt+'</span></td>'+
-      '<td><code class=""muted"" title=""'+esc(peer||'')+'"">'+shn(peer||'--',18)+'</code></td>'+
+      '<td><code class=""muted"" title=""'+esc(peer||'')+'"">'+esc(shn(peer||'--',18))+'</code></td>'+
       '<td class=""'+(dir==='in'?'grn':'red')+'"" style=""font-weight:600;font-variant-numeric:tabular-nums"">'+(dir==='in'?'+':'-')+tx.amount+' VFX</td>'+
       '<td><span class=""badge '+sc+'"">'+sn+'</span></td>'+
       '<td class=""muted"">'+ago(tx.timestamp)+'</td>'+
@@ -1696,7 +1696,7 @@ window.doCreateZfx=function(){
   if(!pwd||pwd.length<8){showMsg('czfx-msg','Password must be at least 8 characters.','err');return;}
   var btn=el('czfx-btn');
   btn.disabled=true;btn.textContent='Creating...';
-  fetch('/wallet/api/privacy/createShieldedAddress/'+encodeURIComponent(addr)+'/'+encodeURIComponent(pwd))
+  fetch('/wallet/api/privacy/createShieldedAddress',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:addr,password:pwd})})
     .then(function(r){return r.json();}).then(function(d){
       btn.disabled=false;btn.textContent='Create';
       if(d.success){
@@ -1731,7 +1731,7 @@ window.doShield=function(){
   if(!zfx.startsWith('zfx_')){showMsg('sh-msg','Shielded address must start with zfx_','err');return;}
   var btn=el('sh-btn');
   btn.disabled=true;btn.textContent='Shielding...';
-  fetch('/wallet/api/privacy/shield/'+encodeURIComponent(from)+'/'+encodeURIComponent(zfx)+'/'+encodeURIComponent(amt))
+  fetch('/wallet/api/privacy/shield',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fromAddress:from,zfxAddress:zfx,amount:String(amt)})})
     .then(function(r){return r.json();}).then(function(d){
       btn.disabled=false;btn.textContent='Shield';
       if(d.success){
@@ -1767,9 +1767,7 @@ window.doUnshield=function(){
   if(!zfx||!to||!amt){showMsg('ush-msg','Please fill all fields.','err');return;}
   var btn=el('ush-btn');
   btn.disabled=true;btn.textContent='Unshielding...';
-  var url='/wallet/api/privacy/unshield/'+encodeURIComponent(zfx)+'/'+encodeURIComponent(to)+'/'+encodeURIComponent(amt);
-  if(pwd)url+='?password='+encodeURIComponent(pwd);
-  fetch(url).then(function(r){return r.json();}).then(function(d){
+  fetch('/wallet/api/privacy/unshield',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({zfxAddress:zfx,toAddress:to,amount:String(amt),password:pwd||null})}).then(function(r){return r.json();}).then(function(d){
     btn.disabled=false;btn.textContent='Unshield';
     if(d.success){
       showMsg('ush-msg','Unshield TX broadcast! Hash: '+(d.hash||''),'ok');
@@ -1804,9 +1802,7 @@ window.doPrivTransfer=function(){
   if(!to.startsWith('zfx_')){showMsg('ptx-msg','Recipient must be a zfx_ address.','err');return;}
   var btn=el('ptx-btn');
   btn.disabled=true;btn.textContent='Sending...';
-  var url='/wallet/api/privacy/transfer/'+encodeURIComponent(from)+'/'+encodeURIComponent(to)+'/'+encodeURIComponent(amt);
-  if(pwd)url+='?password='+encodeURIComponent(pwd);
-  fetch(url).then(function(r){return r.json();}).then(function(d){
+  fetch('/wallet/api/privacy/transfer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fromZfxAddress:from,toZfxAddress:to,amount:String(amt),password:pwd||null})}).then(function(r){return r.json();}).then(function(d){
     btn.disabled=false;btn.textContent='Send';
     if(d.success){
       showMsg('ptx-msg','Private transfer broadcast! Hash: '+(d.hash||''),'ok');
@@ -1825,8 +1821,7 @@ window.doScanZfx=function(){
   if(!selZfx)return;
   var scanBtn=document.querySelector('#priv-actions .act-btn.sec');
   if(scanBtn){scanBtn.disabled=true;scanBtn.textContent='Scanning...';}
-  var url='/wallet/api/privacy/scan/'+encodeURIComponent(selZfx);
-  fetch(url).then(function(r){return r.json();}).then(function(d){
+  fetch('/wallet/api/privacy/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({zfxAddress:selZfx})}).then(function(r){return r.json();}).then(function(d){
     if(scanBtn){scanBtn.disabled=false;scanBtn.innerHTML='&#128269; Scan for Notes';}
     if(d.success){
       var msg='Scanned '+d.blocksScanned+' blocks, '+d.transactionsScanned+' TXs. Found '+d.newNotesFound+' new note'+(d.newNotesFound!==1?'s':'')+ '.';
@@ -2051,8 +2046,7 @@ window.doScanVbtc=function(){
   if(!selZfx||!selVbtcPrivSc)return;
   var scanBtn=document.querySelector('#vbtc-priv-actions .act-btn.sec');
   if(scanBtn){scanBtn.disabled=true;scanBtn.textContent='Scanning...';}
-  var url='/wallet/api/privacy/vbtc/scan/'+encodeURIComponent(selZfx)+'/'+encodeURIComponent(selVbtcPrivSc);
-  fetch(url).then(function(r){return r.json();}).then(function(d){
+  fetch('/wallet/api/privacy/vbtc/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({zfxAddress:selZfx,scUID:selVbtcPrivSc})}).then(function(r){return r.json();}).then(function(d){
     if(scanBtn){scanBtn.disabled=false;scanBtn.innerHTML='&#128269; Scan vBTC Notes';}
     if(d.success){
       var msg='Scanned '+d.blocksScanned+' blocks, '+d.transactionsScanned+' TXs. Found '+d.newNotesFound+' new note'+(d.newNotesFound!==1?'s':'')+'. Balance: '+fmtBal(d.vbtcShieldedBalance)+' vBTC';
@@ -2069,7 +2063,8 @@ window.doScanVbtc=function(){
 
 /* ---- Helpers ---- */
 function el(id){return document.getElementById(id);}
-function esc(s){return s?String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/""/g,'&quot;').replace(/'/g,'&#39;'):'';}" + @"
+function esc(s){return s!=null?String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/""/g,'&quot;').replace(/'/g,'&#39;'):'';}
+function jsa(s){return esc(JSON.stringify(s==null?'':String(s)));} /* VX-17 (follow-up): a value passed into an inline handler as a JSON string literal, then HTML-escaped. esc() alone is decoded back by the HTML parser before the handler runs, so a quote in a name broke out. */" + @"
 function shn(s,max){return s?(s.length>max?s.substring(0,max)+'...':s):'--';}
 function fmtBal(n){return n!=null?(+n).toFixed(8):'0.00000000';}
 function fmtTok(n,dec){var d=dec!=null?dec:8;return n!=null?(+n).toFixed(d):'0';}

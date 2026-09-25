@@ -54,7 +54,8 @@ namespace VerifiedXCore.P2P
                 SCLogUtility.Log($"Wallet Version Verift: {walletVersionVerify}", "CustomLogging");
                 await Task.Delay(10);
 
-                if (!string.IsNullOrWhiteSpace(beaconRef) && walletVersionVerify)
+                // NEW-15: the reference becomes a pool key; an oversized one only grows memory.
+                if (!string.IsNullOrWhiteSpace(beaconRef) && beaconRef.Length <= 256 && walletVersionVerify)
                 {
                     SCLogUtility.Log($"Wal Version Good and Beacon Ref Good.", "CustomLogging");
                     var beaconData = BeaconData.GetBeaconData();
@@ -128,7 +129,12 @@ namespace VerifiedXCore.P2P
                         {
                             SCLogUtility.Log($"Con Exist", "CustomLogging");
                             var beaconCon = Globals.BeaconPool.Values.Where(x => x.Reference == beaconRef || x.IpAddress == peerIP).FirstOrDefault();
-                            if (beaconCon != null)
+                            if (beaconCon == null)
+                            {
+                                // The previous connection's disconnect removed it meanwhile: file a fresh entry.
+                                Globals.BeaconPool[(peerIP, beaconRef)] = new BeaconPool { WalletVersion = walletVersion, Reference = beaconRef, ConnectDate = DateTime.Now, ConnectionId = Context.ConnectionId, IpAddress = peerIP };
+                            }
+                            else
                             {
                                 SCLogUtility.Log($"BeaconCon was not null", "CustomLogging");
                                 beaconCon.WalletVersion = walletVersion;
@@ -178,7 +184,13 @@ namespace VerifiedXCore.P2P
         {
             var peerIP = GetIP(Context);
             Globals.BeaconPeerDict.TryRemove(peerIP, out _);
-            Globals.BeaconPool.TryGetFromKey1(peerIP, out _);
+            // NEW-15: this only LOOKED the entry up, so BeaconPool entries were never removed (unbounded growth on every
+            // node's /beacon hub). Remove this connection's entry (not a newer connection's from the same address).
+            // Found by connection id wherever it is filed: an entry moved to a new address in place stays filed under its
+            // first address (sixth review).
+            foreach (var (ip, _, entry) in Globals.BeaconPool.ToArray())
+                if (entry?.ConnectionId == Context.ConnectionId)
+                    Globals.BeaconPool.TryRemoveFromKey1(ip, out _);
         }
         private async Task SendMessageClient(string clientId, string method, string message)
         {
@@ -323,6 +335,21 @@ namespace VerifiedXCore.P2P
                     if (sigCheck == false)
                     {
                         SCLogUtility.Log($"Bad Signature. Owner | {scState.OwnerAddress} | SCUID: {bsd.SmartContractUID} | Signature: {bsd.Signature}", "CustomLogging-2-ReceiveUploadRequest");
+                        return result;
+                    }
+
+                    // NEW-03 (follow-up): a private beacon authorizes by CurrentOwnerAddress, which the caller supplies; it
+                    // must be the contract's owner (whose signature was just verified), or any local address unlocked it.
+                    if (!string.Equals(bsd.CurrentOwnerAddress, scState.OwnerAddress, StringComparison.Ordinal))
+                    {
+                        SCLogUtility.Log($"CurrentOwnerAddress {bsd.CurrentOwnerAddress} is not the owner of {bsd.SmartContractUID}", "P2PBeaconServer.ReceiveUploadRequest");
+                        return result;
+                    }
+
+                    // NEW-03: asset names become file names on this beacon; only plain names are registered.
+                    if (bsd.Assets == null || bsd.Assets.Any(a => !NFTAssetFileUtility.IsSafeAssetFileName(a)))
+                    {
+                        SCLogUtility.Log($"Unsafe asset name in upload request for {bsd.SmartContractUID}", "P2PBeaconServer.ReceiveUploadRequest");
                         return result;
                     }
 
@@ -665,7 +692,7 @@ namespace VerifiedXCore.P2P
         private static string GetIP(HubCallerContext context)
         {
             var feature = context.Features.Get<IHttpConnectionFeature>();
-            var peerIP = feature.RemoteIpAddress.MapToIPv4().ToString();
+            var peerIP = VerifiedXCore.Utilities.RemoteIp.Text(feature.RemoteIpAddress)!;
 
             return peerIP;
         }

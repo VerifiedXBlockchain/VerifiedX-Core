@@ -92,6 +92,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     bad.Add($"{entry.ValidatorAddress} (inactive)");
                 else if (!v.IsS3C)
                     bad.Add($"{entry.ValidatorAddress} (not flagged S3C on-chain)");
+                else if (!VBTCValidatorRegistry.HoldsValidatorBalance(v.ValidatorAddress)) // NEW-26 (follow-up)
+                    bad.Add($"{entry.ValidatorAddress} (does not hold the {VerifiedXCore.Services.ValidatorService.ValidatorRequiredAmount()} VFX validator balance)");
                 else
                     result.Add(new VBTCValidator
                     {

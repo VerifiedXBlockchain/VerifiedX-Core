@@ -9,7 +9,7 @@ namespace VerifiedXCore.Bitcoin.Models
     {
         ResolvingCompanion,      // scanning owned contracts for an existing linked companion
         CreatingCompanion,       // public DKG (only if none discovered)
-        AwaitingCompanionReady,  // DKG complete → deposit address available
+        AwaitingCompanionReady,  // companion resolved/created; waiting until its contract is on chain (NEW-26 follow-up)
         WaitingForContractFree,  // S3C contract's withdrawal slot is busy (§0) — wait
         WithdrawingFromS3C,       // submit + complete the S3C withdrawal → companion deposit address
         AwaitingBTCArrival,       // poll the companion deposit address for the confirmed delta
@@ -31,6 +31,7 @@ namespace VerifiedXCore.Bitcoin.Models
         public S3CAutoBridgeStatus Status { get; set; } = S3CAutoBridgeStatus.ResolvingCompanion;
 
         public string? PublicScUID { get; set; }
+        public string? CompanionCreateTxHash { get; set; }             // set when this orchestration created the companion
         public string? PublicDepositAddress { get; set; }
         public string? BaseGasAddress { get; set; }
         public decimal BaseGasEthBalance { get; set; }

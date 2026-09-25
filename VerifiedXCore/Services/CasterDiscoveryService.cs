@@ -142,7 +142,7 @@ namespace VerifiedXCore.Services
                         {
                             Address = newCaster.ValidatorAddress,
                             IPAddress = (newCaster.PeerIP ?? "").Replace("::ffff:", ""),
-                            PublicKey = newCaster.ValidatorPublicKey ?? "",
+                            PublicKey = Models.NetworkValidator.BoundPublicKey(newCaster.ValidatorAddress, newCaster.ValidatorPublicKey), // VX-15
                             IsFullyTrusted = true,
                             LastSeen = now,
                             CheckFailCount = 0,
@@ -1942,7 +1942,7 @@ namespace VerifiedXCore.Services
                 CasterLogUtility.Log(
                     $"[CONSENSUS-V2] HandlePromoteAnnounce EXCEPTION: {ex.GetType().Name}: {ex.Message}",
                     "CasterFlow");
-                return $"rejected: {ex.Message}";
+                return $"rejected: {ApiErrorText.For(ex)}";
             }
         }
 

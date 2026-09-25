@@ -361,8 +361,14 @@ namespace VerifiedXCore.Commands
                                     {
                                         rescanForTx = rescan.ToLower() == "y" ? true : false;
                                     }
-                                    var restoredAccount = await Account.Restore(privKey, rescanForTx);
-                                    AccountData.WalletInfo(restoredAccount);
+                                    // VX-11: explicit legacy derivation, only when asked (a legacy address with
+                                    // on-chain history is restored automatically either way).
+                                    AnsiConsole.MarkupLine("Was this key imported into an OLDER VerifiedX wallet and used there before this update? ('[bold green]y[/]' only if so, default '[bold red]n[/]').");
+                                    var legacyAnswer = await ReadLineUtility.ReadLine();
+                                    var useLegacy = !string.IsNullOrEmpty(legacyAnswer) && legacyAnswer.Trim().ToLower() == "y";
+                                    var restoredAccount = await Account.Restore(privKey, rescanForTx, useLegacy);
+                                    if (restoredAccount != null && !string.IsNullOrEmpty(restoredAccount.Address))
+                                        AccountData.WalletInfo(restoredAccount);
                                 }
                             }
                             catch(Exception ex) { }
@@ -381,8 +387,13 @@ namespace VerifiedXCore.Commands
                             var privKey = await ReadLineUtility.ReadLine();
                             if (!string.IsNullOrEmpty(privKey))
                             {
-                                var restoredAccount = await Account.Restore(privKey);
-                                AccountData.WalletInfo(restoredAccount);
+                                // VX-11: explicit legacy derivation, only when asked.
+                                AnsiConsole.MarkupLine("Was this key imported into an OLDER VerifiedX wallet and used there before this update? ('[bold green]y[/]' only if so, default '[bold red]n[/]').");
+                                var legacyAnswer = await ReadLineUtility.ReadLine();
+                                var useLegacy = !string.IsNullOrEmpty(legacyAnswer) && legacyAnswer.Trim().ToLower() == "y";
+                                var restoredAccount = await Account.Restore(privKey, false, useLegacy);
+                                if (restoredAccount != null && !string.IsNullOrEmpty(restoredAccount.Address))
+                                    AccountData.WalletInfo(restoredAccount);
                             }
                         }
                         catch (Exception ex) { }

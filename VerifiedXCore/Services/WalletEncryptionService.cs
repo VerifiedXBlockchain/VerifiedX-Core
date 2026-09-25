@@ -15,10 +15,8 @@ namespace VerifiedXCore.Services
 				return null;	
             }
 
-			//Pulling password from secure string and converting to a byte.
+			//Pulling password from secure string.
 			var password = Globals.EncryptPassword.ToUnsecureString();
-			var newPasswordArray = Encoding.ASCII.GetBytes(password);
-			var passwordKey = new byte[32 - newPasswordArray.Length].Concat(newPasswordArray).ToArray();
 
 			//Generating a random key to encrypt private key with
 			var key = new byte[32]; 
@@ -28,15 +26,16 @@ namespace VerifiedXCore.Services
 			//Encrypting private key with random 32 byte
 			byte[] encrypted = EncryptKey(account.GetKey, key);
 
-			//Encrypting random 32 byte with clients supplied password. This key will be stored and is encrypted
-			byte[] keyEncrypted = EncryptKey(encryptionString, passwordKey);
+			//Encrypting random 32 byte with clients supplied password. This key will be stored and is encrypted.
+			//VX-14: KDF-based wrap (PasswordKeyWrap v1), not the zero-padded password used as the AES key.
+			var keyEncrypted = PasswordKeyWrap.Wrap(encryptionString, password);
 
 			Keystore keystore = new Keystore
 			{
 				Address = account.Address,
 				PrivateKey = Convert.ToBase64String(encrypted), 
 				PublicKey = account.PublicKey,
-				Key = Convert.ToBase64String(keyEncrypted),
+				Key = keyEncrypted,
 				IsUsed = false
 			};
 
@@ -49,10 +48,136 @@ namespace VerifiedXCore.Services
             }
 
 			password = "0";
-			newPasswordArray = new byte[0];
-			passwordKey = new byte[0];
 
 			return keystore;
+		}
+
+		/// <summary>
+		/// VX-14: re-wraps every legacy (zero-padded password) keystore record under the KDF-based format once the
+		/// wallet password is in memory. Records the password does not open, or whose data key does not decrypt the
+		/// stored private key, are left untouched. Returns the number of records re-wrapped.
+		/// </summary>
+		public static int RewrapLegacyKeystoresIfUnlocked()
+		{
+			if (!Globals.IsWalletEncrypted || Globals.EncryptPassword == null || Globals.EncryptPassword.Length == 0)
+				return 0;
+			int n = 0;
+			try
+			{
+				var keystores = Keystore.GetKeystore();
+				if (keystores == null)
+					return 0;
+				var password = Globals.EncryptPassword.ToUnsecureString();
+				foreach (var ks in keystores.FindAll().ToList())
+				{
+					if (TryRewrapLegacy(ks, password))
+						n++;
+				}
+				if (n > 0)
+					Utilities.LogUtility.Log($"VX-14: re-wrapped {n} legacy keystore record(s) under the KDF-based format.", "WalletEncryptionService.RewrapLegacyKeystoresIfUnlocked()");
+			}
+			catch (Exception ex)
+			{
+				Utilities.ErrorLogUtility.LogError($"Re-wrapping legacy keystores failed: {ex.Message}", "WalletEncryptionService.RewrapLegacyKeystoresIfUnlocked()");
+			}
+			return n;
+		}
+
+		private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _passwordChecks = new();
+
+		/// <summary>Test hook: forget verified passwords (a test process opens many wallets).</summary>
+		internal static void ResetPasswordChecks() => _passwordChecks.Clear();
+
+		/// <summary>
+		/// VX-13 (follow-up): true when <paramref name="password"/> is this wallet's encryption password — it opens a
+		/// keystore record and that record's data key opens its stored private key. Anything that seals keys under the
+		/// in-memory password must check this first: the password can be set before it is verified (encpass= at startup,
+		/// the unlock routes' set-then-verify window), and sealing under a typo would lock the keys for good.
+		/// </summary>
+		public static bool IsWalletPassword(string? password)
+		{
+			if (string.IsNullOrEmpty(password)) return false;
+			var id = Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes("vfx-wallet-pw-check|" + password)));
+			if (_passwordChecks.TryGetValue(id, out var known)) return known;
+			var ok = false;
+			try
+			{
+				var ks = Keystore.GetKeystore()?.FindAll().FirstOrDefault(k => !string.IsNullOrEmpty(k.Key) && !string.IsNullOrEmpty(k.PrivateKey));
+				if (ks != null && PasswordKeyWrap.TryUnwrap(ks.Key, password, out var dataKey, out _))
+				{
+					var keyHex = DecryptKey(Convert.FromBase64String(ks.PrivateKey), Convert.FromBase64String(dataKey));
+					ok = !string.IsNullOrEmpty(keyHex) && System.Numerics.BigInteger.TryParse(keyHex, System.Globalization.NumberStyles.AllowHexSpecifier, null, out _);
+				}
+			}
+			catch { ok = false; }
+			if (ok) _passwordChecks[id] = true; // only cache successes (the keystore can appear later)
+			return ok;
+		}
+
+		/// <summary>
+		/// NEW-01 (follow-up): encrypts an imported account for an encrypted wallet and saves its keystore record. Returns
+		/// false (nothing stored) when the wallet password is not in memory or is not the wallet's. The import path used to
+		/// insert the plaintext key first and then call EncryptWallet, which returned null with no password (the plaintext
+		/// key stayed on disk) and, with a password, returned a keystore record the caller never saved (the wallet could
+		/// no longer decrypt the imported key).
+		/// </summary>
+		public static async Task<bool> EncryptImportedAccount(Account account)
+		{
+			if (Globals.EncryptPassword == null || Globals.EncryptPassword.Length == 0)
+				return false;
+			if (!IsWalletPassword(Globals.EncryptPassword.ToUnsecureString()))
+				return false;
+			// NEW-01 (follow-up): SaveKeystore keeps an existing record for the address and drops the new one, which
+			// would leave the account holding ciphertext that no record opens. Reuse an existing record only when it
+			// opens to this same key; otherwise refuse.
+			var existing = Keystore.GetKeystore()?.FindOne(x => x.Address == account.Address);
+			if (existing != null)
+			{
+				var plain = account.PrivateKey;
+				account.PrivateKey = existing.PrivateKey;
+				string? opened = null;
+				try { opened = account.GetKey; } catch { }
+				if (!string.IsNullOrEmpty(opened) && string.Equals(opened.TrimStart('0'), plain.TrimStart('0'), StringComparison.OrdinalIgnoreCase))
+					return true;
+				account.PrivateKey = plain;
+				Utilities.ErrorLogUtility.LogError($"Keystore record for {account.Address} exists and does not open to this key; not storing it.", "WalletEncryptionService.EncryptImportedAccount()");
+				return false;
+			}
+			var ks = await EncryptWallet(account, false);
+			if (ks == null)
+				return false;
+			ks.IsUsed = true;
+			Keystore.SaveKeystore(ks);
+			account.PrivateKey = ks.PrivateKey;
+			return true;
+		}
+
+		/// <summary>VX-14: re-wraps one legacy keystore record (in memory and in the database). False if not legacy or not opened.</summary>
+		public static bool TryRewrapLegacy(Keystore ks, string password)
+		{
+			if (ks == null || !PasswordKeyWrap.IsLegacy(ks.Key))
+				return false;
+			if (!PasswordKeyWrap.TryUnwrap(ks.Key, password, out var dataKey, out var wasLegacy) || !wasLegacy)
+				return false;
+			try
+			{
+				// The data key must actually open the stored private key before the record is rewritten.
+				var keyHex = DecryptKey(Convert.FromBase64String(ks.PrivateKey), Convert.FromBase64String(dataKey));
+				if (string.IsNullOrEmpty(keyHex) || !System.Numerics.BigInteger.TryParse(keyHex, System.Globalization.NumberStyles.AllowHexSpecifier, null, out _))
+					return false;
+			}
+			catch
+			{
+				return false;
+			}
+			var oldKey = ks.Key;
+			var newKey = PasswordKeyWrap.Wrap(dataKey, password);
+			var db = Keystore.GetKeystore();
+			// Field-level update, conditional on the record still holding the legacy value.
+			var updated = db?.UpdateManySafe(x => new Keystore { Key = newKey }, x => x.Address == ks.Address && x.Key == oldKey) ?? 0;
+			if (updated > 0)
+				ks.Key = newKey;
+			return updated > 0;
 		}
 
         public static void DecryptWallet(string passphrase)

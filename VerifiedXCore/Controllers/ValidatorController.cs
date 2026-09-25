@@ -58,7 +58,7 @@ namespace VerifiedXCore.Controllers
             catch (Exception ex)
             {
                 LogUtility.Log($"[BridgeAttest] SignMintAttestation EXCEPTION for lockId={request?.LockId}: {ex.Message}", "ValidatorController.SignMintAttestation");
-                return StatusCode(500, JsonConvert.SerializeObject(new { success = false, error = ex.Message }));
+                return StatusCode(500, JsonConvert.SerializeObject(new { success = false, error = ApiErrorText.Generic(ex) }));
             }
         }
 
@@ -96,7 +96,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.Generic(ex) }));
             }
         }
 
@@ -144,7 +144,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.Generic(ex) }));
             }
         }
 
@@ -165,7 +165,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.Generic(ex) }));
             }
         }
 
@@ -186,7 +186,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.Generic(ex) }));
             }
         }
 
@@ -207,7 +207,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.Generic(ex) }));
             }
         }
 
@@ -215,7 +215,7 @@ namespace VerifiedXCore.Controllers
 
         [HttpPost]
         [Route("Status")]
-        public ActionResult<string> Status([FromBody] NetworkValidator networkVal)
+        public async Task<ActionResult<string>> Status([FromBody] NetworkValidator networkVal)
         {
             try
             {
@@ -244,15 +244,20 @@ namespace VerifiedXCore.Controllers
                     return Unauthorized();
                 }
 
-                _ = Peers.UpdatePeerAsVal(peerIP.Replace("::ffff:", ""), networkVal.Address, networkVal.PublicKey);
-
                 networkVal.IPAddress = peerIP.Replace("::ffff:", "");
 
-                _ = NetworkValidator.AddValidatorToPool(networkVal);
+                // VX-07: the validator's own advertisement — fresh, single-use, key bound to address.
+                // The peer record is updated only AFTER validation (it used to persist the claimed
+                // PublicKey before any check ran).
+                if (await NetworkValidator.AddValidatorToPool(networkVal, advertisingPeerIP: null, directFromValidator: true))
+                    _ = Peers.UpdatePeerAsVal(peerIP.Replace("::ffff:", ""), networkVal.Address, networkVal.PublicKey);
+                else
+                    return Unauthorized();
             }
             catch (Exception ex)
             {
-
+                ErrorLogUtility.LogError($"Status failed: {ex.Message}", "ValidatorController.Status()");
+                return BadRequest("Request failed");
             }
 
             return Ok();
@@ -285,8 +290,14 @@ namespace VerifiedXCore.Controllers
                 if (string.IsNullOrEmpty(peerIP))
                     return BadRequest("Could not determine caller IP");
 
-                // Verify the proof and add it if valid
-                if (proof.VerifyProof())
+                // VX-05: only casters push winner proofs to this route (BlockcasterNode.SendWinningProof).
+                // CasterProofDict is keyed by sender IP and its entries are the casters' votes, so an
+                // arbitrary host must not be able to add entries.
+                if (!BanService.IsCasterIP(peerIP))
+                    return Unauthorized();
+
+                // VX-05: full ingress validation (binding, round, eligibility, registry IP).
+                if (ProofUtility.ValidateIncomingProofForNextRound(proof, out _))
                 {
                     if (!Globals.CasterProofDict.ContainsKey(peerIP))
                     {
@@ -301,7 +312,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(ex.ToString());
+                return BadRequest(ApiErrorText.Generic(ex));
             }
         }
 
@@ -395,7 +406,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(ex.ToString());
+                return BadRequest(ApiErrorText.Generic(ex));
             }
         }
 
@@ -534,7 +545,7 @@ namespace VerifiedXCore.Controllers
                 CasterLogUtility.Log(
                     $"ReceiveCatchUpBlock ERROR: {ex.Message}",
                     "CATCHUP");
-                return BadRequest(ex.Message);
+                return BadRequest(ApiErrorText.Generic(ex));
             }
         }
 
@@ -587,7 +598,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(ex.ToString());
+                return BadRequest(ApiErrorText.Generic(ex));
             }
         }
 
@@ -615,12 +626,15 @@ namespace VerifiedXCore.Controllers
                 if (req == null || string.IsNullOrWhiteSpace(req.CasterAddress) || string.IsNullOrWhiteSpace(req.WinnerAddress) || string.IsNullOrWhiteSpace(req.Signature))
                     return BadRequest();
 
-                var now = TimeUtil.GetTime();
-                if (Math.Abs(now - req.Timestamp) > 90)
-                    return Unauthorized("timestamp");
-
+                // VX-23: membership first, then an overflow-free freshness check. Math.Abs(now - req.Timestamp) threw
+                // OverflowException for Timestamp = long.MinValue before any authentication ran, and the catch returned
+                // the stack trace to the anonymous caller.
                 if (!IsCasterParticipantAddress(req.CasterAddress))
                     return Unauthorized();
+
+                var now = TimeUtil.GetTime();
+                if (!ConsensusRequestAuth.IsFresh(req.Timestamp, now))
+                    return Unauthorized("timestamp");
 
                 var msg = ConsensusMessageFormatter.FormatRequestBlockV1(req.BlockHeight, req.CasterAddress, req.WinnerAddress, req.Timestamp);
                 if (!SignatureService.VerifySignature(req.CasterAddress, msg, req.Signature))
@@ -653,7 +667,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(ex.ToString());
+                return BadRequest(ApiErrorText.Generic(ex));
             }
         }
 
@@ -695,7 +709,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(ex.ToString());
+                return BadRequest(ApiErrorText.Generic(ex));
             }
         }
 
@@ -751,36 +765,31 @@ namespace VerifiedXCore.Controllers
                 if (req == null || req.BlockHeight <= 0 || string.IsNullOrEmpty(req.VoterAddress) || string.IsNullOrEmpty(req.WinnerAddress))
                     return BadRequest("0");
 
-                // Only accept votes from known casters
-                var casterList = Globals.BlockCasters.ToList();
-                if (!casterList.Any(c => c.ValidatorAddress == req.VoterAddress))
+                var remoteIp = HttpContext.Connection.RemoteIpAddress?.ToString().Replace("::ffff:", "");
+                if (remoteIp != null && Globals.BannedIPs.ContainsKey(remoteIp))
+                    return Unauthorized();
+
+                // VX-08: only the round in progress (was: any height, so future rounds could be pre-seeded).
+                if (!ConsensusRequestAuth.IsHeightInWindow(req.BlockHeight, Globals.LastBlock.Height))
                     return BadRequest("0");
 
-                // Store the incoming vote
-                var votesForHeight = Globals.CasterWinnerVoteDict.GetOrAdd(req.BlockHeight, _ => new System.Collections.Concurrent.ConcurrentDictionary<string, string>());
-                votesForHeight[req.VoterAddress] = req.WinnerAddress;
+                // VX-08: the vote must be signed by its voter, who must be a caster. It is stored through
+                // WinnerVoteStore — a caster's vote can only be replaced by a newer vote signed by that caster
+                // (it used to be overwritten by indexer from any request naming a public caster address).
+                if (WinnerVoteStore.TryRecord(req.ToSignedVote(), IsCasterParticipantAddress) == WinnerVoteRecordResult.Invalid)
+                    return BadRequest("0");
 
-                // DETERMINISTIC-CONSENSUS: Store excluded addresses from this voter
-                if (req.ExcludedAddresses != null && req.ExcludedAddresses.Any())
-                {
-                    var excludedForHeight = Globals.CasterExcludedAddressDict.GetOrAdd(req.BlockHeight, _ => new System.Collections.Concurrent.ConcurrentDictionary<string, List<string>>());
-                    excludedForHeight[req.VoterAddress] = req.ExcludedAddresses;
-                }
-
-                // Also ensure our own vote is present (if we have one from CasterRoundDict)
-                if (!string.IsNullOrEmpty(Globals.ValidatorAddress) && !votesForHeight.ContainsKey(Globals.ValidatorAddress))
+                // Also ensure our own vote is present (if we have one from CasterRoundDict) — signed.
+                if (!string.IsNullOrEmpty(Globals.ValidatorAddress) &&
+                    !WinnerVoteStore.GetSigned(req.BlockHeight).Any(v => v.VoterAddress == Globals.ValidatorAddress))
                 {
                     if (Globals.CasterRoundDict.TryGetValue(req.BlockHeight, out var round) && round?.Proof != null)
-                    {
-                        votesForHeight[Globals.ValidatorAddress] = round.Proof.Address;
-                    }
+                        WinnerVoteStore.TryRecord(WinnerVoteStore.CreateOwn(req.BlockHeight, round.Proof.Address), IsCasterParticipantAddress);
                 }
 
-                // Return all votes for this height (include excluded addresses)
-                var allExcluded = Globals.CasterExcludedAddressDict.TryGetValue(req.BlockHeight, out var exDict)
-                    ? exDict.ToDictionary(kv => kv.Key, kv => kv.Value)
-                    : new Dictionary<string, List<string>>();
-                var result = new { BlockHeight = req.BlockHeight, Votes = votesForHeight.ToDictionary(kv => kv.Key, kv => kv.Value), ExcludedAddresses = allExcluded };
+                // Return every vote held for this height WITH its signature, so the caller can verify
+                // each one (including votes this node relays from other casters).
+                var result = new { BlockHeight = req.BlockHeight, SignedVotes = WinnerVoteStore.GetSigned(req.BlockHeight) };
                 return Ok(JsonConvert.SerializeObject(result));
             }
             catch { return BadRequest("0"); }
@@ -788,9 +797,10 @@ namespace VerifiedXCore.Controllers
 
         /// <summary>
         /// CONSENSUS-V2 (Fix #4): Exchange full validator list entries between casters.
-        /// On receipt we liveness-gate every unknown peer-supplied entry before merging into
-        /// <see cref="Globals.NetworkValidators"/> as fully trusted. We always echo back our own
-        /// trusted entries so the caller can fill its gaps in a single round-trip.
+        /// VX-15: the request must be signed by a committee caster (fresh, single-use); each entry must carry a key
+        /// that derives its address and hold the validator balance; entries stay pending until distinct committee
+        /// casters corroborate them and a liveness check passes (<see cref="ValidatorListExchange"/>). We echo back
+        /// our own trusted entries, signed, so the caller can fill its gaps in a single round-trip.
         /// </summary>
         [HttpPost]
         [Route("ExchangeValidatorList")]
@@ -801,56 +811,33 @@ namespace VerifiedXCore.Controllers
                 if (req == null || req.BlockHeight <= 0 || string.IsNullOrEmpty(req.CasterAddress))
                     return BadRequest("0");
 
-                // Only accept from known casters
-                var casterList = Globals.BlockCasters.ToList();
-                if (!casterList.Any(c => c.ValidatorAddress == req.CasterAddress))
+                // VX-15: committee membership alone was the gate (a public address string). The list must now be
+                // signed by that caster, fresh, and used once.
+                if (!ValidatorListExchange.VerifyMessage(req.CasterAddress, req.Timestamp, req.Signature, req.Validators, consumeSignature: true, out var whyRejected))
+                {
+                    CasterLogUtility.Log($"VALLIST-SYNC: ExchangeValidatorList from {req.CasterAddress} rejected: {whyRejected}", "CONSENSUS");
                     return BadRequest("0");
+                }
 
                 int merged = 0;
+                int pending = 0;
                 int rejected = 0;
                 if (req.Validators != null)
                 {
+                    var budget = new ValidatorListExchange.Budget(ValidatorListExchange.PromotionBudgetPerMessage);
                     foreach (var entry in req.Validators)
                     {
-                        if (entry == null
-                            || string.IsNullOrEmpty(entry.Address)
-                            || string.IsNullOrEmpty(entry.IPAddress))
-                            continue;
-                        if (entry.Address == Globals.ValidatorAddress)
-                            continue;
-                        if (Globals.NetworkValidators.ContainsKey(entry.Address))
-                            continue;
-
-                        bool live;
-                        try { live = await NetworkValidator.CheckValidatorLiveness(entry.IPAddress); }
-                        catch { live = false; }
-
-                        if (!live)
-                        {
-                            rejected++;
-                            continue;
-                        }
-
-                        var nv = new NetworkValidator
-                        {
-                            Address = entry.Address,
-                            IPAddress = entry.IPAddress,
-                            PublicKey = entry.PublicKey ?? "",
-                            IsFullyTrusted = true,
-                            LastSeen = TimeUtil.GetTime(),
-                            FirstSeenAtHeight = entry.FirstSeenAtHeight > 0
-                                ? entry.FirstSeenAtHeight
-                                : (Globals.LastBlock?.Height ?? req.BlockHeight),
-                            CheckFailCount = 0,
-                        };
-                        if (Globals.NetworkValidators.TryAdd(entry.Address, nv))
-                            merged++;
+                        // VX-15: entry rules + corroboration; never trusted straight from the wire, first-seen is local.
+                        var r = await ValidatorListExchange.OfferAsync(entry, req.CasterAddress, budget.TryTake);
+                        if (r == ValidatorListExchange.OfferResult.Promoted) merged++;
+                        else if (r == ValidatorListExchange.OfferResult.Pending || r == ValidatorListExchange.OfferResult.Deferred) pending++;
+                        else if (r == ValidatorListExchange.OfferResult.Rejected || r == ValidatorListExchange.OfferResult.Unreachable) rejected++;
                     }
                 }
 
-                if (merged > 0 || rejected > 0)
+                if (merged > 0 || pending > 0 || rejected > 0)
                     CasterLogUtility.Log(
-                        $"VALLIST-SYNC: ExchangeValidatorList from {req.CasterAddress} h={req.BlockHeight} merged={merged} rejected={rejected} (peer reported {req.Validators?.Count ?? 0})",
+                        $"VALLIST-SYNC: ExchangeValidatorList from {req.CasterAddress} h={req.BlockHeight} merged={merged} pending={pending} rejected={rejected} (peer reported {req.Validators?.Count ?? 0})",
                         "CONSENSUS");
 
                 // Build response from our own trusted entries.
@@ -875,6 +862,14 @@ namespace VerifiedXCore.Controllers
                     CasterAddress = Globals.ValidatorAddress ?? "",
                     Validators = myEntries
                 };
+                // VX-15: the response is signed too; the caller merges only a list signed by the caster it asked.
+                try
+                {
+                    var (ts, sig) = ValidatorListExchange.SignOwn(myEntries);
+                    response.Timestamp = ts;
+                    response.Signature = sig;
+                }
+                catch { /* unsigned response: the caller will ignore it */ }
                 return Ok(JsonConvert.SerializeObject(response));
             }
             catch { return BadRequest("0"); }
@@ -883,8 +878,9 @@ namespace VerifiedXCore.Controllers
         /// <summary>
         /// CONSENSUS-V2 (Fix #5): Receives a peer caster's <see cref="ProofSetCommitment"/>
         /// for a given block height, stores it in <see cref="Globals.CasterProofSetCommitDict"/>
-        /// after re-verifying the commitment hash, and returns the full set of commitments this
-        /// node currently holds for that height. Pure exchange — no consensus decisions are made
+        /// through <see cref="ProofSetCommitmentStore"/> (VX-16: signed by its caster, caster accepted,
+        /// height in the current window, hash re-verified), and returns the full set of signed commitments
+        /// this node currently holds for that height. Pure exchange — no consensus decisions are made
         /// here; the caller's <c>ReachProofSetAgreementAsync</c> tallies cross-peer responses.
         /// </summary>
         [HttpPost]
@@ -899,26 +895,26 @@ namespace VerifiedXCore.Controllers
                     || string.IsNullOrEmpty(req.CommitmentHash))
                     return BadRequest("0");
 
-                // Recompute hash to defend against a peer claiming a hash that doesn't match its own list.
-                var sortedAddrs = req.ProofAddressesSorted ?? new List<string>();
-                var recomputed = Nodes.BlockcasterNode.ComputeProofSetCommitmentHash(sortedAddrs);
-                if (!string.Equals(recomputed, req.CommitmentHash, System.StringComparison.Ordinal))
+                var remoteIp = HttpContext?.Connection?.RemoteIpAddress?.ToString().Replace("::ffff:", "");
+                if (remoteIp != null && Globals.BannedIPs.ContainsKey(remoteIp))
+                    return Unauthorized();
+
+                // VX-16: only the round in progress (was: any height — the audit stored 205 identities at h=42, tip 0).
+                if (!ConsensusRequestAuth.IsHeightInWindow(req.BlockHeight, Globals.LastBlock.Height))
+                    return BadRequest("0");
+
+                // VX-16: signed by its caster, caster accepted, hash matches the list; a caster's commitment is replaced
+                // only by a newer one it signed (was: stored for any caller-supplied address, overwritten by indexer).
+                if (ProofSetCommitmentStore.TryRecord(req, IsCasterParticipantAddress) == ProofSetRecordResult.Invalid)
                 {
-                    CasterLogUtility.Log(
-                        $"[CONSENSUS-V2] ExchangeProofSet REJECT from {req.CasterAddress} h={req.BlockHeight}: hash mismatch (peer={req.CommitmentHash[..System.Math.Min(10, req.CommitmentHash.Length)]} recomputed={recomputed[..System.Math.Min(10, recomputed.Length)]})",
-                        "CONSENSUS");
+                    CasterLogUtility.Log($"[CONSENSUS-V2] ExchangeProofSet REJECT from {req.CasterAddress} h={req.BlockHeight}: unsigned, not a caster, or hash mismatch", "CONSENSUS");
                     return BadRequest("0");
                 }
 
-                var commitsForHeight = Globals.CasterProofSetCommitDict.GetOrAdd(
-                    req.BlockHeight,
-                    _ => new System.Collections.Concurrent.ConcurrentDictionary<string, ProofSetCommitment>());
-                commitsForHeight[req.CasterAddress] = req;
+                ProofSetCommitmentStore.PruneBelow(Globals.LastBlock.Height - 10);
 
-                // Snapshot for the response so we don't expose the live ConcurrentDictionary.
-                var snapshot = new Dictionary<string, ProofSetCommitment>();
-                foreach (var kv in commitsForHeight)
-                    snapshot[kv.Key] = kv.Value;
+                // Snapshot for the response (signed commitments, so the caller can verify relayed ones).
+                var snapshot = ProofSetCommitmentStore.Snapshot(req.BlockHeight);
 
                 var resp = new ProofSetExchangeResponse
                 {
@@ -977,7 +973,7 @@ namespace VerifiedXCore.Controllers
                 CasterLogUtility.Log(
                     $"HTTP /PromoteToCaster from {remoteIp}: EXCEPTION {ex.GetType().Name}: {ex.Message}",
                     "CasterFlow");
-                return BadRequest($"rejected: {ex.Message}");
+                return BadRequest($"rejected: {ApiErrorText.Generic(ex)}");
             }
         }
 
@@ -998,7 +994,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(ex.ToString());
+                return BadRequest(ApiErrorText.Generic(ex));
             }
         }
 
@@ -1033,7 +1029,7 @@ namespace VerifiedXCore.Controllers
                 CasterLogUtility.Log(
                     $"HTTP /AnnounceCasterPromotion from {remoteIp}: EXCEPTION {ex.GetType().Name}: {ex.Message}",
                     "CasterFlow");
-                return BadRequest($"rejected: {ex.Message}");
+                return BadRequest($"rejected: {ApiErrorText.Generic(ex)}");
             }
         }
 
@@ -1051,7 +1047,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest(ex.ToString());
+                return BadRequest(ApiErrorText.Generic(ex));
             }
         }
 
@@ -1558,7 +1554,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.Generic(ex)}" });
             }
         }
 
@@ -1592,7 +1588,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Ok(JsonConvert.SerializeObject(new { Height = 0, Casters = new List<CasterInfo>(), Error = ex.Message }));
+                return Ok(JsonConvert.SerializeObject(new { Height = 0, Casters = new List<CasterInfo>(), Error = ApiErrorText.Generic(ex) }));
             }
         }
 
@@ -1626,7 +1622,7 @@ namespace VerifiedXCore.Controllers
                 return Ok(JsonConvert.SerializeObject(new PromotionProposalResponse
                 {
                     Accepted = false,
-                    Reason = $"Error: {ex.Message}",
+                    Reason = $"Error: {ApiErrorText.Generic(ex)}",
                     ResponderAddress = Globals.ValidatorAddress ?? ""
                 }));
             }
@@ -1667,7 +1663,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Ok(JsonConvert.SerializeObject(new { success = false, error = $"Recovery failed: {ex.Message}" }));
+                return Ok(JsonConvert.SerializeObject(new { success = false, error = $"Recovery failed: {ApiErrorText.Generic(ex)}" }));
             }
         }
 
@@ -1701,7 +1697,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Ok(JsonConvert.SerializeObject(new { success = false, error = $"Broadcast failed: {ex.Message}" }));
+                return Ok(JsonConvert.SerializeObject(new { success = false, error = $"Broadcast failed: {ApiErrorText.Generic(ex)}" }));
             }
         }
 
@@ -1737,7 +1733,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Ok(JsonConvert.SerializeObject(new { Error = ex.Message }));
+                return Ok(JsonConvert.SerializeObject(new { Error = ApiErrorText.Generic(ex) }));
             }
         }
 
@@ -1815,7 +1811,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Ok(JsonConvert.SerializeObject(new { Error = ex.Message }));
+                return Ok(JsonConvert.SerializeObject(new { Error = ApiErrorText.Generic(ex) }));
             }
         }
 
@@ -1856,7 +1852,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Ok(JsonConvert.SerializeObject(new { Error = ex.Message }));
+                return Ok(JsonConvert.SerializeObject(new { Error = ApiErrorText.Generic(ex) }));
             }
         }
 

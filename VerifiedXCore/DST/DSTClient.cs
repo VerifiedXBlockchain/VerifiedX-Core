@@ -882,19 +882,13 @@ namespace VerifiedXCore.DST
                             {
                                 try
                                 {
-                                    var _asset = asset;
-                                    if (!asset.EndsWith(".jpg"))
+                                    // VX-04: shared with the shop's request validation so the two cannot disagree.
+                                    var _asset = NFTAssetFileUtility.ThumbnailRequestName(asset);
+                                    if (_asset == null)
                                     {
-                                        var assetArray = asset.Split('.');
-                                        var extIndex = assetArray.Length - 1;
-                                        var extToReplace = assetArray[extIndex];
-                                        if (!Globals.ValidExtensions.Contains(extToReplace))
-                                        {
-                                            //skip as its not a valid extension type.
-                                            assetCount -= 1;
-                                            continue;
-                                        }
-                                        _asset = asset.Replace(extToReplace, "jpg");
+                                        //skip as its not a valid extension type.
+                                        assetCount -= 1;
+                                        continue;
                                     }
                                     //craft message to start process.
                                     var uniqueId = RandomStringUtility.GetRandomStringOnlyLetters(10, false);

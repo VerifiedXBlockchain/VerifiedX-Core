@@ -159,7 +159,7 @@ namespace VerifiedXCore.Utilities
             }
             catch (Exception ex)
             {
-                return (false, $"Unknown Error: {ex.ToString()}");
+                return (false, $"Unknown Error: {ApiErrorText.For(ex)}");
             }
         }
 

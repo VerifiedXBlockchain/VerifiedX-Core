@@ -1,14 +1,26 @@
-﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Controllers;
 using Microsoft.AspNetCore.Mvc.Filters;
 using VerifiedXCore.Utilities;
 
 namespace VerifiedXCore.Controllers
 {
-    public class ActionFilterController : ActionFilterAttribute 
+    public class ActionFilterController : ActionFilterAttribute
     {
         public static List<string> ApprovedMethodList = new List<string> { "GetDebugInfo", "Mother", "Egg", "CheckStatus", "GetCLIVersion", "GetWalletInfo", "NetworkMetrics", "SyncBalances" };
+
+        public const string LockedWalletMessage = "You must type in your encryption password first!";
+
         public override void OnActionExecuting(ActionExecutingContext filterContext)
         {
+            // Resolve the real controller/action from the descriptor. The old code matched any route
+            // VALUE (e.g. a path segment equal to "SendTransaction") and read the action positionally.
+            var descriptor = filterContext.ActionDescriptor as ControllerActionDescriptor;
+            var controllerName = descriptor?.ControllerName ?? filterContext.RouteData.Values["controller"]?.ToString();
+            var actionName = descriptor?.ActionName ?? filterContext.RouteData.Values["action"]?.ToString();
+
+            // Security checks FAIL CLOSED: an exception here used to be swallowed and the request then
+            // proceeded as if every check had passed.
             try
             {
                 if (Globals.AlwaysRequireAPIPassword == true)
@@ -35,8 +47,7 @@ namespace VerifiedXCore.Controllers
 
                 if(Globals.APIToken != null)
                 {
-                    var routeValue = filterContext.RouteData.Values.Values.ToArray()[0];
-                    bool bypass = ApprovedMethodList.Contains(routeValue) ? true : false;
+                    bool bypass = actionName != null && ApprovedMethodList.Contains(actionName);
 
                     var apiToken = filterContext.HttpContext.Request.Headers["apitoken"];
                     if(apiToken != Globals.APIToken.ToUnsecureString() && !bypass)
@@ -45,77 +56,53 @@ namespace VerifiedXCore.Controllers
                     }
                 }
 
-                if (Globals.IsWalletEncrypted)
+                // BB-3: default deny while the wallet is encrypted and locked. Only actions listed in
+                // LockedWalletPolicy (reads, raw externally-signed relays, unlock/status) may run; every
+                // other action — including any route added later — is refused until unlock.
+                if (filterContext.Result == null && LockedWalletPolicy.WalletIsLocked() &&
+                    !LockedWalletPolicy.IsAllowedWhileLocked(controllerName, actionName))
                 {
-                    if (Globals.EncryptPassword.Length == 0)
-                    {
-                        var sendTx = filterContext.RouteData.Values.Values.Contains("SendTransaction");
-                        var createADNR = filterContext.RouteData.Values.Values.Contains("CreateAdnr");
-                        var transferADNR = filterContext.RouteData.Values.Values.Contains("TransferAdnr");
-                        var deleteADNR = filterContext.RouteData.Values.Values.Contains("DeleteAdnr");
-                        var importPrivKey = filterContext.RouteData.Values.Values.Contains("ImportPrivateKey");
-                        var createSig = filterContext.RouteData.Values.Values.Contains("CreateSignature");
-                        var castTopicVote = filterContext.RouteData.Values.Values.Contains("CastTopicVote");
-                        var postNewTopic = filterContext.RouteData.Values.Values.Contains("PostNewTopic");
-                        var mintSC = filterContext.RouteData.Values.Values.Contains("MintSmartContract");
-                        var transferSC = filterContext.RouteData.Values.Values.Contains("TransferNFT");
-                        var burn = filterContext.RouteData.Values.Values.Contains("Burn");
-                        var evolve = filterContext.RouteData.Values.Values.Contains("Evolve");
-                        var devolve = filterContext.RouteData.Values.Values.Contains("Devolve");
-                        var evospec = filterContext.RouteData.Values.Values.Contains("EvolveSpecific");
-
-                        if (sendTx ||
-                            createADNR ||
-                            transferADNR ||
-                            deleteADNR ||
-                            importPrivKey ||
-                            createSig ||
-                            castTopicVote ||
-                            postNewTopic ||
-                            mintSC ||
-                            transferSC ||
-                            burn ||
-                            evolve ||
-                            devolve ||
-                            evospec)
-                        {
-                            filterContext.HttpContext.Response.StatusCode = 401;
-                            filterContext.Result = new UnauthorizedObjectResult("You must type in your encryption password first!");
-                        }
-
-                    }
+                    filterContext.HttpContext.Response.StatusCode = 401;
+                    filterContext.Result = new UnauthorizedObjectResult(LockedWalletMessage);
                 }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"API security filter failed for {controllerName}/{actionName}: {ex.Message}", "ActionFilterController.OnActionExecuting()");
+                filterContext.Result = new StatusCodeResult(500);
+                return;
+            }
 
-                var action = filterContext.RouteData.Values["action"];
-                var controller = filterContext.RouteData.Values["controller"];
+            try
+            {
                 var actionArguments = filterContext.ActionArguments.Count();
-                
+
                 string actionKeysStr = "";
                 if(actionArguments > 0)
                 {
-                    filterContext.ActionArguments.Keys.ToList().ForEach(x => { 
+                    filterContext.ActionArguments.Keys.ToList().ForEach(x => {
                         actionKeysStr += x + ", ";
                     });
                 }
 
-                List<string> APIExclusionList = new List<string> { "SendBlock", "GetWalletInfo", "GetAllAddresses", "GetValidatorAddresses", 
-                    "GetAllLocalTX", "GetSuccessfulLocalTX", "GetFailedLocalTX", "GetPendingLocalTX", "GetMinedLocalTX", "GetAllTopics", 
-                    "GetActiveTopics", "GetInactiveTopics", "GetMyTopics", "GetAllSmartContracts", "GetMintedSmartContracts", "CheckStatus", 
+                // VX-12: routes that touch key material (GetAllAddresses, GetAllReserveAccounts,
+                // GetBitcoinAccountList) are no longer excluded from the API log.
+                List<string> APIExclusionList = new List<string> { "SendBlock", "GetWalletInfo", "GetValidatorAddresses",
+                    "GetAllLocalTX", "GetSuccessfulLocalTX", "GetFailedLocalTX", "GetPendingLocalTX", "GetMinedLocalTX", "GetAllTopics",
+                    "GetActiveTopics", "GetInactiveTopics", "GetMyTopics", "GetAllSmartContracts", "GetMintedSmartContracts", "CheckStatus",
                     "GetIsWalletEncrypted", "GetMyVotes", "GetSingleSmartContract", "GetNFTAssetLocation", "GetCLIVersion", "CheckPasswordNeeded",
                     "GetBeacons", "GetValidatorInfo", "IsValidating", "NetworkMetrics", "Network", "Height", "LastBlock", "GetDecShop", "GetSummaryChatMessages",
-                    "GetAllCollections", "GetAllReserveAccounts", "GetSimpleShopChatMessages", "GetDecShopData", "GetShopSpecificAuction", "GetListing", "GetCollectionListings",
-                    "GetSmartContractData", "GetBalances", "GetDefaultAddressType", "GetLastAccounySync", "GetTokenizedBTCList", "GetBitcoinAccountList", "GetAddressTXList",
+                    "GetAllCollections", "GetSimpleShopChatMessages", "GetDecShopData", "GetShopSpecificAuction", "GetListing", "GetCollectionListings",
+                    "GetSmartContractData", "GetBalances", "GetDefaultAddressType", "GetLastAccounySync", "GetTokenizedBTCList", "GetAddressTXList",
                     "GetDefaultAddressType", "GetAddressUTXOList", "GetCurrentSCOwner", "GetBitcoinTXList", "GetElectrumXState" };
 
-
-
-                if (!APIExclusionList.Contains(action))
+                if (actionName == null || !APIExclusionList.Contains(actionName))
                 {
                     if (Globals.GUI || Globals.LogAPI)
-                        APILogUtility.Log($"API Called: {DateTime.Now.ToString()}. Total Number of Action Arguments: {actionArguments}. Action Keys (Only if Arguments > 0): {actionKeysStr}", $"/{controller}/{action}");
+                        APILogUtility.Log($"API Called: {DateTime.Now.ToString()}. Total Number of Action Arguments: {actionArguments}. Action Keys (Only if Arguments > 0): {actionKeysStr}", $"/{controllerName}/{actionName}");
                 }
             }
-            catch { }
+            catch { /* logging only */ }
         }
     }
 }

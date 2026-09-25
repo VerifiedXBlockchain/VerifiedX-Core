@@ -21,8 +21,14 @@ namespace VerifiedXCore.Models
                 return hdwallet;
             }
 
+            /// <summary>NEW-01 (follow-up): HD and wallet encryption are mutually exclusive (encrypting an HD wallet was
+            /// already refused); the seed and every derived key are stored unencrypted, so none is made in an encrypted wallet.</summary>
+            public const string EncryptedWalletRefusal = "An HD wallet cannot be used in an encrypted wallet: its seed and derived keys would be stored unencrypted.";
+
             public static (bool,string) CreateHDWallet(int amount, BIP39Wordlist wordList, string password = "")
             {
+                if (Globals.IsWalletEncrypted)
+                    return (false, EncryptedWalletRefusal);
                 var hd = GetHDWalletData();
                 var hdwExist = GetHDWallet();
                 if(hdwExist != null)
@@ -54,6 +60,8 @@ namespace VerifiedXCore.Models
 
             public static async Task<string> RestoreHDWallet(string mnemonicStr, string password = "")
             {
+                if (Globals.IsWalletEncrypted)
+                    return EncryptedWalletRefusal;
                 var hd = GetHDWalletData();
                 var hdwExist = GetHDWallet();
                 if (hdwExist != null)
@@ -148,6 +156,8 @@ namespace VerifiedXCore.Models
 
             public static async Task<Account?> GenerateAddress()
             {
+                if (Globals.IsWalletEncrypted)
+                    return null; // NEW-01 (follow-up): see EncryptedWalletRefusal
                 var hd = GetHDWalletData();
                 var hdw = GetHDWallet();
 

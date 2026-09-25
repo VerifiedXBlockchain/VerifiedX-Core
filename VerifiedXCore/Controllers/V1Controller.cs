@@ -278,6 +278,8 @@ namespace VerifiedXCore.Controllers
                     {
                         password = "";
                         Globals.GUIPasswordNeeded = false;
+                        Bitcoin.Services.BitcoinKeystore.SealPlaintextAccountsIfUnlocked(); // VX-13
+                        VerifiedXCore.Services.WalletEncryptionService.RewrapLegacyKeystoresIfUnlocked(); // VX-14: legacy keystore wraps -> KDF-based
                         output = JsonConvert.SerializeObject(new { Result = "Success", Message = "" });
                     }
                     else
@@ -291,7 +293,10 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-
+                // BB-3 follow-up: an unverified password must not stay in memory (it made the wallet look
+                // unlocked to the API gate). E.g. no validator account -> exception before verification.
+                Globals.EncryptPassword = new System.Security.SecureString();
+                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = "Password could not be verified." });
             }
 
             return output;
@@ -347,13 +352,14 @@ namespace VerifiedXCore.Controllers
             {
                 var mnemonic = HDWallet.HDWalletData.CreateHDWallet(strength, BIP39Wordlist.English);
 
-                Globals.HDWallet = mnemonic.Item1;
+                if (mnemonic.Item1)
+                    Globals.HDWallet = true; // a refusal ("HD wallet exist") must not clear the flag
 
                 output = JsonConvert.SerializeObject(new { Result = mnemonic.Item1, Message = mnemonic.Item2});
             }
             catch(Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Result = false, Message = $"Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Result = false, Message = $"Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;
@@ -376,7 +382,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                output = $"ERROR! Message: {ex.ToString()}";
+                output = $"ERROR! Message: {ApiErrorText.For(ex)}";
             }
 
             return output;
@@ -391,7 +397,9 @@ namespace VerifiedXCore.Controllers
         public async Task<string> GetEncryptWallet(string password)
         {
             var output = "";
-            if(Globals.HDWallet == true)
+            // NEW-01 (follow-up): the stored HD record decides, not the session flag (GetHDWallet on an existing HD wallet
+            // used to clear the flag, and encryption then left the seed in plaintext).
+            if(Globals.HDWallet == true || HDWallet.HDWalletData.GetHDWallet() != null)
             {
                 output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"HD wallet cannot be encrypted at this time." });
             }
@@ -402,13 +410,15 @@ namespace VerifiedXCore.Controllers
                     Globals.EncryptPassword = password.ToSecureString();
                     await Keystore.GenerateKeystoreAddresses();
                     Globals.IsWalletEncrypted = true;
+                    Bitcoin.Services.BitcoinKeystore.SealPlaintextAccountsIfUnlocked(); // VX-13: Bitcoin keys follow the wallet
+                    VerifiedXCore.Services.WalletEncryptionService.RewrapLegacyKeystoresIfUnlocked(); // VX-14: legacy keystore wraps -> KDF-based
 
                     password = "0";
                     output = JsonConvert.SerializeObject(new { Result = "Success", Message = $"Wallet Encrypted." });
                 }
                 catch (Exception ex)
                 {
-                    output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"There was an error encrypting your wallet. Error: {ex.ToString()}" });
+                    output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"There was an error encrypting your wallet. Error: {ApiErrorText.For(ex)}" });
                 }
             }
             else
@@ -477,6 +487,8 @@ namespace VerifiedXCore.Controllers
                         {
                             Globals.GUIPasswordNeeded = false;
                             password = "";
+                            Bitcoin.Services.BitcoinKeystore.SealPlaintextAccountsIfUnlocked(); // VX-13
+                            VerifiedXCore.Services.WalletEncryptionService.RewrapLegacyKeystoresIfUnlocked(); // VX-14: legacy keystore wraps -> KDF-based
                             output = JsonConvert.SerializeObject(new { Result = "Success", Message = $"Password has been stored for {Globals.PasswordClearTime} minutes." });
                         }
                         else
@@ -496,7 +508,7 @@ namespace VerifiedXCore.Controllers
                 password = "";
                 Globals.EncryptPassword.Dispose();
                 Globals.EncryptPassword = new SecureString();
-                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error. Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;
@@ -521,9 +533,12 @@ namespace VerifiedXCore.Controllers
                 account = AccountData.CreateNewAccount();
             }
 
+            if (account == null)
+                return "Fail. No address was created: an encrypted wallet must be unlocked with its password, and an HD wallet cannot be used in an encrypted wallet.";
+
             var newAddressInfo = new[]
             {
-                new { Address = account.Address, PrivateKey = account.GetKey}
+                new { Address = account.Address, PrivateKey = KeyParsing.CanonicalKeyHexFromStored(account.GetKey) } // VX-11: portable 64-digit form
             };
 
             LogUtility.Log("New Address Created: " + account.Address, "V1Controller.GetNewAddress()");
@@ -863,13 +878,47 @@ namespace VerifiedXCore.Controllers
         }
 
         /// <summary>
+        /// VX-12: explicit private-key export for one local address (the operator's backup path). Key material is
+        /// no longer included in any account listing; this is the one deliberate way to get it. Refused while the
+        /// wallet is encrypted and locked (not in LockedWalletPolicy), never excluded from the API log, and
+        /// returns the canonical 64-digit key (VX-11), which imports correctly into any tool.
+        /// </summary>
+        [HttpGet("GetPrivateKey/{address}")]
+        public async Task<string> GetPrivateKey(string address)
+        {
+            // VX-12 (follow-up): key export needs a credential. On an unencrypted wallet with no API token or API
+            // password (the audit's setup), any caller that reached the API could read every key in two requests
+            // (list addresses, then export). Allowed only when the wallet is encrypted and unlocked (the BB-3 gate
+            // refuses it while locked), or an API token / API password protects the API.
+            var credentialed = Globals.IsWalletEncrypted
+                || (Globals.APIToken != null && Globals.APIToken.Length > 0)
+                || !string.IsNullOrEmpty(Globals.APIPassword);
+            if (!credentialed)
+                return JsonConvert.SerializeObject(new { Success = false, Message = "Key export requires an encrypted wallet or an API token/password. Use the CLI to view keys on an unprotected wallet." });
+
+            var account = AccountData.GetSingleAccount(address);
+            if (account == null)
+                return JsonConvert.SerializeObject(new { Success = false, Message = "Account not found." });
+            try
+            {
+                return JsonConvert.SerializeObject(new { Success = true, Address = account.Address, PrivateKey = KeyParsing.CanonicalKeyHexFromStored(account.GetKey) });
+            }
+            catch
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = "Key is not available (is the wallet unlocked?)." });
+            }
+        }
+
+        /// <summary>
         /// Imports a private key.
         /// </summary>
         /// <param name="id"></param>
         /// <param name="scan"></param>
         /// <returns></returns>
+        /// <param name="legacy">VX-11: force the pre-fix derivation (for a key imported into an older wallet whose
+        /// address has no on-chain history yet). A legacy address WITH history is restored automatically.</param>
         [HttpGet("ImportPrivateKey/{id}/{scan?}")]
-        public async Task<string> ImportPrivateKey(string id, bool scan = false)
+        public async Task<string> ImportPrivateKey(string id, bool scan = false, [FromQuery] bool legacy = false)
         {
             //use Id to get specific commands
             var output = "Command not recognized."; // this will only display if command not recognized.
@@ -877,7 +926,7 @@ namespace VerifiedXCore.Controllers
             {
                 if(Globals.EncryptPassword.Length > 0)
                 {
-                    var account = await AccountData.RestoreAccount(id, scan);
+                    var account = await AccountData.RestoreAccount(id, scan, legacy: legacy);
 
                     if (account == null)
                     {
@@ -899,7 +948,7 @@ namespace VerifiedXCore.Controllers
             }
             else
             {
-                var account = await AccountData.RestoreAccount(id, scan);
+                var account = await AccountData.RestoreAccount(id, scan, legacy: legacy);
 
                 if (account == null)
                 {
@@ -1188,7 +1237,7 @@ namespace VerifiedXCore.Controllers
                     catch (Exception ex)
                     {
                         ErrorLogUtility.LogError(ex.ToString(), "V1Controller.StartValidating - result: " + result);
-                        result = $"Unknown Error Occured: {ex.ToString()}";
+                        result = $"Unknown Error Occured: {ApiErrorText.For(ex)}";
                     }
                     output = true;
                 }
@@ -1294,23 +1343,23 @@ namespace VerifiedXCore.Controllers
         /// <param name="message"></param>
         /// <returns></returns>
         [HttpGet("CreateSignatureFromPrivateKey/{privKey}/{**message}")]
-        public async Task<string> CreateSignatureFromPrivateKey(string privKey, string message)
+        public async Task<string> CreateSignatureFromPrivateKey(string privKey, string message, [FromQuery] bool legacy = false)
         {
             string output;
 
             try
             {
                 message = message.Replace("%2F", "/");
-                var account = await AccountData.RestoreAccount(privKey, false, true);
+                var account = await AccountData.RestoreAccount(privKey, false, true, legacy: legacy);
 
-                if (account == null)
+                if (account == null || string.IsNullOrEmpty(account.Address))
                     return "Failed to use Private Key.";
 
                 var signature = SignatureService.CreateSignature(message, account.GetPrivKey, account.PublicKey);
 
                 output = signature;
             }
-            catch(Exception ex) { return $"ERROR: {ex.ToString()}"; }
+            catch(Exception ex) { return $"ERROR: {ApiErrorText.For(ex)}"; }
             
             return output;
         }
@@ -1528,7 +1577,7 @@ namespace VerifiedXCore.Controllers
                 }
                 catch (Exception ex)
                 {
-                    return JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Peer: {ipAddr} caused the error: {ex.ToString()}" });
+                    return JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Peer: {ipAddr} caused the error: {ApiErrorText.For(ex)}" });
                 }
             }
             return JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Peer: {ipAddr} was empty or not valid." });
@@ -1573,7 +1622,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error. Error: {ApiErrorText.For(ex)}" });
             }
 
             
@@ -1609,7 +1658,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error. Error: {ApiErrorText.For(ex)}" });
             }
             
             return output;
@@ -1628,11 +1677,14 @@ namespace VerifiedXCore.Controllers
 
             if (mom != null)
             {
-                output = JsonConvert.SerializeObject(mom);
+                // VX-17: never the stored password verifier (it used to be serialised with the record).
+                output = JsonConvert.SerializeObject(new { mom.Id, mom.Name, mom.StartDate });
             }
 
             return output;
         }
+
+        private static bool ContainsLineBreak(string? value) => value != null && (value.Contains('\n') || value.Contains('\r'));
 
         /// <summary>
         /// Joins the mothers house
@@ -1646,6 +1698,9 @@ namespace VerifiedXCore.Controllers
             try
             {
                 var momJoinPayload = JsonConvert.DeserializeObject<Mother.MotherJoinPayload>(jsonData.ToString());
+                // Both values are appended to config.txt as key=value lines: a line break injected further settings.
+                if (ContainsLineBreak(momJoinPayload?.IPAddress) || ContainsLineBreak(momJoinPayload?.Password))
+                    return JsonConvert.SerializeObject(new { Result = "Fail", Message = "Mother address and password may not contain line breaks." });
                 Globals.MotherAddress = momJoinPayload.IPAddress;
                 Globals.MotherPassword = momJoinPayload.Password.ToSecureString();
                 Globals.ConnectToMother = true;
@@ -1663,7 +1718,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error! Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error! Error: {ApiErrorText.For(ex)}" });
             }
            
             return output;
@@ -1730,29 +1785,43 @@ namespace VerifiedXCore.Controllers
 
             var kids = Globals.MothersKids.Values.ToList();
 
+            // VX-17: every kid-supplied value is HTML-encoded before it enters the page (the validator name was
+            // emitted verbatim, so a kid could run script in the operator's browser on the wallet API origin).
+            static string Enc(string? v) => System.Text.Encodings.Web.HtmlEncoder.Default.Encode(v ?? "");
+
             if (kids.Count > 0)
             {
                 foreach (var kid in kids)
                 {
                     var newKidCard = mDecompressed2;
-                    newKidCard = newKidCard.Replace("{ValidatorName}", kid.ValidatorName);
-                    newKidCard = newKidCard.Replace("{Balance}", $"{kid.Balance} VFX");
-                    newKidCard = newKidCard.Replace("{IPAddress}", kid.IPAddress);
-                    newKidCard = newKidCard.Replace("{BlockHeight}", kid.BlockHeight.ToString());
+                    newKidCard = newKidCard.Replace("{ValidatorName}", Enc(kid.ValidatorName));
+                    newKidCard = newKidCard.Replace("{Balance}", Enc($"{kid.Balance} VFX"));
+                    newKidCard = newKidCard.Replace("{IPAddress}", Enc(kid.IPAddress));
+                    newKidCard = newKidCard.Replace("{BlockHeight}", Enc(kid.BlockHeight.ToString()));
                     newKidCard = newKidCard.Replace("{IsValidatingYesNo}", kid.ActiveWithValidating ? "Yes" : "No");
                     newKidCard = newKidCard.Replace("{IsConnectedToMotherYesNo}", kid.ActiveWithMother ? "Yes" : "No");
                     newKidCard = newKidCard.Replace("{IsValidatingBg}", kid.ActiveWithValidating ? "bg-success" : "bg-danger");
                     newKidCard = newKidCard.Replace("{IsConnectedToMotherBg}", kid.ActiveWithMother ? "bg-success" : "bg-danger");
-                    newKidCard = newKidCard.Replace("{Address}", kid.Address);
+                    newKidCard = newKidCard.Replace("{Address}", Enc(kid.Address));
 
                     mother.AppendLine(newKidCard);
                 }
-                
+
             }
 
-            mother.AppendLine(mDecompressed3);
+            // VX-17: a Content-Security-Policy as a second line of defence. The page's only script is the auto-refresh
+            // block in the footer template; it runs under a per-response nonce, so an injected script (or handler)
+            // cannot. Inline styles and data: images are the template's own Bootstrap CSS.
+            var nonce = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+            mother.AppendLine(mDecompressed3.Replace("<script>", $"<script nonce=\"{nonce}\">"));
 
             output = mother.ToString();
+
+            Response.Headers["Content-Security-Policy"] =
+                $"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline'; img-src data:; " +
+                "connect-src 'none'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'";
+            Response.Headers["X-Content-Type-Options"] = "nosniff";
+            Response.Headers["Referrer-Policy"] = "no-referrer";
 
             return base.Content(output, "text/html");
         }
@@ -1991,7 +2060,9 @@ namespace VerifiedXCore.Controllers
             // Add noise layer for grainy effect
             htmlBuilder.AppendLine("<div class=\"noise-layer\"></div>");
             htmlBuilder.AppendLine("<div class=\"gray-line\"></div>");
-            htmlBuilder.AppendLine("<script>");
+            // VX-17 (adjacent): per-response script nonce; see the CSP header below.
+            var debugNonce = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+            htmlBuilder.AppendLine($"<script nonce=\"{debugNonce}\">");
             htmlBuilder.AppendLine("document.addEventListener('DOMContentLoaded', function() {");
             htmlBuilder.AppendLine("    var glitchElement = document.querySelector('.glitch');");
             htmlBuilder.AppendLine("    glitchElement.style.animation = 'glitch-animation 0.1s infinite alternate';");
@@ -2001,8 +2072,16 @@ namespace VerifiedXCore.Controllers
             foreach (var line in lines)
             {
                 // Use inline styling for retro look
-                htmlBuilder.Append($"<div class=\"retro-text\">{line}</div>");
+                // VX-17 (adjacent): the lines include peer-supplied text (e.g. a peer's reported wallet version,
+                // registry IPs) and were emitted verbatim into text/html — the same defect as the Mother page.
+                htmlBuilder.Append($"<div class=\"retro-text\">{System.Text.Encodings.Web.HtmlEncoder.Default.Encode(line)}</div>");
             }
+
+            Response.Headers["Content-Security-Policy"] =
+                $"default-src 'none'; script-src 'nonce-{debugNonce}'; style-src 'unsafe-inline'; img-src data:; " +
+                "connect-src 'none'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'";
+            Response.Headers["X-Content-Type-Options"] = "nosniff";
+            Response.Headers["Referrer-Policy"] = "no-referrer";
 
             // Return the HTML content with content type set to text/html
             return Content(htmlBuilder.ToString(), "text/html");

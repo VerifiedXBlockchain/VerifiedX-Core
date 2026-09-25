@@ -189,7 +189,7 @@ namespace VerifiedXCore.BrowserWalletServices
             }
             catch (Exception ex)
             {
-                return new { success = false, message = $"Error bridging to Base: {ex.Message}" };
+                return new { success = false, message = $"Error bridging to Base: {ApiErrorText.For(ex)}" };
             }
         }
 
@@ -205,7 +205,7 @@ namespace VerifiedXCore.BrowserWalletServices
             }
             catch (Exception ex)
             {
-                return new { success = false, message = $"Error retrying mint: {ex.Message}" };
+                return new { success = false, message = $"Error retrying mint: {ApiErrorText.For(ex)}" };
             }
         }
 
@@ -223,7 +223,7 @@ namespace VerifiedXCore.BrowserWalletServices
             }
             catch (Exception ex)
             {
-                return new { success = false, message = $"Error force-retrying mint: {ex.Message}" };
+                return new { success = false, message = $"Error force-retrying mint: {ApiErrorText.For(ex)}" };
             }
         }
 
@@ -329,7 +329,7 @@ namespace VerifiedXCore.BrowserWalletServices
             }
             catch (Exception ex)
             {
-                return new { success = false, message = $"Preflight error: {ex.Message}" };
+                return new { success = false, message = $"Preflight error: {ApiErrorText.For(ex)}" };
             }
         }
 
@@ -374,7 +374,7 @@ namespace VerifiedXCore.BrowserWalletServices
             }
             catch (Exception ex)
             {
-                return new { success = false, message = $"Error retrieving bridge lock status: {ex.Message}" };
+                return new { success = false, message = $"Error retrieving bridge lock status: {ApiErrorText.For(ex)}" };
             }
         }
     }

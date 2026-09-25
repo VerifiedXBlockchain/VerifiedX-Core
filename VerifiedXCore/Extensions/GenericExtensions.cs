@@ -539,31 +539,57 @@ namespace VerifiedXCore.Extensions
                 return false;
             return true;
         }
-        public static byte[] ToDecompress(this byte[] data)
+        /// <summary>
+        /// BB-4 (VX-09, VX-20, VX-22): default ceiling for GZip output when a caller names none. The overloads without a
+        /// limit used to copy the whole stream, so a few MB of compressed input (gzip reaches ~1000:1) could allocate
+        /// gigabytes. Every overload is now bounded; callers handling remote input pass a tighter limit.
+        /// </summary>
+        public const int DefaultMaxDecompressedBytes = 16 * 1024 * 1024;
+
+        public static byte[] ToDecompress(this byte[] data) => data.ToDecompress(DefaultMaxDecompressedBytes);
+
+        public static string ToDecompress(this string s) => s.ToDecompress(DefaultMaxDecompressedBytes);
+
+        /// <summary>BB-4: GZip-decompresses at most <paramref name="maxOutputBytes"/>; throws InvalidDataException beyond.</summary>
+        public static byte[] ToDecompress(this byte[] data, int maxOutputBytes)
         {
             using (MemoryStream compressedStream = new MemoryStream(data))
-            using (MemoryStream decompressedStream = new MemoryStream())
+            using (GZipStream gzipStream = new GZipStream(compressedStream, CompressionMode.Decompress))
             {
-                using (GZipStream gzipStream = new GZipStream(compressedStream, CompressionMode.Decompress))
-                {
-                    gzipStream.CopyTo(decompressedStream);
-                }
-                return decompressedStream.ToArray();
+                return ReadBounded(gzipStream, maxOutputBytes);
             }
         }
 
-        public static string ToDecompress(this string s)
+        /// <summary>BB-4: base64 → GZip → UTF-16 string, at most <paramref name="maxOutputBytes"/> decompressed bytes.</summary>
+        public static string ToDecompress(this string s, int maxOutputBytes)
         {
             var bytes = Convert.FromBase64String(s);
             using (var msi = new MemoryStream(bytes))
-            using (var mso = new MemoryStream())
+            using (var gs = new GZipStream(msi, CompressionMode.Decompress))
             {
-                using (var gs = new GZipStream(msi, CompressionMode.Decompress))
-                {
-                    gs.CopyTo(mso);
-                }
-                return Encoding.Unicode.GetString(mso.ToArray());
+                return Encoding.Unicode.GetString(ReadBounded(gs, maxOutputBytes));
             }
+        }
+
+        /// <summary>
+        /// BB-4: copies a (decompressing) stream into memory, stopping with InvalidDataException as soon as more than
+        /// <paramref name="maxOutputBytes"/> would be produced. Never allocates past the limit plus one buffer.
+        /// </summary>
+        public static byte[] ReadBounded(Stream source, int maxOutputBytes)
+        {
+            if (maxOutputBytes < 0) throw new ArgumentOutOfRangeException(nameof(maxOutputBytes));
+            using var output = new MemoryStream();
+            var buffer = new byte[81920];
+            long total = 0;
+            int read;
+            while ((read = source.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                total += read;
+                if (total > maxOutputBytes)
+                    throw new InvalidDataException($"decompressed output exceeds {maxOutputBytes} bytes");
+                output.Write(buffer, 0, read);
+            }
+            return output.ToArray();
         }
         private static byte[] GetKey(string password)
         {

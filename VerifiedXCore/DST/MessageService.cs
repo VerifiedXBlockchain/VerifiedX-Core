@@ -210,9 +210,19 @@ namespace VerifiedXCore.DST
             var remoteEndPoint = IPEndPoint.Parse($"{ip}:{message.Data}");
             udpClient.Send(punchMessage, remoteEndPoint);
         }
+        /// <summary>NEW-21: bound on the DST connection tables (entries were never pruned).</summary>
+        public const int MaxDstConnections = 1000;
+
+        /// <summary>NEW-21: whether a NEW entry may be added (existing endpoints always refresh).</summary>
+        public static bool CanTrack(System.Collections.Concurrent.ConcurrentDictionary<string, DSTConnection> table, string key) =>
+            table.ContainsKey(key) || table.Count < MaxDstConnections;
+
+        /// <summary>NEW-21: the first message is kept for the session; an oversized one is not stored.</summary>
+        private static Message? Bounded(Message message) => (message?.Data?.Length ?? 0) <= 4096 ? message : null;
+
         public static void STUNConnect(Message message, IPEndPoint endPoint, UdpClient udpClient)
         {
-            if (message.Data == "helo")
+            if (message.Data == "helo" && CanTrack(Globals.ConnectedShops, endPoint.ToString()))
             {
                 Globals.ConnectedShops.TryGetValue(message.IPAddress, out var shop);
                 if (shop != null)
@@ -227,7 +237,7 @@ namespace VerifiedXCore.DST
                         LastReceiveMessage = TimeUtil.GetTime(),
                         ConnectDate = TimeUtil.GetTime(),
                         IPAddress = endPoint.ToString(),
-                        InitialMessage = message,
+                        InitialMessage = Bounded(message),
                         ConnectionId = RandomStringUtility.GetRandomString(12, true)
                     };
                 }
@@ -239,7 +249,7 @@ namespace VerifiedXCore.DST
         }
         public static void ShopConnect(Message message, IPEndPoint endPoint, UdpClient udpClient)
         {
-            if(message.Data == "helo")
+            if(message.Data == "helo" && CanTrack(Globals.ConnectedClients, endPoint.ToString()))
             {
                 Globals.ConnectedClients.TryGetValue(message.IPAddress, out var client);
                 if(client != null)
@@ -254,7 +264,7 @@ namespace VerifiedXCore.DST
                         LastReceiveMessage = TimeUtil.GetTime(),
                         ConnectDate = TimeUtil.GetTime(),
                         IPAddress = endPoint.ToString(),
-                        InitialMessage = message,
+                        InitialMessage = Bounded(message),
                         ConnectionId = RandomStringUtility.GetRandomString(12, true)
                     };
                 }
@@ -291,25 +301,9 @@ namespace VerifiedXCore.DST
                     }
                     else
                     {
-                        client = new DSTConnection
-                        {
-                            LastReceiveMessage = TimeUtil.GetTime(),
-                            ConnectDate = TimeUtil.GetTime(),
-                            IPAddress = endPoint.ToString(),
-                            InitialMessage = message,
-                            ConnectionId = RandomStringUtility.GetRandomString(12, true)
-                        };
-
-                        Globals.ConnectedClients.TryAdd(endPoint.ToString(),client);
-
-                        client.LastReceiveMessage = TimeUtil.GetTime();
-                        if (!client.KeepAliveStarted)
-                        {
-                            client.KeepAliveStarted = true;
-                            _ = KeepAliveService.KeepAlive(7, endPoint, udpClient, client.ConnectionId);
-                        }
-
-                        Globals.ConnectedClients[endPoint.ToString()] = client;
+                        // NEW-21: an unsolicited KeepAlive from an unknown endpoint used to create a permanent client
+                        // entry and start a keepalive loop toward that (spoofable) source - ~100x UDP reflection. A client
+                        // is added only by its "helo" (ShopConnect); anything else is ignored.
                     }
                 }
                 else
@@ -473,6 +467,27 @@ namespace VerifiedXCore.DST
             }
         }
 
+        /// <summary>VX-04: true when <paramref name="scUID"/> is a contract this shop lists.</summary>
+        internal static bool IsListedOnThisShop(string? scUID)
+        {
+            if (string.IsNullOrEmpty(scUID)) return false;
+            var listings = Listing.GetAllListings();
+            return listings != null && listings.Any(l => l.SmartContractUID == scUID);
+        }
+
+        /// <summary>
+        /// VX-04: true when <paramref name="requestedName"/> is the thumbnail name of one of the assets of
+        /// listed contract <paramref name="scUID"/> (same mapping the buyer uses to request it).
+        /// </summary>
+        internal static async Task<bool> IsListedAssetThumbnail(string? scUID, string? requestedName)
+        {
+            if (string.IsNullOrEmpty(requestedName) || !IsListedOnThisShop(scUID)) return false;
+            var sc = SmartContractMain.SmartContractData.GetSmartContract(scUID);
+            if (sc == null) return false;
+            var assets = await NFTAssetFileUtility.GetAssetListFromSmartContract(sc);
+            return assets.Any(a => string.Equals(NFTAssetFileUtility.ThumbnailRequestName(a), requestedName, StringComparison.Ordinal));
+        }
+
         public static async Task AssetRequest(Message message, IPEndPoint endPoint, UdpClient udpClient)
         {
             if (message.Type == MessageType.AssetReq)
@@ -482,6 +497,9 @@ namespace VerifiedXCore.DST
                     if(message.ComType == MessageComType.Info)
                     {
                         var scUID = message.Data;
+                        // VX-04: only contracts this shop actually lists (was: any contract in the local DB).
+                        if (!IsListedOnThisShop(scUID))
+                            return;
                         var sc = SmartContractMain.SmartContractData.GetSmartContract(scUID);
                         if (sc == null)
                             return;
@@ -507,8 +525,8 @@ namespace VerifiedXCore.DST
                     if (message.ComType == MessageComType.Request)
                     {
 
-                        var assetMessageDataArray = message.Data.Split(',');
-                        if(assetMessageDataArray != null) 
+                        var assetMessageDataArray = message.Data?.Split(',');
+                        if(assetMessageDataArray != null && assetMessageDataArray.Length >= 4)
                         {
                             var uniqueId = assetMessageDataArray[0];
                             var asset = assetMessageDataArray[1];
@@ -523,7 +541,17 @@ namespace VerifiedXCore.DST
                                     _asset = asset.Replace(".pdf", ".jpg");
                                 }
 
-                                _ = AssetSendService.SendAsset(_asset, assetscUID, endPoint, udpClient, ackNum);
+                                // VX-04: unauthenticated datagrams used to reach the filesystem with a
+                                // caller-chosen name and contract. Now: the sender must have completed
+                                // the shop handshake, the contract must be listed on this shop, and the
+                                // name must be one of that contract's thumbnail names. Path resolution is
+                                // additionally confined to the asset folder (NFTAssetFileUtility).
+                                if (ackNumParse && ackNum >= 0 &&
+                                    Globals.ConnectedClients.ContainsKey(endPoint.ToString()) &&
+                                    await IsListedAssetThumbnail(assetscUID, _asset))
+                                {
+                                    _ = AssetSendService.SendAsset(_asset, assetscUID, endPoint, udpClient, ackNum);
+                                }
                             }
                             catch { }
                         }   
@@ -550,6 +578,25 @@ namespace VerifiedXCore.DST
 
                         bid.EndPoint = endPoint;
                         bid.BidSendReceive = BidSendReceive.Received;
+                        bid.BidStatus = BidStatus.Received; // never trust a status set by the sender
+
+                        // VX-10: the sender must have completed the shop handshake and the bidder must have
+                        // signed this listing's purchase key and the exact price the shop would commit.
+                        var bidListing = Listing.GetListingDb()?.Query().Where(x => x.Id == bid.ListingId).FirstOrDefault();
+                        if (!Globals.ConnectedClients.ContainsKey(endPoint.ToString()) ||
+                            DstBidAuthorization.Validate(bid, bidListing, isBuyNow: false, out _) != null)
+                        {
+                            var rejected = GenerateMessage(new Message
+                            {
+                                Type = MessageType.Bid,
+                                ComType = MessageComType.Response,
+                                Data = $"{bid.Id},{BidStatus.Rejected}",
+                                ResponseMessage = true,
+                                ResponseMessageId = message.Id,
+                            }, false);
+                            udpClient.Send(Encoding.UTF8.GetBytes(rejected), endPoint);
+                            return;
+                        }
 
                         Globals.BidQueue.Enqueue(bid);
 
@@ -606,6 +653,25 @@ namespace VerifiedXCore.DST
 
                         bid.EndPoint = endPoint;
                         bid.BidSendReceive = BidSendReceive.Received;
+                        bid.BidStatus = BidStatus.Received; // never trust a status set by the sender
+
+                        // VX-10: the sender must have completed the shop handshake and the bidder must have
+                        // signed this listing's purchase key and the exact price the shop would commit.
+                        var bidListing = Listing.GetListingDb()?.Query().Where(x => x.Id == bid.ListingId).FirstOrDefault();
+                        if (!Globals.ConnectedClients.ContainsKey(endPoint.ToString()) ||
+                            DstBidAuthorization.Validate(bid, bidListing, isBuyNow: true, out _) != null)
+                        {
+                            var rejected = GenerateMessage(new Message
+                            {
+                                Type = MessageType.Bid,
+                                ComType = MessageComType.Response,
+                                Data = $"{bid.Id},{BidStatus.Rejected}",
+                                ResponseMessage = true,
+                                ResponseMessageId = message.Id,
+                            }, false);
+                            udpClient.Send(Encoding.UTF8.GetBytes(rejected), endPoint);
+                            return;
+                        }
 
                         Globals.BuyNowQueue.Enqueue(bid);
 

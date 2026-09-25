@@ -118,7 +118,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 LogUtility.Log($"[BridgeAttest] EXCEPTION during attestation for lockId={request?.LockId}: {ex.Message}\n{ex.StackTrace}", TAG);
-                return Task.FromResult<(bool, string?, string?)>((false, null, ex.Message));
+                return Task.FromResult<(bool, string?, string?)>((false, null, ApiErrorText.For(ex)));
             }
         }
 

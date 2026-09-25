@@ -192,7 +192,11 @@ namespace VerifiedXCore.P2P
                 await Task.WhenAll(delayTask, task);
                 Result = await task;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // Was catch{}: handler failures vanished, hiding faults on the unauthenticated hub.
+                ErrorLogUtility.LogError($"SignalRQueue handler failed ({messageType}): {ex.Message}", "P2PServer.SignalRQueue()");
+            }
             finally
             {
                 try 
@@ -220,44 +224,42 @@ namespace VerifiedXCore.P2P
             try
             {
                 // HAL-16 Fix: Use Block semaphore to ensure blocks are NEVER blocked by TXs
-                return await SignalRQueue(Context, (int)nextBlock.Size, SignalRMessageType.Block, async () =>
+                // VX-19: the queue cost is measured locally (the wire Size was trusted; a negative value credited the budget).
+                return await SignalRQueue(Context, BlockStaging.QueueCost(nextBlock), SignalRMessageType.Block, async () =>
                 {
-                   
-                    if (nextBlock.ChainRefId == BlockchainData.ChainRef)
+
+                    if (nextBlock != null && nextBlock.ChainRefId == BlockchainData.ChainRef)
                     {
                         var IP = GetIP(Context);
                         var nextHeight = Globals.LastBlock.Height + 1;
                         var currentHeight = nextBlock.Height;
-                        
-                        if (currentHeight >= nextHeight)
+
+                        // VX-19: a block ahead of tip+1 is never staged (it used to be held forever — ValidateBlocks only
+                        // evicts heights below the tip). It only tells us we are behind: start the normal downloader,
+                        // which fetches from peers and validates in order.
+                        if (currentHeight > nextHeight)
+                        {
+                            _ = BlockDownloadService.GetAllBlocks();
+                            return false;
+                        }
+
+                        if (currentHeight == nextHeight)
                         {
                             // GOSSIP-GATE (Sep 2026): on a caster, a live tip+1 block from the general hub must pass
                             // the same agreed-hash / majority-attestation rule as message 7 before it is staged.
-                            if (currentHeight == nextHeight
-                                && !await BlockcasterNode.TryAdmitLiveBlockAsCasterAsync(nextBlock, $"P2PHub.ReceiveBlock:{IP}"))
+                            if (!await BlockcasterNode.TryAdmitLiveBlockAsCasterAsync(nextBlock, $"P2PHub.ReceiveBlock:{IP}"))
                                 return false;
 
-                            // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
-                            BlockDownloadService.BlockDict.AddOrUpdate(
-                                currentHeight,
-                                new List<(Block, string)> { (nextBlock, IP) },
-                                (key, existingList) =>
-                                {
-                                    existingList.Add((nextBlock, IP));
-                                    return existingList;
-                                });
+                            // VX-19: header hash, signature, version, local size and known producer; then de-duplicated,
+                            // capped staging. A block that fails is neither staged nor re-gossiped.
+                            if (!BlockStaging.PassesGossipPreChecks(nextBlock, out _) || !BlockStaging.TryStageGossip(nextBlock, IP))
+                                return false;
 
                             await BlockValidatorService.ValidateBlocks();
 
-                            if (nextHeight == currentHeight)
-                            {
-                                string data = "";
-                                data = JsonConvert.SerializeObject(nextBlock);
-                                await Clients.All.SendAsync("GetMessage", "blk", data);
-                            }
-
-                            if (nextHeight < currentHeight)
-                                await BlockDownloadService.GetAllBlocks();
+                            string data = "";
+                            data = JsonConvert.SerializeObject(nextBlock);
+                            await Clients.All.SendAsync("GetMessage", "blk", data);
 
                             return true;
                         }
@@ -341,7 +343,14 @@ namespace VerifiedXCore.P2P
 
         public async Task<long?> SendBlockSpan(long startHeight, long cumulativeBuffer)
         {
-            var blockSpan = await Blockchain.GetBlockSpan(startHeight, cumulativeBuffer);
+            // VX-09: the byte budget is caller-supplied; clamp it so the span it produces is one this node
+            // will actually serve from SendBlockList.
+            // VX-09 (follow-up): the span query walks block documents, so it takes a serve slot like its siblings
+            // (2 per IP, 16 in total); it was the one block-serving hub method without a concurrency cap.
+            using var slot = await BlockServeLimits.TryEnterAsync(GetIP(Context), TimeSpan.FromSeconds(2));
+            if (slot == null)
+                return null;
+            var blockSpan = await Blockchain.GetBlockSpan(startHeight, BlockServeLimits.ClampByteBudget(cumulativeBuffer));
 
             if (blockSpan == null)
                 return null;
@@ -355,11 +364,22 @@ namespace VerifiedXCore.P2P
         public async Task<string> SendBlockList(long startHeight, long endHeight)
         {
             var peerIP = GetIP(Context);
-            var blockSpan = (startHeight, endHeight);
-            var blockList = await Blockchain.GetBlockListFromSpan(blockSpan);
-            if (blockList?.Count > 0)
+
+            // VX-09: validate and clamp the range (end >= start, at most MaxBlocksPerList, never past the tip),
+            // bound the reply bytes while building it, and cap concurrent builds per peer and in total. It used
+            // to materialise any caller-named range — 0..long.MaxValue returned the whole chain.
+            var range = BlockServeLimits.ClampRange(startHeight, endHeight, Globals.LastBlock.Height);
+            if (range == null)
+                return "0";
+
+            using var slot = await BlockServeLimits.TryEnterAsync(peerIP, TimeSpan.FromSeconds(2));
+            if (slot == null)
+                return "0";
+
+            var (json, count) = BlockServeLimits.BuildListJson(range.Value.Start, range.Value.End, BlockchainData.GetBlockByHeight);
+            if (count > 0)
             {
-                var blockListJsonCompressed = JsonConvert.SerializeObject(blockList).ToCompress();
+                var blockListJsonCompressed = json.ToCompress();
                 return blockListJsonCompressed;
             }
             else
@@ -394,6 +414,13 @@ namespace VerifiedXCore.P2P
                 //    }
                 //});
                 var peerIP = GetIP(Context);
+
+                // VX-09: cap concurrent block serving per peer and in total (the hub allows 200 parallel
+                // invocations per connection). Not the SignalRQueue: its sub-second delay escalation would
+                // throttle the one-block-at-a-time V1 downloader.
+                using var slot = await BlockServeLimits.TryEnterAsync(peerIP, TimeSpan.FromSeconds(2));
+                if (slot == null)
+                    return null;
 
                 var message = "";
                 var nextBlockHeight = currentBlock + 1;
@@ -448,8 +475,11 @@ namespace VerifiedXCore.P2P
                                     try
                                     {
                                         ErrorLogUtility.LogError($"TX Failed From Remote Node: {txResult.Item2}", "P2PServer.SendTxToMempool()-3");
-                                        mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
-                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                        // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
+                                        // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
+                                        // carrying a real transaction's hash remove it (and free its claims) during propagation.
+                                        if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
+                                            TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                     }
                                     catch (Exception ex)
                                     {
@@ -541,8 +571,11 @@ namespace VerifiedXCore.P2P
                                     try
                                     {
                                         ErrorLogUtility.LogError($"TX Failed From Remote Node. Rating {rating}, DoubleSpend {dblspndChk}, Crafted {isCraftedIntoBlock}", "P2PServer.SendTxToMempool()-1");
-                                        mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
-                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                        // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
+                                        // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
+                                        // carrying a real transaction's hash remove it (and free its claims) during propagation.
+                                        if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
+                                            TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                     }
                                     catch (Exception ex)
                                     {
@@ -556,16 +589,20 @@ namespace VerifiedXCore.P2P
                         }
                         else
                         {
-                            var isTxStale = await TransactionData.IsTxTimestampStale(txReceived);
+                            // VX-06: the received object is untrusted — only its Hash matched a stored TX. Every
+                            // decision here uses the STORED transaction (txFound). Staleness used to be evaluated
+                            // on the received Timestamp, so a forged object with a victim's hash and an old
+                            // timestamp deleted the victim's pending TX from every node.
+                            var isTxStale = await TransactionData.IsTxTimestampStale(txFound);
                             if (!isTxStale)
                             {
-                                var isCraftedIntoBlock = await TransactionData.HasTxBeenCraftedIntoBlock(txReceived);
+                                var isCraftedIntoBlock = await TransactionData.HasTxBeenCraftedIntoBlock(txFound);
                                 if (isCraftedIntoBlock)
                                 {
                                     try
                                     {
-                                        mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
-                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                        mempool.DeleteManySafe(x => x.Hash == txFound.Hash);// tx has been crafted into block. Remove.
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txFound.Hash);
                                     }
                                     catch (Exception ex)
                                     {
@@ -579,8 +616,8 @@ namespace VerifiedXCore.P2P
                             {
                                 try
                                 {
-                                    mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
-                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                    mempool.DeleteManySafe(x => x.Hash == txFound.Hash);// tx has been crafted into block. Remove.
+                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txFound.Hash);
                                 }
                                 catch (Exception ex)
                                 {
@@ -601,8 +638,11 @@ namespace VerifiedXCore.P2P
                                 try
                                 {
                                     ErrorLogUtility.LogError($"TX Failed From Remote Node: {txResult.Item2}", "P2PServer.SendTxToMempool()-4");
-                                    mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
-                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                    // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
+                                    // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
+                                    // carrying a real transaction's hash remove it (and free its claims) during propagation.
+                                    if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                 }
                                 catch { }
 
@@ -692,8 +732,11 @@ namespace VerifiedXCore.P2P
                                 try
                                 {
                                     ErrorLogUtility.LogError($"TX Failed From Remote Node. Rating {rating}, DoubleSpend {dblspndChk}, Crafted {isCraftedIntoBlock}", "P2PServer.SendTxToMempool()-2");
-                                    mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
-                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                    // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
+                                    // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
+                                    // carrying a real transaction's hash remove it (and free its claims) during propagation.
+                                    if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                 }
                                 catch { }
 
@@ -793,7 +836,7 @@ namespace VerifiedXCore.P2P
         private static string GetIP(HubCallerContext context)
         {
             var feature = context.Features.Get<IHttpConnectionFeature>();            
-            var peerIP = feature.RemoteIpAddress.MapToIPv4().ToString();
+            var peerIP = VerifiedXCore.Utilities.RemoteIp.Text(feature.RemoteIpAddress)!;
 
             return peerIP;
         }

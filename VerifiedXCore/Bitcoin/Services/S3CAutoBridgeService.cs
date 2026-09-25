@@ -1,6 +1,9 @@
 using Newtonsoft.Json.Linq;
 using VerifiedXCore.Bitcoin.Controllers;
 using VerifiedXCore.Bitcoin.Models;
+using VerifiedXCore.Data;
+using VerifiedXCore.Models;
+using VerifiedXCore.Models.SmartContracts;
 using VerifiedXCore.Utilities;
 using System;
 using System.Collections.Concurrent;
@@ -28,6 +31,7 @@ namespace VerifiedXCore.Bitcoin.Services
         private const int BtcArrivalMaxSeconds = 3600;           // BTC confirmation ceiling
         private const int GasPollSeconds = 30;
         private const int GasMaxSeconds = 3600;                  // <= 1h gas window (§12.4)
+        private const int CompanionConfirmMaxSeconds = 1800;     // NEW-26 follow-up: wait for the companion to be on chain
 
         public static S3CAutoBridgeState? GetStatus(string orchestrationId)
             => _orchestrations.TryGetValue(orchestrationId, out var s) ? s : null;
@@ -91,6 +95,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (created == null) { Set(s, S3CAutoBridgeStatus.Failed, "Companion creation failed (public DKG)."); return; }
                     s.PublicScUID = created.Value.scUID;
                     s.PublicDepositAddress = created.Value.depositAddress;
+                    s.CompanionCreateTxHash = created.Value.txHash;
+                    companion = VBTCContractV2.GetContract(created.Value.scUID);
                     s.CompanionBalanceBefore = 0M;   // fresh companion
                 }
                 else
@@ -103,8 +109,22 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
                 Set(s, S3CAutoBridgeStatus.AwaitingCompanionReady);
 
-                if (string.IsNullOrEmpty(s.PublicDepositAddress))
-                { Set(s, S3CAutoBridgeStatus.Failed, "Companion has no deposit address."); return; }
+                // NEW-26 (follow-up): BTC goes only to a companion that exists on chain. The create response (and a local
+                // record) carries the deposit address before the creation is mined; if it never is, BTC sent there has no
+                // contract and no withdrawal path. Wait - at most until the creation can no longer be mined - then take the
+                // address from the confirmation-gated GetMPCDepositAddress. Nothing has moved yet if this gives up.
+                var waitSeconds = companion == null ? CompanionConfirmMaxSeconds
+                    : (int)Math.Clamp(CreationDeadline(companion) - TimeUtil.GetTime() + CeremonyPollSeconds, 0, CompanionConfirmMaxSeconds);
+                var confirmedDeposit = await WaitForCompanionOnChain(s.PublicScUID!, waitSeconds, CeremonyPollSeconds);
+                if (string.IsNullOrEmpty(confirmedDeposit))
+                {
+                    var dead = companion != null && StateOf(companion, TimeUtil.GetTime()) == CompanionState.Dead;
+                    Set(s, S3CAutoBridgeStatus.Abandoned, dead
+                        ? "The companion's creation was never mined and can no longer be; nothing moved. A retry will create a new companion."
+                        : "The companion's creation is still pending; nothing moved. Retry later - it will be reused once it confirms.");
+                    return;
+                }
+                s.PublicDepositAddress = confirmedDeposit;
 
                 // 2. Wait for the S3C contract's withdrawal slot to be free (§0 / §12.4).
                 Set(s, S3CAutoBridgeStatus.WaitingForContractFree);
@@ -151,16 +171,51 @@ namespace VerifiedXCore.Bitcoin.Services
             }
         }
 
-        // §12.2: scan the requester's owned contracts for an existing public companion linked to the S3C.
-        private static VBTCContractV2? DiscoverCompanion(string requester, string s3cUID)
+        // ── NEW-26 (follow-up): a companion is on chain, pending, or dead - decided by time, not by this node's mempool ──
+
+        internal enum CompanionState { OnChain, Pending, Dead }
+
+        /// <summary>Longest a finished ceremony can wait for its contract to be created (controller cleanup: active + terminal TTL).</summary>
+        private const long CeremonyLifetimeSeconds = 2 * 3600;
+
+        /// <summary>
+        /// The last moment a companion's creation can still be mined: its creation timestamp + the network's transaction age
+        /// limit + clock skew (honest nodes refuse older transactions). Records made before the timestamp was stored fall back
+        /// to the ceremony start in the contract UID + the longest a ceremony stays usable + the age limit + skew.
+        /// </summary>
+        internal static long CreationDeadline(VBTCContractV2 c)
         {
-            var owned = VBTCContractV2.GetContractsByOwner(requester);
-            return owned?.FirstOrDefault(c => !c.IsS3C && c.LinkedContractUID == s3cUID);
+            const long ageLimit = Globals.MaxTxAgeSeconds + Globals.MaxFutureSkewSeconds;
+            if (c.CreateTxTimestamp.HasValue) return c.CreateTxTimestamp.Value + ageLimit;
+            var parts = (c.SmartContractUID ?? "").Split(':');
+            return parts.Length == 2 && long.TryParse(parts[1], out var start) ? start + CeremonyLifetimeSeconds + ageLimit : 0;
+        }
+
+        internal static CompanionState StateOf(VBTCContractV2 c, long now)
+        {
+            if (!string.IsNullOrEmpty(c.SmartContractUID) && SmartContractStateTrei.GetSmartContractState(c.SmartContractUID) != null)
+                return CompanionState.OnChain;
+            return now <= CreationDeadline(c) ? CompanionState.Pending : CompanionState.Dead;
+        }
+
+        // §12.2: scan the requester's owned contracts for an existing public companion linked to the S3C.
+        // NEW-26 (follow-up): a companion on chain is reused; otherwise a companion whose creation can still be mined is
+        // waited for (a retry must not create a duplicate while it is pending); a dead one (its creation can never be mined)
+        // is ignored, so a retry creates a new one. Local records are never deleted: a creation this node dropped can still
+        // be mined through a peer, and then the companion is found and served as usual.
+        internal static VBTCContractV2? DiscoverCompanion(string requester, string s3cUID)
+        {
+            var linked = VBTCContractV2.GetContractsByOwner(requester)?
+                .Where(c => !c.IsS3C && c.LinkedContractUID == s3cUID && !string.IsNullOrEmpty(c.SmartContractUID)).ToList();
+            if (linked == null || linked.Count == 0) return null;
+            var now = TimeUtil.GetTime();
+            return linked.FirstOrDefault(c => StateOf(c, now) == CompanionState.OnChain)
+                ?? linked.FirstOrDefault(c => StateOf(c, now) == CompanionState.Pending);
         }
 
         // §12.2: create a public companion linked to the S3C contract via the live ceremony path
         // (forcePublic so the DKG uses the public pool even on an S3C-configured node).
-        private static async Task<(string scUID, string depositAddress)?> CreateCompanion(string requester, string s3cUID)
+        private static async Task<(string scUID, string depositAddress, string? txHash)?> CreateCompanion(string requester, string s3cUID)
         {
             try
             {
@@ -197,12 +252,37 @@ namespace VerifiedXCore.Bitcoin.Services
                 var scUID = createObj["SmartContractUID"]?.ToObject<string>();
                 var deposit = createObj["DepositAddress"]?.ToObject<string>();
                 if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(deposit)) return null;
-                return (scUID, deposit);
+                return (scUID, deposit, createObj["TransactionHash"]?.ToObject<string>());
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"[S3C AutoBridge] CreateCompanion error: {ex.Message}", "S3CAutoBridgeService.CreateCompanion");
                 return null;
+            }
+        }
+
+        /// <summary>
+        /// NEW-26 (follow-up): the companion's deposit address once its contract is on chain, polling up to
+        /// <paramref name="maxSeconds"/>; null if it never confirms. Uses GetMPCDepositAddress, which answers only for a
+        /// contract in chain state.
+        /// </summary>
+        internal static async Task<string?> WaitForCompanionOnChain(string companionScUID, int maxSeconds, int pollSeconds)
+        {
+            var controller = new VBTCController();
+            var waited = 0;
+            while (true)
+            {
+                try
+                {
+                    var obj = JObject.Parse(await controller.GetMPCDepositAddress(companionScUID));
+                    var address = obj["DepositAddress"]?.ToObject<string>();
+                    if (obj["Success"]?.ToObject<bool>() == true && !string.IsNullOrEmpty(address))
+                        return address;
+                }
+                catch { }
+                if (waited >= maxSeconds) return null;
+                await Task.Delay(TimeSpan.FromSeconds(pollSeconds));
+                waited += pollSeconds;
             }
         }
 

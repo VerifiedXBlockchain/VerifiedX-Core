@@ -116,6 +116,10 @@ namespace VerifiedXCore.Services
                 if (scState == null)
                     return (false, $"vBTC V2 contract not found in state trei: {input.SCUID}");
 
+                // VX-01: same contract-type rule as the single shape.
+                if (!Bitcoin.Services.VBTCService.IsVbtcV2Contract(scState))
+                    return (false, $"Contract {input.SCUID} is not a vBTC V2 contract.");
+
                 // S3C §0: per-CONTRACT active-withdrawal gate. includeLocalOnlyRows: false —
                 // consensus must not read rows that exist on this node only (fork vector).
                 if (VBTCWithdrawalRequest.HasActiveContractRequest(input.SCUID, gateHeight, includeLocalOnlyRows: false))
@@ -179,18 +183,69 @@ namespace VerifiedXCore.Services
             return (true, string.Empty);
         }
 
+        /// <summary>
+        /// NEW-17: the payments StateData.CompleteSaleSmartContract applies (SameBlockDebitGuard.SalePaidTransactions):
+        /// positive amounts, paid by the buyer (NextOwner), as separate transactions,
+        /// to the seller (current owner) and - only when the contract has a royalty feature - to its royalty payee; the
+        /// data's Royalty flag must match the contract, and together they cover the price (existing 1 VFX tolerance).
+        /// </summary>
+        internal static string? SalePaymentError(Transaction txRequest, bool? royaltyFlag, SmartContractStateTrei sc, SmartContractMain scMain)
+        {
+            var royaltyFeat = scMain.Features?.FirstOrDefault(x => x.FeatureName == FeatureName.Royalty);
+            var contractRoyalty = royaltyFeat != null;
+            if ((royaltyFlag == true) != contractRoyalty)
+                return "The sale's Royalty flag must match the contract's royalty feature.";
+            if (!(sc.PurchaseAmount > 0M))
+                return "Sale price must be greater than zero.";
+
+            var amountError = LedgerIntegrityRules.SaleAmounts(txRequest);
+            if (amountError != null)
+                return amountError;
+
+            var paid = SameBlockDebitGuard.SalePaidTransactions(txRequest);
+            if (paid.Count == 0 || (contractRoyalty && paid.Count != 2))
+                return "Sale payments are missing.";
+
+            var royaltyPayTo = contractRoyalty ? ((RoyaltyFeature)royaltyFeat!.FeatureFeatures).RoyaltyPayToAddress : null;
+            foreach (var (p, toPayee) in paid)
+            {
+                if (p.FromAddress != sc.NextOwner)
+                    return "Every sale payment must come from the buyer.";
+                var expectedTo = toPayee ? royaltyPayTo : sc.OwnerAddress;
+                if (p.ToAddress != expectedTo)
+                    return $"Sale payment is sent to {p.ToAddress}, but must be sent to {expectedTo}.";
+                // No inner hash/signature check here: the buyer signs the OUTER transaction, whose Data contains these
+                // payments, and JSON parsing drops trailing zeros (0.00000790 -> 0.0000079), so a recomputed inner hash
+                // differs for honest payments (it refused mainnet history from block 899,466 - sixth review).
+            }
+            // One payment tagged "1/2" and "2/2" is selected (and paid) twice by the apply but counted once here.
+            if (contractRoyalty && ReferenceEquals(paid[0].Tx, paid[1].Tx))
+                return "The seller and royalty payments must be separate transactions.";
+            if (paid.Sum(x => x.Tx.Amount) < sc.PurchaseAmount - 1.0M)
+                return "Sale payments do not cover the price.";
+            return null;
+        }
+
         public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false, bool twSkipVerify = false, Dictionary<string, long> processedNonces = null, bool skipPrivatePlonkProofVerification = false, long? blockHeight = null)
         {
             bool txResult = false;
             bool runReserveCheck = true;
 
-            var badTx = Globals.BadTxList.Exists(x => x == txRequest.Hash);
-            if (badTx)
+            // NEW-27: a whitelisted transaction skips validation only in block validation and only with the content its
+            // hash commits to (the carried Hash alone used to skip every check).
+            if (LedgerIntegrityRules.IsHonoredWhitelistEntry(txRequest, blockHeight))
                 return (true, "");
 
-            var badNFTTx = Globals.BadNFTTxList.Exists(x => x == txRequest.Hash);
-            if (badNFTTx) 
-                return (true, "");
+            // NEW-18: one reading of the hash preimage (Data and UnlockTime are joined without a separator).
+            var preimageError = LedgerIntegrityRules.CanonicalPreimage(txRequest);
+            if (preimageError != null)
+                return (false, preimageError);
+
+            // NEW-10: contract UIDs are exact (creation format; references equal the stored record's UID).
+            var contractUidError = LedgerIntegrityRules.ContractUids(txRequest);
+            if (contractUidError != null)
+                return (false, contractUidError);
+
 
             // Height-gated vBTC privacy disable (inert until VbtcPrivacyDisableHeight is set).
             // Deterministic under replay/sync: block validation passes the block's own height;
@@ -396,6 +451,14 @@ namespace VerifiedXCore.Services
 
                 newTxnMod.Build();
 
+                // NEW-22: the "Amount 0" re-hash below matched a transaction SIGNED with Amount "0" whatever Amount it now
+                // carries (the non-integer case above also re-hashed with 0): a relay or producer could raise the amount
+                // of any such transaction without breaking its signature. It applies only to a zero amount.
+                if (!newTxnMod.Hash.Equals(txRequest.Hash) && txRequest.Amount != 0M)
+                {
+                    return (txResult, "This transactions hash is not equal to the original hash.");
+                }
+
                 if (!newTxnMod.Hash.Equals(txRequest.Hash))
                 {
                     var newTxnModZero = new Transaction()
@@ -419,6 +482,28 @@ namespace VerifiedXCore.Services
                     }
                 }
 
+            }
+
+            // NEW-26 (follow-up): a vBTC V2 vault's code (deposit address, DKG data) never changes after creation.
+            var vaultCodeError = LedgerIntegrityRules.VaultCodeUnchanged(txRequest);
+            if (vaultCodeError != null)
+                return (txResult, vaultCodeError);
+
+            // VX-02 (follow-up): a contract creation (Mint(), TokenDeploy(), vBTC V2 create) has its submitted body
+            // decompiled - run in the Trillium interpreter - by the binding checks below. Check the signature first, so a
+            // transaction nobody signed (naming any funded address) never reaches the interpreter. The hash check above
+            // already binds the signed hash to this content. The same signature check still ends VerifyTX.
+            if (LedgerIntegrityRules.CreatedContractUid(txRequest) != null)
+            {
+                var creationSignatureError = SignatureError(txRequest);
+                if (creationSignatureError != null)
+                    return (txResult, creationSignatureError);
+
+                // NEW-26: a vBTC V2 deposit address must be the validators' FROST key (height-gated; block height at
+                // verify, tip + 1 at admission). Runs after the signature check (it decompiles the body too).
+                var dkgAttestationError = LedgerIntegrityRules.VbtcV2DkgAttestation(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1));
+                if (dkgAttestationError != null)
+                    return (txResult, dkgAttestationError);
             }
 
             if (txRequest.TransactionType != TransactionType.TX)
@@ -483,6 +568,13 @@ namespace VerifiedXCore.Services
                                             if(txRequest.FromAddress.StartsWith("xRBX"))
                                                 return (txResult, "A reserve account may not mint a smart contract.");
 
+                                            // VX-02: the body's embedded UID and MinterAddress must be the
+                                            // transaction's; downstream readers of ContractData trust them.
+                                            var mintBody = SmartContractDeployBinding.ReadPayload(txData).Data;
+                                            var mintBindingError = SmartContractDeployBinding.Validate(mintBody, scUID, txRequest.FromAddress, isTokenDeploy: false, out _);
+                                            if (mintBindingError != null)
+                                                return (txResult, mintBindingError);
+
                                             break;
                                         }
 
@@ -494,6 +586,15 @@ namespace VerifiedXCore.Services
                                             
                                             if (txRequest.FromAddress.StartsWith("xRBX"))
                                                 return (txResult, "A reserve account may not deploy a token smart contract.");
+
+                                            // VX-02: the apply credits the initial supply; the body's embedded
+                                            // UID and MinterAddress must be the transaction's (a mismatched body
+                                            // credited an attacker-chosen supply of an EXISTING token), and the
+                                            // supply / decimals must be within documented bounds.
+                                            var deployBody = SmartContractDeployBinding.ReadPayload(txData).Data;
+                                            var deployBindingError = SmartContractDeployBinding.Validate(deployBody, scUID, txRequest.FromAddress, isTokenDeploy: true, out _);
+                                            if (deployBindingError != null)
+                                                return (txResult, deployBindingError);
 
                                             break;
                                         }
@@ -633,6 +734,14 @@ namespace VerifiedXCore.Services
                                             if(amount == null || toAddress == null || fromAddress == null)
                                                 return (txResult, $"TX Data was missing items.");
 
+                                            // NEW-04: the apply debits the FromAddress named in the data, so it must be the signer
+                                            // (anyone could move any holder's tokens), the credit goes to the transaction's
+                                            // ToAddress, and a negative amount (which minted) is refused.
+                                            var tokenTransferError = LedgerIntegrityRules.TokenTransfer(txRequest.FromAddress, txRequest.ToAddress, fromAddress, toAddress, amount)
+                                                ?? LedgerIntegrityRules.TokenTransferResolvesToSender(fromAddress, toAddress);
+                                            if (tokenTransferError != null)
+                                                return (txResult, tokenTransferError);
+
                                             var stateAccount = StateData.GetSpecificAccountStateTrei(fromAddress);
                                             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
 
@@ -689,6 +798,11 @@ namespace VerifiedXCore.Services
 
                                             if (amount == null ||fromAddress == null)
                                                 return (txResult, $"TX Data was missing items.");
+
+                                            // NEW-04: burn debits the data's FromAddress (must be the signer); a negative amount minted.
+                                            var tokenBurnError = LedgerIntegrityRules.TokenBurn(txRequest.FromAddress, fromAddress, amount);
+                                            if (tokenBurnError != null)
+                                                return (txResult, tokenBurnError);
 
                                             var stateAccount = StateData.GetSpecificAccountStateTrei(fromAddress);
                                             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
@@ -772,6 +886,12 @@ namespace VerifiedXCore.Services
 
                                             if (string.IsNullOrEmpty(topicUID))
                                                 return (txResult, "TopicUID cannot be null");
+
+                                            // NEW-04: the vote is recorded for the data's FromAddress, so it must be the signer
+                                            // (anyone could cast any holder's vote).
+                                            var tokenVoteError = LedgerIntegrityRules.TokenVoteCast(txRequest.FromAddress, fromAddress);
+                                            if (tokenVoteError != null)
+                                                return (txResult, tokenVoteError);
 
                                             var stateAccount = StateData.GetSpecificAccountStateTrei(fromAddress);
                                             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
@@ -976,8 +1096,16 @@ namespace VerifiedXCore.Services
 
                                             var amount = amountVal.Value;
 
+                                            // NEW-05: legacy V1 had no positive-amount rule; a negative amount wrote a +amount row
+                                            // to the recipient (minting V1 vBTC).
+                                            var v1AmountError = LedgerIntegrityRules.V1TransferAmount(amountVal);
+                                            if (v1AmountError != null)
+                                                return (txResult, v1AmountError);
+
                                             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
-                                            if (scStateTreiRec != null)
+                                            // NEW-05: a transfer on a contract that does not exist used to pass untouched.
+                                            if (scStateTreiRec == null)
+                                                return (txResult, $"Smart contract not found: {scUID}");
                                             {
                                                 bool isOwner = false;
                                                 if (txRequest.FromAddress == scStateTreiRec.OwnerAddress)
@@ -1018,17 +1146,16 @@ namespace VerifiedXCore.Services
                                                 if (tknz == null)
                                                     return (txResult, $"Token feature error: {scUID}");
 
-                                                if (scStateTreiRec.SCStateTreiTokenizationTXes != null)
+                                                // NEW-05: a non-owner's balance is its ledger sum — zero when it has no rows. The check
+                                                // ran only when rows existed, so a sender with none could send any amount (minting).
+                                                if (!isOwner)
                                                 {
-                                                    var balances = scStateTreiRec.SCStateTreiTokenizationTXes.Where(x => x.FromAddress == txRequest.FromAddress || x.ToAddress == txRequest.FromAddress).ToList();
+                                                    var balance = (scStateTreiRec.SCStateTreiTokenizationTXes ?? new List<SmartContractStateTreiTokenizationTX>())
+                                                        .Where(x => x.FromAddress == txRequest.FromAddress || x.ToAddress == txRequest.FromAddress)
+                                                        .Sum(x => x.Amount);
 
-                                                    if (balances.Any() && !isOwner)
-                                                    {
-                                                        var balance = balances.Sum(x => x.Amount);
-
-                                                        if (balance < amount)
-                                                            return (txResult, $"Insufficient Balance. Current Balance: {balance}");
-                                                    }
+                                                    if (balance < amount)
+                                                        return (txResult, $"Insufficient Balance. Current Balance: {balance}");
                                                 }
                                             }
 
@@ -1075,9 +1202,16 @@ namespace VerifiedXCore.Services
                                                 if (input.FromAddress.StartsWith("xRBX"))
                                                     return (txResult, "Reserve accounts cannot send legacy vBTC (V1). Use vBTC V2 transfers.");
 
-                                                var signatureCheck = SignatureService.VerifySignature(input.FromAddress, signatureInput + txRequest.ToAddress + txRequest.FromAddress, input.Signature);
+                                                // NEW-05: the input's signature was computed and never used, so any holder's
+                                                // balance could be spent by naming them as an input. It must verify, and the
+                                                // input amount must be positive.
+                                                var v1InputError = LedgerIntegrityRules.V1TransferMultiInput(input, signatureInput, txRequest.ToAddress, txRequest.FromAddress);
+                                                if (v1InputError != null)
+                                                    return (txResult, v1InputError);
+
                                                 var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(input.SCUID);
-                                                if (scStateTreiRec != null)
+                                                if (scStateTreiRec == null)
+                                                    return (txResult, $"Smart contract not found: {input.SCUID}");
                                                 {
                                                     bool isOwner = false;
                                                     if (input.FromAddress == scStateTreiRec.OwnerAddress)
@@ -1116,17 +1250,15 @@ namespace VerifiedXCore.Services
                                                     if (tknz == null)
                                                         return (txResult, $"Token feature error: {input.SCUID}");
 
-                                                    if (scStateTreiRec.SCStateTreiTokenizationTXes != null)
+                                                    // NEW-05: zero balance when the input holder has no ledger rows (see TransferCoin()).
+                                                    if (!isOwner)
                                                     {
-                                                        var balances = scStateTreiRec.SCStateTreiTokenizationTXes.Where(x => x.FromAddress == input.FromAddress || x.ToAddress == input.FromAddress).ToList();
+                                                        var balance = (scStateTreiRec.SCStateTreiTokenizationTXes ?? new List<SmartContractStateTreiTokenizationTX>())
+                                                            .Where(x => x.FromAddress == input.FromAddress || x.ToAddress == input.FromAddress)
+                                                            .Sum(x => x.Amount);
 
-                                                        if (balances.Any() && !isOwner)
-                                                        {
-                                                            var balance = balances.Sum(x => x.Amount);
-
-                                                            if (balance < input.Amount)
-                                                                return (txResult, $"Insufficient Balance. Current Balance: {balance}");
-                                                        }
+                                                        if (balance < input.Amount)
+                                                            return (txResult, $"Insufficient Balance. Current Balance: {balance}");
                                                     }
                                                 }
                                             }
@@ -1177,8 +1309,9 @@ namespace VerifiedXCore.Services
 
                                                 // ===== MEMPOOL DEDUPLICATION (ADDITIONAL SAFETY CHECK) =====
                                                 // Even with lead arbiter rule, check for duplicates as additional safety measure
+                                                // NEW-08 (follow-up): mempool admission only (the lead-arbiter rule above is the consensus rule).
                                                 var mempool = TransactionData.GetPool();
-                                                var duplicateInMempool = mempool.Query().Where(x =>
+                                                var duplicateInMempool = (blockVerify || blockDownloads) ? new List<Transaction>() : mempool.Query().Where(x =>
                                                     x.TransactionType == TransactionType.TKNZ_WD_ARB &&
                                                     x.Hash != txRequest.Hash
                                                 ).ToList();
@@ -1316,14 +1449,21 @@ namespace VerifiedXCore.Services
                                                 return (txResult, "Reserve accounts must use the typed vBTC V2 transfer transaction.");
 
                                             // FIND-006 FIX #2: Validate amount is positive
-                                            if (!amount.HasValue || amount.Value <= 0)
-                                                return (txResult, "Amount must be greater than zero.");
+                                            // VX-01 (follow-up): same amount rule as VBTC_V2_TRANSFER (> 0, at most 8 decimals).
+                                            var fnAmountError = Bitcoin.Services.VBTCService.GetVbtcAmountError(amount, "vBTC V2 transfer");
+                                            if (fnAmountError != null)
+                                                return (txResult, fnAmountError);
 
                                             // Balance validation for both owner and non-owner:
                                             // - Owner: query ElectrumX for deposit address balance + ledger balance
                                             // - Non-owner: check ledger balance from tokenization TXes
                                             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
-                                            if (scStateTreiRec != null)
+                                            // VX-01 (follow-up): this function path moves vBTC V2 ledger balances like VBTC_V2_TRANSFER, so
+                                            // it needs the same contract-type check, and a missing contract is refused (it passed untouched).
+                                            if (scStateTreiRec == null)
+                                                return (txResult, $"Smart contract not found: {scUID}");
+                                            if (!Bitcoin.Services.VBTCService.IsVbtcV2Contract(scStateTreiRec))
+                                                return (txResult, $"Target contract {scUID} is not a vBTC V2 contract.");
                                             {
                                                 bool isOwner = fromAddress == scStateTreiRec.OwnerAddress;
 
@@ -1452,7 +1592,9 @@ namespace VerifiedXCore.Services
                             if (scUID == null)
                                 return (txResult, "SCUID cannot be null.");
 
-                            var mempoolList = mempool.Query().Where(x =>
+                            // NEW-08 (follow-up): MEMPOOL ADMISSION ONLY - at block verification this node's own mempool decided
+                            // whether a block was accepted (possible split).
+                            var mempoolList = (blockVerify || blockDownloads) ? new List<Transaction>() : mempool.Query().Where(x =>
                             x.FromAddress == txRequest.FromAddress &&
                             x.Hash != txRequest.Hash &&
                             (x.TransactionType == TransactionType.NFT_SALE ||
@@ -1465,8 +1607,10 @@ namespace VerifiedXCore.Services
 
                                 foreach (var tx in mempoolList)
                                 {
-                                    var txObjData = JObject.Parse(txData);
-                                    var mTXSCUID = txObjData["ContractUID"]?.ToObject<string?>();
+                                    // The pending sibling's own contract (this parsed the transaction under validation, so any
+                                    // pending NFT transaction from the sender refused the sale).
+                                    string? mTXSCUID = null;
+                                    try { mTXSCUID = TransactionUtility.GetSCTXFunctionAndUID(tx).Item3; } catch { }
                                     if (mTXSCUID == scUID)
                                     {
                                         reject = true;
@@ -1522,7 +1666,14 @@ namespace VerifiedXCore.Services
                             if (amountSoldFor == null)
                                 return (txResult, "Amount Sold For cannot be null.");
 
-                            var mempoolList = mempool.Query().Where(x => 
+                            // NEW-17: a negative price let the completion's payment be negative (VFX minted).
+                            var salePriceError = LedgerIntegrityRules.SaleAmounts(txRequest);
+                            if (salePriceError != null)
+                                return (txResult, salePriceError);
+
+                            // NEW-08 (follow-up): MEMPOOL ADMISSION ONLY - at block verification this node's own mempool decided
+                            // whether a block was accepted (possible split).
+                            var mempoolList = (blockVerify || blockDownloads) ? new List<Transaction>() : mempool.Query().Where(x => 
                             x.FromAddress == txRequest.FromAddress && 
                             x.Hash != txRequest.Hash && 
                             (x.TransactionType == TransactionType.NFT_SALE || 
@@ -1535,8 +1686,10 @@ namespace VerifiedXCore.Services
 
                                 foreach (var tx in mempoolList)
                                 {
-                                    var txObjData = JObject.Parse(txData);
-                                    var mTXSCUID = txObjData["ContractUID"]?.ToObject<string?>();
+                                    // The pending sibling's own contract (this parsed the transaction under validation, so any
+                                    // pending NFT transaction from the sender refused the sale).
+                                    string? mTXSCUID = null;
+                                    try { mTXSCUID = TransactionUtility.GetSCTXFunctionAndUID(tx).Item3; } catch { }
                                     if(mTXSCUID == scUID)
                                     {
                                         reject = true;
@@ -1606,7 +1759,9 @@ namespace VerifiedXCore.Services
                             var transactions = jobj["Transactions"]?.ToObject<List<Transaction>?>();
                             var keySign = jobj["KeySign"]?.ToObject<string?>();
 
-                            var mempoolList = mempool.Query().Where(x =>
+                            // NEW-08 (follow-up): MEMPOOL ADMISSION ONLY - at block verification this node's own mempool decided
+                            // whether a block was accepted (possible split).
+                            var mempoolList = (blockVerify || blockDownloads) ? new List<Transaction>() : mempool.Query().Where(x =>
                             x.FromAddress == txRequest.FromAddress &&
                             x.Hash != txRequest.Hash &&
                             (x.TransactionType == TransactionType.NFT_SALE ||
@@ -1619,8 +1774,10 @@ namespace VerifiedXCore.Services
 
                                 foreach (var tx in mempoolList)
                                 {
-                                    var txObjData = JObject.Parse(txData);
-                                    var mTXSCUID = txObjData["ContractUID"]?.ToObject<string?>();
+                                    // The pending sibling's own contract (this parsed the transaction under validation, so any
+                                    // pending NFT transaction from the sender refused the sale).
+                                    string? mTXSCUID = null;
+                                    try { mTXSCUID = TransactionUtility.GetSCTXFunctionAndUID(tx).Item3; } catch { }
                                     if (mTXSCUID == scUID)
                                     {
                                         reject = true;
@@ -1662,6 +1819,12 @@ namespace VerifiedXCore.Services
 
                                     if (scMain == null)
                                         return (txResult, "Failed to decompile smart contract.");
+
+                                    // NEW-17: every payment the apply makes is bound here, on every branch (the royalty-less
+                                    // featured branch had no checks; the others were one-sided bounds).
+                                    var salePaymentError = SalePaymentError(txRequest, royalty, scStateTreiRec, scMain);
+                                    if (salePaymentError != null)
+                                        return (txResult, salePaymentError);
 
                                     if(scMain.Features != null)
                                     {
@@ -1794,7 +1957,7 @@ namespace VerifiedXCore.Services
                     }
                     catch(Exception ex)
                     {
-                        return (txResult, $"Unknown TX Error: {ex.ToString()}");
+                        return (txResult, $"Unknown TX Error: {ApiErrorText.For(ex)}");
                     }
                     
                 }
@@ -2546,6 +2709,13 @@ namespace VerifiedXCore.Services
                         var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
                         if (scStateTreiRec != null)
                             return (txResult, "This vBTC V2 smart contract has already been minted.");
+
+                        // VX-02: same body binding as the generic Mint() path — this type is applied by
+                        // the same StateData mint dispatcher.
+                        var v2Body = SmartContractDeployBinding.ReadPayload(txData).Data;
+                        var v2BindingError = SmartContractDeployBinding.Validate(v2Body, scUID, txRequest.FromAddress, isTokenDeploy: false, out _);
+                        if (v2BindingError != null)
+                            return (txResult, v2BindingError);
                     }
                     catch (Exception ex)
                     {
@@ -2647,6 +2817,10 @@ namespace VerifiedXCore.Services
                                 if (scStateMulti == null)
                                     return (txResult, $"vBTC V2 contract not found in state trei: {input.SCUID}");
 
+                                // VX-01: the tokenization ledger may only be operated on a vBTC V2 contract.
+                                if (!Bitcoin.Services.VBTCService.IsVbtcV2Contract(scStateMulti))
+                                    return (txResult, $"Contract {input.SCUID} is not a vBTC V2 contract.");
+
                                 bool isOwnerMulti = txRequest.FromAddress == scStateMulti.OwnerAddress;
                                 decimal ledgerBalanceMulti = 0M;
                                 if (scStateMulti.SCStateTreiTokenizationTXes != null && scStateMulti.SCStateTreiTokenizationTXes.Any())
@@ -2721,9 +2895,11 @@ namespace VerifiedXCore.Services
                             if (txRequest.FromAddress != fromAddress)
                                 return (txResult, "From address in data must match transaction FromAddress for vBTC V2 transfer.");
 
-                            // Amount validation
-                            if (!amount.HasValue || amount.Value <= 0)
-                                return (txResult, "Amount must be greater than zero for vBTC V2 transfer.");
+                            // Amount validation (VX-01: shared rule — positive, at most 8 decimal places,
+                            // matching the multi-contract transfer shape)
+                            var transferAmountError = Bitcoin.Services.VBTCService.GetVbtcAmountError(amount, "vBTC V2 transfer");
+                            if (transferAmountError != null)
+                                return (txResult, transferAmountError);
 
                             // Recipient binding: the ledger credits tx.ToAddress, so the validated
                             // Data.ToAddress must be the same address — otherwise sentinel recipients
@@ -2781,6 +2957,11 @@ namespace VerifiedXCore.Services
 
                             // Balance validation for both owner and non-owner
                             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+
+                            // VX-01: the tokenization ledger may only be operated on a vBTC V2 contract.
+                            if (scStateTreiRec != null && !Bitcoin.Services.VBTCService.IsVbtcV2Contract(scStateTreiRec))
+                                return (txResult, $"Contract {scUID} is not a vBTC V2 contract.");
+
                             if (scStateTreiRec != null)
                             {
                                 bool isOwner = fromAddress == scStateTreiRec.OwnerAddress;
@@ -3088,10 +3269,26 @@ namespace VerifiedXCore.Services
                                 !amount.HasValue || !feeRate.HasValue)
                                 return (txResult, "Missing required fields for withdrawal request (ContractUID, BTCAddress, Amount, FeeRate).");
 
+                            // VX-01: presence is not validity. The balance gate below is the only other
+                            // quantitative check, and "balance < amount" is false for every negative
+                            // amount — the escrow apply then negated it into an unbacked credit (mint).
+                            // Same rule as the transfer and multi-withdrawal shapes.
+                            var wdAmountError = Bitcoin.Services.VBTCService.GetVbtcAmountError(amount, "vBTC V2 withdrawal request");
+                            if (wdAmountError != null)
+                                return (txResult, wdAmountError);
+
+                            if (feeRate.Value <= 0)
+                                return (txResult, "FeeRate must be greater than zero for vBTC V2 withdrawal request.");
+
                             // Validate contract exists via state trei (available on ALL nodes, not just local)
                             var scState = SmartContractStateTrei.GetSmartContractState(scUID);
                             if (scState == null)
                                 return (txResult, $"vBTC V2 contract not found in state trei: {scUID}");
+
+                            // VX-01: the tokenization ledger may only be operated on a vBTC V2 contract;
+                            // any minted smart contract used to be accepted as a withdrawal target.
+                            if (!Bitcoin.Services.VBTCService.IsVbtcV2Contract(scState))
+                                return (txResult, $"Contract {scUID} is not a vBTC V2 contract.");
 
                             // S3C §0: per-CONTRACT active-withdrawal gate (was per-user) — rejects if
                             // the contract already has a mined active request (anti-grief expiry inside).
@@ -3109,11 +3306,16 @@ namespace VerifiedXCore.Services
 
                             // S3C §0: per-CONTRACT mempool guard (same-block defense) — reject if ANY
                             // withdrawal request for this contract, from any requester, is already pending.
+                            // NEW-08: MEMPOOL ADMISSION ONLY, like the multi loop below — at block verification a
+                            // node holding a competing request in its own mempool rejected a block its peers accepted.
+                            // In-block duplicates are refused by the block-scoped guard in BlockValidatorService.
                             var mempool = TransactionData.GetPool();
-                            var pendingWithdrawals = mempool.Query().Where(x =>
-                                x.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
-                                x.Hash != txRequest.Hash
-                            ).ToList();
+                            var pendingWithdrawals = (!blockVerify && !blockDownloads)
+                                ? mempool.Query().Where(x =>
+                                    x.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
+                                    x.Hash != txRequest.Hash
+                                ).ToList()
+                                : new List<Transaction>();
 
                             foreach (var existingTx in pendingWithdrawals)
                             {
@@ -3436,8 +3638,18 @@ namespace VerifiedXCore.Services
                     if (txRequest.FromAddress != txRequest.ToAddress)
                         return (txResult, "Bridge lock must be a self-transaction (from == to).");
 
-                    if (!amount.HasValue || amount.Value <= 0)
-                        return (txResult, "Amount must be greater than zero for bridge lock.");
+                    // VX-01: shared vBTC amount rule (positive, at most 8 decimal places). A sub-satoshi
+                    // Amount used to pass because AmountSats is the truncated value.
+                    var lockAmountError = Bitcoin.Services.VBTCService.GetVbtcAmountError(amount, "bridge lock");
+                    if (lockAmountError != null)
+                        return (txResult, lockAmountError);
+
+                    // VX-01: the tokenization ledger may only be operated on a vBTC V2 contract.
+                    var lockScState = SmartContractStateTrei.GetSmartContractState(scUID);
+                    if (lockScState == null)
+                        return (txResult, $"vBTC V2 contract not found in state trei: {scUID}");
+                    if (!Bitcoin.Services.VBTCService.IsVbtcV2Contract(lockScState))
+                        return (txResult, $"Contract {scUID} is not a vBTC V2 contract.");
 
                     if (!amountSats.HasValue)
                         return (txResult, "AmountSats is required for bridge lock.");
@@ -3886,26 +4098,24 @@ namespace VerifiedXCore.Services
             }
 
             //Signature Check - Final Check to return true.
-            if (!string.IsNullOrEmpty(txRequest.Signature))
-            {
-                var isTxValid = SignatureService.VerifySignature(txRequest.FromAddress, txRequest.Hash, txRequest.Signature);
-                if (isTxValid)
-                {
-                    txResult = true;
-                }
-                else
-                {
-                    return (txResult, "Signature Failed to verify.");
-                }
-            }
-            else
-            {
-                return (txResult, "Signature cannot be null.");
-            }
+            var signatureError = SignatureError(txRequest);
+            if (signatureError != null)
+                return (txResult, signatureError);
+            txResult = true;
             
             //Return verification result.
             return (txResult, "Transaction has been verified.");
 
+        }
+
+        /// <summary>The transaction signature check (over the carried Hash); null when it passes.</summary>
+        private static string? SignatureError(Transaction txRequest)
+        {
+            if (string.IsNullOrEmpty(txRequest.Signature))
+                return "Signature cannot be null.";
+            return SignatureService.VerifySignature(txRequest.FromAddress, txRequest.Hash, txRequest.Signature)
+                ? null
+                : "Signature Failed to verify.";
         }
 
         public static async Task BadTXDetected(Transaction Tx)
@@ -3944,7 +4154,7 @@ namespace VerifiedXCore.Services
         {
             List<PoolUnlockAllocation>? allocations;
             try { allocations = allocationsToken?.ToObject<List<PoolUnlockAllocation>>(); }
-            catch (Exception ex) { return (false, $"unparseable allocations: {ex.Message}"); }
+            catch (Exception ex) { return (false, $"unparseable allocations: {ApiErrorText.For(ex)}"); }
 
             if (allocations == null || allocations.Count == 0) return (false, "no allocations");
             var seen = new HashSet<string>(StringComparer.Ordinal);

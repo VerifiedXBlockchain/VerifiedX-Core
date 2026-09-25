@@ -52,12 +52,17 @@ namespace VerifiedXCore.Tests
             var originalVals = Globals.NetworkValidators;
             var originalAddr = Globals.ValidatorAddress;
 
+            // VX-15: the exchange must be signed by a committee caster; the request used to name "xCASTER" unsigned.
+            var casterKey = new VerifiedXCore.EllipticCurve.PrivateKey("secp256k1");
+            var casterPub = "04" + Convert.ToHexString(casterKey.publicKey().toString()).ToLowerInvariant();
+            var casterAddress = VerifiedXCore.Data.AccountData.GetHumanAddress(casterPub);
+
             try
             {
                 Globals.ValidatorAddress = "xSELF";
                 Globals.BlockCasters = new ConcurrentBag<Peers>(new[]
                 {
-                    new Peers { ValidatorAddress = "xCASTER", PeerIP = "127.0.0.1", IsValidator = true, ValidatorPublicKey = "PK1" }
+                    new Peers { ValidatorAddress = casterAddress, PeerIP = "127.0.0.1", IsValidator = true, ValidatorPublicKey = casterPub }
                 });
                 Globals.NetworkValidators = new ConcurrentDictionary<string, NetworkValidator>(
                     new Dictionary<string, NetworkValidator>
@@ -86,9 +91,12 @@ namespace VerifiedXCore.Tests
                 var req = new ValidatorListExchangeRequest
                 {
                     BlockHeight = 123,
-                    CasterAddress = "xCASTER",
-                    Validators = new List<ValidatorListEntry>()
+                    CasterAddress = casterAddress,
+                    Validators = new List<ValidatorListEntry>(),
+                    Timestamp = TimeUtil.GetTime()
                 };
+                req.Signature = SignatureService.CreateSignature(
+                    ValidatorListExchange.SigningMessage(casterAddress, req.Timestamp, req.Validators), casterKey, casterPub);
 
                 var action = await controller.ExchangeValidatorList(req);
                 var ok = Assert.IsType<Microsoft.AspNetCore.Mvc.OkObjectResult>(action.Result);

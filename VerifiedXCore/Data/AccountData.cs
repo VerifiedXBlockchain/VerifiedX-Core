@@ -22,10 +22,12 @@ namespace VerifiedXCore.Data
 {
     public static class AccountData
     {
-		public static Account CreateNewAccount(bool skipSave = false)
+		/// <summary>Null when the wallet is encrypted and not unlocked (NEW-01 follow-up).</summary>
+		public static Account? CreateNewAccount(bool skipSave = false)
         {
 			Account account = new Account();
 			var accountMade = false;
+			var refused = false;
 			while(accountMade == false)
             {
 				try
@@ -45,7 +47,21 @@ namespace VerifiedXCore.Data
                     if (verify == true)
                     {
 						if (!skipSave)
-							AddToAccount(account);
+						{
+							// NEW-01 (follow-up): same rule as imports — in an encrypted wallet the key is encrypted (and
+							// its keystore record saved) before the account is stored; while locked, no address is made.
+							bool sealedOk = true;
+							if (Globals.IsWalletEncrypted == true)
+							{
+								// A failure here must end the loop (refuse), not retry forever with new keys.
+								try { sealedOk = WalletEncryptionService.EncryptImportedAccount(account).GetAwaiter().GetResult(); }
+								catch (Exception encEx) { sealedOk = false; ErrorLogUtility.LogError($"Sealing the new key failed: {encEx}", "AccountData.CreateNewAccount()"); }
+							}
+							if (!sealedOk)
+								refused = true;
+							else
+								AddToAccount(account);
+						}
 						accountMade = true;
 					}
 				}
@@ -54,7 +70,12 @@ namespace VerifiedXCore.Data
                     ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "AccountData.CreateNewAccount()");
                 }
             }
-			
+
+			if (refused)
+			{
+				ErrorLogUtility.LogError("New address refused: the wallet is encrypted and not unlocked with its password.", "AccountData.CreateNewAccount()");
+				return null;
+			}
 
 			return account;
 		}
@@ -94,69 +115,152 @@ namespace VerifiedXCore.Data
             return account;
         }
 
-        public static async Task<Account> RestoreAccount(string privKey, bool rescanForTx = false, bool skipSave = false)
+        /// <summary>
+        /// Imports an externally supplied private key (CLI restore, ImportPrivateKey API, privkey= argument).
+        ///
+        /// VX-11: the key is parsed as an UNSIGNED scalar and range-checked (1..n-1). The previous parse read a
+        /// leading 8–f as negative and imported roughly half of all externally generated keys as a different
+        /// address. That derivation is kept, frozen, as <see cref="RestoreAccountLegacy"/>:
+        /// - <paramref name="legacy"/> = true forces it (for a key imported into an older wallet whose address has
+        ///   no visible on-chain history yet);
+        /// - otherwise, if the legacy derivation gives a different address that HAS on-chain history, that
+        ///   account is restored as well, so funds sent to a previously mis-imported address stay reachable.
+        ///   The returned account's <see cref="Account.AlsoRestoredLegacyAddress"/> names it.
+        /// </summary>
+        /// <summary>Null when the import was refused (encrypted wallet not unlocked with its password).</summary>
+        public static async Task<Account?> RestoreAccount(string privKey, bool rescanForTx = false, bool skipSave = false, bool legacy = false)
         {
-			Account account = new Account();
+            if (legacy)
+                return await RestoreAccountLegacy(privKey, rescanForTx, skipSave);
+
+            Account account = new Account();
             try
             {
-				var privateKeyMod = privKey.Replace(" ", ""); //remove any accidental spaces
-				BigInteger b1 = BigInteger.Parse(privateKeyMod, NumberStyles.AllowHexSpecifier);//converts hex private key into big int.
-				PrivateKey privateKey = new PrivateKey("secp256k1", b1);
-				var privKeySecretHex = privateKey.secret.ToString("x");
-				var pubKey = privateKey.publicKey();
+                if (!KeyParsing.TryParseExternalPrivateKeyHex(privKey, out var scalar, out var parseError))
+                {
+                    Console.WriteLine($"Account restore failed. {parseError}");
+                    return account;
+                }
 
-				account.PrivateKey = privKeySecretHex;
-				account.PublicKey = "04" + ByteToHex(pubKey.toString());
-				account.Address = GetHumanAddress(account.PublicKey);
-				//Update balance from state trei
-				var accountState = StateData.GetSpecificAccountStateTrei(account.Address);
-				var adnrState = Adnr.GetAdnr(account.Address);
+                PrivateKey privateKey = new PrivateKey("secp256k1", scalar);
+                account.PrivateKey = privateKey.secret.ToString("x"); // positive: the stored-key parses read it unchanged
+                account.PublicKey = "04" + ByteToHex(privateKey.publicKey().toString());
+                account.Address = GetHumanAddress(account.PublicKey);
 
-				account.ADNR = adnrState != null ? adnrState : null;
-				account.Balance = accountState != null ? accountState.Balance : 0M;
+                // NEW-01 (follow-up): a refused import is reported as a failure, not returned as if it were stored.
+                if (!await FinishRestore(account, rescanForTx, skipSave))
+                    return null;
 
-				if(!skipSave)
-				{
-                    var validators = Validators.Validator.GetAll();
-                    var validator = validators.FindOne(x => x.Address == account.Address);
-                    var accounts = AccountData.GetAccounts();
-                    var accountsValidating = accounts.FindOne(x => x.IsValidating == true);
-                    if (accountsValidating == null)
+                // Legacy compatibility (owner-approved): restore the address an older wallet derived from this
+                // same key too, when it has on-chain history — never silently pick only one.
+                var legacyAddress = KeyParsing.LegacyAddressIfDifferent(privKey);
+                if (legacyAddress != null && legacyAddress != account.Address && HasOnChainFootprint(legacyAddress))
+                {
+                    var legacyAccount = await RestoreAccountLegacy(privKey, rescanForTx, skipSave);
+                    if (legacyAccount?.Address == legacyAddress)
                     {
-                        if (validator != null)
-                        {
-
-                        }
-                    }
-
-                    await RestoreSmartContractsForAddress(account.Address);
-
-                    var accountCheck = AccountData.GetSingleAccount(account.Address);
-                    if (accountCheck == null)
-                    {
-                        AddToAccount(account); //only add if not already in accounts
-                        if (rescanForTx == true)
-                        {
-                            //fire and forget
-                            _ = Task.Run(() => BlockchainRescanUtility.RescanForTransactions(account.Address));
-                        }
-                        if (Globals.IsWalletEncrypted == true)
-                        {
-                            await WalletEncryptionService.EncryptWallet(account, true);
-                        }
+                        account.AlsoRestoredLegacyAddress = legacyAddress;
+                        Console.WriteLine($"Note: this key was previously imported by an older wallet as {legacyAddress}. " +
+                                          $"Both {account.Address} and {legacyAddress} have been restored.");
+                        LogUtility.Log($"VX-11 legacy address {legacyAddress} restored alongside {account.Address}", "AccountData.RestoreAccount()");
                     }
                 }
-			}
-			catch (Exception ex)
-            {
-				//restore failed				
-				Console.WriteLine("Account restore failed. Not a valid private key");
             }
-			
-			//Now need to scan to check for transactions  - feature coming soon.
+            catch (Exception)
+            {
+                //restore failed
+                Console.WriteLine("Account restore failed. Not a valid private key");
+            }
 
-			return account;
-		}
+            return account;
+        }
+
+        /// <summary>
+        /// VX-11: the PRE-FIX import derivation, FROZEN. It reads a leading 8–f hex digit as negative, exactly as
+        /// wallets did before the fix, so it reproduces the address such a wallet derived for a key. Only for
+        /// restoring those addresses; do not change the parse.
+        /// </summary>
+        public static async Task<Account?> RestoreAccountLegacy(string privKey, bool rescanForTx = false, bool skipSave = false)
+        {
+            Account account = new Account();
+            try
+            {
+                BigInteger b1 = KeyParsing.ParseLegacy(privKey); //legacy: signed hex parse
+                PrivateKey privateKey = new PrivateKey("secp256k1", b1);
+                var privKeySecretHex = privateKey.secret.ToString("x");
+                var pubKey = privateKey.publicKey();
+
+                account.PrivateKey = privKeySecretHex;
+                account.PublicKey = "04" + ByteToHex(pubKey.toString());
+                account.Address = GetHumanAddress(account.PublicKey);
+
+                if (!await FinishRestore(account, rescanForTx, skipSave))
+                    return null; // NEW-01 (follow-up): refused import
+            }
+            catch (Exception)
+            {
+                //restore failed
+                Console.WriteLine("Account restore failed. Not a valid private key");
+            }
+
+            return account;
+        }
+
+        /// <summary>VX-11: true when an address has any on-chain trace (state record, ADNR, or an owned contract).</summary>
+        public static bool HasOnChainFootprint(string address)
+        {
+            try
+            {
+                var state = StateData.GetSpecificAccountStateTrei(address);
+                if (state != null && (state.Balance != 0M || state.Nonce > 0 || state.LockedBalance != 0M || (state.TokenAccounts?.Count ?? 0) > 0))
+                    return true;
+                if (Adnr.GetAdnr(address) != null)
+                    return true;
+                return SmartContractStateTrei.GetSmartContractsOwnedByAddress(address)?.Any() == true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Shared tail of every key restore: balance/ADNR lookup and (unless skipSave) persistence.</summary>
+        /// <summary>False when the import was refused (encrypted wallet not unlocked with its password).</summary>
+        private static async Task<bool> FinishRestore(Account account, bool rescanForTx, bool skipSave)
+        {
+            //Update balance from state trei
+            var accountState = StateData.GetSpecificAccountStateTrei(account.Address);
+            var adnrState = Adnr.GetAdnr(account.Address);
+
+            account.ADNR = adnrState != null ? adnrState : null;
+            account.Balance = accountState != null ? accountState.Balance : 0M;
+
+            if(!skipSave)
+            {
+                var accountCheck = AccountData.GetSingleAccount(account.Address);
+                if (accountCheck != null)
+                    await RestoreSmartContractsForAddress(account.Address);
+                if (accountCheck == null)
+                {
+                    // NEW-01 (follow-up): in an encrypted wallet the key is encrypted (and its keystore record saved)
+                    // BEFORE the account is stored; with the wallet locked the import is refused rather than stored in
+                    // plaintext (e.g. privkey= at startup without encpass=).
+                    if (Globals.IsWalletEncrypted == true && !await WalletEncryptionService.EncryptImportedAccount(account))
+                    {
+                        var refusal = $"Import of {account.Address} refused: the wallet is encrypted and the key could not be sealed (wallet locked or password not verified, or a keystore record for this address that opens to a different key). Unlock it (or start with encpass=) and import again.";
+                        Console.WriteLine(refusal);
+                        ErrorLogUtility.LogError(refusal, "AccountData.FinishRestore()");
+                        return false;
+                    }
+                    // Contract records only once the import is accepted (a refused import wrote them anyway).
+                    await RestoreSmartContractsForAddress(account.Address);
+                    AddToAccount(account); //only add if not already in accounts
+                    if (rescanForTx == true)
+                    {
+                        //fire and forget
+                        _ = Task.Run(() => BlockchainRescanUtility.RescanForTransactions(account.Address));
+                    }
+                }
+            }
+            return true;
+        }
 
 		/// <summary>
 		/// Restores all locally-tracked smart contract records for an address from the state trei:
@@ -299,8 +403,11 @@ namespace VerifiedXCore.Data
 			return GetHumanAddress("04" + ByteToHex(pubKey.toString()));
 		}
 
-		public static async Task<Account> RestoreHDAccount(string privKey)
+		/// <summary>Null in an encrypted wallet: HD keys are stored unencrypted (NEW-01 follow-up).</summary>
+		public static async Task<Account?> RestoreHDAccount(string privKey)
 		{
+			if (Globals.IsWalletEncrypted)
+				return null;
 			Account account = new Account();
 			try
 			{
@@ -412,7 +519,10 @@ namespace VerifiedXCore.Data
 			Console.WriteLine("======================");
 			Console.WriteLine("\nAddress :\n{0}", account.Address);
 			Console.WriteLine("\nPublic Key (Uncompressed):\n{0}", account.PublicKey);
-			Console.WriteLine("\nPrivate Key:\n{0}", account.GetKey);
+			// VX-11: print the canonical 64-digit form (the scalar actually used), which imports correctly anywhere.
+			string printedKey;
+			try { printedKey = KeyParsing.CanonicalKeyHexFromStored(account.GetKey); } catch { printedKey = account.GetKey; }
+			Console.WriteLine("\nPrivate Key:\n{0}", printedKey);
 			Console.WriteLine("\n - - - - - - - - - - - - - - - - - - - - - - ");
 			Console.WriteLine("*** Be sure to save private key!                   ***");
 			Console.WriteLine("*** Use your private key to restore account!       ***");
@@ -420,7 +530,9 @@ namespace VerifiedXCore.Data
 		public static async void AddToAccount(Account account)
 		{
 			var accountList = GetAccounts();
-			var accountCheck = accountList.FindOne(x => x.PrivateKey == account.GetKey);
+			// VX-11: dedupe by ADDRESS. The key text can differ for the same key ("0ff…" vs "ff…"), while the
+			// canonical and legacy accounts of one import string are different addresses and must coexist.
+			var accountCheck = accountList.FindOne(x => x.Address == account.Address);
 
 			//This is checking in the event the user is restoring an account, and not creating a brand new one.
 			if(accountCheck == null)

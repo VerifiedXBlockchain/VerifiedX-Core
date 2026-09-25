@@ -113,7 +113,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch (Exception ex)
             {
-                return (false, $"Error: {ex.Message}", null);
+                return (false, $"Error: {ApiErrorText.For(ex)}", null);
             }
         }
 
@@ -548,7 +548,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch (Exception ex)
             {
-                return (false, $"Error: {ex.Message}");
+                return (false, $"Error: {ApiErrorText.For(ex)}");
             }
         }
 
@@ -640,7 +640,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch (Exception ex)
             {
-                return (false, $"Error: {ex.Message}");
+                return (false, $"Error: {ApiErrorText.For(ex)}");
             }
         }
     }

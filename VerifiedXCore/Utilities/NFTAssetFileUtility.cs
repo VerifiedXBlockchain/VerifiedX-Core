@@ -309,30 +309,82 @@ namespace VerifiedXCore.Utilities
             }
             
         }
-        public static string CreateNFTAssetPath(string fileName, string scUID, bool thumbs = false)
+        /// <summary>The per-contract asset folder (with trailing separator). scUID must already be stripped of ':'.</summary>
+        private static string AssetFolder(string scUidFolder)
         {
             var assetLocation = Globals.IsTestNet != true ? "Assets" : "AssetsTestNet";
-
-            scUID = scUID.Replace(":", ""); //remove the ':' because some folder structures won't allow it.
-
-            string path = "";
             if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
             {
                 string homeDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-                path = homeDirectory + Path.DirectorySeparatorChar + MainFolder.ToLower() + Path.DirectorySeparatorChar + assetLocation + Path.DirectorySeparatorChar + scUID + Path.DirectorySeparatorChar;
+                return homeDirectory + Path.DirectorySeparatorChar + MainFolder.ToLower() + Path.DirectorySeparatorChar + assetLocation + Path.DirectorySeparatorChar + scUidFolder + Path.DirectorySeparatorChar;
             }
-            else
-            {
-                if (Debugger.IsAttached)
-                {
-                    path = Directory.GetCurrentDirectory() + Path.DirectorySeparatorChar + "DBs" + Path.DirectorySeparatorChar + assetLocation + Path.DirectorySeparatorChar + scUID + Path.DirectorySeparatorChar;
-                }
-                else
-                {
-                    path = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData) + Path.DirectorySeparatorChar + MainFolder + Path.DirectorySeparatorChar + assetLocation + Path.DirectorySeparatorChar + scUID + Path.DirectorySeparatorChar;
-                }
-            }
-            
+            if (Debugger.IsAttached)
+                return Directory.GetCurrentDirectory() + Path.DirectorySeparatorChar + "DBs" + Path.DirectorySeparatorChar + assetLocation + Path.DirectorySeparatorChar + scUidFolder + Path.DirectorySeparatorChar;
+            return Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData) + Path.DirectorySeparatorChar + MainFolder + Path.DirectorySeparatorChar + assetLocation + Path.DirectorySeparatorChar + scUidFolder + Path.DirectorySeparatorChar;
+        }
+
+        /// <summary>
+        /// VX-04: a bare file name. No directory separators (either OS), no drive/stream colon, no NUL or
+        /// control characters, not "." / "..", and nothing Path.GetFileName would strip.
+        /// </summary>
+        public static bool IsSafeAssetFileName(string? fileName)
+        {
+            if (string.IsNullOrWhiteSpace(fileName)) return false;
+            if (fileName == "." || fileName == ".." || fileName.Contains("..")) return false;
+            foreach (var c in fileName)
+                if (c == '/' || c == '\\' || c == ':' || char.IsControl(c)) return false;
+            return Path.GetFileName(fileName) == fileName;
+        }
+
+        /// <summary>VX-04: contract folder names are the UID without ':' — letters, digits, '-' and '_' only.</summary>
+        public static bool IsSafeScUidFolder(string? scUidFolder) =>
+            !string.IsNullOrEmpty(scUidFolder) && scUidFolder.All(c => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_');
+
+        /// <summary>
+        /// VX-04: resolves an asset path and proves it stays inside the contract's asset folder. Every
+        /// asset path in the node goes through here; a name or UID that could escape the folder (the
+        /// audit's "../../../CANARY_SECRET.txt" read the wallet database) is refused.
+        /// </summary>
+        public static bool TryResolveAssetPath(string? fileName, string? scUID, bool thumbs, out string fullPath)
+        {
+            fullPath = "";
+            if (!IsSafeAssetFileName(fileName)) return false;
+            var scUidFolder = (scUID ?? "").Replace(":", ""); //remove the ':' because some folder structures won't allow it.
+            if (!IsSafeScUidFolder(scUidFolder)) return false;
+
+            var folder = AssetFolder(scUidFolder);
+            var root = Path.GetFullPath(thumbs ? folder + "thumbs" + Path.DirectorySeparatorChar : folder);
+            var candidate = Path.GetFullPath(Path.Combine(root, fileName!));
+            if (!candidate.StartsWith(root, StringComparison.OrdinalIgnoreCase)) return false;
+            if (!string.Equals(Path.GetDirectoryName(candidate)?.TrimEnd(Path.DirectorySeparatorChar), root.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase)) return false;
+
+            fullPath = candidate;
+            return true;
+        }
+
+        /// <summary>
+        /// The thumbnail name a buyer requests for a listed asset (always .jpg), or null when the asset's
+        /// extension is not a thumbnail type. Shared by the buyer (request) and the shop (validation) so
+        /// the two can never disagree. Mirrors the client's historical mapping exactly.
+        /// </summary>
+        public static string? ThumbnailRequestName(string assetName)
+        {
+            if (string.IsNullOrEmpty(assetName)) return null;
+            if (assetName.EndsWith(".jpg")) return assetName;
+            var parts = assetName.Split('.');
+            var ext = parts[parts.Length - 1];
+            if (!Globals.ValidExtensions.Contains(ext)) return null;
+            return assetName.Replace(ext, "jpg");
+        }
+
+        public static string CreateNFTAssetPath(string fileName, string scUID, bool thumbs = false)
+        {
+            // VX-04: this path is also built from names supplied by REMOTE parties (a shop's asset list on
+            // the buyer, a beacon's file name), so an unsafe name is refused rather than written.
+            if (!TryResolveAssetPath(fileName, scUID, thumbs, out var newPath))
+                throw new ArgumentException($"Unsafe NFT asset path refused. File: '{fileName}', Contract: '{scUID}'");
+
+            var path = AssetFolder(scUID.Replace(":", ""));
             if (!Directory.Exists(path))
             {
                 Directory.CreateDirectory(path);
@@ -345,35 +397,13 @@ namespace VerifiedXCore.Utilities
                 }
             }
 
-            var newPath = thumbs ? path + Path.DirectorySeparatorChar + "thumbs" + Path.DirectorySeparatorChar + fileName : path + fileName;
-
             return newPath;
         }
         public static string NFTAssetPath(string fileName, string scUID, bool getThumbs = false)
         {
-            var assetLocation = Globals.IsTestNet != true ? "Assets" : "AssetsTestNet";
-
-            scUID = scUID.Replace(":", ""); //remove the ':' because some folder structures won't allow it.
-
-            string path = "";
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-            {
-                string homeDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-                path = homeDirectory + Path.DirectorySeparatorChar + MainFolder.ToLower() + Path.DirectorySeparatorChar + assetLocation + Path.DirectorySeparatorChar + scUID + Path.DirectorySeparatorChar;
-            }
-            else
-            {
-                if (Debugger.IsAttached)
-                {
-                    path = Directory.GetCurrentDirectory() + Path.DirectorySeparatorChar + "DBs" + Path.DirectorySeparatorChar + assetLocation + Path.DirectorySeparatorChar + scUID + Path.DirectorySeparatorChar;
-                }
-                else
-                {
-                    path = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData) + Path.DirectorySeparatorChar + MainFolder + Path.DirectorySeparatorChar + assetLocation + Path.DirectorySeparatorChar + scUID + Path.DirectorySeparatorChar;
-                }
-            }
-
-            var newPath = getThumbs ? path + "thumbs" + Path.DirectorySeparatorChar + fileName : path + fileName;
+            // VX-04: validated resolution; "NA" (not found) for anything that could leave the folder.
+            if (!TryResolveAssetPath(fileName, scUID, getThumbs, out var newPath))
+                return "NA";
 
             try
             {
@@ -381,7 +411,7 @@ namespace VerifiedXCore.Utilities
                 if (fileExist)
                 {
                     return newPath;
-                }                
+                }
             }
             catch (Exception ex)
             {

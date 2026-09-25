@@ -130,6 +130,7 @@ namespace VerifiedXCore
             Globals.BridgeBurnBindingHeight = Globals.IsTestNet ? 1 : 7_281_000L;
             Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 7_296_200L;
             Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 7_296_200L;
+            Globals.VbtcV2DkgAttestationHeight = Globals.IsTestNet ? 1_002_979 : Globals.VbtcV2DkgAttestationHeight;
 
             //Perform network time sync
             _ = NetworkTimeService.Run();
@@ -514,6 +515,20 @@ namespace VerifiedXCore
             StartupService.CheckBlockRefVerToDb(); //checks check ID
             StartupService.HDWalletCheck();// checks for HD wallet
             StartupService.EncryptedWalletCheck(); //checks if wallet is encrypted
+            VerifiedXCore.Bitcoin.Services.BitcoinKeystore.SealPlaintextAccountsIfUnlocked(); // VX-13: e.g. started with encpass=
+            VerifiedXCore.Services.WalletEncryptionService.RewrapLegacyKeystoresIfUnlocked(); // VX-14: legacy keystore wraps -> KDF-based
+
+            // Security-audit replay precondition (VX-01/VX-02 ship ungated): scan every stored block
+            // with the new consensus predicates, write a report, and exit before any networking.
+            if (argList.Any(a => a.ToLower() == "auditreplayscan"))
+            {
+                Console.WriteLine("Running security-audit replay scan (VX-01, VX-02) over the local chain...");
+                var reportPath = AuditReplayScanService.RunAndWriteReport();
+                Console.WriteLine($"Report written: {reportPath}");
+                Console.WriteLine(File.ReadLines(reportPath).FirstOrDefault(l => l.StartsWith("RESULT:")) ?? "");
+                Environment.Exit(0);
+            }
+
             SeedNodeService.SeedNodes(); //adds nodes to initial find blocks
             SeedNodeService.SeedBench(); //seeds adj bench
             await StartupService.GetArbiters();
@@ -566,8 +581,9 @@ namespace VerifiedXCore
                         {
                             var keySplit = argC.Split(new char[] { '=' });
                             var privateKey = keySplit[1];
-                            var account = await AccountData.RestoreAccount(privateKey);
-                            if (account != null)
+                            // VX-11: add the "legacykey" argument to force the pre-fix derivation.
+                            var account = await AccountData.RestoreAccount(privateKey, legacy: argList.Exists(a => a.ToLower() == "legacykey"));
+                            if (account != null && !string.IsNullOrEmpty(account.Address)) // NEW-01 (follow-up): null when refused
                             {
                                 ConsoleWriterService.Output("Account Loaded: " + account.Address);
 
@@ -735,6 +751,14 @@ namespace VerifiedXCore
             bool useElmah = false;
             string dbPath = GetPathUtility.GetDatabasePath();
             //for web API using Kestrel
+            // VX-03 (follow-up): never expose the wallet API on all interfaces without a credential.
+            var openApiRefusal = ApiRequestGuard.EnforceOpenApiCredential();
+            if (openApiRefusal != null)
+            {
+                Console.WriteLine(openApiRefusal);
+                ErrorLogUtility.LogError(openApiRefusal, "Program.Main()");
+            }
+
             var builder = Host.CreateDefaultBuilder(args)
                 .ConfigureServices((context, services) => { 
 

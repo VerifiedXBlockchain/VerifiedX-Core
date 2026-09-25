@@ -29,17 +29,17 @@ namespace VerifiedXCore
                 options.ClientTimeoutInterval = TimeSpan.FromSeconds(60);
                 options.MaximumReceiveMessageSize = 1179648;
                 options.StreamBufferCapacity = 1024;
-                options.EnableDetailedErrors = true;
+                options.EnableDetailedErrors = false; // VX-23 (follow-up): no exception detail to remote peers
                 options.MaximumParallelInvocationsPerClient = 20; // HAL-054 Fix: Limit concurrent invocations per client
                 options.HandshakeTimeout = TimeSpan.FromSeconds(30);
             }).AddHubOptions<P2PValidatorServer>(options =>
             {
-                options.EnableDetailedErrors = true;
+                options.EnableDetailedErrors = false; // VX-23 (follow-up): no exception detail to remote peers
                 options.MaximumReceiveMessageSize = 8388608;
             })
             .AddHubOptions<P2PBlockcasterServer>(options =>
             {
-                options.EnableDetailedErrors = true;
+                options.EnableDetailedErrors = false; // VX-23 (follow-up): no exception detail to remote peers
                 options.MaximumReceiveMessageSize = 8388608;
             });
 
@@ -52,10 +52,13 @@ namespace VerifiedXCore
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
         public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
         {
-            if (env.IsDevelopment())
+            // VX-23 (adjacent): network-facing P2P host — an unhandled exception returns 500 with no body, never the
+            // developer exception page (it was enabled whenever ASPNETCORE_ENVIRONMENT=Development).
+            app.UseExceptionHandler(errorApp => errorApp.Run(context =>
             {
-                app.UseDeveloperExceptionPage();
-            }
+                context.Response.StatusCode = 500;
+                return Task.CompletedTask;
+            }));
 
             //app.UseHttpsRedirection();
 

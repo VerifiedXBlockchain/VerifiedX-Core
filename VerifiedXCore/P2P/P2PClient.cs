@@ -132,6 +132,31 @@ namespace VerifiedXCore.P2P
         /// Auto-promotes the best non-private IP from ReportedIPs to Globals.ReportedIP
         /// when no IP was manually configured. Requires at least 2 peer confirmations.
         /// </summary>
+        // NEW-20: reporters per reported address (a peer counts once), and a bound on how many addresses are tracked.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, System.Collections.Concurrent.ConcurrentDictionary<string, byte>> _ipReporters = new();
+        private const int MaxTrackedReportedIPs = 256;
+
+        /// <summary>
+        /// NEW-20: records a peer's report of this node's public address. The value was any string (up to ~1.15 MB), was
+        /// counted per MESSAGE, and was never pruned: one peer sending ("IP", "6.6.6.6") twice fixed Globals.ReportedIP,
+        /// which goes into the vBTC validator registration/heartbeat (FROST and caster traffic then routed to the peer),
+        /// and distinct strings grew memory without bound. Only a valid IP address is accepted, it counts each reporting
+        /// peer once, and at most 256 addresses are tracked.
+        /// </summary>
+        public static void RecordReportedIP(string? reported, string? reporter)
+        {
+            if (string.IsNullOrWhiteSpace(reported) || reported.Length > 45 || !System.Net.IPAddress.TryParse(reported.Trim(), out var parsed))
+                return;
+            var ip = VerifiedXCore.Utilities.RemoteIp.Text(parsed)!;
+            var who = string.IsNullOrEmpty(reporter) ? "?" : reporter;
+            if (!_ipReporters.ContainsKey(ip) && _ipReporters.Count >= MaxTrackedReportedIPs)
+                return;
+            var set = _ipReporters.GetOrAdd(ip, _ => new System.Collections.Concurrent.ConcurrentDictionary<string, byte>());
+            if (set.Count < 64) set.TryAdd(who, 0);
+            Globals.ReportedIPs.AddOrUpdate(ip, set.Count, (_, existing) => Math.Max(existing, set.Count));
+            TryAutoUpdateReportedIP();
+        }
+
         public static void TryAutoUpdateReportedIP()
         {
             // Don't overwrite manually configured IP
@@ -316,12 +341,7 @@ namespace VerifiedXCore.P2P
                         }
                         else
                         {
-                            var IP = data.ToString();
-                            if (Globals.ReportedIPs.TryGetValue(IP, out int Occurrences))
-                                Globals.ReportedIPs[IP]++;
-                            else
-                                Globals.ReportedIPs[IP] = 1;
-                            TryAutoUpdateReportedIP();
+                            RecordReportedIP(data?.ToString(), IPAddress);
                         }
                     }                    
                 });
@@ -601,6 +621,22 @@ namespace VerifiedXCore.P2P
 
         #region Get Block V2
 
+        /// <summary>
+        /// VX-20: most a peer's compressed reply (block span, active-validator list) may expand to. Spans are capped at
+        /// 1 MB of blocks by the sender (BlockDownloadService.MaxBlockRequestBuffer); 8 MB leaves room for growth.
+        /// </summary>
+        // VX-20 (follow-up): replies are compressed from UTF-16 text (2 bytes per char). The server caps a list at
+        // BlockServeLimits.MaxListBytes of JSON text, so an honest reply can decompress to twice that; an 8 MB bound
+        // rejected (and banned) an honest peer serving a large span. Still a hard bound against expansion bombs.
+        // VX-20 (follow-up 2): the server always returns at least one block, so a single block larger than MaxListBytes
+        // (blocks may reach MaxBlockSizeBytes) is sent whole; the bound covers a full list plus one maximum-size block.
+        public static int MaxRemoteDecompressedBytes =>
+            (int)(2 * (BlockServeLimits.MaxListBytes + (Globals.MaxBlockSizeBytes > 0 ? Globals.MaxBlockSizeBytes : 10_485_760))) + 1024 * 1024; // unset -> config default (10 MB), as BlockStaging
+
+        /// <summary>VX-20: decodes a SendBlockList reply; throws InvalidDataException when it expands past the bound.</summary>
+        public static List<Block>? DecodeBlockSpan(string blockSpan) =>
+            JsonConvert.DeserializeObject<List<Block>>(blockSpan.ToDecompress(MaxRemoteDecompressedBytes));
+
         public static async Task<List<Block>?> GetBlockList((long, long) heightSpan, NodeInfo node) //base example
         {
             var startTime = DateTime.Now;
@@ -614,8 +650,8 @@ namespace VerifiedXCore.P2P
                 {
                     if(blockSpan != "0")
                     {
-                        var blockSpanDecompressed = blockSpan.ToDecompress();
-                        var blockSpanList = JsonConvert.DeserializeObject<List<Block>>(blockSpanDecompressed);
+                        // VX-20: bounded (it decompressed without limit, so a small reply could allocate gigabytes).
+                        var blockSpanList = DecodeBlockSpan(blockSpan);
                         if(blockSpanList?.Count > 0)
                         {
                             return blockSpanList;
@@ -627,9 +663,21 @@ namespace VerifiedXCore.P2P
                     }
                 }
             }
-            catch(Exception ex)
+            catch (InvalidDataException ex)
             {
-                
+                // VX-20: a reply that expands past the bound is a peer offence, not a transient error.
+                ErrorLogUtility.LogError($"Block span from {node?.NodeIP} rejected: {ex.Message}", "P2PClient.GetBlockList()");
+                if (!string.IsNullOrEmpty(node?.NodeIP))
+                    BanService.BanPeer(node.NodeIP, "Oversized compressed block span", "P2PClient.GetBlockList()");
+            }
+            catch (OutOfMemoryException)
+            {
+                throw; // VX-20: never swallowed
+            }
+            catch (Exception ex)
+            {
+                // VX-20: this catch was empty, so failures (including allocation failures) vanished.
+                ErrorLogUtility.LogError($"Block span from {node?.NodeIP} failed: {ex.Message}", "P2PClient.GetBlockList()");
             }
             finally
             {

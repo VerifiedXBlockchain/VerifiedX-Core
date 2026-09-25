@@ -27,6 +27,16 @@ namespace VerifiedXCore.Models
         public string WinnerAddress { get; set; } = "";
         /// <summary>DETERMINISTIC-CONSENSUS: Addresses this voter excluded (failed liveness) so peers can apply the same exclusions.</summary>
         public List<string> ExcludedAddresses { get; set; } = new();
+        /// <summary>VX-08: the voter's increasing vote counter (see SignedWinnerVote.Sequence).</summary>
+        public long Sequence { get; set; }
+        /// <summary>VX-08: voter's signature over ConsensusMessageFormatter.FormatWinnerVoteV1.</summary>
+        public string Signature { get; set; } = "";
+
+        public Services.SignedWinnerVote ToSignedVote() => new Services.SignedWinnerVote
+        {
+            BlockHeight = BlockHeight, VoterAddress = VoterAddress, WinnerAddress = WinnerAddress,
+            ExcludedAddresses = ExcludedAddresses ?? new(), Sequence = Sequence, Signature = Signature,
+        };
     }
 
     /// <summary>
@@ -56,6 +66,10 @@ namespace VerifiedXCore.Models
         public long BlockHeight { get; set; }
         public string CasterAddress { get; set; } = "";
         public List<ValidatorListEntry> Validators { get; set; } = new();
+        /// <summary>VX-15: unix seconds, inside the signed payload.</summary>
+        public long Timestamp { get; set; }
+        /// <summary>VX-15: CasterAddress's signature over VFX_VALLIST_V1 (ValidatorListExchange.SigningMessage).</summary>
+        public string Signature { get; set; } = "";
     }
 
     /// <summary>
@@ -67,6 +81,10 @@ namespace VerifiedXCore.Models
         public long BlockHeight { get; set; }
         public string CasterAddress { get; set; } = "";
         public List<ValidatorListEntry> Validators { get; set; } = new();
+        /// <summary>VX-15: unix seconds, inside the signed payload.</summary>
+        public long Timestamp { get; set; }
+        /// <summary>VX-15: the responding caster's signature over VFX_VALLIST_V1.</summary>
+        public string Signature { get; set; } = "";
     }
 
 
@@ -161,6 +179,10 @@ namespace VerifiedXCore.Models
         public List<string> ProofAddressesSorted { get; set; } = new();
         /// <summary>SHA256 hex of <c>"|".Join(ProofAddressesSorted)</c>. Lower-case, no separators.</summary>
         public string CommitmentHash { get; set; } = "";
+        /// <summary>VX-16: the caster's increasing counter (unix ms); a newer signed commitment replaces an older one.</summary>
+        public long Sequence { get; set; }
+        /// <summary>VX-16: CasterAddress's signature over VFX_PROOFSET_V1 (ProofSetCommitmentStore.SigningMessage).</summary>
+        public string Signature { get; set; } = "";
     }
 
     /// <summary>

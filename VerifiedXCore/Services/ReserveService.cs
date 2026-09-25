@@ -56,7 +56,7 @@ namespace VerifiedXCore.Services
                         {
                             if(rAUK.Value.DeleteAfterTime < TimeUtil.GetTime())
                             {
-                                Globals.ReserveAccountUnlockKeys.TryRemove(rAUK.Key, out _);
+                                Globals.ReserveAccountUnlockKeys.TryRemove(rAUK); // VX-14: this exact expired entry, never a fresh re-unlock
                             }
                         }
                     }

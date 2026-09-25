@@ -307,7 +307,7 @@ namespace VerifiedXCore.Models.DST
             }
             catch(Exception ex)
             {
-                return (false, $"Failed to delete. Error: {ex.ToString()}");
+                return (false, $"Failed to delete. Error: {ApiErrorText.For(ex)}");
             }
             
         }

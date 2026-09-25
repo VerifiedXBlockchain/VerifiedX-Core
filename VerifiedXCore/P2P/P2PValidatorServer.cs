@@ -417,38 +417,16 @@ namespace VerifiedXCore.P2P
                                 continue;
                             }
 
-                            if(Globals.NetworkValidators.TryGetValue(networkValidator.Address, out var networkValidatorVal))
+                            if(Globals.NetworkValidators.ContainsKey(networkValidator.Address))
                             {
-                                var verifySig = SignatureService.VerifySignature(
-                                    networkValidator.Address, 
-                                    networkValidator.SignatureMessage, 
-                                    networkValidator.Signature);
-
-                                // HAL-025 Fix: Removed weak .Contains() check - proper cryptographic verification is sufficient
-                                if(verifySig)
-                                {
-                                    // CASTER-PROMOTE-FIX: Never allow a gossiped record to demote a
-                                    // validator that is already trusted locally. A gossiped record
-                                    // from an untrusted peer typically carries IsFullyTrusted=false;
-                                    // blindly overwriting would silently flip our trusted entry to
-                                    // untrusted, removing it from caster-candidate eligibility.
-                                    // Preserve the more authoritative local trust + first-seen info.
-                                    if (networkValidatorVal.IsFullyTrusted)
-                                    {
-                                        networkValidator.IsFullyTrusted = true;
-                                    }
-                                    if (networkValidatorVal.FirstSeenAtHeight > 0)
-                                    {
-                                        networkValidator.FirstSeenAtHeight = networkValidatorVal.FirstSeenAtHeight;
-                                    }
-                                    networkValidator.LastSeen = TimeUtil.GetTime();
-                                    Globals.NetworkValidators[networkValidator.Address] = networkValidator;
+                                // VX-07: a gossiped copy refreshes a known validator through the same merge
+                                // as every other path — it can no longer replace the entry (and so move its
+                                // IP or swap its key). Local trust and first-seen are kept by the merge
+                                // (CASTER-PROMOTE-FIX semantics preserved).
+                                if (await NetworkValidator.AddValidatorToPool(networkValidator, peerIP))
                                     processedCount++;
-                                }
                                 else
-                                {
                                     rejectedCount++;
-                                }
                             }
 
                             else
@@ -518,7 +496,8 @@ namespace VerifiedXCore.P2P
             {
                 // HAL-19 Fix: Add SignalRQueue protection with block size-based cost calculation
                 // HAL-16 Fix: Use Block message type to ensure blocks NEVER blocked by TXs
-                return await SignalRQueue(Context, (int)(nextBlock?.Size ?? 0) + 1024, SignalRMessageType.Block, async () =>
+                // VX-19: queue cost measured locally, not the wire Size.
+                return await SignalRQueue(Context, BlockStaging.QueueCost(nextBlock), SignalRMessageType.Block, async () =>
                 {
                     // HAL-18 Fix: Validate caller is an authenticated validator
                     var callerIP = GetIP(Context);
@@ -597,17 +576,18 @@ namespace VerifiedXCore.P2P
                             && !await ValidatorCommitGate.ConfirmAsync(nextBlock, IP, "P2PValidatorServer.ReceiveBlockVal"))
                             return false;
 
+                        // VX-19: a block ahead of tip+1 is not staged; it starts the downloader.
+                        if (currentHeight > nextHeight)
+                        {
+                            _ = BlockDownloadService.GetAllBlocks();
+                            return false;
+                        }
+
                         if (currentHeight >= nextHeight)
                         {
-                            // HAL-066/HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
-                            BlockDownloadService.BlockDict.AddOrUpdate(
-                                currentHeight,
-                                new List<(Block, string)> { (nextBlock, IP) },
-                                (key, existingList) =>
-                                {
-                                    existingList.Add((nextBlock, IP));
-                                    return existingList;
-                                });
+                            // VX-19: gossip pre-checks, then de-duplicated, capped staging.
+                            if (!BlockStaging.PassesGossipPreChecks(nextBlock, out _) || !BlockStaging.TryStageGossip(nextBlock, IP))
+                                return false;
 
                             // HAL-017 Fix: Use configurable delay instead of hardcoded value
                             await Task.Delay(Globals.BlockProcessingDelayMs);
@@ -898,8 +878,11 @@ namespace VerifiedXCore.P2P
                                 {
                                     try
                                     {
-                                        mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
-                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                        // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
+                                        // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
+                                        // carrying a real transaction's hash remove it (and free its claims) during propagation.
+                                        if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
+                                            TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                     }
                                     catch (Exception ex)
                                     {
@@ -959,8 +942,11 @@ namespace VerifiedXCore.P2P
                                 {
                                     try
                                     {
-                                        mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
-                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                        // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
+                                        // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
+                                        // carrying a real transaction's hash remove it (and free its claims) during propagation.
+                                        if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
+                                            TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                     }
                                     catch (Exception ex)
                                     {
@@ -974,16 +960,20 @@ namespace VerifiedXCore.P2P
                         }
                         else
                         {
-                            var isTxStale = await TransactionData.IsTxTimestampStale(txReceived);
+                            // VX-06: the received object is untrusted — only its Hash matched a stored TX. Every
+                            // decision here uses the STORED transaction (txFound). Staleness used to be evaluated
+                            // on the received Timestamp, so a forged object with a victim's hash and an old
+                            // timestamp deleted the victim's pending TX from every node.
+                            var isTxStale = await TransactionData.IsTxTimestampStale(txFound);
                             if (!isTxStale)
                             {
-                                var isCraftedIntoBlock = await TransactionData.HasTxBeenCraftedIntoBlock(txReceived);
+                                var isCraftedIntoBlock = await TransactionData.HasTxBeenCraftedIntoBlock(txFound);
                                 if (isCraftedIntoBlock)
                                 {
                                     try
                                     {
-                                        mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
-                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                        mempool.DeleteManySafe(x => x.Hash == txFound.Hash);// tx has been crafted into block. Remove.
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txFound.Hash);
                                     }
                                     catch (Exception ex)
                                     {
@@ -997,8 +987,8 @@ namespace VerifiedXCore.P2P
                             {
                                 try
                                 {
-                                    mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
-                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                    mempool.DeleteManySafe(x => x.Hash == txFound.Hash);// tx has been crafted into block. Remove.
+                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txFound.Hash);
                                 }
                                 catch (Exception ex)
                                 {
@@ -1018,8 +1008,11 @@ namespace VerifiedXCore.P2P
                             {
                                 try
                                 {
-                                    mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
-                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                    // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
+                                    // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
+                                    // carrying a real transaction's hash remove it (and free its claims) during propagation.
+                                    if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                 }
                                 catch { }
 
@@ -1080,8 +1073,11 @@ namespace VerifiedXCore.P2P
                             {
                                 try
                                 {
-                                    mempool.DeleteManySafe(x => x.Hash == txReceived.Hash);// tx has been crafted into block. Remove.
-                                    TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                    // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
+                                    // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
+                                    // carrying a real transaction's hash remove it (and free its claims) during propagation.
+                                    if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
+                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
                                 }
                                 catch { }
 
@@ -1396,7 +1392,8 @@ namespace VerifiedXCore.P2P
                         return;
                     }
 
-                    if (proof.VerifyProof())
+                    // VX-05: ingress validation.
+                    if (ProofUtility.ValidateIncomingProofForNextRound(proof, out _))
                     {
                         Globals.Proofs.Add(proof);
                         
@@ -1506,7 +1503,7 @@ namespace VerifiedXCore.P2P
                 {
                     if (feature.RemoteIpAddress != null)
                     {
-                        peerIP = feature.RemoteIpAddress.MapToIPv4().ToString();
+                        peerIP = VerifiedXCore.Utilities.RemoteIp.Text(feature.RemoteIpAddress)!;
                     }
                 }
 

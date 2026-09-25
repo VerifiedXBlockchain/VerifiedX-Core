@@ -14,10 +14,15 @@ namespace VerifiedXCore.Bitcoin.Models
         #region Variables
 
         public long Id { get; set; }
+        [Newtonsoft.Json.JsonIgnore][System.Text.Json.Serialization.JsonIgnore] // BB-2 (VX-13): key material is never serialized into API responses
         public string PrivateKey { get; set; }
+        [Newtonsoft.Json.JsonIgnore][System.Text.Json.Serialization.JsonIgnore]
         public string WifKey { get; set; }
         public string PublicKey { set; get; }
         public string Address { get; set; }
+        /// <summary>VX-13: true when PrivateKey holds a KeystoreCrypto-sealed value (wallet encrypted). Read the key
+        /// with BitcoinKeystore.GetPrivateKeyHex / GetWif, never the fields directly.</summary>
+        public bool IsEncrypted { get; set; }
         public string? ADNR { get; set; }
         public decimal Balance { get; set; }
         public bool IsValidating { get; set; }
@@ -114,6 +119,13 @@ namespace VerifiedXCore.Bitcoin.Models
                 }
                 else
                 {
+                    // VX-13: an encrypted wallet never stores a plaintext Bitcoin key. Sealed with the wallet
+                    // password; refused while the wallet is locked (the key would otherwise be written in the clear).
+                    if (Globals.IsWalletEncrypted && !Services.BitcoinKeystore.TrySeal(btcAddr))
+                    {
+                        ErrorLogUtility.LogError($"Refused to store Bitcoin key for {btcAddr.Address}: wallet is encrypted and locked.", "BitcoinAccount.SaveBitcoinAddress()");
+                        return false;
+                    }
                     bitcoin.InsertSafe(btcAddr);
                     return true;
                 }
@@ -125,7 +137,9 @@ namespace VerifiedXCore.Bitcoin.Models
         #endregion
 
         #region Create Bitcoin Address
-        public static BitcoinAccount CreateAddress(bool save = true)
+        /// <summary>Null when <paramref name="save"/> is set and the address could not be stored (encrypted wallet locked):
+        /// an address whose key was never stored must not be shown, or funds sent to it are lost (fourth review).</summary>
+        public static BitcoinAccount? CreateAddress(bool save = true)
         {
             Key privateKey = new Key();
 
@@ -146,8 +160,8 @@ namespace VerifiedXCore.Bitcoin.Models
                 WifKey = wif, 
             };
 
-            if(save)
-                SaveBitcoinAddress(btcAddress);
+            if(save && !SaveBitcoinAddress(btcAddress))
+                return null;
 
             return btcAddress;
         }
@@ -175,11 +189,9 @@ namespace VerifiedXCore.Bitcoin.Models
 
             //return privateKey;
 
-            // Log the exact input string
+            // NEW-14: the derivation input (the arbiter's signing PRIVATE key + scUID) used to be written to sclog.txt in
+            // plaintext - three times, as text and bytes - on a path any remote caller with a VFX keypair can trigger.
             var inputString = signingPrivateKey + scUID;
-            SCLogUtility.Log($"Input string for private key derivation: {inputString}", "BitcoinAccount");
-            SCLogUtility.Log($"Input string length: {inputString.Length}", "BitcoinAccount");
-            SCLogUtility.Log($"Input string bytes: {BitConverter.ToString(Encoding.UTF8.GetBytes(inputString))}", "BitcoinAccount");
 
             byte[] hash = SHA256.Create().ComputeHash(Encoding.UTF8.GetBytes(inputString));
             Key privateKey = new Key(hash);
@@ -192,7 +204,8 @@ namespace VerifiedXCore.Bitcoin.Models
         #endregion
 
         #region Import Private Key Hex
-        public static void ImportPrivateKey(string privateKey, ScriptPubKeyType scriptPubKeyType)
+        /// <summary>False when the key was not stored (already present, or encrypted wallet locked).</summary>
+        public static bool ImportPrivateKey(string privateKey, ScriptPubKeyType scriptPubKeyType)
         {
             byte[] privateKeyBytes = privateKey.HexToByteArray();
             Key recreatedKey = new Key(privateKeyBytes);
@@ -215,15 +228,16 @@ namespace VerifiedXCore.Bitcoin.Models
                 WifKey = wif,
             };
 
-            SaveBitcoinAddress(btcAddress);
-
-            _ = AddressSyncService.SyncAddress(btcAddress.Address);
+            var stored = SaveBitcoinAddress(btcAddress);
+            if (stored)
+                _ = AddressSyncService.SyncAddress(btcAddress.Address);
+            return stored;
         }
 
         #endregion
 
         #region Import Private Key WIF
-        public static void ImportPrivateKeyWIF(string privateKey, ScriptPubKeyType scriptPubKeyType)
+        public static bool ImportPrivateKeyWIF(string privateKey, ScriptPubKeyType scriptPubKeyType)
         {
             BitcoinSecret bitcoinSecret = new BitcoinSecret(privateKey, Globals.BTCNetwork);
             // Get the private key
@@ -247,9 +261,10 @@ namespace VerifiedXCore.Bitcoin.Models
                 WifKey = wif,
             };
 
-            SaveBitcoinAddress(btcAddress);
-
-            _ = AddressSyncService.SyncAddress(btcAddress.Address);
+            var stored = SaveBitcoinAddress(btcAddress);
+            if (stored)
+                _ = AddressSyncService.SyncAddress(btcAddress.Address);
+            return stored;
         }
 
         #endregion
@@ -286,8 +301,8 @@ namespace VerifiedXCore.Bitcoin.Models
             Console.WriteLine("======================");
             Console.WriteLine("\nAddress :\n{0}", account.Address);
             Console.WriteLine("\nPublic Key (Uncompressed):\n{0}", account.PublicKey);
-            Console.WriteLine("\nPrivate Key:\n{0}", account.PrivateKey);
-            Console.WriteLine("\nWif Key:\n{0}", account.WifKey);
+            Console.WriteLine("\nPrivate Key:\n{0}", Services.BitcoinKeystore.GetPrivateKeyHex(account) ?? "(wallet locked)");
+            Console.WriteLine("\nWif Key:\n{0}", Services.BitcoinKeystore.GetWif(account) ?? "(wallet locked)");
             Console.WriteLine("\n - - - - - - - - - - - - - - - - - - - - - - ");
             Console.WriteLine("*** Be sure to save private key!                   ***");
             Console.WriteLine("*** Use your private key to restore account!       ***");

@@ -43,7 +43,7 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                 endpoints.MapGet("/", async context =>
                 {
-                    var ipAddress = context.Connection.RemoteIpAddress?.MapToIPv4().ToString();
+                    var ipAddress = VerifiedXCore.Utilities.RemoteIp.Text(context.Connection.RemoteIpAddress);
                     context.Response.StatusCode = StatusCodes.Status200OK;
                     await context.Response.WriteAsync($"FROST Validator Server - IP: {ipAddress}");
                 });
@@ -333,7 +333,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     catch (Exception ex)
                     {
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = ex.Message }));
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = VerifiedXCore.ApiErrorText.Generic(ex) }));
                     }
                 });
 
@@ -607,7 +607,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
                             Success = false,
-                            Message = $"Error: {ex.Message}"
+                            Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}"
                         }));
                     }
                 });
@@ -735,7 +735,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
                             Success = false,
-                            Message = $"Error: {ex.Message}"
+                            Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}"
                         }));
                     }
                 });
@@ -795,7 +795,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
                             Success = false,
-                            Message = $"Error: {ex.Message}"
+                            Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}"
                         }));
                     }
                 });
@@ -921,9 +921,21 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // NEW-19: seal every package (it carries the recipient's secret share in plaintext) to the
+                            // recipient's registered validator key; the coordinator only ever relays ciphertext.
+                            var idToAddress = BuildAddressToIdentifierMap(session.ParticipantAddresses).ToDictionary(kv => kv.Value, kv => kv.Key);
+                            var sealedShares = FrostShareCrypto.SealAll(sharesJson, sessionId, idToAddress, FrostShareCrypto.VerifiedPublicKey, out var sealError);
+                            if (sealedShares == null)
+                            {
+                                ErrorLogUtility.LogError($"FROST DKG Round 2: shares not released for session {sessionId}: {sealError}", "FrostStartup.DKGRound2");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Round 2 shares cannot be sealed to every participant." }));
+                                return;
+                            }
+
                             // Store Round 2 state
                             session.Round2Secret = round2Secret;
-                            session.GeneratedSharesJson = sharesJson;
+                            session.GeneratedSharesJson = sealedShares;
 
                             LogUtility.Log($"[FROST] DKG Round 2 shares generated via native library for session {sessionId}", "FrostStartup.DKGRound2");
 
@@ -934,7 +946,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 Message = "Round 2 shares generated via FROST native library",
                                 SessionId = sessionId,
                                 SharesGenerated = true,
-                                GeneratedShares = sharesJson  // Coordinator collects and redistributes
+                                GeneratedShares = sealedShares  // Coordinator collects and redistributes ciphertext only (NEW-19)
                             }, Formatting.Indented));
                         }
                     }
@@ -942,7 +954,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     {
                         ErrorLogUtility.LogError($"DKG Round 2 error: {ex.Message}", "FrostStartup.DKGRound2");
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }));
                     }
                 });
 
@@ -1033,9 +1045,16 @@ namespace VerifiedXCore.Bitcoin.FROST
                             }
 
                             // FIND-024 Fix: Persist the received share into the session
+                            // NEW-19: only a share sealed to this validator is accepted; it is opened here.
                             if (!string.IsNullOrEmpty(share.EncryptedShare))
                             {
-                                session.ReceivedSharesJson.TryAdd(share.FromValidatorAddress, share.EncryptedShare);
+                                var myIdSingle = BuildAddressToIdentifierMap(session.ParticipantAddresses).TryGetValue(Globals.ValidatorAddress ?? "", out var mid) ? mid : null;
+                                var myKeySingle = FrostShareCrypto.LocalValidatorPrivateKey();
+                                if (myIdSingle != null && myKeySingle != null
+                                    && FrostShareCrypto.TryOpen(share.EncryptedShare, myKeySingle, share.SessionId, myIdSingle, out var openedSingle))
+                                    session.ReceivedSharesJson.TryAdd(share.FromValidatorAddress, openedSingle);
+                                else
+                                    LogUtility.Log($"[FROST] Refused a DKG share from {share.FromValidatorAddress} that is not sealed to this validator", "FrostStartup.DKGShare");
                             }
 
                             // FIND-024 Fix: Auto-trigger DKG finalization if all required shares received
@@ -1068,7 +1087,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
                             Success = false,
-                            Message = $"Error: {ex.Message}"
+                            Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}"
                         }));
                     }
                 });
@@ -1182,12 +1201,15 @@ namespace VerifiedXCore.Bitcoin.FROST
                                     var senderShares = Newtonsoft.Json.Linq.JObject.Parse(senderSharesStr);
                                     
                                     // Look up using our FROST Identifier
+                                    // NEW-19: the package must be sealed to this validator; plaintext packages are refused.
                                     string shareForMe = null;
                                     if (!string.IsNullOrEmpty(myFrostIdentifier))
                                     {
                                         var shareToken = senderShares[myFrostIdentifier];
-                                        if (shareToken != null)
-                                            shareForMe = shareToken.ToString(Newtonsoft.Json.Formatting.None);
+                                        var myKeyBatch = FrostShareCrypto.LocalValidatorPrivateKey();
+                                        if (shareToken?.Type == Newtonsoft.Json.Linq.JTokenType.String && myKeyBatch != null
+                                            && FrostShareCrypto.TryOpen((string?)shareToken, myKeyBatch, sessionId, myFrostIdentifier, out var opened))
+                                            shareForMe = opened;
                                     }
 
                                     if (!string.IsNullOrEmpty(shareForMe))
@@ -1238,7 +1260,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     {
                         ErrorLogUtility.LogError($"DKG batch share distribution error: {ex.Message}", "FrostStartup.DKGSharesBatch");
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }));
                     }
                 });
 
@@ -1432,7 +1454,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
                             Success = false,
-                            Message = $"Error: {ex.Message}"
+                            Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}"
                         }));
                     }
                 });
@@ -1495,7 +1517,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
                             Success = false,
-                            Message = $"Error: {ex.Message}"
+                            Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}"
                         }));
                     }
                 });
@@ -1546,6 +1568,13 @@ namespace VerifiedXCore.Bitcoin.FROST
                             return;
                         }
 
+                        // NEW-26: this validator's attestation that the key is one it holds a share of, for this contract.
+                        // NEW-26 (follow-up): the attestation also binds the owner (the authenticated leader), the signing
+                        // threshold and the participant list of this validator's own session.
+                        var attestation = FrostDkgAttestation.SignLocal(session.SmartContractUID, session.GroupPublicKey, session.TaprootAddress,
+                            session.LeaderAddress, FrostDkgAttestation.ThresholdFor(session.ParticipantAddresses?.Count ?? 0, session.RequiredThreshold),
+                            session.ParticipantAddresses);
+
                         // Return final result
                         context.Response.StatusCode = StatusCodes.Status200OK;
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
@@ -1553,9 +1582,11 @@ namespace VerifiedXCore.Bitcoin.FROST
                             Success = true,
                             Message = "DKG result retrieved",
                             SessionId = sessionId,
+                            SmartContractUID = session.SmartContractUID,
                             GroupPublicKey = session.GroupPublicKey,
                             TaprootAddress = session.TaprootAddress,
                             DKGProof = session.DKGProof,
+                            Attestation = attestation,
                             IsCompleted = session.IsCompleted
                         }, Formatting.Indented));
                     }
@@ -1566,7 +1597,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
                             Success = false,
-                            Message = $"Error: {ex.Message}"
+                            Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}"
                         }));
                     }
                 });
@@ -1984,7 +2015,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
                             Success = false,
-                            Message = $"Error: {ex.Message}"
+                            Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}"
                         }));
                     }
                 });
@@ -2030,7 +2061,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     catch (Exception ex)
                     {
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }));
                     }
                 });
 
@@ -2210,7 +2241,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     catch (Exception ex)
                     {
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }));
                     }
                 });
 
@@ -2262,7 +2293,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     catch (Exception ex)
                     {
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }));
                     }
                 });
 
@@ -2337,7 +2368,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                         {
                             Success = false,
-                            Message = $"Error: {ex.Message}"
+                            Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}"
                         }));
                     }
                 });
@@ -2434,7 +2465,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     catch (Exception ex)
                     {
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }));
                     }
                 });
 
@@ -2564,7 +2595,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     {
                         ErrorLogUtility.LogError($"Backup store error: {ex.Message}", "FrostStartup.BackupStore");
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }));
                     }
                 });
 
@@ -2654,7 +2685,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     {
                         ErrorLogUtility.LogError($"Backup recover error: {ex.Message}", "FrostStartup.BackupRecover");
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex.Message}" }));
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }));
                     }
                 });
 
@@ -2767,7 +2798,7 @@ namespace VerifiedXCore.Bitcoin.FROST
             }
             catch (Exception ex)
             {
-                return (false, $"Error checking previously signed transaction: {ex.Message}");
+                return (false, $"Error checking previously signed transaction: {ApiErrorText.For(ex)}");
             }
         }
 
@@ -3050,6 +3081,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// </summary>
         private static string DeriveTaprootAddress(string groupPublicKeyHex)
         {
+            // NEW-26: consensus derives the address with FrostDkgAttestation.DeriveTaprootAddress; this must agree with it.
             try
             {
                 // The FROST group public key may be either:

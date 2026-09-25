@@ -271,7 +271,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch (Exception ex)
             {
-                return (false, $"Error: {ex.Message}");
+                return (false, $"Error: {ApiErrorText.For(ex)}");
             }
         }
 

@@ -56,7 +56,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Task.FromResult(Fail(ex.Message));
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
             }
         }
 
@@ -112,7 +112,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Fail(ex.Message);
+                return Fail(ApiErrorText.For(ex));
             }
         }
 
@@ -176,7 +176,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Fail(ex.Message);
+                return Fail(ApiErrorText.For(ex));
             }
         }
 
@@ -240,7 +240,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Fail(ex.Message);
+                return Fail(ApiErrorText.For(ex));
             }
         }
 
@@ -311,7 +311,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Fail(ex.Message);
+                return Fail(ApiErrorText.For(ex));
             }
         }
 
@@ -362,7 +362,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Task.FromResult(Fail(ex.Message));
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
             }
         }
 
@@ -386,7 +386,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Task.FromResult(Fail(ex.Message));
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
             }
         }
 
@@ -420,7 +420,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Task.FromResult(Fail(ex.Message));
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
             }
         }
 
@@ -458,7 +458,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Task.FromResult(Fail(ex.Message));
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
             }
         }
 
@@ -627,7 +627,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Task.FromResult(Fail(ex.Message));
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
             }
         }
 
@@ -666,7 +666,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Task.FromResult(Fail(ex.Message));
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
             }
         }
 
@@ -688,7 +688,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Task.FromResult(Fail(ex.Message));
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
             }
         }
 
@@ -728,7 +728,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Task.FromResult(Fail(ex.Message));
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
             }
         }
 
@@ -791,7 +791,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Fail(ex.Message);
+                return Fail(ApiErrorText.For(ex));
             }
         }
 
@@ -878,7 +878,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Fail(ex.Message);
+                return Fail(ApiErrorText.For(ex));
             }
         }
 
@@ -965,7 +965,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Fail(ex.Message);
+                return Fail(ApiErrorText.For(ex));
             }
         }
 
@@ -1053,7 +1053,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Fail(ex.Message);
+                return Fail(ApiErrorText.For(ex));
             }
         }
 
@@ -1112,7 +1112,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Task.FromResult(Fail(ex.Message));
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
             }
         }
 
@@ -1140,7 +1140,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Task.FromResult(Fail(ex.Message));
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
             }
         }
 
@@ -1319,7 +1319,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Task.FromResult(Fail(ex.Message));
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
             }
         }
 
@@ -1365,7 +1365,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return Task.FromResult(Fail(ex.Message));
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
             }
         }
     }

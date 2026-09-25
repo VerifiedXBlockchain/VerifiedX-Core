@@ -55,10 +55,17 @@ namespace VerifiedXCore.Bitcoin.Controllers
         public async Task<string> GetNewAddress()
         {           
             var account = BitcoinAccount.CreateAddress();
-            
+            if (account == null)
+                return JsonConvert.SerializeObject(new { Success = false, Message = "No address was created: the wallet is encrypted and locked." });
+
             LogUtility.Log("New Address Created: " + account.Address, "BTCV2Controller.GetNewAddress()");
 
-            return JsonConvert.SerializeObject(new { Success = true, Message = $"New Address Added", account.Address, account.PrivateKey, account.WifKey });
+            // VX-13: the one deliberate key hand-off (new address); refused while locked by the BB-3 gate, and the key
+            // is sealed at rest when the wallet is encrypted.
+            var newKeyHex = BitcoinKeystore.GetPrivateKeyHex(account);
+            if (newKeyHex == null)
+                return JsonConvert.SerializeObject(new { Success = false, Message = "You must type in your encryption password first!" });
+            return JsonConvert.SerializeObject(new { Success = true, Message = $"New Address Added", account.Address, PrivateKey = newKeyHex, WifKey = BitcoinKeystore.GetWif(account) });
         }
 
         /// <summary>
@@ -81,14 +88,11 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 addressFormat == Bitcoin.BitcoinAddressFormat.Segwit ? NBitcoin.ScriptPubKeyType.Segwit : NBitcoin.ScriptPubKeyType.TaprootBIP86;
 
             //hex key
-            if (privateKey?.Length > 58)
-            {
-                BitcoinAccount.ImportPrivateKey(privateKey, scriptPubKeyType);
-            }
-            else
-            {
-                BitcoinAccount.ImportPrivateKeyWIF(privateKey, scriptPubKeyType);
-            }
+            var stored = privateKey?.Length > 58
+                ? BitcoinAccount.ImportPrivateKey(privateKey, scriptPubKeyType)
+                : BitcoinAccount.ImportPrivateKeyWIF(privateKey, scriptPubKeyType);
+            if (!stored)
+                return JsonConvert.SerializeObject(new { Success = false, Message = "The key was not imported (already present, or the wallet is encrypted and locked)." });
 
             LogUtility.Log("Key Import Successful.", "BTCV2Controller.GetNewAddress()");
 
@@ -395,7 +399,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;
@@ -468,7 +472,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;
@@ -517,7 +521,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;
@@ -585,7 +589,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch(Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: Message: {ex}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: Message: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -606,7 +610,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: Message: {ex}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: Message: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -625,13 +629,14 @@ namespace VerifiedXCore.Bitcoin.Controllers
         /// Get Tokenized BTC List
         /// </summary>
         /// <returns></returns>
-        [HttpGet("ReplaceByFee/{txid}/{feeRate}")]
-        public async Task<string> ReplaceByFee(string txid, int feeRate)
+        [HttpGet("ReplaceByFee/{txid}/{feeRate}/{allowHighFee?}")]
+        public async Task<string> ReplaceByFee(string txid, int feeRate, bool allowHighFee = false)
         {
             if(string.IsNullOrEmpty(txid) || feeRate == 0)
                 return JsonConvert.SerializeObject(new { Success = false, Message = "Incorrect URL parameters" });
 
-            var result = await TransactionService.ReplaceByFeeTransaction(txid, feeRate);
+            // VX-18: unlock check, fee-rate bound and total-fee bound are enforced in the service.
+            var result = await TransactionService.ReplaceByFeeTransaction(txid, feeRate, allowHighFee);
 
             return result;
         }
@@ -707,7 +712,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -728,7 +733,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -753,7 +758,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -778,7 +783,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -814,7 +819,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -832,8 +837,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
             {
                 var scState = SmartContractStateTrei.GetSmartContractState(scUID);
 
+                // VX-24: the result was computed and discarded (no return), so execution fell through to
+                // scState.OwnerAddress and threw NullReferenceException on every unknown scUID.
                 if (scState == null)
-                    JsonConvert.SerializeObject(new { Success = false, Message = $"SC State Missing: {scUID}" });
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"SC State Missing: {scUID}" });
 
                 bool isOwner = false;
                 if (address == scState.OwnerAddress)
@@ -919,7 +926,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
             }
         }
 
@@ -1017,7 +1024,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     {
                         SmartContractUID = scState.SmartContractUID,
                         Balance = 0.0M,
-                        Error = ex.Message
+                        Error = ApiErrorText.For(ex)
                     });
                 }
             }
@@ -1063,7 +1070,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ex}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
             }
         }
     }

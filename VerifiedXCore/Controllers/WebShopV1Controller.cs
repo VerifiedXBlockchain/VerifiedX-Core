@@ -279,7 +279,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
 
             return JsonConvert.SerializeObject(new { Success = false, Message = "Wallet already has a dec shop associated to it." }); ;
@@ -357,7 +357,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
 
             return JsonConvert.SerializeObject(new { Success = false, Message = "Wallet already has a dec shop associated to it." }); ;
@@ -436,7 +436,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
 
             return JsonConvert.SerializeObject(new { Success = false, Message = "Wallet already has a dec shop associated to it." }); ;
@@ -507,7 +507,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ex.ToString()}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
             }
 
             return JsonConvert.SerializeObject(new { Success = false, Message = "Wallet already has a dec shop associated to it." }); ;
@@ -592,7 +592,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = false, Message = ex.Message });
+                return JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.For(ex) });
             }
         }
     }

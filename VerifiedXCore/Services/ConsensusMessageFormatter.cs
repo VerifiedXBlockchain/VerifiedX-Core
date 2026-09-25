@@ -24,6 +24,53 @@ namespace VerifiedXCore.Services
             return $"VFX_REQBLK_V1|{blockHeight}|{casterAddress}|{winnerAddress}|{timestampUnix}";
         }
 
+        // ── Security audit Sep 2026 (BB-1): signed payloads for routes that were unauthenticated ──
+        // Height-bound consensus messages (proof, winner vote, proof-set commitment) carry no timestamp:
+        // the signed height makes a replay useless once the round has passed, and first-write-wins storage
+        // makes an in-round replay a no-op. Registry messages (status, validator list) are not height-bound,
+        // so they carry a timestamp and are checked for freshness and replay.
+
+        /// <summary>VX-05: a block-producer proof, bound to the signer, height, parent hash and VRF value.</summary>
+        public static string FormatProofV1(long blockHeight, string prevHash, string address, uint vrfNumber)
+            => $"VFX_PROOF_V1|{blockHeight}|{NormalizeHash(prevHash)}|{address}|{vrfNumber}";
+
+        /// <summary>
+        /// VX-08: one caster's winner vote for a height. Excluded addresses sorted ordinal. <paramref name="sequence"/>
+        /// is the voter's increasing vote counter (casters re-vote on retries within a height; only a newer
+        /// signed vote from the same voter replaces an older one).
+        /// </summary>
+        public static string FormatWinnerVoteV1(long blockHeight, string voterAddress, string winnerAddress, IEnumerable<string>? excludedAddresses, long sequence)
+        {
+            var excluded = excludedAddresses == null ? "" : string.Join(",", excludedAddresses.Where(a => !string.IsNullOrEmpty(a)).OrderBy(a => a, StringComparer.Ordinal));
+            return $"VFX_WINVOTE_V1|{blockHeight}|{voterAddress}|{winnerAddress}|{excluded}|{sequence}";
+        }
+
+        /// <summary>
+        /// VX-16: one caster's proof-set commitment for a height. <paramref name="sequence"/> is the caster's increasing
+        /// counter: a caster re-commits when a height is retried, and only a newer signed commitment replaces an older one.
+        /// </summary>
+        public static string FormatProofSetV1(long blockHeight, string casterAddress, string commitmentHash, long sequence)
+            => $"VFX_PROOFSET_V1|{blockHeight}|{casterAddress}|{NormalizeHash(commitmentHash)}|{sequence}";
+
+        /// <summary>VX-07: a validator's own registry advertisement (address, key and IP it claims).</summary>
+        public static string FormatValidatorStatusV1(string address, long timestampUnix, string publicKey, string ipAddress)
+            => $"VFX_VALSTATUS_V1|{address}|{timestampUnix}|{publicKey}|{ipAddress}";
+
+        /// <summary>
+        /// VX-07 (follow-up): a validator's direct Status to one caster, bound to that caster's address. The IP cannot be
+        /// signed (a validator behind NAT does not know the address peers see), so the signature names its recipient
+        /// instead: a fresh Status that caster A relays in its registry gossip cannot be replayed to caster B to move the
+        /// entry to the replayer's IP.
+        /// </summary>
+        public const string ValidatorStatusV2Prefix = "VFX_VALSTATUS_V2";
+
+        public static string FormatValidatorStatusV2(string address, long timestampUnix, string publicKey, string recipientAddress)
+            => $"{ValidatorStatusV2Prefix}|{address}|{timestampUnix}|{publicKey}|{recipientAddress}";
+
+        /// <summary>VX-15: a caster's validator-list exchange; <paramref name="entriesHash"/> covers the entries.</summary>
+        public static string FormatValidatorListV1(string casterAddress, long timestampUnix, string entriesHash)
+            => $"VFX_VALLIST_V1|{casterAddress}|{timestampUnix}|{NormalizeHash(entriesHash)}";
+
         /// <summary>
         /// Wave 3 (membership record): canonical payload for a CasterMembershipRecord.
         /// Casters MUST be sorted by Address ordinal ascending before calling. The record's

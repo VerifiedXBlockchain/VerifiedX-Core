@@ -34,7 +34,7 @@ namespace VerifiedXCore.Beacon
                 endpoints.MapGet("/data", async context =>
                 {
                     // Handle the GET request
-                    var ipAddress = context.Connection.RemoteIpAddress?.MapToIPv4().ToString();
+                    var ipAddress = VerifiedXCore.Utilities.RemoteIp.Text(context.Connection.RemoteIpAddress);
                     await context.Response.WriteAsync($"Hello {ipAddress}, this is the server's response!");
                 });
 
@@ -43,9 +43,18 @@ namespace VerifiedXCore.Beacon
                     // Increase the maximum request body size
                     try
                     {
-                        context.Features.Get<IHttpMaxRequestBodySizeFeature>().MaxRequestBodySize = 152 * 1024 * 1024; // 150 MB
+                        var bodySize = context.Features.Get<IHttpMaxRequestBodySizeFeature>(); if (bodySize != null && !bodySize.IsReadOnly) bodySize.MaxRequestBodySize = 152 * 1024 * 1024; // 150 MB (absent outside Kestrel, e.g. TestServer)
                         var scUID = context.Request.RouteValues["scUID"] as string;
-                        var ipAddress = context.Connection.RemoteIpAddress?.MapToIPv4().ToString();
+                        var ipAddress = VerifiedXCore.Utilities.RemoteIp.Text(context.Connection.RemoteIpAddress);
+                        // NEW-03 (follow-up): refuse before reading the body (up to 152 MB, spilled to disk) or creating
+                        // folders unless this caller registered an upload for this contract.
+                        var registrations = BeaconData.GetBeaconData();
+                        if (registrations == null || !registrations.Exists(x => x.IPAdress == ipAddress && x.SmartContractUID == scUID))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                            await context.Response.WriteAsync("No upload is registered for this contract from this address.");
+                            return;
+                        }
                         // Check if the request contains a file
                         if (context.Request.Form.Files.Count > 0)
                         {
@@ -53,8 +62,14 @@ namespace VerifiedXCore.Beacon
 
                             // Save the uploaded file
                             var fileName = file.FileName;
-                            var scuidFolder = scUID.Replace(":", "");
-                            var filePath = $@"{SaveArea}{scuidFolder}{Path.DirectorySeparatorChar}{fileName}";
+                            // NEW-03: the multipart file name and the route UID were concatenated onto the beacon folder
+                            // unchecked ("../../x" wrote anywhere). Resolve inside the contract's folder or refuse.
+                            if (!BeaconPaths.TryResolve(SaveArea, scUID, fileName, out var filePath))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync("Invalid file name.");
+                                return;
+                            }
 
                             var extChkResult = CheckExtension(fileName);
                             if (!extChkResult)
@@ -73,23 +88,26 @@ namespace VerifiedXCore.Beacon
                                 return;
                             }
 
-                            if (!Directory.Exists($@"{SaveArea}{scuidFolder}{Path.DirectorySeparatorChar}"))
-                                Directory.CreateDirectory($@"{SaveArea}{scuidFolder}{Path.DirectorySeparatorChar}");
+                            var contractFolder = Path.GetDirectoryName(filePath)!;
+                            if (!Directory.Exists(contractFolder))
+                                Directory.CreateDirectory(contractFolder);
 
 
                             var beaconData = BeaconData.GetBeaconData();
                             if (beaconData != null)
                             {
-                                var authCheck = beaconData.Exists(x => x.IPAdress == ipAddress && x.AssetName == fileName);
+                                // NEW-03 (follow-up): the registration must be for THIS contract (the route's UID); an asset
+                                // registered under one's own contract could be planted in another contract's folder.
+                                var authCheck = beaconData.Exists(x => x.IPAdress == ipAddress && x.AssetName == fileName && x.SmartContractUID == scUID);
                                 if (!authCheck)
                                 {
-                                    context.Response.StatusCode = StatusCodes.Status403Forbidden; // Bad Request
-                                    await context.Response.WriteAsync("No file was uploaded. Extension was found in auto reject list.");
+                                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                    await context.Response.WriteAsync("No upload is registered for this asset.");
                                     return;
                                 }
                                 else
                                 {
-                                    var _beaconData = beaconData.Where(x => x.IPAdress == ipAddress && x.AssetName == fileName).FirstOrDefault();
+                                    var _beaconData = beaconData.Where(x => x.IPAdress == ipAddress && x.AssetName == fileName && x.SmartContractUID == scUID).FirstOrDefault();
                                     if (_beaconData != null)
                                     {
                                         using (var stream = new FileStream(filePath, FileMode.Create))
@@ -143,7 +161,7 @@ namespace VerifiedXCore.Beacon
 
                         var scUID = context.Request.RouteValues["scUID"] as string;
                         var fileName = context.Request.RouteValues["fileName"] as string;
-                        var ipAddress = context.Connection.RemoteIpAddress?.MapToIPv4().ToString();
+                        var ipAddress = VerifiedXCore.Utilities.RemoteIp.Text(context.Connection.RemoteIpAddress);
 
                         if (Globals.OptionalLogging)
                         {
@@ -161,9 +179,13 @@ namespace VerifiedXCore.Beacon
                             return;
                         }
 
-                        var scuidFolder = scUID.Replace(":", "");
-
-                        var filePath = $@"{SaveArea}{scuidFolder}{Path.DirectorySeparatorChar}{fileName}";
+                        // NEW-03: resolve inside the contract's folder or refuse (a download read any file on Windows).
+                        if (!BeaconPaths.TryResolve(SaveArea, scUID, fileName, out var filePath))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                            await context.Response.WriteAsync("Invalid file name.");
+                            return;
+                        }
                         bool fileExist = File.Exists(filePath);
                         if (!fileExist)
                         {
@@ -218,18 +240,7 @@ namespace VerifiedXCore.Beacon
 
         private static bool CheckExtension(string fileName)
         {
-            bool output = false;
-
-            string ext = Path.GetExtension(fileName);
-
-            if (!string.IsNullOrEmpty(ext))
-            {
-                var rejectedExtList = Globals.RejectAssetExtensionTypes;
-                var exist = rejectedExtList.Contains(ext);
-                if (!exist)
-                    output = true;
-            }
-            return output;
+            return BeaconPaths.ExtensionAllowed(fileName); // NEW-03: case-insensitive
         }
     }
 }

@@ -30,7 +30,7 @@ namespace VerifiedXCore
                 options.ClientTimeoutInterval = TimeSpan.FromSeconds(60); //close connection after 60 seconds
                 options.MaximumReceiveMessageSize = 1179648;
                 options.StreamBufferCapacity = 25; //was 1024
-                options.EnableDetailedErrors = true;
+                options.EnableDetailedErrors = false; // VX-23 (follow-up): no exception detail to remote peers
                 options.MaximumParallelInvocationsPerClient = 200; // HAL-054 Fix: Limit concurrent invocations per client
             });
             services.AddHostedService<ClientCallService>();
@@ -39,10 +39,13 @@ namespace VerifiedXCore
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
         public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
         {
-            if (env.IsDevelopment())
+            // VX-23 (adjacent): network-facing P2P host — an unhandled exception returns 500 with no body, never the
+            // developer exception page (it was enabled whenever ASPNETCORE_ENVIRONMENT=Development).
+            app.UseExceptionHandler(errorApp => errorApp.Run(context =>
             {
-                app.UseDeveloperExceptionPage();
-            }
+                context.Response.StatusCode = 500;
+                return Task.CompletedTask;
+            }));
 
             //app.UseHttpsRedirection();
 

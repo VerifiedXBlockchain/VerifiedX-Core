@@ -55,6 +55,7 @@ namespace VerifiedXCore.Data
         {
             Globals.TreisUpdating = true;
             StateWriteContext.SetHeight(block.Height); //stamp LastModifiedHeight on state writes for snapshot diffing
+            LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13: every apply path uses the block's height
             var txList = block.Transactions.ToList();
             var txCount = txList.Count();
             int txTreiUpdateSuccessCount = 0;
@@ -268,22 +269,24 @@ namespace VerifiedXCore.Data
                                         EvolveDevolveSpecific(tx);
                                         break;
                                     case "TokenDeploy()":
-                                        DeployTokenContract(tx, block);
+                                        // VX-02: awaited. It was fire-and-forget, so a later TX in the same
+                                        // block could run before this deploy's state writes landed.
+                                        await DeployTokenContract(tx, block);
                                         break;
                                     case "TokenTransfer()":
-                                        TokenTransfer(tx, block);
+                                        await TokenTransfer(tx, block); // NEW-12: awaited (ran concurrently with the rest of the block)
                                         break;
                                     case "TokenMint()":
-                                        TokenMint(tx);
+                                        await TokenMint(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
                                         break;
                                     case "TokenBurn()":
-                                        TokenBurn(tx);
+                                        await TokenBurn(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
                                         break;
                                     case "TokenPause()":
                                         TokenPause(tx);
                                         break;
                                     case "TokenBanAddress()":
-                                        TokenBanAddress(tx);
+                                        await TokenBanAddress(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
                                         break;
                                     case "TokenContractOwnerChange()":
                                         TokenContractOwnerChange(tx);
@@ -340,10 +343,10 @@ namespace VerifiedXCore.Data
                                             StartSaleSmartContract(tx);
                                             break;
                                         case "Sale_Complete()":
-                                            CompleteSaleSmartContract(tx, block);
+                                            await CompleteSaleSmartContract(tx, block); // NEW-12: awaited (ran concurrently with the rest of the block)
                                             break;
                                         case "M_Sale_Complete()":
-                                            CompleteSaleSmartContract(tx, block);
+                                            await CompleteSaleSmartContract(tx, block); // NEW-12: awaited (ran concurrently with the rest of the block)
                                             break;
                                         case "Sale_Cancel()":
                                             CancelSaleSmartContract(tx);
@@ -370,7 +373,7 @@ namespace VerifiedXCore.Data
                                             AddNewAdnr(tx);
                                             break;
                                         case "AdnrTransfer()":
-                                            TransferAdnr(tx);
+                                            await TransferAdnr(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
                                             break;
                                         case "AdnrDelete()":
                                             DeleteAdnr(tx);
@@ -379,7 +382,7 @@ namespace VerifiedXCore.Data
                                             AddNewBTCAdnr(tx);
                                             break;
                                         case "BTCAdnrTransfer()":
-                                            TransferBTCAdnr(tx);
+                                            await TransferBTCAdnr(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
                                             break;
                                         case "BTCAdnrDelete()":
                                             DeleteBTCAdnr(tx);
@@ -465,7 +468,7 @@ namespace VerifiedXCore.Data
                                             UpdateDecShop(tx);
                                             break;
                                         case "DecShopDelete()":
-                                            DeleteDecShop(tx);
+                                            await DeleteDecShop(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
                                             break;
                                         default:
                                             break;
@@ -571,7 +574,7 @@ namespace VerifiedXCore.Data
                                     switch (function)
                                     {
                                         case "Register()":
-                                            RegisterReserveAccount(tx);
+                                            await RegisterReserveAccount(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
                                             break;
                                         case "CallBack()":
                                             var callBackHash = (string?)jobj["Hash"];
@@ -1761,27 +1764,40 @@ namespace VerifiedXCore.Data
             }
         }
 
+        /// <summary>
+        /// TokenDeploy() apply. VX-02: every identity used here comes from the SIGNED transaction:
+        /// the state record, the token owner (TokenDetails.ContractOwner), the credited account and the
+        /// token account's contract UID are tx.FromAddress / the tx ContractUID. The decompiled body is
+        /// read only for the token parameters. Previously the supply was credited under the body's own
+        /// SmartContractUID to the body's own MinterAddress, so a deploy under a fresh UID could inflate
+        /// an existing token for any address. The validator now rejects a mismatched body; this apply is
+        /// written so it could not credit a foreign identity even if one were ever mined.
+        /// Never throws: it is awaited by UpdateTreis, where a throw would flag the block's state apply.
+        /// </summary>
         private static async Task DeployTokenContract(Transaction tx, Block block)
         {
-            SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-            var scData = scDataArray[0];
-            var stDb = GetAccountStateTrei();
-            if (scData != null)
+            try
             {
-                var function = (string?)scData["Function"];
-                var data = (string?)scData["Data"];
-                var scUID = (string?)scData["ContractUID"];
-                var md5List = (string?)scData["MD5List"];
+                var (_, scUID, data, md5List) = SmartContractDeployBinding.ReadPayload(tx.Data);
+                if (string.IsNullOrEmpty(scUID))
+                {
+                    ErrorLogUtility.LogError($"DeployTokenContract: missing ContractUID. TX: {tx.Hash}", "StateData.DeployTokenContract()");
+                    return;
+                }
 
+                var owner = tx.FromAddress;
+                var stDb = GetAccountStateTrei();
 
-                scST.ContractData = data;
-                scST.MinterAddress = tx.FromAddress;
-                scST.OwnerAddress = tx.FromAddress;
-                scST.SmartContractUID = scUID;
-                scST.Nonce = 0;
-                scST.MD5List = md5List;
-                scST.IsToken = true;
+                SmartContractStateTrei scST = new SmartContractStateTrei
+                {
+                    ContractData = data,
+                    MinterAddress = owner,
+                    OwnerAddress = owner,
+                    SmartContractUID = scUID,
+                    Nonce = 0,
+                    MD5List = md5List,
+                    IsToken = true,
+                };
 
                 try
                 {
@@ -1796,59 +1812,45 @@ namespace VerifiedXCore.Data
                             if(tokenFeature != null)
                             {
                                 var tokenDetails = TokenDetails.CreateTokenDetails(tokenFeature, sc);
+                                tokenDetails.ContractOwner = owner; // VX-02: not sc.MinterAddress
                                 scST.TokenDetails = tokenDetails;
 
                                 if(tokenFeature.TokenSupply > 0)
                                 {
-                                    var toAddress = GetSpecificAccountStateTrei(sc.MinterAddress);
+                                    // VX-02: token account keyed on the tx UID, credited to the tx sender.
+                                    var tokenAccount = TokenAccount.CreateTokenAccount(scUID, tokenFeature.TokenName,
+                                        tokenFeature.TokenTicker, tokenFeature.TokenSupply, tokenFeature.TokenDecimalPlaces);
+
+                                    var toAddress = GetSpecificAccountStateTrei(owner);
                                     if(toAddress != null)
                                     {
-                                        var tokenAccount = TokenAccount.CreateTokenAccount(sc.SmartContractUID, tokenFeature.TokenName,
-                                            tokenFeature.TokenTicker, tokenFeature.TokenSupply, tokenFeature.TokenDecimalPlaces);
-
                                         if(toAddress.TokenAccounts?.Count > 0)
                                         {
                                             toAddress.TokenAccounts.Add(tokenAccount);
                                         }
                                         else
                                         {
-                                            List<TokenAccount> tokenAccounts = new List<TokenAccount>
-                                            {
-                                                tokenAccount
-                                            };
-
-                                            toAddress.TokenAccounts = tokenAccounts;
+                                            toAddress.TokenAccounts = new List<TokenAccount> { tokenAccount };
                                         }
 
                                         await stDb.UpdateSafeAsync(toAddress);
                                     }
                                     else
                                     {
-                                        var tokenAccount = TokenAccount.CreateTokenAccount(sc.SmartContractUID, tokenFeature.TokenName, 
-                                            tokenFeature.TokenTicker, tokenFeature.TokenSupply, tokenFeature.TokenDecimalPlaces);
-
-                                        List<TokenAccount> tokenAccounts = new List<TokenAccount>
-                                        {
-                                            tokenAccount
-                                        };
-
                                         var acctStateTreiTo = new AccountStateTrei
                                         {
-                                            Key = tx.ToAddress,
+                                            Key = owner, // VX-02: was tx.ToAddress (a third identity)
                                             Nonce = 0,
                                             Balance = 0.0M,
                                             StateRoot = block.StateRoot,
                                             LockedBalance = 0.0M,
-                                            TokenAccounts = tokenAccounts
+                                            TokenAccounts = new List<TokenAccount> { tokenAccount }
                                         };
 
                                         await stDb.InsertSafeAsync(acctStateTreiTo);
                                     }
-
-
                                 }
                             }
-                            
                         }
                         else if (tokenizationV2Features != null)
                         {
@@ -1867,7 +1869,7 @@ namespace VerifiedXCore.Data
                                     StartingSupply = 0,
                                     CurrentSupply = 0,
                                     IsPaused = false,
-                                    ContractOwner = sc.MinterAddress,
+                                    ContractOwner = owner, // VX-02: not sc.MinterAddress
                                     DecimalPlaces = 8,
                                     TokenBurnable = false,
                                     TokenMintable = false,
@@ -1882,6 +1884,10 @@ namespace VerifiedXCore.Data
 
                 //Save to state trei
                 SmartContractStateTrei.SaveSmartContract(scST);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"DeployTokenContract error: {ex.Message}. TX: {tx.Hash}", "StateData.DeployTokenContract()");
             }
         }
         private static void TokenContractOwnerChange(Transaction tx)
@@ -3118,18 +3124,46 @@ namespace VerifiedXCore.Data
         /// (list of lockId + unlockAmount pairs) so all nodes produce identical state.
         /// </summary>
         /// <summary>
-        /// Writes one tokenization ledger row for a withdrawal: a negative amount is a debit from
-        /// <paramref name="address"/> ("-" sink: escrow at REQUEST, or the legacy burn at COMPLETE);
-        /// a positive amount is a credit back to <paramref name="address"/> ("+" source: refund on an
-        /// approved cancellation). Consensus-critical — runs on ALL nodes.
+        /// VX-01: debits <paramref name="amount"/> from <paramref name="address"/> on the contract's
+        /// tokenization ledger ("-" sink row): the escrow at withdrawal REQUEST, or the legacy burn at
+        /// COMPLETE. <paramref name="amount"/> is the POSITIVE quantity to remove; anything else is
+        /// refused and nothing is written. Consensus-critical — runs on ALL nodes.
         /// </summary>
-        private static bool WriteWithdrawalLedgerRow(string scUID, string address, decimal signedAmount)
+        /// <remarks>
+        /// Replaces a single signed-amount writer whose callers passed <c>-amount</c>: a negative
+        /// request amount turned the debit into a "+" credit row, minting unbacked vBTC. Debit and
+        /// credit are now separate entry points that each reject a non-positive amount, so no caller
+        /// can reintroduce the sign inversion.
+        /// </remarks>
+        private static bool WriteWithdrawalEscrowDebit(string scUID, string address, decimal amount)
+        {
+            if (amount <= 0M)
+            {
+                ErrorLogUtility.LogError($"WriteWithdrawalEscrowDebit refused non-positive amount {amount} for {address} on {scUID}", "StateData.WriteWithdrawalEscrowDebit()");
+                return false;
+            }
+            return AppendWithdrawalLedgerRow(scUID, new SmartContractStateTreiTokenizationTX { Amount = -amount, FromAddress = address, ToAddress = "-" });
+        }
+
+        /// <summary>
+        /// VX-01: credits <paramref name="amount"/> back to <paramref name="address"/> ("+" source row):
+        /// the escrow refund on an approved cancellation — the ONLY path that returns escrow.
+        /// <paramref name="amount"/> must be positive; anything else is refused and nothing is written.
+        /// </summary>
+        private static bool WriteWithdrawalRefundCredit(string scUID, string address, decimal amount)
+        {
+            if (amount <= 0M)
+            {
+                ErrorLogUtility.LogError($"WriteWithdrawalRefundCredit refused non-positive amount {amount} for {address} on {scUID}", "StateData.WriteWithdrawalRefundCredit()");
+                return false;
+            }
+            return AppendWithdrawalLedgerRow(scUID, new SmartContractStateTreiTokenizationTX { Amount = amount, FromAddress = "+", ToAddress = address });
+        }
+
+        private static bool AppendWithdrawalLedgerRow(string scUID, SmartContractStateTreiTokenizationTX row)
         {
             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
-            if (scStateTreiRec == null || signedAmount == 0M) return false;
-            var row = signedAmount < 0M
-                ? new SmartContractStateTreiTokenizationTX { Amount = signedAmount, FromAddress = address, ToAddress = "-" }
-                : new SmartContractStateTreiTokenizationTX { Amount = signedAmount, FromAddress = "+", ToAddress = address };
+            if (scStateTreiRec == null) return false;
             if (scStateTreiRec.SCStateTreiTokenizationTXes?.Count() > 0)
                 scStateTreiRec.SCStateTreiTokenizationTXes.Add(row);
             else
@@ -3504,6 +3538,14 @@ namespace VerifiedXCore.Data
                     return;
                 }
 
+                // VX-01 (defense in depth; VerifyTX rejects this): a non-positive request is never
+                // applied — no request record, no escrow row.
+                if (amount.Value <= 0M)
+                {
+                    ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal refused non-positive amount {amount.Value}. TX: {tx.Hash}", "StateData.RequestVBTCV2Withdrawal()");
+                    return;
+                }
+
                 // FIND-002 FIX: Create per-user withdrawal request record
                 // This allows tracking of who requested the withdrawal and prevents
                 // unauthorized parties from completing another user's withdrawal
@@ -3544,7 +3586,7 @@ namespace VerifiedXCore.Data
                 // Refunded only by an approved cancellation — never by expiry.
                 if (VBTCWithdrawalRequest.EscrowAppliesTo(tx.Height))
                 {
-                    if (!WriteWithdrawalLedgerRow(scUID, requesterAddress, -amount.Value))
+                    if (!WriteWithdrawalEscrowDebit(scUID, requesterAddress, amount.Value))
                         ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal: escrow debit could not be written for {scUID} (contract state missing)", "StateData.RequestVBTCV2Withdrawal()");
                 }
 
@@ -3639,7 +3681,7 @@ namespace VerifiedXCore.Data
                     // ESCROW (gated): identical rule to the single shape, applied per contract.
                     if (VBTCWithdrawalRequest.EscrowAppliesTo(tx.Height))
                     {
-                        if (!WriteWithdrawalLedgerRow(input.SCUID, requesterAddress, -input.Amount))
+                        if (!WriteWithdrawalEscrowDebit(input.SCUID, requesterAddress, input.Amount))
                             ErrorLogUtility.LogError($"RequestVBTCV2WithdrawalMulti: escrow debit could not be written for {input.SCUID} (contract state missing)", "StateData.RequestVBTCV2WithdrawalMulti()");
                     }
 
@@ -3767,7 +3809,7 @@ namespace VerifiedXCore.Data
                 // requests are burned here, using the STORED amount (FIND-002), never tx.Data.
                 if (!VBTCWithdrawalRequest.EscrowAppliesTo(withdrawalRequest.RequestBlockHeight))
                 {
-                    WriteWithdrawalLedgerRow(scUID, withdrawalRequest.RequestorAddress, storedAmount * -1.0M);
+                    WriteWithdrawalEscrowDebit(scUID, withdrawalRequest.RequestorAddress, storedAmount);
                 }
 
                 SCLogUtility.Log($"CompleteVBTCV2Withdrawal completed: SCUID={scUID}, Requester={withdrawalRequest.RequestorAddress}, BTCTxHash={btcTxHash}, Amount={storedAmount} BTC, TxHash={tx.Hash}", 
@@ -3963,7 +4005,7 @@ namespace VerifiedXCore.Data
                                     // Escrowed request: give the debited amount back (approved cancellation is
                                     // the ONLY path that returns escrow; expiry never does).
                                     if (VBTCWithdrawalRequest.EscrowAppliesTo(withdrawalRequest.RequestBlockHeight))
-                                        WriteWithdrawalLedgerRow(cancellation.SmartContractUID, withdrawalRequest.RequestorAddress, withdrawalRequest.Amount);
+                                        WriteWithdrawalRefundCredit(cancellation.SmartContractUID, withdrawalRequest.RequestorAddress, withdrawalRequest.Amount);
                                 }
                             }
 

@@ -110,7 +110,7 @@ namespace VerifiedXCore.Commands
         }
         public static async Task EncryptWallet()
         {
-            if(Globals.HDWallet == true)
+            if(Globals.HDWallet == true || HDWallet.HDWalletData.GetHDWallet() != null) // NEW-01 (follow-up): stored record decides
             {
                 Console.WriteLine("Wallet Encryption is not currently compatible with HD wallets.");
                 Console.WriteLine("This will be released in a future wallet update.");
@@ -200,6 +200,8 @@ namespace VerifiedXCore.Commands
                                     Console.WriteLine("Encrypting Wallet. Please do not close wallet as this may take a few moments.");
                                     await Keystore.GenerateKeystoreAddresses();
                                     Globals.IsWalletEncrypted = true;
+                                    Bitcoin.Services.BitcoinKeystore.SealPlaintextAccountsIfUnlocked(); // VX-13
+                                    VerifiedXCore.Services.WalletEncryptionService.RewrapLegacyKeystoresIfUnlocked(); // VX-14: legacy keystore wraps -> KDF-based
 
                                     Console.WriteLine("Encrypting Wallet has completed...");
                                     MainMenuReturn();
@@ -947,7 +949,8 @@ namespace VerifiedXCore.Commands
                 {
                     var strength = Convert.ToInt32(strengthStr);
                     var mnemonic = HDWallet.HDWalletData.CreateHDWallet(strength, BIP39Wordlist.English);
-                    Globals.HDWallet = mnemonic.Item1;
+                    if (mnemonic.Item1)
+                        Globals.HDWallet = true; // a refusal must not clear the flag
 
                     return mnemonic.Item2;
                 }
@@ -955,7 +958,8 @@ namespace VerifiedXCore.Commands
                 {
                     var strength = Convert.ToInt32(strengthStr);
                     var mnemonic = HDWallet.HDWalletData.CreateHDWallet(strength, BIP39Wordlist.English);
-                    Globals.HDWallet = mnemonic.Item1;
+                    if (mnemonic.Item1)
+                        Globals.HDWallet = true; // a refusal must not clear the flag
 
                     return mnemonic.Item2;
                 }
@@ -1688,7 +1692,10 @@ namespace VerifiedXCore.Commands
                 else
                 {
                     var account = new Account().Build();
-                    AccountData.WalletInfo(account);
+                    if (account != null)
+                        AccountData.WalletInfo(account);
+                    else
+                        Console.WriteLine("The wallet is encrypted and locked; unlock it with its password to create an address.");
                 }
 
             }

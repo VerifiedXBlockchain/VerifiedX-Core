@@ -165,23 +165,7 @@ namespace VerifiedXCore.Services
                         // HAL-066 Fix: Add blocks to competing blocks list
                         foreach (var block in blockBagOrdered)
                         {
-                            BlockDict.AddOrUpdate(
-                                block.Item1.Height,
-                                new List<(Block, string)> { (block.Item1, block.Item2) },
-                                (height, existingList) =>
-                                {
-                                    if (!existingList.Any(b => b.Item1.Hash == block.Item1.Hash))
-                                    {
-                                        existingList.Add((block.Item1, block.Item2));
-                                        if (existingList.Count > 1 && Globals.OptionalLogging)
-                                        {
-                                            ErrorLogUtility.LogError(
-                                                $"HAL-066: Competing block received at height {height}. Now have {existingList.Count} candidates.",
-                                                "BlockDownloadService.GetAllBlocksV2()");
-                                        }
-                                    }
-                                    return existingList;
-                                });
+                            BlockStaging.Stage(block.Item1, block.Item2); // VX-19: de-duplicated staging
                         }
 
                         var stopwatch2 = new Stopwatch();
@@ -359,23 +343,7 @@ namespace VerifiedXCore.Services
                                 var (_, ipAddress) = taskDict[resultHeight];
                                 
                                 // HAL-066 Fix: Add block to competing blocks list
-                                BlockDict.AddOrUpdate(
-                                    resultHeight,
-                                    new List<(Block, string)> { (result, ipAddress) },
-                                    (height, existingList) =>
-                                    {
-                                        if (!existingList.Any(b => b.Item1.Hash == result.Hash))
-                                        {
-                                            existingList.Add((result, ipAddress));
-                                            if (existingList.Count > 1 && Globals.OptionalLogging)
-                                            {
-                                                ErrorLogUtility.LogError(
-                                                    $"HAL-066: Competing block received at height {height}. Now have {existingList.Count} candidates.",
-                                                    "BlockDownloadService.GetAllBlocks()");
-                                            }
-                                        }
-                                        return existingList;
-                                    });
+                                BlockStaging.Stage(result, ipAddress); // VX-19: de-duplicated staging
                                 
                                 taskDict.TryRemove(resultHeight, out _);
                                 _ = BlockValidatorService.ValidateBlocks(true);

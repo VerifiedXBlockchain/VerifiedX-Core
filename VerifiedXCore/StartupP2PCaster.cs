@@ -35,10 +35,13 @@ namespace VerifiedXCore
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
         public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
         {
-            if (env.IsDevelopment())
+            // VX-23: the validator/consensus host is network-facing. An unhandled exception returns 500 with no body — never
+            // the developer exception page (it was enabled whenever ASPNETCORE_ENVIRONMENT=Development).
+            app.UseExceptionHandler(errorApp => errorApp.Run(context =>
             {
-                app.UseDeveloperExceptionPage();
-            }
+                context.Response.StatusCode = 500;
+                return Task.CompletedTask;
+            }));
 
             //app.UseHttpsRedirection();
 

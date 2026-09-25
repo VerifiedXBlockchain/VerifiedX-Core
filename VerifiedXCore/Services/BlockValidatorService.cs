@@ -81,6 +81,11 @@ namespace VerifiedXCore.Services
                 return false;
             if (reason.StartsWith("Bridge lock ", StringComparison.Ordinal))
                 return false;
+            // NEW-06 / NEW-07: producer-selection faults within one block, not local state corruption.
+            if (reason.StartsWith("Duplicate creation", StringComparison.Ordinal))
+                return false;
+            if (reason.StartsWith(SameBlockDebitGuard.ReasonPrefix, StringComparison.Ordinal))
+                return false;
             return true;
         }
 
@@ -454,6 +459,14 @@ namespace VerifiedXCore.Services
                     {
                         DbContext.Rollback("BlockValidatorService.ValidateBlock()-2");
                         return result; //block rejected due to chainref difference
+                    }
+                    // NEW-25: genesis transactions skip VerifyTX; bind their contents to their hashes (and so to the
+                    // genesis block hash that block 1 links to).
+                    if (block.Transactions.Any(t => LedgerIntegrityRules.ContentMatchesHash(t) != null)
+                        || !block.MerkleRoot.Equals(new Block { Transactions = block.Transactions }.MerkleRootOf()))
+                    {
+                        DbContext.Rollback("BlockValidatorService.ValidateBlock()-genesisContent");
+                        return result;
                     }
                     //Genesis Block
                     result = true;
@@ -879,7 +892,14 @@ namespace VerifiedXCore.Services
                         // VBTC_V2_WITHDRAWAL_REQUESTs for the same contract in one block. Track the
                         // contracts seen here and reject the second (mirrors blockPrivateNullifierKeys).
                         var blockWithdrawalContracts = new HashSet<string>();
+                        // NEW-06: one contract creation (Mint/TokenDeploy/vBTC V2 create) per ContractUID per block. The
+                        // "already deployed" checks read committed state only, so two creations of one UID in the same
+                        // block both passed and the second credited its own supply under the first's contract.
+                        // Case-insensitive: contract records are looked up through LiteDB's default collation, which ignores case.
+                        var blockCreatedContracts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         var blockBridgeState = new Bitcoin.Services.BridgeIntraBlockGuard.State();
+                        // NEW-07: one running debit per (ledger, contract, holder) across every debit-writing type.
+                        var blockDebitState = new SameBlockDebitGuard.State { BlockHeight = block.Height };
                         var uniqueAddresses = block.Transactions
                             .Where(x => x.FromAddress != "Coinbase_TrxFees" && x.FromAddress != "Coinbase_BlkRwd")
                             .Select(x => x.FromAddress)
@@ -895,6 +915,8 @@ namespace VerifiedXCore.Services
                         }
                         
                         // Process transactions ordered by nonce to ensure sequential validation
+                        // NEW-13: the apply and the guard read tx.Height, which no hash covers - use the block's height.
+                        LedgerIntegrityRules.NormalizeTransactionHeights(block);
                         var orderedTransactions = block.Transactions
                             .OrderBy(x => x.FromAddress)
                             .ThenBy(x => x.Nonce)
@@ -919,6 +941,9 @@ namespace VerifiedXCore.Services
                                     try
                                     {
                                         var wScUID = JObject.Parse(blkTransaction.Data)["ContractUID"]?.ToObject<string>();
+                                        // Keyed by the stored contract's UID (LiteDB lookups ignore case and invisible characters).
+                                        if (!string.IsNullOrEmpty(wScUID))
+                                            wScUID = SmartContractStateTrei.GetSmartContractState(wScUID)?.SmartContractUID ?? wScUID;
                                         if (!string.IsNullOrEmpty(wScUID))
                                         {
                                             if (!blockWithdrawalContracts.Add(wScUID))
@@ -930,8 +955,9 @@ namespace VerifiedXCore.Services
                                             // serialization must register EVERY input contract — otherwise
                                             // two multi requests drawing on the same vault could share a
                                             // block and both open, defeating the per-contract gate.
-                                            foreach (var (wMultiScUid, _) in Bitcoin.Services.VBTCService.GetVbtcV2WithdrawalOutflows(blkTransaction))
+                                            foreach (var (wMultiScUidRaw, _) in Bitcoin.Services.VBTCService.GetVbtcV2WithdrawalOutflows(blkTransaction))
                                             {
+                                                var wMultiScUid = SmartContractStateTrei.GetSmartContractState(wMultiScUidRaw)?.SmartContractUID ?? wMultiScUidRaw;
                                                 if (!blockWithdrawalContracts.Add(wMultiScUid))
                                                 {
                                                     effectiveTxResult = (false, $"Duplicate withdrawal request for contract {wMultiScUid} within block.");
@@ -941,6 +967,20 @@ namespace VerifiedXCore.Services
                                         }
                                     }
                                     catch { }
+                                }
+
+                                if (effectiveTxResult.Item1)
+                                {
+                                    var duplicateCreation = LedgerIntegrityRules.RegisterCreationInBlock(blkTransaction, blockCreatedContracts);
+                                    if (duplicateCreation != null)
+                                        effectiveTxResult = (false, duplicateCreation);
+                                }
+
+                                // NEW-07: debits by one holder on one contract within the block may not exceed its balance.
+                                if (effectiveTxResult.Item1)
+                                {
+                                    var (debitOk, debitReason) = SameBlockDebitGuard.TryRegister(blkTransaction, blockDebitState);
+                                    if (!debitOk) effectiveTxResult = (false, debitReason);
                                 }
 
                                 // Bridge: one redemption per Base burn and one draw per lock within a block
@@ -1919,6 +1959,8 @@ namespace VerifiedXCore.Services
                 bool rejectBlock = false;
                 var blockPrivateNullifierKeys = new HashSet<string>();
                 var blockBridgeStateTask = new Bitcoin.Services.BridgeIntraBlockGuard.State();
+                var blockDebitStateTask = new SameBlockDebitGuard.State { BlockHeight = block.Height }; // NEW-07
+                LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13
                 foreach (Transaction transaction in block.Transactions)
                 {
                     if (transaction.FromAddress != "Coinbase_TrxFees" && transaction.FromAddress != "Coinbase_BlkRwd")
@@ -1935,6 +1977,11 @@ namespace VerifiedXCore.Services
                         {
                             var (bridgeOk, bridgeReason) = Bitcoin.Services.BridgeIntraBlockGuard.TryRegister(transaction, blockBridgeStateTask);
                             if (!bridgeOk) effectiveTxResult = (false, bridgeReason);
+                        }
+                        if (effectiveTxResult.Item1)
+                        {
+                            var (debitOk, debitReason) = SameBlockDebitGuard.TryRegister(transaction, blockDebitStateTask);
+                            if (!debitOk) effectiveTxResult = (false, debitReason);
                         }
                         rejectBlock = effectiveTxResult.Item1 == false ? rejectBlock = true : false;
                         if (rejectBlock)

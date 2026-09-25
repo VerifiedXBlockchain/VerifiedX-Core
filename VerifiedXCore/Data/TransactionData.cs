@@ -1020,7 +1020,9 @@ namespace VerifiedXCore.Data
 
                                 if (passedPreCheck)
                                 {
-                                    var dblspndChk = await DoubleSpendReplayCheck(tx);
+                                    // NEW-07: the proposal applies the same-block debit guard itself (DropSameBlockOverspends,
+                                    // which defers); here it would DELETE a valid transaction whose sibling overspends.
+                                    var dblspndChk = await DoubleSpendReplayCheck(tx, skipDebitGuard: true);
                                     var isCraftedIntoBlock = await HasTxBeenCraftedIntoBlock(tx);
                                     var txVerify = await TransactionValidatorService.VerifyTX(tx);
 
@@ -1176,10 +1178,35 @@ namespace VerifiedXCore.Data
 
             }
 
-            return approvedMemPoolList;
+            // NEW-06: one contract creation per ContractUID per block (block validation rejects a block carrying two,
+            // see BlockValidatorService). Keep the first; drop a later one AND that sender's later transactions so the
+            // proposal has no nonce gap. The dropped creation stays in the mempool and fails as "already deployed".
+            // NEW-07: likewise for debits that together overspend a holder's balance on one contract.
+            return SameBlockDebitGuard.DropSameBlockOverspends(DropDuplicateContractCreations(approvedMemPoolList));
         }
 
-        public static async Task<bool> DoubleSpendReplayCheck(Transaction tx)
+        public static List<Transaction> DropDuplicateContractCreations(List<Transaction> approved)
+        {
+            var created = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // LiteDB lookups ignore case
+            var blockedSenders = new HashSet<string>(StringComparer.Ordinal);
+            var result = new List<Transaction>();
+            foreach (var tx in approved)
+            {
+                if (tx.FromAddress != null && blockedSenders.Contains(tx.FromAddress))
+                    continue;
+                var uid = LedgerIntegrityRules.CreatedContractUid(tx);
+                if (uid != null && !created.Add(uid))
+                {
+                    if (tx.FromAddress != null) blockedSenders.Add(tx.FromAddress);
+                    LogUtility.Log($"[ProcessTxPool] Skipping duplicate creation of contract {uid} (tx {tx.Hash}) for this block", "TransactionData.ProcessTxPool()");
+                    continue;
+                }
+                result.Add(tx);
+            }
+            return result;
+        }
+
+        public static async Task<bool> DoubleSpendReplayCheck(Transaction tx, bool skipDebitGuard = false)
         {
             bool result = false;
             AccountStateTrei? stateTreiAcct = null;
@@ -1270,6 +1297,11 @@ namespace VerifiedXCore.Data
                 }
                 catch { }
             }
+
+            // NEW-07: every debit-writing type (vBTC V2/V1 and fungible tokens, both data shapes), jointly with the
+            // sender's pending transactions. The vBTC V2 check above only counted typed transfers against each other.
+            if (!skipDebitGuard && !SameBlockDebitGuard.CheckAgainstPending(tx, txs).Ok)
+                return true;
 
             //double NFT transfer or burn check
             if (tx.TransactionType != TransactionType.TX && 

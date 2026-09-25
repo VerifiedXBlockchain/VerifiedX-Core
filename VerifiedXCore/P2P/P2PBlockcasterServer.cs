@@ -357,7 +357,8 @@ namespace VerifiedXCore.P2P
             {
                 // HAL-048 Fix: Re-enable SignalRQueue protection with block size-based cost calculation
                 // HAL-16 Fix: Use Block message type to ensure blocks NEVER blocked by TXs
-                return await P2PServer.SignalRQueue(Context, (int)(nextBlock?.Size ?? 0) + 1024, SignalRMessageType.Block, async () =>
+                // VX-19: queue cost measured locally, not the wire Size.
+                return await P2PServer.SignalRQueue(Context, BlockStaging.QueueCost(nextBlock), SignalRMessageType.Block, async () =>
                 {
                     // HAL-048 Fix: Add basic validation before processing
                     var callerIP = GetIP(Context);
@@ -414,23 +415,14 @@ namespace VerifiedXCore.P2P
                                 && !await BlockcasterNode.TryAdmitLiveBlockAsCasterAsync(nextBlock, $"CasterHub.ReceiveBlockVal:{IP}"))
                                 return false;
 
-                            BlockDownloadService.BlockDict.AddOrUpdate(
-                                currentHeight,
-                                new List<(Block, string)> { (nextBlock, IP) },
-                                (height, existingList) =>
-                                {
-                                    if (!existingList.Any(b => b.Item1.Hash == nextBlock.Hash))
-                                    {
-                                        existingList.Add((nextBlock, IP));
-                                        if (existingList.Count > 1 && Globals.OptionalLogging)
-                                        {
-                                            ErrorLogUtility.LogError(
-                                                $"HAL-066: Competing block received at height {height}. Now have {existingList.Count} candidates.",
-                                                "P2PBlockcasterServer.ReceiveBlockVal()");
-                                        }
-                                    }
-                                    return existingList;
-                                });
+                            // VX-19: gossip pre-checks, then de-duplicated, capped staging (only tip+1; see below for blocks further ahead).
+                            if (currentHeight > nextHeight)
+                            {
+                                _ = BlockDownloadService.GetAllBlocks();
+                                return false;
+                            }
+                            if (!BlockStaging.PassesGossipPreChecks(nextBlock, out _) || !BlockStaging.TryStageGossip(nextBlock, IP))
+                                return false;
 
                             await Task.Delay(2000);
 
@@ -489,7 +481,7 @@ namespace VerifiedXCore.P2P
                 {
                     if (feature.RemoteIpAddress != null)
                     {
-                        peerIP = feature.RemoteIpAddress.MapToIPv4().ToString();
+                        peerIP = VerifiedXCore.Utilities.RemoteIp.Text(feature.RemoteIpAddress)!;
                     }
                 }
 

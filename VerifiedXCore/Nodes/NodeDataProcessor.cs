@@ -65,20 +65,17 @@ namespace VerifiedXCore.Nodes
                                     && !await BlockcasterNode.TryAdmitLiveBlockAsCasterAsync(nextBlock, $"P2PGossip:{ipAddress}"))
                                     return;
 
-                                // HAL-072 Fix: Use AddOrUpdate to properly handle competing blocks list
-                                BlockDownloadService.BlockDict.AddOrUpdate(
-                                    currentHeight,
-                                    new List<(Block, string)> { (nextBlock, ipAddress) },
-                                    (key, existingList) =>
-                                    {
-                                        existingList.Add((nextBlock, ipAddress));
-                                        return existingList;
-                                    });
-                                
-                                if (nextHeight == currentHeight)
-                                    await BlockValidatorService.ValidateBlocks();
-                                if (nextHeight < currentHeight)                                            
+                                // VX-19: only the next height is staged, after the gossip pre-checks, de-duplicated and
+                                // capped; a block further ahead only starts the downloader (it was held forever).
+                                if (nextHeight < currentHeight)
+                                {
                                     await BlockDownloadService.GetAllBlocks();
+                                    return;
+                                }
+                                if (!BlockStaging.PassesGossipPreChecks(nextBlock, out _) || !BlockStaging.TryStageGossip(nextBlock, ipAddress))
+                                    return;
+
+                                await BlockValidatorService.ValidateBlocks();
                             }
                         }
                                 

@@ -21,6 +21,28 @@ namespace VerifiedXCore.Controllers
     public class RSV1Controller : ControllerBase
     {
         /// <summary>
+        /// VX-14: the reserve account as the API shows it. Never the entity: no PrivateKey / EncryptedDecryptKey
+        /// ciphertext and no GetKey / GetPrivKey. IsUnlocked / UnlockExpiresAt replace reading GetKey != "0".
+        /// </summary>
+        private static object ToView(ReserveAccount a)
+        {
+            var unlocked = ReserveAccount.TryGetActiveUnlock(a.Address, out var unlock);
+            return new
+            {
+                a.Id,
+                a.Address,
+                a.PublicKey,
+                a.RecoveryAddress,
+                a.AvailableBalance,
+                a.LockedBalance,
+                a.TotalBalance,
+                a.IsNetworkProtected,
+                IsUnlocked = unlocked,
+                UnlockExpiresAt = unlocked ? unlock!.DeleteAfterTime : 0L
+            };
+        }
+
+        /// <summary>
         /// Dumps out all reserve accounts locally stored.
         /// </summary>
         /// <returns></returns>
@@ -32,7 +54,7 @@ namespace VerifiedXCore.Controllers
             var reserveAccounts = ReserveAccount.GetReserveAccounts();
             if (reserveAccounts?.Count() > 0)
             {
-                output = JsonConvert.SerializeObject(new { Success = true, Message = $"{reserveAccounts?.Count()} Found!", ReserveAccounts = reserveAccounts });
+                output = JsonConvert.SerializeObject(new { Success = true, Message = $"{reserveAccounts?.Count()} Found!", ReserveAccounts = reserveAccounts!.Select(ToView).ToList() });
             }
             else
             {
@@ -55,7 +77,7 @@ namespace VerifiedXCore.Controllers
             var reserveAccount = ReserveAccount.GetReserveAccountSingle(address);
             if (reserveAccount != null)
             {
-                output = JsonConvert.SerializeObject(new { Success = true, Message = $"Account Found!", ReserveAccount = reserveAccount });
+                output = JsonConvert.SerializeObject(new { Success = true, Message = $"Account Found!", ReserveAccount = ToView(reserveAccount) });
             }
             else
             {
@@ -257,7 +279,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ex.ToString()}" }, Formatting.Indented);
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ApiErrorText.For(ex)}" }, Formatting.Indented);
             }
 
             return output;
@@ -314,7 +336,7 @@ namespace VerifiedXCore.Controllers
             }
             catch(Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;
@@ -375,7 +397,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error Occurred. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Unknown Error Occurred. Error: {ApiErrorText.For(ex)}" });
                 SCLogUtility.Log($"Unknown Error Transfering NFT. Error: {ex.ToString()}", "SCV1Controller.TransferNFT()");
             }
 
@@ -414,7 +436,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;
@@ -454,7 +476,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;
@@ -487,7 +509,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;
@@ -545,7 +567,7 @@ namespace VerifiedXCore.Controllers
             }
             catch (Exception ex)
             {
-                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ex.ToString()}" });
+                output = JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error. Error: {ApiErrorText.For(ex)}" });
             }
 
             return output;
@@ -561,38 +583,35 @@ namespace VerifiedXCore.Controllers
         [HttpGet("UnlockReserveAccount/{address}/{unlockTime}/{**password}")]
         public async Task<string> UnlockReserveAccount(string address, int unlockTime, string password)
         {
-            if (Globals.ReserveAccountUnlockKeys.ContainsKey(address))
+            // VX-14: an expired entry does not count as unlocked (it is removed here).
+            if (ReserveAccount.TryGetActiveUnlock(address, out _))
                 return JsonConvert.SerializeObject(new { Success = true, Message = $"Reserve Account is already unlocked", AlreadyUnlocked = true });
-
-            var key = ReserveAccount.GetPrivateKey(address, password);
 
             if(unlockTime < 0)
                 return JsonConvert.SerializeObject(new { Success = false, Message = "Unlock time cannot be less than zero.", AlreadyUnlocked = false });
 
+            var key = ReserveAccount.GetPrivateKey(address, password);
+
             if (key == null)
                 return JsonConvert.SerializeObject(new { Success = false, Message = "Key could not be created from password.", AlreadyUnlocked = false });
 
-            var rAccount = ReserveAccount.CreateNewReserveAccount(password, false, true, key);
-
-            if (rAccount.Address != address)
+            // VX-14: derive the address straight from the decrypted key (same parse as signing). This used to build a
+            // throwaway reserve account (a second password wrap and a new recovery account) just to read its address.
+            if (ReserveAccount.AddressFromPrivateKeyHex(key) != address)
                 return JsonConvert.SerializeObject(new { Success = false, Message = "Provided details were not correct. Please try a different password or address.", AlreadyUnlocked = false });
 
+            // VX-14: the window is a real number of minutes (the default config gave 0, i.e. "unlocked for 0 minutes"
+            // while the key stayed readable until the sweep ran). The message reports the window actually applied.
+            var unlockMinutes = ReserveAccount.ReserveUnlockMinutes;
             var rAUK = new ReserveAccountUnlockKey {
-                DeleteAfterTime = TimeUtil.GetTime(0, Globals.WalletUnlockTime, 0, 0),
+                DeleteAfterTime = TimeUtil.GetTime(0, unlockMinutes, 0, 0),
                 Password = password.ToSecureString(),
                 UnlockTimeHours = unlockTime
             };
 
-            if(Globals.ReserveAccountUnlockKeys.ContainsKey(address))
-            {
-                Globals.ReserveAccountUnlockKeys[address] = rAUK;
-            }
-            else
-            {
-                Globals.ReserveAccountUnlockKeys.TryAdd(address, rAUK);
-            }
+            Globals.ReserveAccountUnlockKeys[address] = rAUK;
 
-            return JsonConvert.SerializeObject(new { Success = true, Message = $"Reserve Account has been unlocked for {Globals.WalletUnlockTime} minutes.", AlreadyUnlocked = false });
+            return JsonConvert.SerializeObject(new { Success = true, Message = $"Reserve Account has been unlocked for {unlockMinutes} minutes.", AlreadyUnlocked = false, UnlockExpiresAt = rAUK.DeleteAfterTime });
         }
     }
 }

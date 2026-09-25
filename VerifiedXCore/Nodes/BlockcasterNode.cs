@@ -331,7 +331,7 @@ namespace VerifiedXCore.Nodes
                                         {
                                             Address = caster.ValidatorAddress,
                                             IPAddress = (caster.PeerIP ?? "").Replace("::ffff:", ""),
-                                            PublicKey = caster.ValidatorPublicKey ?? "",
+                                            PublicKey = Models.NetworkValidator.BoundPublicKey(caster.ValidatorAddress, caster.ValidatorPublicKey), // VX-15
                                             IsFullyTrusted = true,
                                             LastSeen = srNow,
                                             CheckFailCount = 0,
@@ -1124,6 +1124,8 @@ namespace VerifiedXCore.Nodes
                         // Phase E fix: hydrate the missing public key from the seed's BootstrapStatus
                         // instead of silently skipping (a skipped seed = empty legacy proofs = no-winner stall).
                         pubKey = await FetchPeerValidatorPublicKeyAsync(caster.PeerIP);
+                        // VX-15: the BootstrapStatus answer is unsigned; keep the key only if it owns the address.
+                        pubKey = NetworkValidator.BoundPublicKey(caster.ValidatorAddress, pubKey);
                         if (string.IsNullOrEmpty(pubKey))
                         {
                             CasterLogUtility.Log(
@@ -1600,8 +1602,12 @@ namespace VerifiedXCore.Nodes
 
                         // FIX B: Apply winner exclusions to proofSnapshot — prevents peer proofs
                         // from overriding local exclusions during winner agreement.
-                        var proofSnapshot = Globals.Proofs
-                            .Where(x => x.BlockHeight == Height && !skippedAddresses.Contains(x.Address))
+                        // VX-05: the snapshot is the casters' votes — exactly one entry per caster
+                        // (CasterProofDict, keyed by caster IP). It used to be read from the shared
+                        // Globals.Proofs bag, which other peers can also add to, so repeated copies of
+                        // one proof inflated that address's count in the count-first selection below.
+                        var proofSnapshot = Globals.CasterProofDict.Values
+                            .Where(x => x != null && x.BlockHeight == Height && !skippedAddresses.Contains(x.Address))
                             .ToList();
 
                         // CONSENSUS-V2 (Fix #5): Proof-set commitment exchange.
@@ -3038,7 +3044,7 @@ namespace VerifiedXCore.Nodes
             switch (message)
             {
                 case "1":
-                    _ = IpMessage(data);
+                    _ = IpMessage(data, ipAddress);
                     break;
                 case "2":
                     _ = ReceiveVote(data);
@@ -3109,14 +3115,9 @@ namespace VerifiedXCore.Nodes
 
         #region Messages
         //1
-        private static async Task IpMessage(string data)
+        private static async Task IpMessage(string data, string ipAddress)
         {
-            var IP = data.ToString();
-            if (Globals.ReportedIPs.TryGetValue(IP, out int Occurrences))
-                Globals.ReportedIPs[IP]++;
-            else
-                Globals.ReportedIPs[IP] = 1;
-            P2P.P2PClient.TryAutoUpdateReportedIP();
+            P2P.P2PClient.RecordReportedIP(data, ipAddress); // NEW-20
         }
 
         //2
@@ -3128,7 +3129,8 @@ namespace VerifiedXCore.Nodes
                 var proof = JsonConvert.DeserializeObject<Proof>(data);
                 if (proof != null)
                 {
-                    if (proof.VerifyProof())
+                    // VX-05: ingress validation.
+                    if (ProofUtility.ValidateIncomingProofForNextRound(proof, out _))
                         Globals.Proofs.Add(proof);
                 }
             }
@@ -3764,6 +3766,11 @@ namespace VerifiedXCore.Nodes
 
             var requiredAgreement = ConsensusQuorum.Required(committeeCount); // ONE-QUORUM
 
+            // VX-08: only committee members' signed votes count — relayed or first-hand.
+            var committeeVoters = new HashSet<string>(casters.Where(c => !string.IsNullOrEmpty(c.ValidatorAddress)).Select(c => c.ValidatorAddress!), StringComparer.Ordinal);
+            committeeVoters.Add(Globals.ValidatorAddress);
+            bool IsCommitteeVoter(string a) => committeeVoters.Contains(a);
+
             // DETERMINISTIC-CONSENSUS: Check for deadlock safety net
             if (_winnerAgreementFailHeight == height)
             {
@@ -3776,7 +3783,7 @@ namespace VerifiedXCore.Nodes
                     // Deadlock detected! Use deterministic tiebreaker: sort all known votes lexicographically
                     // and pick the lowest winner address. All casters will converge on the same choice.
                     var allVotes = Globals.CasterWinnerVoteDict.TryGetValue(height, out var existingVotes)
-                        ? existingVotes.Values.Distinct().OrderBy(v => v, StringComparer.Ordinal).ToList()
+                        ? existingVotes.Where(kv => IsCommitteeVoter(kv.Key)).Select(kv => kv.Value).Distinct().OrderBy(v => v, StringComparer.Ordinal).ToList()
                         : new List<string> { myChosenWinner };
                     var tiebreakWinner = allVotes.FirstOrDefault() ?? myChosenWinner;
                     CasterLogUtility.Log(
@@ -3794,9 +3801,10 @@ namespace VerifiedXCore.Nodes
                 _winnerAgreementFailCount = 1;
             }
 
-            // Store our own vote
+            // Store our own vote — signed (VX-08), so peers can verify it and relay it verifiably.
+            var myVote = WinnerVoteStore.CreateOwn(height, myChosenWinner);
+            WinnerVoteStore.TryRecord(myVote, IsCommitteeVoter);
             var votesForHeight = Globals.CasterWinnerVoteDict.GetOrAdd(height, _ => new ConcurrentDictionary<string, string>());
-            votesForHeight[Globals.ValidatorAddress] = myChosenWinner;
 
             // Also store in CasterRoundDict so the endpoint can read it
             if (Globals.CasterRoundDict.TryGetValue(height, out var currentRound) && currentRound != null)
@@ -3824,7 +3832,9 @@ namespace VerifiedXCore.Nodes
                                 BlockHeight = height,
                                 VoterAddress = Globals.ValidatorAddress,
                                 WinnerAddress = myChosenWinner,
-                                ExcludedAddresses = new List<string>() // DETERMINISTIC-CONSENSUS: No local exclusions (removed WINNER-SKIP)
+                                ExcludedAddresses = myVote.ExcludedAddresses, // DETERMINISTIC-CONSENSUS: No local exclusions (removed WINNER-SKIP)
+                                Sequence = myVote.Sequence,
+                                Signature = myVote.Signature,
                             };
                             using var content = new StringContent(
                                 JsonConvert.SerializeObject(voteReq),
@@ -3836,13 +3846,16 @@ namespace VerifiedXCore.Nodes
                                 var body = await resp.Content.ReadAsStringAsync();
                                 if (!string.IsNullOrEmpty(body) && body != "0")
                                 {
-                                    var voteResp = JsonConvert.DeserializeAnonymousType(body, new { BlockHeight = 0L, Votes = new Dictionary<string, string>() });
-                                    if (voteResp?.Votes != null)
+                                    var voteResp = JsonConvert.DeserializeAnonymousType(body, new { BlockHeight = 0L, SignedVotes = new List<SignedWinnerVote>() });
+                                    if (voteResp?.SignedVotes != null)
                                     {
-                                        // Merge remote votes into our local dict
-                                        foreach (var kv in voteResp.Votes)
+                                        // VX-08: merge only votes for THIS round that carry their voter's
+                                        // signature from a committee member (the peer's own and any it relays).
+                                        // The unsigned voter→winner map used to be merged as-is.
+                                        foreach (var v in voteResp.SignedVotes)
                                         {
-                                            votesForHeight.TryAdd(kv.Key, kv.Value);
+                                            if (v != null && v.BlockHeight == height)
+                                                WinnerVoteStore.TryRecord(v, IsCommitteeVoter);
                                         }
                                     }
                                 }
@@ -3854,8 +3867,8 @@ namespace VerifiedXCore.Nodes
 
                 await Task.WhenAll(peerTasks);
 
-                // Check for supermajority agreement
-                var voteGroups = votesForHeight.Values
+                // Check for supermajority agreement (committee voters only — VX-08)
+                var voteGroups = votesForHeight.Where(kv => IsCommitteeVoter(kv.Key)).Select(kv => kv.Value)
                     .GroupBy(v => v)
                     .OrderByDescending(g => g.Count())
                     .ToList();
@@ -3893,6 +3906,7 @@ namespace VerifiedXCore.Nodes
             var oldKeys = Globals.CasterWinnerVoteDict.Keys.Where(k => k < height - 10).ToList();
             foreach (var k in oldKeys)
                 Globals.CasterWinnerVoteDict.TryRemove(k, out _);
+            WinnerVoteStore.PruneBelow(height - 10);
 
             // DETERMINISTIC-CONSENSUS: Cleanup old excluded address entries
             var oldExclKeys = Globals.CasterExcludedAddressDict.Keys.Where(k => k < height - 10).ToList();
@@ -3966,9 +3980,16 @@ namespace VerifiedXCore.Nodes
 
             var requiredAgreement = ConsensusQuorum.Required(committeeCount); // ONE-QUORUM
 
+            // VX-16: only committee members' signed commitments count — first-hand or relayed.
+            var committeeCasters = new HashSet<string>(casters.Where(c => !string.IsNullOrEmpty(c.ValidatorAddress)).Select(c => c.ValidatorAddress!), StringComparer.Ordinal);
+            committeeCasters.Add(Globals.ValidatorAddress ?? "");
+            bool IsCommitteeCaster(string a) => committeeCasters.Contains(a);
+
+            // VX-16: our own commitment is signed (peers reject unsigned ones) and recorded through the store.
+            myCommitment = ProofSetCommitmentStore.SignOwn(myCommitment);
+            ProofSetCommitmentStore.TryRecord(myCommitment, IsCommitteeCaster);
             var commitsForHeight = Globals.CasterProofSetCommitDict
                 .GetOrAdd(height, _ => new ConcurrentDictionary<string, Models.ProofSetCommitment>());
-            commitsForHeight[Globals.ValidatorAddress ?? ""] = myCommitment;
 
             var sw = Stopwatch.StartNew();
             // Cache hash → sorted address list so we don't have to track group-membership
@@ -4006,12 +4027,9 @@ namespace VerifiedXCore.Nodes
                             {
                                 if (kv.Value == null) continue;
                                 if (kv.Value.BlockHeight != height) continue;
-                                if (string.IsNullOrEmpty(kv.Value.CasterAddress)) continue;
-                                // Re-verify the commitment hash so a bad peer can't poison our tally.
-                                var recomputed = ComputeProofSetCommitmentHash(kv.Value.ProofAddressesSorted ?? new List<string>());
-                                if (!string.Equals(recomputed, kv.Value.CommitmentHash, StringComparison.Ordinal))
-                                    continue;
-                                commitsForHeight[kv.Value.CasterAddress] = kv.Value;
+                                // VX-16: each relayed commitment must be signed by its own caster, who must be in the
+                                // committee; hash re-verified inside. It used to be merged on the hash check alone.
+                                ProofSetCommitmentStore.TryRecord(kv.Value, IsCommitteeCaster);
                             }
                         }
                         catch { /* best-effort */ }
@@ -4021,14 +4039,16 @@ namespace VerifiedXCore.Nodes
                 await Task.WhenAll(peerTasks).ConfigureAwait(false);
 
                 hashToAddresses[myCommitment.CommitmentHash] = myCommitment.ProofAddressesSorted ?? new List<string>();
-                foreach (var c in commitsForHeight.Values)
+                // VX-16: tally committee members only (the store may also hold other accepted casters from the route).
+                var committeeCommits = commitsForHeight.Where(kv => IsCommitteeCaster(kv.Key)).Select(kv => kv.Value).ToList();
+                foreach (var c in committeeCommits)
                 {
                     if (c == null || string.IsNullOrEmpty(c.CommitmentHash)) continue;
                     if (!hashToAddresses.ContainsKey(c.CommitmentHash))
                         hashToAddresses[c.CommitmentHash] = c.ProofAddressesSorted ?? new List<string>();
                 }
 
-                var byHash = commitsForHeight.Values
+                var byHash = committeeCommits
                     .Where(c => c != null && !string.IsNullOrEmpty(c.CommitmentHash))
                     .GroupBy(c => c.CommitmentHash, StringComparer.Ordinal)
                     .OrderByDescending(g => g.Count())
@@ -4131,6 +4151,19 @@ namespace VerifiedXCore.Nodes
             int totalMerged = 0;
             int totalRejected = 0;
             int totalDeferred = 0;
+            int totalPending = 0;
+
+            // VX-15: our request is signed (the receiver rejects unsigned lists); liveness checks this round are
+            // bounded by one shared budget across all peers.
+            long reqTimestamp;
+            string reqSignature;
+            try { (reqTimestamp, reqSignature) = ValidatorListExchange.SignOwn(myEntries); }
+            catch (Exception ex)
+            {
+                CasterLogUtility.Log($"VALLIST-SYNC: cannot sign validator list: {ex.Message}", "CONSENSUS");
+                return;
+            }
+            var promotionBudget = new ValidatorListExchange.Budget(VALIDATOR_LIST_SYNC_MERGE_CAP);
 
             var syncTasks = casters.Select(async caster =>
             {
@@ -4143,7 +4176,9 @@ namespace VerifiedXCore.Nodes
                     {
                         BlockHeight = currentHeight,
                         CasterAddress = Globals.ValidatorAddress ?? "",
-                        Validators = myEntries
+                        Validators = myEntries,
+                        Timestamp = reqTimestamp,
+                        Signature = reqSignature
                     };
                     using var content = new StringContent(
                         JsonConvert.SerializeObject(req),
@@ -4161,67 +4196,16 @@ namespace VerifiedXCore.Nodes
                     if (listResp?.Validators == null || listResp.Validators.Count == 0)
                         return;
 
-                    int peerMerged = 0;
-                    int peerRejected = 0;
-                    int peerDeferred = 0;
-                    foreach (var entry in listResp.Validators)
-                    {
-                        if (entry == null
-                            || string.IsNullOrEmpty(entry.Address)
-                            || string.IsNullOrEmpty(entry.IPAddress))
-                            continue;
-
-                        // Skip self and anything already known.
-                        if (entry.Address == Globals.ValidatorAddress)
-                            continue;
-                        if (Globals.NetworkValidators.ContainsKey(entry.Address))
-                            continue;
-
-                        // CONSENSUS-V2 (Fix #4): Per-round merge cap. Once we've merged
-                        // VALIDATOR_LIST_SYNC_MERGE_CAP entries this round, defer the rest to the next
-                        // sync tick. We still drain the response (no early break) so the HTTP
-                        // socket closes cleanly and we get an accurate "deferred" count for logs.
-                        if (Volatile.Read(ref totalMerged) >= VALIDATOR_LIST_SYNC_MERGE_CAP)
-                        {
-                            Interlocked.Increment(ref peerDeferred);
-                            continue;
-                        }
-
-                        // Liveness + version gate before merging — never trust a peer's word alone.
-                        bool live;
-                        try { live = await NetworkValidator.CheckValidatorLiveness(entry.IPAddress); }
-                        catch { live = false; }
-
-                        if (!live)
-                        {
-                            Interlocked.Increment(ref peerRejected);
-                            continue;
-                        }
-
-                        // Re-check the cap AFTER the (slow) liveness call — another peer task could
-                        // have crossed the threshold while we were awaiting.
-                        if (Volatile.Read(ref totalMerged) >= VALIDATOR_LIST_SYNC_MERGE_CAP)
-                        {
-                            Interlocked.Increment(ref peerDeferred);
-                            continue;
-                        }
-
-                        var nv = new NetworkValidator
-                        {
-                            Address = entry.Address,
-                            IPAddress = entry.IPAddress,
-                            PublicKey = entry.PublicKey ?? "",
-                            IsFullyTrusted = true,
-                            LastSeen = TimeUtil.GetTime(),
-                            FirstSeenAtHeight = entry.FirstSeenAtHeight > 0 ? entry.FirstSeenAtHeight : currentHeight,
-                            CheckFailCount = 0,
-                        };
-                        if (Globals.NetworkValidators.TryAdd(entry.Address, nv))
-                        {
-                            Interlocked.Increment(ref peerMerged);
-                            Interlocked.Increment(ref totalMerged);
-                        }
-                    }
+                    // VX-15: same rules as the route. The response must be signed by the caster we asked; entries need a key
+                    // that derives the address and the validator balance, and join only after distinct committee casters
+                    // corroborate them and a liveness check passes. First-seen is local; the wire value is ignored.
+                    var outcome = await ValidatorListExchange.MergeResponseAsync(listResp, caster.ValidatorAddress ?? "", promotionBudget);
+                    int Count(ValidatorListExchange.OfferResult r) => outcome.TryGetValue(r, out var n) ? n : 0;
+                    int peerMerged = Count(ValidatorListExchange.OfferResult.Promoted);
+                    int peerRejected = Count(ValidatorListExchange.OfferResult.Rejected) + Count(ValidatorListExchange.OfferResult.Unreachable);
+                    int peerDeferred = Count(ValidatorListExchange.OfferResult.Deferred);
+                    Interlocked.Add(ref totalMerged, peerMerged);
+                    Interlocked.Add(ref totalPending, Count(ValidatorListExchange.OfferResult.Pending));
 
                     if (peerMerged > 0 || peerRejected > 0 || peerDeferred > 0)
                         CasterLogUtility.Log(
@@ -4245,7 +4229,7 @@ namespace VerifiedXCore.Nodes
                     "CONSENSUS");
 
             CasterLogUtility.Log(
-                $"VALLIST-SYNC: SUMMARY at height {currentHeight} → casters={casters.Count} merged={totalMerged} rejected={totalRejected} deferred={totalDeferred} myCount(after)={Globals.NetworkValidators.Count}",
+                $"VALLIST-SYNC: SUMMARY at height {currentHeight} → casters={casters.Count} merged={totalMerged} pending={totalPending} rejected={totalRejected} deferred={totalDeferred} myCount(after)={Globals.NetworkValidators.Count}",
                 "CONSENSUS");
         }
 
@@ -4388,14 +4372,7 @@ namespace VerifiedXCore.Nodes
 
             if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
             {
-                BlockDownloadService.BlockDict.AddOrUpdate(
-                    currentHeight,
-                    new List<(Block, string)> { (block, producerIp) },
-                    (key, existingList) =>
-                    {
-                        existingList.Add((block, producerIp));
-                        return existingList;
-                    });
+                BlockStaging.Stage(block, producerIp); // VX-19: de-duplicated staging (our own agreed block)
                 if (nextHeight == currentHeight)
                     await BlockValidatorService.ValidateBlocks();
                 if (nextHeight < currentHeight)
@@ -4758,7 +4735,8 @@ namespace VerifiedXCore.Nodes
                             if (responseJson != null && responseJson != "0" && responseJson != "\"0\"")
                             {
                                 var remoteCasterProof = JsonConvert.DeserializeObject<Proof>(responseJson);
-                                if (remoteCasterProof != null && remoteCasterProof.VerifyProof())
+                                // VX-05: same ingress validation as the push route.
+                                if (remoteCasterProof != null && ProofUtility.ValidateIncomingProof(remoteCasterProof, proof.BlockHeight, proof.PreviousBlockHash, out _))
                                 {
                                     Globals.CasterProofDict.TryAdd(validator.PeerIP, remoteCasterProof);
                                     CasterLogUtility.Log($"ProofFetch ACCEPTED from {cleanIP} addr={remoteCasterProof.Address} VRF={remoteCasterProof.VRFNumber}", "PROOFDIAG");

@@ -147,7 +147,11 @@ namespace VerifiedXCore.Bitcoin.Models
             }
 
             string btcSigMessage = TimeUtil.GetTime().ToString();
-            var btcSignature = Services.SignatureService.CreateSignature(btcAccount.PrivateKey, btcSigMessage);
+            // VX-13: sealed keys are available only while the wallet is unlocked.
+            var btcKeyHex = Services.BitcoinKeystore.GetPrivateKeyHex(btcAccount);
+            if (string.IsNullOrEmpty(btcKeyHex))
+                return (null, "You must type in your encryption password first!");
+            var btcSignature = Services.SignatureService.CreateSignature(btcKeyHex, btcSigMessage);
             
             if(btcSignature == "F" )
                 return (null, $"Failed to produce signature for : {btcAddress}");

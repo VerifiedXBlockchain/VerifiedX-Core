@@ -114,7 +114,7 @@ namespace VerifiedXCore.Privacy
             }
             catch (Exception ex)
             {
-                return Task.FromResult((false, ex.Message));
+                return Task.FromResult((false, ApiErrorText.For(ex)));
             }
         }
 
@@ -158,7 +158,7 @@ namespace VerifiedXCore.Privacy
             }
             catch (Exception ex)
             {
-                return Task.FromResult((false, ex.Message));
+                return Task.FromResult((false, ApiErrorText.For(ex)));
             }
         }
     }

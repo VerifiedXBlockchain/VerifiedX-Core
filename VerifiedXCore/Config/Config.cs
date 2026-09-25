@@ -22,6 +22,7 @@ namespace VerifiedXCore.Config
 		public string? ArbiterPassword { get; set; }
 		public string? APICallURL { get; set; }
 		public int WalletUnlockTime { get; set; }
+		public long MaxBtcFeeRateSatPerVb { get; set; }
         public bool ChainCheckPoint { get; set; }
 		public int ChainCheckPointInterval { get; set; }
         public int ChainCheckPointRetain { get; set; }
@@ -123,6 +124,7 @@ namespace VerifiedXCore.Config
 				config.ValidatorAddress = dict.ContainsKey("ValidatorAddress") ? dict["ValidatorAddress"] : null;
 				config.ValidatorName = dict.ContainsKey("ValidatorName") ? dict["ValidatorName"] : Guid.NewGuid().ToString();
 				config.WalletUnlockTime = dict.ContainsKey("WalletUnlockTime") ? Convert.ToInt32(dict["WalletUnlockTime"]) : 15;
+				config.MaxBtcFeeRateSatPerVb = dict.ContainsKey("MaxBtcFeeRateSatPerVb") ? Convert.ToInt64(dict["MaxBtcFeeRateSatPerVb"]) : 2_000; // VX-18
 				config.ChainCheckPoint = dict.ContainsKey("ChainCheckPoint") ? Convert.ToBoolean(dict["ChainCheckPoint"]) : false;
 				config.ForceSoloBootstrap = dict.ContainsKey("ForceSoloBootstrap") ? Convert.ToBoolean(dict["ForceSoloBootstrap"]) : false;
 				config.APICallURLLogging = dict.ContainsKey("APICallURLLogging") ? Convert.ToBoolean(dict["APICallURLLogging"]) : false;
@@ -547,6 +549,8 @@ namespace VerifiedXCore.Config
 				Globals.AlwaysRequireAPIPassword = config.AlwaysRequireAPIPassword;
 
 			}
+			Globals.MaxBtcFeeRateSatPerVb = config.MaxBtcFeeRateSatPerVb > 0 ? config.MaxBtcFeeRateSatPerVb : 2_000; // VX-18
+
 			if(config.ChainCheckPoint == true)
             {
 				//establish chain checkpoint parameters here.

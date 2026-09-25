@@ -195,6 +195,14 @@ namespace VerifiedXCore
         public static long BridgeIntraBlockGuardHeight = 999_999_999_999L;
 
         /// <summary>
+        /// NEW-26: vBTC V2 deposit-address binding. At/after this height a contract creation carrying a TokenizationV2
+        /// feature must name the Taproot address of its FROST group key as its DepositAddress and carry validator
+        /// attestations of the DKG (FrostDkgAttestation). Earlier contracts stay as recorded (creator-trusted; disclosed).
+        /// Inert until set at rollout (mainnet and testnet), after the validators run the attesting build.
+        /// </summary>
+        public static long VbtcV2DkgAttestationHeight = 7_500_500L;
+
+        /// <summary>
         /// Withdrawal escrow (security fix): at/after this height a vBTC withdrawal REQUEST debits the
         /// requester's ledger immediately (escrow); COMPLETE only finalizes (no second burn) and an
         /// approved cancellation refunds. Before it, the legacy burn-at-completion applies. Without
@@ -229,6 +237,8 @@ namespace VerifiedXCore
         public static SemaphoreSlim BlocksDownloadSlim = new SemaphoreSlim(1, 1);
         public static SemaphoreSlim BlocksDownloadV2Slim = new SemaphoreSlim(1, 1);
         public static int WalletUnlockTime = 0;
+        /// <summary>VX-18: highest Bitcoin fee rate (sat/vB) any local signing path will use. Config "MaxBtcFeeRateSatPerVb".</summary>
+        public static long MaxBtcFeeRateSatPerVb = 2_000;
         public static int ChainCheckPointInterval = 0;
         public static int ChainCheckPointRetain = 0;
         public static int PasswordClearTime = 10;
@@ -252,8 +262,8 @@ namespace VerifiedXCore
         public static int APIPort = 7292;
         public static int ValAPIPort = 7294;
         public static int APIPortSSL = 7777;
-        public static int MajorVer = 7;
-        public static int MinorVer = 2;
+        public static int MajorVer = 8;
+        public static int MinorVer = 0;
         public static int RevisionVer = 0;
         public static int BuildVer = 0;
         public static int SCVersion = 1;
@@ -660,10 +670,14 @@ namespace VerifiedXCore
         #region Bad TX Ignore List
 
         public static List<string> BadADNRTxList = new List<string> { "9ebe7eb08abcf35f7e5cad6a5346babcb045f0e52732cdfddd021296331c2056"};
-        public static List<string> BadNFTTxList = new List<string>() { "70e34dd1b5d646addc5328f971b4ab370095985dcf4bce1d0e1ea222824daa6d" };
+        // NEW-27: the built-in entries (70e34dd1..., 9065618f..., b05b230c...) were added in 2023 as a testnet bypass; none of
+        // them is in mainnet (scanned to 4,589,149) or the current testnet, and they let any content carrying one of those
+        // hashes skip validation. Operator entries (console / bad-TX prompt) are added at runtime; see
+        // LedgerIntegrityRules.IsHonoredWhitelistEntry.
+        public static List<string> BadNFTTxList = new List<string>();
         public static List<string> BadTopicTxList = new List<string>();
         public static List<string> BadVoteTxList = new List<string>();
-        public static List<string> BadTxList = new List<string> { "9065618ff356dc1dcef8cd5413ffe826f8ab45ca8b6bb9c8f9853d1de0b576ae", "b05b230c9f7fb6f9014c0a9a4a5b1c9ddaf36a96462635d628272b8c62e2e5b3" };
+        public static List<string> BadTxList = new List<string>(); // NEW-27: see BadNFTTxList
         public static List<string> BadDSTList = new List<string> { "8f9eec99c69ace2ad758048ceb281c38099173ca95a97c31114f2d136b34916a", 
         "a898112b2770ca2182d330d71f8830ad7eeb2b7ac9030cf33312ebeefd72c8a5",
         "152250f2673234765ab61e3f46e2ef94a80e50cf24bcaaf0ad5e0341f8b5626a",
