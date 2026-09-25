@@ -631,7 +631,7 @@ namespace VerifiedXCore.P2P
         // VX-20 (follow-up 2): the server always returns at least one block, so a single block larger than MaxListBytes
         // (blocks may reach MaxBlockSizeBytes) is sent whole; the bound covers a full list plus one maximum-size block.
         public static int MaxRemoteDecompressedBytes =>
-            (int)(2 * (BlockServeLimits.MaxListBytes + Math.Max(0, Globals.MaxBlockSizeBytes))) + 1024 * 1024;
+            (int)(2 * (BlockServeLimits.MaxListBytes + (Globals.MaxBlockSizeBytes > 0 ? Globals.MaxBlockSizeBytes : 10_485_760))) + 1024 * 1024; // unset -> config default (10 MB), as BlockStaging
 
         /// <summary>VX-20: decodes a SendBlockList reply; throws InvalidDataException when it expands past the bound.</summary>
         public static List<Block>? DecodeBlockSpan(string blockSpan) =>

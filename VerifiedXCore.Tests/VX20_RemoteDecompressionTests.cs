@@ -98,9 +98,18 @@ namespace VerifiedXCore.Tests
             var blocks = new List<Block> { new Block { Height = 1, Hash = "h1", Transactions = new List<Transaction> { bigTx } } };
             var json = JsonConvert.SerializeObject(blocks);
             Assert.True(json.Length > VerifiedXCore.P2P.BlockServeLimits.MaxListBytes);
-            Assert.True(json.Length < VerifiedXCore.Globals.MaxBlockSizeBytes);
-            var decoded = P2PClient.DecodeBlockSpan(json.ToCompress());
-            Assert.Single(decoded!);
+            Assert.True(json.Length < 10_485_760); // the default MaxBlockSizeBytes
+            var reply = json.ToCompress();
+            var prior = VerifiedXCore.Globals.MaxBlockSizeBytes;
+            try
+            {
+                foreach (var limit in new[] { 10_485_760, 0 }) // configured, and unset (treated as the 10 MB default)
+                {
+                    VerifiedXCore.Globals.MaxBlockSizeBytes = limit;
+                    Assert.Single(P2PClient.DecodeBlockSpan(reply)!);
+                }
+            }
+            finally { VerifiedXCore.Globals.MaxBlockSizeBytes = prior; }
         }
     }
 }
