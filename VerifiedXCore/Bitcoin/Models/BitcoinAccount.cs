@@ -189,11 +189,9 @@ namespace VerifiedXCore.Bitcoin.Models
 
             //return privateKey;
 
-            // Log the exact input string
+            // NEW-14: the derivation input (the arbiter's signing PRIVATE key + scUID) used to be written to sclog.txt in
+            // plaintext - three times, as text and bytes - on a path any remote caller with a VFX keypair can trigger.
             var inputString = signingPrivateKey + scUID;
-            SCLogUtility.Log($"Input string for private key derivation: {inputString}", "BitcoinAccount");
-            SCLogUtility.Log($"Input string length: {inputString.Length}", "BitcoinAccount");
-            SCLogUtility.Log($"Input string bytes: {BitConverter.ToString(Encoding.UTF8.GetBytes(inputString))}", "BitcoinAccount");
 
             byte[] hash = SHA256.Create().ComputeHash(Encoding.UTF8.GetBytes(inputString));
             Key privateKey = new Key(hash);
