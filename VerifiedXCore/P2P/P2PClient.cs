@@ -628,7 +628,10 @@ namespace VerifiedXCore.P2P
         // VX-20 (follow-up): replies are compressed from UTF-16 text (2 bytes per char). The server caps a list at
         // BlockServeLimits.MaxListBytes of JSON text, so an honest reply can decompress to twice that; an 8 MB bound
         // rejected (and banned) an honest peer serving a large span. Still a hard bound against expansion bombs.
-        public const int MaxRemoteDecompressedBytes = (int)(2 * BlockServeLimits.MaxListBytes) + 1024 * 1024;
+        // VX-20 (follow-up 2): the server always returns at least one block, so a single block larger than MaxListBytes
+        // (blocks may reach MaxBlockSizeBytes) is sent whole; the bound covers a full list plus one maximum-size block.
+        public static int MaxRemoteDecompressedBytes =>
+            (int)(2 * (BlockServeLimits.MaxListBytes + Math.Max(0, Globals.MaxBlockSizeBytes))) + 1024 * 1024;
 
         /// <summary>VX-20: decodes a SendBlockList reply; throws InvalidDataException when it expands past the bound.</summary>
         public static List<Block>? DecodeBlockSpan(string blockSpan) =>

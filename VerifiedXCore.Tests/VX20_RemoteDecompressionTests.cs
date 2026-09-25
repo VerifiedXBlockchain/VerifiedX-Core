@@ -87,5 +87,20 @@ namespace VerifiedXCore.Tests
             var decoded = P2PClient.DecodeBlockSpan(json.ToCompress());
             Assert.Single(decoded!);
         }
+
+        [Fact]
+        public void VX20_FollowUp2_OneHonestBlockLargerThanTheListCap_Decodes()
+        {
+            // The server always returns at least one block; a block over MaxListBytes (blocks may reach
+            // MaxBlockSizeBytes, 10 MB) is sent alone and decompresses to twice its JSON length. The previous bound
+            // (2 x MaxListBytes + 1 MB) refused it and banned the honest peer.
+            var bigTx = new Transaction { Hash = "t", FromAddress = "a", ToAddress = "b", Data = new string('d', 9_500_000) };
+            var blocks = new List<Block> { new Block { Height = 1, Hash = "h1", Transactions = new List<Transaction> { bigTx } } };
+            var json = JsonConvert.SerializeObject(blocks);
+            Assert.True(json.Length > VerifiedXCore.P2P.BlockServeLimits.MaxListBytes);
+            Assert.True(json.Length < VerifiedXCore.Globals.MaxBlockSizeBytes);
+            var decoded = P2PClient.DecodeBlockSpan(json.ToCompress());
+            Assert.Single(decoded!);
+        }
     }
 }
