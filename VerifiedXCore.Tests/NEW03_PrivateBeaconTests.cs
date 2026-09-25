@@ -113,5 +113,20 @@ namespace VerifiedXCore.Tests
             }
             finally { Globals.BeaconPool.TryRemoveFromKey1("10.1.2.3", out _); }
         }
+
+        [Fact]
+        public async Task NEW15_FollowUp_EntryFiledUnderAnotherAddressIsRemovedByConnection()
+        {
+            // Sixth review: a reconnect from a new address updates the entry in place, so it stays filed under the first
+            // address; the lookup by the disconnecting address missed it and it was never removed.
+            var ctx = new FakeContext();
+            Globals.BeaconPool[("10.9.9.9", "ref-moved")] = new BeaconPool { ConnectionId = ctx.ConnectionId, IpAddress = "10.1.2.3", Reference = "ref-moved" };
+            try
+            {
+                await new P2PBeaconServer { Context = ctx }.OnDisconnectedAsync(null);
+                Assert.False(Globals.BeaconPool.TryGetFromKey1("10.9.9.9", out _));
+            }
+            finally { Globals.BeaconPool.TryRemoveFromKey1("10.9.9.9", out _); }
+        }
     }
 }

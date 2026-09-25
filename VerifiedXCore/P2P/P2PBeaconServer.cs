@@ -129,7 +129,12 @@ namespace VerifiedXCore.P2P
                         {
                             SCLogUtility.Log($"Con Exist", "CustomLogging");
                             var beaconCon = Globals.BeaconPool.Values.Where(x => x.Reference == beaconRef || x.IpAddress == peerIP).FirstOrDefault();
-                            if (beaconCon != null)
+                            if (beaconCon == null)
+                            {
+                                // The previous connection's disconnect removed it meanwhile: file a fresh entry.
+                                Globals.BeaconPool[(peerIP, beaconRef)] = new BeaconPool { WalletVersion = walletVersion, Reference = beaconRef, ConnectDate = DateTime.Now, ConnectionId = Context.ConnectionId, IpAddress = peerIP };
+                            }
+                            else
                             {
                                 SCLogUtility.Log($"BeaconCon was not null", "CustomLogging");
                                 beaconCon.WalletVersion = walletVersion;
@@ -181,8 +186,11 @@ namespace VerifiedXCore.P2P
             Globals.BeaconPeerDict.TryRemove(peerIP, out _);
             // NEW-15: this only LOOKED the entry up, so BeaconPool entries were never removed (unbounded growth on every
             // node's /beacon hub). Remove this connection's entry (not a newer connection's from the same address).
-            if (Globals.BeaconPool.TryGetFromKey1(peerIP, out var pooled) && pooled.Value?.ConnectionId == Context.ConnectionId)
-                Globals.BeaconPool.TryRemoveFromKey1(peerIP, out _);
+            // Found by connection id wherever it is filed: an entry moved to a new address in place stays filed under its
+            // first address (sixth review).
+            foreach (var (ip, _, entry) in Globals.BeaconPool.ToArray())
+                if (entry?.ConnectionId == Context.ConnectionId)
+                    Globals.BeaconPool.TryRemoveFromKey1(ip, out _);
         }
         private async Task SendMessageClient(string clientId, string method, string message)
         {
