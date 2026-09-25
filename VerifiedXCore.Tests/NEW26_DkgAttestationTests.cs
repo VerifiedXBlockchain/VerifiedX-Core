@@ -7,6 +7,7 @@ using Newtonsoft.Json;
 using VerifiedXCore;
 using VerifiedXCore.Bitcoin.FROST;
 using VerifiedXCore.Bitcoin.FROST.Models;
+using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Data;
 using VerifiedXCore.EllipticCurve;
 using VerifiedXCore.Extensions;
@@ -385,6 +386,59 @@ namespace VerifiedXCore.Tests
             Assert.Equal(0, CountOf(controller, "= Services.VBTCValidatorRegistry.GetPublicValidators()"));
             var s3c = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "Services", "S3CService.cs"));
             Assert.Contains("VBTCValidatorRegistry.HoldsValidatorBalance(v.ValidatorAddress)", s3c);
+        }
+
+        // ── Follow-up: the wallet never runs or finishes a ceremony whose contract would be refused ──
+
+        [Fact]
+        public void NEW26_FollowUp_TooFewReachableValidators_RefusedBeforeTheCeremony()
+        {
+            // 4 funded public validators: a majority is 3. A ceremony with 2 reachable completes with a real key whose
+            // contract can carry at most 2 attestations - refused - so it must not start.
+            Assert.Contains("at least 3 of the 4", FrostDkgAttestation.PreCeremonyShortfall(2, false, 0));
+            Assert.Null(FrostDkgAttestation.PreCeremonyShortfall(3, false, 0));
+            Assert.Contains("at least 2 of the 3", FrostDkgAttestation.PreCeremonyShortfall(1, true, 3));   // S3C: its pool
+            Globals.LastBlock = new Block { Height = Activation - 10 };                                          // before activation
+            Assert.Null(FrostDkgAttestation.PreCeremonyShortfall(0, false, 0));
+        }
+
+        [Fact]
+        public void NEW26_FollowUp_FinishedCeremonyWithTooFewAttestations_Refused()
+        {
+            var uid = NewUid();
+            var two = Proof(uid, _groupKey, _address, _public.Take(2));
+            var three = Proof(uid, _groupKey, _address, _public.Take(3));
+            var participants = _public.Select(v => v.Address).ToList();
+            Assert.Contains("2 eligible validator(s); 3 required", FrostDkgAttestation.CeremonyResultError(uid, _groupKey, _address, two, participants, false));
+            Assert.Null(FrostDkgAttestation.CeremonyResultError(uid, _groupKey, _address, three, participants, false));
+        }
+
+        [Fact]
+        public async Task NEW26_FollowUp_DepositAddressServedOnlyForAContractOnChain()
+        {
+            var uid = NewUid();
+            VBTCContractV2.SaveContract(new VBTCContractV2 { SmartContractUID = uid, OwnerAddress = _minter.Address, DepositAddress = _address, FrostGroupPublicKey = _groupKey });
+            var controller = new VerifiedXCore.Bitcoin.Controllers.VBTCController();
+
+            var before = Newtonsoft.Json.Linq.JObject.Parse(await controller.GetMPCDepositAddress(uid));
+            Assert.False((bool)before["Success"]!);                                   // local record only: not served
+            Assert.Null(before["DepositAddress"]);
+
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei { SmartContractUID = uid, ContractData = "x", MinterAddress = _minter.Address, OwnerAddress = _minter.Address });
+            var after = Newtonsoft.Json.Linq.JObject.Parse(await controller.GetMPCDepositAddress(uid));
+            Assert.True((bool)after["Success"]!);                                      // on chain: served
+            Assert.Equal(_address, (string?)after["DepositAddress"]);
+        }
+
+        [Fact]
+        public void NEW26_FollowUp_WalletChecksAreWiredIntoEveryCeremonyPath()
+        {
+            var root = Path.GetDirectoryName(Path.GetDirectoryName(ThisFile()))!;
+            var controller = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "Controllers", "VBTCController.cs"));
+            Assert.Equal(4, CountOf(controller, "FrostDkgAttestation.PreCeremonyShortfall("));   // every ceremony start
+            Assert.Equal(3, CountOf(controller, "FrostDkgAttestation.CeremonyResultError("));    // every ceremony finish
+            Assert.Equal(0, CountOf(controller, "DepositAddress = ceremony.Status == CeremonyStatus.Completed ? ceremony.DepositAddress : null"));
+            Assert.Equal(2, CountOf(controller, "VBTCContractV2.DeleteContract(scUID); SmartContractMain.SmartContractData.DeleteSmartContract(scUID);"));
         }
 
         // ── Validator and coordinator sides ────────────────────────────────────────────────

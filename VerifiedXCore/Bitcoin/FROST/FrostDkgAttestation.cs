@@ -126,6 +126,44 @@ namespace VerifiedXCore.Bitcoin.FROST
             catch { return null; }
         }
 
+        // ── Wallet side (NEW-26 follow-up): never run or finish a ceremony whose contract consensus would refuse ──
+
+        /// <summary>Whether a contract created now (at the next block) must carry validator attestations.</summary>
+        public static bool RequiredForNextBlock => (Globals.LastBlock?.Height ?? -1) + 1 >= Globals.VbtcV2DkgAttestationHeight;
+
+        /// <summary>The validators consensus counts for the next block: active at the tip and holding the validator balance.</summary>
+        public static List<VBTCValidator> EligibleAtTip() =>
+            Services.VBTCValidatorRegistry.FundedOnly(Services.VBTCValidatorRegistry.GetActiveValidatorsAt(Globals.LastBlock?.Height ?? -1));
+
+        /// <summary>
+        /// Before a ceremony: null when enough validators are reachable to collect the attestations consensus will require,
+        /// else the reason. A public contract needs a majority of the funded active public validators; an S3C contract a
+        /// majority of its pool. A ceremony with fewer could complete and produce a real key whose contract is refused.
+        /// </summary>
+        public static string? PreCeremonyShortfall(int reachable, bool isS3C, int s3cPoolSize)
+        {
+            if (!RequiredForNextBlock) return null;
+            var basis = isS3C ? s3cPoolSize : EligibleAtTip().Count(v => v.IsActive && !v.IsS3C);
+            var need = Required(basis);
+            return reachable >= need ? null
+                : $"Only {reachable} validator(s) are reachable; a vBTC V2 contract needs attestations from at least {need} of the {basis} eligible validators, so its creation would be refused. Try again when more validators are online.";
+        }
+
+        /// <summary>
+        /// After a ceremony, before its deposit address is recorded or shown: null when the contract it produced would pass
+        /// the consensus check at the tip (same rule, same validator set), else the reason.
+        /// </summary>
+        public static string? CeremonyResultError(string contractUid, string? groupPublicKey, string? taprootAddress, string? dkgProof, List<string>? participants, bool isS3C)
+        {
+            if (!RequiredForNextBlock) return null;
+            var feature = new TokenizationV2Feature
+            {
+                DepositAddress = taprootAddress ?? "", FrostGroupPublicKey = groupPublicKey ?? "", DKGProof = dkgProof ?? "",
+                ValidatorAddressesSnapshot = participants ?? new List<string>(), IsS3C = isS3C,
+            };
+            return Validate(feature, contractUid, EligibleAtTip);
+        }
+
         /// <summary>
         /// Consensus check for a TokenizationV2 contract created at some height; null when it passes.
         /// <paramref name="activeAtPreviousBlock"/> returns the vBTC validator set derived from committed blocks up to

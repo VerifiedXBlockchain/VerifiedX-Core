@@ -199,7 +199,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     InitiatedTimestamp = ceremony.InitiatedTimestamp,
                     CompletedTimestamp = ceremony.CompletedTimestamp,
                     ErrorMessage = ceremony.ErrorMessage,
-                    DepositAddress = ceremony.Status == CeremonyStatus.Completed ? ceremony.DepositAddress : null,
+                    // NEW-26 (follow-up): the deposit address is served by GetMPCDepositAddress once the contract is on chain;
+                    // BTC sent to it before then has no contract (and no withdrawal path) if the contract is refused.
+                    DepositAddress = (string?)null,
                     FrostGroupPublicKey = ceremony.Status == CeremonyStatus.Completed ? ceremony.FrostGroupPublicKey : null,
                     DKGProof = ceremony.Status == CeremonyStatus.Completed ? ceremony.DKGProof : null,
                     ValidatorCount = ceremony.ValidatorSnapshot?.Count ?? 0,
@@ -257,6 +259,16 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     return;
                 }
 
+                // NEW-26 (follow-up): refuse up front when too few validators are reachable to attest the contract.
+                var staticShortfall = FrostDkgAttestation.PreCeremonyShortfall(activeValidators.Count, ceremony.IsS3C, allValidators.Count);
+                if (staticShortfall != null)
+                {
+                    ceremony.Status = CeremonyStatus.Failed;
+                    ceremony.ErrorMessage = staticShortfall;
+                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                    return;
+                }
+
                 LogUtility.Log($"[MPC Ceremony] Starting DKG with {activeValidators.Count} reachable validators " +
                     $"(out of {allValidators.Count} registered).", "VBTCController.ExecuteMPCCeremonyLocallyStatic");
 
@@ -293,6 +305,16 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 ceremony.ValidatorSnapshot = dkgResult.ParticipantAddresses;
                 LogUtility.Log($"[MPC Ceremony] Validator snapshot built from {dkgResult.ParticipantAddresses.Count} actual respondents " +
                     $"(out of {activeValidators.Count} candidates).", "VBTCController.ExecuteMPCCeremonyLocallyStatic");
+
+                // NEW-26 (follow-up): a finished ceremony whose contract consensus would refuse must not expose a deposit address.
+                var staticResultError = FrostDkgAttestation.CeremonyResultError(ceremonyId, dkgResult.GroupPublicKey, dkgResult.TaprootAddress, dkgResult.DKGProof, dkgResult.ParticipantAddresses, ceremony.IsS3C);
+                if (staticResultError != null)
+                {
+                    ceremony.Status = CeremonyStatus.Failed;
+                    ceremony.ErrorMessage = "The key ceremony finished, but its contract would be refused: " + staticResultError;
+                    ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                    return;
+                }
 
                 ceremony.DepositAddress = dkgResult.TaprootAddress;
                 ceremony.FrostGroupPublicKey = dkgResult.GroupPublicKey;
@@ -552,7 +574,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     CompletedTimestamp = ceremony.CompletedTimestamp,
                     ErrorMessage = ceremony.ErrorMessage,
                     // Only include results if completed
-                    DepositAddress = ceremony.Status == CeremonyStatus.Completed ? ceremony.DepositAddress : null,
+                    // NEW-26 (follow-up): the deposit address is served by GetMPCDepositAddress once the contract is on chain;
+                    // BTC sent to it before then has no contract (and no withdrawal path) if the contract is refused.
+                    DepositAddress = (string?)null,
                     FrostGroupPublicKey = ceremony.Status == CeremonyStatus.Completed ? ceremony.FrostGroupPublicKey : null,
                     DKGProof = ceremony.Status == CeremonyStatus.Completed ? ceremony.DKGProof : null,
                     ValidatorCount = ceremony.ValidatorSnapshot?.Count ?? 0,
@@ -803,6 +827,16 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 return;
             }
 
+            // NEW-26 (follow-up): refuse up front when too few validators are reachable to attest the contract.
+            var shortfall = FrostDkgAttestation.PreCeremonyShortfall(activeValidators.Count, ceremony.IsS3C, allValidators.Count);
+            if (shortfall != null)
+            {
+                ceremony.Status = CeremonyStatus.Failed;
+                ceremony.ErrorMessage = shortfall;
+                ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                return;
+            }
+
             LogUtility.Log($"[MPC Ceremony] Starting DKG with {activeValidators.Count} reachable validators " +
                 $"(out of {allValidators.Count} registered).", "VBTCController.ExecuteMPCCeremonyLocally");
 
@@ -842,6 +876,16 @@ namespace VerifiedXCore.Bitcoin.Controllers
             ceremony.ValidatorSnapshot = dkgResult.ParticipantAddresses;
             LogUtility.Log($"[MPC Ceremony] Validator snapshot built from {dkgResult.ParticipantAddresses.Count} actual respondents " +
                 $"(out of {activeValidators.Count} candidates).", "VBTCController.ExecuteMPCCeremonyLocally");
+
+            // NEW-26 (follow-up): a finished ceremony whose contract consensus would refuse must not expose a deposit address.
+            var resultError = FrostDkgAttestation.CeremonyResultError(ceremonyId, dkgResult.GroupPublicKey, dkgResult.TaprootAddress, dkgResult.DKGProof, dkgResult.ParticipantAddresses, ceremony.IsS3C);
+            if (resultError != null)
+            {
+                ceremony.Status = CeremonyStatus.Failed;
+                ceremony.ErrorMessage = "The key ceremony finished, but its contract would be refused: " + resultError;
+                ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                return;
+            }
 
             // DKG ceremony completed successfully
             ceremony.DepositAddress = dkgResult.TaprootAddress;
@@ -1010,6 +1054,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var scTx = await SmartContractService.MintSmartContractTx(result.Item2, TransactionType.VBTC_V2_CONTRACT_CREATE);
                 if (scTx == null)
                 {
+                    // NEW-26 (follow-up): the contract was refused; drop the local records saved above so no deposit
+                    // address for a contract that does not exist is kept or served.
+                    try { VBTCContractV2.DeleteContract(scUID); SmartContractMain.SmartContractData.DeleteSmartContract(scUID); } catch { }
                     return JsonConvert.SerializeObject(new
                     {
                         Success = false,
@@ -1034,6 +1081,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     TransactionHash = scTx.Hash,
                     CeremonyId = payload.CeremonyId,
                     DepositAddress = depositAddress,
+                    DepositAddressConfirmed = false, // NEW-26 (follow-up): do not deposit until GetMPCDepositAddress returns it (contract on chain)
                     FrostGroupPublicKey = frostGroupPublicKey,
                     DKGProof = dkgProof,
                     ValidatorCount = validatorSnapshot.Count,
@@ -1078,6 +1126,17 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     {
                         Success = false,
                         Message = "Contract exists but deposit address has not been generated yet. DKG ceremony may not have completed."
+                    });
+                }
+
+                // NEW-26 (follow-up): only a contract that is on chain has a usable deposit address. Until its creation is
+                // confirmed, BTC sent there would have no contract and no withdrawal path.
+                if (SmartContractStateTrei.GetSmartContractState(scUID) == null)
+                {
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = "The contract is not confirmed on chain yet. Do not deposit until it is; try again after its creation transaction is in a block."
                     });
                 }
 
@@ -1260,6 +1319,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var scTx = await SmartContractService.MintSmartContractTx(result.Item2, TransactionType.VBTC_V2_CONTRACT_CREATE);
                 if (scTx == null)
                 {
+                    // NEW-26 (follow-up): the contract was refused; drop the local records saved above so no deposit
+                    // address for a contract that does not exist is kept or served.
+                    try { VBTCContractV2.DeleteContract(scUID); SmartContractMain.SmartContractData.DeleteSmartContract(scUID); } catch { }
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to create or broadcast smart contract transaction" });
                 }
 
@@ -1277,6 +1339,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     TransactionHash = scTx.Hash,
                     CeremonyId = payload.CeremonyId,
                     DepositAddress = depositAddress,
+                    DepositAddressConfirmed = false, // NEW-26 (follow-up): do not deposit until GetMPCDepositAddress returns it (contract on chain)
                     DKGProof = dkgProof,
                     ValidatorCount = validatorSnapshot.Count,
                     ProofBlockHeight = ceremony.ProofBlockHeight,
@@ -3301,6 +3364,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var activeValidators = await Services.FrostMPCService.ProbeValidatorReachability(allValidators);
                 if (activeValidators.Count < 3)
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient reachable validators ({activeValidators.Count}/{allValidators.Count})" });
+                var rawShortfall = FrostDkgAttestation.PreCeremonyShortfall(activeValidators.Count, false, 0); // NEW-26 (follow-up)
+                if (rawShortfall != null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = rawShortfall });
 
                 var threshold = 51; // Default base threshold for DKG ceremonies
 
@@ -3426,6 +3492,14 @@ namespace VerifiedXCore.Bitcoin.Controllers
                             ceremony.CompletedTimestamp = TimeUtil.GetTime();
                             return;
                         }
+                        var rawRunShortfall = FrostDkgAttestation.PreCeremonyShortfall(activeValidators.Count, ceremony.IsS3C, allValidators.Count); // NEW-26 (follow-up)
+                        if (rawRunShortfall != null)
+                        {
+                            ceremony.Status = CeremonyStatus.Failed;
+                            ceremony.ErrorMessage = rawRunShortfall;
+                            ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                            return;
+                        }
 
                         ceremony.ProgressPercentage = 15;
                         ceremony.Status = CeremonyStatus.Round1InProgress;
@@ -3449,6 +3523,16 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         {
                             ceremony.Status = CeremonyStatus.Failed;
                             ceremony.ErrorMessage = "FROST DKG ceremony failed";
+                            ceremony.CompletedTimestamp = TimeUtil.GetTime();
+                            return;
+                        }
+
+                        // NEW-26 (follow-up): a finished ceremony whose contract consensus would refuse must not expose a deposit address.
+                        var rawResultError = FrostDkgAttestation.CeremonyResultError(payload.CeremonyId, dkgResult.GroupPublicKey, dkgResult.TaprootAddress, dkgResult.DKGProof, dkgResult.ParticipantAddresses, ceremony.IsS3C);
+                        if (rawResultError != null)
+                        {
+                            ceremony.Status = CeremonyStatus.Failed;
+                            ceremony.ErrorMessage = "The key ceremony finished, but its contract would be refused: " + rawResultError;
                             ceremony.CompletedTimestamp = TimeUtil.GetTime();
                             return;
                         }
@@ -3622,6 +3706,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Hash = deployTx.Hash,
                     SmartContractUID = scUID,
                     DepositAddress = ceremony.DepositAddress,
+                    DepositAddressConfirmed = false, // NEW-26 (follow-up): do not deposit until GetMPCDepositAddress returns it (contract on chain)
                     CeremonyId = payload.CeremonyId,
                     Timestamp = deployTx.Timestamp,
                     Fee = deployTx.Fee,
