@@ -217,10 +217,14 @@ namespace VerifiedXCore.Services
         /// recipient are checked), yet StateData.UpdateTreis applied their TransactionType and Data like any other
         /// transaction: a winning producer could make its coinbase an FTKN_TX TokenTransfer() of a victim's tokens to
         /// itself, an NFT Transfer(), a vBTC transfer or a reserve function. Producers only ever build TX with no Data.
+        /// NEW-25 (correction): Fee, Nonce and UnlockTime are pinned too (0, 0, none - true of every coinbase on mainnet to
+        /// 6,891,066 and testnet to 999,745), so with the reward and recipient checks every value-bearing field of an
+        /// ordinary coinbase is fixed without recomputing its hash.
         /// </summary>
         public static string? CoinbaseShape(Transaction tx) =>
-            IsCoinbase(tx) && (tx.TransactionType != TransactionType.TX || !string.IsNullOrEmpty(tx.Data))
-                ? "A coinbase transaction must be a plain TX with no Data."
+            IsCoinbase(tx) && (tx.TransactionType != TransactionType.TX || !string.IsNullOrEmpty(tx.Data)
+                               || tx.Fee != 0M || tx.Nonce != 0 || tx.UnlockTime != null)
+                ? "A coinbase transaction must be a plain TX with no Data, fee, nonce or unlock time."
                 : null;
 
         /// <summary>
@@ -229,6 +233,9 @@ namespace VerifiedXCore.Services
         /// serving blocks to a syncing node could change a coinbase's (or genesis transaction's) recipient, amount, type
         /// or Data while keeping its Hash, the merkle root, the block hash and every signature (e.g. the special block at
         /// 3,074,185 crediting 50,000,000 to an attacker). Producers build them with Build(), so the hash recomputes.
+        /// NEW-25 (correction): applied to genesis and the special block only. Decimal scale does not survive storage and
+        /// relay (Fee 0.00 stored as 0), so mainnet coinbases at 399,792 and 811,860-3,074,180 do not recompute although
+        /// their values are right; ordinary blocks pin the coinbase values instead (CoinbaseShape + reward/recipient).
         /// </summary>
         public static string? ContentMatchesHash(Transaction tx) =>
             tx != null && (string.IsNullOrEmpty(tx.Hash) || tx.GetHash() != tx.Hash)

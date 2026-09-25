@@ -76,7 +76,7 @@ namespace VerifiedXCore.Services
                 var coinbaseError = LedgerIntegrityRules.CoinbaseShape(tx); // NEW-16
                 if (coinbaseError != null)
                     Add("NEW-16 coinbase shape", coinbaseError);
-                if ((LedgerIntegrityRules.IsCoinbase(tx) || height == 0) && LedgerIntegrityRules.ContentMatchesHash(tx) is string contentError) // NEW-25
+                if (((LedgerIntegrityRules.IsCoinbase(tx) && height == Globals.SpecialBlockHeight) || height == 0) && LedgerIntegrityRules.ContentMatchesHash(tx) is string contentError) // NEW-25 (correction: genesis and the special block)
                     Add("NEW-25 coinbase/genesis content vs hash", contentError);
 
                 var uidError = LedgerIntegrityRules.ContractUids(tx); // NEW-10

@@ -659,10 +659,13 @@ namespace VerifiedXCore.Data
         }
         public static bool ValidateBlock(Block block)
         {
-            // NEW-16 / NEW-25: coinbase shape and content-to-hash binding apply at every height, including the special
-            // block (which returned before any coinbase check).
+            // NEW-16 / NEW-25: the coinbase shape applies at every height, including the special block (which returned
+            // before any coinbase check). The special block's coinbases skip the reward/recipient checks below, so their
+            // contents are bound to their hashes there. NEW-25 (correction): only there - decimal scale is not preserved
+            // in storage, and 2,262,322 mainnet coinbases (399,792; 811,860-3,074,180) do not recompute.
             if (block.Transactions.Any(tx => Services.LedgerIntegrityRules.IsCoinbase(tx)
-                && (Services.LedgerIntegrityRules.CoinbaseShape(tx) != null || Services.LedgerIntegrityRules.ContentMatchesHash(tx) != null)))
+                && (Services.LedgerIntegrityRules.CoinbaseShape(tx) != null
+                    || (block.Height == Globals.SpecialBlockHeight && Services.LedgerIntegrityRules.ContentMatchesHash(tx) != null))))
                 return false;
 
             if (block.Height == Globals.SpecialBlockHeight)
