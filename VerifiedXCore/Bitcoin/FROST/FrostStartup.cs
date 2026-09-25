@@ -921,9 +921,21 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // NEW-19: seal every package (it carries the recipient's secret share in plaintext) to the
+                            // recipient's registered validator key; the coordinator only ever relays ciphertext.
+                            var idToAddress = BuildAddressToIdentifierMap(session.ParticipantAddresses).ToDictionary(kv => kv.Value, kv => kv.Key);
+                            var sealedShares = FrostShareCrypto.SealAll(sharesJson, sessionId, idToAddress, FrostShareCrypto.VerifiedPublicKey, out var sealError);
+                            if (sealedShares == null)
+                            {
+                                ErrorLogUtility.LogError($"FROST DKG Round 2: shares not released for session {sessionId}: {sealError}", "FrostStartup.DKGRound2");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Round 2 shares cannot be sealed to every participant." }));
+                                return;
+                            }
+
                             // Store Round 2 state
                             session.Round2Secret = round2Secret;
-                            session.GeneratedSharesJson = sharesJson;
+                            session.GeneratedSharesJson = sealedShares;
 
                             LogUtility.Log($"[FROST] DKG Round 2 shares generated via native library for session {sessionId}", "FrostStartup.DKGRound2");
 
@@ -934,7 +946,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 Message = "Round 2 shares generated via FROST native library",
                                 SessionId = sessionId,
                                 SharesGenerated = true,
-                                GeneratedShares = sharesJson  // Coordinator collects and redistributes
+                                GeneratedShares = sealedShares  // Coordinator collects and redistributes ciphertext only (NEW-19)
                             }, Formatting.Indented));
                         }
                     }
@@ -1033,9 +1045,16 @@ namespace VerifiedXCore.Bitcoin.FROST
                             }
 
                             // FIND-024 Fix: Persist the received share into the session
+                            // NEW-19: only a share sealed to this validator is accepted; it is opened here.
                             if (!string.IsNullOrEmpty(share.EncryptedShare))
                             {
-                                session.ReceivedSharesJson.TryAdd(share.FromValidatorAddress, share.EncryptedShare);
+                                var myIdSingle = BuildAddressToIdentifierMap(session.ParticipantAddresses).TryGetValue(Globals.ValidatorAddress ?? "", out var mid) ? mid : null;
+                                var myKeySingle = FrostShareCrypto.LocalValidatorPrivateKey();
+                                if (myIdSingle != null && myKeySingle != null
+                                    && FrostShareCrypto.TryOpen(share.EncryptedShare, myKeySingle, share.SessionId, myIdSingle, out var openedSingle))
+                                    session.ReceivedSharesJson.TryAdd(share.FromValidatorAddress, openedSingle);
+                                else
+                                    LogUtility.Log($"[FROST] Refused a DKG share from {share.FromValidatorAddress} that is not sealed to this validator", "FrostStartup.DKGShare");
                             }
 
                             // FIND-024 Fix: Auto-trigger DKG finalization if all required shares received
@@ -1182,12 +1201,15 @@ namespace VerifiedXCore.Bitcoin.FROST
                                     var senderShares = Newtonsoft.Json.Linq.JObject.Parse(senderSharesStr);
                                     
                                     // Look up using our FROST Identifier
+                                    // NEW-19: the package must be sealed to this validator; plaintext packages are refused.
                                     string shareForMe = null;
                                     if (!string.IsNullOrEmpty(myFrostIdentifier))
                                     {
                                         var shareToken = senderShares[myFrostIdentifier];
-                                        if (shareToken != null)
-                                            shareForMe = shareToken.ToString(Newtonsoft.Json.Formatting.None);
+                                        var myKeyBatch = FrostShareCrypto.LocalValidatorPrivateKey();
+                                        if (shareToken?.Type == Newtonsoft.Json.Linq.JTokenType.String && myKeyBatch != null
+                                            && FrostShareCrypto.TryOpen((string?)shareToken, myKeyBatch, sessionId, myFrostIdentifier, out var opened))
+                                            shareForMe = opened;
                                     }
 
                                     if (!string.IsNullOrEmpty(shareForMe))
