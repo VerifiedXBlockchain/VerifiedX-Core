@@ -101,6 +101,26 @@ namespace VerifiedXCore.Services
             return null;
         }
 
+        // ── NEW-27: whitelisted transactions ───────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Whether a transaction on the bad-transaction whitelist (Globals.BadTxList / BadNFTTxList) skips validation here.
+        /// VerifyTX and the per-block debit guard used to skip every check for ANY transaction whose carried Hash was listed.
+        /// Nothing binds a carried hash to the content (the merkle root is built from the stored hashes), so any content
+        /// carrying a listed hash verified, at admission and in blocks - e.g. a victim's balance sent to an attacker, unsigned.
+        /// An entry (added by an operator on this node) is now honoured only in block validation, never at admission or
+        /// proposal, and only for the content its hash commits to.
+        /// </summary>
+        public static bool IsHonoredWhitelistEntry(Transaction? tx, long? blockHeight)
+        {
+            if (tx == null || string.IsNullOrEmpty(tx.Hash) || blockHeight == null) return false;
+            bool listed;
+            try { listed = Globals.BadTxList.Contains(tx.Hash) || Globals.BadNFTTxList.Contains(tx.Hash); }
+            catch { listed = false; } // the lists are edited from the console
+            if (!listed) return false;
+            try { return tx.GetHash() == tx.Hash; } catch { return false; }
+        }
+
         // ── NEW-26: a vBTC V2 deposit address is the validators' FROST key ──────────────────────────────────────
 
         /// <summary>

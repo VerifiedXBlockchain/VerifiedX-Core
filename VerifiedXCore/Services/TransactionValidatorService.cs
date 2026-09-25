@@ -231,12 +231,9 @@ namespace VerifiedXCore.Services
             bool txResult = false;
             bool runReserveCheck = true;
 
-            var badTx = Globals.BadTxList.Exists(x => x == txRequest.Hash);
-            if (badTx)
-                return (true, "");
-
-            var badNFTTx = Globals.BadNFTTxList.Exists(x => x == txRequest.Hash);
-            if (badNFTTx) 
+            // NEW-27: a whitelisted transaction skips validation only in block validation and only with the content its
+            // hash commits to (the carried Hash alone used to skip every check).
+            if (LedgerIntegrityRules.IsHonoredWhitelistEntry(txRequest, blockHeight))
                 return (true, "");
 
             // NEW-18: one reading of the hash preimage (Data and UnlockTime are joined without a separator).

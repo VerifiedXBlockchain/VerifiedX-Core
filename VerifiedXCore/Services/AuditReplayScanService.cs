@@ -316,7 +316,7 @@ namespace VerifiedXCore.Services
                         hits.Add(new Hit(0, "", TransactionType.TX, "NEW-25 genesis merkle root", "Genesis merkle root does not match its transactions."));
                     var createdInBlock = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // NEW-06
                     var debitsInBlock = new Dictionary<SameBlockDebitGuard.DebitKey, (int N, decimal Sum, Transaction Last)>(); // NEW-07
-                    var sweepState = new SameBlockDebitGuard.State(_ => null); // NEW-07: balances not judged, only the Recover() rule
+                    var sweepState = new SameBlockDebitGuard.State(_ => null) { BlockHeight = block.Height }; // NEW-07: balances not judged, only the Recover() rule
                     foreach (var tx in block.Transactions ?? new List<Transaction>())
                     {
                         txCount++;

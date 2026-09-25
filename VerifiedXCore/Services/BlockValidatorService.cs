@@ -899,7 +899,7 @@ namespace VerifiedXCore.Services
                         var blockCreatedContracts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         var blockBridgeState = new Bitcoin.Services.BridgeIntraBlockGuard.State();
                         // NEW-07: one running debit per (ledger, contract, holder) across every debit-writing type.
-                        var blockDebitState = new SameBlockDebitGuard.State();
+                        var blockDebitState = new SameBlockDebitGuard.State { BlockHeight = block.Height };
                         var uniqueAddresses = block.Transactions
                             .Where(x => x.FromAddress != "Coinbase_TrxFees" && x.FromAddress != "Coinbase_BlkRwd")
                             .Select(x => x.FromAddress)
@@ -1959,7 +1959,7 @@ namespace VerifiedXCore.Services
                 bool rejectBlock = false;
                 var blockPrivateNullifierKeys = new HashSet<string>();
                 var blockBridgeStateTask = new Bitcoin.Services.BridgeIntraBlockGuard.State();
-                var blockDebitStateTask = new SameBlockDebitGuard.State(); // NEW-07
+                var blockDebitStateTask = new SameBlockDebitGuard.State { BlockHeight = block.Height }; // NEW-07
                 LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13
                 foreach (Transaction transaction in block.Transactions)
                 {

@@ -270,6 +270,9 @@ namespace VerifiedXCore.Services
             internal HashSet<string> Swept { get; } = new(StringComparer.Ordinal);
             private readonly Dictionary<DebitKey, decimal?> _balances = new();
 
+            /// <summary>The height of the block being validated; null at admission and proposal (NEW-27).</summary>
+            public long? BlockHeight { get; init; }
+
             /// <summary>Consensus state (block validation).</summary>
             public State() : this(CommittedBalance) { }
             public State(Func<DebitKey, decimal?> balanceOf) { _balanceOf = balanceOf; }
@@ -298,8 +301,9 @@ namespace VerifiedXCore.Services
                 return (false, $"{ReasonPrefix}: transaction {tx.Hash} appears more than once in the block.");
             if (!string.IsNullOrEmpty(tx.Hash))
                 state.Hashes.Add(tx.Hash);
-            // Whitelisted historical transactions skip VerifyTX entirely; they are not judged here either.
-            if (Globals.BadTxList.Exists(x => x == tx.Hash) || Globals.BadNFTTxList.Exists(x => x == tx.Hash))
+            // Whitelisted transactions skip VerifyTX; they are not judged here either (NEW-27: only in block validation and
+            // only with the content their hash commits to).
+            if (LedgerIntegrityRules.IsHonoredWhitelistEntry(tx, state.BlockHeight))
                 return (true, "");
 
             // A reserve Recover() sweeps every balance of the reserve to its recovery address, a debit of the whole

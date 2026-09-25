@@ -169,9 +169,12 @@ namespace VerifiedXCore.Tests
             Signed(_holder, _other.Address, TransactionType.TKNZ_TX,
                 JsonConvert.SerializeObject(new[] { new { Function = "TransferCoin()", ContractUID = V1, Amount = amount } }), nonce);
 
-        private static (bool Ok, string Reason) Block(params Transaction[] txs)
+        private static (bool Ok, string Reason) Block(params Transaction[] txs) => BlockAt(null, txs);
+
+        /// <summary>The guard over one block; <paramref name="height"/> is the block's height (null at admission/proposal).</summary>
+        private static (bool Ok, string Reason) BlockAt(long? height, params Transaction[] txs)
         {
-            var state = new SameBlockDebitGuard.State();
+            var state = new SameBlockDebitGuard.State { BlockHeight = height };
             foreach (var tx in txs)
             {
                 var r = SameBlockDebitGuard.TryRegister(tx, state);
@@ -361,7 +364,11 @@ namespace VerifiedXCore.Tests
             var a = V2FunctionTransfer(1.0M, 0);
             var b = V2FunctionTransfer(1.0M, 1);
             Globals.BadTxList.Add(b.Hash);
-            try { Assert.True(Block(a, b).Ok); }
+            try
+            {
+                Assert.True(BlockAt(100, a, b).Ok);   // block validation: an operator-whitelisted transaction is not judged
+                Assert.False(Block(a, b).Ok);         // NEW-27: never at admission or proposal
+            }
             finally { Globals.BadTxList.Remove(b.Hash); }
         }
 
