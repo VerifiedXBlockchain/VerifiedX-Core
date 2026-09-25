@@ -1070,6 +1070,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (Globals.VBTCDefaultAssetOnly)
                     await NFTAssetFileUtility.AssociateDefaultVBTCLogo(scUID);
 
+                RecordCreationTx(scUID, scTx.Hash, scTx.Timestamp); // NEW-26 (follow-up)
+
                 // Ceremony results consumed — remove from memory immediately to free space
                 RemoveCeremony(payload.CeremonyId);
 
@@ -1093,6 +1095,22 @@ namespace VerifiedXCore.Bitcoin.Controllers
             {
                 return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
             }
+        }
+
+        /// <summary>
+        /// NEW-26 (follow-up): stores the creation transaction on the local contract record (see VBTCContractV2.CreateTxTimestamp).
+        /// </summary>
+        private static void RecordCreationTx(string scUID, string txHash, long txTimestamp)
+        {
+            try
+            {
+                var rec = VBTCContractV2.GetContract(scUID);
+                if (rec == null) return;
+                rec.CreateTxHash = txHash;
+                rec.CreateTxTimestamp = txTimestamp;
+                VBTCContractV2.UpdateContract(rec);
+            }
+            catch { }
         }
 
         /// <summary>
@@ -1327,6 +1345,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                 if (Globals.VBTCDefaultAssetOnly)
                     await NFTAssetFileUtility.AssociateDefaultVBTCLogo(scUID);
+
+                RecordCreationTx(scUID, scTx.Hash, scTx.Timestamp); // NEW-26 (follow-up)
 
                 // Ceremony results consumed — remove from memory immediately to free space
                 RemoveCeremony(payload.CeremonyId);
@@ -3697,6 +3717,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 deployTx.Build();
 
                 _pendingRawVbtcTxs[deployTx.Hash] = deployTx;
+                RecordCreationTx(scUID, deployTx.Hash, deployTx.Timestamp); // NEW-26 (follow-up)
 
                 // Don't consume ceremony yet — wait until TX is signed and broadcast
                 // Store ceremony mapping so SendRawCreateContractTx can clean up

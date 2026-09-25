@@ -50,6 +50,12 @@ namespace VerifiedXCore.Bitcoin.Models
         // S3C — copied from the contract's TokenizationV2Feature at mint/decompile (§5.4).
         public bool IsS3C { get; set; }
         public string? LinkedContractUID { get; set; }
+
+        // NEW-26 (follow-up): the contract's creation transaction as broadcast by this wallet. A creation older than the
+        // network's transaction age limit can never be mined, which is how S3C AutoBridge tells a pending companion from a
+        // dead one without trusting this node's mempool. Null on records made before this field existed.
+        public string? CreateTxHash { get; set; }
+        public long? CreateTxTimestamp { get; set; }
         #endregion
 
         #region Database Methods

@@ -7,6 +7,7 @@ using VerifiedXCore.Bitcoin.Services;
 using VerifiedXCore.Data;
 using VerifiedXCore.Extensions;
 using VerifiedXCore.Models;
+using VerifiedXCore.Utilities;
 using Xunit;
 
 namespace VerifiedXCore.Tests
@@ -72,37 +73,71 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Deposit, await wait);
         }
 
-        // ── Retries (Greptile follow-up): an unconfirmed companion must not block later attempts ──
+        // ── Retries (Greptile follow-ups): on chain / pending / dead by time; never deleted ──
+
+        private static void SetCreated(string uid, long? createdAt)
+        {
+            var rec = VBTCContractV2.GetContract(uid)!;
+            rec.CreateTxTimestamp = createdAt;
+            rec.CreateTxHash = createdAt.HasValue ? "createtx-" + uid : null;
+            VBTCContractV2.UpdateContract(rec);
+        }
 
         [Fact]
-        public void UnconfirmedCompanionIsNotRediscovered_AConfirmedOneIs()
+        public void PendingCompanion_IsReused_NoDuplicate()
         {
-            Assert.Null(S3CAutoBridgeService.DiscoverCompanion("xRequester", "s3c:1"));      // local record only: a retry creates a new one
+            // A retry while the creation is still pending must wait for it, not create another companion.
+            SetCreated(Companion, TimeUtil.GetTime() - 100);
+            Assert.Equal(Companion, S3CAutoBridgeService.DiscoverCompanion("xRequester", "s3c:1")?.SmartContractUID);
+        }
+
+        [Fact]
+        public void DeadCompanion_IsIgnored_SoARetryCreatesANewOne()
+        {
+            // Older than the transaction age limit: no honest node will mine its creation.
+            SetCreated(Companion, TimeUtil.GetTime() - Globals.MaxTxAgeSeconds - Globals.MaxFutureSkewSeconds - 10);
+            Assert.Null(S3CAutoBridgeService.DiscoverCompanion("xRequester", "s3c:1"));
+            Assert.NotNull(VBTCContractV2.GetContract(Companion));                    // the record is kept
+        }
+
+        [Fact]
+        public void CompanionConfirmedThroughAPeer_IsFoundEvenAfterItsDeadline()
+        {
+            // This node dropped the creation, a peer mined it: chain state decides, and the record was never deleted.
+            SetCreated(Companion, TimeUtil.GetTime() - 10 * 3600);
             Confirm();
             Assert.Equal(Companion, S3CAutoBridgeService.DiscoverCompanion("xRequester", "s3c:1")?.SmartContractUID);
         }
 
         [Fact]
-        public void CompanionWhoseCreationIsGone_IsForgotten()
+        public void OnChainCompanion_PreferredOverAPendingOne()
         {
-            Assert.True(S3CAutoBridgeService.ForgetUnconfirmedCompanion(Companion, "createtx1"));  // not on chain, not pending
-            Assert.Null(VBTCContractV2.GetContract(Companion));
+            const string second = "9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d:1790800100";
+            SetCreated(Companion, TimeUtil.GetTime() - 100);                              // pending
+            VBTCContractV2.SaveContract(new VBTCContractV2 { SmartContractUID = second, OwnerAddress = "xRequester", DepositAddress = "bc1psecond", LinkedContractUID = "s3c:1", CreateTxTimestamp = TimeUtil.GetTime() - 100 });
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei { SmartContractUID = second, ContractData = "x", MinterAddress = "xRequester", OwnerAddress = "xRequester" });
+            Assert.Equal(second, S3CAutoBridgeService.DiscoverCompanion("xRequester", "s3c:1")?.SmartContractUID);
         }
 
         [Fact]
-        public void CompanionWhoseCreationIsStillPending_IsKept()
+        public void RecordWithoutAStoredTimestamp_IsJudgedFromTheCeremonyStartInItsUid()
         {
-            TransactionData.GetPool().InsertSafe(new Transaction { Hash = "createtx1", FromAddress = "xRequester", ToAddress = "xRequester", Data = "x" });
-            Assert.False(S3CAutoBridgeService.ForgetUnconfirmedCompanion(Companion, "createtx1"));
-            Assert.NotNull(VBTCContractV2.GetContract(Companion));
+            var now = TimeUtil.GetTime();
+            var old = new VBTCContractV2 { SmartContractUID = $"aa:{now - 5 * 3600}" };      // 5 h ago: past 2 h + 1 h + skew
+            var recent = new VBTCContractV2 { SmartContractUID = $"bb:{now - 3600}" };       // 1 h ago: may still be mined
+            Assert.Equal(S3CAutoBridgeService.CompanionState.Dead, S3CAutoBridgeService.StateOf(old, now));
+            Assert.Equal(S3CAutoBridgeService.CompanionState.Pending, S3CAutoBridgeService.StateOf(recent, now));
         }
 
         [Fact]
-        public void ConfirmedCompanion_IsNeverForgotten()
+        public void CompanionRecordsAreNeverDeleted_AndEveryCreationPathRecordsItsTransaction()
         {
-            Confirm();
-            Assert.False(S3CAutoBridgeService.ForgetUnconfirmedCompanion(Companion, "createtx1"));
-            Assert.NotNull(VBTCContractV2.GetContract(Companion));
+            var root = Path.GetDirectoryName(Path.GetDirectoryName(ThisFile()))!;
+            var service = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "Services", "S3CAutoBridgeService.cs"));
+            Assert.DoesNotContain("DeleteContract(", service);
+            Assert.DoesNotContain("DeleteSmartContract(", service);
+            var controller = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "Controllers", "VBTCController.cs"));
+            Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(controller, @"RecordCreationTx\(scUID, ").Count);
         }
 
         [Fact]

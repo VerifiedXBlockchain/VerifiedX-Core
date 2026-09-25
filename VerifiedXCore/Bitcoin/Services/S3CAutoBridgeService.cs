@@ -96,6 +96,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     s.PublicScUID = created.Value.scUID;
                     s.PublicDepositAddress = created.Value.depositAddress;
                     s.CompanionCreateTxHash = created.Value.txHash;
+                    companion = VBTCContractV2.GetContract(created.Value.scUID);
                     s.CompanionBalanceBefore = 0M;   // fresh companion
                 }
                 else
@@ -110,16 +111,17 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 // NEW-26 (follow-up): BTC goes only to a companion that exists on chain. The create response (and a local
                 // record) carries the deposit address before the creation is mined; if it never is, BTC sent there has no
-                // contract and no withdrawal path. Wait for the contract, then take the address from the confirmation-gated
-                // GetMPCDepositAddress. Nothing has moved yet if this gives up.
-                var confirmedDeposit = await WaitForCompanionOnChain(s.PublicScUID!, CompanionConfirmMaxSeconds, CeremonyPollSeconds);
+                // contract and no withdrawal path. Wait - at most until the creation can no longer be mined - then take the
+                // address from the confirmation-gated GetMPCDepositAddress. Nothing has moved yet if this gives up.
+                var waitSeconds = companion == null ? CompanionConfirmMaxSeconds
+                    : (int)Math.Clamp(CreationDeadline(companion) - TimeUtil.GetTime() + CeremonyPollSeconds, 0, CompanionConfirmMaxSeconds);
+                var confirmedDeposit = await WaitForCompanionOnChain(s.PublicScUID!, waitSeconds, CeremonyPollSeconds);
                 if (string.IsNullOrEmpty(confirmedDeposit))
                 {
-                    // A companion whose creation is gone (not on chain, not pending) is forgotten locally so a retry creates a
-                    // new one; one still pending is kept (a retry reuses it once it confirms). No BTC was sent to it.
-                    var forgotten = s.CompanionCreateTxHash != null && ForgetUnconfirmedCompanion(s.PublicScUID!, s.CompanionCreateTxHash);
-                    Set(s, S3CAutoBridgeStatus.Abandoned, "The companion contract was not confirmed on chain within the wait window; nothing moved."
-                        + (forgotten ? " Its creation was not mined; a retry will create a new companion." : ""));
+                    var dead = companion != null && StateOf(companion, TimeUtil.GetTime()) == CompanionState.Dead;
+                    Set(s, S3CAutoBridgeStatus.Abandoned, dead
+                        ? "The companion's creation was never mined and can no longer be; nothing moved. A retry will create a new companion."
+                        : "The companion's creation is still pending; nothing moved. Retry later - it will be reused once it confirms.");
                     return;
                 }
                 s.PublicDepositAddress = confirmedDeposit;
@@ -169,32 +171,46 @@ namespace VerifiedXCore.Bitcoin.Services
             }
         }
 
-        // §12.2: scan the requester's owned contracts for an existing public companion linked to the S3C.
-        // NEW-26 (follow-up): only a companion that is on chain. A local record whose creation was never mined would
-        // otherwise be rediscovered on every retry and waited for forever.
-        internal static VBTCContractV2? DiscoverCompanion(string requester, string s3cUID)
-        {
-            var owned = VBTCContractV2.GetContractsByOwner(requester);
-            return owned?.FirstOrDefault(c => !c.IsS3C && c.LinkedContractUID == s3cUID
-                && !string.IsNullOrEmpty(c.SmartContractUID) && SmartContractStateTrei.GetSmartContractState(c.SmartContractUID) != null);
-        }
+        // ── NEW-26 (follow-up): a companion is on chain, pending, or dead - decided by time, not by this node's mempool ──
+
+        internal enum CompanionState { OnChain, Pending, Dead }
+
+        /// <summary>Longest a finished ceremony can wait for its contract to be created (controller cleanup: active + terminal TTL).</summary>
+        private const long CeremonyLifetimeSeconds = 2 * 3600;
 
         /// <summary>
-        /// NEW-26 (follow-up): removes the local records of a companion whose creation is not on chain and no longer in the
-        /// mempool (dropped or refused), so it is neither shown nor waited for again. Keeps them while the creation is still
-        /// pending or once it is on chain. Returns whether it removed them.
+        /// The last moment a companion's creation can still be mined: its creation timestamp + the network's transaction age
+        /// limit + clock skew (honest nodes refuse older transactions). Records made before the timestamp was stored fall back
+        /// to the ceremony start in the contract UID + the longest a ceremony stays usable + the age limit + skew.
         /// </summary>
-        internal static bool ForgetUnconfirmedCompanion(string companionScUID, string createTxHash)
+        internal static long CreationDeadline(VBTCContractV2 c)
         {
-            try
-            {
-                if (SmartContractStateTrei.GetSmartContractState(companionScUID) != null) return false;
-                if (!string.IsNullOrEmpty(createTxHash) && TransactionData.GetPool().FindOne(x => x.Hash == createTxHash) != null) return false;
-                VBTCContractV2.DeleteContract(companionScUID);
-                SmartContractMain.SmartContractData.DeleteSmartContract(companionScUID);
-                return true;
-            }
-            catch { return false; }
+            const long ageLimit = Globals.MaxTxAgeSeconds + Globals.MaxFutureSkewSeconds;
+            if (c.CreateTxTimestamp.HasValue) return c.CreateTxTimestamp.Value + ageLimit;
+            var parts = (c.SmartContractUID ?? "").Split(':');
+            return parts.Length == 2 && long.TryParse(parts[1], out var start) ? start + CeremonyLifetimeSeconds + ageLimit : 0;
+        }
+
+        internal static CompanionState StateOf(VBTCContractV2 c, long now)
+        {
+            if (!string.IsNullOrEmpty(c.SmartContractUID) && SmartContractStateTrei.GetSmartContractState(c.SmartContractUID) != null)
+                return CompanionState.OnChain;
+            return now <= CreationDeadline(c) ? CompanionState.Pending : CompanionState.Dead;
+        }
+
+        // §12.2: scan the requester's owned contracts for an existing public companion linked to the S3C.
+        // NEW-26 (follow-up): a companion on chain is reused; otherwise a companion whose creation can still be mined is
+        // waited for (a retry must not create a duplicate while it is pending); a dead one (its creation can never be mined)
+        // is ignored, so a retry creates a new one. Local records are never deleted: a creation this node dropped can still
+        // be mined through a peer, and then the companion is found and served as usual.
+        internal static VBTCContractV2? DiscoverCompanion(string requester, string s3cUID)
+        {
+            var linked = VBTCContractV2.GetContractsByOwner(requester)?
+                .Where(c => !c.IsS3C && c.LinkedContractUID == s3cUID && !string.IsNullOrEmpty(c.SmartContractUID)).ToList();
+            if (linked == null || linked.Count == 0) return null;
+            var now = TimeUtil.GetTime();
+            return linked.FirstOrDefault(c => StateOf(c, now) == CompanionState.OnChain)
+                ?? linked.FirstOrDefault(c => StateOf(c, now) == CompanionState.Pending);
         }
 
         // §12.2: create a public companion linked to the S3C contract via the live ceremony path
