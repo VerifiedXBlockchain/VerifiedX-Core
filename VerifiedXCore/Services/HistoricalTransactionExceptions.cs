@@ -12,7 +12,12 @@ namespace VerifiedXCore.Services
     /// hash commits to - so it cannot be replayed, re-proposed or re-shaped, and every rule stays in force for everything
     /// else. Honoured entries skip VerifyTX and the per-block debit guard, exactly as they did when they were mined; their
     /// state apply is unchanged. Source: the read-only rule scan of the mainnet chain to block 6,891,066 (35 rule hits on
-    /// 32 transactions) plus anything the full replay through block validation finds. Mainnet only.
+    /// 32 transactions) plus anything the full replay through block validation finds.
+    ///
+    /// Testnet (owner decision, 25 Sep 2026): the bridge exit and its completion of 12 May 2026. The pre-audit bridge rule
+    /// b61d49f5 (13 Sep) requires a committee-caster sender from testnet height 1; for these old heights the committee falls
+    /// back to today's seed casters, and the sender (a caster that voted on the exit at the time) is not one, so a fresh
+    /// testnet sync stopped at 64,607. They are the only bridge exits on testnet.
     /// </summary>
     public static class HistoricalTransactionExceptions
     {
@@ -52,13 +57,21 @@ namespace VerifiedXCore.Services
             ["506179cce4e79cce6082b93928f689087da5226dc41253ece18b1523ff2e292a"] = 5_646_388, // TKNZ_TX: NEW-05 V1 amount
         };
 
+        private static readonly IReadOnlyDictionary<string, long> Testnet = new Dictionary<string, long>(StringComparer.Ordinal)
+        {
+            ["b9c2b93e8f59837a40555010d8c25f698b83996696932d9a4201a43e76e72765"] = 64_607, // VBTC_V2_BRIDGE_EXIT_TO_BTC: b61d49f5 committee-caster submitter
+            ["2ba20f2b99faeaca472bd3ff91528befac8880130a16da5dd5332997a729cfec"] = 64_609, // VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE: b61d49f5 committee-caster submitter
+        };
+
         public static int MainnetCount => Mainnet.Count;
+        public static int TestnetCount => Testnet.Count;
 
         /// <summary>Whether this mined transaction is on the list for this block height (block validation only).</summary>
         public static bool IsAccepted(Transaction? tx, long? blockHeight)
         {
-            if (Globals.IsTestNet || tx == null || blockHeight == null || string.IsNullOrEmpty(tx.Hash)) return false;
-            if (!Mainnet.TryGetValue(tx.Hash, out var height) || height != blockHeight.Value) return false;
+            if (tx == null || blockHeight == null || string.IsNullOrEmpty(tx.Hash)) return false;
+            var list = Globals.IsTestNet ? Testnet : Mainnet;
+            if (!list.TryGetValue(tx.Hash, out var height) || height != blockHeight.Value) return false;
             try { return tx.GetHash() == tx.Hash; } catch { return false; }
         }
     }
