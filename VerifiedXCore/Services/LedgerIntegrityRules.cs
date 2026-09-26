@@ -141,6 +141,8 @@ namespace VerifiedXCore.Services
         public static bool IsHonoredWhitelistEntry(Transaction? tx, long? blockHeight)
         {
             if (tx == null || string.IsNullOrEmpty(tx.Hash) || blockHeight == null) return false;
+            // Historical mainnet transactions (owner decision): the fixed list, each bound to its own block height and content.
+            if (HistoricalTransactionExceptions.IsAccepted(tx, blockHeight)) return true;
             bool listed;
             try { listed = Globals.BadTxList.Contains(tx.Hash) || Globals.BadNFTTxList.Contains(tx.Hash); }
             catch { listed = false; } // the lists are edited from the console
