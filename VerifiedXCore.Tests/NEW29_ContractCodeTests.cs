@@ -52,6 +52,10 @@ namespace VerifiedXCore.Tests
         internal const string EndlessWhile = "var spin = 0\nwhile true { spin = spin + 1 }";
         internal const string EndlessFor = "var total = 0\nfor i = 0 to 2000000000 { total = total + 1 }";
         internal const string SelfCall = "function Again() : int { return Again() }\nvar r = Again()";
+        // A call cycle inside functions (no top-level call). A top-level call to one of the body's own functions
+        // (SelfCall) makes Trillium 1.4.0's RecursionCheck throw instead of reporting - the body still never runs,
+        // but it is an interpreter bug (handed off to the Trillium repo). This case goes through the real diagnostic.
+        internal const string CallCycle = "function Ping(n : int) : int { return Pong(n + 1) }\nfunction Pong(n : int) : int { return Ping(n) }";
 
         private static string Plain() => VbtcTestContracts.BuildContractData(Uid, Minter, null, name: "Plain");
 
@@ -75,6 +79,7 @@ namespace VerifiedXCore.Tests
         [InlineData(EndlessWhile)]
         [InlineData(EndlessFor)]
         [InlineData(SelfCall)]
+        [InlineData(CallCycle)]
         public void ABodyWithALoopOrRecursion_IsNeverRun(string code)
         {
             var body = WithCode(Plain(), code);
@@ -82,9 +87,18 @@ namespace VerifiedXCore.Tests
             Assert.ThrowsAny<Exception>(() => SmartContractMain.GenerateSmartContractInMemory(body)); // unreadable, like any bad body
         }
 
+        [Fact]
+        public void TheBanReportsACallCycle_AsAParseError()
+        {
+            var tree = global::Trillium.Syntax.SyntaxTree.Parse(Source(WithCode(Plain(), CallCycle)), preventLoopsAndRecursion: true);
+            Assert.Contains(tree.Diagnostics, d => d.Message.StartsWith("Potential recursion was detected"));
+            Assert.Empty(global::Trillium.Syntax.SyntaxTree.Parse(Source(Plain()), preventLoopsAndRecursion: true).Diagnostics);
+        }
+
         [Theory]
         [InlineData(EndlessWhile)]
         [InlineData(SelfCall)]
+        [InlineData(CallCycle)]
         public void ConsensusReadersAnswerAtOnce_AndTheSameWayEveryTime(string code)
         {
             var body = WithCode(Plain(), code);
