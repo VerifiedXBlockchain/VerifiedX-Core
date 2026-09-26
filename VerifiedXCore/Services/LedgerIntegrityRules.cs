@@ -183,6 +183,58 @@ namespace VerifiedXCore.Services
                 () => VBTCValidatorRegistry.FundedOnly(VBTCValidatorRegistry.GetActiveValidatorsAt(height - 1))); // NEW-26 (follow-up): funded now
         }
 
+        // ── NEW-29: contract code must be deterministic and must terminate ──────────────────────────────────────
+
+        /// <summary>The language built-ins whose result differs between nodes (unseeded random; the node's console).</summary>
+        public static readonly string[] NondeterministicBuiltins = { "rand", "input" };
+
+        /// <summary>
+        /// Every node runs contract code to read a contract (VX-01, VX-02, NEW-26, NEW-28, token-deploy apply), so the code
+        /// must give every node the same answer and must finish. Trillium's rand() is unseeded and input() reads the node's
+        /// console: a body whose minter or features depend on them is accepted by some nodes and refused by others. A
+        /// do-while loop is the one unbounded construct the parse-time loop/recursion ban does not catch. A transaction that
+        /// carries a contract body using any of these is refused, before anything runs it. Only bodies that parse are
+        /// examined, on their syntax tree: a body with a parse error never runs (Compilation.Evaluate stops first), and
+        /// words inside a broken multi-line string (e.g. "do" in a description) must not refuse it. No mainnet or testnet
+        /// body uses these, so there is no activation height. Null when the rule passes.
+        /// </summary>
+        public static string? ContractBodyAllowed(Transaction tx)
+        {
+            foreach (var body in CarriedContractBodies(tx?.Data))
+            {
+                string text;
+                try { text = System.Text.Encoding.Unicode.GetString(SmartContractUtility.Decompress(Convert.FromBase64String(body))); }
+                catch { continue; } // not a contract body: nothing ever runs it
+                var tree = global::Trillium.Syntax.SyntaxTree.Parse(text, preventLoopsAndRecursion: true); // as the node parses it
+                if (tree.Diagnostics.Length > 0) continue;
+                var pending = new Stack<global::Trillium.Syntax.SyntaxNode>();
+                pending.Push(tree.Root);
+                while (pending.Count > 0)
+                {
+                    var node = pending.Pop();
+                    if (node is global::Trillium.Syntax.DoWhileStatementSyntax)
+                        return "Contract code may not use a do-while loop.";
+                    if (node is global::Trillium.Syntax.CallExpressionSyntax call && NondeterministicBuiltins.Contains(call.Identifier.Text))
+                        return $"Contract code may not call {call.Identifier.Text}().";
+                    foreach (var child in node.GetChildren())
+                        pending.Push(child);
+                }
+            }
+            return null;
+        }
+
+        /// <summary>Every string "Data" value in the payload (array or object shape) - the contract bodies a transaction carries.</summary>
+        private static IEnumerable<string> CarriedContractBodies(string? txData)
+        {
+            if (string.IsNullOrEmpty(txData) || !txData.Contains("\"Data\"")) yield break;
+            JToken root;
+            try { root = JToken.Parse(txData); } catch { yield break; }
+            var items = root is JArray arr ? arr.ToList() : new List<JToken> { root };
+            foreach (var item in items)
+                if (item is JObject obj && obj["Data"] is JValue v && v.Type == JTokenType.String && !string.IsNullOrEmpty((string?)v))
+                    yield return (string)v!;
+        }
+
         // ── NEW-28: legacy V1 vBTC (arbiter tokenization) is retired ────────────────────────────────────────────
 
         public const string VbtcV1RetiredMessage = "Legacy V1 vBTC is retired: V1 contracts cannot be created, transferred or withdrawn.";

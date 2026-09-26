@@ -484,6 +484,12 @@ namespace VerifiedXCore.Services
 
             }
 
+            // NEW-29: a carried contract body must be deterministic and terminate - checked on its syntax tree, before any
+            // rule below runs the code.
+            var contractBodyError = LedgerIntegrityRules.ContractBodyAllowed(txRequest);
+            if (contractBodyError != null)
+                return (txResult, contractBodyError);
+
             // NEW-26 (follow-up): a vBTC V2 vault's code (deposit address, DKG data) never changes after creation.
             var vaultCodeError = LedgerIntegrityRules.VaultCodeUnchanged(txRequest);
             if (vaultCodeError != null)

@@ -45,6 +45,8 @@ namespace VerifiedXCore.Services
             var hits = new List<Hit>();
             void Add(string rule, string reason) => hits.Add(new Hit(height, tx.Hash ?? "", tx.TransactionType, rule, reason));
             if (HistoricalTransactionExceptions.IsAccepted(tx, height)) return hits; // historical mainnet list: accepted as mined
+            var bodyError = LedgerIntegrityRules.ContractBodyAllowed(tx); // NEW-29
+            if (bodyError != null) Add("NEW-29 contract body", bodyError);
 
             try
             {
