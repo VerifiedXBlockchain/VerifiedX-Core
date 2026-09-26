@@ -13,6 +13,9 @@ namespace VerifiedXCore.Services
     {
         public static async Task<(string, string)> GetTokenizationDetails(string accountAddress, string scUID)
         {
+            // NEW-28: no V1 deposit address is handed out any more (V1 vBTC is retired).
+            if (VerifiedXCore.Bitcoin.Services.TokenizationService.V1Retired)
+                return ("FAIL", VerifiedXCore.Bitcoin.Services.TokenizationService.V1RetiredMessage);
             var myList = Globals.Arbiters.Where(x => x.EndOfService == null && x.StartOfService <= TimeUtil.GetTime()).ToList();
             var rnd = new Random();
             myList = myList.OrderBy(x => rnd.Next()).ToList();

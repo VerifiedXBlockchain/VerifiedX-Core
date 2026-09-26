@@ -77,6 +77,35 @@ namespace VerifiedXCore.Bitcoin.Services
             return isV2;
         }
 
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string DataDigest, bool IsV1)> _vbtcV1ContractCache = new();
+
+        /// <summary>
+        /// NEW-28: a legacy V1 vBTC (arbiter tokenization) contract - the code stored in the state trei declares the
+        /// Tokenization feature and not TokenizationV2 (a V2 vault is never treated as V1). Same reading as
+        /// <see cref="IsVbtcV2Contract"/>; missing or undecompilable contract data is not a V1 contract.
+        /// </summary>
+        public static bool IsVbtcV1Contract(SmartContractStateTrei? scState)
+        {
+            if (scState == null || string.IsNullOrEmpty(scState.SmartContractUID) || string.IsNullOrEmpty(scState.ContractData))
+                return false;
+
+            var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(scState.ContractData)));
+            if (_vbtcV1ContractCache.TryGetValue(scState.SmartContractUID, out var cached) && cached.DataDigest == digest)
+                return cached.IsV1;
+
+            bool isV1;
+            try { isV1 = DeclaresVbtcV1(SmartContractMain.GenerateSmartContractInMemory(scState.ContractData)); }
+            catch { isV1 = false; }
+
+            _vbtcV1ContractCache[scState.SmartContractUID] = (digest, isV1);
+            return isV1;
+        }
+
+        /// <summary>NEW-28: the decompiled contract carries the V1 Tokenization feature and no TokenizationV2 feature.</summary>
+        public static bool DeclaresVbtcV1(SmartContractMain? scMain) =>
+            scMain?.Features?.Any(f => f != null && f.FeatureName == FeatureName.Tokenization) == true
+            && scMain.Features.Any(f => f != null && f.FeatureName == FeatureName.TokenizationV2) == false;
+
         /// <summary>
         /// Spendable transparent vBTC for <paramref name="fromAddress"/> on contract <paramref name="scUid"/>:
         /// owner = BTC deposit balance + tokenization ledger; non-owner = ledger only (matches <see cref="TransferVBTC"/>).

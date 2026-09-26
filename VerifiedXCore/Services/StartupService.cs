@@ -675,6 +675,15 @@ namespace VerifiedXCore.Services
 
         public static void ArbiterCheck()
         {
+            // NEW-28: V1 vBTC is retired, so arbiter mode (V1 deposit addresses and withdrawal signing) no longer starts.
+            if (VerifiedXCore.Bitcoin.Services.TokenizationService.V1Retired)
+            {
+                Globals.IsArbiter = false;
+                if (!string.IsNullOrEmpty(Globals.ValidatorAddress) && Globals.Arbiters.Any(x => x.Address == Globals.ValidatorAddress))
+                    LogUtility.Log("Arbiter mode not started: legacy V1 vBTC is retired.", "StartupService.ArbiterCheck()");
+                return;
+            }
+
             if(!string.IsNullOrEmpty(Globals.ValidatorAddress))
             {
                 if (Globals.Arbiters.Any(x => x.Address == Globals.ValidatorAddress))

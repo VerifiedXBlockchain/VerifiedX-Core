@@ -181,6 +181,46 @@ namespace VerifiedXCore.Services
                 () => VBTCValidatorRegistry.FundedOnly(VBTCValidatorRegistry.GetActiveValidatorsAt(height - 1))); // NEW-26 (follow-up): funded now
         }
 
+        // ── NEW-28: legacy V1 vBTC (arbiter tokenization) is retired ────────────────────────────────────────────
+
+        public const string VbtcV1RetiredMessage = "Legacy V1 vBTC is retired: V1 contracts cannot be created, transferred or withdrawn.";
+
+        /// <summary>The contract functions that exist only for V1 vBTC (its ledger transfers and arbiter withdrawals).</summary>
+        public static readonly string[] VbtcV1OnlyFunctions = { "TransferCoin()", "TransferCoinMulti()", "TokenizedWithdrawalRequest()", "TokenizedWithdrawalComplete()" };
+
+        /// <summary>
+        /// From Globals.VbtcV1RetirementHeight: no V1 withdrawal transaction, no V1-only function, and nothing that names an
+        /// existing V1 contract (ownership transfer, sale, update, evolve, burn, ...). V1 balances stay frozen as recorded.
+        /// Keys on the contract, not the transaction type: vBTC V2 uses TKNZ_TX and TKNZ_MINT too. Contract creations are
+        /// checked separately (<see cref="VbtcV1Creation"/>) because that decompiles the submitted body.
+        /// </summary>
+        public static string? VbtcV1Frozen(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.VbtcV1RetirementHeight) return null;
+            if (tx.TransactionType == TransactionType.TKNZ_WD_ARB || tx.TransactionType == TransactionType.TKNZ_WD_OWNER)
+                return VbtcV1RetiredMessage;
+            var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+            if (payload.Function != null && VbtcV1OnlyFunctions.Contains(payload.Function))
+                return VbtcV1RetiredMessage;
+            if (!string.IsNullOrEmpty(payload.ContractUID) && VBTCService.IsVbtcV1Contract(SmartContractStateTrei.GetSmartContractState(payload.ContractUID)))
+                return VbtcV1RetiredMessage;
+            return null;
+        }
+
+        /// <summary>
+        /// From Globals.VbtcV1RetirementHeight a Mint() whose body declares the V1 Tokenization feature is refused. Decompiles
+        /// the submitted body, so it runs after the signature check (VX-02 follow-up). A body that does not decompile is no V1
+        /// contract to any reader, and the V1 functions are refused by name anyway.
+        /// </summary>
+        public static string? VbtcV1Creation(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.VbtcV1RetirementHeight) return null;
+            var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+            if (payload.Function != "Mint()" || string.IsNullOrEmpty(payload.Data)) return null;
+            try { return VBTCService.DeclaresVbtcV1(VerifiedXCore.Models.SmartContracts.SmartContractMain.GenerateSmartContractInMemory(payload.Data)) ? VbtcV1RetiredMessage : null; }
+            catch { return null; }
+        }
+
         // ── NEW-13: a transaction's Height is its block's height ────────────────────────────────────────────────
 
         // ── NEW-18: an unambiguous hash preimage ────────────────────────────────────────────────────────────────
