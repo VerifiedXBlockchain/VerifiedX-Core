@@ -12,7 +12,9 @@ namespace VerifiedXCore.Services
     /// hash commits to - so it cannot be replayed, re-proposed or re-shaped, and every rule stays in force for everything
     /// else. Honoured entries skip VerifyTX and the per-block debit guard, exactly as they did when they were mined; their
     /// state apply is unchanged. Source: the read-only rule scan of the mainnet chain to block 6,891,066 (35 rule hits on
-    /// 32 transactions) plus anything the full replay through block validation finds.
+    /// 32 transactions) plus what the full replay through block validation finds: a NEW-07 same-block overspend (5,655,096)
+    /// and the last V1 withdrawal request (5,662,203), whose lead-arbiter rule depends on arbiter signing addresses each
+    /// node fetches over HTTP at startup - with arbiters retired (NEW-28) no syncing node could ever accept it.
     ///
     /// Testnet (owner decision, 25 Sep 2026): the bridge exit and its completion of 12 May 2026. The pre-audit bridge rule
     /// b61d49f5 (13 Sep) requires a committee-caster sender from testnet height 1; for these old heights the committee falls
@@ -55,6 +57,9 @@ namespace VerifiedXCore.Services
             ["ab7e9d2780e41f4e8f0d56ff6a135da228f245a3941f0cba0e1d798b6002b6f9"] = 5_639_511, // TKNZ_TX: NEW-05 V1 amount
             ["3a1e91e679e42b341a871282f97124607356674968b71c7a7f68f011e7355240"] = 5_639_751, // TKNZ_TX: NEW-05 V1 amount
             ["506179cce4e79cce6082b93928f689087da5226dc41253ece18b1523ff2e292a"] = 5_646_388, // TKNZ_TX: NEW-05 V1 amount
+            // Found by the full replay through block validation:
+            ["460f23b0fb8afe0ee761b686a2e047adb64796cc140fbf0fc23a530d2765092e"] = 5_655_096, // FTKN_TX: NEW-07 same-block overspend (200 of a token, balance 191)
+            ["b5b99795d923a7a6849db4562ebaa2419b29a058a14dbbadb23c7486b17027fc"] = 5_662_203, // TKNZ_WD_ARB: lead-arbiter rule (TXHeightRule5) needs arbiter signing addresses a node fetches over HTTP; arbiters are retired (NEW-28)
         };
 
         private static readonly IReadOnlyDictionary<string, long> Testnet = new Dictionary<string, long>(StringComparer.Ordinal)

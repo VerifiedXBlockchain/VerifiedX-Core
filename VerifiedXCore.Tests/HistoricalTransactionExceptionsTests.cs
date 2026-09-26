@@ -110,8 +110,9 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void TheListHoldsTheScannedTransactions()
         {
-            // 35 rule hits on 32 transactions in the read-only scan of mainnet to block 6,891,066.
-            Assert.Equal(32, HistoricalTransactionExceptions.MainnetCount);
+            // 35 rule hits on 32 transactions in the read-only scan of mainnet to block 6,891,066, plus 2 found by the full
+            // replay (a same-block overspend at 5,655,096 and the last V1 withdrawal request at 5,662,203).
+            Assert.Equal(34, HistoricalTransactionExceptions.MainnetCount);
             // Testnet: the only bridge exit and its completion (blocks 64,607 and 64,609).
             Assert.Equal(2, HistoricalTransactionExceptions.TestnetCount);
         }
