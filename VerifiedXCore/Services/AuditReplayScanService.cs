@@ -44,6 +44,7 @@ namespace VerifiedXCore.Services
         {
             var hits = new List<Hit>();
             void Add(string rule, string reason) => hits.Add(new Hit(height, tx.Hash ?? "", tx.TransactionType, rule, reason));
+            if (HistoricalTransactionExceptions.IsAccepted(tx, height)) return hits; // historical mainnet list: accepted as mined
 
             try
             {

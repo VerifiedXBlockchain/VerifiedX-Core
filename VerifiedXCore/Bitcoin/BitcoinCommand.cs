@@ -387,6 +387,13 @@ namespace VerifiedXCore.Bitcoin
             Console.Clear();
             Console.SetCursorPosition(Console.CursorLeft, Console.CursorTop);
 
+            if (TokenizationService.V1Retired) // NEW-28
+            {
+                Console.WriteLine(TokenizationService.V1RetiredMessage);
+                await ReturnToMenu();
+                return;
+            }
+
             try
             {
                 var accountList = AccountData.GetAccountsWithBalance();

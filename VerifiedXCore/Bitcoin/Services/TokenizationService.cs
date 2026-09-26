@@ -27,8 +27,17 @@ namespace VerifiedXCore.Bitcoin.Services
 {
     public class TokenizationService
     {
+        /// <summary>
+        /// NEW-28: legacy V1 vBTC (arbiter tokenization) is retired as of this release (owner decision; holders were told to
+        /// withdraw beforehand). The wallet no longer creates, transfers or withdraws V1 vBTC; balances stay readable. The
+        /// chain refuses the same from Globals.VbtcV1RetirementHeight. vBTC V2 (VBTCController) is unaffected.
+        /// </summary>
+        public static readonly bool V1Retired = true;
+        public const string V1RetiredMessage = "Legacy V1 vBTC is retired: it can no longer be created, transferred or withdrawn. Use vBTC V2.";
+
         public static async Task<SmartContractMain?> CreateTokenizationScMain(string address, string fileLocation, string depositAddress, string proofJson, string tokenName = "vBTC Token", string description = "vBTC Token")
         {
+            if (V1Retired) { SCLogUtility.Log(V1RetiredMessage, "TokenizationService.CreateTokenizationScMain()"); return null; } // NEW-28
             try
             {
                 string fileName = "";
@@ -152,6 +161,7 @@ namespace VerifiedXCore.Bitcoin.Services
         }
         public static async Task<(bool, string)> CreateTokenizationSmartContract(SmartContractMain smartContractMain)
         {
+            if (V1Retired) return (false, V1RetiredMessage); // NEW-28
             try
             {
                 SmartContractReturnData scReturnData = new SmartContractReturnData();
@@ -217,6 +227,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
         public static async Task<(bool, string)> MintSmartContract(string id, bool returnTx = false, TransactionType txType = TransactionType.NFT_MINT)
         {
+            if (V1Retired) return (false, V1RetiredMessage); // NEW-28
             try
             {
                 var scMain = SmartContractMain.SmartContractData.GetSmartContract(id);
@@ -261,6 +272,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
         public static async Task<string> TransferOwnership(string scUID, string toAddress, string? backupURL = "")
         {
+            if (V1Retired) return await SCLogUtility.LogAndReturn(V1RetiredMessage, "TokenizationService.TransferOwnership()", false); // NEW-28
             var btcTkn = await TokenizedBitcoin.GetTokenizedBitcoin(scUID);
 
             if (btcTkn == null)
@@ -381,6 +393,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
         public static async Task<string> TransferCoin(BTCTokenizeTransaction? jsonData)
         {
+            if (V1Retired) return await SCLogUtility.LogAndReturn(V1RetiredMessage, "TokenizationService.TransferCoin()", false); // NEW-28
             try
             {
                 if (jsonData == null)
@@ -555,6 +568,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
         public static async Task<string> TransferCoinMulti(BTCTokenizeTransactionMulti? jsonData)
         {
+            if (V1Retired) return await SCLogUtility.LogAndReturn(V1RetiredMessage, "TokenizationService.TransferCoinMulti()", false); // NEW-28
             try
             {
                 if (jsonData == null)
@@ -722,6 +736,7 @@ namespace VerifiedXCore.Bitcoin.Services
         //Local TX Withdrawal
         public static async Task<string> WithdrawalCoin(string vfxAddress, string btcToAddress, string scUID, decimal amount, long chosenFeeRate = 10)
         {
+            if (V1Retired) return await SCLogUtility.LogAndReturn(V1RetiredMessage, "TokenizationService.WithdrawalCoin()", false); // NEW-28
             try
             {
                 var account = AccountData.GetSingleAccount(vfxAddress);
@@ -851,6 +866,7 @@ namespace VerifiedXCore.Bitcoin.Services
         //Raw TX Withdrawal
         public static async Task<string> WithdrawalCoin(string vfxAddress, string btcToAddress, string scUID, decimal amount, long timestamp, string uniqueId, string signature, bool isTest, long chosenFeeRate = 10)
         {
+            if (V1Retired) return await SCLogUtility.LogAndReturn(V1RetiredMessage, "TokenizationService.WithdrawalCoin()", false); // NEW-28
             try
             {
                 var message = $"{vfxAddress}.{timestamp}.{uniqueId}";
@@ -915,6 +931,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
         public static async Task<(VerifiedXCore.Models.Transaction?, string)> CreateTokenizedWithdrawal(TokenizedWithdrawals tw, string fromAddress, string toAddress, Account account, string scUID, bool isArb = false)
         {
+            if (V1Retired) return (null, V1RetiredMessage); // NEW-28
             var tx = new VerifiedXCore.Models.Transaction();
 
             var txData = JsonConvert.SerializeObject(new { Function = "TokenizedWithdrawalRequest()", ContractUID = scUID, TokenizedWithdrawal = tw });
@@ -968,6 +985,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
         public static async Task<(VerifiedXCore.Models.Transaction?, string)> CompleteTokenizedWithdrawal(string fromAddress, Account account, string scUID, string btcTXHash, string uniqueId)
         {
+            if (V1Retired) return (null, V1RetiredMessage); // NEW-28
             var tx = new VerifiedXCore.Models.Transaction();
 
             var txData = JsonConvert.SerializeObject(new { Function = "TokenizedWithdrawalComplete()", ContractUID = scUID, UniqueId = uniqueId, TransactionHash = btcTXHash });

@@ -489,6 +489,11 @@ namespace VerifiedXCore.Services
             if (vaultCodeError != null)
                 return (txResult, vaultCodeError);
 
+            // NEW-28: legacy V1 vBTC is retired and frozen (height-gated; block height at verify, tip + 1 at admission).
+            var v1FrozenError = LedgerIntegrityRules.VbtcV1Frozen(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1));
+            if (v1FrozenError != null)
+                return (txResult, v1FrozenError);
+
             // VX-02 (follow-up): a contract creation (Mint(), TokenDeploy(), vBTC V2 create) has its submitted body
             // decompiled - run in the Trillium interpreter - by the binding checks below. Check the signature first, so a
             // transaction nobody signed (naming any funded address) never reaches the interpreter. The hash check above
@@ -504,6 +509,11 @@ namespace VerifiedXCore.Services
                 var dkgAttestationError = LedgerIntegrityRules.VbtcV2DkgAttestation(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1));
                 if (dkgAttestationError != null)
                     return (txResult, dkgAttestationError);
+
+                // NEW-28: no new V1 vBTC contract (decompiles the body too, so after the signature check).
+                var v1CreationError = LedgerIntegrityRules.VbtcV1Creation(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1));
+                if (v1CreationError != null)
+                    return (txResult, v1CreationError);
             }
 
             if (txRequest.TransactionType != TransactionType.TX)

@@ -203,6 +203,13 @@ namespace VerifiedXCore
         public static long VbtcV2DkgAttestationHeight = 7_500_500L;
 
         /// <summary>
+        /// NEW-28: legacy V1 vBTC (arbiter tokenization) is retired. At/after this height no V1 contract is created, no V1
+        /// transfer or withdrawal is accepted, and nothing may touch an existing V1 contract - balances are frozen as they
+        /// stand (owner decision: holders were told to withdraw beforehand). Same activation as the rest of this upgrade.
+        /// </summary>
+        public static long VbtcV1RetirementHeight = 7_500_500L;
+
+        /// <summary>
         /// Withdrawal escrow (security fix): at/after this height a vBTC withdrawal REQUEST debits the
         /// requester's ledger immediately (escrow); COMPLETE only finalizes (no second burn) and an
         /// approved cancellation refunds. Before it, the legacy burn-at-completion applies. Without
