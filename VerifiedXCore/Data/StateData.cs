@@ -3784,6 +3784,8 @@ namespace VerifiedXCore.Data
                 withdrawalRequest.Status = VBTCWithdrawalStatus.Completed;
                 withdrawalRequest.IsCompleted = true;
                 withdrawalRequest.BTCTxHash = btcTxHash;
+                withdrawalRequest.CompletionTxHash = tx.Hash;          // informational (withdrawal history on any node)
+                withdrawalRequest.CompletionTimestamp = tx.Timestamp;
                 VBTCWithdrawalRequest.Save(withdrawalRequest, true);
 
                 // Update local contract tracking if available (informational — only on nodes with local contract)

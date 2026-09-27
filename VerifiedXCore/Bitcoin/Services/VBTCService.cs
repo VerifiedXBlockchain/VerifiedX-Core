@@ -809,7 +809,9 @@ namespace VerifiedXCore.Bitcoin.Services
             var pendingByContract = GetPendingVbtcTransferOutflowsByContract(fromAddress);
 
             var candidates = new List<(string ScUid, decimal Available)>();
-            var contracts = VBTCContractV2.GetAllContracts();
+            // The address's contracts from chain state: the local VBTCContractV2 table holds only this node's wallet's
+            // contracts, so for a web wallet served by another node (raw builders) its balances were invisible.
+            var contracts = VBTCChainView.VaultsFor(fromAddress);
             if (contracts != null)
             {
                 foreach (var contract in contracts)
@@ -1355,7 +1357,9 @@ namespace VerifiedXCore.Bitcoin.Services
             catch { }
 
             var candidates = new List<(string ScUid, decimal Available)>();
-            var contracts = VBTCContractV2.GetAllContracts();
+            // The address's contracts from chain state: the local VBTCContractV2 table holds only this node's wallet's
+            // contracts, so for a web wallet served by another node (raw builders) its balances were invisible.
+            var contracts = VBTCChainView.VaultsFor(requestorAddress);
             if (contracts != null)
             {
                 foreach (var contract in contracts)

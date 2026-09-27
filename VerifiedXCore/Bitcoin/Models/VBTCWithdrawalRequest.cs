@@ -22,6 +22,10 @@ namespace VerifiedXCore.Bitcoin.Models
         public bool IsCompleted { get; set; }
         public VBTCWithdrawalStatus Status { get; set; }
         public string? BTCTxHash { get; set; }
+        // Informational (not read by consensus): the COMPLETE transaction and its time, so any node can serve a contract's
+        // withdrawal history (VBTCChainView), not only the owner's node through its local VBTCContractV2 record.
+        public string? CompletionTxHash { get; set; }
+        public long? CompletionTimestamp { get; set; }
         // S3C §0: block height the request was mined at (0 = submitted but not yet mined).
         // Drives the per-contract anti-grief expiry in HasActiveContractRequest.
         public long RequestBlockHeight { get; set; }

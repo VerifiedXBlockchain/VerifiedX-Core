@@ -1127,18 +1127,23 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (string.IsNullOrEmpty(scUID))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract UID is required" });
 
-                // FIND-025 Fix: Load real contract data instead of returning placeholders
-                var contract = VBTCContractV2.GetContract(scUID);
-                if (contract == null)
+                // The deposit address is read from the contract on chain, so any node can serve it (the local VBTCContractV2
+                // record exists only on the owner's node). NEW-26 (follow-up): only a contract that is on chain has a usable
+                // deposit address - until its creation is confirmed, BTC sent there would have no contract and no withdrawal path.
+                var vault = Services.VBTCChainView.GetVault(scUID);
+                if (vault == null)
                 {
+                    var pendingLocal = VBTCContractV2.GetContract(scUID);
                     return JsonConvert.SerializeObject(new
                     {
                         Success = false,
-                        Message = "vBTC V2 contract not found for the given scUID"
+                        Message = pendingLocal != null
+                            ? "The contract is not confirmed on chain yet. Do not deposit until it is; try again after its creation transaction is in a block."
+                            : "vBTC V2 contract not found for the given scUID"
                     });
                 }
 
-                if (string.IsNullOrEmpty(contract.DepositAddress))
+                if (string.IsNullOrEmpty(vault.Feature.DepositAddress))
                 {
                     return JsonConvert.SerializeObject(new
                     {
@@ -1147,26 +1152,15 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     });
                 }
 
-                // NEW-26 (follow-up): only a contract that is on chain has a usable deposit address. Until its creation is
-                // confirmed, BTC sent there would have no contract and no withdrawal path.
-                if (SmartContractStateTrei.GetSmartContractState(scUID) == null)
-                {
-                    return JsonConvert.SerializeObject(new
-                    {
-                        Success = false,
-                        Message = "The contract is not confirmed on chain yet. Do not deposit until it is; try again after its creation transaction is in a block."
-                    });
-                }
-
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
                     Message = "Deposit address retrieved",
                     SmartContractUID = scUID,
-                    DepositAddress = contract.DepositAddress,
-                    FrostGroupPublicKey = contract.FrostGroupPublicKey ?? string.Empty,
-                    RequiredThreshold = contract.RequiredThreshold,
-                    DKGProof = contract.DKGProof ?? string.Empty
+                    DepositAddress = vault.Feature.DepositAddress,
+                    FrostGroupPublicKey = vault.Feature.FrostGroupPublicKey ?? string.Empty,
+                    RequiredThreshold = vault.Feature.RequiredThreshold,
+                    DKGProof = vault.Feature.DKGProof ?? string.Empty
                 });
             }
             catch (Exception ex)
@@ -1525,10 +1519,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (scStateTrei == null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Smart contract state not found." });
 
-                // 2. Load vBTC V2 contract
-                var vbtcContract = VBTCContractV2.GetContract(scUID);
-                if (vbtcContract == null)
-                    return JsonConvert.SerializeObject(new { Success = false, Message = $"vBTC V2 contract not found: {scUID}" });
+                // 2. (No local VBTCContractV2 record needed: it exists only on the owner's own node, and everything below
+                //    comes from chain state - a web wallet served by another node got "vBTC V2 contract not found".)
 
                 // 3. Generate SC in memory from state data
                 var sc = SmartContractMain.GenerateSmartContractInMemory(scStateTrei.ContractData);
@@ -2173,7 +2165,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 }
                 else if (amount > 0 && !string.IsNullOrEmpty(btcDestination))
                 {
-                    var depositAddress = VBTCContractV2.GetContract(payload.SmartContractUID)?.DepositAddress;
+                    var depositAddress = Services.VBTCChainView.GetVault(payload.SmartContractUID)?.Feature.DepositAddress
+                        ?? VBTCContractV2.GetContract(payload.SmartContractUID)?.DepositAddress; // chain first (any node), local fallback
                     if (!string.IsNullOrEmpty(depositAddress))
                     {
                         var buildProbe = await Services.BitcoinTransactionService.BuildUnsignedTaprootTransaction(
@@ -2396,9 +2389,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid owner signature" });
                 }
 
-                // 4. Verify owner is the contract owner
-                var contract = VBTCContractV2.GetContract(payload.SmartContractUID);
-                if (contract == null || contract.OwnerAddress != payload.OwnerAddress)
+                // 4. Verify owner is the contract owner - from chain state (the local record exists only on the owner's node)
+                var ownerState = SmartContractStateTrei.GetSmartContractState(payload.SmartContractUID);
+                if (ownerState == null || ownerState.OwnerAddress != payload.OwnerAddress)
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Only the contract owner can request cancellation" });
                 }
@@ -3945,10 +3938,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var contractBalances = new List<object>();
                 decimal totalBalance = 0.0M;
 
-                // Get all locally-known vBTC V2 contracts. Enumerating all (not just owned) lets
-                // balance-holders see contracts they received value on; the loop below already
-                // filters to contracts where the address is owner or has a ledger balance.
-                var contracts = VBTCContractV2.GetAllContracts();
+                // The address's vBTC V2 contracts from chain state (owner, or ledger rows): the local VBTCContractV2 table
+                // holds only this node's wallet's contracts, so any other address saw missing balances.
+                var contracts = Services.VBTCChainView.VaultsFor(address);
                 //SCLogUtility.Log($"VBTC-TRACE [5-BalanceQuery]: GetAllVBTCBalances({address}) — local VBTCContractV2 records: {contracts?.Count ?? 0}",
                 //    "VBTCController.GetAllVBTCBalances()");
                 if (contracts != null && contracts.Any())
@@ -3974,8 +3966,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                             }
                         }
 
-                        // Check if this address is the owner (check both local DB and state trei)
-                        bool isOwner = contract.OwnerAddress == address || scState?.OwnerAddress == address;
+                        // Owner and deposit address from chain; the local record (owner's node only) just caches the BTC balance.
+                        var local = VBTCContractV2.GetContract(contract.SmartContractUID);
+                        var depositAddress = contract.Feature.DepositAddress;
+                        bool isOwner = scState?.OwnerAddress == address;
                         decimal depositBalance = 0.0M;
 
                         // Owner ledger: full sum + completed-withdrawal add-back so withdrawal burn
@@ -3984,30 +3978,30 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         if (isOwner && scState != null)
                             ledgerBalance = Services.VBTCService.GetOwnerLedgerBalance(scState, address, Globals.LastBlock?.Height ?? 0);
 
-                        if (isOwner && !string.IsNullOrEmpty(contract.DepositAddress))
+                        if (isOwner && !string.IsNullOrEmpty(depositAddress))
                         {
                             try
                             {
                                 using var elxClient = await VerifiedXCore.Bitcoin.Bitcoin.ElectrumXClient();
                                 if (elxClient != null)
                                 {
-                                    var balance = await elxClient.GetBalance(contract.DepositAddress, false);
+                                    var balance = await elxClient.GetBalance(depositAddress, false);
                                     depositBalance = balance.Confirmed / 100_000_000M;
                                 }
                                 else
                                 {
-                                    depositBalance = contract.Balance;
+                                    depositBalance = local?.Balance ?? 0M;
                                 }
 
-                                if (contract.Balance != depositBalance)
+                                if (local != null && local.Balance != depositBalance)
                                 {
-                                    contract.Balance = depositBalance;
-                                    VBTCContractV2.UpdateContract(contract);
+                                    local.Balance = depositBalance;
+                                    VBTCContractV2.UpdateContract(local);
                                 }
                             }
                             catch
                             {
-                                depositBalance = contract.Balance;
+                                depositBalance = local?.Balance ?? 0M;
                             }
                         }
 
@@ -4029,7 +4023,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                             contractBalances.Add(new
                             {
                                 SmartContractUID = contract.SmartContractUID,
-                                DepositAddress = contract.DepositAddress,
+                                DepositAddress = depositAddress,
                                 Balance = contractBalance,
                                 DepositAddressBalance = isOwner ? depositBalance : (decimal?)null,
                                 LedgerBalance = ledgerBalance,
@@ -4038,7 +4032,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                                 PendingReserveSends = pendingReserveSends,
                                 TransactionCount = txCount,
                                 IsOwner = isOwner,
-                                WithdrawalStatus = contract.WithdrawalStatus.ToString()
+                                WithdrawalStatus = Services.VBTCChainView.WithdrawalStatus(contract.SmartContractUID).ToString()
                             });
 
                             totalBalance += contractBalance;
@@ -4175,8 +4169,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
         {
             try
             {
-                var contract = VBTCContractV2.GetContract(scUID);
-                if (contract == null)
+                // From the withdrawal tables every node writes from blocks (the local record is on the owner's node only).
+                if (Services.VBTCChainView.GetVault(scUID) == null)
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Contract not found" });
                 }
@@ -4186,7 +4180,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Success = true,
                     Message = "Withdrawal history retrieved",
                     SmartContractUID = scUID,
-                    WithdrawalHistory = contract.WithdrawalHistory ?? new List<VBTCWithdrawalHistory>()
+                    WithdrawalHistory = Services.VBTCChainView.WithdrawalHistory(scUID, VBTCContractV2.GetContract(scUID))
                 });
             }
             catch (Exception ex)
@@ -4206,21 +4200,19 @@ namespace VerifiedXCore.Bitcoin.Controllers
         {
             try
             {
-                var contract = VBTCContractV2.GetContract(scUID);
-                if (contract == null)
+                // From the withdrawal tables every node writes from blocks (the local record is on the owner's node only).
+                if (Services.VBTCChainView.GetVault(scUID) == null)
                 {
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Contract not found" });
                 }
-
-                var hasActiveWithdrawal = VBTCContractV2.HasActiveWithdrawal(scUID);
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
                     Message = "Withdrawal status retrieved",
                     SmartContractUID = scUID,
-                    Status = contract.WithdrawalStatus.ToString(),
-                    HasActiveWithdrawal = hasActiveWithdrawal
+                    Status = Services.VBTCChainView.WithdrawalStatus(scUID).ToString(),
+                    HasActiveWithdrawal = Services.VBTCChainView.HasActiveWithdrawal(scUID)
                 });
             }
             catch (Exception ex)
@@ -4457,41 +4449,42 @@ namespace VerifiedXCore.Bitcoin.Controllers
         {
             try
             {
-                var contracts = string.IsNullOrEmpty(address)
-                    ? VBTCContractV2.GetAllContracts()
-                    : VBTCContractV2.GetContractsByOwner(address);
+                // From chain state (owner filter = the on-chain owner): the local VBTCContractV2 table holds only this node's
+                // wallet's contracts. Fields that exist only in a local record (the cached BTC balance and validator-activity
+                // bookkeeping) come from it when this node has one, else they are empty.
+                var vaults = string.IsNullOrEmpty(address)
+                    ? Services.VBTCChainView.AllVaults()
+                    : Services.VBTCChainView.VaultsOwnedBy(address);
 
-                var contractList = contracts ?? new List<VBTCContractV2>();
-
-                // Enrich each contract with Name/Description from SmartContractMain
-                var enriched = contractList.Select(c =>
+                var enriched = vaults.Select(v =>
                 {
-                    var scMain = SmartContractMain.SmartContractData.GetSmartContract(c.SmartContractUID);
+                    var c = VBTCContractV2.GetContract(v.SmartContractUID);
+                    var active = Services.VBTCChainView.ActiveWithdrawal(v.SmartContractUID);
                     return new
                     {
-                        c.SmartContractUID,
-                        c.OwnerAddress,
-                        c.DepositAddress,
-                        c.Balance,
-                        c.ValidatorAddressesSnapshot,
-                        c.FrostGroupPublicKey,
-                        c.FrostPubkeyPackage,
-                        c.RequiredThreshold,
-                        c.DKGProof,
-                        c.ProofBlockHeight,
-                        c.LastValidatorActivityBlock,
-                        c.TotalRegisteredValidators,
-                        c.OriginalThreshold,
-                        c.WithdrawalStatus,
-                        c.ActiveWithdrawalBTCDestination,
-                        c.ActiveWithdrawalAmount,
-                        c.ActiveWithdrawalRequestHash,
-                        c.WithdrawalRequestBlock,
-                        c.ActiveWithdrawalFeeRate,
-                        c.ActiveWithdrawalRequestTime,
-                        c.WithdrawalHistory,
-                        Name = scMain?.Name ?? "",
-                        Description = scMain?.Description ?? "",
+                        v.SmartContractUID,
+                        v.OwnerAddress,
+                        v.Feature.DepositAddress,
+                        Balance = c?.Balance ?? 0M,
+                        v.Feature.ValidatorAddressesSnapshot,
+                        v.Feature.FrostGroupPublicKey,
+                        FrostPubkeyPackage = c?.FrostPubkeyPackage,
+                        v.Feature.RequiredThreshold,
+                        v.Feature.DKGProof,
+                        v.Feature.ProofBlockHeight,
+                        LastValidatorActivityBlock = c?.LastValidatorActivityBlock ?? 0,
+                        TotalRegisteredValidators = c?.TotalRegisteredValidators ?? (v.Feature.ValidatorAddressesSnapshot?.Count ?? 0),
+                        OriginalThreshold = c?.OriginalThreshold ?? v.Feature.RequiredThreshold,
+                        WithdrawalStatus = Services.VBTCChainView.WithdrawalStatus(v.SmartContractUID),
+                        ActiveWithdrawalBTCDestination = active?.BTCDestination,
+                        ActiveWithdrawalAmount = active?.Amount,
+                        ActiveWithdrawalRequestHash = active?.TransactionHash,
+                        WithdrawalRequestBlock = active?.RequestBlockHeight,
+                        ActiveWithdrawalFeeRate = active?.FeeRate ?? 0,
+                        ActiveWithdrawalRequestTime = active?.Timestamp ?? 0,
+                        WithdrawalHistory = Services.VBTCChainView.WithdrawalHistory(v.SmartContractUID, c),
+                        v.Name,
+                        v.Description,
                     };
                 }).ToList();
 
