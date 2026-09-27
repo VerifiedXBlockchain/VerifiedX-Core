@@ -935,8 +935,11 @@ namespace VerifiedXCore.Services
                                         effectiveTxResult = (false, nulErr ?? "Duplicate nullifier within block.");
                                 }
 
-                                // S3C §0: enforce one withdrawal request per contract within a block.
-                                if (effectiveTxResult.Item1 && blkTransaction.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST)
+                                // S3C §0: enforce one withdrawal request per contract within a block. Retired at
+                                // VbtcWithdrawalConcurrencyHeight: requests no longer serialize per contract, and
+                                // the same-block debit guard below keeps one holder's requests within its balance.
+                                if (effectiveTxResult.Item1 && blkTransaction.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST
+                                    && !Bitcoin.Services.VBTCService.WithdrawalConcurrencyActive(block.Height))
                                 {
                                     try
                                     {

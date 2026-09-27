@@ -109,6 +109,78 @@ namespace VerifiedXCore.Bitcoin.Services
             return reachableList;
         }
 
+        /// <summary>One outstanding signed withdrawal tx on a contract, merged across the validators that report it.</summary>
+        public sealed class ContractPinView
+        {
+            public string WithdrawalRequestHash { get; set; } = "";
+            public string BtcTxId { get; set; } = "";
+            public HashSet<string> Outpoints { get; set; } = new();
+            /// <summary>True only when every validator that reported the pin marks it reclaimable (a withheld tx).</summary>
+            public bool Reclaimable { get; set; }
+        }
+
+        /// <summary>
+        /// Reads /frost/pins/{scUID} from the contract's validators so a withdrawal is built from coins no other
+        /// withdrawal's signed transaction holds. Pins are merged by withdrawal; a pin is reclaimable only when
+        /// every validator reporting it agrees (the stricter view wins). AnyAnswered is false when no validator
+        /// served the endpoint (older build or unreachable) — the build then proceeds without exclusions and a
+        /// validator refusal names the held coins instead.
+        /// </summary>
+        public static async Task<(bool AnyAnswered, List<ContractPinView> Pins)> FetchContractPins(string scUID, List<VBTCValidator> validators)
+        {
+            var merged = new System.Collections.Concurrent.ConcurrentDictionary<string, ContractPinView>(StringComparer.OrdinalIgnoreCase);
+            var answered = 0;
+
+            var tasks = validators.Select(async validator =>
+            {
+                try
+                {
+                    if (!InputValidationHelper.ValidateValidatorIPAddress(validator.IPAddress, out _))
+                        return;
+                    var response = await _probeHttpClient.GetAsync($"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/pins/{Uri.EscapeDataString(scUID)}");
+                    if (!response.IsSuccessStatusCode)
+                        return;
+                    var body = JObject.Parse(await response.Content.ReadAsStringAsync());
+                    if (body["Success"]?.ToObject<bool>() != true)
+                        return;
+                    Interlocked.Increment(ref answered);
+
+                    foreach (var p in body["Pins"] as JArray ?? new JArray())
+                    {
+                        var wrh = p["WithdrawalRequestHash"]?.ToObject<string>() ?? "";
+                        if (string.IsNullOrEmpty(wrh))
+                            continue;
+                        var reclaimable = p["Reclaimable"]?.ToObject<bool>() == true;
+                        var outpoints = p["Outpoints"]?.ToObject<List<string>>() ?? new List<string>();
+                        merged.AddOrUpdate(wrh,
+                            _ => new ContractPinView
+                            {
+                                WithdrawalRequestHash = wrh,
+                                BtcTxId = p["BtcTxId"]?.ToObject<string>() ?? "",
+                                Outpoints = outpoints.Select(o => o.ToLowerInvariant()).ToHashSet(),
+                                Reclaimable = reclaimable
+                            },
+                            (_, existing) =>
+                            {
+                                lock (existing)
+                                {
+                                    foreach (var o in outpoints) existing.Outpoints.Add(o.ToLowerInvariant());
+                                    existing.Reclaimable &= reclaimable;
+                                }
+                                return existing;
+                            });
+                    }
+                }
+                catch
+                {
+                    // Unreachable or older validator: it contributes nothing; its refusal (if any) surfaces at signing.
+                }
+            });
+
+            await Task.WhenAll(tasks);
+            return (answered > 0, merged.Values.ToList());
+        }
+
         #endregion
 
         #region DKG Ceremony - Taproot Address Generation

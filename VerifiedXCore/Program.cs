@@ -130,6 +130,8 @@ namespace VerifiedXCore
             Globals.BridgeBurnBindingHeight = Globals.IsTestNet ? 1 : 7_281_000L;
             Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 7_296_200L;
             Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 7_296_200L;
+            // TODO set both: testnet must be ABOVE its tip at deploy (block 1,017,408 holds a request the fee floor refuses).
+            Globals.VbtcWithdrawalConcurrencyHeight = Globals.IsTestNet ? 1_018_000 : Globals.VbtcWithdrawalConcurrencyHeight;
             Globals.VbtcV2DkgAttestationHeight = Globals.IsTestNet ? 1_002_979 : Globals.VbtcV2DkgAttestationHeight;
             Globals.VbtcV1RetirementHeight = Globals.IsTestNet ? 1_002_979 : Globals.VbtcV1RetirementHeight;
 
@@ -702,6 +704,7 @@ namespace VerifiedXCore
             MessageLocksCleanupService.Start();
             BroadcastTrackingCleanupService.Start();
             Bitcoin.Services.VBTCWithdrawalCleanupService.Start();
+            Bitcoin.Services.VBTCDeferredCompletionService.Start();
 
             // Base Bridge: Load configuration from environment variables
             Bitcoin.Services.BaseBridgeService.LoadConfig();

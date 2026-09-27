@@ -37,6 +37,13 @@ namespace VerifiedXCore.Bitcoin.Services
         public const string TransientUtxoErrorMarker = "[TRANSIENT-UTXO]";
 
         /// <summary>
+        /// Marker for a build that failed only because other withdrawals' signed transactions hold the coins it
+        /// needs (validator pins). The withdrawal coordinator retries in reclaim mode when some of those are
+        /// reclaimable; it is also transient (TransientUtxoErrorMarker is appended).
+        /// </summary>
+        public const string PinnedCoinsShortfallMarker = "[PINNED-COINS]";
+
+        /// <summary>
         /// Gets an available Electrum client. Delegates to ClientService.GetElectrumClient, which
         /// handshakes (server version), bumps Count on success and FailCount on failure, and rotates
         /// through the pool — unlike the old private selector here, which pinned the same server
@@ -299,12 +306,47 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// Coin-selection order, deterministic (same tiebreakers as <see cref="SortUtxosDeterministic"/>) so a
+        /// retry reproduces the same selection. <paramref name="preferredOutpoints"/> come first. Then, with
+        /// <paramref name="smallestSufficientFirst"/> (VbtcWithdrawalConcurrencyHeight), the smallest single coin
+        /// that covers the amount, so a small withdrawal ties up a small coin rather than the vault's largest
+        /// (under per-coin pins, largest-first let a dust withdrawal hold the whole vault); the rest follow
+        /// largest-first, which is also the whole order before the height.
+        /// </summary>
+        public static List<BlockchainScripthashListunspentResult> OrderUtxosForSelection(
+            IEnumerable<BlockchainScripthashListunspentResult> utxos, ulong amountSats,
+            HashSet<string>? preferredOutpoints, bool smallestSufficientFirst)
+        {
+            var sorted = SortUtxosDeterministic(utxos);
+            bool IsPreferred(BlockchainScripthashListunspentResult u) =>
+                preferredOutpoints is { Count: > 0 } && preferredOutpoints.Contains($"{u.TxHash}:{u.TxPos}".ToLowerInvariant());
+
+            var preferred = sorted.Where(IsPreferred).ToList();
+            var rest = sorted.Where(u => !IsPreferred(u)).ToList();
+
+            if (smallestSufficientFirst && preferred.Count == 0)
+            {
+                // sorted is value DESC, so the LAST covering coin is the smallest one that covers.
+                var smallestCovering = rest.LastOrDefault(u => u.Value >= amountSats);
+                if (smallestCovering != null)
+                {
+                    rest.Remove(smallestCovering);
+                    rest.Insert(0, smallestCovering);
+                }
+            }
+
+            return preferred.Concat(rest).ToList();
+        }
+
+        /// <summary>
         /// Builds an unsigned Taproot transaction.
         /// <paramref name="preferredOutpoints"/> (lowercase "txid:vout"): outpoints to select FIRST,
         /// used when a previously signed-but-unresolved tx may exist for the contract — spending at
         /// least one of its outpoints makes the new tx CONFLICT with it, which is what the
         /// validators' contract pin requires to sign a different withdrawal (and what guarantees at
-        /// most one of the two ever confirms).
+        /// most one of the two ever confirms). From VbtcWithdrawalConcurrencyHeight this is used only to
+        /// reclaim the coins of a withheld transaction.
+        /// <paramref name="excludedOutpoints"/>: coins held by other withdrawals' signed transactions; never selected.
         /// </summary>
         /// <summary>
         /// Transaction builder for withdrawal builds. NBitcoin shuffles inputs AND outputs by
@@ -329,7 +371,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 string destinationAddress,
                 decimal amountBTC,
                 long feeRateSatsPerVByte,
-                HashSet<string>? preferredOutpoints = null)
+                HashSet<string>? preferredOutpoints = null,
+                HashSet<string>? excludedOutpoints = null)
         {
             try
             {
@@ -363,10 +406,15 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 ulong amountToSend = Convert.ToUInt64(amountBTC * BTCMultiplier);
                 ulong feeEstimate = 0;
-                bool sufficientInputsFound = false;
+                ulong totalInputAmount = 0;
                 List<Coin> unspentCoins = new List<Coin>();
                 List<BlockchainScripthashListunspentResult> selectedUtxos = new List<BlockchainScripthashListunspentResult>();
-                ulong previousTotalInputAmount = 0;
+
+                // Coins another withdrawal's signed transaction holds (validator pins) are never selected:
+                // validators refuse a transaction that spends a live withdrawal's coins.
+                var spendable = excludedOutpoints is { Count: > 0 }
+                    ? utxos.Where(u => !excludedOutpoints.Contains($"{u.TxHash}:{u.TxPos}".ToLowerInvariant())).ToList()
+                    : utxos;
 
                 // One handshaked client for the whole selection pass — the old code opened a fresh
                 // TCP+TLS connection per UTXO.
@@ -379,77 +427,52 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 // Select UTXOs to cover the withdrawal amount.
                 // The fee is deducted FROM the withdrawal amount (user receives amount - fee).
-                while (!sufficientInputsFound)
+                var ordered = OrderUtxosForSelection(spendable, amountToSend, preferredOutpoints,
+                    smallestSufficientFirst: VBTCService.WithdrawalConcurrencyActive(VBTCService.NextBlockHeight));
+                foreach (var utxo in ordered)
                 {
-                    unspentCoins.Clear();
-                    selectedUtxos.Clear();
-                    ulong totalInputAmount = 0;
+                    // Fetch the raw transaction to get the output
+                    var rawTx = await rawTxClient.GetRawTx(utxo.TxHash);
+                    if (rawTx?.RawTx == null)
+                        continue; // not counted: a coin we cannot reconstruct cannot fund the tx
 
-                    // Deterministic order (FIND-028) — largest first for efficient selection, full
-                    // tiebreaker so retries reproduce the same selection. Preferred outpoints (a
-                    // prior unresolved signed tx's inputs) float to the front; OrderByDescending is
-                    // stable, so the deterministic order is preserved within each group.
-                    var sortedUtxos = SortUtxosDeterministic(utxos);
-                    if (preferredOutpoints is { Count: > 0 })
-                        sortedUtxos = sortedUtxos
-                            .OrderByDescending(u => preferredOutpoints.Contains($"{u.TxHash}:{u.TxPos}".ToLowerInvariant()))
-                            .ToList();
+                    var tx = NBitcoin.Transaction.Parse(rawTx.RawTx, Globals.BTCNetwork);
+                    var output = tx.Outputs[utxo.TxPos];
 
-                    foreach (var utxo in sortedUtxos)
-                    {
-                        totalInputAmount += utxo.Value;
+                    OutPoint outPoint = new OutPoint(uint256.Parse(utxo.TxHash), utxo.TxPos);
+                    unspentCoins.Add(new Coin(outPoint, output));
+                    selectedUtxos.Add(utxo);
+                    totalInputAmount += utxo.Value;
 
-                        // Fetch the raw transaction to get the output
-                        var rawTx = await rawTxClient.GetRawTx(utxo.TxHash);
+                    // Estimate transaction size for Taproot (smaller than legacy/segwit)
+                    // Taproot: ~57.5 vBytes per input, ~43 vBytes per output + 10.5 overhead
+                    int estimatedSize = (int)(57.5 * unspentCoins.Count + 43 * 2 + 10.5); // destination + change
+                    feeEstimate = (ulong)(estimatedSize * feeRateSatsPerVByte);
 
-                        if (rawTx?.RawTx != null)
-                        {
-                            var tx = NBitcoin.Transaction.Parse(rawTx.RawTx, Globals.BTCNetwork);
-                            var output = tx.Outputs[utxo.TxPos];
-
-                            OutPoint outPoint = new OutPoint(uint256.Parse(utxo.TxHash), utxo.TxPos);
-                            Coin coin = new Coin(outPoint, output);
-
-                            unspentCoins.Add(coin);
-                            selectedUtxos.Add(utxo);
-                        }
-
-                        // Check if we have enough
-                        if (totalInputAmount >= previousTotalInputAmount)
-                        {
-                            int inputCount = unspentCoins.Count;
-                            int outputCount = 2; // destination + change
-
-                            // Estimate transaction size for Taproot (smaller than legacy/segwit)
-                            // Taproot: ~57.5 vBytes per input, ~43 vBytes per output + 10.5 overhead
-                            int estimatedSize = (int)(57.5 * inputCount + 43 * outputCount + 10.5);
-                            feeEstimate = (ulong)(estimatedSize * feeRateSatsPerVByte);
-
-                            // Fee is deducted from withdrawal amount, so UTXOs only need to cover the amount
-                            ulong totalRequired = amountToSend;
-
-                            if (totalInputAmount >= totalRequired)
-                            {
-                                sufficientInputsFound = true;
-                                break;
-                            }
-                        }
-
-                        previousTotalInputAmount = totalInputAmount;
-                    }
-
-                    if (!sufficientInputsFound && totalInputAmount == previousTotalInputAmount)
-                    {
-                        return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(), 
-                            $"Insufficient funds. Required: {amountToSend * SatoshiMultiplier:F8} BTC, Available: {totalInputAmount * SatoshiMultiplier:F8} BTC");
-                    }
+                    // Fee is deducted from withdrawal amount, so UTXOs only need to cover the amount
+                    if (totalInputAmount >= amountToSend)
+                        break;
                 }
 
-                // Safety check: fee must not exceed withdrawal amount
-                if (feeEstimate >= amountToSend)
+                if (totalInputAmount < amountToSend)
+                {
+                    var excludedSats = (ulong)utxos.Sum(u => (decimal)u.Value) - (ulong)spendable.Sum(u => (decimal)u.Value);
+                    if (excludedSats > 0 && totalInputAmount + excludedSats >= amountToSend)
+                    {
+                        // Enough coins exist, but other withdrawals' signed transactions hold them. They free up
+                        // when those transactions confirm (or are reclaimed) — retryable, not a vault problem.
+                        return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(),
+                            $"{PinnedCoinsShortfallMarker} Not enough free coins right now: {excludedSats * SatoshiMultiplier:F8} BTC is held by other withdrawals in flight. Required: {amountToSend * SatoshiMultiplier:F8} BTC, free: {totalInputAmount * SatoshiMultiplier:F8} BTC. Try again once they confirm. {TransientUtxoErrorMarker}");
+                    }
+                    return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(),
+                        $"Insufficient funds. Required: {amountToSend * SatoshiMultiplier:F8} BTC, Available: {totalInputAmount * SatoshiMultiplier:F8} BTC");
+                }
+
+                // Safety check: the payout left after the fee must be a relayable output.
+                if (feeEstimate >= amountToSend || amountToSend - feeEstimate < (ulong)VBTCService.TaprootDustSats)
                 {
                     return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(),
-                        $"Fee ({feeEstimate * SatoshiMultiplier:F8} BTC) exceeds or equals withdrawal amount ({amountToSend * SatoshiMultiplier:F8} BTC). Increase withdrawal amount or decrease fee rate.");
+                        $"Fee ({feeEstimate * SatoshiMultiplier:F8} BTC) leaves less than the {VBTCService.TaprootDustSats}-sat minimum payout from the withdrawal amount ({amountToSend * SatoshiMultiplier:F8} BTC). Increase withdrawal amount or decrease fee rate.");
                 }
 
                 // Fee is deducted from the withdrawal amount: user receives (amount - fee)
@@ -844,6 +867,90 @@ namespace VerifiedXCore.Bitcoin.Services
             return lookup.Confirmations ?? 0;
         }
 
+        public enum OutpointSpendVerdict
+        {
+            /// <summary>The chain could not be read well enough to decide.</summary>
+            Inconclusive,
+            /// <summary>Every outpoint is unspent, or spent only by transactions still in the mempool.</summary>
+            NotSpentByConfirmed,
+            /// <summary>At least one outpoint is spent by a confirmed transaction.</summary>
+            SpentByConfirmed
+        }
+
+        /// <summary>
+        /// A signed transaction is dead - it can never confirm - only once one of its inputs is spent by a CONFIRMED
+        /// transaction. A mempool spend is not enough: it can be evicted or replaced, and the signed transaction can
+        /// then still confirm. (Treating "missing from listunspent" as dead let a withholder get a second transaction
+        /// signed for the same withdrawal while the first could still be broadcast: two payouts.)
+        /// Pure: <paramref name="unspent"/> is the address's unspent set, <paramref name="mempoolSpent"/> the
+        /// outpoints its mempool transactions spend (null when that could not be read).
+        /// </summary>
+        public static OutpointSpendVerdict ClassifyOutpointSpends(IEnumerable<string> outpoints, ISet<string> unspent, ISet<string>? mempoolSpent)
+        {
+            var missing = outpoints.Where(o => !unspent.Contains(o)).ToList();
+            if (missing.Count == 0)
+                return OutpointSpendVerdict.NotSpentByConfirmed;
+            if (mempoolSpent == null)
+                return OutpointSpendVerdict.Inconclusive;
+            return missing.Any(o => !mempoolSpent.Contains(o)) ? OutpointSpendVerdict.SpentByConfirmed : OutpointSpendVerdict.NotSpentByConfirmed;
+        }
+
+        /// <summary>Most unconfirmed deposit-address transactions read to tell mempool spends from confirmed ones.</summary>
+        public const int MaxUnconfirmedHistoryScan = 50;
+
+        /// <summary>
+        /// Reads the deposit address's unspent set and its mempool transactions to classify <paramref name="outpoints"/>
+        /// (lowercase "txid:vout"). Anything that cannot be read is Inconclusive; callers keep their pins then.
+        /// </summary>
+        public static async Task<(OutpointSpendVerdict Verdict, string Detail)> GetOutpointSpendVerdict(string depositAddress, IEnumerable<string> outpoints)
+        {
+            try
+            {
+                var ops = outpoints.Select(o => (o ?? "").Trim().ToLowerInvariant()).Where(o => o.Length > 0).Distinct().ToList();
+                if (ops.Count == 0)
+                    return (OutpointSpendVerdict.NotSpentByConfirmed, "no outpoints");
+
+                var lookup = await GetTaprootUTXOs(depositAddress);
+                if (!lookup.Success)
+                    return (OutpointSpendVerdict.Inconclusive, $"utxolookup=failed ({lookup.Error})");
+                var unspent = lookup.Utxos.Select(u => $"{u.TxHash}:{u.TxPos}".ToLowerInvariant()).ToHashSet();
+                if (ops.All(unspent.Contains))
+                    return (OutpointSpendVerdict.NotSpentByConfirmed, $"utxolookup=all {ops.Count} unspent");
+
+                using var client = await GetElectrumClient();
+                if (client == null)
+                    return (OutpointSpendVerdict.Inconclusive, "no Electrum server for the address history");
+
+                // The outpoints existed, so the address has history; an empty answer is a failed read.
+                var history = await client.GetHistory(depositAddress);
+                if (history == null || history.Count == 0)
+                    return (OutpointSpendVerdict.Inconclusive, "address history unavailable");
+
+                // Electrum lists mempool transactions with height 0 (or -1 when they have unconfirmed parents).
+                var unconfirmed = history.Where(h => h.Height <= 0).Select(h => h.TxHash).Distinct().ToList();
+                if (unconfirmed.Count > MaxUnconfirmedHistoryScan)
+                    return (OutpointSpendVerdict.Inconclusive, $"{unconfirmed.Count} unconfirmed transactions on the address");
+
+                var mempoolSpent = new HashSet<string>();
+                foreach (var txid in unconfirmed)
+                {
+                    var raw = await client.GetRawTx(txid);
+                    if (raw?.RawTx == null)
+                        return (OutpointSpendVerdict.Inconclusive, $"mempool tx {txid} unavailable");
+                    foreach (var input in NBitcoin.Transaction.Parse(raw.RawTx, Globals.BTCNetwork).Inputs)
+                        mempoolSpent.Add($"{input.PrevOut.Hash}:{input.PrevOut.N}".ToLowerInvariant());
+                }
+
+                var verdict = ClassifyOutpointSpends(ops, unspent, mempoolSpent);
+                var missing = ops.Count(o => !unspent.Contains(o));
+                return (verdict, $"{missing}/{ops.Count} spent, {ops.Count(o => mempoolSpent.Contains(o))} of them by mempool txs");
+            }
+            catch (Exception ex)
+            {
+                return (OutpointSpendVerdict.Inconclusive, $"check threw {ex.Message}");
+            }
+        }
+
         /// <summary>
         /// Complete workflow: Build, sign with FROST, and broadcast a Bitcoin withdrawal transaction.
         /// FIND-028 retry determinism: when <paramref name="pinnedUnsignedTxHex"/>/<paramref name="pinnedCoins"/>
@@ -869,7 +976,10 @@ namespace VerifiedXCore.Bitcoin.Services
                 string? pinnedUnsignedTxHex = null,
                 List<PinnedWithdrawalCoin>? pinnedCoins = null,
                 Action<string, List<PinnedWithdrawalCoin>>? persistPinnedBuild = null,
-                HashSet<string>? preferredOutpoints = null)
+                HashSet<string>? preferredOutpoints = null,
+                HashSet<string>? excludedOutpoints = null,
+                Action<NBitcoin.Transaction>? onBuilt = null,
+                Action<string, string>? onSigned = null)
         {
             try
             {
@@ -892,7 +1002,8 @@ namespace VerifiedXCore.Bitcoin.Services
                         destinationAddress,
                         amountBTC,
                         feeRateSatsPerVByte,
-                        preferredOutpoints);
+                        preferredOutpoints,
+                        excludedOutpoints);
 
                     if (!buildResult.Success || buildResult.UnsignedTx == null)
                     {
@@ -918,6 +1029,9 @@ namespace VerifiedXCore.Bitcoin.Services
                     }
                 }
 
+                // The caller learns which coins the tx spends (reclaim detection) before anything is signed.
+                onBuilt?.Invoke(unsignedTx);
+
                 // Step 2: Sign with FROST (FIND-020: pass spent coins for BIP341 sighash computation)
                 var signingResult = await SignTransactionWithFROST(
                     unsignedTx,
@@ -932,6 +1046,14 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (!signingResult.Success)
                 {
                     return (false, string.Empty, string.Empty, $"Failed to sign transaction: {signingResult.ErrorMessage}", signingResult.Ceremony);
+                }
+
+                // Durable before broadcast: (txid, signed hex) for callers that must track the tx across a crash.
+                try { onSigned?.Invoke(signingResult.TxHash, signingResult.SignedTxHex); }
+                catch (Exception sex)
+                {
+                    ErrorLogUtility.LogError($"onSigned callback failed for withdrawal {withdrawalRequestHash}: {sex.Message}",
+                        "BitcoinTransactionService.ExecuteFROSTWithdrawal()");
                 }
 
                 // Step 3: Optionally broadcast signed transaction to Bitcoin network

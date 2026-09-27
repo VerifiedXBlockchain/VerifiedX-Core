@@ -47,7 +47,7 @@ namespace VerifiedXCore.Tests
 
         private static void Confirm() => SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
         {
-            SmartContractUID = Companion, ContractData = "x", MinterAddress = "xRequester", OwnerAddress = "xRequester",
+            SmartContractUID = Companion, ContractData = VbtcTestContracts.VaultContractData(Companion, "xRequester", Deposit), MinterAddress = "xRequester", OwnerAddress = "xRequester",
         });
 
         [Fact]

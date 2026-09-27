@@ -43,6 +43,7 @@ namespace VerifiedXCore.Services
                 Globals.BridgeBurnBindingHeight = Globals.IsTestNet ? 1 : 7_281_000L;
                 Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 7_296_200L;
                 Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 7_296_200L;
+                Globals.VbtcWithdrawalConcurrencyHeight = Globals.VbtcWithdrawalConcurrencyHeight; // TODO testnet height (above the tip at deploy)
             }
             else
             {
@@ -59,6 +60,7 @@ namespace VerifiedXCore.Services
                 Globals.BridgeBurnBindingHeight = Globals.IsTestNet ? 1 : 7_281_000L;
                 Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 7_296_200L;
                 Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 7_296_200L;
+                Globals.VbtcWithdrawalConcurrencyHeight = Globals.VbtcWithdrawalConcurrencyHeight; // TODO mainnet height (at or after WithdrawalEscrowHeight)
             }
 
             Config.Config.EstablishConfigFile();

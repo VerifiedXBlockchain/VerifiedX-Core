@@ -50,10 +50,10 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void HasPendingCancellation_TrueOnlyForUnprocessedRecords()
         {
-            VBTCWithdrawalCancellation.SaveCancellation(new VBTCWithdrawalCancellation { CancellationUID = "c-old", SmartContractUID = "sc", OwnerAddress = "xO", WithdrawalRequestHash = "wrh-2", IsProcessed = true, IsApproved = false, ValidatorVotes = new() });
+            VBTCWithdrawalCancellation.SaveCancellation(new VBTCWithdrawalCancellation { CancellationUID = "CANCEL_c-old", SmartContractUID = "sc", OwnerAddress = "xO", WithdrawalRequestHash = "wrh-2", IsProcessed = true, IsApproved = false, ValidatorVotes = new() });
             Assert.False(VBTCWithdrawalCancellation.HasPendingCancellation("wrh-2"));
 
-            VBTCWithdrawalCancellation.SaveCancellation(new VBTCWithdrawalCancellation { CancellationUID = "c-new", SmartContractUID = "sc", OwnerAddress = "xO", WithdrawalRequestHash = "wrh-2", IsProcessed = false, RequestTime = VerifiedXCore.Utilities.TimeUtil.GetTime(), ValidatorVotes = new() });
+            VBTCWithdrawalCancellation.SaveCancellation(new VBTCWithdrawalCancellation { CancellationUID = "CANCEL_c-new", SmartContractUID = "sc", OwnerAddress = "xO", WithdrawalRequestHash = "wrh-2", IsProcessed = false, RequestTime = VerifiedXCore.Utilities.TimeUtil.GetTime(), ValidatorVotes = new() });
             Assert.True(VBTCWithdrawalCancellation.HasPendingCancellation("wrh-2"));
 
             Assert.False(VBTCWithdrawalCancellation.HasPendingCancellation("wrh-none"));
@@ -64,10 +64,10 @@ namespace VerifiedXCore.Tests
         public void StalledCancellation_StopsBlockingSigningAfterMaxAge()
         {
             long now = 1_700_000_000;
-            VBTCWithdrawalCancellation.SaveCancellation(new VBTCWithdrawalCancellation { CancellationUID = "c-stale", SmartContractUID = "sc", OwnerAddress = "xO", WithdrawalRequestHash = "wrh-3", IsProcessed = false, RequestTime = now - VBTCWithdrawalCancellation.PENDING_CANCELLATION_MAX_AGE_SECONDS - 1, ValidatorVotes = new() });
+            VBTCWithdrawalCancellation.SaveCancellation(new VBTCWithdrawalCancellation { CancellationUID = "CANCEL_c-stale", SmartContractUID = "sc", OwnerAddress = "xO", WithdrawalRequestHash = "wrh-3", IsProcessed = false, RequestTime = now - VBTCWithdrawalCancellation.PENDING_CANCELLATION_MAX_AGE_SECONDS - 1, ValidatorVotes = new() });
             Assert.False(VBTCWithdrawalCancellation.HasPendingCancellation("wrh-3", now));
 
-            VBTCWithdrawalCancellation.SaveCancellation(new VBTCWithdrawalCancellation { CancellationUID = "c-fresh", SmartContractUID = "sc", OwnerAddress = "xO", WithdrawalRequestHash = "wrh-4", IsProcessed = false, RequestTime = now - 60, ValidatorVotes = new() });
+            VBTCWithdrawalCancellation.SaveCancellation(new VBTCWithdrawalCancellation { CancellationUID = "CANCEL_c-fresh", SmartContractUID = "sc", OwnerAddress = "xO", WithdrawalRequestHash = "wrh-4", IsProcessed = false, RequestTime = now - 60, ValidatorVotes = new() });
             Assert.True(VBTCWithdrawalCancellation.HasPendingCancellation("wrh-4", now));
         }
     }

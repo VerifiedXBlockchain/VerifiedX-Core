@@ -152,7 +152,13 @@ namespace VerifiedXCore.Trillium
 
 		protected override EvaluationResult? EvaluateSubmission(string text)
 		{
-			var syntaxTree = SyntaxTree.Parse(text);
+			// NEW-29: every contract the node runs is parsed with the language's loop/recursion ban on. It was off (the
+			// parameter defaults to false), so a body with `while true` ran forever and one that called itself overflowed
+			// the stack and killed the node - reachable from one signed mint, which VX-02 decompiles at admission. The ban
+			// refuses while/for loops and call-graph cycles at parse time, so such a body never runs; to every reader it
+			// is an undecompilable body. No mainnet or testnet contract body uses a loop or recursion.
+			// Not covered by the ban: do-while (refused in new bodies by LedgerIntegrityRules.ContractBodyAllowed).
+			var syntaxTree = SyntaxTree.Parse(text, preventLoopsAndRecursion: true);
 			var compilation = Compilation.CreateScript(_previous, syntaxTree);
 
 			if (_showTree)

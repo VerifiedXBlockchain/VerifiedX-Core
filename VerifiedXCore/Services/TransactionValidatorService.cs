@@ -30,9 +30,10 @@ namespace VerifiedXCore.Services
         /// <summary>
         /// Consensus validation for a vBTC V2 multi-contract withdrawal request
         /// (Function "VBTCWithdrawalRequestMultiV2()"). Semantics are exactly those of N single
-        /// withdrawal requests: per-contract existence, the per-contract active-request gate, the
-        /// per-requestor repeat cooldown and the identical owner/non-owner balance formula — the
-        /// only thing shared across inputs is the requester, the destination and the fee rate.
+        /// withdrawal requests: per-contract existence, the fee floor (from VbtcWithdrawalConcurrencyHeight;
+        /// before it, the per-contract active-request gate and the per-requestor repeat cooldown) and the
+        /// identical owner/non-owner balance formula — the only thing shared across inputs is the
+        /// requester, the destination and the fee rate.
         /// </summary>
         private static async Task<(bool Ok, string Reason)> ValidateVbtcV2MultiWithdrawalRequest(
             Transaction txRequest, JObject jobj, long? blockHeight, bool blockDownloads, bool blockVerify)
@@ -62,6 +63,11 @@ namespace VerifiedXCore.Services
             if (feeRate.Value <= 0)
                 return (false, "FeeRate must be greater than zero for multi-contract vBTC withdrawal.");
 
+            // VbtcWithdrawalConcurrencyHeight: the contract lock and the repeat cooldown stop applying (escrow and the
+            // same-block debit guard bound what one holder can have open), and every input - its own Bitcoin
+            // transaction - must clear the fee floor.
+            var concurrencyActive = Bitcoin.Services.VBTCService.WithdrawalConcurrencyActive(blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+
             if (inputs == null || !inputs.Any())
                 return (false, "Inputs cannot be empty for multi-contract vBTC withdrawal.");
 
@@ -83,6 +89,12 @@ namespace VerifiedXCore.Services
                     return (false, "Input amounts must be greater than zero for multi-contract vBTC withdrawal.");
                 if (input.Amount != Math.Round(input.Amount, 8))
                     return (false, "Input amounts cannot have more than 8 decimal places for multi-contract vBTC withdrawal.");
+                if (concurrencyActive)
+                {
+                    var floorError = Bitcoin.Services.VBTCService.GetWithdrawalFeeFloorError(input.Amount, feeRate.Value, $"Multi-contract vBTC withdrawal input {input.SCUID}");
+                    if (floorError != null)
+                        return (false, floorError);
+                }
                 inputSum += input.Amount;
             }
 
@@ -95,7 +107,7 @@ namespace VerifiedXCore.Services
             // contents are per-node, so a node still holding a losing duplicate must never reject a
             // block its peers accepted. Determinism post-mine comes from HasActiveContractRequest.
             HashSet<string> pendingContracts = new HashSet<string>(StringComparer.Ordinal);
-            if (!blockVerify && !blockDownloads)
+            if (!blockVerify && !blockDownloads && !concurrencyActive)
             {
                 var mempool = TransactionData.GetPool();
                 var pendingWithdrawals = mempool.Query().Where(x =>
@@ -120,16 +132,19 @@ namespace VerifiedXCore.Services
                 if (!Bitcoin.Services.VBTCService.IsVbtcV2Contract(scState))
                     return (false, $"Contract {input.SCUID} is not a vBTC V2 contract.");
 
-                // S3C §0: per-CONTRACT active-withdrawal gate. includeLocalOnlyRows: false —
-                // consensus must not read rows that exist on this node only (fork vector).
-                if (VBTCWithdrawalRequest.HasActiveContractRequest(input.SCUID, gateHeight, includeLocalOnlyRows: false))
-                    return (false, $"A withdrawal is already in progress for contract {input.SCUID}; try again once it completes.");
+                if (!concurrencyActive)
+                {
+                    // S3C §0: per-CONTRACT active-withdrawal gate. includeLocalOnlyRows: false —
+                    // consensus must not read rows that exist on this node only (fork vector).
+                    if (VBTCWithdrawalRequest.HasActiveContractRequest(input.SCUID, gateHeight, includeLocalOnlyRows: false))
+                        return (false, $"A withdrawal is already in progress for contract {input.SCUID}; try again once it completes.");
 
-                if (VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(requesterAddress, input.SCUID, gateHeight))
-                    return (false, $"Requestor {requesterAddress} has a recently expired incomplete withdrawal on contract {input.SCUID} and is in the repeat-request cooldown ({VBTCWithdrawalRequest.REPEAT_REQUEST_COOLDOWN_BLOCKS} blocks).");
+                    if (VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(requesterAddress, input.SCUID, gateHeight))
+                        return (false, $"Requestor {requesterAddress} has a recently expired incomplete withdrawal on contract {input.SCUID} and is in the repeat-request cooldown ({VBTCWithdrawalRequest.REPEAT_REQUEST_COOLDOWN_BLOCKS} blocks).");
 
-                if (pendingContracts.Contains(input.SCUID))
-                    return (false, $"A withdrawal request for contract {input.SCUID} is already pending in the mempool.");
+                    if (pendingContracts.Contains(input.SCUID))
+                        return (false, $"A withdrawal request for contract {input.SCUID} is already pending in the mempool.");
+                }
 
                 // Balance: identical formula to the single shape, per input contract.
                 bool isRequesterOwner = requesterAddress == scState.OwnerAddress;
@@ -483,6 +498,12 @@ namespace VerifiedXCore.Services
                 }
 
             }
+
+            // NEW-29: a carried contract body must be deterministic and terminate - checked on its syntax tree, before any
+            // rule below runs the code.
+            var contractBodyError = LedgerIntegrityRules.ContractBodyAllowed(txRequest);
+            if (contractBodyError != null)
+                return (txResult, contractBodyError);
 
             // NEW-26 (follow-up): a vBTC V2 vault's code (deposit address, DKG data) never changes after creation.
             var vaultCodeError = LedgerIntegrityRules.VaultCodeUnchanged(txRequest);
@@ -3290,6 +3311,17 @@ namespace VerifiedXCore.Services
                             if (feeRate.Value <= 0)
                                 return (txResult, "FeeRate must be greater than zero for vBTC V2 withdrawal request.");
 
+                            // VbtcWithdrawalConcurrencyHeight: fee floor on; the contract lock, the repeat cooldown
+                            // and the per-contract mempool guard off (escrow + SameBlockDebitGuard bound what one
+                            // holder can have open, so a request no longer blocks other holders).
+                            var wdConcurrencyActive = Bitcoin.Services.VBTCService.WithdrawalConcurrencyActive(blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+                            if (wdConcurrencyActive)
+                            {
+                                var floorError = Bitcoin.Services.VBTCService.GetWithdrawalFeeFloorError(amount.Value, feeRate.Value, "vBTC V2 withdrawal request");
+                                if (floorError != null)
+                                    return (txResult, floorError);
+                            }
+
                             // Validate contract exists via state trei (available on ALL nodes, not just local)
                             var scState = SmartContractStateTrei.GetSmartContractState(scUID);
                             if (scState == null)
@@ -3304,14 +3336,14 @@ namespace VerifiedXCore.Services
                             // the contract already has a mined active request (anti-grief expiry inside).
                             // includeLocalOnlyRows: false — consensus must not read rows that exist on
                             // this node only (fork vector; activates at V2WithdrawalExpiryFixHeight).
-                            if (VBTCWithdrawalRequest.HasActiveContractRequest(scUID, Globals.LastBlock?.Height ?? 0, includeLocalOnlyRows: false))
+                            if (!wdConcurrencyActive && VBTCWithdrawalRequest.HasActiveContractRequest(scUID, Globals.LastBlock?.Height ?? 0, includeLocalOnlyRows: false))
                                 return (txResult, $"A withdrawal is already in progress for contract {scUID}; try again once it completes.");
 
                             // Anti-griefing (V2WithdrawalExpiryFixHeight): a requestor whose previous
                             // request on this contract expired incomplete sits out a cooldown before
                             // requesting again — otherwise one address can relock a shared contract
                             // every 360 blocks indefinitely.
-                            if (VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(requesterAddress, scUID, Globals.LastBlock?.Height ?? 0))
+                            if (!wdConcurrencyActive && VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(requesterAddress, scUID, Globals.LastBlock?.Height ?? 0))
                                 return (txResult, $"Requestor {requesterAddress} has a recently expired incomplete withdrawal on contract {scUID} and is in the repeat-request cooldown ({VBTCWithdrawalRequest.REPEAT_REQUEST_COOLDOWN_BLOCKS} blocks).");
 
                             // S3C §0: per-CONTRACT mempool guard (same-block defense) — reject if ANY
@@ -3320,7 +3352,7 @@ namespace VerifiedXCore.Services
                             // node holding a competing request in its own mempool rejected a block its peers accepted.
                             // In-block duplicates are refused by the block-scoped guard in BlockValidatorService.
                             var mempool = TransactionData.GetPool();
-                            var pendingWithdrawals = (!blockVerify && !blockDownloads)
+                            var pendingWithdrawals = (!blockVerify && !blockDownloads && !wdConcurrencyActive)
                                 ? mempool.Query().Where(x =>
                                     x.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
                                     x.Hash != txRequest.Hash
@@ -3347,7 +3379,7 @@ namespace VerifiedXCore.Services
                             // node holding the losing duplicate must not reject a block its peers
                             // accepted. Post-mine determinism comes from HasActiveContractRequest and
                             // the block-scoped guard in BlockValidatorService.
-                            if (!blockVerify && !blockDownloads)
+                            if (!blockVerify && !blockDownloads && !wdConcurrencyActive)
                             {
                                 foreach (var existingTx in pendingWithdrawals)
                                 {

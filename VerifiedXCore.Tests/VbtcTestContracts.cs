@@ -55,6 +55,26 @@ namespace VerifiedXCore.Tests
             return Encoding.Unicode.GetBytes(scText).ToCompress().ToBase64();
         }
 
+        /// <summary>
+        /// A vBTC V2 vault body (TokenizationV2 feature) with the given identity and deposit address - what the chain holds for
+        /// a vault, so routes that read the vault from chain state (VBTCChainView) see it.
+        /// </summary>
+        public static string VaultContractData(string embeddedUid, string embeddedMinter, string depositAddress, string? groupKey = null, bool isS3C = false)
+            => BuildContractData(embeddedUid, embeddedMinter, new List<SmartContractFeatures>
+            {
+                new SmartContractFeatures
+                {
+                    FeatureName = FeatureName.TokenizationV2,
+                    FeatureFeatures = new TokenizationV2Feature
+                    {
+                        AssetName = "vBTC", AssetTicker = "vBTC", DepositAddress = depositAddress, Version = 2,
+                        ValidatorAddressesSnapshot = new List<string> { "xValidator1", "xValidator2", "xValidator3" },
+                        FrostGroupPublicKey = groupKey ?? "02" + new string('a', 64), RequiredThreshold = 51, DKGProof = "proof",
+                        ProofBlockHeight = 1, CeremonyId = embeddedUid, ImageBase = "default", IsS3C = isS3C,
+                    },
+                },
+            }, name: "vBTC");
+
         /// <summary>A fungible-token deploy body (Token feature) with the given embedded identity and supply.</summary>
         public static string TokenContractData(string embeddedUid, string embeddedMinter, long supply, int decimals = 2)
             => BuildContractData(embeddedUid, embeddedMinter, new List<SmartContractFeatures>

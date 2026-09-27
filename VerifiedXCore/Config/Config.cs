@@ -364,10 +364,17 @@ namespace VerifiedXCore.Config
                 Globals.BTCNetwork = NBitcoin.Network.TestNet4;
                 Globals.SegwitP2SHStartPrefix = "2";
                 Globals.SegwitTaprootStartPrefix = "tb1";
-                Globals.ArbiterEncryptPassword = ("s7K#Y6fA%L3P9*wN2@R4$qG5hT8*dE7!").ToSecureString();
+                Globals.ArbiterEncryptPassword = ("s7K#Y6fA%L3P9*wN2@R4$qG5hT8*dE7!").ToSecureString(); //deprecated. only for legacy block purposes. No risk here.
                 Globals.TotalArbiterParties = 2;
                 Globals.TotalArbiterThreshold = 2;
                 Globals.ClientSettings = new List<Bitcoin.ElectrumX.ClientSettings> {
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "blackie.c3-soft.com",
+                        Port = 57010,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    },
                     new Bitcoin.ElectrumX.ClientSettings {
                         Host = "mempool.space",
                         Port = 40002,
@@ -375,16 +382,16 @@ namespace VerifiedXCore.Config
                         Count = 0,
                         FailCount = 0
                     },
-                    //new Bitcoin.ElectrumX.ClientSettings {
-                    //    Host = "testnet4-electrumx.wakiyamap.dev",
-                    //    Port = 51002,
-                    //    UseSsl = true,
-                    //    Count = 0,
-                    //    FailCount = 0
-                    //},
                     new Bitcoin.ElectrumX.ClientSettings {
-                        Host = "blackie.c3-soft.com",
-                        Port = 57010,
+                        Host = "bitcoin-testnet4.stackwallet.com",
+                        Port = 50002,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    },
+                    new Bitcoin.ElectrumX.ClientSettings {
+                        Host = "testnet.aranguren.org",
+                        Port = 52002, //52002 is testnet4; 51002 on this host is testnet3
                         UseSsl = true,
                         Count = 0,
                         FailCount = 0
@@ -419,10 +426,17 @@ namespace VerifiedXCore.Config
                     Globals.BTCNetwork = NBitcoin.Network.TestNet4;
                     Globals.SegwitP2SHStartPrefix = "2";
                     Globals.SegwitTaprootStartPrefix = "tb1";
-                    Globals.ArbiterEncryptPassword = ("s7K#Y6fA%L3P9*wN2@R4$qG5hT8*dE7!").ToSecureString();
+                    Globals.ArbiterEncryptPassword = ("s7K#Y6fA%L3P9*wN2@R4$qG5hT8*dE7!").ToSecureString(); //deprecated. only for legacy block purposes. No risk here.
                     Globals.TotalArbiterParties = 2;
                     Globals.TotalArbiterThreshold = 2;
                     Globals.ClientSettings = new List<Bitcoin.ElectrumX.ClientSettings> {
+                        new Bitcoin.ElectrumX.ClientSettings {
+                            Host = "blackie.c3-soft.com",
+                            Port = 57010,
+                            UseSsl = true,
+                            Count = 0,
+                            FailCount = 0
+                        },
                         new Bitcoin.ElectrumX.ClientSettings {
                             Host = "mempool.space",
                             Port = 40002,
@@ -430,16 +444,16 @@ namespace VerifiedXCore.Config
                             Count = 0,
                             FailCount = 0
                         },
-                        //new Bitcoin.ElectrumX.ClientSettings {
-                        //    Host = "testnet4-electrumx.wakiyamap.dev",
-                        //    Port = 51002,
-                        //    UseSsl = true,
-                        //    Count = 0,
-                        //    FailCount = 0
-                        //},
                         new Bitcoin.ElectrumX.ClientSettings {
-                            Host = "blackie.c3-soft.com",
-                            Port = 57010,
+                            Host = "bitcoin-testnet4.stackwallet.com",
+                            Port = 50002,
+                            UseSsl = true,
+                            Count = 0,
+                            FailCount = 0
+                        },
+                        new Bitcoin.ElectrumX.ClientSettings {
+                            Host = "testnet.aranguren.org",
+                            Port = 52002, //52002 is testnet4; 51002 on this host is testnet3
                             UseSsl = true,
                             Count = 0,
                             FailCount = 0

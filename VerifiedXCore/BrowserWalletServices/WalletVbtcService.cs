@@ -75,11 +75,18 @@ namespace VerifiedXCore.BrowserWalletServices
                 if (!seen.Add(scState.SmartContractUID))
                     continue;
 
+                // Escrow in open withdrawal requests is already out of the balance; an expired unpaid one
+                // comes back only by cancelling it.
+                var (escrowedAmount, expiredEscrowAmount, _) = Bitcoin.Services.VBTCService.DescribeEscrowedWithdrawals(address, scState.SmartContractUID);
+
                 // Keep the row visible while an exit is in flight — a non-owner sending its
-                // whole balance would otherwise vanish for the 24h window.
-                if (totalBalance > 0M || isOwner || pendingReserveSends > 0M)
+                // whole balance would otherwise vanish for the 24h window. Same for escrow.
+                if (totalBalance > 0M || isOwner || pendingReserveSends > 0M || escrowedAmount > 0M)
                 {
                     var contract = VBTCContractV2.GetContract(scState.SmartContractUID);
+                    // Withdrawal state from the withdrawal table with the 360-block expiry applied: the local
+                    // record's fields are never cleared when a request expires.
+                    var active = Bitcoin.Services.VBTCChainView.ActiveWithdrawal(scState.SmartContractUID);
                     resultList.Add(new
                     {
                         scUID = scState.SmartContractUID,
@@ -90,9 +97,11 @@ namespace VerifiedXCore.BrowserWalletServices
                         pendingReserveSends = pendingReserveSends,
                         ledgerBalance = ledgerBalance,
                         isOwner = isOwner,
-                        withdrawalStatus = contract?.WithdrawalStatus.ToString() ?? "None",
-                        activeWithdrawalAmount = contract?.ActiveWithdrawalAmount ?? 0M,
-                        activeWithdrawalDest = contract?.ActiveWithdrawalBTCDestination ?? "",
+                        withdrawalStatus = Bitcoin.Services.VBTCChainView.WithdrawalStatus(scState.SmartContractUID).ToString(),
+                        activeWithdrawalAmount = active?.Amount ?? 0M,
+                        activeWithdrawalDest = active?.BTCDestination ?? "",
+                        escrowedWithdrawalAmount = escrowedAmount,
+                        expiredEscrowAmount = expiredEscrowAmount,
                         proofBlockHeight = contract?.ProofBlockHeight ?? 0,
                         totalValidators = contract?.TotalRegisteredValidators ?? 0,
                         requiredThreshold = contract?.RequiredThreshold ?? 0,
@@ -133,17 +142,18 @@ namespace VerifiedXCore.BrowserWalletServices
 
         public static object GetWithdrawStatus(string scUID)
         {
-            var contract = VBTCContractV2.GetContract(scUID);
-            if (contract == null)
+            if (VBTCContractV2.GetContract(scUID) == null && Bitcoin.Services.VBTCChainView.GetVault(scUID) == null)
                 return new { success = false, message = "Contract not found" };
 
+            // From the withdrawal table with the 360-block expiry applied (the local record never clears).
+            var active = Bitcoin.Services.VBTCChainView.ActiveWithdrawal(scUID);
             return new
             {
                 success = true,
-                status = contract.WithdrawalStatus.ToString(),
-                amount = contract.ActiveWithdrawalAmount ?? 0M,
-                destination = contract.ActiveWithdrawalBTCDestination ?? "",
-                requestHash = contract.ActiveWithdrawalRequestHash ?? ""
+                status = Bitcoin.Services.VBTCChainView.WithdrawalStatus(scUID).ToString(),
+                amount = active?.Amount ?? 0M,
+                destination = active?.BTCDestination ?? "",
+                requestHash = active?.TransactionHash ?? ""
             };
         }
 

@@ -31,6 +31,11 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                     _ = builder.RunConsoleAsync();
                     
+                    // Pins live in memory; rebuild them from the durable signed evidence so a restart cannot
+                    // let a new withdrawal spend the coins of a signed transaction that is still out there.
+                    try { FrostStartup.RestorePinsFromEvidence(); }
+                    catch (Exception ex) { Console.WriteLine($"[FROST] Pin restore error: {ex.Message}"); }
+
                     // FIND-0013 Fix: Start periodic session cleanup background task
                     _ = Task.Run(async () => await SessionCleanupLoop());
 
@@ -125,15 +130,15 @@ namespace VerifiedXCore.Bitcoin.FROST
                     VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.CleanupExpiredRecords();
 
                     // Pin reconciler: zero Electrum load when no pins are outstanding (the common case).
-                    foreach (var pin in VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.GetAllContractPins())
+                    foreach (var scUID in VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.GetAllContractPins().Select(p => p.ScUID).Distinct())
                     {
                         try
                         {
-                            await FrostStartup.TryReleaseContractPinIfObservedOnChain(pin.ScUID);
+                            await FrostStartup.TryReleaseContractPinIfObservedOnChain(scUID);
                         }
                         catch (Exception ex)
                         {
-                            Console.WriteLine($"[FROST] Pin reconcile error for {pin.ScUID}: {ex.Message}");
+                            Console.WriteLine($"[FROST] Pin reconcile error for {scUID}: {ex.Message}");
                         }
                     }
                 }

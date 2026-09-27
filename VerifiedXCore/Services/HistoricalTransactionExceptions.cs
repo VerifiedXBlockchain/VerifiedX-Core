@@ -12,7 +12,9 @@ namespace VerifiedXCore.Services
     /// hash commits to - so it cannot be replayed, re-proposed or re-shaped, and every rule stays in force for everything
     /// else. Honoured entries skip VerifyTX and the per-block debit guard, exactly as they did when they were mined; their
     /// state apply is unchanged. Source: the read-only rule scan of the mainnet chain to block 6,891,066 (35 rule hits on
-    /// 32 transactions) plus anything the full replay through block validation finds.
+    /// 32 transactions) plus what the full replay through block validation finds: a NEW-07 same-block overspend (5,655,096)
+    /// and the last V1 withdrawal request (5,662,203), whose lead-arbiter rule depends on arbiter signing addresses each
+    /// node fetches over HTTP at startup - with arbiters retired (NEW-28) no syncing node could ever accept it.
     ///
     /// Testnet (owner decision, 25 Sep 2026): the bridge exit and its completion of 12 May 2026. The pre-audit bridge rule
     /// b61d49f5 (13 Sep) requires a committee-caster sender from testnet height 1; for these old heights the committee falls
@@ -55,6 +57,9 @@ namespace VerifiedXCore.Services
             ["ab7e9d2780e41f4e8f0d56ff6a135da228f245a3941f0cba0e1d798b6002b6f9"] = 5_639_511, // TKNZ_TX: NEW-05 V1 amount
             ["3a1e91e679e42b341a871282f97124607356674968b71c7a7f68f011e7355240"] = 5_639_751, // TKNZ_TX: NEW-05 V1 amount
             ["506179cce4e79cce6082b93928f689087da5226dc41253ece18b1523ff2e292a"] = 5_646_388, // TKNZ_TX: NEW-05 V1 amount
+            // Found by the full replay through block validation:
+            ["460f23b0fb8afe0ee761b686a2e047adb64796cc140fbf0fc23a530d2765092e"] = 5_655_096, // FTKN_TX: NEW-07 same-block overspend (200 of a token, balance 191)
+            ["b5b99795d923a7a6849db4562ebaa2419b29a058a14dbbadb23c7486b17027fc"] = 5_662_203, // TKNZ_WD_ARB: lead-arbiter rule (TXHeightRule5) needs arbiter signing addresses a node fetches over HTTP; arbiters are retired (NEW-28)
         };
 
         private static readonly IReadOnlyDictionary<string, long> Testnet = new Dictionary<string, long>(StringComparer.Ordinal)
@@ -65,6 +70,54 @@ namespace VerifiedXCore.Services
 
         public static int MainnetCount => Mainnet.Count;
         public static int TestnetCount => Testnet.Count;
+
+        // ── Reserve reversals the network applied the pre-6b914353 way (owner decision, 26 Sep 2026) ────────────────
+
+        private sealed record ReserveReversal(long Height, string From, string Function, string? CalledBackHash);
+
+        /// <summary>
+        /// Before 6b914353 (2026-08-30) CallBack() and Recover() refunded the reserve sender on every node but set the
+        /// transfer's reserve row to CalledBack / Recovered only on a node whose LOCAL WALLET held the transaction. Every
+        /// other node left the row Pending, and 24 h later the finalizer paid the recipient as well: 11 mainnet transfers,
+        /// 299,615.99 VFX paid twice, all by 5,519,286. The fix flips the row on every node, with no activation height, so
+        /// a node syncing from genesis computed lower balances than the live network and refused block 4,124,088 (a
+        /// recipient spending its second payment). For exactly these control transactions the row is left Pending, as the
+        /// network applied them; every other CallBack()/Recover() is unchanged. Bound to hash, block height, sender,
+        /// function and (for CallBack) the transfer called back - five of these 2023 transactions do not recompute to
+        /// their stored hash (decimal scale lost in storage), and nothing else in them is read.
+        /// </summary>
+        private static readonly IReadOnlyDictionary<string, ReserveReversal> MainnetReserveReversals = new Dictionary<string, ReserveReversal>(StringComparer.Ordinal)
+        {
+            // Recover() - the two pending transfers to REjHm... (995.99 + 8,998.99)
+            ["2f20dff8b6264688179edb8bf911fef22647643ae3dda4b7983b5f780568c7ed"] = new(1_243_110, "xRBX9Zgi3Dsyufu8xG4Yf1W95gdhXa1ApZ", "Recover()", null),
+            // CallBack() - transfer called back (amount, recipient)
+            ["e86c39058693c6a564a5afe21a5e2b6128f623a7a1cfd652e862133be2b968bb"] = new(1_659_325, "xRBX68MKPk1rqXvB7jzsRW4BSTZCkkvHh7", "CallBack()", "bc76703f48f0e330c01001cc9abf5e2b1a76120b04aec2fce3e287225ed7542a"), // 4,000 to RF3X6EB...
+            ["63bed6dbe633ef339be99056b3405f34c0932c559e56f3ea8e2226e0d3c482b4"] = new(1_659_327, "xRBX68MKPk1rqXvB7jzsRW4BSTZCkkvHh7", "CallBack()", "b033369360f0484ac3e63cc6b484888964d1d9888aab8b3ea3c8da9ce009e691"), // 1,500 to RBFKT...
+            ["7f285e062d6dcb355b9b13e1c90fb5ebf48c9fd81667376f18c70949038e6d79"] = new(1_659_333, "xRBX68MKPk1rqXvB7jzsRW4BSTZCkkvHh7", "CallBack()", "76f22da053567c6c7a7f363219bf6092f1fb1277d4d4bb0d40df1632e9f70afa"), // 3,500 to RBEE9...
+            ["a115b5d34c58bc61c5284de04bb163c4a39b9a803f31949cd9598ada889835eb"] = new(1_659_381, "xRBX68MKPk1rqXvB7jzsRW4BSTZCkkvHh7", "CallBack()", "52f29b16076136c7edb2f37ac2c4fa8115af795fe0d41908ee7ada0f1f6314e5"), // 3,500 to RBEE9...
+            ["d6c8c9d87c08a4f3724802dd80aacc88db83a038ae6a259834131fa6ec077fd4"] = new(3_821_832, "xRBXapXc1PGevze59V7Wc4Gb5pK32ShvT9", "CallBack()", "cefdefdd32939e85bcb6ef5ef8f8c55f68293a515ba2d55321e3abbdba6826e5"), // 10 to RQKDU...
+            ["9a1fd70f1735aa69c19e91aea2d27b0a121e7cf4acf512b9896c3d50554ca15b"] = new(3_944_533, "xRBXYfe8TNEmptPriAehPpvPTdBQgVhebP", "CallBack()", "60af58affb14a79b322677870949dbc27636c4f0e89cc7c2afae94a540b85f3e"), // 10 to RC8Jd...
+            ["f7aacfb052b9782619c24e3f4809aa025dd020f792224f93bfdec6cf04a79ac6"] = new(5_099_581, "xRBX4G1QWZFjc6srKvxYeAYFsLkdC68d1z", "CallBack()", "c172b606c36eb8d79265204de8d4f6fde3c82d00e84745b60741bd17849e76c2"), // 1 to RWwag...
+            ["f82d35452b020bb135274201dc82b0727c2157468b87e1f33c20688289b5b52b"] = new(5_351_562, "xRBXYfe8TNEmptPriAehPpvPTdBQgVhebP", "CallBack()", "89ef3abae49ca2270cc6b9fc055befc27f923869bd5a3b195f86d0adc54c41b2"), // 277,100 to RC9YF...
+            ["6238a4d64a3ae255ee05b0fb177bfa5915e76bf2dc774004d376a4faba461b56"] = new(5_519_286, "xRBXTWkCBdbzJRrETU8ZMYRJBPzWuzx2Ei", "CallBack()", "bcb8f5ca2c36ce610f96215decb8840f2a4bad428ad54d602a8e4ce80ed46fba"), // 0.01 to RW6fa...
+        };
+
+        public static int MainnetReserveReversalCount => MainnetReserveReversals.Count;
+
+        /// <summary>Whether this mined CallBack()/Recover() leaves its transfers Pending, as the network applied it.</summary>
+        public static bool KeepsReversedTransferPending(Transaction? tx, long? blockHeight)
+        {
+            if (Globals.IsTestNet || tx == null || blockHeight == null || string.IsNullOrEmpty(tx.Hash) || string.IsNullOrEmpty(tx.Data)) return false;
+            if (!MainnetReserveReversals.TryGetValue(tx.Hash, out var r)) return false;
+            if (r.Height != blockHeight.Value || tx.TransactionType != TransactionType.RESERVE || !string.Equals(tx.FromAddress, r.From, StringComparison.Ordinal))
+                return false;
+            try
+            {
+                var data = Newtonsoft.Json.Linq.JObject.Parse(tx.Data);
+                return (string?)data["Function"] == r.Function && (r.CalledBackHash == null || (string?)data["Hash"] == r.CalledBackHash);
+            }
+            catch { return false; }
+        }
 
         /// <summary>Whether this mined transaction is on the list for this block height (block validation only).</summary>
         public static bool IsAccepted(Transaction? tx, long? blockHeight)

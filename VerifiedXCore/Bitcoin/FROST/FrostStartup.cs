@@ -61,6 +61,41 @@ namespace VerifiedXCore.Bitcoin.FROST
                     await context.Response.WriteAsync(response);
                 });
 
+                /// <summary>
+                /// GET /frost/pins/{scUID} - the contract's outstanding signed withdrawal transactions as this
+                /// validator holds them: coins a new withdrawal must not spend, and whether each may be reclaimed
+                /// (a withheld tx). Coordinators read it before building so they pick free coins instead of being
+                /// refused. Public: outpoints and txids of the contract's own vault are chain data.
+                /// </summary>
+                endpoints.MapGet("/frost/pins/{scUID}", async context =>
+                {
+                    var scUID = context.Request.RouteValues["scUID"]?.ToString();
+                    if (string.IsNullOrEmpty(scUID))
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "scUID required" }));
+                        return;
+                    }
+
+                    var concurrency = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.ConcurrencyMode;
+                    var pins = new List<object>();
+                    foreach (var pin in VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.GetContractPins(scUID))
+                    {
+                        var (reclaimable, reason) = concurrency ? await IsPinReclaimableAsync(pin) : (false, "withdrawal concurrency not active");
+                        pins.Add(new { pin.WithdrawalRequestHash, pin.BtcTxId, pin.Outpoints, pin.PinnedAt, Reclaimable = reclaimable, ReclaimReason = reason });
+                    }
+
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        ValidatorAddress = Globals.ValidatorAddress,
+                        SmartContractUID = scUID,
+                        ConcurrencyMode = concurrency,
+                        Pins = pins
+                    }));
+                });
+
                 #endregion
 
                 #region Operator Endpoints (localhost-only)
@@ -1725,18 +1760,28 @@ namespace VerifiedXCore.Bitcoin.FROST
                                     .CheckWithdrawalSigning(request.SmartContractUID, request.WithdrawalRequestHash,
                                         request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints);
 
-                                // If blocked by the contract-level outpoint pin, check on-chain whether
-                                // the pinned tx has since confirmed (or been conflicted away) — if so
-                                // the pin is released and the check re-run. Pins have no time expiry;
-                                // observed on-chain spend is the ONLY release.
-                                if (blocked && reason.Contains("PIN:"))
+                                // If blocked by a contract outpoint pin, check on-chain whether the pinned
+                                // tx(s) have since confirmed (or can no longer confirm) — released pins drop
+                                // out and the check re-runs. Pins have no time expiry; observed on-chain
+                                // resolution is the ONLY release. With withdrawal concurrency, a pin whose tx
+                                // is being withheld may also be reclaimed (ResolveReclaimablePinsAsync).
+                                if (blocked && reason.Contains(VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.PinMarker))
                                 {
-                                    if (await TryReleaseContractPinIfObservedOnChain(request.SmartContractUID))
+                                    ISet<string>? reclaimable = null;
+                                    if (VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.ConcurrencyMode && request.TxInputOutpoints != null)
                                     {
-                                        (blocked, reason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                                            .CheckWithdrawalSigning(request.SmartContractUID, request.WithdrawalRequestHash,
-                                                request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints);
+                                        await TryReleaseContractPinIfObservedOnChain(request.SmartContractUID, request.WithdrawalRequestHash, request.TxInputOutpoints);
+                                        reclaimable = await ResolveReclaimablePinsAsync(request.SmartContractUID, request.WithdrawalRequestHash, request.TxInputOutpoints);
                                     }
+                                    else
+                                    {
+                                        // Legacy: the blocking pin need not overlap (a disjoint tx is what it refuses).
+                                        await TryReleaseContractPinIfObservedOnChain(request.SmartContractUID);
+                                    }
+
+                                    (blocked, reason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
+                                        .CheckWithdrawalSigning(request.SmartContractUID, request.WithdrawalRequestHash,
+                                            request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints, reclaimable);
                                 }
 
                                 if (blocked)
@@ -2757,8 +2802,11 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// <summary>
         /// Durable evidence check for a new signing request. Same txid as the recorded one: allowed
         /// (idempotent multi-input / retry). Different txid: allowed only when the recorded tx is
-        /// provably gone (not confirmed AND none of its outpoints still unspent, i.e. conflicted away);
-        /// refused when it confirmed (already paid) or when the chain could not be consulted.
+        /// provably dead (unknown to every server AND one of its inputs spent by a CONFIRMED
+        /// transaction); refused when it confirmed (already paid), while it can still confirm, or when
+        /// the chain could not be consulted. "All inputs missing from listunspent" is not proof: a
+        /// mempool spend can be evicted or replaced, after which the first tx can still confirm, and a
+        /// second signed tx for the same withdrawal would then pay it twice.
         /// </summary>
         internal static async Task<(bool Ok, string Reason)> CheckPriorSignedTransactionAsync(string scUID, string withdrawalRequestHash, string? requestedTxId)
         {
@@ -2774,25 +2822,23 @@ namespace VerifiedXCore.Bitcoin.FROST
                     return (false, $"A transaction ({evidence.BtcTxId}) already signed for this withdrawal has confirmed on Bitcoin; refusing to sign another");
                 if (verdict == PriorTxVerdict.InMempool)
                     return (false, $"Previously signed transaction {evidence.BtcTxId} for this withdrawal is in the Bitcoin mempool (unconfirmed); refusing to sign another while it can still confirm");
-                // Unknown to every Electrum server: it may have been conflicted away. Prove it below by
-                // checking that none of its inputs is still spendable. (Electrum's unspent list hides
-                // outputs spent by a MEMPOOL tx, which is why an InMempool answer must refuse above.)
+                // Unknown to every Electrum server: it may have been conflicted away. Prove it below: one
+                // of its inputs must be spent by a CONFIRMED transaction.
 
                 var depositAddress = FrostSigningAuthorization.ResolveDepositAddressForContract(scUID);
                 if (string.IsNullOrEmpty(depositAddress))
                     return (false, "Contract deposit address could not be resolved to check the previously signed transaction");
 
-                var utxos = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.GetTaprootUTXOs(depositAddress);
-                if (!utxos.Success)
-                    return (false, $"UTXO lookup failed while checking previously signed transaction {evidence.BtcTxId}; refusing to sign another");
+                var (spendVerdict, spendDetail) = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.GetOutpointSpendVerdict(depositAddress, evidence.Outpoints);
+                if (spendVerdict == VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.OutpointSpendVerdict.Inconclusive)
+                    return (false, $"Could not establish whether previously signed transaction {evidence.BtcTxId} can still confirm ({spendDetail}); refusing to sign another");
+                if (spendVerdict != VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed)
+                    return (false, $"Previously signed transaction {evidence.BtcTxId} for this withdrawal can still confirm ({spendDetail}); refusing to sign a second one");
 
-                var unspent = utxos.Utxos.Select(u => $"{u.TxHash}:{u.TxPos}".ToLowerInvariant()).ToHashSet();
-                var stillUnspent = evidence.Outpoints.Count(op => unspent.Contains(op));
-                if (stillUnspent > 0)
-                    return (false, $"Previously signed transaction {evidence.BtcTxId} for this withdrawal is still spendable ({stillUnspent} input(s) unspent); refusing to sign a second one");
-
-                // Conflicted away: its inputs were spent by something else and it did not confirm.
+                // Conflicted away: a confirmed transaction spent one of its inputs, so it can never confirm.
                 VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.Delete(scUID, withdrawalRequestHash);
+                VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.ForgetDeadTransaction(scUID, withdrawalRequestHash,
+                    $"signed tx {evidence.BtcTxId} can never confirm ({spendDetail})");
                 LogUtility.Log($"[FROST Dedup] Previously signed tx {evidence.BtcTxId} for {withdrawalRequestHash} was conflicted away on-chain; allowing a new transaction.", "FrostStartup.SignStart");
                 return (true, "");
             }
@@ -2831,98 +2877,199 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// FIND-024 Fix: Shared helper to finalize DKG when all required shares have been received.
         /// Calls FrostNative.DKGRound3Finalize, derives the Taproot address via NBitcoin,
         /// <summary>
-        /// Checks on-chain whether a contract's pinned (signed-but-outstanding) withdrawal tx has
-        /// been resolved, and releases the pin if so. Resolution means either:
-        ///  - the pinned txid itself confirmed (its withdrawal should then complete normally), or
-        ///  - every pinned input outpoint is gone from the deposit address's unspent set (a
-        ///    conflicting tx confirmed, so the pinned tx can never confirm).
-        /// Uses the resilient Electrum lookup; on any inconclusive answer the pin is KEPT —
+        /// Checks on-chain whether a contract's pinned (signed-but-outstanding) withdrawal txs have
+        /// been resolved, and releases each pin that is. Resolution means either:
+        ///  - the pinned txid itself confirmed (its withdrawal should then complete normally) — and
+        ///    every other pin sharing an input with it is released too (it can never confirm), or
+        ///  - one of the pinned inputs is spent by a CONFIRMED transaction (the pinned tx can never
+        ///    confirm). A mempool spend is not enough; see GetOutpointSpendVerdict.
+        /// Uses the resilient Electrum lookups; on any inconclusive answer the pin is KEPT —
         /// releasing it early would reopen the double-payout window this pin exists to close.
-        /// Returns true if the pin was released.
+        /// Returns true when no pin remains on the contract.
         /// </summary>
-        internal static async Task<bool> TryReleaseContractPinIfObservedOnChain(string scUID)
+        internal static async Task<bool> TryReleaseContractPinIfObservedOnChain(string scUID,
+            string? forWithdrawalRequestHash = null, IEnumerable<string>? onlyOverlapping = null)
         {
-            try
+            // A blocked signing only needs the pins its tx overlaps checked (a busy contract can hold many).
+            var pins = onlyOverlapping != null && forWithdrawalRequestHash != null
+                ? VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.GetOverlappingPins(scUID, forWithdrawalRequestHash, onlyOverlapping)
+                : VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.GetContractPins(scUID);
+            foreach (var pin in pins)
             {
-                var pin = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.GetContractPin(scUID);
-                if (pin == null)
-                    return true; // Nothing pinned (already released)
-
-                string txCheckDetail;
-
-                // 1) Pinned tx confirmed? Multi-server lookup — the old single-server check meant one
-                // wedged Electrum connection held the pin forever after the tx had long confirmed.
-                if (!string.IsNullOrEmpty(pin.Value.BtcTxId))
+                try
                 {
-                    var lookup = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService
-                        .GetTransactionConfirmationsResilient(pin.Value.BtcTxId);
-                    if (lookup.Confirmations >= 1)
-                    {
+                    await TryReleaseOnePinAsync(scUID, pin);
+                }
+                catch (Exception ex)
+                {
+                    VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.NotePinReleaseCheck(scUID, pin.WithdrawalRequestHash, $"kept: check threw {ex.Message}");
+                    LogUtility.Log($"[FROST Dedup] Pin release check failed for {scUID}/{pin.WithdrawalRequestHash} (keeping pin): {ex.Message}", "FrostStartup.TryReleaseContractPinIfObservedOnChain");
+                }
+            }
+            return VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.GetContractPins(scUID).Count == 0;
+        }
+
+        private static async Task TryReleaseOnePinAsync(string scUID, VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.ContractPinInfo pin)
+        {
+            string txCheckDetail;
+
+            // 1) Pinned tx confirmed? Multi-server lookup — the old single-server check meant one
+            // wedged Electrum connection held the pin forever after the tx had long confirmed.
+            if (!string.IsNullOrEmpty(pin.BtcTxId))
+            {
+                var lookup = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService
+                    .GetTransactionConfirmationsResilient(pin.BtcTxId);
+                if (lookup.Confirmations >= 1)
+                {
+                    VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
+                        .ClearContractPin(scUID, pin.WithdrawalRequestHash, $"pinned tx confirmed with {lookup.Confirmations} confirmation(s)");
+
+                    // Any other pinned tx spending one of these coins now conflicts with a confirmed tx.
+                    foreach (var loser in VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.GetOverlappingPins(scUID, pin.WithdrawalRequestHash, pin.Outpoints))
                         VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                            .ClearContractPin(scUID, $"pinned tx confirmed with {lookup.Confirmations} confirmation(s)");
-                        return true;
-                    }
-
-                    if (lookup.Confirmations == 0)
-                    {
-                        // Known but unconfirmed: the tx is alive in a mempool. Its inputs are hidden from
-                        // Electrum's unspent list while it waits, so the outpoint check below would wrongly
-                        // conclude "conflicted away" and release the pin. Keep it.
-                        var aliveOutcome = $"kept: txlookup=unconfirmed/in-mempool ({lookup.ServersTried} server(s): {lookup.Detail})";
-                        VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.NotePinReleaseCheck(scUID, aliveOutcome);
-                        LogUtility.Log($"[FROST Dedup] Pin release check for {scUID} (tx {pin.Value.BtcTxId}) — {aliveOutcome}", "FrostStartup.TryReleaseContractPinIfObservedOnChain");
-                        return false;
-                    }
-                    txCheckDetail = $"txlookup=UNKNOWN ({lookup.ServersTried} server(s): {lookup.Detail})";
-                }
-                else
-                {
-                    txCheckDetail = "txlookup=skipped (no BtcTxId on pin)";
+                            .ClearContractPin(scUID, loser.WithdrawalRequestHash, $"conflicts with confirmed tx {pin.BtcTxId} (withdrawal {pin.WithdrawalRequestHash})");
+                    return;
                 }
 
-                // 2) All pinned outpoints spent (conflicting tx confirmed)?
-                string utxoCheckDetail;
-                var depositAddress = VerifiedXCore.Bitcoin.Models.VBTCContractV2.GetContract(scUID)?.DepositAddress;
-                if (!string.IsNullOrEmpty(depositAddress))
+                if (lookup.Confirmations == 0)
                 {
-                    var lookup = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.GetTaprootUTXOs(depositAddress);
-                    if (lookup.Success)
-                    {
-                        var unspent = lookup.Utxos
-                            .Select(u => $"{u.TxHash}:{u.TxPos}".ToLowerInvariant())
-                            .ToHashSet();
-                        var stillUnspent = pin.Value.Outpoints.Count(op => unspent.Contains(op.ToLowerInvariant()));
-                        if (stillUnspent == 0)
-                        {
-                            VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                                .ClearContractPin(scUID, "all pinned outpoints spent on-chain (pinned tx confirmed or conflicted away)");
-                            return true;
-                        }
-                        utxoCheckDetail = $"utxolookup={stillUnspent}/{pin.Value.Outpoints.Count} pinned outpoint(s) still unspent";
-                    }
-                    else
-                    {
-                        utxoCheckDetail = $"utxolookup=failed ({lookup.Error})";
-                    }
+                    // Known but unconfirmed: the tx is alive in a mempool. Keep it.
+                    var aliveOutcome = $"kept: txlookup=unconfirmed/in-mempool ({lookup.ServersTried} server(s): {lookup.Detail})";
+                    VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.NotePinReleaseCheck(scUID, pin.WithdrawalRequestHash, aliveOutcome);
+                    LogUtility.Log($"[FROST Dedup] Pin release check for {scUID} (tx {pin.BtcTxId}) — {aliveOutcome}", "FrostStartup.TryReleaseContractPinIfObservedOnChain");
+                    return;
                 }
-                else
-                {
-                    utxoCheckDetail = "utxolookup=skipped (no local contract/deposit address)";
-                }
-
-                // Keep the pin — but never silently: stamp and log WHY, so a stuck pin is diagnosable
-                // from /frost/status and the logs instead of invisible until the next blocked withdrawal.
-                var outcome = $"kept: {txCheckDetail}; {utxoCheckDetail}";
-                VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.NotePinReleaseCheck(scUID, outcome);
-                LogUtility.Log($"[FROST Dedup] Pin release check for {scUID} (tx {pin.Value.BtcTxId}) — {outcome}", "FrostStartup.TryReleaseContractPinIfObservedOnChain");
-                return false;
+                txCheckDetail = $"txlookup=UNKNOWN ({lookup.ServersTried} server(s): {lookup.Detail})";
             }
-            catch (Exception ex)
+            else
             {
-                VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.NotePinReleaseCheck(scUID, $"kept: check threw {ex.Message}");
-                LogUtility.Log($"[FROST Dedup] Pin release check failed for {scUID} (keeping pin): {ex.Message}", "FrostStartup.TryReleaseContractPinIfObservedOnChain");
-                return false;
+                txCheckDetail = "txlookup=skipped (no BtcTxId on pin)";
             }
+
+            // 2) One of the pinned inputs spent by a confirmed tx?
+            string utxoCheckDetail;
+            var depositAddress = FrostSigningAuthorization.ResolveDepositAddressForContract(scUID);
+            if (!string.IsNullOrEmpty(depositAddress))
+            {
+                var (verdict, detail) = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.GetOutpointSpendVerdict(depositAddress, pin.Outpoints);
+                if (verdict == VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed)
+                {
+                    VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
+                        .ClearContractPin(scUID, pin.WithdrawalRequestHash, $"a pinned input is spent by a confirmed tx ({detail}); the pinned tx can never confirm");
+                    return;
+                }
+                utxoCheckDetail = $"spendcheck={verdict} ({detail})";
+            }
+            else
+            {
+                utxoCheckDetail = "spendcheck=skipped (deposit address unresolved)";
+            }
+
+            // Keep the pin — but never silently: stamp and log WHY, so a stuck pin is diagnosable
+            // from /frost/status and the logs instead of invisible until the next blocked withdrawal.
+            var outcome = $"kept: {txCheckDetail}; {utxoCheckDetail}";
+            VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.NotePinReleaseCheck(scUID, pin.WithdrawalRequestHash, outcome);
+            LogUtility.Log($"[FROST Dedup] Pin release check for {scUID} (tx {pin.BtcTxId}) — {outcome}", "FrostStartup.TryReleaseContractPinIfObservedOnChain");
+        }
+
+        /// <summary>
+        /// How long after signing a withdrawal's transaction must go unseen before its coins may be reclaimed. An
+        /// honest coordinator broadcasts and completes within a minute of signing; half an hour means the tx is
+        /// being withheld (or its coordinator died before broadcasting).
+        /// </summary>
+        internal const long RECLAIM_GRACE_SECONDS = 1800;
+
+        /// <summary>
+        /// Chain-state part of the reclaim rule (pure). A pin may be reclaimed only when its withdrawal has a
+        /// consensus row that is still open (a completed withdrawal's payout must stand: knocking out its tx after
+        /// COMPLETE would leave it paid in vBTC terms but not in BTC; bridge exits have no row and are never
+        /// reclaimed) and the grace period since signing has passed. FrostStartup adds the Bitcoin part: the tx is
+        /// unknown to every Electrum server (neither in a mempool nor confirmed).
+        /// </summary>
+        public static (bool Eligible, string Reason) IsPinReclaimEligible(VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest? row, long pinnedAt, long now)
+        {
+            if (row == null)
+                return (false, "no consensus withdrawal row (bridge exit or unknown withdrawal)");
+            if (row.IsCompleted || row.Status == VerifiedXCore.Bitcoin.Models.VBTCWithdrawalStatus.Completed
+                || row.Status == VerifiedXCore.Bitcoin.Models.VBTCWithdrawalStatus.Cancelled)
+                return (false, "withdrawal completed; its transaction must stand");
+            var age = now - pinnedAt;
+            if (age < RECLAIM_GRACE_SECONDS)
+                return (false, $"signed {age}s ago (grace {RECLAIM_GRACE_SECONDS}s)");
+            return (true, $"open withdrawal, signed {age}s ago");
+        }
+
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (long At, bool Reclaimable, string Reason)> _reclaimCache = new();
+        private const long RECLAIM_CACHE_SECONDS = 60;
+
+        /// <summary>Full reclaim rule for one pin (cached briefly: the public /frost/pins endpoint calls it too).</summary>
+        internal static async Task<(bool Reclaimable, string Reason)> IsPinReclaimableAsync(VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.ContractPinInfo pin)
+        {
+            var now = TimeUtil.GetTime();
+            var cacheKey = $"{pin.ScUID}:{pin.WithdrawalRequestHash}:{pin.BtcTxId}";
+            if (_reclaimCache.TryGetValue(cacheKey, out var cached) && now - cached.At < RECLAIM_CACHE_SECONDS)
+                return (cached.Reclaimable, cached.Reason);
+
+            (bool, string) result;
+            var row = VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.GetByTransactionHash(pin.WithdrawalRequestHash, pin.ScUID);
+            var (eligible, why) = IsPinReclaimEligible(row, pin.PinnedAt, now);
+            if (!eligible)
+                result = (false, why);
+            else if (string.IsNullOrEmpty(pin.BtcTxId))
+                result = (false, "pin has no txid to look up");
+            else
+            {
+                var lookup = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.GetTransactionConfirmationsResilient(pin.BtcTxId);
+                result = lookup.Confirmations.HasValue
+                    ? (false, $"tx {pin.BtcTxId} is {(lookup.Confirmations > 0 ? "confirmed" : "in a mempool")}")
+                    : (true, $"{why}; tx {pin.BtcTxId} unknown to {lookup.ServersTried} Electrum server(s) — withheld");
+            }
+
+            _reclaimCache[cacheKey] = (now, result.Item1, result.Item2);
+            return result;
+        }
+
+        /// <summary>
+        /// Other withdrawals' pins that the transaction being signed overlaps AND that may be reclaimed. The
+        /// coordinator of a reclaiming withdrawal completes only after its tx confirms (VBTCService).
+        /// </summary>
+        internal static async Task<ISet<string>> ResolveReclaimablePinsAsync(string scUID, string withdrawalRequestHash, List<string>? txInputOutpoints)
+        {
+            var reclaimable = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var pin in VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.GetOverlappingPins(scUID, withdrawalRequestHash, txInputOutpoints))
+            {
+                var (ok, reason) = await IsPinReclaimableAsync(pin);
+                LogUtility.Log($"[FROST Dedup] Reclaim check for {scUID}: pin of {pin.WithdrawalRequestHash} (tx {pin.BtcTxId}) requested by {withdrawalRequestHash} — {(ok ? "RECLAIMABLE" : "live")}: {reason}",
+                    "FrostStartup.ResolveReclaimablePinsAsync");
+                if (ok)
+                    reclaimable.Add(pin.WithdrawalRequestHash);
+            }
+            return reclaimable;
+        }
+
+        /// <summary>
+        /// Re-creates pins from durable evidence after a restart; the in-memory pins do not survive one and a signed
+        /// transaction stays broadcastable. Withdrawals already completed on chain are skipped; the reconciler releases
+        /// the rest once their transactions resolve.
+        /// </summary>
+        internal static int RestorePinsFromEvidence()
+        {
+            var restored = 0;
+            foreach (var ev in VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.GetAll())
+            {
+                try
+                {
+                    var row = VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.GetByTransactionHash(ev.WithdrawalRequestHash, ev.ScUID);
+                    if (row != null && row.IsCompleted)
+                        continue;
+                    if (VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.RestorePin(ev.ScUID, ev.WithdrawalRequestHash, ev.BtcTxId, ev.Outpoints, ev.Timestamp))
+                        restored++;
+                }
+                catch { }
+            }
+            if (restored > 0)
+                LogUtility.Log($"[FROST Dedup] Restored {restored} outpoint pin(s) from signed evidence after startup", "FrostStartup.RestorePinsFromEvidence");
+            return restored;
         }
 
         /// persists the key package, and marks the session as completed.

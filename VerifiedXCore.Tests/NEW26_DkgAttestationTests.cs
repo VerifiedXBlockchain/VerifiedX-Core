@@ -479,7 +479,7 @@ namespace VerifiedXCore.Tests
             Assert.False((bool)before["Success"]!);                                   // local record only: not served
             Assert.Null(before["DepositAddress"]);
 
-            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei { SmartContractUID = uid, ContractData = "x", MinterAddress = _minter.Address, OwnerAddress = _minter.Address });
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei { SmartContractUID = uid, ContractData = VbtcTestContracts.VaultContractData(uid, _minter.Address, _address, _groupKey), MinterAddress = _minter.Address, OwnerAddress = _minter.Address });
             var after = Newtonsoft.Json.Linq.JObject.Parse(await controller.GetMPCDepositAddress(uid));
             Assert.True((bool)after["Success"]!);                                      // on chain: served
             Assert.Equal(_address, (string?)after["DepositAddress"]);

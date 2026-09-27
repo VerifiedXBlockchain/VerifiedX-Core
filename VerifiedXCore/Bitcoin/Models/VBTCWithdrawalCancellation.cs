@@ -28,6 +28,17 @@ namespace VerifiedXCore.Bitcoin.Models
         public bool IsProcessed { get; set; }
         #endregion
 
+        /// <summary>
+        /// UID prefix of every record created by a mined VBTC_V2_WITHDRAWAL_CANCEL (StateData and the store rebuild:
+        /// "CANCEL_{tx hash}"). Older builds' /CancelWithdrawal and /CancelWithdrawalRaw endpoints saved records with
+        /// random GUIDs on the serving node only; those exist nowhere else on the network.
+        /// </summary>
+        public const string OnChainUidPrefix = "CANCEL_";
+
+        /// <summary>True for a record that exists on every node (created from a mined cancel transaction).</summary>
+        public static bool IsOnChainRecord(VBTCWithdrawalCancellation? c) =>
+            c?.CancellationUID?.StartsWith(OnChainUidPrefix, StringComparison.Ordinal) == true;
+
         #region Database Methods
         public static ILiteCollection<VBTCWithdrawalCancellation> GetDb()
         {
@@ -84,8 +95,10 @@ namespace VerifiedXCore.Bitcoin.Models
                 var db = GetDb();
                 if (db == null) return false;
                 var cutoff = nowSeconds - PENDING_CANCELLATION_MAX_AGE_SECONDS;
+                // On-chain records only: a node-local leftover must not block signing on one validator.
                 return db.Find(x => x.WithdrawalRequestHash == withdrawalRequestHash)
                          .Where(x => string.IsNullOrEmpty(scUID) || x.SmartContractUID == scUID)
+                         .Where(IsOnChainRecord)
                          .Any(x => !x.IsProcessed && x.RequestTime >= cutoff);
             }
             catch { return false; }
@@ -106,7 +119,11 @@ namespace VerifiedXCore.Bitcoin.Models
             if (cancellations == null)
                 return null;
 
+            // On-chain records only. This backs the consensus duplicate-cancel rule (VerifyTX, StateData): a
+            // node-local leftover here made that node refuse the real cancel — at block validation too — while
+            // every other node accepted it.
             return cancellations.Find(x => x.WithdrawalRequestHash == withdrawalRequestHash)
+                .Where(IsOnChainRecord)
                 .FirstOrDefault(x => string.IsNullOrEmpty(scUID) || x.SmartContractUID == scUID);
         }
 
