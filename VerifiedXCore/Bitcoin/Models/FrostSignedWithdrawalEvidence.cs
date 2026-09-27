@@ -69,6 +69,13 @@ namespace VerifiedXCore.Bitcoin.Models
             }
         }
 
+        /// <summary>Every recorded signing (startup pin restore). Empty when the store is unavailable.</summary>
+        public static List<FrostSignedWithdrawalEvidence> GetAll()
+        {
+            try { return Coll()?.FindAll().ToList() ?? new(); }
+            catch { return new(); }
+        }
+
         public static bool Delete(string scUID, string withdrawalRequestHash)
         {
             try { return (Coll()?.DeleteMany(x => x.ScUID == scUID && x.WithdrawalRequestHash == withdrawalRequestHash) ?? 0) > 0; }

@@ -200,14 +200,14 @@ namespace VerifiedXCore
         /// attestations of the DKG (FrostDkgAttestation). Earlier contracts stay as recorded (creator-trusted; disclosed).
         /// Inert until set at rollout (mainnet and testnet), after the validators run the attesting build.
         /// </summary>
-        public static long VbtcV2DkgAttestationHeight = 7_500_500L;
+        public static long VbtcV2DkgAttestationHeight = 7_400_500L;
 
         /// <summary>
         /// NEW-28: legacy V1 vBTC (arbiter tokenization) is retired. At/after this height no V1 contract is created, no V1
         /// transfer or withdrawal is accepted, and nothing may touch an existing V1 contract - balances are frozen as they
         /// stand (owner decision: holders were told to withdraw beforehand). Same activation as the rest of this upgrade.
         /// </summary>
-        public static long VbtcV1RetirementHeight = 7_500_500L;
+        public static long VbtcV1RetirementHeight = 7_400_500L;
 
         /// <summary>
         /// Withdrawal escrow (security fix): at/after this height a vBTC withdrawal REQUEST debits the
@@ -217,6 +217,20 @@ namespace VerifiedXCore
         /// request expired — draining a shared contract's vault.
         /// </summary>
         public static long WithdrawalEscrowHeight = 999_999_999_999L;
+
+        /// <summary>
+        /// vBTC withdrawal concurrency (S3C §0 revision). At/after this height:
+        /// (a) a withdrawal request no longer locks its contract: the per-contract active-request gate, the requester
+        ///     repeat cooldown and the one-request-per-contract-per-block guard stop applying. Any number of holders - and
+        ///     one holder many times - may have requests open on one contract; each is escrowed at REQUEST, and
+        ///     SameBlockDebitGuard keeps pending and same-block requests within the holder's balance;
+        /// (b) every request must leave a relayable payout after the smallest Bitcoin fee it can pay
+        ///     (VBTCService.GetWithdrawalFeeFloorError), both request shapes, per input.
+        /// Off-chain, the same height switches validators from one outstanding signed transaction per contract to any
+        /// number whose coins do not overlap (FrostWithdrawalSigningTracker). Must be at or after WithdrawalEscrowHeight:
+        /// concurrent withdrawals are only safe when every request is escrowed. Inert until set.
+        /// </summary>
+        public static long VbtcWithdrawalConcurrencyHeight = 7_400_500L;
 
         /// <summary>
         /// Base (vBTC.b) minting validator set = registered vBTC validators that are ALSO members of

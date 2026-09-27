@@ -47,6 +47,14 @@ namespace VerifiedXCore.Bitcoin.Models
         public string? PinnedUnsignedTxHex { get; set; }
         public string? PinnedCoinsJson { get; set; }
 
+        // Reclaim (local-only, never consensus-read; VbtcWithdrawalConcurrencyHeight): this withdrawal's tx takes back
+        // coins of another withdrawal's withheld transaction. Until its own tx confirms the withheld one could still
+        // replace it, so COMPLETE is submitted only after that confirmation. Set at build (intent) and at signing
+        // (the txid to wait for, and the signed hex so a coordinator that died before broadcasting can rebroadcast).
+        public bool CompleteAfterConfirmation { get; set; }
+        public string? CompleteAfterBtcTxId { get; set; }
+        public string? DeferredSignedTxHex { get; set; }
+
         // S3C §0: ~1 hour at ~10s/block; matches the existing 1-hour FROST ceremony TTL.
         public const long EXPIRY_BLOCKS = 360;
 
@@ -309,6 +317,27 @@ namespace VerifiedXCore.Bitcoin.Models
         }
         #endregion
 
+        #region Open Escrowed Requests
+        /// <summary>
+        /// The requester's mined, still-open requests on the contract whose amount was debited at REQUEST (escrow).
+        /// That amount is already out of the ledger balance — PendingWithdrawals does not show it — and after the
+        /// request expires unpaid it comes back only through an approved cancellation. Display only.
+        /// </summary>
+        public static List<VBTCWithdrawalRequest> GetOpenEscrowedRequests(string address, string scUID)
+        {
+            var vwrDb = GetVBTCWithdrawalRequestDb();
+            if (vwrDb == null)
+                return new List<VBTCWithdrawalRequest>();
+
+            return vwrDb.Query()
+                .Where(x => x.RequestorAddress == address && x.SmartContractUID == scUID && !x.IsCompleted)
+                .ToList()
+                .Where(x => !string.IsNullOrEmpty(x.TransactionHash) && EscrowAppliesTo(x.RequestBlockHeight))
+                .OrderBy(x => x.RequestBlockHeight)
+                .ToList();
+        }
+        #endregion
+
         #region Get Completed Withdrawal Amount
         /// <summary>
         /// Gets the total amount of COMPLETED withdrawals to add back into the OWNER's balance for a
@@ -426,6 +455,12 @@ namespace VerifiedXCore.Bitcoin.Models
                 // would make that clear a permanent no-op and strand the stale build.
                 existingRequest.PinnedUnsignedTxHex = request.PinnedUnsignedTxHex;
                 existingRequest.PinnedCoinsJson = request.PinnedCoinsJson;
+
+                // Reclaim deferral travels with the pinned build: same unconditional assignment, so clearing the
+                // build clears it too. (The mine-time save passes a fresh row, but nothing is built before mining.)
+                existingRequest.CompleteAfterConfirmation = request.CompleteAfterConfirmation;
+                existingRequest.CompleteAfterBtcTxId = request.CompleteAfterBtcTxId;
+                existingRequest.DeferredSignedTxHex = request.DeferredSignedTxHex;
 
                 vwrDb.UpdateSafe(existingRequest);
                 return true;

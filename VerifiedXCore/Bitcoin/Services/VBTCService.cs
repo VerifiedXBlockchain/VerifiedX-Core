@@ -39,6 +39,95 @@ namespace VerifiedXCore.Bitcoin.Services
             return null;
         }
 
+        /// <summary>
+        /// Virtual size of the smallest withdrawal transaction BitcoinTransactionService builds: one Taproot key-path
+        /// input and two outputs (destination + change) = 57.5 + 2 × 43 + 10.5 vB.
+        /// </summary>
+        public const int MinWithdrawalTxVBytes = 154;
+
+        /// <summary>Dust limit of a Taproot output: Bitcoin nodes do not relay a smaller one.</summary>
+        public const long TaprootDustSats = 330;
+
+        /// <summary>
+        /// Consensus rule (VbtcWithdrawalConcurrencyHeight), shared with the wallet paths so both give the same message:
+        /// a withdrawal pays its Bitcoin fee out of the amount, so the amount must cover the fee of the smallest withdrawal
+        /// transaction at the request's own fee rate and still leave a relayable payout. Uses only the request's fields, so
+        /// every node agrees. A request that passes can still need more inputs (and fee) when the vault's coins are small;
+        /// that request fails at signing and blocks no one but its requester.
+        /// </summary>
+        public static string? GetWithdrawalFeeFloorError(decimal amount, long feeRate, string context)
+        {
+            if (feeRate <= 0 || amount <= 0M)
+                return null; // the amount and fee-rate rules report these
+            var minFeeSats = (decimal)feeRate * MinWithdrawalTxVBytes;
+            var payoutSats = amount * 100_000_000M - minFeeSats;
+            if (payoutSats >= TaprootDustSats)
+                return null;
+            var minAmount = (minFeeSats + TaprootDustSats) / 100_000_000M;
+            return $"{context}: {amount:0.########} BTC cannot pay a Bitcoin withdrawal at {feeRate} sat/vB. The smallest withdrawal transaction costs {minFeeSats:0} sats in fees and the payout must be at least {TaprootDustSats} sats, so the minimum at this fee rate is {minAmount:0.########} BTC. Raise the amount or lower the fee rate.";
+        }
+
+        /// <summary>
+        /// Balance-endpoint view of the escrow a holder has in open withdrawal requests on one contract: the total, the
+        /// part in requests past the 360-block window (recoverable only by cancelling), and one entry per request so a
+        /// wallet can offer Complete, or Cancel for an expired or unpayable one.
+        /// </summary>
+        public static (decimal EscrowedAmount, decimal ExpiredEscrowAmount, List<object> Requests) DescribeEscrowedWithdrawals(string address, string scUID)
+        {
+            var height = Globals.LastBlock?.Height ?? 0;
+            var now = TimeUtil.GetTime();
+            decimal total = 0M, expired = 0M;
+            var requests = new List<object>();
+            foreach (var r in VBTCWithdrawalRequest.GetOpenEscrowedRequests(address, scUID))
+            {
+                var isExpired = !VBTCWithdrawalRequest.IsStillBlocking(r, height, now);
+                total += r.Amount;
+                if (isExpired)
+                    expired += r.Amount;
+                requests.Add(new
+                {
+                    RequestHash = r.TransactionHash,
+                    r.Amount,
+                    r.BTCDestination,
+                    r.FeeRate,
+                    r.RequestBlockHeight,
+                    ExpiresAtHeight = r.RequestBlockHeight + VBTCWithdrawalRequest.EXPIRY_BLOCKS,
+                    Expired = isExpired,
+                    Unpayable = GetUnpayableWithdrawalMessage(r) != null,
+                    CancellationPending = VBTCWithdrawalCancellation.HasPendingCancellation(r.TransactionHash, now, scUID),
+                });
+            }
+            return (total, expired, requests);
+        }
+
+        /// <summary>Prefix of the message for a withdrawal request that can never be paid (see GetUnpayableWithdrawalMessage).</summary>
+        public const string UnpayableWithdrawalMarker = "[UNPAYABLE-WITHDRAWAL]";
+
+        /// <summary>
+        /// Null when the request can be paid; otherwise why not and how to recover. Applies to requests of any height:
+        /// ones mined before the fee floor existed can be below it, and completing them fails on every attempt.
+        /// </summary>
+        public static string? GetUnpayableWithdrawalMessage(VBTCWithdrawalRequest? request)
+        {
+            if (request == null || request.IsCompleted || request.Amount <= 0)
+                return null;
+            var feeRate = request.FeeRate != 0 ? request.FeeRate : 10; // CompleteWithdrawal's default
+            var floorError = GetWithdrawalFeeFloorError(request.Amount, feeRate, "This withdrawal");
+            if (floorError == null)
+                return null;
+            var escrowed = VBTCWithdrawalRequest.EscrowAppliesTo(request.RequestBlockHeight)
+                ? $" to refund the {request.Amount:0.########} vBTC held in escrow"
+                : "";
+            return $"{UnpayableWithdrawalMarker} Withdrawal {request.TransactionHash} can never be paid, so completing it will keep failing. {floorError} " +
+                   $"Cancel it instead: a withdrawal-cancel transaction from {request.RequestorAddress} asks the contract's validators to vote{escrowed}.";
+        }
+
+        /// <summary>True once withdrawal concurrency and the fee floor apply to a transaction at <paramref name="height"/>.</summary>
+        public static bool WithdrawalConcurrencyActive(long height) => height >= Globals.VbtcWithdrawalConcurrencyHeight;
+
+        /// <summary>Height a transaction submitted now would be mined at (local gates and mempool admission).</summary>
+        public static long NextBlockHeight => (Globals.LastBlock?.Height ?? 0) + 1;
+
         // Keyed by SmartContractUID; the stored digest guards against a (never expected) change of
         // ContractData under the same UID. Decompiling runs a Trillium REPL, so this is cached.
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string DataDigest, bool IsV2)> _vbtcV2ContractCache = new();
@@ -1062,6 +1151,14 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (feeRate <= 0)
                     return (false, "FeeRate must be greater than zero for vBTC V2 withdrawal request.");
 
+                var concurrencyActive = WithdrawalConcurrencyActive(NextBlockHeight);
+                if (concurrencyActive)
+                {
+                    var floorError = GetWithdrawalFeeFloorError(amount, feeRate, "vBTC V2 withdrawal request");
+                    if (floorError != null)
+                        return (false, floorError);
+                }
+
                 // Get account and validate
                 var account = AccountData.GetSingleAccount(requestorAddress);
                 if (account == null)
@@ -1070,8 +1167,10 @@ namespace VerifiedXCore.Bitcoin.Services
                     return (false, $"Account not found: {requestorAddress}");
                 }
 
-                // FIND-003 FIX: Check if THIS USER already has an active withdrawal request (per-user tracking)
-                var existingRequest = VBTCWithdrawalRequest.GetActiveRequest(requestorAddress, scUID);
+                // FIND-003 FIX: Check if THIS USER already has an active withdrawal request (per-user tracking).
+                // From VbtcWithdrawalConcurrencyHeight a holder may have several open (each escrowed; the pending
+                // check below keeps them within the balance) — an exchange pays many customers from one address.
+                var existingRequest = concurrencyActive ? null : VBTCWithdrawalRequest.GetActiveRequest(requestorAddress, scUID);
                 if (existingRequest != null)
                 {
                     SCLogUtility.Log($"Active withdrawal already exists for user {requestorAddress}. Request Hash: {existingRequest.TransactionHash}", "VBTCService.RequestWithdrawal()");
@@ -1143,6 +1242,8 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 // Verify transaction
                 var result = await TransactionValidatorService.VerifyTX(withdrawalTx);
+                if (result.Item1 && concurrencyActive)
+                    result = CheckPendingWithdrawalDebits(withdrawalTx);
                 if (result.Item1)
                 {
                     await TransactionData.AddTxToWallet(withdrawalTx, true);
@@ -1162,6 +1263,26 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 SCLogUtility.Log($"vBTC V2 Withdrawal Request Error: {ex.Message}", "VBTCService.RequestWithdrawal()");
                 return (false, $"Error: {ApiErrorText.For(ex)}");
+            }
+        }
+
+        /// <summary>
+        /// Local wallet admission: this request together with the requester's other pending transactions must not
+        /// debit more than it holds on any contract (the same SameBlockDebitGuard rule peers apply at admission).
+        /// With several requests allowed open at once, two requests from one wallet can otherwise both pass VerifyTX,
+        /// which reads committed state only.
+        /// </summary>
+        private static (bool, string) CheckPendingWithdrawalDebits(Transaction withdrawalTx)
+        {
+            try
+            {
+                var pending = TransactionData.GetPool().Find(x => x.FromAddress == withdrawalTx.FromAddress && x.Hash != withdrawalTx.Hash).ToList();
+                var (ok, reason) = SameBlockDebitGuard.CheckAgainstPending(withdrawalTx, pending);
+                return ok ? (true, string.Empty) : (false, $"Together with this address's pending transactions the withdrawal exceeds its balance: {reason}");
+            }
+            catch (Exception ex)
+            {
+                return (false, $"Pending-balance check failed: {ex.Message}");
             }
         }
 
@@ -1263,6 +1384,18 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (!planOk)
                     return (false, planError, null);
 
+                // Every allocation is its own Bitcoin transaction paying its own fee.
+                var multiConcurrencyActive = WithdrawalConcurrencyActive(NextBlockHeight);
+                if (multiConcurrencyActive)
+                {
+                    foreach (var allocation in allocations)
+                    {
+                        var floorError = GetWithdrawalFeeFloorError(allocation.Amount, feeRate, $"Withdrawal share from contract {allocation.SCUID}");
+                        if (floorError != null)
+                            return (false, $"{floorError} (The total was split across {allocations.Count} contracts; each share pays its own Bitcoin fee.)", allocations);
+                    }
+                }
+
                 if (allocations.Count == 1)
                 {
                     // One vault covers it — use the plain single-contract path (keeps the on-chain
@@ -1303,6 +1436,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 withdrawalTx.Signature = signature;
 
                 var result = await TransactionValidatorService.VerifyTX(withdrawalTx);
+                if (result.Item1 && multiConcurrencyActive)
+                    result = CheckPendingWithdrawalDebits(withdrawalTx);
                 if (result.Item1)
                 {
                     await TransactionData.AddTxToWallet(withdrawalTx, true);
@@ -1328,9 +1463,10 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Greedy allocation of a total withdrawal across the contracts this address can actually
         /// withdraw from right now: largest available balance first (deterministic tie-break on
         /// SCUID) so the withdrawal uses the fewest vaults — and therefore the fewest Bitcoin
-        /// transactions and miner fees. Contracts consensus would reject the requestor on (an
-        /// active request on the contract, the repeat-request cooldown, a request already pending
-        /// in our mempool) are skipped, so the crafted TX is never one our own validators refuse.
+        /// transactions and miner fees. Before VbtcWithdrawalConcurrencyHeight, contracts consensus
+        /// would reject the requestor on (an active request on the contract, the repeat-request
+        /// cooldown, a request already pending in our mempool) are skipped; from it, the requester's
+        /// own pending requests are subtracted from what each contract has left for it instead.
         ///
         /// Candidate discovery reads the LOCAL VBTCContractV2 table, so this only sees contracts
         /// this node knows about. Callers serving a remote signer (the raw/offline endpoints)
@@ -1343,15 +1479,23 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             var allocations = new List<VBTCV2MultiWithdrawalInput>();
             var currentHeight = Globals.LastBlock?.Height ?? 0;
+            var concurrencyActive = WithdrawalConcurrencyActive(NextBlockHeight);
 
+            // Before VbtcWithdrawalConcurrencyHeight any pending request locks its contract (skip those). From it,
+            // only this requester's own pending requests matter, and they reduce what the contract has left for it.
             var pendingContracts = new HashSet<string>(StringComparer.Ordinal);
+            var ownPendingByContract = new Dictionary<string, decimal>(StringComparer.Ordinal);
             try
             {
                 var pool = TransactionData.GetPool();
                 foreach (var ptx in pool.Find(x => x.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST).ToList())
                 {
-                    foreach (var (scUid, _) in GetVbtcV2WithdrawalOutflows(ptx))
+                    foreach (var (scUid, amt) in GetVbtcV2WithdrawalOutflows(ptx))
+                    {
                         pendingContracts.Add(scUid);
+                        if (ptx.FromAddress == requestorAddress)
+                            ownPendingByContract[scUid] = (ownPendingByContract.TryGetValue(scUid, out var sum) ? sum : 0M) + amt;
+                    }
                 }
             }
             catch { }
@@ -1368,18 +1512,21 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (string.IsNullOrEmpty(scUid) || candidates.Any(c => c.ScUid == scUid))
                         continue;
 
-                    if (pendingContracts.Contains(scUid))
-                        continue;
-                    if (VBTCWithdrawalRequest.HasActiveContractRequest(scUid, currentHeight, includeLocalOnlyRows: true))
-                        continue;
-                    if (VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(requestorAddress, scUid, currentHeight))
-                        continue;
+                    if (!concurrencyActive)
+                    {
+                        if (pendingContracts.Contains(scUid))
+                            continue;
+                        if (VBTCWithdrawalRequest.HasActiveContractRequest(scUid, currentHeight, includeLocalOnlyRows: true))
+                            continue;
+                        if (VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(requestorAddress, scUid, currentHeight))
+                            continue;
+                    }
 
                     var balResult = await TryGetAvailableTransparentVbtcBalance(scUid, requestorAddress);
                     if (!balResult.success)
                         continue;
 
-                    var available = Math.Round(balResult.availableBalance, 8);
+                    var available = Math.Round(balResult.availableBalance - (concurrencyActive && ownPendingByContract.TryGetValue(scUid, out var ownPending) ? ownPending : 0M), 8);
                     if (available > 0)
                         candidates.Add((scUid, available));
                 }
@@ -1424,8 +1571,9 @@ namespace VerifiedXCore.Bitcoin.Services
         /// local contract table <see cref="BuildWithdrawalAllocationPlan"/> enumerates.
         /// </summary>
         public static async Task<(bool Ok, string Error)> ValidateWithdrawalAllocations(
-            string requestorAddress, List<VBTCV2MultiWithdrawalInput>? inputs, decimal totalAmount)
+            string requestorAddress, List<VBTCV2MultiWithdrawalInput>? inputs, decimal totalAmount, int feeRate = 0)
         {
+            var concurrencyActive = WithdrawalConcurrencyActive(NextBlockHeight);
             if (inputs == null || !inputs.Any())
                 return (false, "Inputs cannot be empty for multi-contract vBTC withdrawal.");
 
@@ -1444,6 +1592,12 @@ namespace VerifiedXCore.Bitcoin.Services
                     return (false, "Input amounts must be greater than zero for multi-contract vBTC withdrawal.");
                 if (input.Amount != Math.Round(input.Amount, 8))
                     return (false, "Input amounts cannot have more than 8 decimal places for multi-contract vBTC withdrawal.");
+                if (concurrencyActive)
+                {
+                    var floorError = GetWithdrawalFeeFloorError(input.Amount, feeRate, $"Multi-contract vBTC withdrawal input {input.SCUID}");
+                    if (floorError != null)
+                        return (false, floorError);
+                }
                 sum += input.Amount;
             }
 
@@ -1457,10 +1611,10 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (SmartContractStateTrei.GetSmartContractState(input.SCUID) == null)
                     return (false, $"vBTC V2 contract not found in state trei: {input.SCUID}");
 
-                if (VBTCWithdrawalRequest.HasActiveContractRequest(input.SCUID, currentHeight, includeLocalOnlyRows: false))
+                if (!concurrencyActive && VBTCWithdrawalRequest.HasActiveContractRequest(input.SCUID, currentHeight, includeLocalOnlyRows: false))
                     return (false, $"A withdrawal is already in progress for contract {input.SCUID}; try again once it completes.");
 
-                if (VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(requestorAddress, input.SCUID, currentHeight))
+                if (!concurrencyActive && VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(requestorAddress, input.SCUID, currentHeight))
                     return (false, $"Requestor {requestorAddress} is in the repeat-request cooldown for contract {input.SCUID}.");
 
                 var balResult = await TryGetAvailableTransparentVbtcBalance(input.SCUID, requestorAddress);
@@ -1718,6 +1872,32 @@ namespace VerifiedXCore.Bitcoin.Services
                     return (false, string.Empty, string.Empty, $"Withdrawal request already completed: {withdrawalRequestHash}", null);
                 }
 
+                // Reclaim deferral (VbtcWithdrawalConcurrencyHeight): this withdrawal's tx took back coins of a
+                // withheld transaction, which could still replace it until it confirms, so its COMPLETE waits.
+                if (!signOnly && !isTransientRequest && !string.IsNullOrEmpty(withdrawalRequest.CompleteAfterBtcTxId))
+                {
+                    var (deferredAction, deferredMessage) = await ResolveDeferredCompletion(withdrawalRequest, depositAddress);
+                    if (deferredAction == DeferredCompletionAction.Submit)
+                        return await SubmitWithdrawalCompletion(scUID, withdrawalRequestHash, withdrawalRequest,
+                            withdrawalRequest.Amount, withdrawalRequest.BTCDestination, withdrawalRequest.CompleteAfterBtcTxId!, vbtcContract);
+                    if (deferredAction == DeferredCompletionAction.Wait)
+                        return (false, string.Empty, withdrawalRequest.CompleteAfterBtcTxId!, deferredMessage, null);
+                    // Rebuild: our tx lost to the withheld one (which paid ITS withdrawal); build a new one below.
+                }
+
+                // A request whose amount cannot cover the smallest withdrawal tx at its own fee rate can never be
+                // paid (the builder refuses it on every attempt). Say so now, and point at the only way out.
+                // Requests mined before VbtcWithdrawalConcurrencyHeight's fee floor can be like this.
+                if (!isTransientRequest)
+                {
+                    var unpayable = GetUnpayableWithdrawalMessage(withdrawalRequest);
+                    if (unpayable != null)
+                    {
+                        SCLogUtility.Log($"Withdrawal {withdrawalRequestHash} on {scUID} can never be paid; not starting a ceremony.", "VBTCService.CompleteWithdrawal()");
+                        return (false, string.Empty, string.Empty, unpayable, null);
+                    }
+                }
+
                 // ============================================================
                 // FROST INTEGRATION: Execute Bitcoin Withdrawal Transaction
                 // ============================================================
@@ -1796,25 +1976,27 @@ namespace VerifiedXCore.Bitcoin.Services
                     return (false, string.Empty, string.Empty, $"Insufficient reachable validators. Have: {validators.Count}, Need: {requiredValidators} (Adjusted threshold: {adjustedThreshold}%)", null);
                 }
 
-                // Get withdrawal details — prefer contract Active* fields (set by StateData when TX is mined),
-                // fall back to the VBTCWithdrawalRequest record (handles Raw path, remote validators, and timing edge cases)
+                // Withdrawal details come from THIS request's row (keyed by request hash + contract). The contract's
+                // single Active* slot holds whichever request was mined last, so with several requests open on one
+                // contract it would pay this withdrawal with another holder's amount and destination. It is only a
+                // fallback for a row that carries no details.
                 decimal withdrawalAmount;
                 string btcDestination;
 
-                if (hasLocalContract 
-                    && vbtcContract!.ActiveWithdrawalAmount.HasValue && vbtcContract.ActiveWithdrawalAmount.Value > 0
-                    && !string.IsNullOrEmpty(vbtcContract.ActiveWithdrawalBTCDestination))
+                if (withdrawalRequest.Amount > 0 && !string.IsNullOrEmpty(withdrawalRequest.BTCDestination))
                 {
-                    withdrawalAmount = vbtcContract.ActiveWithdrawalAmount.Value;
-                    btcDestination = vbtcContract.ActiveWithdrawalBTCDestination;
-                }
-                else if (withdrawalRequest.Amount > 0 && !string.IsNullOrEmpty(withdrawalRequest.BTCDestination))
-                {
-                    // Fall back to withdrawal request record (Raw path or TX not yet mined into block)
-                    SCLogUtility.Log($"Using withdrawal request record for details (contract Active* fields not yet populated). Amount: {withdrawalRequest.Amount}, Dest: {withdrawalRequest.BTCDestination}",
-                        "VBTCService.CompleteWithdrawal()");
                     withdrawalAmount = withdrawalRequest.Amount;
                     btcDestination = withdrawalRequest.BTCDestination;
+                }
+                else if (hasLocalContract
+                    && vbtcContract!.ActiveWithdrawalRequestHash == withdrawalRequestHash
+                    && vbtcContract.ActiveWithdrawalAmount.HasValue && vbtcContract.ActiveWithdrawalAmount.Value > 0
+                    && !string.IsNullOrEmpty(vbtcContract.ActiveWithdrawalBTCDestination))
+                {
+                    SCLogUtility.Log($"Withdrawal request row has no details; using the contract's Active* fields for this same request. Amount: {vbtcContract.ActiveWithdrawalAmount}, Dest: {vbtcContract.ActiveWithdrawalBTCDestination}",
+                        "VBTCService.CompleteWithdrawal()");
+                    withdrawalAmount = vbtcContract.ActiveWithdrawalAmount.Value;
+                    btcDestination = vbtcContract.ActiveWithdrawalBTCDestination;
                 }
                 else
                 {
@@ -1880,7 +2062,31 @@ namespace VerifiedXCore.Bitcoin.Services
                     }
                 }
 
-                if (pinnedUnsignedTxHex == null)
+                var concurrencyActive = WithdrawalConcurrencyActive(NextBlockHeight);
+                HashSet<string>? excludedOutpoints = null;
+                HashSet<string> liveOutpoints = new HashSet<string>();
+                HashSet<string> reclaimOutpoints = new HashSet<string>();
+                // A reclaim build is never made for a delegated/bridge-exit call (no row to carry the deferral).
+                var allowReclaim = !isTransientRequest;
+                // A reused pinned build keeps the reclaim intent it was built with.
+                var isReclaim = pinnedUnsignedTxHex != null && withdrawalRequest.CompleteAfterConfirmation;
+
+                if (pinnedUnsignedTxHex == null && concurrencyActive)
+                {
+                    // Concurrency: build only from coins no other withdrawal's signed tx holds (validators refuse
+                    // the rest). Coins of a withheld tx (reclaimable) are held back too, and used only if the free
+                    // coins cannot cover this withdrawal.
+                    var (pinsAnswered, pins) = await FrostMPCService.FetchContractPins(scUID, validators);
+                    var otherPins = pins.Where(p => !string.Equals(p.WithdrawalRequestHash, withdrawalRequestHash, StringComparison.OrdinalIgnoreCase)).ToList();
+                    liveOutpoints = otherPins.Where(p => !p.Reclaimable).SelectMany(p => p.Outpoints).ToHashSet();
+                    reclaimOutpoints = otherPins.Where(p => p.Reclaimable).SelectMany(p => p.Outpoints).Where(o => !liveOutpoints.Contains(o)).ToHashSet();
+                    excludedOutpoints = liveOutpoints.Concat(reclaimOutpoints).ToHashSet();
+                    if (!pinsAnswered)
+                        SCLogUtility.Log($"No validator served /frost/pins for {scUID}; building without exclusions (a refusal will name held coins).", "VBTCService.CompleteWithdrawal()");
+                    else if (excludedOutpoints.Count > 0)
+                        SCLogUtility.Log($"Excluding {excludedOutpoints.Count} coin(s) held by {otherPins.Count} other withdrawal(s) on {scUID} ({reclaimOutpoints.Count} reclaimable).", "VBTCService.CompleteWithdrawal()");
+                }
+                else if (pinnedUnsignedTxHex == null)
                 {
                     // Conflict-preference: if an EARLIER request for this contract left a pinned,
                     // unresolved tx behind, prefer its outpoints so our new tx conflicts with any
@@ -1904,23 +2110,47 @@ namespace VerifiedXCore.Bitcoin.Services
                 var coordinatorAddress = withdrawalRequest.RequestorAddress;
                 SCLogUtility.Log($"Executing FROST withdrawal: {withdrawalAmount} BTC to {btcDestination} (signOnly={signOnly}, coordinator={coordinatorAddress})", "VBTCService.CompleteWithdrawal()");
 
-                var btcResult = await BitcoinTransactionService.ExecuteFROSTWithdrawal(
-                    depositAddress,
-                    btcDestination,
-                    withdrawalAmount,
-                    feeRate,
-                    scUID,
-                    validators,
-                    adjustedThreshold,
-                    broadcast: !signOnly,
-                    coordinatorAddress: coordinatorAddress,
-                    withdrawalRequestHash: withdrawalRequestHash,  // FIND-028: Validator-side dedup
-                    preSignedAuth: preSignedAuth,
-                    pinnedUnsignedTxHex: pinnedUnsignedTxHex,
-                    pinnedCoins: pinnedCoins,
-                    persistPinnedBuild: isTransientRequest ? null : (hex, coins) => PersistPinnedBuild(withdrawalRequestHash, scUID, hex, coins),
-                    preferredOutpoints: preferredOutpoints
-                );
+                Task<(bool Success, string TxHash, string SignedTxHex, string ErrorMessage, FROST.Models.FrostCeremonyOutcome? Ceremony)> RunWithdrawal(
+                    HashSet<string>? preferred, HashSet<string>? excluded, bool reclaimBuild) =>
+                    BitcoinTransactionService.ExecuteFROSTWithdrawal(
+                        depositAddress,
+                        btcDestination,
+                        withdrawalAmount,
+                        feeRate,
+                        scUID,
+                        validators,
+                        adjustedThreshold,
+                        broadcast: !signOnly,
+                        coordinatorAddress: coordinatorAddress,
+                        withdrawalRequestHash: withdrawalRequestHash,  // FIND-028: Validator-side dedup
+                        preSignedAuth: preSignedAuth,
+                        pinnedUnsignedTxHex: pinnedUnsignedTxHex,
+                        pinnedCoins: pinnedCoins,
+                        persistPinnedBuild: isTransientRequest ? null : (hex, coins) => PersistPinnedBuild(withdrawalRequestHash, scUID, hex, coins, reclaimBuild),
+                        preferredOutpoints: preferred,
+                        excludedOutpoints: excluded,
+                        onSigned: isTransientRequest ? null : (txid, hex) =>
+                        {
+                            // Before broadcast: a coordinator that dies after broadcasting still waits for the
+                            // confirmation on restart, and one that dies before can rebroadcast.
+                            if (reclaimBuild || isReclaim)
+                                PersistDeferredCompletion(withdrawalRequestHash, scUID, txid, hex);
+                        });
+
+                var btcResult = await RunWithdrawal(preferredOutpoints, excludedOutpoints, reclaimBuild: false);
+
+                // Free coins cannot cover it but a withheld tx's coins can: take those back. Validators sign this only
+                // for pins they also find reclaimable, and COMPLETE waits for this tx to confirm (the withheld tx could
+                // otherwise replace it after this withdrawal completed).
+                if (!btcResult.Success && pinnedUnsignedTxHex == null && allowReclaim && reclaimOutpoints.Count > 0
+                    && btcResult.ErrorMessage.Contains(BitcoinTransactionService.PinnedCoinsShortfallMarker))
+                {
+                    SCLogUtility.Log($"Free coins cannot cover withdrawal {withdrawalRequestHash}; reclaiming {reclaimOutpoints.Count} coin(s) of withheld transaction(s) on {scUID}.", "VBTCService.CompleteWithdrawal()");
+                    isReclaim = true;
+                    btcResult = await RunWithdrawal(reclaimOutpoints, liveOutpoints, reclaimBuild: true);
+                    if (!btcResult.Success)
+                        isReclaim = false;
+                }
 
                 if (!btcResult.Success)
                 {
@@ -1943,16 +2173,147 @@ namespace VerifiedXCore.Bitcoin.Services
                 PersistSignedBtcTxId(withdrawalRequestHash, scUID, btcTxHash);
 
                 // signOnly mode: Return the signed TX hex without broadcasting or creating VFX TX.
-                // The caller (wallet node) will handle broadcast and VFX completion TX.
+                // The caller (wallet node) will handle broadcast and VFX completion TX. A reclaim build is
+                // recorded on the row (CompleteAfterBtcTxId): the raw COMPLETE builder waits for its confirmation.
                 if (signOnly)
                 {
-                    SCLogUtility.Log($"signOnly mode: returning signed TX hex to caller. TxHash: {btcTxHash}", "VBTCService.CompleteWithdrawal()");
+                    SCLogUtility.Log($"signOnly mode: returning signed TX hex to caller. TxHash: {btcTxHash}" + (isReclaim ? " (reclaim: complete after it confirms)" : ""), "VBTCService.CompleteWithdrawal()");
                     return (true, string.Empty, signedTxHex, string.Empty, null);
                 }
 
-                // ============================================================
-                // Full mode: Continue with VFX completion transaction
-                // ============================================================
+                if (isReclaim)
+                {
+                    SCLogUtility.Log($"Reclaim tx {btcTxHash} broadcast for withdrawal {withdrawalRequestHash}; COMPLETE deferred until it confirms.", "VBTCService.CompleteWithdrawal()");
+                    return (false, string.Empty, btcTxHash, AwaitingConfirmationMessage(btcTxHash, "broadcast"), null);
+                }
+
+                return await SubmitWithdrawalCompletion(scUID, withdrawalRequestHash, withdrawalRequest, withdrawalAmount, btcDestination, btcTxHash, vbtcContract);
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"vBTC V2 Withdrawal Complete Error: {ex.Message}", "VBTCService.CompleteWithdrawal()");
+                return (false, string.Empty, string.Empty, $"Error: {ApiErrorText.For(ex)}", null);
+            }
+        }
+
+        /// <summary>
+        /// Coins of the contract that other withdrawals' signed transactions hold, as the contract's validators report
+        /// them: Live (never spend) and Reclaimable (withheld; spend only when the free coins cannot cover the
+        /// withdrawal). The same split CompleteWithdrawal builds with, for callers that must predict its build
+        /// (PrepareCompleteWithdrawalRaw). Empty sets before VbtcWithdrawalConcurrencyHeight.
+        /// </summary>
+        public static async Task<(HashSet<string> Live, HashSet<string> Reclaimable)> GetHeldCoins(string scUID, string withdrawalRequestHash)
+        {
+            var live = new HashSet<string>();
+            var reclaimable = new HashSet<string>();
+            if (!WithdrawalConcurrencyActive(NextBlockHeight))
+                return (live, reclaimable);
+            try
+            {
+                var scState = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scState == null || string.IsNullOrEmpty(scState.ContractData))
+                    return (live, reclaimable);
+                var feature = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData)?.Features?
+                    .Where(x => x.FeatureName == FeatureName.TokenizationV2).Select(x => x.FeatureFeatures).FirstOrDefault() as TokenizationV2Feature;
+                var snapshot = new HashSet<string>(feature?.ValidatorAddressesSnapshot ?? new List<string>());
+                var validators = (VBTCValidatorRegistry.GetActiveValidators() ?? new List<VBTCValidator>())
+                    .Where(v => snapshot.Count == 0 || snapshot.Contains(v.ValidatorAddress)).ToList();
+
+                var (_, pins) = await FrostMPCService.FetchContractPins(scUID, validators);
+                var others = pins.Where(p => !string.Equals(p.WithdrawalRequestHash, withdrawalRequestHash, StringComparison.OrdinalIgnoreCase)).ToList();
+                live = others.Where(p => !p.Reclaimable).SelectMany(p => p.Outpoints).ToHashSet();
+                reclaimable = others.Where(p => p.Reclaimable).SelectMany(p => p.Outpoints).Where(o => !live.Contains(o)).ToHashSet();
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"Held-coin lookup failed for {scUID}: {ex.Message}", "VBTCService.GetHeldCoins()");
+            }
+            return (live, reclaimable);
+        }
+
+        /// <summary>Prefix of the CompleteWithdrawal result for a reclaim tx whose COMPLETE waits for its confirmation.</summary>
+        public const string AwaitingConfirmationMarker = "[AWAITING-BTC-CONFIRMATION]";
+
+        private static string AwaitingConfirmationMessage(string btcTxHash, string state) =>
+            $"{AwaitingConfirmationMarker} Bitcoin transaction {btcTxHash} {state}. It takes back coins a withheld withdrawal was holding, so this withdrawal is completed on VFX only after it confirms (a node wallet does this automatically; otherwise call CompleteWithdrawal again).";
+
+        public enum DeferredCompletionAction { Submit, Wait, Rebuild }
+
+        /// <summary>
+        /// Next step for a reclaim withdrawal whose COMPLETE waits for its own tx (CompleteAfterBtcTxId): submit once
+        /// it confirms; wait while it is in a mempool (rebroadcasting the stored signed tx when no server knows it);
+        /// rebuild when it can never confirm (the withheld tx won: an input is spent by a confirmed tx) — the fields
+        /// are then cleared, and validators allow a new tx on the same evidence.
+        /// </summary>
+        private static async Task<(DeferredCompletionAction Action, string Message)> ResolveDeferredCompletion(VBTCWithdrawalRequest row, string depositAddress)
+        {
+            var txid = row.CompleteAfterBtcTxId!;
+
+            if (HasPendingCompletion(row.TransactionHash, row.SmartContractUID))
+                return (DeferredCompletionAction.Wait, $"The completion for withdrawal {row.TransactionHash} is already in the mempool.");
+
+            var lookup = await BitcoinTransactionService.GetTransactionConfirmationsResilient(txid);
+            if (lookup.Confirmations >= 1)
+                return (DeferredCompletionAction.Submit, string.Empty);
+            if (lookup.Confirmations == 0)
+                return (DeferredCompletionAction.Wait, AwaitingConfirmationMessage(txid, "is in the mempool, waiting for its first confirmation"));
+
+            // Unknown to every server: never broadcast (coordinator died after signing), evicted, or replaced.
+            var coins = string.IsNullOrEmpty(row.PinnedCoinsJson)
+                ? new List<PinnedWithdrawalCoin>()
+                : JsonConvert.DeserializeObject<List<PinnedWithdrawalCoin>>(row.PinnedCoinsJson) ?? new List<PinnedWithdrawalCoin>();
+            var (verdict, detail) = await BitcoinTransactionService.GetOutpointSpendVerdict(depositAddress, coins.Select(c => c.ToOutpointKey()));
+            if (verdict == BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed)
+            {
+                SCLogUtility.Log($"Reclaim tx {txid} for withdrawal {row.TransactionHash} can never confirm ({detail}); rebuilding.", "VBTCService.ResolveDeferredCompletion()");
+                row.CompleteAfterConfirmation = false;
+                row.CompleteAfterBtcTxId = null;
+                row.DeferredSignedTxHex = null;
+                row.PinnedUnsignedTxHex = null;
+                row.PinnedCoinsJson = null;
+                VBTCWithdrawalRequest.Save(row, true);
+                return (DeferredCompletionAction.Rebuild, string.Empty);
+            }
+
+            if (!string.IsNullOrEmpty(row.DeferredSignedTxHex) && verdict == BitcoinTransactionService.OutpointSpendVerdict.NotSpentByConfirmed)
+            {
+                var rebroadcast = await BitcoinTransactionService.BroadcastTransaction(NBitcoin.Transaction.Parse(row.DeferredSignedTxHex, Globals.BTCNetwork));
+                return (DeferredCompletionAction.Wait, AwaitingConfirmationMessage(txid, rebroadcast.Success ? "was not seen by any server and has been rebroadcast" : $"was not seen by any server; rebroadcast failed ({rebroadcast.ErrorMessage})"));
+            }
+
+            return (DeferredCompletionAction.Wait, AwaitingConfirmationMessage(txid, $"is not known to any server yet ({detail})"));
+        }
+
+        /// <summary>True when a WITHDRAWAL_COMPLETE for this request and contract is already in the local mempool.</summary>
+        private static bool HasPendingCompletion(string withdrawalRequestHash, string scUID)
+        {
+            try
+            {
+                return TransactionData.GetPool().Find(x => x.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE).ToList()
+                    .Any(x =>
+                    {
+                        try
+                        {
+                            var j = JObject.Parse(x.Data);
+                            return j["WithdrawalRequestHash"]?.ToObject<string>() == withdrawalRequestHash && j["ContractUID"]?.ToObject<string>() == scUID;
+                        }
+                        catch { return false; }
+                    });
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// Signs and submits the VFX WITHDRAWAL_COMPLETE for a withdrawal whose Bitcoin tx is out (and, for a reclaim,
+        /// confirmed). Signed by the requester's local account.
+        /// </summary>
+        private static async Task<(bool Success, string VFXTxHash, string BTCTxHash, string ErrorMessage, FROST.Models.FrostCeremonyOutcome? Ceremony)> SubmitWithdrawalCompletion(
+            string scUID, string withdrawalRequestHash, VBTCWithdrawalRequest withdrawalRequest,
+            decimal withdrawalAmount, string btcDestination, string btcTxHash, VBTCContractV2? vbtcContract)
+        {
+            try
+            {
+                var hasLocalContract = vbtcContract != null;
 
                 // Use validator address or first available account for transaction creation
                 string fromAddress = withdrawalRequest.RequestorAddress;
@@ -2117,7 +2478,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// validators, so any retry re-signs the identical sighashes instead of rebuilding.
         /// Written BEFORE the first announce; local-only, never consensus-read.
         /// </summary>
-        private static void PersistPinnedBuild(string withdrawalRequestHash, string scUID, string unsignedTxHex, List<PinnedWithdrawalCoin> coins)
+        private static void PersistPinnedBuild(string withdrawalRequestHash, string scUID, string unsignedTxHex, List<PinnedWithdrawalCoin> coins, bool reclaimBuild = false)
         {
             try
             {
@@ -2127,11 +2488,38 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 storedRequest.PinnedUnsignedTxHex = unsignedTxHex;
                 storedRequest.PinnedCoinsJson = JsonConvert.SerializeObject(coins);
+                // A retry reuses this exact tx, so it must keep waiting for confirmation too.
+                storedRequest.CompleteAfterConfirmation = reclaimBuild;
+                storedRequest.CompleteAfterBtcTxId = null;
+                storedRequest.DeferredSignedTxHex = null;
                 VBTCWithdrawalRequest.Save(storedRequest, true);
             }
             catch (Exception ex)
             {
                 SCLogUtility.Log($"Failed to persist pinned build on request {withdrawalRequestHash}: {ex.Message}", "VBTCService.PersistPinnedBuild()");
+            }
+        }
+
+        /// <summary>
+        /// Reclaim: record the signed tx this withdrawal's COMPLETE waits for (txid) and its signed hex (rebroadcast
+        /// after a crash). Written before broadcast. Local-only, never consensus-read.
+        /// </summary>
+        private static void PersistDeferredCompletion(string withdrawalRequestHash, string scUID, string btcTxId, string signedTxHex)
+        {
+            try
+            {
+                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
+                if (storedRequest == null)
+                    return;
+
+                storedRequest.CompleteAfterConfirmation = true;
+                storedRequest.CompleteAfterBtcTxId = btcTxId;
+                storedRequest.DeferredSignedTxHex = signedTxHex;
+                VBTCWithdrawalRequest.Save(storedRequest, true);
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"Failed to persist deferred completion on request {withdrawalRequestHash}: {ex.Message}", "VBTCService.PersistDeferredCompletion()");
             }
         }
 

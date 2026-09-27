@@ -1753,9 +1753,27 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         SmartContractUID = payload.SmartContractUID
                     });
                 }
+                else if (result.ErrorMessage?.StartsWith(Services.VBTCService.AwaitingConfirmationMarker) == true)
+                {
+                    // Reclaim: the BTC tx is out; the VFX completion follows its first confirmation.
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        Message = result.ErrorMessage,
+                        BTCTransactionHash = result.BTCTxHash,
+                        Status = "Awaiting_BTC_Confirmation",
+                        SmartContractUID = payload.SmartContractUID
+                    });
+                }
                 else
                 {
-                    return JsonConvert.SerializeObject(new { Success = false, Message = result.ErrorMessage });
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = result.ErrorMessage,
+                        // Retrying cannot help: the wallet should offer cancellation instead of Complete.
+                        Unpayable = result.ErrorMessage?.StartsWith(Services.VBTCService.UnpayableWithdrawalMarker) == true
+                    });
                 }
             }
             catch (Exception ex)
@@ -1765,10 +1783,16 @@ namespace VerifiedXCore.Bitcoin.Controllers
         }
 
         /// <summary>
-        /// Request cancellation of a failed withdrawal
+        /// Cancel a withdrawal request that will not be paid (e.g. one that can never be paid at its fee rate), so the
+        /// contract's validators can vote to refund its escrow. Submits the on-chain VBTC_V2_WITHDRAWAL_CANCEL signed by
+        /// the requester's account on this node; OwnerAddress is the address that REQUESTED the withdrawal (the field
+        /// name predates non-owner withdrawals). A web wallet, whose keys this node does not hold, builds the same
+        /// transaction with GetRawCancelWithdrawalTxData and submits it with SendRawCancelWithdrawalTx.
+        /// (This used to save a cancellation record on this node only: nothing reached the chain, and the leftover
+        /// record made this node refuse the requester's real cancel transaction.)
         /// </summary>
-        /// <param name="payload">Cancellation request with failure proof</param>
-        /// <returns>Cancellation request ID</returns>
+        /// <param name="payload">SmartContractUID, OwnerAddress (the requester), WithdrawalRequestHash</param>
+        /// <returns>The cancel transaction hash and the cancellation's on-chain UID</returns>
         [HttpPost("CancelWithdrawal")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
         public async Task<string> CancelWithdrawal([FromBody] VBTCCancellationPayload payload)
@@ -1783,33 +1807,24 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     string.IsNullOrEmpty(payload.WithdrawalRequestHash))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
 
-                var cancellationUID = Guid.NewGuid().ToString();
+                var requester = payload.OwnerAddress;
+                if (AccountData.GetSingleAccount(requester) == null)
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = $"This node does not hold the key for {requester}, so it cannot sign the cancel. Build it with GetRawCancelWithdrawalTxData, sign the hash, and submit it with SendRawCancelWithdrawalTx."
+                    });
 
-                // Create cancellation record
-                var cancellation = new VBTCWithdrawalCancellation
-                {
-                    CancellationUID = cancellationUID,
-                    SmartContractUID = payload.SmartContractUID,
-                    OwnerAddress = payload.OwnerAddress,
-                    WithdrawalRequestHash = payload.WithdrawalRequestHash,
-                    BTCTxHash = payload.BTCTxHash,
-                    FailureProof = payload.FailureProof,
-                    RequestTime = TimeUtil.GetTime(),
-                    ValidatorVotes = new Dictionary<string, bool>(),
-                    ApproveCount = 0,
-                    RejectCount = 0,
-                    IsApproved = false,
-                    IsProcessed = false
-                };
-
-                // Save cancellation to database
-                VBTCWithdrawalCancellation.SaveCancellation(cancellation);
+                var (ok, result) = await Services.VBTCService.CancelWithdrawal(payload.SmartContractUID, requester, payload.WithdrawalRequestHash);
+                if (!ok)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = result });
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
-                    Message = "Cancellation request created. Awaiting validator votes (75% required).",
-                    CancellationUID = cancellationUID,
+                    Message = "Cancel transaction broadcast. Once it is mined, the contract's validators vote on it (75% required); an approved cancellation refunds the escrowed vBTC.",
+                    CancelTxHash = result,
+                    CancellationUID = $"{VBTCWithdrawalCancellation.OnChainUidPrefix}{result}",
                     RequiredVotes = "75%"
                 });
             }
@@ -1978,7 +1993,15 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                 // 4. S3C §0: per-CONTRACT active-withdrawal gate (was per-user). Reject if the
                 // contract already has any active withdrawal (anti-grief expiry inside the check).
-                var hasActive = VBTCWithdrawalRequest.HasActiveContractRequest(payload.SmartContractUID, Globals.LastBlock?.Height ?? 0);
+                // Retired at VbtcWithdrawalConcurrencyHeight, which also brings the fee floor.
+                var preRegConcurrencyActive = Services.VBTCService.WithdrawalConcurrencyActive(Services.VBTCService.NextBlockHeight);
+                if (preRegConcurrencyActive)
+                {
+                    var floorError = Services.VBTCService.GetWithdrawalFeeFloorError(payload.Amount, payload.FeeRate, "vBTC V2 withdrawal request");
+                    if (floorError != null)
+                        return JsonConvert.SerializeObject(new { Success = false, Message = floorError });
+                }
+                var hasActive = !preRegConcurrencyActive && VBTCWithdrawalRequest.HasActiveContractRequest(payload.SmartContractUID, Globals.LastBlock?.Height ?? 0);
                 if (hasActive)
                 {
                     // Local gate — free to be helpful: name the blocking request and when it releases.
@@ -2112,6 +2135,11 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     if (withdrawalRequest.IsCompleted)
                         return JsonConvert.SerializeObject(new { Success = false, Message = "Withdrawal request already completed" });
 
+                    // Before the wallet signs anything: a request that can never be paid should be cancelled.
+                    var unpayable = Services.VBTCService.GetUnpayableWithdrawalMessage(withdrawalRequest);
+                    if (unpayable != null)
+                        return JsonConvert.SerializeObject(new { Success = false, Message = unpayable, Unpayable = true });
+
                     amount = withdrawalRequest.Amount;
                     btcDestination = withdrawalRequest.BTCDestination ?? "";
                     feeRate = withdrawalRequest.FeeRate != 0 ? withdrawalRequest.FeeRate : 10;
@@ -2169,8 +2197,19 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         ?? VBTCContractV2.GetContract(payload.SmartContractUID)?.DepositAddress; // chain first (any node), local fallback
                     if (!string.IsNullOrEmpty(depositAddress))
                     {
+                        // Same coin policy Execute uses: skip coins other withdrawals' signed txs hold; take back a
+                        // withheld tx's coins only when the free ones cannot cover this withdrawal.
+                        var (liveHeld, reclaimableHeld) = await Services.VBTCService.GetHeldCoins(payload.SmartContractUID, payload.WithdrawalRequestHash);
                         var buildProbe = await Services.BitcoinTransactionService.BuildUnsignedTaprootTransaction(
-                            depositAddress, btcDestination, amount, feeRate);
+                            depositAddress, btcDestination, amount, feeRate,
+                            excludedOutpoints: liveHeld.Concat(reclaimableHeld).ToHashSet());
+                        if (!buildProbe.Success && reclaimableHeld.Count > 0
+                            && buildProbe.ErrorMessage.Contains(Services.BitcoinTransactionService.PinnedCoinsShortfallMarker))
+                        {
+                            buildProbe = await Services.BitcoinTransactionService.BuildUnsignedTaprootTransaction(
+                                depositAddress, btcDestination, amount, feeRate,
+                                preferredOutpoints: reclaimableHeld, excludedOutpoints: liveHeld);
+                        }
 
                         if (buildProbe.Success && buildProbe.UnsignedTx != null)
                         {
@@ -2314,6 +2353,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     {
                         Success = false,
                         Message = withdrawalResult.ErrorMessage ?? "FROST signing ceremony failed",
+                        Unpayable = withdrawalResult.ErrorMessage?.StartsWith(Services.VBTCService.UnpayableWithdrawalMarker) == true,
                         FailureCode = ceremony?.FailureCode.ToString(),
                         SessionId = ceremony?.SessionId,
                         InputIndex = ceremony?.InputIndex,
@@ -2327,13 +2367,22 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     });
                 }
 
+                // Reclaim build (it takes back a withheld withdrawal's coins): the wallet must wait for the
+                // tx's first confirmation before recording the completion; GetRawCompleteWithdrawalTxData enforces it.
+                var signedRow = VBTCWithdrawalRequest.GetByTransactionHash(payload.WithdrawalRequestHash, payload.SmartContractUID);
+                var completeAfterConfirmation = !string.IsNullOrEmpty(signedRow?.CompleteAfterBtcTxId);
+
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
-                    Message = "FROST signing successful. Broadcast the SignedBTCTxHex to the Bitcoin network.",
+                    Message = completeAfterConfirmation
+                        ? "FROST signing successful. Broadcast the SignedBTCTxHex, then wait for its FIRST CONFIRMATION before building the completion (it takes back coins a withheld withdrawal was holding)."
+                        : "FROST signing successful. Broadcast the SignedBTCTxHex to the Bitcoin network.",
                     SignedBTCTxHex = withdrawalResult.BTCTxHash, // In signOnly mode, BTCTxHash contains the signed hex
                     SmartContractUID = payload.SmartContractUID,
-                    WithdrawalRequestHash = payload.WithdrawalRequestHash
+                    WithdrawalRequestHash = payload.WithdrawalRequestHash,
+                    CompleteAfterConfirmation = completeAfterConfirmation,
+                    BTCTransactionId = signedRow?.CompleteAfterBtcTxId
                 });
             }
             catch (Exception ex)
@@ -2396,38 +2445,15 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Only the contract owner can request cancellation" });
                 }
 
-                var cancellationUID = Guid.NewGuid().ToString();
-
-                // 6. Create cancellation record
-                var cancellation = new VBTCWithdrawalCancellation
-                {
-                    CancellationUID = cancellationUID,
-                    SmartContractUID = payload.SmartContractUID,
-                    OwnerAddress = payload.OwnerAddress,
-                    WithdrawalRequestHash = payload.WithdrawalRequestHash,
-                    BTCTxHash = payload.BTCTxHash,
-                    FailureProof = payload.FailureProof,
-                    RequestTime = currentTime,
-                    ValidatorVotes = new Dictionary<string, bool>(),
-                    ApproveCount = 0,
-                    RejectCount = 0,
-                    IsApproved = false,
-                    IsProcessed = false
-                };
-
-                // 7. Save to database
-                VBTCWithdrawalCancellation.SaveCancellation(cancellation);
-
+                // 5. No record is saved here. A cancellation exists only once the requester's signed
+                // VBTC_V2_WITHDRAWAL_CANCEL is mined (every node then creates it). The record this used to save
+                // lived on this node only, reached no validator, and made this node refuse the real cancel.
                 return JsonConvert.SerializeObject(new
                 {
-                    Success = true,
-                    Message = "Raw cancellation request created successfully. Awaiting validator votes (75% required).",
-                    CancellationUID = cancellationUID,
+                    Success = false,
+                    Message = "A withdrawal is cancelled on chain by the address that requested it: build the transaction with GetRawCancelWithdrawalTxData (RequestorAddress = the requester), sign the hash, and submit it with SendRawCancelWithdrawalTx.",
                     SmartContractUID = payload.SmartContractUID,
-                    WithdrawalRequestHash = payload.WithdrawalRequestHash,
-                    RequiredVotes = "75%",
-                    UniqueId = payload.UniqueId,
-                    Timestamp = currentTime
+                    WithdrawalRequestHash = payload.WithdrawalRequestHash
                 });
             }
             catch (Exception ex)
@@ -2783,11 +2809,20 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (payload.FeeRate <= 0)
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Fee rate must be greater than zero" });
 
+                var rawConcurrencyActive = Services.VBTCService.WithdrawalConcurrencyActive(Services.VBTCService.NextBlockHeight);
+                if (rawConcurrencyActive)
+                {
+                    var floorError = Services.VBTCService.GetWithdrawalFeeFloorError(payload.Amount, payload.FeeRate, "vBTC V2 withdrawal request");
+                    if (floorError != null)
+                        return JsonConvert.SerializeObject(new { Success = false, Message = floorError });
+                }
+
                 // Check for existing active withdrawal — but ignore the caller's own LOCAL-ONLY
                 // pre-registration rows (TransactionHash == "", created by RequestWithdrawalRaw).
                 // Such a row represents THIS withdrawal being built, not a competing one; counting
                 // it here made the pre-register → build-TX sequence self-blocking for ~360 blocks.
-                var existingRequest = VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()?.Query()
+                // From VbtcWithdrawalConcurrencyHeight a holder may have several open (each escrowed).
+                var existingRequest = rawConcurrencyActive ? null : VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()?.Query()
                     .Where(x => x.RequestorAddress == payload.RequestorAddress &&
                                 x.SmartContractUID == payload.SmartContractUID &&
                                 !x.IsCompleted)
@@ -2899,7 +2934,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (payload.Inputs != null && payload.Inputs.Any())
                 {
                     var (allocOk, allocError) = await Services.VBTCService.ValidateWithdrawalAllocations(
-                        payload.RequestorAddress, payload.Inputs, payload.TotalAmount);
+                        payload.RequestorAddress, payload.Inputs, payload.TotalAmount, payload.FeeRate);
                     if (!allocOk)
                         return JsonConvert.SerializeObject(new { Success = false, Message = allocError });
 
@@ -2913,6 +2948,17 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         return JsonConvert.SerializeObject(new { Success = false, Message = planError });
 
                     allocations = planned;
+                }
+
+                // Each allocation pays its own Bitcoin fee (VbtcWithdrawalConcurrencyHeight fee floor).
+                if (Services.VBTCService.WithdrawalConcurrencyActive(Services.VBTCService.NextBlockHeight))
+                {
+                    foreach (var allocation in allocations)
+                    {
+                        var floorError = Services.VBTCService.GetWithdrawalFeeFloorError(allocation.Amount, payload.FeeRate, $"Withdrawal share from contract {allocation.SCUID}");
+                        if (floorError != null)
+                            return JsonConvert.SerializeObject(new { Success = false, Message = floorError });
+                    }
                 }
 
                 var btcAddress = payload.BTCAddress.ToBTCAddressNormalize();
@@ -3132,6 +3178,22 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                 if (string.IsNullOrEmpty(payload.BTCDestination))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "BTCDestination is required" });
+
+                // Reclaim: a tx that took back a withheld withdrawal's coins is completed only once it confirms —
+                // until then the withheld tx can still replace it, and a mined completion would stand unpaid.
+                var completingRow = VBTCWithdrawalRequest.GetByTransactionHash(payload.WithdrawalRequestHash, payload.SmartContractUID);
+                if (!string.IsNullOrEmpty(completingRow?.CompleteAfterBtcTxId)
+                    && string.Equals(completingRow.CompleteAfterBtcTxId, payload.BTCTransactionHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    var conf = await Services.BitcoinTransactionService.GetTransactionConfirmationsResilient(payload.BTCTransactionHash);
+                    if (!(conf.Confirmations >= 1))
+                        return JsonConvert.SerializeObject(new
+                        {
+                            Success = false,
+                            Message = $"{Services.VBTCService.AwaitingConfirmationMarker} Bitcoin transaction {payload.BTCTransactionHash} has not confirmed yet ({(conf.Confirmations == 0 ? "in the mempool" : "not seen by any server")}). This withdrawal takes back coins a withheld withdrawal was holding, so complete it after the first confirmation.",
+                            CompleteAfterConfirmation = true
+                        });
+                }
 
                 // Build transaction data (same format as VBTCService.CompleteWithdrawal uses)
                 var txData = JsonConvert.SerializeObject(new
@@ -3898,6 +3960,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     ? ReserveTransactions.GetPendingVBTCTransferTotal(address, scUID)
                     : 0M;
 
+                // Escrowed withdrawals are already out of Balance (debited at REQUEST), so PendingWithdrawals does
+                // not show them; an expired unpaid one comes back only by cancelling it.
+                var (escrowedAmount, expiredEscrowAmount, escrowedRequests) = Services.VBTCService.DescribeEscrowedWithdrawals(address, scUID);
+
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
@@ -3910,6 +3976,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     AvailableBalance = totalBalance - pendingWithdrawals - pendingReserveSends,
                     PendingWithdrawals = pendingWithdrawals,
                     PendingReserveSends = pendingReserveSends,
+                    EscrowedWithdrawalAmount = escrowedAmount,
+                    ExpiredEscrowAmount = expiredEscrowAmount,
+                    EscrowedWithdrawals = escrowedRequests,
                     IsOwner = isOwner,
                     TransactionCount = scState.SCStateTreiTokenizationTXes?.Count(x => x.FromAddress == address || x.ToAddress == address) ?? 0
                 });
@@ -4010,7 +4079,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         //SCLogUtility.Log($"VBTC-TRACE [5-BalanceQuery]: SCUID: {contract.SmartContractUID} — StateTreiFound: {scState != null}, LedgerBalance: {ledgerBalance}, TxCount: {txCount}, IsOwner: {isOwner}, Included: {contractBalance > 0 || isOwner}",
                         //    "VBTCController.GetAllVBTCBalances()");
 
-                        if (contractBalance > 0 || isOwner)
+                        // A holder whose whole balance sits in escrow still has something on this contract.
+                        var (escrowedAmount, expiredEscrowAmount, escrowedRequests) = Services.VBTCService.DescribeEscrowedWithdrawals(address, contract.SmartContractUID);
+
+                        if (contractBalance > 0 || isOwner || escrowedAmount > 0)
                         {
                             var pendingWithdrawals = VBTCWithdrawalRequest.GetIncompleteWithdrawalAmount(address, contract.SmartContractUID);
 
@@ -4030,6 +4102,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                                 AvailableBalance = contractBalance - pendingWithdrawals - pendingReserveSends,
                                 PendingWithdrawals = pendingWithdrawals,
                                 PendingReserveSends = pendingReserveSends,
+                                EscrowedWithdrawalAmount = escrowedAmount,
+                                ExpiredEscrowAmount = expiredEscrowAmount,
+                                EscrowedWithdrawals = escrowedRequests,
                                 TransactionCount = txCount,
                                 IsOwner = isOwner,
                                 WithdrawalStatus = Services.VBTCChainView.WithdrawalStatus(contract.SmartContractUID).ToString()
@@ -4114,6 +4189,18 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Contract not found" });
                 }
+
+                // The local record's withdrawal fields are written when a request is mined and never cleared when it
+                // expires, so a dead request showed as pending forever (and blocked the wallet's Withdraw button).
+                // Report them from the withdrawal table with the expiry applied, like GetContractList (not saved).
+                var active = Services.VBTCChainView.ActiveWithdrawal(scUID);
+                contract.WithdrawalStatus = Services.VBTCChainView.WithdrawalStatus(scUID);
+                contract.ActiveWithdrawalBTCDestination = active?.BTCDestination;
+                contract.ActiveWithdrawalAmount = active?.Amount;
+                contract.ActiveWithdrawalRequestHash = active?.TransactionHash;
+                contract.WithdrawalRequestBlock = active?.RequestBlockHeight;
+                contract.ActiveWithdrawalFeeRate = active?.FeeRate ?? 0;
+                contract.ActiveWithdrawalRequestTime = active?.Timestamp ?? 0;
 
                 return JsonConvert.SerializeObject(new
                 {

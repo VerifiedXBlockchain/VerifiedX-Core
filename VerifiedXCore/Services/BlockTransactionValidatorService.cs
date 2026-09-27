@@ -800,8 +800,10 @@ namespace VerifiedXCore.Services
                                 }
 
                                 // Per-contract gates, measured against the block's own height so
-                                // replay stays deterministic (NOT the chain tip).
-                                if (VBTCWithdrawalRequest.HasActiveContractRequest(input.SCUID, blockHeight, includeLocalOnlyRows: false))
+                                // replay stays deterministic (NOT the chain tip). Retired at
+                                // VbtcWithdrawalConcurrencyHeight, like the consensus rule they mirror.
+                                var multiGatesActive = !Bitcoin.Services.VBTCService.WithdrawalConcurrencyActive(blockHeight);
+                                if (multiGatesActive && VBTCWithdrawalRequest.HasActiveContractRequest(input.SCUID, blockHeight, includeLocalOnlyRows: false))
                                 {
                                     SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST (multi) validation failed: contract {input.SCUID} already has an active withdrawal",
                                         "BlockTransactionValidatorService.ProcessIncomingTransactions()");
@@ -811,7 +813,7 @@ namespace VerifiedXCore.Services
                                     return;
                                 }
 
-                                if (VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(multiRequester, input.SCUID, blockHeight))
+                                if (multiGatesActive && VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(multiRequester, input.SCUID, blockHeight))
                                 {
                                     SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST (multi) validation failed: requestor {multiRequester} in repeat-request cooldown for contract {input.SCUID}",
                                         "BlockTransactionValidatorService.ProcessIncomingTransactions()");
@@ -891,7 +893,9 @@ namespace VerifiedXCore.Services
                             // under block replay/sync (NOT the chain tip).
                             // includeLocalOnlyRows: false — consensus must not read rows that exist on
                             // this node only (fork vector; activates at V2WithdrawalExpiryFixHeight).
-                            if (VBTCWithdrawalRequest.HasActiveContractRequest(scUID, blockHeight, includeLocalOnlyRows: false))
+                            // Retired at VbtcWithdrawalConcurrencyHeight, with the cooldown below.
+                            var singleGatesActive = !Bitcoin.Services.VBTCService.WithdrawalConcurrencyActive(blockHeight);
+                            if (singleGatesActive && VBTCWithdrawalRequest.HasActiveContractRequest(scUID, blockHeight, includeLocalOnlyRows: false))
                             {
                                 SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: contract {scUID} already has an active withdrawal",
                                     "BlockTransactionValidatorService.ProcessIncomingTransactions()");
@@ -904,7 +908,7 @@ namespace VerifiedXCore.Services
                             // Anti-griefing (V2WithdrawalExpiryFixHeight): repeat-request cooldown after an
                             // expired-incomplete request by the same requestor. Deterministic: mined
                             // RequestBlockHeight + the block's own height.
-                            if (VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(requesterAddress, scUID, blockHeight))
+                            if (singleGatesActive && VBTCWithdrawalRequest.IsRequestorInRepeatCooldown(requesterAddress, scUID, blockHeight))
                             {
                                 SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: requestor {requesterAddress} in repeat-request cooldown for contract {scUID}",
                                     "BlockTransactionValidatorService.ProcessIncomingTransactions()");

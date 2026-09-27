@@ -287,8 +287,11 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         // §12.4: turn §0's per-contract reject into a local wait-and-retry, bounded by a timeout.
+        // From VbtcWithdrawalConcurrencyHeight other holders' requests no longer lock the contract: no wait.
         private static async Task<bool> WaitForContractFree(string s3cUID)
         {
+            if (VBTCService.WithdrawalConcurrencyActive(VBTCService.NextBlockHeight))
+                return true;
             var waited = 0;
             while (waited < ContractFreeMaxSeconds)
             {

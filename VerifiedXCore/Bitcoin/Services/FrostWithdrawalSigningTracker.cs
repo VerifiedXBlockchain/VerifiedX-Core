@@ -23,12 +23,18 @@ namespace VerifiedXCore.Bitcoin.Services
     ///    second transaction for the same withdrawal — the actual double-spend attack).
     ///  - The full sighash set announced on the first sign/start is pinned; later inputs must
     ///    match it (a fake "input 1" carrying another transaction's sighash is refused).
-    ///  - Per-CONTRACT outpoint pin (double-withdrawal guard): once a withdrawal's tx is signed,
-    ///    its input outpoints are pinned for the contract. A DIFFERENT withdrawal's tx is only
-    ///    signed if it CONFLICTS with the pinned tx (spends at least one pinned outpoint) —
-    ///    Bitcoin then guarantees at most one of them ever confirms, closing the
-    ///    sign-withhold-expire-resign double-payout path. The pin clears when the pinned tx (or a
-    ///    conflict) is observed on-chain — see FrostStartup's spentness check — never by timeout.
+    ///  - Contract outpoint pins: once a withdrawal's tx is signed, its input outpoints are pinned
+    ///    for the contract. Pins clear when the pinned tx (or a conflict) is observed on-chain —
+    ///    see FrostStartup's release check — never by timeout.
+    ///    * Before VbtcWithdrawalConcurrencyHeight (one pin per contract): a DIFFERENT withdrawal's
+    ///      tx is only signed if it CONFLICTS with the pinned tx, so at most one of them confirms.
+    ///      Without escrow that closed the sign-withhold-expire-resign double payout.
+    ///    * From VbtcWithdrawalConcurrencyHeight (one pin per withdrawal): every request is escrowed,
+    ///      so two withdrawals' transactions confirming is two legitimate payouts. A new tx is signed
+    ///      when it spends NONE of another live withdrawal's pinned coins — a conflict would let one
+    ///      withdrawal's payout knock out another's after it completed. The one exception is a
+    ///      RECLAIMABLE pin (a withheld transaction; FrostStartup decides), whose coins a new tx may
+    ///      take back — that coordinator then completes only after its tx confirms.
     ///
     /// This is the primary defense — even if a user modifies their local node code to bypass
     /// client-side checks, validators independently enforce these rules.
@@ -41,9 +47,10 @@ namespace VerifiedXCore.Bitcoin.Services
         private static readonly ConcurrentDictionary<string, WithdrawalRecord> _withdrawals = new();
 
         /// <summary>
-        /// Per-contract outstanding-signed-transaction pins. Key = scUID.
+        /// Outstanding-signed-transaction pins: scUID → (withdrawal request hash → pin). Before
+        /// VbtcWithdrawalConcurrencyHeight a contract holds at most one pin (the latest signing replaces it).
         /// </summary>
-        private static readonly ConcurrentDictionary<string, ContractOutpointPin> _contractPins = new();
+        private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, ContractOutpointPin>> _contractPins = new();
 
         /// <summary>
         /// Cooldown period after a failed signing attempt before retry is allowed (seconds).
@@ -61,6 +68,12 @@ namespace VerifiedXCore.Bitcoin.Services
         /// </summary>
         private const int RECORD_EXPIRY_SECONDS = 86400;
 
+        /// <summary>Marker in a refusal caused by a pin; FrostStartup then runs the on-chain release and reclaim checks.</summary>
+        public const string PinMarker = "PIN:";
+
+        /// <summary>One outstanding signed transaction per withdrawal (concurrency) vs one per contract (legacy).</summary>
+        public static bool ConcurrencyMode => VBTCService.WithdrawalConcurrencyActive(VBTCService.NextBlockHeight);
+
         /// <summary>
         /// Check whether this validator may participate in a signing ceremony for the given
         /// withdrawal input. Returns (blocked, reason) — if blocked, refuse the sign/start.
@@ -71,13 +84,15 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <param name="messageHash">The BIP341 sighash being signed (empty = legacy caller; falls back to withdrawal-level rules).</param>
         /// <param name="allInputSighashes">The full announced sighash set for the transaction (null = legacy single-input).</param>
         /// <param name="txInputOutpoints">"txid:vout" for every input of the transaction being signed (used by the contract-level conflict rule).</param>
+        /// <param name="reclaimablePins">Withdrawal hashes whose pins FrostStartup found reclaimable (concurrency mode only).</param>
         public static (bool Blocked, string Reason) CheckWithdrawalSigning(
             string scUID,
             string withdrawalRequestHash,
             int inputIndex = 0,
             string? messageHash = null,
             List<string>? allInputSighashes = null,
-            List<string>? txInputOutpoints = null)
+            List<string>? txInputOutpoints = null,
+            ISet<string>? reclaimablePins = null)
         {
             if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
                 return (false, string.Empty); // Non-withdrawal signing, allow
@@ -142,24 +157,66 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
             }
 
-            // Contract-level double-withdrawal guard: while a DIFFERENT withdrawal's signed tx is
-            // outstanding for this contract, only a CONFLICTING tx (sharing >=1 input outpoint) may
-            // be signed. Deterministic largest-first coin selection makes legitimate successors
-            // conflict naturally; only a disjoint-UTXO second payout is refused.
-            if (_contractPins.TryGetValue(scUID, out var pin) &&
-                !string.Equals(pin.WithdrawalRequestHash, withdrawalRequestHash, StringComparison.OrdinalIgnoreCase))
+            if (!_contractPins.TryGetValue(scUID, out var pins) || pins.IsEmpty)
+                return (false, string.Empty);
+
+            var others = pins.Values
+                .Where(p => !string.Equals(p.WithdrawalRequestHash, withdrawalRequestHash, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(p => p.Timestamp)
+                .ToList();
+            if (others.Count == 0)
+                return (false, string.Empty);
+
+            if (!ConcurrencyMode)
             {
+                // Legacy contract-level double-withdrawal guard: while a DIFFERENT withdrawal's signed tx is
+                // outstanding for this contract, only a CONFLICTING tx (sharing >=1 input outpoint) may
+                // be signed. Deterministic largest-first coin selection makes legitimate successors
+                // conflict naturally; only a disjoint-UTXO second payout is refused.
+                var pin = others[0];
                 var conflicts = txInputOutpoints != null &&
                                 txInputOutpoints.Any(op => pin.Outpoints.Contains(op, StringComparer.OrdinalIgnoreCase));
                 if (!conflicts)
                 {
                     return (true, $"Contract has an outstanding signed withdrawal tx ({pin.BtcTxId}, withdrawal {pin.WithdrawalRequestHash}). " +
                         $"A new withdrawal tx must spend at least one of its inputs [{string.Join(",", pin.Outpoints)}] so at most one can confirm. " +
-                        $"PIN:{pin.BtcTxId}");
+                        $"{PinMarker}{pin.BtcTxId}");
                 }
+                return (false, string.Empty);
+            }
+
+            // Concurrency: the tx must not take another live withdrawal's coins. Without its outpoints the
+            // overlap cannot be checked (FrostSigningAuthorization derives them, so this is a malformed call).
+            if (txInputOutpoints == null || txInputOutpoints.Count == 0)
+                return (true, $"Transaction inputs were not announced; cannot check them against the {others.Count} outstanding signed withdrawal tx(s) on this contract. {PinMarker}{others[0].BtcTxId}");
+
+            foreach (var pin in others)
+            {
+                var overlap = txInputOutpoints.Where(op => pin.Outpoints.Contains(op, StringComparer.OrdinalIgnoreCase)).ToList();
+                if (overlap.Count == 0)
+                    continue;
+                if (reclaimablePins != null && reclaimablePins.Contains(pin.WithdrawalRequestHash))
+                    continue; // withheld: its coins may be taken back
+                return (true, $"The transaction spends [{string.Join(",", overlap)}], held by the outstanding signed tx {pin.BtcTxId} of withdrawal {pin.WithdrawalRequestHash}. " +
+                    $"Build from other coins (see /frost/pins/{scUID}); they free up when that tx confirms. {PinMarker}{pin.BtcTxId}");
             }
 
             return (false, string.Empty);
+        }
+
+        /// <summary>
+        /// Other withdrawals' pins on the contract that share a coin with <paramref name="txInputOutpoints"/>
+        /// (the candidates FrostStartup evaluates for reclaim).
+        /// </summary>
+        public static List<ContractPinInfo> GetOverlappingPins(string scUID, string withdrawalRequestHash, IEnumerable<string>? txInputOutpoints)
+        {
+            if (txInputOutpoints == null)
+                return new List<ContractPinInfo>();
+            var ops = txInputOutpoints.Select(o => o.ToLowerInvariant()).ToHashSet();
+            return GetContractPins(scUID)
+                .Where(p => !string.Equals(p.WithdrawalRequestHash, withdrawalRequestHash, StringComparison.OrdinalIgnoreCase))
+                .Where(p => p.Outpoints.Any(ops.Contains))
+                .ToList();
         }
 
         /// <summary>
@@ -216,9 +273,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
         /// <summary>
         /// Record that this validator generated a Round 2 signature share for a withdrawal input.
-        /// Also pins the transaction's input outpoints at the CONTRACT level so a different
-        /// withdrawal cannot sign a non-conflicting (double-payout) transaction while this signed
-        /// one is outstanding.
+        /// Also pins the transaction's input outpoints at the CONTRACT level (see the class summary).
         /// </summary>
         public static void RecordSigningCompleted(string scUID, string withdrawalRequestHash, string sessionId,
             int inputIndex = 0, string? messageHash = null, List<string>? txInputOutpoints = null, string? btcTxId = null)
@@ -250,8 +305,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
 
             // Contract-level pin: my key share is now out for this transaction; until it is observed
-            // on-chain (confirmed or conflicted away), any OTHER withdrawal tx for this contract must
-            // conflict with it.
+            // on-chain (confirmed or conflicted away) the rules in CheckWithdrawalSigning apply.
             if (txInputOutpoints != null && txInputOutpoints.Count > 0)
             {
                 var pin = new ContractOutpointPin
@@ -262,12 +316,54 @@ namespace VerifiedXCore.Bitcoin.Services
                     Outpoints = txInputOutpoints.Select(o => o.ToLowerInvariant()).ToList(),
                     Timestamp = TimeUtil.GetTime()
                 };
-                _contractPins.AddOrUpdate(scUID, pin, (_, _) => pin);
+                if (ConcurrencyMode)
+                {
+                    PinsFor(scUID)[withdrawalRequestHash] = pin;
+                }
+                else
+                {
+                    // Legacy: one pin per contract — the latest signed tx replaces it.
+                    var single = NewPinSet();
+                    single[withdrawalRequestHash] = pin;
+                    _contractPins[scUID] = single;
+                }
             }
 
             LogUtility.Log($"[FROST Dedup] Recorded signing COMPLETED for withdrawal {withdrawalRequestHash} input {inputIndex} on contract {scUID}, session {sessionId}" +
                 (txInputOutpoints != null ? $", pinned {txInputOutpoints.Count} outpoint(s)" : ""),
                 "FrostWithdrawalSigningTracker.RecordSigningCompleted");
+        }
+
+        /// <summary>
+        /// Re-creates a pin from durable evidence after a restart (the in-memory pins do not survive one, and a
+        /// signed transaction stays broadcastable). Never replaces a live pin. <paramref name="signedAt"/> keeps
+        /// the original signing time, which the reclaim grace period is measured from.
+        /// </summary>
+        public static bool RestorePin(string scUID, string withdrawalRequestHash, string? btcTxId, List<string> outpoints, long signedAt)
+        {
+            if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash) || outpoints == null || outpoints.Count == 0)
+                return false;
+            return PinsFor(scUID).TryAdd(withdrawalRequestHash, new ContractOutpointPin
+            {
+                ScUID = scUID,
+                WithdrawalRequestHash = withdrawalRequestHash,
+                BtcTxId = btcTxId ?? string.Empty,
+                Outpoints = outpoints.Select(o => o.ToLowerInvariant()).ToList(),
+                Timestamp = signedAt > 0 ? signedAt : TimeUtil.GetTime()
+            });
+        }
+
+        /// <summary>
+        /// The withdrawal's signed tx is provably dead (an input spent by a confirmed tx — FrostStartup checks):
+        /// drop its in-memory signing record and pin so a replacement tx for the same withdrawal can be signed now,
+        /// not after the 24h record expiry.
+        /// </summary>
+        public static void ForgetDeadTransaction(string scUID, string withdrawalRequestHash, string reason)
+        {
+            if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
+                return;
+            _withdrawals.TryRemove(BuildKey(scUID, withdrawalRequestHash), out _);
+            ClearContractPin(scUID, withdrawalRequestHash, reason);
         }
 
         /// <summary>
@@ -315,58 +411,86 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// Returns the outstanding signed-transaction pin for a contract, if any.
+        /// The most recent outstanding signed-transaction pin for a contract, if any (the only one before
+        /// VbtcWithdrawalConcurrencyHeight). Use <see cref="GetContractPins"/> for all of them.
         /// </summary>
         public static (string WithdrawalRequestHash, string BtcTxId, List<string> Outpoints)? GetContractPin(string scUID)
         {
-            if (_contractPins.TryGetValue(scUID, out var pin))
-                return (pin.WithdrawalRequestHash, pin.BtcTxId, pin.Outpoints.ToList());
-            return null;
+            var latest = GetContractPins(scUID).OrderByDescending(p => p.PinnedAt).FirstOrDefault();
+            if (latest == null)
+                return null;
+            return (latest.WithdrawalRequestHash, latest.BtcTxId, latest.Outpoints.ToList());
+        }
+
+        /// <summary>Every outstanding signed-transaction pin for a contract.</summary>
+        public static List<ContractPinInfo> GetContractPins(string scUID)
+        {
+            if (string.IsNullOrEmpty(scUID) || !_contractPins.TryGetValue(scUID, out var pins))
+                return new List<ContractPinInfo>();
+            return pins.Values.Select(ToInfo).ToList();
         }
 
         /// <summary>
-        /// Clears the contract pin — call ONLY after observing on-chain that the pinned tx confirmed
-        /// or that its inputs were spent by a conflicting tx (i.e. the pinned tx can never confirm).
-        /// The pin has no time-based expiry: a signed, unbroadcast tx stays spendable forever.
+        /// Clears every pin on the contract (operator override) — call ONLY after observing on-chain that
+        /// the pinned txs are resolved. The pin has no time-based expiry: a signed, unbroadcast tx stays
+        /// spendable forever.
         /// </summary>
         public static void ClearContractPin(string scUID, string reason)
         {
-            if (_contractPins.TryRemove(scUID, out var pin))
+            if (_contractPins.TryRemove(scUID, out var pins))
             {
-                LogUtility.Log($"[FROST Dedup] Cleared contract outpoint pin for {scUID} (tx {pin.BtcTxId}, withdrawal {pin.WithdrawalRequestHash}): {reason}",
-                    "FrostWithdrawalSigningTracker.ClearContractPin");
+                foreach (var pin in pins.Values)
+                    LogUtility.Log($"[FROST Dedup] Cleared contract outpoint pin for {scUID} (tx {pin.BtcTxId}, withdrawal {pin.WithdrawalRequestHash}): {reason}",
+                        "FrostWithdrawalSigningTracker.ClearContractPin");
             }
         }
 
         /// <summary>
-        /// Snapshot of every outstanding contract pin, for the background reconciler and the
-        /// localhost-only /frost/status endpoint. All fields are on-chain/contract-public data.
+        /// Clears one withdrawal's pin — call ONLY after observing on-chain that its tx confirmed or can never
+        /// confirm (an input spent by a confirmed transaction).
         /// </summary>
-        public static List<ContractPinInfo> GetAllContractPins()
+        public static void ClearContractPin(string scUID, string withdrawalRequestHash, string reason)
         {
-            return _contractPins.Values
-                .Select(pin => new ContractPinInfo
-                {
-                    ScUID = pin.ScUID,
-                    WithdrawalRequestHash = pin.WithdrawalRequestHash,
-                    BtcTxId = pin.BtcTxId,
-                    Outpoints = pin.Outpoints.ToList(),
-                    PinnedAt = pin.Timestamp,
-                    LastReleaseCheckTime = pin.LastReleaseCheckTime,
-                    LastReleaseCheckOutcome = pin.LastReleaseCheckOutcome
-                })
-                .ToList();
+            if (_contractPins.TryGetValue(scUID, out var pins) && pins.TryRemove(withdrawalRequestHash, out var pin))
+            {
+                LogUtility.Log($"[FROST Dedup] Cleared contract outpoint pin for {scUID} (tx {pin.BtcTxId}, withdrawal {pin.WithdrawalRequestHash}): {reason}",
+                    "FrostWithdrawalSigningTracker.ClearContractPin");
+                if (pins.IsEmpty)
+                    _contractPins.TryRemove(new KeyValuePair<string, ConcurrentDictionary<string, ContractOutpointPin>>(scUID, pins));
+            }
         }
 
         /// <summary>
-        /// Stamps the outcome of a pin-release check onto the live pin (kept + why), so a pin that
+        /// Snapshot of every outstanding pin, for the background reconciler and the /frost/status and
+        /// /frost/pins endpoints. All fields are on-chain/contract-public data.
+        /// </summary>
+        public static List<ContractPinInfo> GetAllContractPins()
+        {
+            return _contractPins.Values.SelectMany(p => p.Values).Select(ToInfo).ToList();
+        }
+
+        /// <summary>
+        /// Stamps the outcome of a pin-release check onto the live pins (kept + why), so a pin that
         /// is being held is visibly being held for a REASON — the old release path kept pins with
         /// no telemetry at all, which is how two validators sat on a confirmed tx's pin for hours.
         /// No-op if the pin no longer exists (released concurrently).
         /// </summary>
         public static void NotePinReleaseCheck(string scUID, string outcome)
         {
-            if (_contractPins.TryGetValue(scUID, out var pin))
+            if (_contractPins.TryGetValue(scUID, out var pins))
+            {
+                foreach (var pin in pins.Values)
+                {
+                    pin.LastReleaseCheckTime = TimeUtil.GetTime();
+                    pin.LastReleaseCheckOutcome = outcome;
+                }
+            }
+        }
+
+        /// <summary>Stamps one withdrawal's pin with the outcome of its release check.</summary>
+        public static void NotePinReleaseCheck(string scUID, string withdrawalRequestHash, string outcome)
+        {
+            if (_contractPins.TryGetValue(scUID, out var pins) && pins.TryGetValue(withdrawalRequestHash, out var pin))
             {
                 pin.LastReleaseCheckTime = TimeUtil.GetTime();
                 pin.LastReleaseCheckOutcome = outcome;
@@ -409,6 +533,23 @@ namespace VerifiedXCore.Bitcoin.Services
         private static string BuildKey(string scUID, string withdrawalRequestHash)
             => $"{scUID}:{withdrawalRequestHash}";
 
+        private static ConcurrentDictionary<string, ContractOutpointPin> NewPinSet()
+            => new ConcurrentDictionary<string, ContractOutpointPin>(StringComparer.OrdinalIgnoreCase);
+
+        private static ConcurrentDictionary<string, ContractOutpointPin> PinsFor(string scUID)
+            => _contractPins.GetOrAdd(scUID, _ => NewPinSet());
+
+        private static ContractPinInfo ToInfo(ContractOutpointPin pin) => new ContractPinInfo
+        {
+            ScUID = pin.ScUID,
+            WithdrawalRequestHash = pin.WithdrawalRequestHash,
+            BtcTxId = pin.BtcTxId,
+            Outpoints = pin.Outpoints.ToList(),
+            PinnedAt = pin.Timestamp,
+            LastReleaseCheckTime = pin.LastReleaseCheckTime,
+            LastReleaseCheckOutcome = pin.LastReleaseCheckOutcome
+        };
+
         /// <summary>
         /// True if this validator has produced a signature share for ANY input of a Bitcoin
         /// transaction for the withdrawal, or holds the contract-level outpoint pin for it. Used to
@@ -427,8 +568,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
             }
 
-            if (_contractPins.TryGetValue(scUID, out var pin)
-                && string.Equals(pin.WithdrawalRequestHash, withdrawalRequestHash, StringComparison.Ordinal))
+            if (_contractPins.TryGetValue(scUID, out var pins) && pins.ContainsKey(withdrawalRequestHash))
                 return true;
 
             // Durable evidence outlives the in-memory records.
@@ -468,6 +608,7 @@ namespace VerifiedXCore.Bitcoin.Services
             public string WithdrawalRequestHash { get; set; } = string.Empty;
             public string BtcTxId { get; set; } = string.Empty;
             public List<string> Outpoints { get; set; } = new();
+            /// <summary>Unix time the transaction was signed (restored from evidence after a restart).</summary>
             public long Timestamp { get; set; }
             /// <summary>Unix time of the last release check that ran against this pin (0 = never checked).</summary>
             public long LastReleaseCheckTime { get; set; }
