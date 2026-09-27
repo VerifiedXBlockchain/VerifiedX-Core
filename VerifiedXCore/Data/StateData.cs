@@ -581,12 +581,14 @@ namespace VerifiedXCore.Data
                                             // Awaited: these now mutate the tokenization ledger
                                             // (consensus state) and must not race the rest of
                                             // block application or the world-trei update.
-                                            await CallBackReserveAccountTx(callBackHash);
+                                            await CallBackReserveAccountTx(callBackHash,
+                                                HistoricalTransactionExceptions.KeepsReversedTransferPending(tx, block.Height)); // historical, see there
                                             break;
                                         case "Recover()":
                                             string recoveryAddress = jobj["RecoveryAddress"].ToObject<string>();
                                             string recoverySigScript = jobj["RecoverySigScript"].ToObject<string>();
-                                            await RecoverReserveAccountTx(recoveryAddress, tx.FromAddress, block.StateRoot);
+                                            await RecoverReserveAccountTx(recoveryAddress, tx.FromAddress, block.StateRoot,
+                                                HistoricalTransactionExceptions.KeepsReversedTransferPending(tx, block.Height)); // historical, see there
                                             break;
                                         default:
                                             break;
@@ -874,7 +876,9 @@ namespace VerifiedXCore.Data
             catch { }
         }
 
-        private static async Task CallBackReserveAccountTx(string? callBackHash)
+        /// <param name="keepTransferPending">Only for the historical mainnet callbacks in
+        /// HistoricalTransactionExceptions: refund as usual but leave the reserve row Pending, as the network applied them.</param>
+        private static async Task CallBackReserveAccountTx(string? callBackHash, bool keepTransferPending = false)
         {
             try
             {
@@ -1052,9 +1056,12 @@ namespace VerifiedXCore.Data
                         // Gating this flip on the wallet row left the row Pending on non-wallet
                         // nodes, where the finalizer would later apply a transfer that was
                         // called back everywhere else (consensus divergence).
-                        rTX.ReserveTransactionStatus = ReserveTransactionStatus.CalledBack;
-                        if (rtxDb != null)
-                            await rtxDb.UpdateSafeAsync(rTX);
+                        if (!keepTransferPending)
+                        {
+                            rTX.ReserveTransactionStatus = ReserveTransactionStatus.CalledBack;
+                            if (rtxDb != null)
+                                await rtxDb.UpdateSafeAsync(rTX);
+                        }
 
                         // Local wallet rows (0, 1, or 2 — same-wallet sends store both the
                         // sender and recipient copies under one hash).
@@ -1064,7 +1071,9 @@ namespace VerifiedXCore.Data
             }
             catch { }
         }
-        private static async Task RecoverReserveAccountTx(string? _recoveryAddress, string _fromAddress, string stateRoot)
+        /// <param name="keepTransfersPending">Only for the historical mainnet recovery in HistoricalTransactionExceptions:
+        /// redirect as usual but leave the reserve rows Pending, as the network applied it.</param>
+        private static async Task RecoverReserveAccountTx(string? _recoveryAddress, string _fromAddress, string stateRoot, bool keepTransfersPending = false)
         {
             try
             {
@@ -1226,9 +1235,12 @@ namespace VerifiedXCore.Data
                         // Flip the reserve row UNCONDITIONALLY (see CallBack note above) —
                         // on non-wallet nodes a Pending row would otherwise be finalized later,
                         // applying the ORIGINAL transfer on top of the recovery redirect.
-                        rTX.ReserveTransactionStatus = ReserveTransactionStatus.Recovered;
-                        if (rtxDb != null)
-                            await rtxDb.UpdateSafeAsync(rTX);
+                        if (!keepTransfersPending)
+                        {
+                            rTX.ReserveTransactionStatus = ReserveTransactionStatus.Recovered;
+                            if (rtxDb != null)
+                                await rtxDb.UpdateSafeAsync(rTX);
+                        }
 
                         await TransactionData.UpdateTxStatusForAllByHash(rTX.Hash, TransactionStatus.Recovered);
                     }
