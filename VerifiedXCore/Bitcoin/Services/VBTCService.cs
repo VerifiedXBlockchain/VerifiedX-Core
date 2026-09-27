@@ -222,7 +222,44 @@ namespace VerifiedXCore.Bitcoin.Services
 
             ledgerBalance += VBTCWithdrawalRequest.GetCompletedWithdrawalAmount(ownerAddress, scState.SmartContractUID, currentHeight);
 
+            // Ex-owner correction (tester MTI#9), same activation as the all-requesters add-back above. That add-back makes
+            // the owner's figure equal to "deposit minus what every other address holds on the ledger", and it assumes no
+            // other address holds less than zero - true for holders, whose spends are checked against their rows. It is not
+            // true for a former owner: the debits it made while it owned the vault (transfers out, withdrawals) stay on its
+            // address when ownership moves, so its rows sum below zero and the new owner was credited with them - e.g. a
+            // former owner's 0.0055 withdrawal counted as the new owner's spendable vBTC, and a transfer of it was admitted.
+            // Such an address holds nothing (it cannot spend either: its own balance is that same negative sum), so it counts
+            // as zero. Every spendable figure on the contract then adds up to the deposit. Block validation trusts the
+            // producer for owner debits, so this changes what nodes admit and report, not which blocks are valid.
+            if (currentHeight >= Globals.V2WithdrawalOwnerAddBackFixHeight)
+                ledgerBalance += NegativeNonOwnerPositions(scState, ownerAddress);
+
             return ledgerBalance;
+        }
+
+        /// <summary>
+        /// The sum of the ledger positions below zero held by addresses other than <paramref name="ownerAddress"/> (a former
+        /// owner's leftover owner-era debits). Each address's position is computed exactly as its own balance is: the sum
+        /// of the rows it appears in. Returns zero or less.
+        /// </summary>
+        public static decimal NegativeNonOwnerPositions(SmartContractStateTrei scState, string ownerAddress)
+        {
+            var rows = scState?.SCStateTreiTokenizationTXes;
+            if (rows == null || rows.Count == 0)
+                return 0M;
+
+            var others = rows.SelectMany(r => new[] { r.FromAddress, r.ToAddress })
+                .Where(a => !string.IsNullOrEmpty(a) && a != "+" && a != "-" && a != ownerAddress)
+                .Distinct(StringComparer.Ordinal);
+
+            decimal negative = 0M;
+            foreach (var address in others)
+            {
+                var position = rows.Where(r => r.FromAddress == address || r.ToAddress == address).Sum(r => r.Amount);
+                if (position < 0M)
+                    negative += position;
+            }
+            return negative;
         }
 
         /// <summary>
