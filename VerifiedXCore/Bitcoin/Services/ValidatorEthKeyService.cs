@@ -27,8 +27,16 @@ namespace VerifiedXCore.Bitcoin.Services
             if (account == null)
                 return string.Empty;
 
+            // The Base address depends only on the public key, which the account stores in the clear, so it is derived
+            // from that - the same address, EIP-55 cased like EthECKey.GetPublicAddress(). Through the private key it failed
+            // whenever the wallet was encrypted and locked: GetKey then returns the encrypted record, which is not hex
+            // (tester: "Transfer to Base" preflight FormatException on a locked wallet).
+            var fromPublicKey = DeriveBaseAddressFromVfxPublicKey(account.PublicKey);
+            if (!string.IsNullOrEmpty(fromPublicKey))
+                return Nethereum.Util.AddressUtil.Current.ConvertToChecksumAddress(fromPublicKey);
+
             var privHex = account.GetKey;
-            if (string.IsNullOrEmpty(privHex))
+            if (string.IsNullOrEmpty(privHex) || !privHex.All(Uri.IsHexDigit))
                 return string.Empty;
 
             if (privHex.Length % 2 != 0)
