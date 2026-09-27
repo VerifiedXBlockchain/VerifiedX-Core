@@ -137,7 +137,7 @@ namespace VerifiedXCore
         /// (c) a per-requestor repeat-offense cooldown applies after an expired-incomplete request.
         /// Inert (rule never active) until set. Testnet/mainnet values assigned in Program/WardenService.
         /// </summary>
-        public static long V2WithdrawalExpiryFixHeight = 999_999_999_999L;
+        public static long V2WithdrawalExpiryFixHeight = 7_281_000L;
         /// <summary>
         /// vBTC owner add-back consensus fix activation height. At/after this height the owner
         /// balance add-back (VBTCWithdrawalRequest.GetCompletedWithdrawalAmount) counts ALL
@@ -150,7 +150,7 @@ namespace VerifiedXCore
         /// bypass). Inert (legacy owner-only behavior) until set. Testnet/mainnet values assigned
         /// in Program/WardenService.
         /// </summary>
-        public static long V2WithdrawalOwnerAddBackFixHeight = 999_999_999_999L;
+        public static long V2WithdrawalOwnerAddBackFixHeight = 7_281_000L;
         /// <summary>
         /// Activation height for the legacy TransferVBTCV2() dispatcher's blockVerify bypass.
         /// At/after this height an owner-balance shortfall in that path is bypassed during block
@@ -161,7 +161,7 @@ namespace VerifiedXCore
         /// otherwise-valid blocks. Permissive-only. Inert until set; values assigned in
         /// Program/WardenService.
         /// </summary>
-        public static long VbtcLegacyTransferBypassFixHeight = 999_999_999_999L;
+        public static long VbtcLegacyTransferBypassFixHeight = 7_281_000L;
         /// <summary>
         /// vBTC V2 multi-contract transfer activation height. At/after this height a
         /// VBTC_V2_TRANSFER whose Data.Function == "TransferVBTCMultiV2()" is validated and
@@ -174,7 +174,7 @@ namespace VerifiedXCore
         /// during the mixed-fleet window. Inert until set. Testnet/mainnet values assigned in
         /// Program/WardenService.
         /// </summary>
-        public static long V2TransferMultiHeight = 999_999_999_999L;
+        public static long V2TransferMultiHeight = 7_281_000L;
 
         /// <summary>
         /// Bridge burn-binding hardening (security fix): at/after this height, bridge unlock /
@@ -184,7 +184,7 @@ namespace VerifiedXCore
         /// are validated against lock state. Before it, legacy (unbound) verification applies so
         /// historical blocks stay valid.
         /// </summary>
-        public static long BridgeBurnBindingHeight = 999_999_999_999L;
+        public static long BridgeBurnBindingHeight = 7_281_000L;
 
         /// <summary>
         /// Bridge intra-block guard (security fix): at/after this height, a block may not contain two
@@ -192,7 +192,7 @@ namespace VerifiedXCore
         /// pool-unlock apply consumes the burn and debits each lock BEFORE crediting. Before it, the
         /// legacy behaviour applies so historical blocks stay valid.
         /// </summary>
-        public static long BridgeIntraBlockGuardHeight = 999_999_999_999L;
+        public static long BridgeIntraBlockGuardHeight = 7_296_200L;
 
         /// <summary>
         /// NEW-26: vBTC V2 deposit-address binding. At/after this height a contract creation carrying a TokenizationV2
@@ -216,7 +216,7 @@ namespace VerifiedXCore
         /// escrow a holder could receive the BTC, never complete, keep the vBTC and repeat after the
         /// request expired — draining a shared contract's vault.
         /// </summary>
-        public static long WithdrawalEscrowHeight = 999_999_999_999L;
+        public static long WithdrawalEscrowHeight = 7_296_200L;
 
         /// <summary>
         /// vBTC withdrawal concurrency (S3C §0 revision). At/after this height:
