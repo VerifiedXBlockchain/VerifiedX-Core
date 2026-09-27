@@ -44,6 +44,7 @@ namespace VerifiedXCore.Services
                 Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 7_296_200L;
                 Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 7_296_200L;
                 Globals.VbtcWithdrawalConcurrencyHeight = Globals.VbtcWithdrawalConcurrencyHeight; // TODO testnet height (above the tip at deploy)
+                Globals.VbtcCancellationVoteRulesHeight = Globals.VbtcCancellationVoteRulesHeight; // TODO testnet height (same value as Program.cs)
             }
             else
             {
@@ -61,6 +62,7 @@ namespace VerifiedXCore.Services
                 Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 7_296_200L;
                 Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 7_296_200L;
                 Globals.VbtcWithdrawalConcurrencyHeight = Globals.VbtcWithdrawalConcurrencyHeight; // TODO mainnet height (at or after WithdrawalEscrowHeight)
+                Globals.VbtcCancellationVoteRulesHeight = Globals.VbtcCancellationVoteRulesHeight; // TODO mainnet height (same value as Program.cs)
             }
 
             Config.Config.EstablishConfigFile();

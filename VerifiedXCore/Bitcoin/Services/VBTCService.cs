@@ -2085,8 +2085,17 @@ namespace VerifiedXCore.Bitcoin.Services
 
                             case PinnedReuseDecision.AlreadyPaid:
                                 SCLogUtility.Log($"Withdrawal {withdrawalRequestHash} already paid on-chain as {pinnedTxId} ({pinnedTxConfirmations} conf) — refusing to sign a second tx.", "VBTCService.CompleteWithdrawal()");
-                                return (false, string.Empty, string.Empty,
-                                    $"The previously signed Bitcoin tx {pinnedTxId} for this withdrawal is already confirmed on-chain — this withdrawal is paid. Complete/reconcile it instead of re-signing.", null);
+                                // Paid, but its completion never reached the chain (the coordinator stopped between
+                                // broadcast and COMPLETE). Nothing is signed again: record the completion with the
+                                // confirmed transaction. This is also where a cancellation rejected for a signed,
+                                // confirmed transaction ends.
+                                if (!signOnly && !isTransientRequest && !string.IsNullOrEmpty(pinnedTxId))
+                                {
+                                    SCLogUtility.Log($"Submitting the completion of withdrawal {withdrawalRequestHash} for confirmed Bitcoin tx {pinnedTxId}.", "VBTCService.CompleteWithdrawal()");
+                                    return await SubmitWithdrawalCompletion(scUID, withdrawalRequestHash, withdrawalRequest, withdrawalAmount, btcDestination, pinnedTxId, vbtcContract);
+                                }
+                                return (false, string.Empty, pinnedTxId ?? string.Empty,
+                                    $"{AlreadyPaidMarker} The previously signed Bitcoin tx {pinnedTxId} for this withdrawal is already confirmed on-chain — this withdrawal is paid. Record its completion with GetRawCompleteWithdrawalTxData (BTCTransactionHash = {pinnedTxId}) instead of re-signing.", null);
 
                             case PinnedReuseDecision.RebuildFresh:
                                 SCLogUtility.Log($"Pinned tx for withdrawal {withdrawalRequestHash} was conflicted away on-chain (all pinned outpoints spent, {pinnedTxId ?? "n/a"} known-unconfirmed) — clearing pin and rebuilding.", "VBTCService.CompleteWithdrawal()");
@@ -2267,6 +2276,9 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             return (live, reclaimable);
         }
+
+        /// <summary>Prefix of the result for a withdrawal whose Bitcoin tx confirmed but whose completion a web wallet must still record.</summary>
+        public const string AlreadyPaidMarker = "[ALREADY-PAID]";
 
         /// <summary>Prefix of the CompleteWithdrawal result for a reclaim tx whose COMPLETE waits for its confirmation.</summary>
         public const string AwaitingConfirmationMarker = "[AWAITING-BTC-CONFIRMATION]";

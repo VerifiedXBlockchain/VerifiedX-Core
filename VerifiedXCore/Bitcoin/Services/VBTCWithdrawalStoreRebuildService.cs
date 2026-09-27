@@ -442,6 +442,14 @@ namespace VerifiedXCore.Bitcoin.Services
         private static void ReplayCancel(Transaction tx, RebuildResult result)
         {
             if (string.IsNullOrEmpty(tx.Data)) { result.Skipped++; return; }
+
+            // VbtcCancellationVoteRulesHeight: the same method live processing uses (skips a record that exists).
+            if (VBTCCancellationVoting.RulesActive(tx.Height))
+            {
+                if (VBTCCancellationVoting.ApplyCancel(tx, out _)) result.CancellationsCreated++; else result.Skipped++;
+                return;
+            }
+
             var jobj = JObject.Parse(tx.Data);
             var scUID = jobj["ContractUID"]?.ToObject<string?>();
             var withdrawalRequestHash = jobj["WithdrawalRequestHash"]?.ToObject<string?>();
@@ -474,6 +482,16 @@ namespace VerifiedXCore.Bitcoin.Services
         private static void ReplayVote(Transaction tx, RebuildResult result)
         {
             if (string.IsNullOrEmpty(tx.Data)) { result.Skipped++; return; }
+
+            // VbtcCancellationVoteRulesHeight: the same method live processing uses. Voters are read at the vote's own
+            // height from committed blocks, so a replay years later decides as the network did. The escrow refund is a
+            // ledger row, written by StateData for the deciding vote whoever counted it first (RefundDueFor).
+            if (VBTCCancellationVoting.RulesActive(tx.Height))
+            {
+                if (VBTCCancellationVoting.ApplyVote(tx).Applied) result.VotesApplied++; else result.Skipped++;
+                return;
+            }
+
             var jobj = JObject.Parse(tx.Data);
             var cancellationUID = jobj["CancellationUID"]?.ToObject<string?>();
             var approve = jobj["Approve"]?.ToObject<bool?>() ?? false;

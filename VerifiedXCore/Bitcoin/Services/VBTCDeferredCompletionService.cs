@@ -32,7 +32,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 return; // previous pass still running
             try
             {
-                if (Globals.StopAllTimers)
+                // Only at the network's height: a node that is syncing reads withdrawal rows of a past state.
+                if (!VBTCCancellationVoteService.NodeIsAtNetworkHeight().Ready)
                     return;
 
                 var rows = VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()?.Query()

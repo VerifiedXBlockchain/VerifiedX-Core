@@ -3844,6 +3844,18 @@ namespace VerifiedXCore.Data
         {
             try
             {
+                // VbtcCancellationVoteRulesHeight: the shared rules create the record (stamped with its mined height).
+                if (Bitcoin.Services.VBTCCancellationVoting.RulesActive(tx.Height))
+                {
+                    if (Bitcoin.Services.VBTCCancellationVoting.ApplyCancel(tx, out var created) && created != null)
+                    {
+                        MarkLocalContractCancellationRequested(created.SmartContractUID);
+                        SCLogUtility.Log($"CancelVBTCV2Withdrawal: Cancellation request created. CancellationUID={created.CancellationUID}, SCUID={created.SmartContractUID}, Requester={tx.FromAddress}, WithdrawalHash={created.WithdrawalRequestHash}, VotesCloseAt={created.RequestBlockHeight + VBTCWithdrawalCancellation.VOTE_WINDOW_BLOCKS}",
+                            "StateData.CancelVBTCV2Withdrawal()");
+                    }
+                    return;
+                }
+
                 var jobj = JObject.Parse(tx.Data);
                 var scUID = jobj["ContractUID"]?.ToObject<string?>();
                 var withdrawalRequestHash = jobj["WithdrawalRequestHash"]?.ToObject<string?>();
@@ -3923,16 +3935,68 @@ namespace VerifiedXCore.Data
             }
         }
 
+        /// <summary>Local display only (the owner's node): the contract shows a cancellation in progress.</summary>
+        private static void MarkLocalContractCancellationRequested(string scUID)
+        {
+            var contract = VBTCContractV2.GetContract(scUID);
+            if (contract != null)
+            {
+                contract.WithdrawalStatus = VBTCWithdrawalStatus.Cancellation_Requested;
+                VBTCContractV2.UpdateContract(contract);
+            }
+        }
+
+        /// <summary>
+        /// VbtcCancellationVoteRulesHeight: counts the vote through the shared rules and writes the escrow refund when
+        /// this vote is the one that approved the cancellation (see VBTCCancellationVoting.RefundDueFor).
+        /// </summary>
+        private static void VoteOnVBTCV2CancellationByRules(Transaction tx)
+        {
+            var result = Bitcoin.Services.VBTCCancellationVoting.ApplyVote(tx);
+
+            var refund = Bitcoin.Services.VBTCCancellationVoting.RefundDueFor(tx);
+            if (refund != null)
+            {
+                if (!WriteWithdrawalRefundCredit(refund.SmartContractUID, refund.RequestorAddress, refund.Amount))
+                    ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation: refund of {refund.Amount} to {refund.RequestorAddress} on {refund.SmartContractUID} could not be written (contract state missing). Vote: {tx.Hash}", "StateData.VoteOnVBTCV2Cancellation()");
+
+                // Local display only: the contract no longer shows this withdrawal as active.
+                var contract = VBTCContractV2.GetContract(refund.SmartContractUID);
+                if (contract != null && contract.ActiveWithdrawalRequestHash == refund.TransactionHash)
+                {
+                    contract.WithdrawalStatus = VBTCWithdrawalStatus.None;
+                    contract.ActiveWithdrawalRequestHash = null;
+                    contract.ActiveWithdrawalAmount = 0;
+                    contract.ActiveWithdrawalBTCDestination = null;
+                    contract.ActiveWithdrawalFeeRate = 0;
+                    contract.ActiveWithdrawalRequestTime = 0;
+                    VBTCContractV2.UpdateContract(contract);
+                }
+            }
+
+            if (result.Applied)
+                SCLogUtility.Log($"VoteOnVBTCV2Cancellation: vote counted. CancellationUID={result.Cancellation?.CancellationUID}, Voter={tx.FromAddress}, Outcome={result.Outcome}, Approvals={result.ApproveCount}, Rejections={result.RejectCount}, ActiveVoters={result.ActiveVoters}, Required={Bitcoin.Services.VBTCCancellationVoting.RequiredApprovals(result.ActiveVoters)}" +
+                    (refund != null ? $", Refunded={refund.Amount} to {refund.RequestorAddress}" : "") +
+                    (!string.IsNullOrEmpty(result.Cancellation?.SignedBtcTxId) ? $", SignedBtcTx={result.Cancellation.SignedBtcTxId} (reported by {result.Cancellation.SignedTxReportedBy})" : ""),
+                    "StateData.VoteOnVBTCV2Cancellation()");
+        }
+
         /// <summary>
         /// FIND-018 Fix: Handle VBTC_V2_WITHDRAWAL_VOTE transaction
         /// Records a validator vote on a cancellation request.
-        /// When 75% approval threshold is reached, the withdrawal is cancelled and funds are unlocked.
-        /// Only active vBTC validators (tx.FromAddress) can vote.
+        /// Legacy rules (below VbtcCancellationVoteRulesHeight): when 75% of the contract's full voter set approve,
+        /// the withdrawal is cancelled and funds are unlocked. Only active vBTC validators (tx.FromAddress) can vote.
         /// </summary>
         private static void VoteOnVBTCV2Cancellation(Transaction tx)
         {
             try
             {
+                if (Bitcoin.Services.VBTCCancellationVoting.RulesActive(tx.Height))
+                {
+                    VoteOnVBTCV2CancellationByRules(tx);
+                    return;
+                }
+
                 var jobj = JObject.Parse(tx.Data);
                 var cancellationUID = jobj["CancellationUID"]?.ToObject<string?>();
                 var approve = jobj["Approve"]?.ToObject<bool?>() ?? false;

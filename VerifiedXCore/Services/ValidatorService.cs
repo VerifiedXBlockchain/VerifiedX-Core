@@ -187,6 +187,7 @@ namespace VerifiedXCore.Services
                 _ = StartupValidators();
                 _ = Task.Run(BlockHeightCheckLoop);
                 _ = VBTCValidatorHeartbeatService.VBTCValidatorHeartbeatLoop();  // Start vBTC V2 validator heartbeat loop
+                _ = Bitcoin.Services.VBTCCancellationVoteService.VoteLoop();     // Vote on withdrawal cancellations (escrow refunds)
 
                 // Send vBTC V2 registration TX in the background after everything is loaded
                 _ = SendVBTCV2RegistrationTx();

@@ -59,7 +59,8 @@ namespace VerifiedXCore.Tests
         /// A vBTC V2 vault body (TokenizationV2 feature) with the given identity and deposit address - what the chain holds for
         /// a vault, so routes that read the vault from chain state (VBTCChainView) see it.
         /// </summary>
-        public static string VaultContractData(string embeddedUid, string embeddedMinter, string depositAddress, string? groupKey = null, bool isS3C = false)
+        public static string VaultContractData(string embeddedUid, string embeddedMinter, string depositAddress, string? groupKey = null, bool isS3C = false,
+            IEnumerable<string>? snapshot = null)
             => BuildContractData(embeddedUid, embeddedMinter, new List<SmartContractFeatures>
             {
                 new SmartContractFeatures
@@ -68,7 +69,7 @@ namespace VerifiedXCore.Tests
                     FeatureFeatures = new TokenizationV2Feature
                     {
                         AssetName = "vBTC", AssetTicker = "vBTC", DepositAddress = depositAddress, Version = 2,
-                        ValidatorAddressesSnapshot = new List<string> { "xValidator1", "xValidator2", "xValidator3" },
+                        ValidatorAddressesSnapshot = snapshot != null ? new List<string>(snapshot) : new List<string> { "xValidator1", "xValidator2", "xValidator3" },
                         FrostGroupPublicKey = groupKey ?? "02" + new string('a', 64), RequiredThreshold = 51, DKGProof = "proof",
                         ProofBlockHeight = 1, CeremonyId = embeddedUid, ImageBase = "default", IsS3C = isS3C,
                     },

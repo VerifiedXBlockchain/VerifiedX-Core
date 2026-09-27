@@ -1061,7 +1061,49 @@ namespace VerifiedXCore.Services
                 }
 
                 // FIND-018 Fix: vBTC V2 Withdrawal Cancellation - Block-level validation
-                if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
+                // VbtcCancellationVoteRulesHeight: this runs AFTER the block's state was applied, so re-checking the
+                // rules here judges the transaction against its own effect (the vote that decided a cancellation would
+                // read "already decided" and be stamped Invalid). Post-gate the wallet record follows what was applied.
+                var cancelVoteByRules = Bitcoin.Services.VBTCCancellationVoting.RulesActive(blockHeight);
+                if (cancelVoteByRules && tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
+                {
+                    var created = VBTCWithdrawalCancellation.GetCancellation($"{VBTCWithdrawalCancellation.OnChainUidPrefix}{tx.Hash}");
+                    if (created == null)
+                    {
+                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_CANCEL {tx.Hash} was mined but did not open a cancellation (see the node's error log for the reason).",
+                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                        var txdata = TransactionData.GetAll();
+                        tx.TransactionStatus = TransactionStatus.Invalid;
+                        txdata.InsertSafe(tx);
+                    }
+                    else
+                    {
+                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_CANCEL applied. Requester: {tx.FromAddress}, SCUID: {created.SmartContractUID}, WithdrawalHash: {created.WithdrawalRequestHash}, CancellationUID: {created.CancellationUID}",
+                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                    }
+                }
+
+                if (cancelVoteByRules && tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
+                {
+                    string? votedUid = null;
+                    try { votedUid = JObject.Parse(tx.Data)["CancellationUID"]?.ToObject<string?>(); } catch { }
+                    var voted = string.IsNullOrEmpty(votedUid) ? null : VBTCWithdrawalCancellation.GetCancellation(votedUid);
+                    if (!VBTCWithdrawalCancellation.WasVoteCounted(voted, tx.FromAddress, tx.Hash))
+                    {
+                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_VOTE {tx.Hash} from {tx.FromAddress} was mined but not counted (see the node's error log for the reason).",
+                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                        var txdata = TransactionData.GetAll();
+                        tx.TransactionStatus = TransactionStatus.Invalid;
+                        txdata.InsertSafe(tx);
+                    }
+                    else
+                    {
+                        SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_VOTE counted. Voter: {tx.FromAddress}, CancellationUID: {votedUid}",
+                            "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                    }
+                }
+
+                if (!cancelVoteByRules && tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
                 {
                     try
                     {
@@ -1122,7 +1164,7 @@ namespace VerifiedXCore.Services
                 }
 
                 // FIND-018 Fix: vBTC V2 Withdrawal Vote - Block-level validation
-                if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
+                if (!cancelVoteByRules && tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
                 {
                     try
                     {

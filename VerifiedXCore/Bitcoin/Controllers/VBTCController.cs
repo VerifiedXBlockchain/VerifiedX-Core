@@ -1835,10 +1835,15 @@ namespace VerifiedXCore.Bitcoin.Controllers
         }
 
         /// <summary>
-        /// Validator votes on withdrawal cancellation request
+        /// Operator override: cast THIS node's validator vote on a withdrawal cancellation now, as an on-chain
+        /// VBTC_V2_WITHDRAWAL_VOTE (validators vote on their own every few minutes; see VBTCCancellationVoteService).
+        /// ValidatorAddress must be this node's validator. An approve is still refused when this validator holds
+        /// signing records for the withdrawal; a reject names the transaction it signed when it knows one.
+        /// (This used to edit the cancellation record in this node's database for any address given: nothing reached
+        /// the chain, and the node's record then differed from every other node's.)
         /// </summary>
-        /// <param name="payload">Vote details</param>
-        /// <returns>Vote confirmation and current tally</returns>
+        /// <param name="payload">CancellationUID, ValidatorAddress (this node's validator), Approve</param>
+        /// <returns>The vote transaction hash</returns>
         [HttpPost("VoteOnCancellation")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
         public async Task<string> VoteOnCancellation([FromBody] VBTCCancellationVotePayload payload)
@@ -1852,73 +1857,110 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (string.IsNullOrEmpty(payload.CancellationUID) || string.IsNullOrEmpty(payload.ValidatorAddress))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "CancellationUID and ValidatorAddress are required" });
 
-                // Verify validator is active
-                var validator = Services.VBTCValidatorRegistry.GetValidator(payload.ValidatorAddress);
-                if (validator == null || !validator.IsActive)
-                {
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator is not active or not found" });
-                }
+                if (string.IsNullOrEmpty(Globals.ValidatorAddress) || payload.ValidatorAddress != Globals.ValidatorAddress)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "A vote is signed by the validator that casts it: ValidatorAddress must be this node's validator address." });
 
-                // Get cancellation record
+                // A node that is behind sees long-decided cancellations as open (its tip is low).
+                var (atHeight, notReadyReason) = Services.VBTCCancellationVoteService.NodeIsAtNetworkHeight();
+                if (!atHeight)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"This node is not at the network's height ({notReadyReason}); it cannot vote yet." });
+
                 var cancellation = VBTCWithdrawalCancellation.GetCancellation(payload.CancellationUID);
-                if (cancellation == null)
-                {
+                if (cancellation == null || !VBTCWithdrawalCancellation.IsOnChainRecord(cancellation))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Cancellation request not found" });
-                }
 
                 if (cancellation.IsProcessed)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Cancellation has already been decided" });
+
+                if (Services.VBTCCancellationVoteService.HasPendingVote(Globals.ValidatorAddress, cancellation.CancellationUID))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "This validator's vote on the cancellation is already in the mempool" });
+
+                // SECURITY: never approve cancelling a withdrawal this validator signed a Bitcoin transaction for -
+                // the requester could take the refund AND broadcast the BTC. The decision comes from this
+                // validator's own signing records; the operator can only vote with it or reject.
+                var (decision, reason, signedTxId) = await Services.VBTCCancellationVoteService.DecideForAsync(cancellation);
+                if (payload.Approve && decision != Services.VBTCCancellationVoteService.VoteDecision.Approve)
                 {
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Cancellation has already been processed" });
+                    LogUtility.Log($"[VBTC V2] Cancellation approve vote REFUSED for {cancellation.WithdrawalRequestHash}: {reason}", "VBTCController.VoteOnCancellation");
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Approve refused: {reason}." });
                 }
 
-                // SECURITY: never approve cancelling a withdrawal this validator has already signed a
-                // Bitcoin transaction for (or that carries a pinned/signed tx). vBTC is burned only at
-                // completion, so approving here would let the requester keep the vBTC AND broadcast the BTC.
-                if (payload.Approve)
-                {
-                    var trackerSigned = Services.FrostWithdrawalSigningTracker.HasSignedTransaction(cancellation.SmartContractUID, cancellation.WithdrawalRequestHash);
-                    var localRow = VBTCWithdrawalRequest.GetByTransactionHash(cancellation.WithdrawalRequestHash, cancellation.SmartContractUID);
-                    var (canApprove, refuseReason) = Services.CancellationVoteGuard.CanApprove(trackerSigned, localRow);
-                    if (!canApprove)
-                    {
-                        LogUtility.Log($"[VBTC V2] Cancellation approve vote REFUSED for {cancellation.WithdrawalRequestHash}: {refuseReason}", "VBTCController.VoteOnCancellation");
-                        return JsonConvert.SerializeObject(new { Success = false, Message = refuseReason });
-                    }
-                }
-
-                // Check if validator already voted
-                if (VBTCWithdrawalCancellation.HasValidatorVoted(payload.CancellationUID, payload.ValidatorAddress))
-                {
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Validator has already voted on this cancellation" });
-                }
-
-                // Record vote
-                VBTCWithdrawalCancellation.AddVote(payload.CancellationUID, payload.ValidatorAddress, payload.Approve);
-
-                // Refresh cancellation data after vote
-                cancellation = VBTCWithdrawalCancellation.GetCancellation(payload.CancellationUID);
-                int totalValidators = Services.VBTCValidatorRegistry.GetActiveValidatorCount();
-                int votePercentage = totalValidators > 0 
-                    ? VBTCWithdrawalCancellation.GetVotePercentage(payload.CancellationUID, totalValidators) 
-                    : 0;
-
-                // Check if 75% threshold reached
-                if (votePercentage >= 75 && !cancellation!.IsProcessed)
-                {
-                    VBTCWithdrawalCancellation.MarkAsProcessed(payload.CancellationUID, true);
-                    cancellation = VBTCWithdrawalCancellation.GetCancellation(payload.CancellationUID);
-                }
+                var (ok, result) = await Services.VBTCCancellationVoteService.CastVote(cancellation, payload.Approve,
+                    payload.Approve ? null : signedTxId,
+                    payload.Approve ? reason : $"operator reject; {reason}");
+                if (!ok)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = result });
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
-                    Message = "Vote recorded",
+                    Message = "Vote transaction broadcast. It counts once it is mined.",
+                    VoteTxHash = result,
                     CancellationUID = payload.CancellationUID,
-                    ApproveCount = cancellation?.ApproveCount ?? 0,
-                    RejectCount = cancellation?.RejectCount ?? 0,
-                    TotalValidators = totalValidators,
-                    ApprovalPercentage = votePercentage,
-                    IsApproved = cancellation?.IsApproved ?? false
+                    Approve = payload.Approve,
+                    SignedBtcTxId = payload.Approve ? null : signedTxId
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
+            }
+        }
+
+        /// <summary>
+        /// The cancellations of a withdrawal and where their votes stand: approvals, rejections, how many approvals are
+        /// needed from the contract's active voters, when the vote window closes, and - when a validator reported a
+        /// signed Bitcoin transaction - that transaction (the withdrawal is payable: complete it instead).
+        /// </summary>
+        [HttpGet("GetCancellationStatus/{scUID}/{withdrawalRequestHash}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetCancellationStatus(string scUID, string withdrawalRequestHash)
+        {
+            try
+            {
+                var tip = Globals.LastBlock?.Height ?? 0;
+                var rulesActive = Services.VBTCCancellationVoting.RulesActive(tip + 1);
+                var request = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
+                var cancellations = VBTCWithdrawalCancellation.GetCancellationsFor(withdrawalRequestHash, scUID);
+
+                var activeVoters = rulesActive
+                    ? Services.VBTCCancellationVoting.ActiveVoters(scUID, tip).Count
+                    : Services.VBTCService.ResolveCancellationVoterSet(scUID).Count;
+                var required = rulesActive
+                    ? Services.VBTCCancellationVoting.RequiredApprovals(activeVoters)
+                    : (int)Math.Ceiling(activeVoters * 0.75);
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    SmartContractUID = scUID,
+                    WithdrawalRequestHash = withdrawalRequestHash,
+                    WithdrawalStatus = request?.Status.ToString(),
+                    CurrentHeight = tip,
+                    VotingRulesActive = rulesActive,
+                    VotingRulesHeight = Globals.VbtcCancellationVoteRulesHeight,
+                    ActiveVoters = activeVoters,
+                    RequiredApprovals = required == int.MaxValue ? (int?)null : required,
+                    CanCancelNow = request != null && !request.IsCompleted
+                        && (rulesActive
+                            ? VBTCWithdrawalCancellation.GetOpenCancellation(withdrawalRequestHash, scUID, tip + 1) == null
+                            : cancellations.Count == 0),
+                    Cancellations = cancellations.Select(c => new
+                    {
+                        c.CancellationUID,
+                        Status = c.IsProcessed ? (c.IsApproved ? "Approved" : "Rejected")
+                            : VBTCWithdrawalCancellation.IsVoteWindowOpen(c, tip + 1) ? "Voting"
+                            : c.RequestBlockHeight > 0 ? "Lapsed" : "FiledBeforeVotingRules",
+                        c.ApproveCount,
+                        c.RejectCount,
+                        Votes = c.ValidatorVotes,
+                        c.RequestBlockHeight,
+                        VotesCloseAtHeight = c.RequestBlockHeight > 0 ? c.RequestBlockHeight + VBTCWithdrawalCancellation.VOTE_WINDOW_BLOCKS : (long?)null,
+                        c.DecidedAtHeight,
+                        c.DecidedByTxHash,
+                        c.SignedBtcTxId,
+                        c.SignedTxReportedBy
+                    })
                 });
             }
             catch (Exception ex)

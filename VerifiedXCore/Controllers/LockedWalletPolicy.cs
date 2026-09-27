@@ -111,7 +111,7 @@ namespace VerifiedXCore.Controllers
             "VBTC.GetWithdrawalStatus", "VBTC.GetContractHealth", "VBTC.GetDefaultImageBase", "VBTC.GetContractList",
             "VBTC.GetShieldedVBTCBalance", "VBTC.GetShieldedVBTCPoolState", "VBTC.GetBridgeLockStatus",
             "VBTC.GetMintAttestation", "VBTC.GetBridgeLocks", "VBTC.GetBridgeLocksByOwner", "VBTC.GetBaseBalance",
-            "VBTC.GetBridgeStatus", "VBTC.GetBridgeConfig",
+            "VBTC.GetBridgeStatus", "VBTC.GetBridgeConfig", "VBTC.GetCancellationStatus",
             "VBTC.CreateVBTCContractRaw", "VBTC.PrepareMPCCeremonyRaw", "VBTC.ExecuteMPCCeremonyRaw",
             "VBTC.GetRawCreateContractTxData", "VBTC.SendRawCreateContractTx",
             "VBTC.GetRawTransferVBTCData", "VBTC.GetRawTransferVBTCMultiData", "VBTC.SendRawTransferVBTCTx",

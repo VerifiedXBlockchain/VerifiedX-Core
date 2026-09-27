@@ -399,6 +399,16 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void Reclaim_CancelledWithdrawal_AtOnce()
+        {
+            // Its escrow was refunded, so its transaction must never pay: the next withdrawal that spends these
+            // coins makes sure it cannot. No grace period.
+            var now = 100_000L;
+            var cancelled = Row(completed: true, status: VBTCWithdrawalStatus.Cancelled);
+            Assert.True(FrostStartup.IsPinReclaimEligible(cancelled, now, now).Eligible);
+        }
+
+        [Fact]
         public void Reclaim_WithinGrace_NotYet()
         {
             var now = 100_000L;

@@ -26,7 +26,39 @@ namespace VerifiedXCore.Bitcoin.Models
         public int RejectCount { get; set; }
         public bool IsApproved { get; set; }
         public bool IsProcessed { get; set; }
+
+        // VbtcCancellationVoteRulesHeight. Height the cancel was mined at (0 on records from before the rules): the
+        // vote window is measured from it, in blocks, so every node agrees when it closes.
+        public long RequestBlockHeight { get; set; }
+        // The vote that decided the cancellation (approved or rejected): its height and hash; unset while undecided.
+        // The escrow refund belongs to that transaction, so a node that replays state from blocks, or whose store
+        // rebuild counted the vote first, still writes the credit exactly once.
+        public long DecidedAtHeight { get; set; }
+        public string? DecidedByTxHash { get; set; }
+        // Set when a validator's reject named the Bitcoin transaction it signed for the withdrawal: that
+        // transaction can still pay out, so the cancellation was rejected and the withdrawal should be completed.
+        public string? SignedBtcTxId { get; set; }
+        public string? SignedTxReportedBy { get; set; }
+        // Validator address → hash of the vote transaction that was counted for it (display and wallet bookkeeping).
+        public Dictionary<string, string>? VoteTxHashes { get; set; }
         #endregion
+
+        /// <summary>True when <paramref name="voteTxHash"/> is the vote that was counted for <paramref name="validatorAddress"/>.</summary>
+        public static bool WasVoteCounted(VBTCWithdrawalCancellation? c, string validatorAddress, string voteTxHash) =>
+            c?.VoteTxHashes != null && c.VoteTxHashes.TryGetValue(validatorAddress, out var counted)
+            && string.Equals(counted, voteTxHash, StringComparison.Ordinal);
+
+        /// <summary>
+        /// Blocks after a cancel is mined during which validators may vote on it (~1 day). Validators refuse to sign
+        /// for the withdrawal for exactly as long, so an approval can never race a new signature. After it, an
+        /// undecided cancellation has lapsed: votes are refused, signing resumes, and the requester may cancel again.
+        /// </summary>
+        public const long VOTE_WINDOW_BLOCKS = 7_200;
+
+        /// <summary>True while the cancellation can still be voted on at <paramref name="height"/>.</summary>
+        public static bool IsVoteWindowOpen(VBTCWithdrawalCancellation c, long height) =>
+            c != null && !c.IsProcessed && c.RequestBlockHeight > 0 && height >= c.RequestBlockHeight
+            && height - c.RequestBlockHeight <= VOTE_WINDOW_BLOCKS;
 
         /// <summary>
         /// UID prefix of every record created by a mined VBTC_V2_WITHDRAWAL_CANCEL (StateData and the store rebuild:
@@ -95,13 +127,49 @@ namespace VerifiedXCore.Bitcoin.Models
                 var db = GetDb();
                 if (db == null) return false;
                 var cutoff = nowSeconds - PENDING_CANCELLATION_MAX_AGE_SECONDS;
+                var height = Globals.LastBlock?.Height ?? 0;
                 // On-chain records only: a node-local leftover must not block signing on one validator.
+                // A record stamped with its mined height is pending for exactly its vote window (block height, the
+                // same clock the votes are judged by - a stalled chain must not reopen signing while an approval
+                // can still land). Older records keep the wall-clock bound.
                 return db.Find(x => x.WithdrawalRequestHash == withdrawalRequestHash)
                          .Where(x => string.IsNullOrEmpty(scUID) || x.SmartContractUID == scUID)
                          .Where(IsOnChainRecord)
-                         .Any(x => !x.IsProcessed && x.RequestTime >= cutoff);
+                         .Any(x => x.RequestBlockHeight > 0
+                             ? IsVoteWindowOpen(x, Math.Max(height, x.RequestBlockHeight))
+                             : !x.IsProcessed && x.RequestTime >= cutoff);
             }
             catch { return false; }
+        }
+
+        /// <summary>
+        /// VbtcCancellationVoteRulesHeight: the cancellation of this withdrawal share that is open at
+        /// <paramref name="height"/> (undecided, inside its vote window), or null. At most one exists: a new cancel
+        /// is accepted only when none is open. Records from before the rules carry no height and are never open.
+        /// </summary>
+        public static VBTCWithdrawalCancellation? GetOpenCancellation(string withdrawalRequestHash, string? scUID, long height)
+        {
+            if (string.IsNullOrWhiteSpace(withdrawalRequestHash)) return null;
+            var db = GetDb();
+            if (db == null) return null;
+            return db.Find(x => x.WithdrawalRequestHash == withdrawalRequestHash)
+                .Where(IsOnChainRecord)
+                .Where(x => string.IsNullOrEmpty(scUID) || x.SmartContractUID == scUID)
+                .Where(x => IsVoteWindowOpen(x, height))
+                .OrderByDescending(x => x.RequestBlockHeight)
+                .FirstOrDefault();
+        }
+
+        /// <summary>Every on-chain cancellation of a withdrawal share, newest first (status display).</summary>
+        public static List<VBTCWithdrawalCancellation> GetCancellationsFor(string withdrawalRequestHash, string? scUID)
+        {
+            var db = GetDb();
+            if (db == null || string.IsNullOrWhiteSpace(withdrawalRequestHash)) return new List<VBTCWithdrawalCancellation>();
+            return db.Find(x => x.WithdrawalRequestHash == withdrawalRequestHash)
+                .Where(IsOnChainRecord)
+                .Where(x => string.IsNullOrEmpty(scUID) || x.SmartContractUID == scUID)
+                .OrderByDescending(x => x.RequestBlockHeight).ThenByDescending(x => x.RequestTime)
+                .ToList();
         }
 
         public static VBTCWithdrawalCancellation? GetCancellationByWithdrawalHash(string withdrawalRequestHash) =>
@@ -194,7 +262,10 @@ namespace VerifiedXCore.Bitcoin.Models
             }
         }
 
-        public static void AddVote(string cancellationUID, string validatorAddress, bool approve)
+        public static void AddVote(string cancellationUID, string validatorAddress, bool approve) =>
+            AddVote(cancellationUID, validatorAddress, approve, null);
+
+        public static void AddVote(string cancellationUID, string validatorAddress, bool approve, string? voteTxHash)
         {
             try
             {
@@ -203,6 +274,12 @@ namespace VerifiedXCore.Bitcoin.Models
 
                 if (cancellation != null && !cancellation.IsProcessed)
                 {
+                    if (!string.IsNullOrEmpty(voteTxHash))
+                    {
+                        cancellation.VoteTxHashes ??= new Dictionary<string, string>();
+                        cancellation.VoteTxHashes[validatorAddress] = voteTxHash;
+                    }
+
                     if (cancellation.ValidatorVotes == null)
                     {
                         cancellation.ValidatorVotes = new Dictionary<string, bool>();
@@ -250,7 +327,10 @@ namespace VerifiedXCore.Bitcoin.Models
             }
         }
 
-        public static void MarkAsProcessed(string cancellationUID, bool approved)
+        public static void MarkAsProcessed(string cancellationUID, bool approved) =>
+            MarkAsProcessed(cancellationUID, approved, 0, null, null, null);
+
+        public static void MarkAsProcessed(string cancellationUID, bool approved, long decidedAtHeight, string? decidedByTxHash, string? signedBtcTxId, string? reportedBy)
         {
             try
             {
@@ -261,6 +341,15 @@ namespace VerifiedXCore.Bitcoin.Models
                 {
                     cancellation.IsProcessed = true;
                     cancellation.IsApproved = approved;
+                    if (decidedAtHeight > 0)
+                        cancellation.DecidedAtHeight = decidedAtHeight;
+                    if (!string.IsNullOrEmpty(decidedByTxHash))
+                        cancellation.DecidedByTxHash = decidedByTxHash;
+                    if (!string.IsNullOrEmpty(signedBtcTxId))
+                    {
+                        cancellation.SignedBtcTxId = signedBtcTxId;
+                        cancellation.SignedTxReportedBy = reportedBy;
+                    }
                     cancellations.UpdateSafe(cancellation);
                 }
             }

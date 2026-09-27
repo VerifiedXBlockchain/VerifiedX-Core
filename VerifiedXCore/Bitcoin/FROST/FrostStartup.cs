@@ -126,6 +126,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                         BTCNetwork = Globals.BTCNetwork?.Name,
                         Timestamp = TimeUtil.GetTime(),
                         PinnedContracts = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.GetAllContractPins(),
+                        // Where this validator's signing records begin (cancellation votes abstain before it).
+                        SigningRecordsEpoch = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.GetEpoch(),
+                        AtNetworkHeight = VerifiedXCore.Bitcoin.Services.VBTCCancellationVoteService.NodeIsAtNetworkHeight().Ready,
                         ElectrumServers = Globals.ClientSettings?.Select(s => new { s.Host, s.Port, s.Count, s.FailCount })
                     }, Formatting.Indented);
                     context.Response.StatusCode = StatusCodes.Status200OK;
@@ -191,6 +194,43 @@ namespace VerifiedXCore.Bitcoin.FROST
                     LogUtility.Log($"[FROST] Operator cleared durable signed evidence for {scUID}/{wrh}: removed={removed}", "FrostStartup.EvidenceClear");
                     context.Response.StatusCode = StatusCodes.Status200OK;
                     await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = true, Removed = removed }));
+                });
+
+                /// <summary>
+                /// POST /frost/evidence/epoch/{height}?confirm=true - operator statement (localhost only) of where this
+                /// validator's signing records begin. The node stamps this itself (its oldest record, or the tip when it
+                /// has none); an operator who knows the machine's records are complete further back - it has run as a
+                /// validator without interruption since that block - sets it so the validator can vote on older
+                /// withdrawals. Setting it earlier than the truth makes the validator approve refunds for withdrawals
+                /// it may have signed. Never called automatically.
+                /// </summary>
+                endpoints.MapPost("/frost/evidence/epoch/{height}", async context =>
+                {
+                    if (!IsLoopbackRequest(context)) { await WriteForbiddenAsync(context); return; }
+
+                    if (!long.TryParse(context.Request.RouteValues["height"]?.ToString(), out var height) || height < 0)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "height must be a block height" }));
+                        return;
+                    }
+                    if (context.Request.Query["confirm"] != "true")
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                        {
+                            Success = false,
+                            Message = "This states that this machine holds every signing record of this validator since the given block. If it does not, the validator can approve a refund for a withdrawal it signed. To proceed, add ?confirm=true.",
+                            Current = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.GetEpoch()
+                        }));
+                        return;
+                    }
+
+                    var previous = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.GetEpoch();
+                    var epoch = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.SetEpoch(height, "set by operator via localhost endpoint");
+                    LogUtility.Log($"[FROST] WARNING: operator set the signing-records epoch to block {height} (was {previous?.EpochHeight.ToString() ?? "unset"}).", "FrostStartup./frost/evidence/epoch");
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = epoch != null, Epoch = epoch, Previous = previous }, Formatting.Indented));
                 });
 
                 endpoints.MapPost("/frost/pins/clear/{scUID}", async context =>
@@ -2172,6 +2212,20 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // A cancellation of this withdrawal was mined after the ceremony started (sign/start
+                            // checks it too): releasing a share now could produce a payable transaction for a
+                            // withdrawal whose escrow validators - possibly this one - are voting to refund.
+                            if (!string.IsNullOrEmpty(session.WithdrawalRequestHash)
+                                && !session.WithdrawalRequestHash.StartsWith(FrostSigningAuthorization.BtcExitPrefix, StringComparison.OrdinalIgnoreCase)
+                                && VerifiedXCore.Bitcoin.Models.VBTCWithdrawalCancellation.HasPendingCancellation(
+                                    session.WithdrawalRequestHash, TimeUtil.GetTime(), session.SmartContractUID))
+                            {
+                                LogUtility.Log($"[FROST] Sign Round 2 REFUSED for session {sessionId}: a cancellation of withdrawal {session.WithdrawalRequestHash} is being voted on.", "FrostStartup.SignRound2");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "A cancellation of this withdrawal is being voted on; refusing to sign" }));
+                                return;
+                            }
+
                             if (session.NonceConsumed)
                             {
                                 ErrorLogUtility.LogError($"FROST Sign Round 2 REFUSED for session {sessionId}: nonce already consumed (re-sign attempt).", "FrostStartup.SignRound2");
@@ -2980,18 +3034,21 @@ namespace VerifiedXCore.Bitcoin.FROST
         internal const long RECLAIM_GRACE_SECONDS = 1800;
 
         /// <summary>
-        /// Chain-state part of the reclaim rule (pure). A pin may be reclaimed only when its withdrawal has a
-        /// consensus row that is still open (a completed withdrawal's payout must stand: knocking out its tx after
-        /// COMPLETE would leave it paid in vBTC terms but not in BTC; bridge exits have no row and are never
-        /// reclaimed) and the grace period since signing has passed. FrostStartup adds the Bitcoin part: the tx is
-        /// unknown to every Electrum server (neither in a mempool nor confirmed).
+        /// Chain-state part of the reclaim rule (pure). A pin may be reclaimed when its withdrawal has a consensus
+        /// row that is still open and the grace period since signing has passed, or - at once - when the withdrawal
+        /// was CANCELLED: its escrow was refunded, so its transaction must never pay, and the next withdrawal that
+        /// spends those coins makes sure it cannot (a signer that was offline during the vote could not reject).
+        /// A completed withdrawal's payout must stand (knocking out its tx after COMPLETE would leave it paid in
+        /// vBTC terms but not in BTC); bridge exits have no row and are never reclaimed. FrostStartup adds the
+        /// Bitcoin part: the tx is unknown to every Electrum server (neither in a mempool nor confirmed).
         /// </summary>
         public static (bool Eligible, string Reason) IsPinReclaimEligible(VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest? row, long pinnedAt, long now)
         {
             if (row == null)
                 return (false, "no consensus withdrawal row (bridge exit or unknown withdrawal)");
-            if (row.IsCompleted || row.Status == VerifiedXCore.Bitcoin.Models.VBTCWithdrawalStatus.Completed
-                || row.Status == VerifiedXCore.Bitcoin.Models.VBTCWithdrawalStatus.Cancelled)
+            if (row.Status == VerifiedXCore.Bitcoin.Models.VBTCWithdrawalStatus.Cancelled)
+                return (true, "withdrawal cancelled and refunded; its transaction must not pay");
+            if (row.IsCompleted || row.Status == VerifiedXCore.Bitcoin.Models.VBTCWithdrawalStatus.Completed)
                 return (false, "withdrawal completed; its transaction must stand");
             var age = now - pinnedAt;
             if (age < RECLAIM_GRACE_SECONDS)

@@ -3559,7 +3559,29 @@ namespace VerifiedXCore.Services
             }
 
             // FIND-018 Fix: VBTC V2 Withdrawal Cancel - Consensus-level validation
-            if (txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
+            // VbtcCancellationVoteRulesHeight: cancel and vote transactions follow VBTCCancellationVoting (one rule set
+            // for validation, apply and the store rebuild). Below it the legacy checks that follow apply unchanged.
+            var cancelVoteHeight = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
+            var cancelVoteRulesActive = Bitcoin.Services.VBTCCancellationVoting.RulesActive(cancelVoteHeight);
+            if (cancelVoteRulesActive && (txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL
+                                          || txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE))
+            {
+                try
+                {
+                    var rulesError = txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL
+                        ? Bitcoin.Services.VBTCCancellationVoting.ValidateCancel(txRequest, cancelVoteHeight)
+                        : Bitcoin.Services.VBTCCancellationVoting.ValidateVote(txRequest, cancelVoteHeight);
+                    if (rulesError != null)
+                        return (txResult, rulesError);
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Failed to validate {txRequest.TransactionType} transaction: {ex}", "TransactionValidatorService.VerifyTX()");
+                    return (txResult, $"Failed to validate vBTC V2 withdrawal {(txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL ? "cancel" : "vote")} transaction.");
+                }
+            }
+
+            if (!cancelVoteRulesActive && txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
             {
                 if (!string.IsNullOrWhiteSpace(txRequest.Data))
                 {
@@ -3602,7 +3624,7 @@ namespace VerifiedXCore.Services
             }
 
             // FIND-018 Fix: VBTC V2 Withdrawal Vote - Consensus-level validation
-            if (txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
+            if (!cancelVoteRulesActive && txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
             {
                 if (!string.IsNullOrWhiteSpace(txRequest.Data))
                 {

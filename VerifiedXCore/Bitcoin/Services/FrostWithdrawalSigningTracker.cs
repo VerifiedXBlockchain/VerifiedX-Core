@@ -578,6 +578,22 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// True while a signing ceremony for the withdrawal is running on this validator (an input started and not yet
+        /// signed, failed or stale). A cancellation vote waits for it to end: until then this validator cannot say
+        /// whether it will have signed.
+        /// </summary>
+        public static bool HasCeremonyInProgress(string scUID, string withdrawalRequestHash)
+        {
+            if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash)) return false;
+            if (!_withdrawals.TryGetValue(BuildKey(scUID, withdrawalRequestHash), out var record)) return false;
+            var now = TimeUtil.GetTime();
+            lock (record.Lock)
+            {
+                return record.Inputs.Values.Any(i => i.State == SigningState.InProgress && now - i.Timestamp <= IN_PROGRESS_STALE_SECONDS);
+            }
+        }
+
+        /// <summary>
         /// Per-withdrawal record: one sub-record per transaction input, plus the pinned sighash set.
         /// </summary>
         private class WithdrawalRecord

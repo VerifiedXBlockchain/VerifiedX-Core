@@ -233,6 +233,22 @@ namespace VerifiedXCore
         public static long VbtcWithdrawalConcurrencyHeight = 7_400_500L;
 
         /// <summary>
+        /// vBTC V2 withdrawal-cancellation voting rules (public and S3C contracts alike; see
+        /// Bitcoin.Services.VBTCCancellationVoting). For cancel and vote transactions at/after this height:
+        /// (a) voters and the approval denominator are the contract's voter set that is ACTIVE at the block before the
+        ///     vote (was: the full DKG snapshot, dead validators included, so a contract with over a quarter of its
+        ///     validators gone could never refund escrow), read from committed blocks so replay gives the same answer;
+        /// (b) a reject vote that names the Bitcoin transaction its validator signed for the withdrawal rejects the
+        ///     cancellation outright: a payable transaction exists, and refunding the escrow would pay twice;
+        /// (c) a cancellation is decided (approved or rejected) or lapses after VOTE_WINDOW_BLOCKS; votes on a lapsed or
+        ///     decided cancellation are refused;
+        /// (d) a withdrawal may be cancelled again once its previous cancellation was rejected or lapsed.
+        /// Before it, the legacy rules apply unchanged. Must be above the tip when EVERY node runs a build with these
+        /// rules: a cancel mined at/after it is recorded differently by an older build. Testnet value in Program.cs.
+        /// </summary>
+        public static long VbtcCancellationVoteRulesHeight = 7_400_500L;
+
+        /// <summary>
         /// Base (vBTC.b) minting validator set = registered vBTC validators that are ALSO members of
         /// the caster committee. vBTC validator registration is a free self-transaction gated only
         /// by a wallet balance, so mirroring the raw registry onto the Base contract would let a

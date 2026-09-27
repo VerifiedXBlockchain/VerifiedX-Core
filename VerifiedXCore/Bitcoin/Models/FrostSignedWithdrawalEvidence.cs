@@ -69,6 +69,56 @@ namespace VerifiedXCore.Bitcoin.Models
             }
         }
 
+        /// <summary>
+        /// Where this validator's signing records begin. "I hold no signing record for this withdrawal" means "I never
+        /// signed for it" only for withdrawals requested after this height: a validator restored onto a new machine has
+        /// its key shares (peer backups) but not its records. Stamped once, when the node is at the network's height -
+        /// a node still syncing has a low local tip, and stamping there would claim records for history it never saw.
+        /// </summary>
+        public class Epoch
+        {
+            public int Id { get; set; } = 1;
+            public long EpochHeight { get; set; }
+            public long StampedAtUtc { get; set; }
+            public string Source { get; set; } = string.Empty;
+        }
+
+        public const string EpochCollectionName = "rsrv_frost_signed_evidence_epoch";
+
+        private static ILiteCollection<Epoch>? EpochColl() => DbContext.DB_vBTC?.GetCollection<Epoch>(EpochCollectionName);
+
+        public static Epoch? GetEpoch()
+        {
+            try { return EpochColl()?.FindById(1); }
+            catch { return null; }
+        }
+
+        public static Epoch? SetEpoch(long epochHeight, string source)
+        {
+            try
+            {
+                var epoch = new Epoch { EpochHeight = Math.Max(0, epochHeight), StampedAtUtc = TimeUtil.GetTime(), Source = source };
+                EpochColl()?.Upsert(epoch);
+                return epoch;
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"FrostSignedWithdrawalEvidence.SetEpoch failed: {ex.Message}", "FrostSignedWithdrawalEvidence");
+                return null;
+            }
+        }
+
+        /// <summary>Time of the oldest signing record held, or null when there is none.</summary>
+        public static long? OldestRecordTimestamp()
+        {
+            try
+            {
+                var all = Coll()?.FindAll().Where(x => x.Timestamp > 0).ToList();
+                return all == null || all.Count == 0 ? null : all.Min(x => x.Timestamp);
+            }
+            catch { return null; }
+        }
+
         /// <summary>Every recorded signing (startup pin restore). Empty when the store is unavailable.</summary>
         public static List<FrostSignedWithdrawalEvidence> GetAll()
         {
