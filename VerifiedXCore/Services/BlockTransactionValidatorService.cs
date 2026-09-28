@@ -823,16 +823,9 @@ namespace VerifiedXCore.Services
                                     return;
                                 }
 
-                                var multiBalCheck = await Bitcoin.Services.VBTCService.TryGetAvailableTransparentVbtcBalance(input.SCUID, multiRequester, blockHeight);
-                                if (!multiBalCheck.success || multiBalCheck.availableBalance < input.Amount)
-                                {
-                                    SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST (multi) validation failed: Insufficient balance on {input.SCUID}. Requester: {multiRequester}, Available: {multiBalCheck.availableBalance}, Requested: {input.Amount}",
-                                        "BlockTransactionValidatorService.ProcessIncomingTransactions()");
-                                    var txdataMultiInvalid = TransactionData.GetAll();
-                                    tx.TransactionStatus = TransactionStatus.Invalid;
-                                    txdataMultiInvalid.InsertSafe(tx);
-                                    return;
-                                }
+                                // No balance re-check: consensus validated the mined request, and this runs after the
+                                // state apply (a re-check double-counts the debit) - and must never ask Electrum
+                                // while syncing blocks.
                             }
 
                             var txdataMultiSuccess = TransactionData.GetAll();
@@ -918,21 +911,9 @@ namespace VerifiedXCore.Services
                                 return;
                             }
 
-                            // FIND-002 FIX: Validate balance for requesterAddress (tx.FromAddress), not ownerAddress.
-                            // Post-consensus local wallet bookkeeping only — uses the same formula as request
-                            // creation and consensus validation (owner branch = live deposit balance + full
-                            // ledger + completed-withdrawal add-back) so a mined, consensus-valid owner
-                            // request is not stamped Invalid in the local wallet tx list.
-                            var balCheck = await Bitcoin.Services.VBTCService.TryGetAvailableTransparentVbtcBalance(scUID, requesterAddress, blockHeight);
-                            if (!balCheck.success || balCheck.availableBalance < amount.Value)
-                            {
-                                SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_REQUEST validation failed: Insufficient balance. Requester: {requesterAddress}, Available: {balCheck.availableBalance}, Requested: {amount.Value}",
-                                    "BlockTransactionValidatorService.ProcessIncomingTransactions()");
-                                var txdata = TransactionData.GetAll();
-                                tx.TransactionStatus = TransactionStatus.Invalid;
-                                txdata.InsertSafe(tx);
-                                return;
-                            }
+                            // No balance re-check here: this is post-consensus wallet bookkeeping for a mined request
+                            // (it runs after the state apply, so a re-check double-counts the debit), and it must never
+                            // ask Electrum while syncing blocks - a failed lookup stamped valid requests Invalid.
 
                             // Mark as success and insert
                             var txdataSuccess = TransactionData.GetAll();

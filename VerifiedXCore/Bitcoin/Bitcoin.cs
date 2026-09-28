@@ -111,104 +111,16 @@ namespace VerifiedXCore.Bitcoin
             return result;
         }
 
-        public static async Task<Client?> ElectrumXClient()
+        /// <summary>A client whose server just answered, or null. Server choice and health live in ElectrumServerPool.</summary>
+        public static Task<Client?> ElectrumXClient()
         {
-            bool electrumServerFound = false;
-            Client client = null;
-            while (!electrumServerFound)
-            {
-                var electrumServer = Globals.ClientSettings.Where(x => x.FailCount < 5).OrderBy(x => x.Count).FirstOrDefault();
-                if (electrumServer != null)
-                {
-                    try
-                    {
-                        var clientConnection = new Client(electrumServer.Host, electrumServer.Port, true);
-                        var serverVersion = await clientConnection.GetServerVersion();
-
-                        client = clientConnection;
-
-                        if (serverVersion == null)
-                            throw new Exception("Bad server response or no connection.");
-
-                        if (serverVersion.ProtocolVersion.Major != 1 && serverVersion.ProtocolVersion.Minor < 4)
-                            throw new Exception("Bad version.");
-
-                        electrumServerFound = true;
-                        electrumServer.Count++;
-                    }
-                    catch (Exception ex)
-                    {
-                        //TODO: ADD LOGS
-                        electrumServer.FailCount++;
-                        electrumServer.Count++;
-                        await Task.Delay(1000);
-                    }
-
-                }
-                else
-                {
-                    //no servers found
-                    client = null;
-                    break;
-                }
-                //TODO: ADD LOGS
-                await Task.Delay(1000);
-            }
-
-            return client;
+            return ElectrumServerPool.GetClientAsync();
         }
 
-        public static async Task ElectrumXRun()
+        /// <summary>Starts the Electrum health probe (once per process; Program starts it for every node).</summary>
+        public static Task ElectrumXRun()
         {
-            //Stopwatch sw = Stopwatch.StartNew();
-            
-            while(true)
-            {
-                bool electrumServerFound = false;
-                while (!electrumServerFound)
-                {
-                    var electrumServer = Globals.ClientSettings.Where(x => x.FailCount < 5).OrderBy(x => x.Count).FirstOrDefault();
-                    if (electrumServer != null)
-                    {
-                        try
-                        {
-                            using(var client = new Client(electrumServer.Host, electrumServer.Port, true))
-                            {
-                                //var client = new Client(electrumServer.Host, electrumServer.Port, true);
-                                var serverVersion = await client.GetServerVersion();
-
-                                if (serverVersion.ProtocolVersion == null)
-                                    throw new Exception("Bad server response or no connection.");
-
-                                Globals.ElectrumXConnected = true;
-                                Globals.ElectrumXLastCommunication = DateTime.Now;
-                                electrumServerFound = true;
-
-                                client.Dispose();
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            //sw.Stop();
-                            //var timetaken = sw.Elapsed.TotalMinutes;
-                            electrumServer.FailCount++;
-                            electrumServer.Count++;
-                            await Task.Delay(3000);
-                        }
-                    }
-                    else
-                    {
-                        Globals.ElectrumXConnected = false;
-                        foreach (var elec in Globals.ClientSettings)
-                        {
-                            elec.FailCount = 0;
-                        }
-                        break;
-                    }
-                }
-                
-                await Task.Delay(new TimeSpan(0,1,0));
-            }   
+            return ElectrumServerPool.StartHealthProbeLoop();
         }
 
         public static async Task AccountCheck()
@@ -221,54 +133,9 @@ namespace VerifiedXCore.Bitcoin
                 var delay = Task.Delay(new TimeSpan(0,2,0));
                 await BalanceCheckLock.WaitAsync();
 
-                bool electrumServerFound = false;
-                Client client = null;
-                while(!electrumServerFound)
-                {
-                    var electrumServer = Globals.ClientSettings.Where(x => x.FailCount < 5).OrderBy(x => x.Count).FirstOrDefault();
-                    if (electrumServer != null)
-                    {
-                        try
-                        {
-                            var clientConnection = new Client(electrumServer.Host, electrumServer.Port, true);
-                            var serverVersion = await clientConnection.GetServerVersion();
+                Client? client = await ElectrumServerPool.GetClientAsync();
+                bool electrumServerFound = client != null;
 
-                            client = clientConnection;
-
-                            if (serverVersion == null)
-                                throw new Exception("Bad server response or no connection.");
-
-                            if(serverVersion.ProtocolVersion.Major != 1 && serverVersion.ProtocolVersion.Minor < 4)
-                                throw new Exception("Bad version.");
-
-                            electrumServerFound = true;
-                            electrumServer.Count++;
-                        }
-                        catch (Exception ex)
-                        {
-                            //TODO: ADD LOGS
-                            electrumServer.FailCount++;
-                            electrumServer.Count++;
-                            await Task.Delay(3000);
-                        }
-
-                    }
-                    else
-                    {
-                        //no servers found
-                        foreach (var elec in Globals.ClientSettings)
-                        {
-                            elec.FailCount = 0;
-                        }
-
-                        await Task.Delay(15000);
-                        break;
-                    }
-                    //TODO: ADD LOGS
-                    await Task.Delay(1000);
-                }
-                
-                
                 try
                 {
                     Globals.BTCSyncing = true;
@@ -286,6 +153,8 @@ namespace VerifiedXCore.Bitcoin
                             bool checkForNewUnspent = false;
                             bool unconfirmedFound = false;
                             var balance = await client.GetBalance(address.Address, false);
+                            if (!client.LastCallSucceeded)
+                                continue; // no answer is not a zero balance: keep what is stored
                             var btcAccount = BitcoinAccount.GetBitcoin()?.FindOne(x => x.Address == address.Address);
                             if (btcAccount != null)
                             {
@@ -573,6 +442,8 @@ namespace VerifiedXCore.Bitcoin
                                 bool checkForNewUnspent = false;
                                 bool unconfirmedFound= false;
                                 var balance = await client.GetBalance(address.DepositAddress, false);
+                                if (!client.LastCallSucceeded)
+                                    continue; // no answer is not a zero balance (a zero here also flagged the vault insolvent)
 
                                 var btcAccount = BitcoinAccount.GetBitcoin()?.FindOne(x => x.Address == address.DepositAddress);
 

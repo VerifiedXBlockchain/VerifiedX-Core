@@ -10,57 +10,21 @@ namespace VerifiedXCore.Bitcoin.Services
     {
         public static async Task SyncAddress(string address)
         {
-            bool electrumServerFound = false;
-            Client client = null;
-            while (!electrumServerFound)
-            {
-                var electrumServer = Globals.ClientSettings.Where(x => x.FailCount < 10).OrderBy(x => x.Count).FirstOrDefault();
-                if (electrumServer != null)
-                {
-                    try
-                    {
-                        client = new Client(electrumServer.Host, electrumServer.Port, true);
-                        var serverVersion = await client.GetServerVersion();
+            // One handshaked client for the whole sync. (The old loop ran the sync even on a client whose handshake
+            // had just failed, and saved the failed balance lookup as zero.)
+            using var client = await ElectrumServerPool.GetClientAsync();
+            if (client == null)
+                return;
 
-                        if (serverVersion == null)
-                            throw new Exception("Bad server response or no connection.");
-
-                        if (serverVersion.ProtocolVersion.Major != 1 && serverVersion.ProtocolVersion.Minor < 4)
-                            throw new Exception("Bad version.");
-
-                        electrumServerFound = true;
-                        electrumServer.Count++;
-                    }
-                    catch (Exception ex)
-                    {
-                        //TODO: ADD LOGS
-                        electrumServer.FailCount++;
-                        electrumServer.Count++;
-                        await Task.Delay(1000);
-                    }
-
-                }
-                else
-                {
-                    //no servers found
-                    return;
-                }
-                //TODO: ADD LOGS
-                await Task.Delay(1000);
-
-                if(client != null)
-                {
-                    await GetBalance(client, address);
-                    await GetTxHistory(client, address);
-                    await Getinputs(client, address);
-
-                    client.Dispose();
-                }
-            }
+            await GetBalance(client, address);
+            await GetTxHistory(client, address);
+            await Getinputs(client, address);
         }
         private static async Task GetBalance(Client client, string address)
         {
             var balance = await client.GetBalance(address, false);
+            if (!client.LastCallSucceeded)
+                return; // no answer is not a zero balance: keep what is stored
             var btcAccount = BitcoinAccount.GetBitcoin()?.FindOne(x => x.Address == address);
             if (btcAccount != null)
             {

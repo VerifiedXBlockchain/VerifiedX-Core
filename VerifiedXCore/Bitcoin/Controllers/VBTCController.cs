@@ -3927,6 +3927,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 decimal ledgerBalance = 0.0M;
                 bool isOwner = false;
                 decimal depositBalance = 0.0M;
+                bool depositStale = false;
 
                 // Calculate ledger balance from State Trei tokenization transactions.
                 // State entries use negative amounts for debits, so the net balance is simply the sum.
@@ -3954,39 +3955,12 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     // double-counts the owner's own withdrawal burns against the deposit balance).
                     ledgerBalance = Services.VBTCService.GetOwnerLedgerBalance(scState, address, Globals.LastBlock?.Height ?? 0);
 
-                    // For the owner, query ElectrumX for the real-time deposit address balance.
-                    // Deposit address falls back to the state-trei contract code, so owner balances
-                    // resolve correctly on nodes with no local VBTCContractV2 record (e.g. casters).
+                    // For the owner, the real-time deposit address balance (last known, flagged stale, when no
+                    // Electrum server answers). Deposit address falls back to the state-trei contract code, so owner
+                    // balances resolve correctly on nodes with no local VBTCContractV2 record (e.g. casters).
                     var depositAddr = Services.VBTCService.ResolveDepositAddress(scState, contract);
                     if (!string.IsNullOrEmpty(depositAddr))
-                    {
-                        try
-                        {
-                            using var client = await VerifiedXCore.Bitcoin.Bitcoin.ElectrumXClient();
-                            if (client != null)
-                            {
-                                var balance = await client.GetBalance(depositAddr, false);
-                                depositBalance = balance.Confirmed / 100_000_000M;
-
-                                // Also update the local contract balance while we have it
-                                if (contract != null && contract.Balance != depositBalance)
-                                {
-                                    contract.Balance = depositBalance;
-                                    VBTCContractV2.UpdateContract(contract);
-                                }
-                            }
-                            else
-                            {
-                                depositBalance = contract?.Balance ?? 0M;
-                            }
-                        }
-                        catch (Exception elxEx)
-                        {
-                            // If ElectrumX is unavailable, fall back to cached local balance
-                            depositBalance = contract?.Balance ?? 0M;
-                            ErrorLogUtility.LogError($"ElectrumX query failed, using cached balance: {elxEx.Message}", "VBTCController.GetVBTCBalance");
-                        }
-                    }
+                        (depositBalance, depositStale) = await Services.VBTCService.GetDepositBalanceForDisplay(depositAddr, contract);
                 }
 
                 // Owner balance = deposit address balance + ledger balance
@@ -4014,6 +3988,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     SmartContractUID = scUID,
                     Balance = totalBalance,
                     DepositAddressBalance = isOwner ? depositBalance : (decimal?)null,
+                    DepositBalanceStale = isOwner ? depositStale : (bool?)null,
                     LedgerBalance = ledgerBalance,
                     AvailableBalance = totalBalance - pendingWithdrawals - pendingReserveSends,
                     PendingWithdrawals = pendingWithdrawals,
@@ -4082,6 +4057,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         var depositAddress = contract.Feature.DepositAddress;
                         bool isOwner = scState?.OwnerAddress == address;
                         decimal depositBalance = 0.0M;
+                        bool depositStale = false;
 
                         // Owner ledger: full sum + completed-withdrawal add-back so withdrawal burn
                         // rows aren't double-counted against the deposit balance (which already
@@ -4090,31 +4066,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                             ledgerBalance = Services.VBTCService.GetOwnerLedgerBalance(scState, address, Globals.LastBlock?.Height ?? 0);
 
                         if (isOwner && !string.IsNullOrEmpty(depositAddress))
-                        {
-                            try
-                            {
-                                using var elxClient = await VerifiedXCore.Bitcoin.Bitcoin.ElectrumXClient();
-                                if (elxClient != null)
-                                {
-                                    var balance = await elxClient.GetBalance(depositAddress, false);
-                                    depositBalance = balance.Confirmed / 100_000_000M;
-                                }
-                                else
-                                {
-                                    depositBalance = local?.Balance ?? 0M;
-                                }
-
-                                if (local != null && local.Balance != depositBalance)
-                                {
-                                    local.Balance = depositBalance;
-                                    VBTCContractV2.UpdateContract(local);
-                                }
-                            }
-                            catch
-                            {
-                                depositBalance = local?.Balance ?? 0M;
-                            }
-                        }
+                            (depositBalance, depositStale) = await Services.VBTCService.GetDepositBalanceForDisplay(depositAddress, local);
 
                         decimal contractBalance = isOwner ? depositBalance + ledgerBalance : ledgerBalance;
 
@@ -4140,6 +4092,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                                 DepositAddress = depositAddress,
                                 Balance = contractBalance,
                                 DepositAddressBalance = isOwner ? depositBalance : (decimal?)null,
+                                DepositBalanceStale = isOwner ? depositStale : (bool?)null,
                                 LedgerBalance = ledgerBalance,
                                 AvailableBalance = contractBalance - pendingWithdrawals - pendingReserveSends,
                                 PendingWithdrawals = pendingWithdrawals,

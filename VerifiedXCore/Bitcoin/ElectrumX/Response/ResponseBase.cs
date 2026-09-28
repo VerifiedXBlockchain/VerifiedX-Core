@@ -1,6 +1,12 @@
 ﻿namespace VerifiedXCore.Bitcoin.ElectrumX.Response
 {
-    public class ResponseBase<TResultModel> where TResultModel:new()
+    /// <summary>What every Electrum JSON-RPC answer carries, whatever its result type.</summary>
+    public interface IElectrumResponse
+    {
+        Error Error { get; }
+    }
+
+    public class ResponseBase<TResultModel> : IElectrumResponse where TResultModel:new()
     {
 
         [Newtonsoft.Json.JsonProperty("jsonrpc")]

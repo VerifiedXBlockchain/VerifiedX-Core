@@ -127,7 +127,8 @@ namespace VerifiedXCore.Tests
         {
             TheReportedVault();
             var tx = OwnerTransfer(0.001M);
-            // Admission (no ElectrumX here, so the deposit reads 0: the old ledger figure alone covered 0.001).
+            // Admission with an empty deposit (the old ledger figure alone covered 0.001).
+            using var electrum = new FakeElectrum(("server", true, 0M));
             var admission = await TransactionValidatorService.VerifyTX(tx);
             Assert.False(admission.Item1);
             Assert.Contains("Insufficient", admission.Item2);

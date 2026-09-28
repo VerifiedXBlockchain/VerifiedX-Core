@@ -527,6 +527,10 @@ namespace VerifiedXCore.Data
 
         public static async Task<List<Transaction>> ProcessTxPool()
         {
+            // Block proposal: an owner debit whose Bitcoin deposit no Electrum server can confirm is left out of this
+            // block but kept in the mempool (below), instead of being deleted as invalid.
+            using var electrumScope = VerifiedXCore.Bitcoin.Services.ElectrumCheckScope.Enter(VerifiedXCore.Bitcoin.Services.ElectrumCheckMode.BlockProposal);
+
             var collection = DbContext.DB_Mempool.GetCollection<Transaction>(DbContext.RSRV_TRANSACTION_POOL);
 
             var memPoolTxList = collection.FindAll().ToList();
@@ -1109,6 +1113,12 @@ namespace VerifiedXCore.Data
                                             else
                                                 LogUtility.Log($"[ProcessTxPool] Skipping bridge tx {tx.Hash} for this block: {bridgeBatchReason}", "TransactionData.ProcessTxPool()");
                                         }
+                                    }
+                                    else if (!txVerify.Item1 && VerifiedXCore.Bitcoin.Services.VbtcOwnerDeposit.IsUnverifiable(txVerify.Item2))
+                                    {
+                                        // Not invalid, just unconfirmable right now: retried next block, and the
+                                        // 60-minute timestamp rule removes it if Electrum never answers.
+                                        LogUtility.Log($"[ProcessTxPool] Skipping {tx.Hash} for this block: {txVerify.Item2}", "TransactionData.ProcessTxPool()");
                                     }
                                     else
                                     {

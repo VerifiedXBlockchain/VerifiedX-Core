@@ -105,7 +105,13 @@ namespace VerifiedXCore.Bitcoin.Services
                     s.PublicDepositAddress = companion.DepositAddress;
                     // Snapshot the reused companion's balance so we bridge only the arrived delta (§12.3).
                     var bal = await VBTCService.TryGetAvailableTransparentVbtcBalance(s.PublicScUID, s.RequesterAddress);
-                    s.CompanionBalanceBefore = bal.success ? bal.availableBalance : 0M;
+                    if (!bal.success)
+                    {
+                        // A zero "before" would bridge the companion's whole existing balance as if it had just arrived.
+                        Set(s, S3CAutoBridgeStatus.Abandoned, $"Could not read the companion's balance ({bal.error}); nothing moved. Retry later.");
+                        return;
+                    }
+                    s.CompanionBalanceBefore = bal.availableBalance;
                 }
                 Set(s, S3CAutoBridgeStatus.AwaitingCompanionReady);
 

@@ -17,107 +17,149 @@ namespace VerifiedXCore.Bitcoin.ElectrumX
         protected readonly string Host;
         protected readonly int Port;
         protected readonly bool UseSsl;
-        protected TcpClient TcpClient;
-        protected SslStream SslStream;
-        protected NetworkStream TcpStream;
-        protected const int Buffersize = ushort.MaxValue;
+        protected TcpClient? TcpClient;
+        protected Stream? Stream;
         private const int MaxResponseSize = 10 * 1024 * 1024; // 10 MB max response size
-        private static readonly TimeSpan ReadTimeout = TimeSpan.FromSeconds(30);
         public static Version CurrentVersion;
         protected bool IsConnected;
         protected static NBitcoin.Network Network;
+
+        /// <summary>
+        /// Default bound on TCP connect plus TLS handshake. The connect used to have no bound at all: a server that
+        /// never answered (packets dropped, not refused) hung every call routed to it, and since the attempt never
+        /// finished its FailCount never rose, so it was picked again (tester report MTI#11).
+        /// </summary>
+        public static readonly TimeSpan DefaultConnectTimeout = TimeSpan.FromSeconds(5);
+
+        /// <summary>Default bound on one request/response once connected.</summary>
+        public static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(10);
+
+        public TimeSpan ConnectTimeout { get; set; } = DefaultConnectTimeout;
+        public TimeSpan RequestTimeout { get; set; } = DefaultRequestTimeout;
+
+        /// <summary>
+        /// The last command got a well-formed answer without a JSON-RPC error. Commands still return an empty
+        /// result on failure (existing callers rely on that), so a caller that must not mistake a failure for a
+        /// zero balance or an empty list checks this.
+        /// </summary>
+        public bool LastCallSucceeded { get; private set; }
+
+        /// <summary>
+        /// The server answered the last command, possibly with a JSON-RPC error (an unknown transaction, say).
+        /// False means it could not be reached or did not answer in time: the server-health signal.
+        /// </summary>
+        public bool LastCallAnswered { get; private set; }
+
+        /// <summary>Why the last command did not succeed, for logs.</summary>
+        public string? LastFailure { get; private set; }
+
+        public string ServerLabel => $"{Host}:{Port}";
 
         public Client(string host, int port, bool useSsl = false)
         {
             Host = host;
             Port = port;
             UseSsl = useSsl;
-            Network = Globals.BTCNetwork;               
+            Network = Globals.BTCNetwork;
         }
 
         public Client(ClientSettings settings) : this(settings.Host, settings.Port, settings.UseSsl) { }
 
         #endregion
 
-        #region Connect/Disconnect/SSL Method
+        #region Connect/Disconnect/Exchange
 
-        protected async Task ConnectWithSsl()
+        private async Task Connect()
         {
             if (IsConnected)
                 return;
+
+            using var cts = new CancellationTokenSource(ConnectTimeout);
+            // WaitAsync is the backstop: whether the DNS step inside ConnectAsync honors the token is platform-dependent.
+            await Observe(ConnectCore(cts.Token)).WaitAsync(ConnectTimeout);
+            IsConnected = true;
+        }
+
+        private async Task ConnectCore(CancellationToken token)
+        {
+            // Locals, not the fields: after a timeout Disconnect() clears the fields while this may still be running.
+            var tcp = new TcpClient();
+            TcpClient = tcp;
+            await tcp.ConnectAsync(Host, Port, token);
+            if (UseSsl)
+            {
+                var ssl = new SslStream(tcp.GetStream(), false, (sender, certificate, chan, sslPolicy) => true);
+                Stream = ssl;
+                await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = Host }, token);
+            }
+            else
+            {
+                Stream = tcp.GetStream();
+            }
+        }
+
+        /// <summary>One request, one answer, then the connection is closed. Empty string on any failure (LastFailure says why).</summary>
+        private async Task<string> Exchange(byte[] requestData)
+        {
             try
             {
-                TcpClient = new TcpClient();
-                await TcpClient.ConnectAsync(Host, Port);
-                SslStream = new SslStream(TcpClient.GetStream(), true,
-                    (sender, certificate, chan, sslPolicy) => true);
-                await SslStream.AuthenticateAsClientAsync(Host);
-                IsConnected = true;
-            }
-            catch (SocketException ex)
-            {
-                Console.WriteLine(ex);
+                await Connect();
+                using var cts = new CancellationTokenSource(RequestTimeout);
+                return await Observe(ReadAnswer(requestData, cts.Token)).WaitAsync(RequestTimeout);
             }
             catch (Exception ex)
             {
-                Console.WriteLine(ex);
+                LastFailure = ex is TimeoutException || ex is OperationCanceledException ? "timed out" : ex.Message;
+                return string.Empty;
+            }
+            finally
+            {
+                Disconnect();
             }
         }
-        protected async Task ConnectNoSsl()
+
+        private async Task<string> ReadAnswer(byte[] requestData, CancellationToken token)
         {
-            if (IsConnected)
-                return;
-            try
-            {
-                TcpClient = new TcpClient();
-                await TcpClient.ConnectAsync(Host, Port);
-                TcpStream = TcpClient.GetStream();
-                IsConnected = true;
-            }
-            catch (SocketException ex)
-            {
-                Console.WriteLine(ex);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine(ex);
-            }
-        }
-        private async Task<string> SendMessageWithSsl(byte[] requestData)
-        {
-            const int bufferSize = 8192;
-            var buffer = new byte[bufferSize];
+            var stream = Stream ?? throw new IOException("not connected");
+            await stream.WriteAsync(requestData, 0, requestData.Length, token);
+
+            var buffer = new byte[8192];
+            var chars = new char[Encoding.UTF8.GetMaxCharCount(buffer.Length)];
+            var decoder = Encoding.UTF8.GetDecoder(); // keeps a multi-byte character split across reads intact
+            var response = new StringBuilder();
             var totalBytesRead = 0;
-
-            using var cts = new CancellationTokenSource(ReadTimeout);
-
-            //system not reference to system of an object error here
-            await SslStream.WriteAsync(requestData, 0, requestData.Length, cts.Token);
-
-            var responseBuilder = new StringBuilder();
 
             while (true)
             {
-                int read = await SslStream.ReadAsync(buffer, 0, buffer.Length, cts.Token);
+                int read = await stream.ReadAsync(buffer, 0, buffer.Length, token);
                 if (read == 0)
-                    break;
+                    throw new IOException("connection closed before a complete answer");
 
                 totalBytesRead += read;
                 if (totalBytesRead > MaxResponseSize)
-                {
-                    Disconnect();
-                    return string.Empty;
-                }
+                    throw new IOException("answer exceeded the size limit");
 
-                responseBuilder.Append(Encoding.ASCII.GetString(buffer, 0, read));
+                response.Append(chars, 0, decoder.GetChars(buffer, 0, read, chars, 0));
 
-                if (IsCompleteJson(responseBuilder.ToString()))
-                    break;
+                var text = response.ToString();
+                if (IsCompleteJson(text))
+                    return text;
             }
-
-            Disconnect();
-            return responseBuilder.ToString();
         }
+
+        /// <summary>A task abandoned by WaitAsync still faults when Disconnect tears its socket down; observe that fault.</summary>
+        private static Task<T> Observe<T>(Task<T> task)
+        {
+            _ = task.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+            return task;
+        }
+
+        private static Task Observe(Task task)
+        {
+            _ = task.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+            return task;
+        }
+
         private bool IsCompleteJson(string response)
         {
             response = response.Trim();
@@ -137,46 +179,72 @@ namespace VerifiedXCore.Bitcoin.ElectrumX
             }
             return false;
         }
-        private async Task<string> SendMessageNoSsl(byte[] requestData)
+
+        /// <summary>
+        /// Sends one request and parses the answer, recording LastCallAnswered / LastCallSucceeded / LastFailure.
+        /// Null when nothing usable came back; a JSON-RPC error still returns the response (LastCallSucceeded false).
+        /// </summary>
+        private async Task<T?> Call<T>(byte[] requestData) where T : class, IElectrumResponse
         {
-            var response = new StringBuilder();
-            var buffer = new byte[Buffersize];
-            var totalBytesRead = 0;
+            LastCallSucceeded = false;
+            LastCallAnswered = false;
+            LastFailure = null;
 
-            using var cts = new CancellationTokenSource(ReadTimeout);
+            var buff = await Exchange(requestData);
+            if (string.IsNullOrEmpty(buff))
+                return null;
 
-            await TcpStream.WriteAsync(requestData, 0, requestData.Length, cts.Token);
-            var bytes = await TcpStream.ReadAsync(buffer, 0, buffer.Length, cts.Token);
-            do
+            T? response;
+            try
             {
-                totalBytesRead += bytes;
-                if (totalBytesRead > MaxResponseSize)
-                {
-                    Disconnect();
-                    return string.Empty;
-                }
-
-                response.Append(Encoding.UTF8.GetString(buffer, 0, bytes));
+                response = JsonConvert.DeserializeObject<T>(buff);
             }
-            while (TcpStream.DataAvailable);
+            catch (Exception ex)
+            {
+                LastFailure = $"malformed answer: {ex.Message}";
+                return null;
+            }
 
-            Disconnect();
-            return response.ToString();
+            if (response == null)
+            {
+                LastFailure = "empty answer";
+                return null;
+            }
+
+            LastCallAnswered = true;
+            if (response.Error != null)
+            {
+                LastFailure = $"server error {response.Error.Code}: {response.Error.Message}";
+                OnError?.Invoke(this, response.Error.Code, response.Error.Message);
+                return response;
+            }
+
+            LastCallSucceeded = true;
+            return response;
         }
+
+        /// <summary>A successful call whose answer carried no result is not a success.</summary>
+        private T? Succeeded<T>(T? result) where T : class
+        {
+            if (result == null && LastCallSucceeded)
+            {
+                LastCallSucceeded = false;
+                LastFailure = "answer carried no result";
+            }
+            return result;
+        }
+
         protected void Disconnect()
         {
             IsConnected = false;
-            TcpStream?.Close();
-            SslStream?.Close();
-            TcpClient?.Close();
-
+            Stream?.Dispose();
+            TcpClient?.Dispose();
+            Stream = null;
+            TcpClient = null;
         }
         protected void Dispose(bool disposing)
         {
             if (!disposing) return;
-            TcpClient?.Dispose();
-            SslStream?.Dispose();
-            TcpStream?.Dispose();
             Disconnect();
         }
         public void Dispose()
@@ -200,42 +268,23 @@ namespace VerifiedXCore.Bitcoin.ElectrumX
         {
             if (string.IsNullOrEmpty(hexTx))
                 return new BlockchainTransactionBroadcastResult();
-            var requestData = new BlockchainTransactionBroadcastRequest(hexTx).GetRequestData();
-            var buff = "";
-            try
-            {
-                if (UseSsl)
-                {
-                    await ConnectWithSsl();
-                    buff = await SendMessageWithSsl(requestData);
-                }
-                else
-                {
-                    await ConnectNoSsl();
-                    buff = await SendMessageNoSsl(requestData);
-                }
-            }
-            catch
-            {
-                // ignored
-            }
-            if (string.IsNullOrEmpty(buff))
+
+            var response = await Call<BlockchainTransactionBroadcastResponse>(new BlockchainTransactionBroadcastRequest(hexTx).GetRequestData());
+            if (response == null)
             {
                 VerifiedXCore.Utilities.ErrorLogUtility.LogError(
-                    $"Electrum broadcast: empty response from {Host}:{Port}",
+                    $"Electrum broadcast: no answer from {Host}:{Port} ({LastFailure})",
                     "Client.Broadcast");
                 return new BlockchainTransactionBroadcastResult();
             }
-            var response = JsonConvert.DeserializeObject<BlockchainTransactionBroadcastResponse>(buff);
-            if (response?.Error != null)
+            if (response.Error != null)
             {
                 VerifiedXCore.Utilities.ErrorLogUtility.LogError(
                     $"Electrum broadcast REJECTED: code={response.Error.Code}, message={response.Error.Message}, host={Host}:{Port}",
                     "Client.Broadcast");
-                OnError?.Invoke(this, response.Error.Code, response.Error.Message);
                 return new BlockchainTransactionBroadcastResult { ErrorMessage = response.Error.Message };
             }
-            return response != null ? response.GetResultModel() : new BlockchainTransactionBroadcastResult();
+            return response.GetResultModel();
         }
         #endregion
 
@@ -253,61 +302,20 @@ namespace VerifiedXCore.Bitcoin.ElectrumX
         {
             if (address == null)
                 return new List<BlockchainScripthashGetHistoryResult>();
-            var scriptHash = GetScriptHash(address);
-            var requestData = new BlockchainScripthashGetHistoryRequest(scriptHash).GetRequestData();
-            var buff = "";
-            try
-            {
-                if (UseSsl)
-                {
-                    await ConnectWithSsl();
-                    buff = await SendMessageWithSsl(requestData);
-                }
-                else
-                {
-                    await ConnectNoSsl();
-                    buff = await SendMessageNoSsl(requestData);
-                }
-            }
-            catch
-            {
-                // ignored
-            }
-            var response = !string.IsNullOrEmpty(buff) ? JsonConvert.DeserializeObject<BlockchainScripthashGetHistoryResponse>(buff) : null;
-            if (response?.Error != null)
-                OnError?.Invoke(this, response.Error.Code, response.Error.Message);
-            return response != null ? response.GetResultModel() : new List<BlockchainScripthashGetHistoryResult>();
+            return await GetHistoryByScriptHash(GetScriptHash(address));
         }
 
         public async Task<List<BlockchainScripthashGetHistoryResult>> GetHistory(string baseAddr)
         {
             if (string.IsNullOrEmpty(baseAddr))
                 return new List<BlockchainScripthashGetHistoryResult>();
+            return await GetHistoryByScriptHash(GetScriptHash(BitcoinAddress.Create(baseAddr, Globals.BTCNetwork)));
+        }
 
-            var bAddr = BitcoinAddress.Create(baseAddr, Globals.BTCNetwork);
-            var requestData = new BlockchainScripthashGetHistoryRequest(GetScriptHash(bAddr)).GetRequestData();
-            var buff = "";
-            try
-            {
-                if (UseSsl)
-                {
-                    await ConnectWithSsl();
-                    buff = await SendMessageWithSsl(requestData);
-                }
-                else
-                {
-                    await ConnectNoSsl();
-                    buff = await SendMessageNoSsl(requestData);
-                }
-            }
-            catch
-            {
-                // ignored
-            }
-            var response = !string.IsNullOrEmpty(buff) ? JsonConvert.DeserializeObject<BlockchainScripthashGetHistoryResponse>(buff) : null;
-            if (response?.Error != null)
-                OnError?.Invoke(this, response.Error.Code, response.Error.Message);
-            return response != null ? response.GetResultModel() : new List<BlockchainScripthashGetHistoryResult>();
+        private async Task<List<BlockchainScripthashGetHistoryResult>> GetHistoryByScriptHash(string scriptHash)
+        {
+            var response = await Call<BlockchainScripthashGetHistoryResponse>(new BlockchainScripthashGetHistoryRequest(scriptHash).GetRequestData());
+            return Succeeded(LastCallSucceeded ? response!.GetResultModel() : null) ?? new List<BlockchainScripthashGetHistoryResult>();
         }
 
         #endregion
@@ -317,28 +325,7 @@ namespace VerifiedXCore.Bitcoin.ElectrumX
         {
             if (string.IsNullOrEmpty(txHash))
                 return -1;
-            var requestData = new BlockchainTransactionGetRequest(txHash, true).GetRequestData();
-            var buff = "";
-            try
-            {
-                if (UseSsl)
-                {
-                    await ConnectWithSsl();
-                    buff = await SendMessageWithSsl(requestData);
-                }
-                else
-                {
-                    await ConnectNoSsl();
-                    buff = await SendMessageNoSsl(requestData);
-                }
-            }
-            catch
-            {
-                // ignored
-            }
-            var response = !string.IsNullOrEmpty(buff) ? JsonConvert.DeserializeObject<BlockchainTransactionGetConfirmsResponse>(buff) : null;
-            if (response?.Error != null)
-                OnError?.Invoke(this, response.Error.Code, response.Error.Message);
+            var response = await Call<BlockchainTransactionGetConfirmsResponse>(new BlockchainTransactionGetRequest(txHash, true).GetRequestData());
             return response?.GetResultModel() ?? -1;
         }
         #endregion
@@ -346,59 +333,13 @@ namespace VerifiedXCore.Bitcoin.ElectrumX
         #region Get Balance
         public async Task<BlockchainScripthashGetBalanceResult> GetBalance(string address, bool isLegacy)
         {
-            var prefix = "";
-
-            var bAddr = BitcoinAddress.Create(prefix + address, Globals.BTCNetwork);
-            var requestData = new BlockchainScripthashGetBalance(GetScriptHash(bAddr)).GetRequestData();
-            var buff = "";
-            try
-            {
-                if (UseSsl)
-                {
-                    await ConnectWithSsl();
-                    buff = await SendMessageWithSsl(requestData);
-                }
-                else
-                {
-                    await ConnectNoSsl();
-                    buff = await SendMessageNoSsl(requestData);
-                }
-            }
-            catch
-            {
-                // ignored
-            }
-            var response = !string.IsNullOrEmpty(buff) ? JsonConvert.DeserializeObject<BlockchainScripthashGetBalanceResponse>(buff) : null;
-            if (response?.Error != null)
-                OnError?.Invoke(this, response.Error.Code, response.Error.Message);
-            return response != null ? response.GetResultModel() : new BlockchainScripthashGetBalanceResult();
+            return await GetBalance(BitcoinAddress.Create(address, Globals.BTCNetwork));
         }
 
         public async Task<BlockchainScripthashGetBalanceResult> GetBalance(IDestination address)
         {
-            var requestData = new BlockchainScripthashGetBalance(GetScriptHash(address)).GetRequestData();
-            var buff = "";
-            try
-            {
-                if (UseSsl)
-                {
-                    await ConnectWithSsl();
-                    buff = await SendMessageWithSsl(requestData);
-                }
-                else
-                {
-                    await ConnectNoSsl();
-                    buff = await SendMessageNoSsl(requestData);
-                }
-            }
-            catch
-            {
-                // ignored
-            }
-            var response = !string.IsNullOrEmpty(buff) ? JsonConvert.DeserializeObject<BlockchainScripthashGetBalanceResponse>(buff) : null;
-            if (response?.Error != null)
-                OnError?.Invoke(this, response.Error.Code, response.Error.Message);
-            return response != null ? response.GetResultModel() : new BlockchainScripthashGetBalanceResult();
+            var response = await Call<BlockchainScripthashGetBalanceResponse>(new BlockchainScripthashGetBalance(GetScriptHash(address)).GetRequestData());
+            return Succeeded(LastCallSucceeded ? response!.GetResultModel() : null) ?? new BlockchainScripthashGetBalanceResult();
         }
         #endregion
 
@@ -417,59 +358,27 @@ namespace VerifiedXCore.Bitcoin.ElectrumX
 
         public async Task<List<BlockchainScripthashListunspentResult>> GetListUnspent(string scriptHash)
         {
-            var requestData = new BlockchainScripthashListunspentRequest(scriptHash).GetRequestData();
-            var buff = "";
-            try
-            {
-                if (UseSsl)
-                {
-                    await ConnectWithSsl();
-                    buff = await SendMessageWithSsl(requestData);
-                }
-                else
-                {
-                    await ConnectNoSsl();
-                    buff = await SendMessageNoSsl(requestData);
-                }
-            }
-            catch
-            {
-                // ignored
-            }
-            var response = !string.IsNullOrEmpty(buff) ? JsonConvert.DeserializeObject<BlockchainScripthashListunspentResponse>(buff) : null;
-            if (response?.Error != null)
-                OnError?.Invoke(this, response.Error.Code, response.Error.Message);
-            return response != null ? response.GetResultModel() : new List<BlockchainScripthashListunspentResult>();
+            var response = await Call<BlockchainScripthashListunspentResponse>(new BlockchainScripthashListunspentRequest(scriptHash).GetRequestData());
+            return Succeeded(LastCallSucceeded ? response!.GetResultModel() : null) ?? new List<BlockchainScripthashListunspentResult>();
         }
         #endregion
 
         #region Get Server Version
         public async Task<ServerVersionResult> GetServerVersion()
         {
-            var requestData = new ServerVersionRequest().GetRequestData();
-            var buff = "";
-            try
-            {
-                if (UseSsl)
-                {
-                    await ConnectWithSsl();
-                    buff = await SendMessageWithSsl(requestData);
-                }
-                else
-                {
-                    await ConnectNoSsl();
-                    buff = await SendMessageNoSsl(requestData);
-                }
-            }
-            catch
-            {
-                // ignored
-            }
+            var response = await Call<ServerVersionResponse>(new ServerVersionRequest().GetRequestData());
+            var valid = LastCallSucceeded && response!.Result?.Length >= 2;
+            return Succeeded(valid ? response!.GetResultModel() : null) ?? new ServerVersionResult();
+        }
+        #endregion
 
-            var response = !string.IsNullOrEmpty(buff) ? JsonConvert.DeserializeObject<ServerVersionResponse>(buff) : null;
-            if (response?.Error != null)
-                OnError?.Invoke(this, response.Error.Code, response.Error.Message);
-            return response != null ? response.GetResultModel() : new ServerVersionResult();
+        #region Get Tip Height
+        /// <summary>The server's current block height (blockchain.headers.subscribe), or null when it did not answer.</summary>
+        public async Task<int?> GetTipHeight()
+        {
+            var response = await Call<BlockchainHeadersTipResponse>(new BlockchainHeadersSubscribeRequest().GetRequestData());
+            var result = Succeeded(LastCallSucceeded ? response!.Result : null);
+            return result?.Height;
         }
         #endregion
 
@@ -478,61 +387,16 @@ namespace VerifiedXCore.Bitcoin.ElectrumX
         {
             if (string.IsNullOrEmpty(txHash))
                 return new BlockchainTransactionGetResult();
-            var requestData = new BlockchainTransactionGetRequest(txHash).GetRequestData();
-            var buff = "";
-            try
-            {
-                if (UseSsl)
-                {
-                    await ConnectWithSsl();
-                    buff = await SendMessageWithSsl(requestData);
-                }
-                else
-                {
-                    await ConnectNoSsl();
-                    buff = await SendMessageNoSsl(requestData);
-                }
-            }
-            catch
-            {
-                // ignored
-            }
-            var response = !string.IsNullOrEmpty(buff) ? JsonConvert.DeserializeObject<BlockchainTransactionGetResponse>(buff) : null;
-            if (response?.Error != null)
-                OnError?.Invoke(this, response.Error.Code, response.Error.Message);
-            return response?.GetResultModel() ?? new BlockchainTransactionGetResult();
+            var response = await Call<BlockchainTransactionGetResponse>(new BlockchainTransactionGetRequest(txHash).GetRequestData());
+            return Succeeded(LastCallSucceeded && response!.Result != null ? response.GetResultModel() : null) ?? new BlockchainTransactionGetResult();
         }
         #endregion
 
         #region Get Block Header Hex
         public async Task<BlockchainBlockHeaderGetResult> GetBlockHeaderHex(int height)
         {
-            var requestData = new BlockchainBlockHeaderGetRequest(height, 1).GetRequestData();
-            var responseString = "";
-            try
-            {
-                if (UseSsl)
-                {
-                    await ConnectWithSsl();
-                    responseString = await SendMessageWithSsl(requestData);
-                }
-                else
-                {
-                    await ConnectNoSsl();
-                    responseString = await SendMessageNoSsl(requestData);
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine(ex.Message);
-            }
-
-            var response = JsonConvert.DeserializeObject<BlockchainBlockHeaderGetResponse>(responseString);
-            if (response?.Error != null)
-            {
-                OnError?.Invoke(this, response.Error.Code, response.Error.Message);
-            }
-            return response?.Result;
+            var response = await Call<BlockchainBlockHeaderGetResponse>(new BlockchainBlockHeaderGetRequest(height, 1).GetRequestData());
+            return Succeeded(LastCallSucceeded ? response!.Result : null);
         }
 
         #endregion
@@ -540,30 +404,8 @@ namespace VerifiedXCore.Bitcoin.ElectrumX
         #region Get Block Transaction  Merkle
         public async Task<BlockchainTransactionGetMerkleResult> GetBlockchainTransactionGetMerkle(string txId, int height)
         {
-            var requestData = new BlockchainTransactionGetMerkleRequest(txId, height).GetRequestData();
-            var buff = "";
-            try
-            {
-                if (UseSsl)
-                {
-                    await ConnectWithSsl();
-                    buff = await SendMessageWithSsl(requestData);
-                }
-                else
-                {
-                    await ConnectNoSsl();
-                    buff = await SendMessageNoSsl(requestData);
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine(ex.Message);
-            }
-
-            var response = !string.IsNullOrEmpty(buff) ? JsonConvert.DeserializeObject<BlockchainTransactionGetMerkleResponse>(buff) : null;
-            if (response?.Error != null)
-                OnError?.Invoke(this, response.Error.Code, response.Error.Message);
-            return response != null ? response.GetResultModel() : new BlockchainTransactionGetMerkleResult();
+            var response = await Call<BlockchainTransactionGetMerkleResponse>(new BlockchainTransactionGetMerkleRequest(txId, height).GetRequestData());
+            return Succeeded(LastCallSucceeded ? response!.GetResultModel() : null) ?? new BlockchainTransactionGetMerkleResult();
         }
         #endregion
 

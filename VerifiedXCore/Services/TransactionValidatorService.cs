@@ -160,33 +160,20 @@ namespace VerifiedXCore.Services
                 }
 
                 decimal totalBalance = ledgerBalance;
+                var deposit = new OwnerDepositCheck(OwnerDepositStatus.NotQueried, 0M);
                 if (isRequesterOwner)
                 {
                     ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scState, requesterAddress, gateHeight);
 
-                    decimal depositBalance = 0M;
-                    if (!blockDownloads && !blockVerify)
-                    {
-                        var depositAddr = Bitcoin.Services.VBTCService.ResolveDepositAddress(scState, null);
-                        if (!string.IsNullOrEmpty(depositAddr))
-                        {
-                            try
-                            {
-                                using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
-                                if (elxClient != null)
-                                {
-                                    var bal = await elxClient.GetBalance(depositAddr, false);
-                                    depositBalance = bal.Confirmed / 100_000_000M;
-                                }
-                            }
-                            catch { /* ElectrumX unavailable — depositBalance stays 0 */ }
-                        }
-                    }
+                    deposit = await VbtcOwnerDeposit.CheckAsync(() => Bitcoin.Services.VBTCService.ResolveDepositAddress(scState, null),
+                        input.Amount - ledgerBalance, blockDownloads, blockVerify);
+                    if (deposit.Status == OwnerDepositStatus.Unverifiable)
+                        return (false, $"{VbtcOwnerDeposit.UnverifiableReason} (contract {input.SCUID})");
 
-                    totalBalance = depositBalance + ledgerBalance;
+                    totalBalance = deposit.DepositBalance + ledgerBalance;
                 }
 
-                if (totalBalance < input.Amount)
+                if (totalBalance < input.Amount && deposit.Status != OwnerDepositStatus.Trusted)
                 {
                     // Owner branch at block verification trusts the crafter's ElectrumX check —
                     // same rule as the single shape.
@@ -1518,39 +1505,15 @@ namespace VerifiedXCore.Services
                                                     // ElectrumX deposit balance) are cancelled out.
                                                     ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateTreiRec, fromAddress, blockHeight ?? Globals.LastBlock?.Height ?? 0);
 
-                                                    // Owner: query ElectrumX for deposit address balance and add ledger balance
-                                                    decimal depositBalance = 0M;
-                                                    // Get deposit address from state trei contract data (available on ALL nodes)
-                                                    string depositAddr = null;
-                                                    var scMainDecompile = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
-                                                    if (scMainDecompile?.Features != null)
-                                                    {
-                                                        var tknzV2 = scMainDecompile.Features
-                                                            .Where(x => x.FeatureName == FeatureName.TokenizationV2)
-                                                            .Select(x => x.FeatureFeatures).FirstOrDefault();
-                                                        if (tknzV2 != null)
-                                                            depositAddr = ((TokenizationV2Feature)tknzV2).DepositAddress;
-                                                    }
-
-                                                    if (!string.IsNullOrEmpty(depositAddr))
-                                                    {
-                                                        if (!blockDownloads && !blockVerify)
-                                                        {
-                                                            try
-                                                            {
-                                                                using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
-                                                                if (elxClient != null)
-                                                                {
-                                                                    var balance = await elxClient.GetBalance(depositAddr, false);
-                                                                    depositBalance = balance.Confirmed / 100_000_000M;
-                                                                }
-                                                            }
-                                                            catch { /* ElectrumX unavailable — depositBalance stays 0 */ }
-                                                        }
-                                                    }
+                                                    // Owner: deposit address balance (Electrum, never for mined blocks) plus ledger.
+                                                    var deposit = await VbtcOwnerDeposit.CheckAsync(() => Bitcoin.Services.VBTCService.ResolveDepositAddress(scStateTreiRec, null),
+                                                        amount.Value - ledgerBalance, blockDownloads, blockVerify);
+                                                    if (deposit.Status == OwnerDepositStatus.Unverifiable)
+                                                        return (txResult, VbtcOwnerDeposit.UnverifiableReason);
+                                                    decimal depositBalance = deposit.DepositBalance;
 
                                                     decimal ownerBalance = depositBalance + ledgerBalance;
-                                                    if (ownerBalance < amount.Value)
+                                                    if (ownerBalance < amount.Value && deposit.Status != OwnerDepositStatus.Trusted)
                                                     {
                                                         // At/after VbtcLegacyTransferBypassFixHeight this legacy dispatcher path
                                                         // gets the same trust-the-crafter bypass as VBTC_V2_TRANSFER: ElectrumX is
@@ -2869,26 +2832,13 @@ namespace VerifiedXCore.Services
                                     // live deposit balance — same formula as the single shape.
                                     ledgerBalanceMulti = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateMulti, txRequest.FromAddress, blockHeight ?? Globals.LastBlock?.Height ?? 0);
 
-                                    decimal depositBalanceMulti = 0M;
-                                    if (!blockDownloads && !blockVerify)
-                                    {
-                                        var depositAddrMulti = Bitcoin.Services.VBTCService.ResolveDepositAddress(scStateMulti, null);
-                                        if (!string.IsNullOrEmpty(depositAddrMulti))
-                                        {
-                                            try
-                                            {
-                                                using var elxClientMulti = await Bitcoin.Bitcoin.ElectrumXClient();
-                                                if (elxClientMulti != null)
-                                                {
-                                                    var elxBalanceMulti = await elxClientMulti.GetBalance(depositAddrMulti, false);
-                                                    depositBalanceMulti = elxBalanceMulti.Confirmed / 100_000_000M;
-                                                }
-                                            }
-                                            catch { /* ElectrumX unavailable — depositBalance stays 0 */ }
-                                        }
-                                    }
+                                    var depositMulti = await VbtcOwnerDeposit.CheckAsync(() => Bitcoin.Services.VBTCService.ResolveDepositAddress(scStateMulti, null),
+                                        input.Amount - ledgerBalanceMulti, blockDownloads, blockVerify);
+                                    if (depositMulti.Status == OwnerDepositStatus.Unverifiable)
+                                        return (txResult, $"{VbtcOwnerDeposit.UnverifiableReason} (contract {input.SCUID})");
+                                    decimal depositBalanceMulti = depositMulti.DepositBalance;
 
-                                    if (depositBalanceMulti + ledgerBalanceMulti < input.Amount)
+                                    if (depositBalanceMulti + ledgerBalanceMulti < input.Amount && depositMulti.Status != OwnerDepositStatus.Trusted)
                                     {
                                         // At block verification, trust the crafter's ElectrumX check —
                                         // same owner-branch rule as the single shape.
@@ -3023,38 +2973,15 @@ namespace VerifiedXCore.Services
                                     // ElectrumX deposit balance) are cancelled out.
                                     ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateTreiRec, fromAddress, blockHeight ?? Globals.LastBlock?.Height ?? 0);
 
-                                    // Owner: get deposit address from state trei contract data (available on ALL nodes)
-                                    decimal depositBalance = 0M;
-                                    string depositAddr2 = null;
-                                    var scMainDecompile2 = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
-                                    if (scMainDecompile2?.Features != null)
-                                    {
-                                        var tknzV2 = scMainDecompile2.Features
-                                            .Where(x => x.FeatureName == FeatureName.TokenizationV2)
-                                            .Select(x => x.FeatureFeatures).FirstOrDefault();
-                                        if (tknzV2 != null)
-                                            depositAddr2 = ((TokenizationV2Feature)tknzV2).DepositAddress;
-                                    }
-
-                                    if (!string.IsNullOrEmpty(depositAddr2))
-                                    {
-                                        if (!blockDownloads && !blockVerify)
-                                        {
-                                            try
-                                            {
-                                                using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
-                                                if (elxClient != null)
-                                                {
-                                                    var balance = await elxClient.GetBalance(depositAddr2, false);
-                                                    depositBalance = balance.Confirmed / 100_000_000M;
-                                                }
-                                            }
-                                            catch { /* ElectrumX unavailable — depositBalance stays 0 */ }
-                                        }
-                                    }
+                                    // Owner: deposit address balance (Electrum, never for mined blocks) plus ledger.
+                                    var deposit = await VbtcOwnerDeposit.CheckAsync(() => Bitcoin.Services.VBTCService.ResolveDepositAddress(scStateTreiRec, null),
+                                        amount.Value - ledgerBalance + pendingReserveOut, blockDownloads, blockVerify);
+                                    if (deposit.Status == OwnerDepositStatus.Unverifiable)
+                                        return (txResult, VbtcOwnerDeposit.UnverifiableReason);
+                                    decimal depositBalance = deposit.DepositBalance;
 
                                     decimal ownerBalance = depositBalance + ledgerBalance - pendingReserveOut;
-                                    if (ownerBalance < amount.Value)
+                                    if (ownerBalance < amount.Value && deposit.Status != OwnerDepositStatus.Trusted)
                                     {
                                         // During block verification, skip deposit balance check for owner.
                                         // The block crafter already verified via ElectrumX during mempool admission.
@@ -3410,6 +3337,7 @@ namespace VerifiedXCore.Services
                                 }
 
                                 decimal totalBalance = ledgerBalance;
+                                var deposit = new OwnerDepositCheck(OwnerDepositStatus.NotQueried, 0M);
                                 if (isRequesterOwner)
                                 {
                                     // Owner ledger: full sum + completed-withdrawal add-back. Transfer debits and
@@ -3417,43 +3345,16 @@ namespace VerifiedXCore.Services
                                     // ElectrumX deposit balance) are cancelled out.
                                     ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scState, requesterAddress, blockHeight ?? Globals.LastBlock?.Height ?? 0);
 
-                                    // Get deposit address from state trei contract data (available on ALL nodes)
-                                    decimal depositBalance = 0M;
-                                    string wdDepositAddr = null;
-                                    var scMainWd = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
-                                    if (scMainWd?.Features != null)
-                                    {
-                                        var tknzV2Wd = scMainWd.Features
-                                            .Where(x => x.FeatureName == FeatureName.TokenizationV2)
-                                            .Select(x => x.FeatureFeatures).FirstOrDefault();
-                                        if (tknzV2Wd != null)
-                                            wdDepositAddr = ((TokenizationV2Feature)tknzV2Wd).DepositAddress;
-                                    }
-
-                                    if (!string.IsNullOrEmpty(wdDepositAddr))
-                                    {
-                                        // Skip live ElectrumX during block verification too (matches the
-                                        // transfer/bridge sites): the owner-shortfall check below is bypassed
-                                        // under blockVerify regardless of the queried value, so the query was
-                                        // pure nondeterministic network I/O at block acceptance time.
-                                        if (!blockDownloads && !blockVerify)
-                                        {
-                                            try
-                                            {
-                                                using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
-                                                if (elxClient != null)
-                                                {
-                                                    var bal = await elxClient.GetBalance(wdDepositAddr, false);
-                                                    depositBalance = bal.Confirmed / 100_000_000M;
-                                                }
-                                            }
-                                            catch { /* ElectrumX unavailable — depositBalance stays 0 */ }
-                                        }
-                                    }
-                                    totalBalance = depositBalance + ledgerBalance;
+                                    // Deposit address balance: Electrum is never asked during block validation (the
+                                    // owner-shortfall check below is bypassed under blockVerify regardless).
+                                    deposit = await VbtcOwnerDeposit.CheckAsync(() => Bitcoin.Services.VBTCService.ResolveDepositAddress(scState, null),
+                                        amount.Value - ledgerBalance, blockDownloads, blockVerify);
+                                    if (deposit.Status == OwnerDepositStatus.Unverifiable)
+                                        return (txResult, VbtcOwnerDeposit.UnverifiableReason);
+                                    totalBalance = deposit.DepositBalance + ledgerBalance;
                                 }
 
-                                if (totalBalance < amount.Value)
+                                if (totalBalance < amount.Value && deposit.Status != OwnerDepositStatus.Trusted)
                                 {
                                     // During block verification, skip deposit balance check for the owner.
                                     // The block crafter already verified via ElectrumX during mempool admission.
@@ -4288,37 +4189,14 @@ namespace VerifiedXCore.Services
                 // ElectrumX deposit balance) are cancelled out.
                 ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateTreiRec, fromAddress, currentHeight);
 
-                decimal depositBalance = 0M;
-                string? depositAddr2 = null;
-                var scMainDecompile2 = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
-                if (scMainDecompile2?.Features != null)
-                {
-                    var tknzV2 = scMainDecompile2.Features
-                        .Where(x => x.FeatureName == FeatureName.TokenizationV2)
-                        .Select(x => x.FeatureFeatures).FirstOrDefault();
-                    if (tknzV2 != null)
-                        depositAddr2 = ((TokenizationV2Feature)tknzV2).DepositAddress;
-                }
-
-                if (!string.IsNullOrEmpty(depositAddr2))
-                {
-                    if (!blockDownloads && !blockVerify)
-                    {
-                        try
-                        {
-                            using var elxClient = await Bitcoin.Bitcoin.ElectrumXClient();
-                            if (elxClient != null)
-                            {
-                                var balance = await elxClient.GetBalance(depositAddr2, false);
-                                depositBalance = balance.Confirmed / 100_000_000M;
-                            }
-                        }
-                        catch { /* ElectrumX unavailable */ }
-                    }
-                }
+                var deposit = await VbtcOwnerDeposit.CheckAsync(() => Bitcoin.Services.VBTCService.ResolveDepositAddress(scStateTreiRec, null),
+                    amount - ledgerBalance, blockDownloads, blockVerify);
+                if (deposit.Status == OwnerDepositStatus.Unverifiable)
+                    return (false, VbtcOwnerDeposit.UnverifiableReason);
+                decimal depositBalance = deposit.DepositBalance;
 
                 decimal ownerBalance = depositBalance + ledgerBalance;
-                if (ownerBalance < amount)
+                if (ownerBalance < amount && deposit.Status != OwnerDepositStatus.Trusted)
                 {
                     if (!blockVerify)
                         return (false, $"Insufficient vBTC balance (owner) for bridge lock. Available: {ownerBalance} (deposit: {depositBalance}, ledger: {ledgerBalance}), Requested: {amount}");

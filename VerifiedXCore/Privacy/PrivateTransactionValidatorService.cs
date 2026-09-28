@@ -18,7 +18,6 @@ namespace VerifiedXCore.Privacy
             bool skipPlonkProofVerification = false,
             long? blockHeight = null)
         {
-            _ = blockVerify;
             _ = twSkipVerify;
 
             if (txRequest.Data != null && txRequest.Data.Length > Globals.MaxPrivateTxDataSize)
@@ -75,7 +74,7 @@ namespace VerifiedXCore.Privacy
 
             if (PrivateTransactionTypes.IsTransparentShield(txRequest.TransactionType))
             {
-                var shield = await ValidateTransparentShield(txRequest, payload!, processedNonces, blockHeight);
+                var shield = await ValidateTransparentShield(txRequest, payload!, processedNonces, blockHeight, blockDownloads || blockVerify);
                 if (!shield.ok)
                     return shield;
             }
@@ -264,7 +263,8 @@ namespace VerifiedXCore.Privacy
             Transaction txRequest,
             PrivateTxPayload payload,
             Dictionary<string, long>? processedNonces,
-            long? blockHeight)
+            long? blockHeight,
+            bool blockContext)
         {
             if (txRequest.FromAddress == "Coinbase_BlkRwd" || txRequest.FromAddress == "Coinbase_TrxFees")
                 return (false, "Invalid private shield from address.");
@@ -296,7 +296,14 @@ namespace VerifiedXCore.Privacy
                     && payload.VbtcTransparentAmount < Globals.MinShieldAmountVBTC)
                     return (false, $"VBTC shield vbtc_amt must be at least {Globals.MinShieldAmountVBTC}.");
 
-                if (!string.IsNullOrWhiteSpace(payload.VbtcContractUid)
+                // Mined shields from a vault owner are not re-checked: the owner's balance includes the Bitcoin
+                // deposit, and Electrum is never asked during block validation (the producer checked it). Non-owner
+                // balances are ledger-only and are still checked.
+                var ownerInBlock = blockContext
+                    && SmartContractStateTrei.GetSmartContractState(payload.VbtcContractUid ?? "")?.OwnerAddress == txRequest.FromAddress;
+
+                if (!ownerInBlock
+                    && !string.IsNullOrWhiteSpace(payload.VbtcContractUid)
                     && payload.VbtcTransparentAmount is > 0)
                 {
                     var vbtcBalResult = await VerifiedXCore.Bitcoin.Services.VBTCService.TryGetAvailableTransparentVbtcBalance(

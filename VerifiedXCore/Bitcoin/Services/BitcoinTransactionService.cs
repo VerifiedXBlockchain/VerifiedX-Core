@@ -43,23 +43,15 @@ namespace VerifiedXCore.Bitcoin.Services
         /// </summary>
         public const string PinnedCoinsShortfallMarker = "[PINNED-COINS]";
 
-        /// <summary>
-        /// Gets an available Electrum client. Delegates to ClientService.GetElectrumClient, which
-        /// handshakes (server version), bumps Count on success and FailCount on failure, and rotates
-        /// through the pool — unlike the old private selector here, which pinned the same server
-        /// forever because it never incremented either counter.
-        /// </summary>
+        /// <summary>A handshake-verified Electrum client, or null (server choice and health: ElectrumServerPool).</summary>
         private static async Task<Client?> GetElectrumClient()
         {
             return await ClientService.GetElectrumClient();
         }
 
         /// <summary>
-        /// Returns the selectable Electrum servers (FailCount under the threshold) ordered by least-used
-        /// first — same selection rule as GetElectrumClient, but as a full list so callers can fan out
-        /// across DISTINCT servers instead of always hitting the single least-used one.
-        /// If every server has exceeded the FailCount threshold, the pool is reset wholesale
-        /// (mirroring Bitcoin.ElectrumXRun) so a long outage cannot permanently exhaust it.
+        /// The usable Electrum servers, best first (ElectrumServerPool), as a full list so callers can fan out
+        /// across DISTINCT servers.
         /// </summary>
         private static List<ClientSettings> GetElectrumServerCandidates()
         {
@@ -188,14 +180,15 @@ namespace VerifiedXCore.Bitcoin.Services
         /// The old implementation asked ONE Electrum server once, with no health tracking — a server
         /// that was down, slow, or behind produced an empty answer indistinguishable from an empty
         /// address ("No UTXOs found" on a funded vault). Now:
-        ///   1. Query up to MaxElectrumServersForUTXOQuery DISTINCT Electrum servers (least-used first,
-        ///      Count/FailCount tracked like every other Electrum consumer); return on the first hit.
+        ///   1. Query up to MaxElectrumServersForUTXOQuery DISTINCT Electrum servers (best first, health
+        ///      tracked by ElectrumServerPool); return on the first hit. A server that does not answer is
+        ///      skipped, not counted as "empty".
         ///   2. If no server returns UTXOs, decide whether "empty" can be trusted via DecideEmptyVerdict:
         ///      an Electrum quorum (2+ servers answering empty) confirms it; a single empty answer needs
         ///      the ADVISORY Esplora cross-check to agree. Esplora is never a spend source and never
         ///      required — if it is unreachable, an Electrum quorum still decides.
         ///   3. If the cross-check shows the address IS funded, the empty-answering servers are behind:
-        ///      bump their FailCount so rotation skips them, and return a transient failure so the
+        ///      put them in cooldown so selection skips them, and return a transient failure so the
         ///      caller retries against healthier servers.
         ///   4. Anything inconclusive is Success=false — a transient, retryable state, never "empty".
         /// </summary>
@@ -226,25 +219,20 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (serversTried >= MaxElectrumServersForUTXOQuery)
                     break;
                 serversTried++;
-                server.Count++;
 
-                try
+                var (answered, utxos) = await ElectrumServerPool.AttemptAsync(server, c => c.GetListUnspent(scriptHash));
+                if (!answered)
                 {
-                    using (var client = new Client(server.Host, server.Port, true))
-                    {
-                        var utxos = await client.GetListUnspent(scriptHash);
-                        if (utxos != null && utxos.Any())
-                            return UtxoLookupResult.Found(utxos.ToList(), UtxoSource.Electrum, serversTried);
+                    // No answer is not "empty": a dead server used to count toward the empty quorum here.
+                    ErrorLogUtility.LogError($"Electrum UTXO query got no answer from {server.Label}", "BitcoinTransactionService.GetTaprootUTXOs()");
+                    continue;
+                }
 
-                        // Empty answer — remember this server so we can penalize it if funds turn out to exist.
-                        emptyServers.Add(server);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    server.FailCount++;
-                    ErrorLogUtility.LogError($"Electrum UTXO query failed on {server.Host}:{server.Port}: {ex.Message}", "BitcoinTransactionService.GetTaprootUTXOs()");
-                }
+                if (utxos != null && utxos.Any())
+                    return UtxoLookupResult.Found(utxos.ToList(), UtxoSource.Electrum, serversTried);
+
+                // Empty answer — remember this server so we can penalize it if funds turn out to exist.
+                emptyServers.Add(server);
             }
 
             // Step 2: no Electrum server produced UTXOs. If nothing even answered, that is a plain
@@ -265,11 +253,11 @@ namespace VerifiedXCore.Bitcoin.Services
             switch (verdict)
             {
                 case EmptyCorroborationVerdict.PenalizeAndRetry:
-                    // Empty-while-funded: these servers are behind/unindexed. Bump FailCount so
-                    // rotation skips them, then have the caller retry — the next attempt selects
+                    // Empty-while-funded: these servers are behind/unindexed. Cool them down so
+                    // selection skips them, then have the caller retry — the next attempt selects
                     // healthier Electrum servers. We do NOT spend from Esplora data.
                     foreach (var server in emptyServers)
-                        server.FailCount++;
+                        ElectrumServerPool.ReportFailure(server, "answered empty for a funded address (behind or unindexed)");
 
                     LogUtility.Log(
                         $"[UTXO] {emptyServers.Count} Electrum server(s) returned empty for {taprootAddress} but a cross-check shows " +
@@ -804,8 +792,8 @@ namespace VerifiedXCore.Bitcoin.Services
 
         /// <summary>
         /// Multi-server Bitcoin tx confirmation lookup. Queries up to MaxElectrumServersForUTXOQuery
-        /// DISTINCT Electrum servers (least-used first, Count/FailCount tracked like every other
-        /// Electrum consumer), short-circuiting on the first positive answer. The old single-server
+        /// DISTINCT Electrum servers (best first, health tracked by ElectrumServerPool),
+        /// short-circuiting on the first positive answer. The old single-server
         /// version returned 0 for every failure mode, making "Electrum is broken" indistinguishable
         /// from "tx not confirmed".
         /// </summary>
@@ -824,32 +812,20 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (serversTried >= MaxElectrumServersForUTXOQuery)
                     break;
                 serversTried++;
-                server.Count++;
 
-                try
+                // AttemptAsync records server health: a server that answers "unknown transaction" is up (it used to
+                // be penalized like a dead one, which could cool down the whole pool over one conflicted-away tx).
+                var (ok, answer) = await ElectrumServerPool.AttemptAsync(server, c => c.GetConfirms(txHash));
+                var confirms = ok ? answer : -1; // -1 = no answer, never 0 (0 means "known, unconfirmed")
+                answers.Add(confirms);
+
+                if (confirms >= 1)
                 {
-                    using (var client = new Client(server.Host, server.Port, true))
-                    {
-                        var confirms = await client.GetConfirms(txHash);
-                        answers.Add(confirms);
-
-                        if (confirms >= 1)
-                        {
-                            details.Add($"{server.Host}:{server.Port}={confirms}");
-                            return new TxConfirmationLookup(confirms, serversTried, string.Join(", ", details));
-                        }
-
-                        details.Add($"{server.Host}:{server.Port}={(confirms == 0 ? "0 (mempool)" : "no-answer")}");
-                        if (confirms < 0)
-                            server.FailCount++;
-                    }
+                    details.Add($"{server.Label}={confirms}");
+                    return new TxConfirmationLookup(confirms, serversTried, string.Join(", ", details));
                 }
-                catch (Exception ex)
-                {
-                    server.FailCount++;
-                    details.Add($"{server.Host}:{server.Port}=error({ex.Message})");
-                    ErrorLogUtility.LogError($"Electrum confirmation query failed on {server.Host}:{server.Port}: {ex.Message}", "BitcoinTransactionService.GetTransactionConfirmationsResilient()");
-                }
+
+                details.Add($"{server.Label}={(confirms == 0 ? "0 (mempool)" : "no-answer")}");
             }
 
             return new TxConfirmationLookup(CombineConfirmationAnswers(answers), serversTried,

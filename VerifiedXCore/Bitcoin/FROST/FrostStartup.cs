@@ -129,7 +129,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         // Where this validator's signing records begin (cancellation votes abstain before it).
                         SigningRecordsEpoch = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.GetEpoch(),
                         AtNetworkHeight = VerifiedXCore.Bitcoin.Services.VBTCCancellationVoteService.NodeIsAtNetworkHeight().Ready,
-                        ElectrumServers = Globals.ClientSettings?.Select(s => new { s.Host, s.Port, s.Count, s.FailCount })
+                        ElectrumServers = Globals.ClientSettings?.Select(s => new { s.Host, s.Port, s.Count, s.FailCount, s.CooldownUntilUtc, s.LastSuccessUtc, s.LastLatencyMs, s.TipHeight, s.IsLagging })
                     }, Formatting.Indented);
                     context.Response.StatusCode = StatusCodes.Status200OK;
                     await context.Response.WriteAsync(response);

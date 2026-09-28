@@ -234,10 +234,20 @@ namespace VerifiedXCore.Services
             var committed = CommittedBalance(key);
             if (committed.HasValue || key.Kind != LedgerKind.VbtcV2)
                 return committed;
+
+            // A plain node relaying a peer's transaction does not judge owners (validators do).
+            if (!Bitcoin.Services.ElectrumCheckScope.MayQueryElectrum)
+                return null;
             try
             {
-                var (ok, available, _) = Bitcoin.Services.VBTCService.TryGetAvailableTransparentVbtcBalance(key.ContractUid, key.Holder).GetAwaiter().GetResult();
-                return ok ? available : 0M;
+                var (ok, available, error) = Bitcoin.Services.VBTCService.TryGetAvailableTransparentVbtcBalance(key.ContractUid, key.Holder).GetAwaiter().GetResult();
+                if (ok)
+                    return available;
+                // No Electrum answer: a validator admitting a peer's transaction does not judge it (block proposal
+                // will); otherwise use the ledger-only lower bound, so a debit the ledger covers is not dropped.
+                if (Bitcoin.Services.VbtcOwnerDeposit.IsUnverifiable(error))
+                    return Bitcoin.Services.ElectrumCheckScope.Current == Bitcoin.Services.ElectrumCheckMode.PeerAdmission ? null : available;
+                return 0M;
             }
             catch { return 0M; }
         }

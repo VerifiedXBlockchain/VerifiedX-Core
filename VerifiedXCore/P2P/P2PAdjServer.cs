@@ -257,6 +257,8 @@ namespace VerifiedXCore.P2P
             {
                 return await P2PServer.SignalRQueue(Context, (transaction.Data?.Length ?? 0) + 1028, async () =>
                 {
+                    // A peer's transaction: only validators check vBTC owner deposits against Electrum.
+                    using var electrumScope = VerifiedXCore.Bitcoin.Services.ElectrumCheckScope.Enter(VerifiedXCore.Bitcoin.Services.ElectrumCheckMode.PeerAdmission);
                     bool output = false;
                     if (Globals.BlocksDownloadSlim.CurrentCount != 0)
                     {

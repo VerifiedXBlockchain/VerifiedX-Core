@@ -3464,6 +3464,8 @@ namespace VerifiedXCore.Nodes
         //7777
         private static async Task TxMessage(string data)
         {
+            // A peer's transaction: only validators check vBTC owner deposits against Electrum.
+            using var electrumScope = VerifiedXCore.Bitcoin.Services.ElectrumCheckScope.Enter(VerifiedXCore.Bitcoin.Services.ElectrumCheckMode.PeerAdmission);
             var transaction = JsonConvert.DeserializeObject<Transaction>(data);
             if (transaction != null)
             {

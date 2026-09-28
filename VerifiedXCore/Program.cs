@@ -721,6 +721,10 @@ namespace VerifiedXCore
                 LogUtility.Log("[vBTC Bridge V2] No validator Base address derived (node may not be a validator).", "Program.Main()");
             }
 
+            // Electrum health probe: every node, headless included (it used to start only in GUI mode or the
+            // Bitcoin menu, so a headless validator never forgave a failed server).
+            _ = Bitcoin.ElectrumX.ElectrumServerPool.StartHealthProbeLoop();
+
             // vBTC V2: Start deposit balance scan loop (scans owned contracts via Electrum)
             _ = Task.Run(Bitcoin.Services.VBTCService.VBTCV2BalanceScanLoop);
 

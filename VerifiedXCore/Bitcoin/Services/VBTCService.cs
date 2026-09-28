@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using VerifiedXCore.Bitcoin.ElectrumX;
 using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Data;
 using VerifiedXCore.Extensions;
@@ -297,6 +298,30 @@ namespace VerifiedXCore.Bitcoin.Services
             return null;
         }
 
+        /// <summary>
+        /// A vault deposit address's balance for display: a fresh Electrum answer (saved to the local contract
+        /// record), or when no server answers the last known value with Stale set. A failed lookup used to be shown,
+        /// and saved, as zero.
+        /// </summary>
+        public static async Task<(decimal Balance, bool Stale)> GetDepositBalanceForDisplay(string depositAddress, VBTCContractV2? local)
+        {
+            var answer = await DepositBalanceLookup.GetConfirmedBalanceAsync(depositAddress);
+            if (!answer.Answered)
+                return (DepositBalanceLookup.LastKnownBalance(depositAddress) ?? local?.Balance ?? 0M, true);
+
+            if (local != null && local.Balance != answer.ConfirmedBtc)
+            {
+                local.Balance = answer.ConfirmedBtc;
+                VBTCContractV2.UpdateContract(local);
+            }
+            return (answer.ConfirmedBtc, false);
+        }
+
+        /// <summary>
+        /// Spendable transparent vBTC. For a vault owner that includes the deposit address's confirmed BTC; when no
+        /// Electrum server answers, success is false with <see cref="VbtcOwnerDeposit.UnverifiableReason"/> and the
+        /// balance is the ledger alone (a lower bound).
+        /// </summary>
         public static async Task<(bool success, decimal availableBalance, string? error)> TryGetAvailableTransparentVbtcBalance(string scUid, string fromAddress, long? blockHeight = null)
         {
             try
@@ -327,14 +352,12 @@ namespace VerifiedXCore.Bitcoin.Services
                 // Try local DB first; fall back to State Trei + in-memory decompile for remote nodes.
                 string? ownerAddress = null;
                 string? depositAddress = null;
-                decimal localCachedBalance = 0M;
 
                 var vbtcContract = VBTCContractV2.GetContract(scUid);
                 if (vbtcContract != null)
                 {
                     ownerAddress = vbtcContract.OwnerAddress;
                     depositAddress = vbtcContract.DepositAddress;
-                    localCachedBalance = vbtcContract.Balance;
                 }
                 else
                 {
@@ -356,31 +379,17 @@ namespace VerifiedXCore.Bitcoin.Services
                 // of completed withdrawals whose burn rows the ElectrumX balance already reflects.
                 ledgerBalance = GetOwnerLedgerBalance(scState, fromAddress, blockHeight ?? Globals.LastBlock?.Height ?? 0);
 
-                // Query Electrum for real-time balance of the deposit address.
+                // The deposit address's confirmed BTC. When no Electrum server answers the caller is told so: a
+                // failed lookup used to read as a zero deposit, or as the local cache, and either could be wrong.
+                // The balance returned with that error is the ledger alone, a lower bound (a deposit is never
+                // negative), which the same-block debit guard uses at block proposal.
                 decimal btcDepositBalance = 0M;
                 if (!string.IsNullOrEmpty(depositAddress))
                 {
-                    try
-                    {
-                        using var client = await VerifiedXCore.Bitcoin.Bitcoin.ElectrumXClient();
-                        if (client != null)
-                        {
-                            var balance = await client.GetBalance(depositAddress, false);
-                            btcDepositBalance = balance.Confirmed / 100_000_000M;
-                        }
-                        else
-                        {
-                            // Electrum unavailable — fall back to locally cached balance if we have it
-                            btcDepositBalance = localCachedBalance;
-                        }
-                    }
-                    catch (Exception elxEx)
-                    {
-                        // Electrum query failed — fall back to locally cached balance
-                        ErrorLogUtility.LogError($"ElectrumX query failed for deposit balance, using cached: {elxEx.Message}",
-                            "VBTCService.TryGetAvailableTransparentVbtcBalance()");
-                        btcDepositBalance = localCachedBalance;
-                    }
+                    var answer = await DepositBalanceLookup.GetConfirmedBalanceAsync(depositAddress);
+                    if (!answer.Answered)
+                        return (false, ledgerBalance, VbtcOwnerDeposit.UnverifiableReason);
+                    btcDepositBalance = answer.ConfirmedBtc;
                 }
 
                 return (true, btcDepositBalance + ledgerBalance, null);
