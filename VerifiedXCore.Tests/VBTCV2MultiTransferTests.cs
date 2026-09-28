@@ -194,6 +194,46 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task PostGate_SameContractInAnotherLetterCase_Rejected_AtAdmissionInABlockAndInThePreflight()
+        {
+            // MTI#13: contract lookups ignore case, so "ABCDEF01:1" resolves to "abcdef01:1". Two 0.6 inputs on a 1.0
+            // balance, one per spelling, must not pass as two distinct contracts.
+            ActivateGate();
+            SeedContract("abcdef01:1", "xSomeOwner", ("+", Sender, 1.0M));
+            var inputs = new[] { ("abcdef01:1", 0.6M), ("ABCDEF01:1", 0.6M) };
+            var tx = BuildTx(MultiData(1.2M, inputs));
+
+            // NEW-10 refuses the alias first; the distinct-contract rule is the second line of defense.
+            var admission = await TransactionValidatorService.VerifyTX(tx);
+            Assert.False(admission.Item1);
+            Assert.Contains("'ABCDEF01:1' does not match the stored contract", admission.Item2);
+
+            var inBlock = await TransactionValidatorService.VerifyTX(tx, false, true, false, null, false, ActivationHeight + 1);
+            Assert.False(inBlock.Item1);
+            Assert.Contains("'ABCDEF01:1' does not match the stored contract", inBlock.Item2);
+
+            Assert.True(LedgerIntegrityRules.HasDuplicateContract(inputs.Select(i => i.Item1)));
+
+            var preflight = await VBTCService.ValidateTransferAllocations(Sender,
+                inputs.Select(i => new VBTCV2MultiTransferInput { SCUID = i.Item1, Amount = i.Item2 }).ToList(), 1.2M);
+            Assert.False(preflight.Ok);
+            Assert.Contains("distinct contracts", preflight.Error);
+        }
+
+        [Fact]
+        public async Task PostGate_ContractIdNotExactlyAsStored_Rejected_InThePreflightToo()
+        {
+            ActivateGate();
+            SeedContract("abcdef02:1", "xSomeOwner", ("+", Sender, 1.0M));
+
+            var preflight = await VBTCService.ValidateTransferAllocations(Sender,
+                new List<VBTCV2MultiTransferInput> { new() { SCUID = "ABCDEF02:1", Amount = 0.5M } }, 0.5M);
+
+            Assert.False(preflight.Ok);
+            Assert.Contains("does not match the stored contract", preflight.Error);
+        }
+
+        [Fact]
         public async Task PostGate_TotalAmountMismatch_Rejected()
         {
             ActivateGate();

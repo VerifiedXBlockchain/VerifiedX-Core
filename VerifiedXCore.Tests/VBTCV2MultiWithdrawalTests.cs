@@ -234,6 +234,33 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task Multi_SameContractInAnotherLetterCase_Rejected_AtAdmissionInABlockAndInThePreflight()
+        {
+            // MTI#13: contract lookups ignore case, so "ABCDEF03:1" resolves to "abcdef03:1". Two 0.6 inputs on a 1.0
+            // balance, one per spelling, must not pass as two distinct contracts.
+            SetTip();
+            SeedContract("abcdef03:1", "xSomeOwner", ("+", Requestor, 1.0M));
+            var inputs = new[] { ("abcdef03:1", 0.6M), ("ABCDEF03:1", 0.6M) };
+            var tx = BuildTx(MultiData(1.2M, inputs));
+
+            // NEW-10 refuses the alias first; the distinct-contract rule is the second line of defense.
+            var admission = await TransactionValidatorService.VerifyTX(tx);
+            Assert.False(admission.Item1);
+            Assert.Contains("'ABCDEF03:1' does not match the stored contract", admission.Item2);
+
+            var inBlock = await TransactionValidatorService.VerifyTX(tx, false, true, false, null, false, TestHeight + 1);
+            Assert.False(inBlock.Item1);
+            Assert.Contains("'ABCDEF03:1' does not match the stored contract", inBlock.Item2);
+
+            Assert.True(LedgerIntegrityRules.HasDuplicateContract(inputs.Select(i => i.Item1)));
+
+            var preflight = await VBTCService.ValidateWithdrawalAllocations(Requestor,
+                inputs.Select(i => new VBTCV2MultiWithdrawalInput { SCUID = i.Item1, Amount = i.Item2 }).ToList(), 1.2M, 10);
+            Assert.False(preflight.Ok);
+            Assert.Contains("distinct contracts", preflight.Error);
+        }
+
+        [Fact]
         public async Task Multi_InsufficientInputBalance_RejectedNamingTheContract()
         {
             SetTip();

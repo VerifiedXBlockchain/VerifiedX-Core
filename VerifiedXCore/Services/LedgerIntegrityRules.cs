@@ -405,11 +405,39 @@ namespace VerifiedXCore.Services
             foreach (var uid in ReferencedContractUids(tx))
             {
                 if (uid == created) continue;
-                var record = SmartContractStateTrei.GetSmartContractState(uid);
-                if (record != null && !string.Equals(record.SmartContractUID, uid, StringComparison.Ordinal))
-                    return $"Contract UID '{uid}' does not match the stored contract '{record.SmartContractUID}' exactly.";
+                var error = InexactReference(uid);
+                if (error != null)
+                    return error;
             }
             return null;
+        }
+
+        /// <summary>The reason <paramref name="uid"/> names a stored contract under a different spelling (case, invisible
+        /// characters), or null when it is exact or names no contract.</summary>
+        public static string? InexactReference(string uid)
+        {
+            var record = SmartContractStateTrei.GetSmartContractState(uid);
+            return record != null && !string.Equals(record.SmartContractUID, uid, StringComparison.Ordinal)
+                ? $"Contract UID '{uid}' does not match the stored contract '{record.SmartContractUID}' exactly."
+                : null;
+        }
+
+        /// <summary>
+        /// Multi-contract inputs must name distinct contracts, judged by the contract each one resolves to rather than
+        /// its spelling: the lookup ignores case and invisible characters, so "abc:1" and "ABC:1" are one contract
+        /// (MTI#13). Two spellings of one contract always include one that differs from the stored UID, which the
+        /// exactness rule above already refuses, so this refuses nothing that rule admits.
+        /// </summary>
+        public static bool HasDuplicateContract(IEnumerable<string?> uids)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var uid in uids)
+            {
+                var resolved = string.IsNullOrEmpty(uid) ? "" : SmartContractStateTrei.GetSmartContractState(uid)?.SmartContractUID ?? uid;
+                if (!seen.Add(resolved))
+                    return true;
+            }
+            return false;
         }
 
         /// <summary>Every contract UID named in the transaction data (any depth), plus the debit keys (privacy payloads).</summary>

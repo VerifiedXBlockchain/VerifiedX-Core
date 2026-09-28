@@ -1018,7 +1018,7 @@ namespace VerifiedXCore.Bitcoin.Services
             if (inputs.Count > MaxMultiTransferInputs)
                 return (false, $"Multi-contract vBTC transfer exceeds the maximum of {MaxMultiTransferInputs} inputs.");
 
-            if (inputs.Select(x => x.SCUID).Distinct().Count() != inputs.Count)
+            if (LedgerIntegrityRules.HasDuplicateContract(inputs.Select(x => x.SCUID)))
                 return (false, "Multi-contract vBTC transfer inputs must reference distinct contracts.");
 
             decimal sum = 0M;
@@ -1044,6 +1044,11 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 if (SmartContractStateTrei.GetSmartContractState(input.SCUID) == null)
                     return (false, $"vBTC V2 contract not found in state trei: {input.SCUID}");
+
+                // NEW-10: the exact stored UID, as consensus requires (the preflight said Success for an upper-case alias).
+                var inexact = LedgerIntegrityRules.InexactReference(input.SCUID);
+                if (inexact != null)
+                    return (false, inexact);
 
                 var balResult = await TryGetAvailableTransparentVbtcBalance(input.SCUID, fromAddress);
                 if (!balResult.success)
@@ -1626,7 +1631,7 @@ namespace VerifiedXCore.Bitcoin.Services
             if (inputs.Count > MaxMultiWithdrawalInputs)
                 return (false, $"Multi-contract vBTC withdrawal exceeds the maximum of {MaxMultiWithdrawalInputs} inputs.");
 
-            if (inputs.Select(x => x.SCUID).Distinct().Count() != inputs.Count)
+            if (LedgerIntegrityRules.HasDuplicateContract(inputs.Select(x => x.SCUID)))
                 return (false, "Multi-contract vBTC withdrawal inputs must reference distinct contracts.");
 
             decimal sum = 0M;
@@ -1656,6 +1661,11 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 if (SmartContractStateTrei.GetSmartContractState(input.SCUID) == null)
                     return (false, $"vBTC V2 contract not found in state trei: {input.SCUID}");
+
+                // NEW-10: the exact stored UID, as consensus requires (the preflight said Success for an upper-case alias).
+                var inexact = LedgerIntegrityRules.InexactReference(input.SCUID);
+                if (inexact != null)
+                    return (false, inexact);
 
                 if (!concurrencyActive && VBTCWithdrawalRequest.HasActiveContractRequest(input.SCUID, currentHeight, includeLocalOnlyRows: false))
                     return (false, $"A withdrawal is already in progress for contract {input.SCUID}; try again once it completes.");

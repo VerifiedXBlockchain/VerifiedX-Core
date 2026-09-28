@@ -77,7 +77,7 @@ namespace VerifiedXCore.Services
             // Duplicate SCUIDs would let each input pass an individual balance check while jointly
             // overspending the contract — and would mint two rows the per-contract gate can't tell
             // apart.
-            if (inputs.Select(x => x.SCUID).Distinct().Count() != inputs.Count)
+            if (LedgerIntegrityRules.HasDuplicateContract(inputs.Select(x => x.SCUID)))
                 return (false, "Multi-contract vBTC withdrawal inputs must reference distinct contracts.");
 
             decimal inputSum = 0M;
@@ -2785,7 +2785,7 @@ namespace VerifiedXCore.Services
 
                             // Duplicate SCUIDs would let each input pass an individual balance
                             // check while jointly overspending the contract.
-                            if (multiInputs.Select(x => x.SCUID).Distinct().Count() != multiInputs.Count)
+                            if (LedgerIntegrityRules.HasDuplicateContract(multiInputs.Select(x => x.SCUID)))
                                 return (txResult, "Multi-contract vBTC transfer inputs must reference distinct contracts.");
 
                             decimal multiInputSum = 0M;
