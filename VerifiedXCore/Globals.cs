@@ -249,6 +249,18 @@ namespace VerifiedXCore
         public static long VbtcCancellationVoteRulesHeight = 7_400_500L;
 
         /// <summary>
+        /// vBTC V2 vault transaction size. Since NEW-26 a vault's contract body carries every ceremony participant three
+        /// times (snapshot, proof participant list, one signed attestation each): about 460 bytes of transaction per
+        /// validator, so the 30 KB transaction cap admits a vault only up to ~60 validators (mainnet has 160+). At/after
+        /// this height a VBTC_V2_CONTRACT_CREATE, and a Transfer() that resends a vault's stored code unchanged, may be up
+        /// to MaxVbtcVaultTxSizeBytes; every other transaction keeps the 30 KB cap. A relaxation checked in block
+        /// validation: a block carrying a larger vault transaction is refused by an older build. Testnet value in Program.cs.
+        /// </summary>
+        public static long VbtcVaultTxSizeHeight = 7_410_000L;
+        /// <summary>Covers FrostDkgAttestation.MaxParticipants (512 participants is ~221 KB).</summary>
+        public const int MaxVbtcVaultTxSizeBytes = 256 * 1024;
+
+        /// <summary>
         /// Base (vBTC.b) minting validator set = registered vBTC validators that are ALSO members of
         /// the caster committee. vBTC validator registration is a free self-transaction gated only
         /// by a wallet balance, so mirroring the raw registry onto the Base contract would let a

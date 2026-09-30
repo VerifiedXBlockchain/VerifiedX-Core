@@ -136,6 +136,7 @@ namespace VerifiedXCore
             Globals.VbtcCancellationVoteRulesHeight = Globals.IsTestNet ? 1_019_000 : Globals.VbtcCancellationVoteRulesHeight;
             Globals.VbtcV2DkgAttestationHeight = Globals.IsTestNet ? 1_002_979 : Globals.VbtcV2DkgAttestationHeight;
             Globals.VbtcV1RetirementHeight = Globals.IsTestNet ? 1_002_979 : Globals.VbtcV1RetirementHeight;
+            Globals.VbtcVaultTxSizeHeight = Globals.IsTestNet ? 1 : Globals.VbtcVaultTxSizeHeight;
 
             //Perform network time sync
             _ = NetworkTimeService.Run();

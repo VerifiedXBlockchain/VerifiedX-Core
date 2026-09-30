@@ -128,6 +128,39 @@ namespace VerifiedXCore.Services
                 : "A vBTC V2 vault's contract code cannot be changed after creation.";
         }
 
+        // ── vBTC V2 vault transaction size ─────────────────────────────────────────────────────────────────────
+
+        public const int DefaultMaxTxSizeBytes = 30 * 1024;
+
+        /// <summary>
+        /// The size cap for a transaction mined at <paramref name="height"/>: Globals.MaxVbtcVaultTxSizeBytes from
+        /// Globals.VbtcVaultTxSizeHeight for a vault creation, or for a Transfer() of an on-chain vault that carries the
+        /// vault's stored code exactly (the only body VaultCodeUnchanged admits, so no transfer outgrows its vault's
+        /// creation); 30 KB for everything else. A creation's body is judged by the creation rules that follow the size
+        /// check (NEW-26 attestation, decompile), so a large creation that is not a valid vault is still refused.
+        /// </summary>
+        public static int MaxTxSizeBytes(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.VbtcVaultTxSizeHeight)
+                return DefaultMaxTxSizeBytes;
+            if (tx.TransactionType == TransactionType.VBTC_V2_CONTRACT_CREATE)
+                return Globals.MaxVbtcVaultTxSizeBytes;
+            // Vault transfers go out as TKNZ_TX (wallet and raw routes); the generic NFT transfer path (NFT_TX) can carry one too.
+            if ((tx.TransactionType != TransactionType.TKNZ_TX && tx.TransactionType != TransactionType.NFT_TX) || tx.Data == null)
+                return DefaultMaxTxSizeBytes;
+            try
+            {
+                var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+                if (payload.Function != "Transfer()" || string.IsNullOrEmpty(payload.ContractUID) || string.IsNullOrEmpty(payload.Data))
+                    return DefaultMaxTxSizeBytes;
+                var stored = SmartContractStateTrei.GetSmartContractState(payload.ContractUID);
+                if (stored == null || !string.Equals(payload.Data, stored.ContractData, StringComparison.Ordinal) || !VBTCService.IsVbtcV2Contract(stored))
+                    return DefaultMaxTxSizeBytes;
+                return Globals.MaxVbtcVaultTxSizeBytes;
+            }
+            catch { return DefaultMaxTxSizeBytes; }
+        }
+
         // ── NEW-27: whitelisted transactions ───────────────────────────────────────────────────────────────────
 
         /// <summary>

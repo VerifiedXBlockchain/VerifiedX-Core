@@ -405,11 +405,12 @@ namespace VerifiedXCore.Services
                 return (txResult, TX_ALREADY_SENT_REASON);
             }
 
-            var checkSize = await VerifyTXSize(txRequest);
-
-            if (!checkSize)
+            // vBTC V2 vault transactions may be larger from VbtcVaultTxSizeHeight (see LedgerIntegrityRules.MaxTxSizeBytes);
+            // block validation passes the block's height, admission the height the tx would mine into.
+            var maxTxSize = LedgerIntegrityRules.MaxTxSizeBytes(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1));
+            if (!VerifyTXSize(txRequest, maxTxSize))
             {
-                return (txResult, $"This transactions is too large. Max size allowed is 30 kb.");
+                return (txResult, $"This transactions is too large. Max size allowed is {maxTxSize / 1024} kb.");
             }
 
             //Hash Check
@@ -4214,18 +4215,15 @@ namespace VerifiedXCore.Services
             return (true, "");
         }
 
-        public static async Task<bool> VerifyTXSize(Transaction txRequest)
+        public static Task<bool> VerifyTXSize(Transaction txRequest) =>
+            Task.FromResult(VerifyTXSize(txRequest, LedgerIntegrityRules.DefaultMaxTxSizeBytes));
+
+        public static bool VerifyTXSize(Transaction txRequest, int maxSize)
         {
             var txJsonSize = JsonConvert.SerializeObject(txRequest);
             var size = txJsonSize.Length;
 
-            //30720 bytes
-            if (size > (1024 * 30))
-            {
-                return false;
-            }
-
-            return true;
+            return size <= maxSize;
         }
 
     }
