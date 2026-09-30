@@ -115,7 +115,7 @@ namespace VerifiedXCore
                 LogUtility.Log("Warden monitoring service started", "Program.Main()");
             }
             //Forced Testnet
-            Globals.IsTestNet = true;
+            //Globals.IsTestNet = true;
 
 
             //Globals.IsCustomTestNet = true;
