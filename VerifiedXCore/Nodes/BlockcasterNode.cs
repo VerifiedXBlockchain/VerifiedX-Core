@@ -1335,6 +1335,22 @@ namespace VerifiedXCore.Nodes
                         await Task.Delay(Math.Max(2000, Globals.BlockTime / 4));
                     }
 
+                    // RECORD-HOLD: a caster casts only with the current membership record, and only while that record
+                    // lists it. Mainnet Oct 1: a promoted caster that never received the record cast under the legacy
+                    // live-list rules — a non-member's votes and attestations counted toward its quorum — and committed
+                    // the block that forked the chain.
+                    var recordHold = await RecordHoldAsync(Height);
+                    if (recordHold != null)
+                    {
+                        if (Environment.TickCount64 - _lastRecordHoldLogTicks >= 15_000)
+                        {
+                            CasterLogUtility.Log($"RECORD-HOLD: sitting out round {Height} — {recordHold}.", "ROUND");
+                            _lastRecordHoldLogTicks = Environment.TickCount64;
+                        }
+                        await Task.Delay(Math.Max(2000, Globals.BlockTime / 4));
+                        continue;
+                    }
+
                     // FIX 1 (CRITICAL): Block hash sync before VRF computation.
                     // If our LastBlock.Hash differs from peer casters, VRF seeds diverge and
                     // casters pick different winners → fork. Sync BEFORE generating proofs.
@@ -2205,6 +2221,78 @@ namespace VerifiedXCore.Nodes
 
         private static (long Height, string MajorityHash) _minorityFork = (-1, "");
 
+        private static long _lastRecordHoldLogTicks;
+        private static DateTime _lastRecordPullUtc = DateTime.MinValue;
+        private const int RECORD_PULL_SECONDS = 60;
+        private const int RECORD_PULL_BEHIND_SECONDS = 10;
+
+        /// <summary>
+        /// Pulls the membership record from peers (every minute, every 10 s while behind) and returns why this caster must
+        /// sit out the round, or null. The pull also reconciles the live caster list to the record.
+        /// </summary>
+        private static async Task<string?> RecordHoldAsync(long height)
+        {
+            var head = CasterMembershipStore.GetCurrent();
+            var reason = RecordHoldReason(head?.RecordSeq, CasterDiscoveryService.LastObservedPeerHeads,
+                CasterMembershipStore.GetCommitteeForHeight(height), Globals.ValidatorAddress);
+            var since = (DateTime.UtcNow - _lastRecordPullUtc).TotalSeconds;
+            if (since >= RECORD_PULL_SECONDS || (reason != null && since >= RECORD_PULL_BEHIND_SECONDS))
+            {
+                _lastRecordPullUtc = DateTime.UtcNow;
+                var peers = Globals.BlockCasters.ToList().Select(c => c.PeerIP)
+                    .Concat((head?.Casters ?? new List<CasterInfo>()).Select(c => c.PeerIP))
+                    .Select(ip => (ip ?? "").Replace("::ffff:", ""))
+                    .Where(ip => ip.Length > 0 && ip != Globals.ReportedIP)
+                    .Distinct().ToList();
+                if (peers.Count > 0)
+                {
+                    try { await CasterDiscoveryService.FetchAndAdoptMembershipAsync(peers, reconcileWhenUnchanged: false); } catch { }
+                }
+                PruneNonMembers(height);
+                reason = RecordHoldReason(CasterMembershipStore.GetCurrent()?.RecordSeq, CasterDiscoveryService.LastObservedPeerHeads,
+                    CasterMembershipStore.GetCommitteeForHeight(height), Globals.ValidatorAddress);
+            }
+            return reason;
+        }
+
+        /// <summary>
+        /// Removes live casters that are in neither the governing committee nor the newest record (a promotion announce
+        /// or a legacy-era list can leave one behind). Remove-only: re-adding evicted members stays with the probed heal.
+        /// </summary>
+        private static void PruneNonMembers(long height)
+        {
+            var committee = CasterMembershipStore.GetCommitteeForHeight(height);
+            var head = CasterMembershipStore.GetCurrent();
+            var live = Globals.BlockCasters.ToList();
+            var strays = NonMembers(live, committee, head);
+            if (strays.Count == 0) return;
+            Globals.BlockCasters = new ConcurrentBag<Peers>(live.Where(p => !strays.Contains(p.ValidatorAddress ?? "")));
+            Globals.SyncKnownCastersFromBlockCasters();
+            CasterLogUtility.Log($"RECORD-PRUNE: removed {string.Join(", ", strays)} from the live caster list — not in the membership record.", "ROUND");
+        }
+
+        /// <summary>Pure: live caster addresses outside the record (self excluded; nothing before a record exists).</summary>
+        internal static HashSet<string> NonMembers(IEnumerable<Peers> live, HashSet<string>? committee, CasterMembershipRecord? head)
+        {
+            return live.Select(p => p.ValidatorAddress ?? "")
+                .Where(a => a.Length > 0 && a != Globals.ValidatorAddress && !CasterDiscoveryService.IsRecordMember(a, committee, head))
+                .ToHashSet(StringComparer.Ordinal);
+        }
+
+        /// <summary>
+        /// Pure: why a caster may not cast, or null. Behind: a majority of the peers that answered (at least two) report a
+        /// newer record than ours, or we have none while they do — one peer's unverified claim never holds a caster.
+        /// Not listed: a record exists and its committee for the height does not contain us.
+        /// </summary>
+        internal static string? RecordHoldReason(long? localSeq, IReadOnlyList<long> peerHeads, HashSet<string>? committee, string? self)
+        {
+            var mine = localSeq ?? -1;
+            if (peerHeads.Count >= 2 && peerHeads.Count(h => h > mine) * 2 > peerHeads.Count)
+                return $"membership record behind peers (ours {(localSeq?.ToString() ?? "none")}, peers report up to {peerHeads.Max()})";
+            if (committee != null && (string.IsNullOrEmpty(self) || !committee.Contains(self)))
+                return "this node is not in the membership record's committee";
+            return null;
+        }
 
         /// <summary>True while a committee quorum holds a different block at this caster's tip: the caster sits out rounds.</summary>
         internal static bool IsHoldingOnMinorityFork() =>
