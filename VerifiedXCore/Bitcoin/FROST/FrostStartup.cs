@@ -1253,6 +1253,11 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 LogUtility.Log($"[FROST] WARNING: Could not determine own FROST Identifier for share extraction. MyAddress={myAddress}", "FrostStartup.DKGSharesBatch");
                             }
 
+                            // Senders whose share would not open or does not match their Round 1 commitment. Reported to the
+                            // coordinator, which drops the culprit and reruns the ceremony (the native finalize only fails,
+                            // without naming the sender).
+                            var accusations = new Dictionary<string, string>(StringComparer.Ordinal);
+
                             // For each sender's generated shares, extract the share meant for this validator
                             foreach (var kvp in allSharesToken)
                             {
@@ -1260,11 +1265,16 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 if (senderAddr == myAddress) continue; // Skip our own shares
 
                                 var senderSharesStr = kvp.Value?.ToString();
-                                if (string.IsNullOrEmpty(senderSharesStr)) continue;
+                                if (string.IsNullOrEmpty(senderSharesStr))
+                                {
+                                    if (session.ParticipantAddresses.Contains(senderAddr)) accusations[senderAddr] = FrostDkgBlame.AccusationUnopenable;
+                                    continue;
+                                }
 
                                 // Bound data size
                                 if (senderSharesStr.Length > FrostSessionStorage.MAX_COMMITMENT_DATA_LENGTH * 10)
                                 {
+                                    if (session.ParticipantAddresses.Contains(senderAddr)) accusations[senderAddr] = FrostDkgBlame.AccusationUnopenable;
                                     LogUtility.Log($"[FROST] Share data from {senderAddr} exceeds size limit, skipping", "FrostStartup.DKGSharesBatch");
                                     continue;
                                 }
@@ -1289,16 +1299,26 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                                     if (!string.IsNullOrEmpty(shareForMe))
                                     {
+                                        if (session.Round1Commitments.TryGetValue(senderAddr, out var senderCommitment)
+                                            && !FrostDkgBlame.ShareMatchesCommitment(shareForMe, senderCommitment, myFrostIdentifier!))
+                                        {
+                                            accusations[senderAddr] = FrostDkgBlame.AccusationInvalidShare;
+                                            LogUtility.Log($"[FROST] Share from {senderAddr} does not match its Round 1 commitment.", "FrostStartup.DKGSharesBatch");
+                                            continue;
+                                        }
                                         session.ReceivedSharesJson.TryAdd(senderAddr, shareForMe);
                                         sharesExtracted++;
                                     }
                                     else
                                     {
+                                        if (!string.IsNullOrEmpty(myFrostIdentifier))
+                                            accusations[senderAddr] = FrostDkgBlame.AccusationUnopenable;
                                         LogUtility.Log($"[FROST] No share found for identifier '{myFrostIdentifier}' from {senderAddr}. Available keys: {string.Join(",", senderShares.Properties().Select(p => p.Name))}", "FrostStartup.DKGSharesBatch");
                                     }
                                 }
                                 catch (Exception parseEx)
                                 {
+                                    if (session.ParticipantAddresses.Contains(senderAddr)) accusations[senderAddr] = FrostDkgBlame.AccusationUnopenable;
                                     LogUtility.Log($"[FROST] Failed to parse shares from {senderAddr}: {parseEx.Message}", "FrostStartup.DKGSharesBatch");
                                 }
                             }
@@ -1311,7 +1331,7 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                             // Auto-trigger DKG finalization if all required shares are now received
                             var dkgFinalized = false;
-                            if (receivedCount >= totalOtherParticipants && !session.IsCompleted 
+                            if (accusations.Count == 0 && receivedCount >= totalOtherParticipants && !session.IsCompleted
                                 && !string.IsNullOrEmpty(session.Round2Secret))
                             {
                                 dkgFinalized = TryFinalizeDKG(session);
@@ -1327,7 +1347,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 TotalReceivedShares = receivedCount,
                                 RequiredShares = totalOtherParticipants,
                                 DKGFinalized = dkgFinalized,
-                                TaprootAddress = session.TaprootAddress ?? ""
+                                TaprootAddress = session.TaprootAddress ?? "",
+                                Accusations = accusations
                             }, Formatting.Indented));
                         }
                     }
@@ -3263,7 +3284,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// This ensures DKG and signing ceremonies use consistent identifiers even when
         /// the validator list grows, shrinks, or the dictionary iteration order changes.
         /// </summary>
-        private static Dictionary<string, string> BuildAddressToIdentifierMap(List<string> participantAddresses)
+        internal static Dictionary<string, string> BuildAddressToIdentifierMap(List<string> participantAddresses)
         {
             var sorted = participantAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
             var map = new Dictionary<string, string>();

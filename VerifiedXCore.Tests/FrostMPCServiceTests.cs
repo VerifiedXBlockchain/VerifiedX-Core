@@ -13,6 +13,10 @@ namespace VerifiedXCore.Tests
     /// </summary>
     public class FrostMPCServiceTests
     {
+        /// <summary>The ceremony result (CoordinateDKGCeremony now returns the run: result, contract UID and dropped validators).</summary>
+        private static async Task<FrostDKGResult?> DkgResult(string ceremonyId, string ownerAddress, List<VBTCValidator> validators, int threshold) =>
+            (await FrostMPCService.CoordinateDKGCeremony(ceremonyId, ownerAddress, validators, threshold)).Result;
+
         #region DKG Ceremony Tests
 
         [Fact(Skip = "Integration test — requires live validator HTTP endpoints. Mock validators have no servers, so CoordinateDKGCeremony returns null. Run against a live testnet to verify FROST DKG ceremony.")]
@@ -25,7 +29,7 @@ namespace VerifiedXCore.Tests
             var threshold = 51;
 
             // Act
-            var result = await FrostMPCService.CoordinateDKGCeremony(
+            var result = await DkgResult(
                 scUID,
                 ownerAddress,
                 validators,
@@ -52,7 +56,7 @@ namespace VerifiedXCore.Tests
             var threshold = 51;
 
             // Act
-            var result = await FrostMPCService.CoordinateDKGCeremony(
+            var result = await DkgResult(
                 scUID,
                 ownerAddress,
                 validators,
@@ -71,7 +75,7 @@ namespace VerifiedXCore.Tests
             var validators = CreateMockValidators(3);
             
             // Act
-            var result = await FrostMPCService.CoordinateDKGCeremony(
+            var result = await DkgResult(
                 "test_sc",
                 "VFX_OWNER",
                 validators,
@@ -95,7 +99,7 @@ namespace VerifiedXCore.Tests
             foreach (var threshold in thresholds)
             {
                 // Act
-                var result = await FrostMPCService.CoordinateDKGCeremony(
+                var result = await DkgResult(
                     $"test_sc_{threshold}",
                     "VFX_OWNER",
                     validators,
@@ -115,8 +119,8 @@ namespace VerifiedXCore.Tests
             var validators = CreateMockValidators(3);
             
             // Act
-            var result1 = await FrostMPCService.CoordinateDKGCeremony("sc1", "owner1", validators, 51);
-            var result2 = await FrostMPCService.CoordinateDKGCeremony("sc2", "owner2", validators, 51);
+            var result1 = await DkgResult("sc1", "owner1", validators, 51);
+            var result2 = await DkgResult("sc2", "owner2", validators, 51);
 
             // Assert
             Assert.NotNull(result1);
@@ -272,7 +276,7 @@ namespace VerifiedXCore.Tests
             var ownerAddress = "VFX_INTEGRATION_TEST";
 
             // Act - Step 1: DKG Ceremony
-            var dkgResult = await FrostMPCService.CoordinateDKGCeremony(
+            var dkgResult = await DkgResult(
                 scUID,
                 ownerAddress,
                 validators,
@@ -307,7 +311,7 @@ namespace VerifiedXCore.Tests
             // Act - Launch 3 concurrent ceremonies
             for (int i = 0; i < 3; i++)
             {
-                var ceremony = FrostMPCService.CoordinateDKGCeremony(
+                var ceremony = DkgResult(
                     $"concurrent_sc_{i}",
                     $"owner_{i}",
                     validators,

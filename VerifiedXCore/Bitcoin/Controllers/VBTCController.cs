@@ -206,7 +206,11 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     DKGProof = ceremony.Status == CeremonyStatus.Completed ? ceremony.DKGProof : null,
                     ValidatorCount = ceremony.ValidatorSnapshot?.Count ?? 0,
                     RequiredThreshold = ceremony.RequiredThreshold,
-                    ProofBlockHeight = ceremony.ProofBlockHeight
+                    ProofBlockHeight = ceremony.ProofBlockHeight,
+                    // The contract UID to create the contract with: the ceremony id unless the ceremony was rerun after
+                    // dropping validators that failed it (each run is attested under its own UID).
+                    ContractUID = ceremony.Status == CeremonyStatus.Completed ? ceremony.EffectiveContractUID : null,
+                    DroppedValidators = ceremony.ExcludedValidators
                 });
             }
             catch (Exception ex)
@@ -275,7 +279,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 ceremony.ProgressPercentage = 15;
                 ceremony.Status = CeremonyStatus.Round1InProgress;
 
-                var dkgResult = await Services.FrostMPCService.CoordinateDKGCeremony(
+                // Failing participants are dropped and the ceremony rerun while the rest still meet the NEW-26 participation rule.
+                var dkgRun = await Services.FrostMPCService.CoordinateDKGCeremony(
                     ceremonyId,
                     ceremony.OwnerAddress,
                     activeValidators,
@@ -290,13 +295,16 @@ namespace VerifiedXCore.Bitcoin.Controllers
                             ceremony.Status = CeremonyStatus.Round2InProgress;
                         else if (round == 3 && ceremony.Status != CeremonyStatus.Round3InProgress)
                             ceremony.Status = CeremonyStatus.Round3InProgress;
-                    }
+                    },
+                    participantShortfall: n => FrostDkgAttestation.PreCeremonyShortfall(n, ceremony.IsS3C, allValidators.Count)
                 );
+                ceremony.ExcludedValidators = dkgRun.Excluded.Count > 0 ? dkgRun.Excluded : null;
 
+                var dkgResult = dkgRun.Result;
                 if (dkgResult == null)
                 {
                     ceremony.Status = CeremonyStatus.Failed;
-                    ceremony.ErrorMessage = "FROST DKG ceremony failed - unable to generate Taproot address";
+                    ceremony.ErrorMessage = "FROST DKG ceremony failed: " + (dkgRun.Error ?? "unable to generate Taproot address");
                     ceremony.CompletedTimestamp = TimeUtil.GetTime();
                     return;
                 }
@@ -307,7 +315,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     $"(out of {activeValidators.Count} candidates).", "VBTCController.ExecuteMPCCeremonyLocallyStatic");
 
                 // NEW-26 (follow-up): a finished ceremony whose contract consensus would refuse must not expose a deposit address.
-                var staticResultError = FrostDkgAttestation.CeremonyResultError(ceremonyId, dkgResult.GroupPublicKey, dkgResult.TaprootAddress, dkgResult.DKGProof, dkgResult.ParticipantAddresses, ceremony.IsS3C, ceremony.OwnerAddress);
+                var staticResultError = FrostDkgAttestation.CeremonyResultError(dkgRun.ContractUID!, dkgResult.GroupPublicKey, dkgResult.TaprootAddress, dkgResult.DKGProof, dkgResult.ParticipantAddresses, ceremony.IsS3C, ceremony.OwnerAddress);
                 if (staticResultError != null)
                 {
                     ceremony.Status = CeremonyStatus.Failed;
@@ -316,6 +324,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     return;
                 }
 
+                ceremony.ContractUID = dkgRun.ContractUID;
                 ceremony.DepositAddress = dkgResult.TaprootAddress;
                 ceremony.FrostGroupPublicKey = dkgResult.GroupPublicKey;
                 ceremony.DKGProof = dkgResult.DKGProof;
@@ -581,7 +590,11 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     DKGProof = ceremony.Status == CeremonyStatus.Completed ? ceremony.DKGProof : null,
                     ValidatorCount = ceremony.ValidatorSnapshot?.Count ?? 0,
                     RequiredThreshold = ceremony.RequiredThreshold,
-                    ProofBlockHeight = ceremony.ProofBlockHeight
+                    ProofBlockHeight = ceremony.ProofBlockHeight,
+                    // The contract UID to create the contract with: the ceremony id unless the ceremony was rerun after
+                    // dropping validators that failed it (each run is attested under its own UID).
+                    ContractUID = ceremony.Status == CeremonyStatus.Completed ? ceremony.EffectiveContractUID : null,
+                    DroppedValidators = ceremony.ExcludedValidators
                 };
 
                 return JsonConvert.SerializeObject(response);
@@ -845,7 +858,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
             // Execute FROST DKG Ceremony via FrostMPCService with progress callback
             ceremony.Status = CeremonyStatus.Round1InProgress;
 
-            var dkgResult = await Services.FrostMPCService.CoordinateDKGCeremony(
+            // Failing participants are dropped and the ceremony rerun while the rest still meet the NEW-26 participation rule.
+            var dkgRun = await Services.FrostMPCService.CoordinateDKGCeremony(
                 ceremonyId,
                 ceremony.OwnerAddress,
                 activeValidators,
@@ -861,13 +875,16 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         ceremony.Status = CeremonyStatus.Round2InProgress;
                     else if (round == 3 && ceremony.Status != CeremonyStatus.Round3InProgress)
                         ceremony.Status = CeremonyStatus.Round3InProgress;
-                }
+                },
+                participantShortfall: n => FrostDkgAttestation.PreCeremonyShortfall(n, ceremony.IsS3C, allValidators.Count)
             );
+            ceremony.ExcludedValidators = dkgRun.Excluded.Count > 0 ? dkgRun.Excluded : null;
 
+            var dkgResult = dkgRun.Result;
             if (dkgResult == null)
             {
                 ceremony.Status = CeremonyStatus.Failed;
-                ceremony.ErrorMessage = "FROST DKG ceremony failed - unable to generate Taproot address";
+                ceremony.ErrorMessage = "FROST DKG ceremony failed: " + (dkgRun.Error ?? "unable to generate Taproot address");
                 ceremony.CompletedTimestamp = TimeUtil.GetTime();
                 return;
             }
@@ -878,7 +895,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 $"(out of {activeValidators.Count} candidates).", "VBTCController.ExecuteMPCCeremonyLocally");
 
             // NEW-26 (follow-up): a finished ceremony whose contract consensus would refuse must not expose a deposit address.
-            var resultError = FrostDkgAttestation.CeremonyResultError(ceremonyId, dkgResult.GroupPublicKey, dkgResult.TaprootAddress, dkgResult.DKGProof, dkgResult.ParticipantAddresses, ceremony.IsS3C, ceremony.OwnerAddress);
+            var resultError = FrostDkgAttestation.CeremonyResultError(dkgRun.ContractUID!, dkgResult.GroupPublicKey, dkgResult.TaprootAddress, dkgResult.DKGProof, dkgResult.ParticipantAddresses, ceremony.IsS3C, ceremony.OwnerAddress);
             if (resultError != null)
             {
                 ceremony.Status = CeremonyStatus.Failed;
@@ -888,6 +905,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             }
 
             // DKG ceremony completed successfully
+            ceremony.ContractUID = dkgRun.ContractUID;
             ceremony.DepositAddress = dkgResult.TaprootAddress;
             ceremony.FrostGroupPublicKey = dkgResult.GroupPublicKey;
             ceremony.DKGProof = dkgResult.DKGProof;
@@ -961,8 +979,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     });
                 }
 
-                // NEW-26: the contract UID is the ceremony id the validators attested.
-                var scUID = payload.CeremonyId;
+                // NEW-26: the contract UID is the one the validators attested (the ceremony id, unless the ceremony was rerun).
+                var scUID = ceremony.EffectiveContractUID;
 
                 // Use ceremony results
                 string depositAddress = ceremony.DepositAddress!;
@@ -976,11 +994,11 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 // remote ceremony ID. We must use it here so that signing can find the keys.
                 var effectiveCeremonyId = ceremony.IsRemote && !string.IsNullOrEmpty(ceremony.RemoteCeremonyId)
                     ? ceremony.RemoteCeremonyId
-                    : payload.CeremonyId;
+                    : ceremony.EffectiveContractUID;
 
                 if (effectiveCeremonyId != payload.CeremonyId)
                 {
-                    LogUtility.Log($"[FROST MPC] Using remote ceremony ID for contract. Local: {payload.CeremonyId}, Remote (validators use): {effectiveCeremonyId}",
+                    LogUtility.Log($"[FROST MPC] Contract UID differs from the ceremony id (remote or rerun ceremony). Ceremony: {payload.CeremonyId}, contract (validators use): {effectiveCeremonyId}",
                         "VBTCController.CreateVBTCContract");
                 }
 
@@ -1250,8 +1268,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     });
                 }
 
-                // NEW-26: the contract UID is the ceremony id the validators attested.
-                var scUID = payload.CeremonyId;
+                // NEW-26: the contract UID is the one the validators attested (the ceremony id, unless the ceremony was rerun).
+                var scUID = ceremony.EffectiveContractUID;
 
                 // Use ceremony results
                 string depositAddress = ceremony.DepositAddress!;
@@ -1263,11 +1281,11 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 // when the ceremony was delegated, so validators can find their FROST keys.
                 var effectiveCeremonyId = ceremony.IsRemote && !string.IsNullOrEmpty(ceremony.RemoteCeremonyId)
                     ? ceremony.RemoteCeremonyId
-                    : payload.CeremonyId;
+                    : ceremony.EffectiveContractUID;
 
                 if (effectiveCeremonyId != payload.CeremonyId)
                 {
-                    LogUtility.Log($"[FROST MPC] Using remote ceremony ID for raw contract. Local: {payload.CeremonyId}, Remote (validators use): {effectiveCeremonyId}",
+                    LogUtility.Log($"[FROST MPC] Raw contract UID differs from the ceremony id (remote or rerun ceremony). Ceremony: {payload.CeremonyId}, contract (validators use): {effectiveCeremonyId}",
                         "VBTCController.CreateVBTCContractRaw");
                 }
 
@@ -3499,10 +3517,27 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var startMessage = $"{sessionId}.{payload.OwnerAddress}.{startTimestamp}";
                 var shareDistMessage = $"{sessionId}.{payload.OwnerAddress}.{shareDistTimestamp}";
 
+                // Sessions for reruns: a ceremony drops participants that fail it and runs again, and each run needs its
+                // own session signed by the owner. Signing these is optional; without them the ceremony runs once.
+                var retrySessions = Enumerable.Range(1, Services.FrostMPCService.MaxDkgAttempts - 1).Select(i =>
+                {
+                    var retrySessionId = Guid.NewGuid().ToString();
+                    var retryStart = startTimestamp + 2 * i;
+                    return new
+                    {
+                        SessionId = retrySessionId,
+                        StartMessage = $"{retrySessionId}.{payload.OwnerAddress}.{retryStart}",
+                        StartTimestamp = retryStart,
+                        ShareDistributionMessage = $"{retrySessionId}.{payload.OwnerAddress}.{retryStart + 1}",
+                        ShareDistributionTimestamp = retryStart + 1
+                    };
+                }).ToList();
+
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
-                    Message = "Sign both LeaderAuthMessages with your private key (ECDSA secp256k1) and submit via ExecuteMPCCeremonyRaw.",
+                    Message = "Sign both LeaderAuthMessages with your private key (ECDSA secp256k1) and submit via ExecuteMPCCeremonyRaw. " +
+                        "Also sign the messages in RetrySessions and submit them, so the ceremony can rerun without validators that fail it.",
                     CeremonyId = ceremonyId,
                     SessionId = sessionId,
                     OwnerAddress = payload.OwnerAddress,
@@ -3512,7 +3547,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     StartMessage = startMessage,
                     StartTimestamp = startTimestamp,
                     ShareDistributionMessage = shareDistMessage,
-                    ShareDistributionTimestamp = shareDistTimestamp
+                    ShareDistributionTimestamp = shareDistTimestamp,
+                    RetrySessions = retrySessions
                 });
             }
             catch (Exception ex)
@@ -3548,6 +3584,24 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var shareDistMessage = $"{payload.SessionId}.{payload.OwnerAddress}.{payload.ShareDistributionTimestamp}";
                 if (!SignatureService.VerifySignature(payload.OwnerAddress, shareDistMessage, payload.ShareDistributionSignature))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Invalid share distribution signature" });
+
+                // Optional pre-signed sessions for reruns (see PrepareMPCCeremonyRaw).
+                var retryAuths = new List<VerifiedXCore.Bitcoin.FROST.Models.PreSignedLeaderAuth>();
+                foreach (var retry in (payload.RetrySessions ?? new List<RawCeremonySession>()).Take(Services.FrostMPCService.MaxDkgAttempts - 1))
+                {
+                    if (string.IsNullOrEmpty(retry.SessionId) || retry.SessionId == payload.SessionId
+                        || !SignatureService.VerifySignature(payload.OwnerAddress, $"{retry.SessionId}.{payload.OwnerAddress}.{retry.StartTimestamp}", retry.StartSignature)
+                        || !SignatureService.VerifySignature(payload.OwnerAddress, $"{retry.SessionId}.{payload.OwnerAddress}.{retry.ShareDistributionTimestamp}", retry.ShareDistributionSignature))
+                        return JsonConvert.SerializeObject(new { Success = false, Message = $"Invalid retry session signature ({retry.SessionId})" });
+                    retryAuths.Add(new VerifiedXCore.Bitcoin.FROST.Models.PreSignedLeaderAuth
+                    {
+                        SessionId = retry.SessionId,
+                        StartSignature = retry.StartSignature,
+                        StartTimestamp = retry.StartTimestamp,
+                        ShareDistributionSignature = retry.ShareDistributionSignature,
+                        ShareDistributionTimestamp = retry.ShareDistributionTimestamp
+                    });
+                }
 
                 // Anti-spam checks
                 var existingActive = _ceremonies.Values.FirstOrDefault(c =>
@@ -3621,7 +3675,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         ceremony.ProgressPercentage = 15;
                         ceremony.Status = CeremonyStatus.Round1InProgress;
 
-                        var dkgResult = await Services.FrostMPCService.CoordinateDKGCeremony(
+                        // One attempt per signed session; failing participants are dropped between attempts.
+                        var dkgRun = await Services.FrostMPCService.CoordinateDKGCeremony(
                             payload.CeremonyId,
                             payload.OwnerAddress,
                             activeValidators,
@@ -3634,18 +3689,21 @@ namespace VerifiedXCore.Bitcoin.Controllers
                                 else if (round == 2) ceremony.Status = CeremonyStatus.Round2InProgress;
                                 else if (round == 3) ceremony.Status = CeremonyStatus.Round3InProgress;
                             },
-                            preSignedAuth);
+                            new[] { preSignedAuth }.Concat(retryAuths).ToList(),
+                            n => FrostDkgAttestation.PreCeremonyShortfall(n, ceremony.IsS3C, allValidators.Count));
+                        ceremony.ExcludedValidators = dkgRun.Excluded.Count > 0 ? dkgRun.Excluded : null;
 
+                        var dkgResult = dkgRun.Result;
                         if (dkgResult == null)
                         {
                             ceremony.Status = CeremonyStatus.Failed;
-                            ceremony.ErrorMessage = "FROST DKG ceremony failed";
+                            ceremony.ErrorMessage = "FROST DKG ceremony failed: " + (dkgRun.Error ?? "unknown error");
                             ceremony.CompletedTimestamp = TimeUtil.GetTime();
                             return;
                         }
 
                         // NEW-26 (follow-up): a finished ceremony whose contract consensus would refuse must not expose a deposit address.
-                        var rawResultError = FrostDkgAttestation.CeremonyResultError(payload.CeremonyId, dkgResult.GroupPublicKey, dkgResult.TaprootAddress, dkgResult.DKGProof, dkgResult.ParticipantAddresses, ceremony.IsS3C, payload.OwnerAddress);
+                        var rawResultError = FrostDkgAttestation.CeremonyResultError(dkgRun.ContractUID!, dkgResult.GroupPublicKey, dkgResult.TaprootAddress, dkgResult.DKGProof, dkgResult.ParticipantAddresses, ceremony.IsS3C, payload.OwnerAddress);
                         if (rawResultError != null)
                         {
                             ceremony.Status = CeremonyStatus.Failed;
@@ -3655,6 +3713,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         }
 
                         ceremony.ValidatorSnapshot = dkgResult.ParticipantAddresses;
+                        ceremony.ContractUID = dkgRun.ContractUID;
                         ceremony.DepositAddress = dkgResult.TaprootAddress;
                         ceremony.FrostGroupPublicKey = dkgResult.GroupPublicKey;
                         ceremony.DKGProof = dkgResult.DKGProof;
@@ -3725,10 +3784,11 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Owner address mismatch." });
 
                 var effectiveCeremonyId = ceremony.IsRemote && !string.IsNullOrEmpty(ceremony.RemoteCeremonyId)
-                    ? ceremony.RemoteCeremonyId : payload.CeremonyId;
+                    ? ceremony.RemoteCeremonyId : ceremony.EffectiveContractUID;
 
-                // Create the smart contract object. NEW-26: its UID is the ceremony id the validators attested.
-                var scUID = payload.CeremonyId;
+                // Create the smart contract object. NEW-26: its UID is the one the validators attested (the ceremony id,
+                // unless the ceremony was rerun).
+                var scUID = ceremony.EffectiveContractUID;
 
                 var tokenizationV2Feature = new TokenizationV2Feature
                 {
@@ -5507,6 +5567,15 @@ namespace VerifiedXCore.Bitcoin.Controllers
         public string OwnerAddress { get; set; } = "";
     }
 
+    public class RawCeremonySession
+    {
+        public string SessionId { get; set; } = "";
+        public long StartTimestamp { get; set; }
+        public string StartSignature { get; set; } = "";
+        public long ShareDistributionTimestamp { get; set; }
+        public string ShareDistributionSignature { get; set; } = "";
+    }
+
     public class ExecuteMPCCeremonyRawPayload
     {
         public string OwnerAddress { get; set; } = "";
@@ -5516,6 +5585,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
         public string StartSignature { get; set; } = "";
         public long ShareDistributionTimestamp { get; set; }
         public string ShareDistributionSignature { get; set; } = "";
+        /// <summary>Optional signed sessions from the RetrySessions of PrepareMPCCeremonyRaw: one ceremony rerun each.</summary>
+        public List<RawCeremonySession>? RetrySessions { get; set; }
     }
 
     // Base Bridge Payload Models

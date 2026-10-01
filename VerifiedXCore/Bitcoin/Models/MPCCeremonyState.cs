@@ -44,6 +44,24 @@ namespace VerifiedXCore.Bitcoin.Models
         public List<string> ValidatorSnapshot { get; set; }
 
         /// <summary>
+        /// The contract UID the validators attested and stored their key packages under. It is the ceremony id unless
+        /// the ceremony was rerun after dropping failing participants (each attempt has its own UID); the contract must be
+        /// created with this UID. Null until the ceremony completes.
+        /// </summary>
+        public string? ContractUID { get; set; }
+
+        /// <summary>
+        /// Validators dropped from the ceremony after causing an attempt to fail (address -> reason).
+        /// </summary>
+        public Dictionary<string, string>? ExcludedValidators { get; set; }
+
+        /// <summary>
+        /// The contract UID to create the contract with: the attested one when the ceremony recorded it, else the ceremony
+        /// id (ceremonies from before reruns existed).
+        /// </summary>
+        public string EffectiveContractUID => !string.IsNullOrEmpty(ContractUID) ? ContractUID! : CeremonyId;
+
+        /// <summary>
         /// Required threshold for signing (percentage)
         /// </summary>
         public int RequiredThreshold { get; set; }
