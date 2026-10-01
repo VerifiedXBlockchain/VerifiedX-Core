@@ -490,7 +490,7 @@ namespace VerifiedXCore.Tests
         {
             var root = Path.GetDirectoryName(Path.GetDirectoryName(ThisFile()))!;
             var controller = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "Controllers", "VBTCController.cs"));
-            Assert.Equal(4, CountOf(controller, "FrostDkgAttestation.PreCeremonyShortfall("));   // every ceremony start
+            Assert.Equal(7, CountOf(controller, "FrostDkgAttestation.PreCeremonyShortfall("));   // every ceremony start, and the floor for each ceremony's reruns
             Assert.Equal(3, CountOf(controller, "FrostDkgAttestation.CeremonyResultError("));    // every ceremony finish
             Assert.Equal(0, CountOf(controller, "DepositAddress = ceremony.Status == CeremonyStatus.Completed ? ceremony.DepositAddress : null"));
             Assert.Equal(2, CountOf(controller, "VBTCContractV2.DeleteContract(scUID); SmartContractMain.SmartContractData.DeleteSmartContract(scUID);"));
@@ -545,10 +545,10 @@ namespace VerifiedXCore.Tests
             var controller = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "Controllers", "VBTCController.cs"));
             Assert.DoesNotContain("var ceremonyId = Guid.NewGuid().ToString();", controller);
             Assert.DoesNotContain("var scUID = Guid.NewGuid()", controller);
-            Assert.Equal(3, CountOf(controller, "var scUID = payload.CeremonyId;"));
+            Assert.Equal(3, CountOf(controller, "var scUID = ceremony.EffectiveContractUID;"));   // the attested UID (the ceremony id unless rerun)
 
             var mpc = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "Services", "FrostMPCService.cs"));
-            Assert.Contains("dkgProof = FrostDkgAttestation.BuildProof(ceremonyId, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, attestations);", mpc);
+            Assert.Contains("var dkgProof = FrostDkgAttestation.BuildProof(contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, attestations);", mpc);
             var startup = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "FROST", "FrostStartup.cs"));
             Assert.Contains("FrostDkgAttestation.SignLocal(session.SmartContractUID, session.GroupPublicKey, session.TaprootAddress,", startup);
             Assert.Contains("session.LeaderAddress, FrostDkgAttestation.ThresholdFor(session.ParticipantAddresses?.Count ?? 0, session.RequiredThreshold),", startup);
