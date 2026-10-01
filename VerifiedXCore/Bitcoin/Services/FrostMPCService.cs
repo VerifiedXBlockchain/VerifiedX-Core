@@ -207,8 +207,20 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Test seam: runs one attempt (contract UID, session, participants, auth) in place of the validator network.</summary>
         internal static Func<string, string, List<VBTCValidator>, PreSignedLeaderAuth?, Task<DkgAttempt>>? AttemptRunnerForTests;
 
-        /// <summary>Attempts per ceremony: each failed attempt drops the participants that caused it.</summary>
-        public const int MaxDkgAttempts = 3;
+        /// <summary>
+        /// Attempts per ceremony: each failed attempt drops the participants that caused it, so the participation floor
+        /// bounds the loop; this caps the time. (Mainnet: three attempts were spent on two slow Round 2 answers, one missed
+        /// start and the three validators that never finish.)
+        /// </summary>
+        public const int MaxDkgAttempts = 6;
+
+        /// <summary>
+        /// Participants that failed a key ceremony coordinated by this node, until when, and why. A later ceremony leaves
+        /// them out from the start (while the participation floor still holds), instead of spending attempts finding them
+        /// again: the mainnet validators that never finish failed every ceremony at its last step.
+        /// </summary>
+        internal static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (long Until, string Reason)> RecentDkgFailures = new(StringComparer.Ordinal);
+        public const long DkgFailureMemorySeconds = 6 * 3600;
 
         /// <summary>
         /// Coordinate a FROST key ceremony (DKG) for a vBTC V2 vault. Any node (validator or wallet) can coordinate; the
@@ -245,6 +257,28 @@ namespace VerifiedXCore.Bitcoin.Services
             var participants = validators.GroupBy(v => v.ValidatorAddress, StringComparer.Ordinal).Select(g => g.First()).ToList();
             progressCallback?.Invoke(0, 5);
 
+            // Leave out participants that failed a recent ceremony, unless that would breach the participation floor.
+            var now = TimeUtil.GetTime();
+            var remembered = participants
+                .Select(v => (v.ValidatorAddress, Known: RecentDkgFailures.TryGetValue(v.ValidatorAddress, out var f) && f.Until > now ? f.Reason : null))
+                .Where(r => r.Known != null).ToList();
+            if (remembered.Count > 0)
+            {
+                var remaining = participants.Count - remembered.Count;
+                if (remaining >= FrostDkgAttestation.MinParticipants && participantShortfall?.Invoke(remaining) == null)
+                {
+                    foreach (var (address, reason) in remembered)
+                        run.Excluded[address] = $"failed a recent key ceremony ({reason})";
+                    LogUtility.Log($"[FROST MPC] Leaving out {remembered.Count} validator(s) that failed a recent key ceremony: " +
+                        string.Join(", ", remembered.Select(r => r.ValidatorAddress)), "FrostMPCService.CoordinateDKGCeremony");
+                }
+                else
+                {
+                    LogUtility.Log($"[FROST MPC] Keeping {remembered.Count} validator(s) that failed a recent key ceremony: leaving them out would breach the participation floor.",
+                        "FrostMPCService.CoordinateDKGCeremony");
+                }
+            }
+
             for (int attempt = 1; attempt <= attempts; attempt++)
             {
                 participants = participants.Where(v => !run.Excluded.ContainsKey(v.ValidatorAddress)).ToList();
@@ -273,6 +307,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     run.Result = outcome.Result;
                     run.ContractUID = contractUid;
                     run.Error = null;
+                    foreach (var p in outcome.Result.ParticipantAddresses ?? new List<string>())
+                        RecentDkgFailures.TryRemove(p, out _);
                     LogUtility.Log($"[FROST MPC] DKG ceremony completed on attempt {attempt}. Contract: {contractUid}, Address: {outcome.Result.TaprootAddress}, " +
                         $"Participants: {outcome.Result.ParticipantAddresses.Count}, Dropped: {run.Excluded.Count}", "FrostMPCService.CoordinateDKGCeremony");
                     return run;
@@ -282,6 +318,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 foreach (var (address, reason) in outcome.Failed)
                 {
                     run.Excluded.TryAdd(address, reason);
+                    RecentDkgFailures[address] = (TimeUtil.GetTime() + DkgFailureMemorySeconds, reason);
                     LogUtility.Log($"[FROST MPC] DKG attempt {attempt}: dropping {address} — {reason}", "FrostMPCService.CoordinateDKGCeremony");
                 }
                 if (outcome.Failed.Count == 0)

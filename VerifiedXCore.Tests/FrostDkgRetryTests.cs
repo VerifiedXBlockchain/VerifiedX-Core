@@ -23,7 +23,13 @@ namespace VerifiedXCore.Tests
     [Collection("FrostDkgRetry")]
     public class FrostDkgRetryTests : IDisposable
     {
-        public void Dispose() => FrostMPCService.AttemptRunnerForTests = null;
+        public FrostDkgRetryTests() => FrostMPCService.RecentDkgFailures.Clear();
+
+        public void Dispose()
+        {
+            FrostMPCService.AttemptRunnerForTests = null;
+            FrostMPCService.RecentDkgFailures.Clear();
+        }
 
         private static string Id(int i) => i.ToString("x").PadLeft(64, '0');
 
@@ -276,6 +282,56 @@ namespace VerifiedXCore.Tests
             sessions.Clear();
             await FrostMPCService.CoordinateDKGCeremony("c", "ROwner", Validators(10), 51, preSignedAuths: new[] { Auth("s1"), Auth("s2"), Auth("s3") });
             Assert.Equal(new[] { "s1", "s2", "s3" }, sessions);
+        }
+
+        /// <summary>Fails any attempt that includes one of these participants (like the mainnet validators that never finish).</summary>
+        private static Func<string, string, List<VBTCValidator>, PreSignedLeaderAuth?, Task<FrostMPCService.DkgAttempt>> FailWhenPresent(
+            HashSet<string> bad, List<int> participantCounts) => (uid, session, participants, auth) =>
+        {
+            participantCounts.Add(participants.Count);
+            var attempt = new FrostMPCService.DkgAttempt();
+            foreach (var p in participants.Where(p => bad.Contains(p.ValidatorAddress)))
+                attempt.Failed[p.ValidatorAddress] = "did not finish the key ceremony";
+            if (attempt.Failed.Count == 0) attempt.Result = ResultFor(uid, participants);
+            else attempt.Error = "failed";
+            return Task.FromResult(attempt);
+        };
+
+        [Fact]
+        public async Task ALaterCeremony_LeavesOutRecentFailures_FromTheStart()
+        {
+            var validators = Validators(162);
+            var bad = validators.Skip(10).Take(3).Select(v => v.ValidatorAddress).ToHashSet();
+            var counts = new List<int>();
+            FrostMPCService.AttemptRunnerForTests = FailWhenPresent(bad, counts);
+
+            Assert.NotNull((await FrostMPCService.CoordinateDKGCeremony("c1", "ROwner", validators, 51)).Result);
+            Assert.Equal(new[] { 162, 159 }, counts);
+
+            counts.Clear();
+            var second = await FrostMPCService.CoordinateDKGCeremony("c2", "ROwner", validators, 51);
+            Assert.NotNull(second.Result);
+            Assert.Equal(new[] { 159 }, counts);                        // no attempt spent rediscovering them
+            Assert.Equal("c2", second.ContractUID);
+            Assert.All(bad, a => Assert.StartsWith("failed a recent key ceremony", second.Excluded[a]));
+        }
+
+        [Fact]
+        public async Task RecentFailures_AreKept_WhenLeavingThemOutWouldBreachTheFloor_AndASuccessClearsThem()
+        {
+            var validators = Validators(20);
+            var flaky = validators[0].ValidatorAddress;
+            FrostMPCService.RecentDkgFailures[flaky] = (VerifiedXCore.Utilities.TimeUtil.GetTime() + 3600, "did not finish the key ceremony");
+            var counts = new List<int>();
+            FrostMPCService.AttemptRunnerForTests = FailWhenPresent(new HashSet<string>(), counts);
+
+            var run = await FrostMPCService.CoordinateDKGCeremony("c", "ROwner", validators, 51,
+                participantShortfall: n => n >= 20 ? null : $"Only {n} validator(s) are reachable");
+
+            Assert.NotNull(run.Result);
+            Assert.Equal(new[] { 20 }, counts);
+            Assert.Empty(run.Excluded);
+            Assert.False(FrostMPCService.RecentDkgFailures.ContainsKey(flaky));   // it finished this time
         }
 
         [Fact]
