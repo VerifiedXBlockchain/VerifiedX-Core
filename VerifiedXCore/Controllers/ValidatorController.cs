@@ -434,7 +434,10 @@ namespace VerifiedXCore.Controllers
         [Route("GetBlock/{blockHeight}")]
         public ActionResult<string?> GetBlock(long blockHeight)
         {
-            if(Globals.CasterRoundDict.ContainsKey(blockHeight))
+            // A committed height serves the committed block only. The round draft used to come first, so a caster whose
+            // draft was another producer's block (mainnet fork at 7,414,815) served that block while GetBlockHash
+            // reported its committed hash — and a forked peer's resolution, fetching from it, never got the right block.
+            if (blockHeight > (Globals.LastBlock?.Height ?? -1) && Globals.CasterRoundDict.ContainsKey(blockHeight))
             {
                 var round = Globals.CasterRoundDict[blockHeight];
                 if(round == null)

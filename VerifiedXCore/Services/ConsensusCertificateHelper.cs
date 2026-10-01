@@ -109,6 +109,14 @@ namespace VerifiedXCore.Services
             if (!Globals.BlockCasters.Any(x => x.ValidatorAddress == acc.Address))
                 return false;
 
+            // One block per height: never sign a second, different block at a height this node already signed.
+            if (!AttestationGuard.TryClaim(block.Height, block.Hash))
+            {
+                var signed = AttestationGuard.SignedAt(block.Height) ?? "";
+                CasterLogUtility.Log($"ATTEST-GUARD: refusing to sign block {block.Hash?[..Math.Min(16, block.Hash?.Length ?? 0)]} at height {block.Height} — already signed {signed[..Math.Min(16, signed.Length)]} there.", "CERT");
+                return false;
+            }
+
             var msg = ConsensusMessageFormatter.FormatAttestationV1(block.Height, block.Hash, block.Validator, block.PrevHash);
             var sig = SignatureService.CreateSignature(msg, acc.GetPrivKey, acc.PublicKey);
             if (sig == "ERROR")

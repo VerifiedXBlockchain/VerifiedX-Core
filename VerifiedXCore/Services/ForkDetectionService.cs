@@ -165,59 +165,69 @@ namespace VerifiedXCore.Services
                 SyncState = "Recovering";
             ForkStatusText = "Resolving";
 
-            // Prefer a caster as the reference peer; casters are the producers of the majority branch.
-            var casterIps = CasterIps();
-            var majorityPeer = verdict.MajorityPeers.OrderByDescending(ip => casterIps.Contains(ip)).First();
+            // Every majority peer is a candidate reference, casters (committee members) first. This used to take the first
+            // one and retry it forever: at the mainnet fork (7,414,815) that peer served a stale block from GetBlock while
+            // GetBlockHash reported the majority hash, and the node never tried the peers that would have worked.
+            var references = ReferenceOrder(verdict.MajorityPeers, CasterIps());
+            var inconsistent = new List<string>();
 
             LogUtility.Log(
-                $"[{caller}] FORK-RESOLVE: attempt {_attempts} — majority ({verdict.DecidedBy}: {verdict.Differing}/{verdict.Responders}) holds {Short(verdict.MajorityHash)} at h={myTip.Height}, we hold {Short(myTip.Hash)}. stalled={stalled} reference={majorityPeer}.",
+                $"[{caller}] FORK-RESOLVE: attempt {_attempts} — majority ({verdict.DecidedBy}: {verdict.Differing}/{verdict.Responders}) holds {Short(verdict.MajorityHash)} at h={myTip.Height}, we hold {Short(myTip.Hash)}. stalled={stalled} references={string.Join(",", references)}.",
                 "ForkDetection");
 
-            var divergenceHeight = await ForkResolutionUtility.FindDivergenceHeightAsync(
-                h => GetPeerHashAtHeightAsync(majorityPeer, h),
-                LocalHashAt,
-                myTip.Height);
-
-            if (divergenceHeight < 0)
+            foreach (var majorityPeer in references)
             {
-                ForkStatusText = "Unresolved";
-                LastRecoveryResult = "divergence-not-found";
-                LogUtility.Log($"[{caller}] FORK-RESOLVE: could not locate a common ancestor with {majorityPeer} (peer unresponsive or foreign chain). Retrying in {ForkResolutionUtility.NextBackoffSeconds(_attempts)}s.", "ForkDetection");
-                ResetStreak(keepStatus: true);
-                return;
-            }
-            KnownDivergenceHeight = divergenceHeight;
-            var depth = myTip.Height - divergenceHeight + 1;
-
-            // Source policy goes up BEFORE the block fetch: it dials the majority peers over P2P
-            // (a stranded node often has no P2P link to any of them) and quarantines peers that
-            // hold our losing hash, so the P2P fallback fetch and the redownload only ever talk
-            // to the majority. Cleared on every exit below.
-            RecoverySourcePolicy.Set(verdict.MajorityPeers, verdict.AgreeingPeers);
-            try
-            {
-                await RecoverySourcePolicy.EnsureSourcesConnectedAsync();
-
-                var localBlock = BlockchainData.GetBlockByHeight(divergenceHeight);
-                var remoteHashAtDivergence = await GetPeerHashAtHeightAsync(majorityPeer, divergenceHeight);
-                var remoteBlock = await ForkRecoveryUtility.FetchCommittedBlockAsync(majorityPeer, divergenceHeight);
-                if (localBlock == null || remoteBlock == null || remoteBlock.Height != divergenceHeight
-                    || string.IsNullOrEmpty(remoteBlock.Hash) || remoteBlock.Hash != remoteHashAtDivergence)
+                var divergenceHeight = await ForkResolutionUtility.FindDivergenceHeightAsync(
+                    h => GetPeerHashAtHeightAsync(majorityPeer, h),
+                    LocalHashAt,
+                    myTip.Height);
+                if (divergenceHeight < 0)
                 {
-                    ForkStatusText = "Unresolved";
-                    LastRecoveryResult = "remote-block-unavailable";
-                    LogUtility.Log($"[{caller}] FORK-RESOLVE: could not obtain a block at divergence h={divergenceHeight} matching {majorityPeer}'s hash {Short(remoteHashAtDivergence)} (depth {depth}; API + P2P both tried). Retrying in {ForkResolutionUtility.NextBackoffSeconds(_attempts)}s.", "ForkDetection");
-                    ResetStreak(keepStatus: true);
+                    LogUtility.Log($"[{caller}] FORK-RESOLVE: no common ancestor found with {majorityPeer} (unresponsive or foreign chain); trying the next majority peer.", "ForkDetection");
+                    continue;
+                }
+                KnownDivergenceHeight = divergenceHeight;
+                var depth = myTip.Height - divergenceHeight + 1;
+
+                // Source policy goes up BEFORE the block fetch: it dials the majority peers over P2P
+                // (a stranded node often has no P2P link to any of them) and quarantines peers that
+                // hold our losing hash, so the P2P fallback fetch and the redownload only ever talk
+                // to the majority. Peers found serving a block that does not match their own hash are
+                // not sources either. Cleared on every exit below.
+                RecoverySourcePolicy.Set(verdict.MajorityPeers.Except(inconsistent).ToList(), verdict.AgreeingPeers.Concat(inconsistent).ToList());
+                try
+                {
+                    await RecoverySourcePolicy.EnsureSourcesConnectedAsync();
+
+                    var localBlock = BlockchainData.GetBlockByHeight(divergenceHeight);
+                    var remoteHashAtDivergence = await GetPeerHashAtHeightAsync(majorityPeer, divergenceHeight);
+                    var remoteBlock = await ForkRecoveryUtility.FetchCommittedBlockAsync(majorityPeer, divergenceHeight);
+                    if (localBlock == null || remoteBlock == null || remoteBlock.Height != divergenceHeight
+                        || string.IsNullOrEmpty(remoteBlock.Hash) || remoteBlock.Hash != remoteHashAtDivergence)
+                    {
+                        inconsistent.Add(majorityPeer);
+                        LogUtility.Log($"[{caller}] FORK-RESOLVE: {majorityPeer} did not serve a block at divergence h={divergenceHeight} matching its hash {Short(remoteHashAtDivergence)} (got {Short(remoteBlock?.Hash)}); trying the next majority peer.", "ForkDetection");
+                        continue;
+                    }
+
+                    await ResolveWithBlocksAsync(caller, myTip, verdict, stalled, majorityPeer, divergenceHeight, depth, localBlock, remoteBlock);
                     return;
                 }
+                finally
+                {
+                    RecoverySourcePolicy.Clear();
+                }
+            }
 
-                await ResolveWithBlocksAsync(caller, myTip, verdict, stalled, majorityPeer, divergenceHeight, depth, localBlock, remoteBlock);
-            }
-            finally
-            {
-                RecoverySourcePolicy.Clear();
-            }
+            ForkStatusText = "Unresolved";
+            LastRecoveryResult = "remote-block-unavailable";
+            LogUtility.Log($"[{caller}] FORK-RESOLVE: no majority peer served a consistent block ({references.Count} tried, {inconsistent.Count} inconsistent). Retrying in {ForkResolutionUtility.NextBackoffSeconds(_attempts)}s.", "ForkDetection");
+            ResetStreak(keepStatus: true);
         }
+
+        /// <summary>Pure: the order in which majority peers are tried as the reference — casters first, then the rest.</summary>
+        internal static List<string> ReferenceOrder(IEnumerable<string> majorityPeers, HashSet<string> casterIps) =>
+            majorityPeers.Distinct().OrderByDescending(ip => casterIps.Contains(ip)).ToList();
 
         private static async Task ResolveWithBlocksAsync(string caller, Block myTip, ForkResolutionUtility.MajorityVerdict verdict, bool stalled,
             string majorityPeer, long divergenceHeight, long depth, Block localBlock, Block remoteBlock)
@@ -394,11 +404,26 @@ namespace VerifiedXCore.Services
         private static string? LocalHashAt(long h)
             => h == Globals.LastBlock.Height ? Globals.LastBlock.Hash : BlockchainData.GetBlockByHeight(h)?.Hash;
 
+        /// <summary>
+        /// The peers whose vote counts as a caster's. In the record era only committee members do: at the mainnet fork
+        /// (7,414,815) a caster outside the record (RVGy4) counted, and it was the one serving the wrong block.
+        /// </summary>
         private static HashSet<string> CasterIps()
-            => Globals.BlockCasters.ToList()
-                .Select(c => RecoverySourcePolicy.Normalize(c.PeerIP))
-                .Where(ip => ip.Length > 0)
-                .ToHashSet();
+        {
+            var committee = CasterMembershipStore.GetCommitteeForHeight(Globals.LastBlock.Height + 1);
+            return CasterIpsFor(committee, Globals.BlockCasters.ToList(), CasterMembershipStore.GetCurrent()?.Casters);
+        }
+
+        /// <summary>Pure: live casters' IPs, restricted to committee members (plus the record's own PeerIPs) when a committee exists.</summary>
+        internal static HashSet<string> CasterIpsFor(HashSet<string>? committee, List<Peers> liveCasters, List<CasterInfo>? recordCasters)
+        {
+            var live = liveCasters
+                .Where(c => committee == null || (!string.IsNullOrEmpty(c.ValidatorAddress) && committee.Contains(c.ValidatorAddress!)))
+                .Select(c => RecoverySourcePolicy.Normalize(c.PeerIP));
+            var fromRecord = committee == null ? Enumerable.Empty<string>()
+                : (recordCasters ?? new List<CasterInfo>()).Where(c => committee.Contains(c.Address)).Select(c => RecoverySourcePolicy.Normalize(c.PeerIP));
+            return live.Concat(fromRecord).Where(ip => ip.Length > 0).ToHashSet();
+        }
 
         /// <summary>
         /// SOURCE-POLICY (Sep 2026): one-shot majority survey for a height — who holds what hash,
@@ -421,7 +446,7 @@ namespace VerifiedXCore.Services
         {
             var casters = CasterIps();
             return casters.Select(ip => (Ip: ip, IsCaster: true))
-                .Concat(Globals.BlockCasterNodes.Values.Select(n => (Ip: RecoverySourcePolicy.Normalize(n.NodeIP), IsCaster: true)))
+                .Concat(Globals.BlockCasterNodes.Values.Select(n => (Ip: RecoverySourcePolicy.Normalize(n.NodeIP), IsCaster: casters.Contains(RecoverySourcePolicy.Normalize(n.NodeIP)))))
                 .Concat(Globals.ValidatorNodes.Values.Select(n => (Ip: RecoverySourcePolicy.Normalize(n.NodeIP), IsCaster: casters.Contains(RecoverySourcePolicy.Normalize(n.NodeIP)))))
                 .Concat(Globals.Nodes.Values.Select(n => (Ip: RecoverySourcePolicy.Normalize(n.NodeIP), IsCaster: casters.Contains(RecoverySourcePolicy.Normalize(n.NodeIP)))))
                 .Where(p => p.Ip.Length > 0)

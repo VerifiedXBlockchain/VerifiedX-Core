@@ -28,6 +28,11 @@ namespace VerifiedXCore.Services
                 if (!Globals.BlockCasters.Any(x => x.ValidatorAddress == myAddr))
                     return;
 
+                // One block per height (AttestationGuard): a block accepted after this node signed another one at the
+                // height — e.g. the majority block adopted by fork resolution — is already certified without us.
+                if (!AttestationGuard.TryClaim(block.Height, block.Hash))
+                    return;
+
                 var msg = ConsensusMessageFormatter.FormatAttestationV1(block.Height, block.Hash, block.Validator, block.PrevHash);
                 var sig = SignatureService.CreateSignature(msg, acc.GetPrivKey, acc.PublicKey);
                 if (sig == "ERROR")
