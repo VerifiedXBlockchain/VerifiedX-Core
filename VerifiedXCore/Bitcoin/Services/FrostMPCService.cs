@@ -605,13 +605,10 @@ namespace VerifiedXCore.Bitcoin.Services
                     leaderSignature = VerifiedXCore.Services.SignatureService.AddressSignature(leaderAddress, leaderMessage);
                 }
 
-                var redistributePayload = JsonConvert.SerializeObject(new
-                {
-                    LeaderAddress = leaderAddress,
-                    Timestamp = timestamp,
-                    LeaderSignature = leaderSignature,
-                    AllGeneratedShares = allGeneratedShares
-                });
+                // Each validator gets only the shares addressed to it. Sending every validator all n×(n-1) shares made the
+                // upload grow with n³: ~10 MB per validator and ~1.6 GB in total at 162 validators, so every request hit
+                // the 90 s timeout and mainnet DKG never got past Round 2.
+                var sharesByRecipient = SharesForEachRecipient(validators.Select(v => v.ValidatorAddress).ToList(), allGeneratedShares);
 
                 var distributeSuccessCount = 0;
                 var distributeTasks = validators.Select(async validator =>
@@ -619,6 +616,13 @@ namespace VerifiedXCore.Bitcoin.Services
                     try
                     {
                         var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/dkg/shares/{sessionId}";
+                        var redistributePayload = JsonConvert.SerializeObject(new
+                        {
+                            LeaderAddress = leaderAddress,
+                            Timestamp = timestamp,
+                            LeaderSignature = leaderSignature,
+                            AllGeneratedShares = sharesByRecipient[validator.ValidatorAddress]
+                        });
                         var content = new StringContent(redistributePayload, Encoding.UTF8, "application/json");
                         var response = await _ceremonyHttpClient.PostAsync(url, content);
 
@@ -653,6 +657,43 @@ namespace VerifiedXCore.Bitcoin.Services
                 ErrorLogUtility.LogError($"Share distribution error: {ex.Message}", "FrostMPCService.CoordinateShareDistribution");
                 return null;
             }
+        }
+
+        /// <summary>
+        /// The Round 2 share batch for each participant: per sender, only the one package addressed to that participant
+        /// ({ sender: "{ identifier: sealedPackage }" }), in the shape the validators' /frost/dkg/shares handler already
+        /// reads (it parses each sender's map and looks up its own identifier), so validators need no upgrade.
+        /// Identifiers come from the sorted participant list, as the validators derive them. A sender whose map cannot be
+        /// read, or lacks the participant's identifier, is passed through whole (the previous behaviour).
+        /// </summary>
+        internal static Dictionary<string, Dictionary<string, string>> SharesForEachRecipient(
+            List<string> participantAddresses, IReadOnlyDictionary<string, string> generatedSharesBySender)
+        {
+            var idByAddress = FrostStartup.BuildAddressToIdentifierMap(participantAddresses);
+            var parsed = new Dictionary<string, JObject?>();
+            foreach (var (sender, shares) in generatedSharesBySender)
+            {
+                try { parsed[sender] = JObject.Parse(shares); }
+                catch { parsed[sender] = null; }
+            }
+
+            var result = new Dictionary<string, Dictionary<string, string>>();
+            foreach (var recipient in participantAddresses)
+            {
+                var batch = new Dictionary<string, string>();
+                idByAddress.TryGetValue(recipient, out var recipientId);
+                foreach (var (sender, shares) in generatedSharesBySender)
+                {
+                    if (sender == recipient)
+                        continue;
+                    var token = recipientId == null ? null : parsed[sender]?[recipientId];
+                    batch[sender] = token == null
+                        ? shares
+                        : new JObject { [recipientId!] = token }.ToString(Formatting.None);
+                }
+                result[recipient] = batch;
+            }
+            return result;
         }
 
         /// <summary>

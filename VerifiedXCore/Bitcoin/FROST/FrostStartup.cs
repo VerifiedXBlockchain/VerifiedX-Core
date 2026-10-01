@@ -3263,7 +3263,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// This ensures DKG and signing ceremonies use consistent identifiers even when
         /// the validator list grows, shrinks, or the dictionary iteration order changes.
         /// </summary>
-        private static Dictionary<string, string> BuildAddressToIdentifierMap(List<string> participantAddresses)
+        internal static Dictionary<string, string> BuildAddressToIdentifierMap(List<string> participantAddresses)
         {
             var sorted = participantAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
             var map = new Dictionary<string, string>();
