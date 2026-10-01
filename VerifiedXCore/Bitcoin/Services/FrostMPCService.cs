@@ -1580,7 +1580,15 @@ namespace VerifiedXCore.Bitcoin.Services
                         LogUtility.Log($"[FROST MPC] WARNING: Failed to parse stored participant order: {orderEx.Message}. Falling back to sorted order.", "FrostMPCService.AggregateSignature");
                     }
                 }
-                var addressListForAggregate = storedOrderForAggregate ?? signerAddresses;
+                // A coordinator outside the DKG (Spyglass's node for every web wallet withdrawal) has no stored
+                // order. The identifiers were assigned over the DKG participants, so numbering the reachable
+                // signers instead shifts every identifier after a missing participant and aggregation fails
+                // (native error -4). The contract's validator snapshot is that participant list.
+                List<string>? contractParticipants = null;
+                if (storedOrderForAggregate == null || storedOrderForAggregate.Count == 0)
+                    contractParticipants = GetContractDkgParticipants(scUID);
+                var addressListForAggregate = ResolveAggregationOrder(storedOrderForAggregate, contractParticipants, pubkeyPackage, signerAddresses, out var orderSource);
+                LogUtility.Log($"[FROST MPC] Aggregation identifier order: {orderSource} ({addressListForAggregate.Count} entries, {signerAddresses.Count} signers)", "FrostMPCService.AggregateSignature");
                 var addrToFrostId = BuildAddressToFrostIdentifierMap(addressListForAggregate);
 
                 // Remap shares: VFX address → FROST Identifier
@@ -1693,6 +1701,81 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Participant 2 → "0000000000000000000000000000000000000000000000000000000000000002"
         /// This must match the identical logic in FrostStartup.BuildAddressToIdentifierMap.
         /// </summary>
+        /// <summary>
+        /// The address list whose sorted order gives each signer its DKG identifier. Prefers the coordinator's stored
+        /// DKG order, then the contract's DKG participants, then the reachable signers (only correct when every DKG
+        /// participant is among them). Contract participants are used only when their count matches the pubkey
+        /// package's verifying shares, so a snapshot that differs from the DKG set never replaces the old behaviour.
+        /// </summary>
+        internal static List<string> ResolveAggregationOrder(
+            List<string>? storedOrder,
+            List<string>? contractParticipants,
+            string pubkeyPackage,
+            List<string> signerAddresses,
+            out string source)
+        {
+            if (storedOrder != null && storedOrder.Count > 0)
+            {
+                source = "stored DKG order";
+                return storedOrder;
+            }
+
+            if (contractParticipants != null && contractParticipants.Count > 0)
+            {
+                var shareCount = CountVerifyingShares(pubkeyPackage);
+                if (shareCount == contractParticipants.Count)
+                {
+                    source = "contract DKG participants";
+                    return contractParticipants;
+                }
+                source = $"signer addresses (contract lists {contractParticipants.Count} participants, pubkey package has {shareCount?.ToString() ?? "unreadable"} verifying shares)";
+                return signerAddresses;
+            }
+
+            source = "signer addresses (no DKG participant list found)";
+            return signerAddresses;
+        }
+
+        internal static int? CountVerifyingShares(string pubkeyPackage)
+        {
+            try
+            {
+                return (JObject.Parse(pubkeyPackage)["verifying_shares"] as JObject)?.Count;
+            }
+            catch (JsonException)
+            {
+                return null;
+            }
+        }
+
+        /// <summary>The contract's DKG participants (ValidatorAddressesSnapshot), from the local DB or State Trei.</summary>
+        internal static List<string>? GetContractDkgParticipants(string scUID)
+        {
+            try
+            {
+                var localContract = VBTCContractV2.GetContract(scUID);
+                if (localContract?.ValidatorAddressesSnapshot != null && localContract.ValidatorAddressesSnapshot.Count > 0)
+                    return localContract.ValidatorAddressesSnapshot;
+
+                var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                if (scStateTreiRec == null || string.IsNullOrEmpty(scStateTreiRec.ContractData))
+                    return null;
+
+                var scMain = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
+                var tknz = scMain?.Features?
+                    .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                    .Select(x => x.FeatureFeatures)
+                    .OfType<TokenizationV2Feature>()
+                    .FirstOrDefault();
+                return tknz?.ValidatorAddressesSnapshot;
+            }
+            catch (Exception ex)
+            {
+                LogUtility.Log($"[FROST MPC] Could not read DKG participants for {scUID}: {ex.Message}", "FrostMPCService.GetContractDkgParticipants");
+                return null;
+            }
+        }
+
         private static string ParticipantIndexToFrostIdentifier(int participantIndex)
         {
             return participantIndex.ToString("x").PadLeft(64, '0');
@@ -1709,7 +1792,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// so that the same set of addresses ALWAYS produces the same mapping, regardless of
         /// input order. This must match FrostStartup.BuildAddressToIdentifierMap exactly.
         /// </summary>
-        private static Dictionary<string, string> BuildAddressToFrostIdentifierMap(List<string> signerAddresses)
+        internal static Dictionary<string, string> BuildAddressToFrostIdentifierMap(List<string> signerAddresses)
         {
             var sorted = signerAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
             var map = new Dictionary<string, string>();
