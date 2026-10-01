@@ -168,6 +168,9 @@ namespace VerifiedXCore.Services
                         // /depart removes a seed from the committee.
                         if (Globals.IsLocalBootstrapCaster)
                             return;
+                        // /maintenance: a planned restart keeps the seat (peers hold it for 10 minutes).
+                        if (CasterSeatService.MaintenanceAnnounced)
+                            return;
                         try
                         {
                             CasterDiscoveryService.BroadcastDeparture().GetAwaiter().GetResult();

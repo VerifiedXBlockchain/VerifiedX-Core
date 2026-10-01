@@ -2197,6 +2197,7 @@ namespace VerifiedXCore.Commands
             table.AddRow("[blue]/clear[/]", "[green]This will clear the current console window.[/]");
             table.AddRow("[blue]/update[/]", "[green]This will download latest CLI client to VFX folder location under 'Download'.[/]");
             table.AddRow("[blue]/depart[/]", "[green]Gracefully departs the caster pool (waits for network confirmation), then exits.[/]");
+            table.AddRow("[blue]/maintenance[/]", "[green]Caster: before a planned restart, holds your committee seat for 10 minutes (instead of 5). Then stop the node normally.[/]");
             table.AddRow("[blue]/safe-update[/]", "[green]Departs gracefully, downloads + applies the latest release for this OS, then restarts.[/]");
             table.AddRow("[blue]/mempool[/]", "[green]This will print out the current state of the mempool.[/]");
             table.AddRow("[blue]/recp[/]", "[green]This will attempt to perform a reconnect to peers.[/]");

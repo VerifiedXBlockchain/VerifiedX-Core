@@ -241,6 +241,16 @@ namespace VerifiedXCore.Nodes
                         "CasterFlow");
                 }
 
+                // SEAT-HEAL: in the record era the record decides whether this node holds a seat; peers' live lists
+                // don't (they drop a restarted member until it resumes). The round loop's resume gate decides when it
+                // may cast. Before a record exists the old majority-of-live-lists rule below still applies.
+                if (!Globals.IsBlockCaster && CasterMembershipStore.GetCurrent() is { } seatHead
+                    && seatHead.Casters.Any(c => c.Address == Globals.ValidatorAddress))
+                {
+                    CasterLogUtility.Log($"SelfRecovery: record seq {seatHead.RecordSeq} lists this node — IsBlockCaster=true; casting waits for the resume checks.", "CasterFlow");
+                    Globals.IsBlockCaster = true;
+                }
+
                 if (!Globals.IsBlockCaster)
                 {
                     // FIX 4: Self-recovery heartbeat — poll a peer caster's /GetCasters endpoint.
@@ -388,6 +398,14 @@ namespace VerifiedXCore.Nodes
                     catch (Exception ex) { CasterLogUtility.Log($"HEAL error: {ex.Message}", "CasterFlow"); }
                 }
 
+                // SEAT-HEAL: time every member's absence, and past the grace period remove one (seat proposer only).
+                try
+                {
+                    await CasterSeatService.ObserveCommitteeAsync();
+                    await CasterSeatService.TryRemoveAbsentAsync();
+                }
+                catch (Exception ex) { CasterLogUtility.Log($"SEAT error: {ex.Message}", "SEAT"); }
+
                 // WATCHDOG: height-delta stall detector — the only signal a silently-failing round
                 // cannot reset. Escalation re-kicks heal + the fork check on its own cadence.
                 await ChainProgressWatchdog.TickAsync("MonitorCasters");
@@ -422,7 +440,8 @@ namespace VerifiedXCore.Nodes
 
                 var casterList = Globals.BlockCasters.ToList();
 
-                if (!Globals.IsBootstrapMode && casterList.Count < Globals.MaxBlockCasters)
+                // Legacy live-list replacement; in the record era seats change only through signed records.
+                if (!Globals.IsBootstrapMode && !CasterMembershipStore.RecordEraActive && casterList.Count < Globals.MaxBlockCasters)
                     await InitiateReplacement(Globals.LastBlock.Height);
 
                 await CasterDiscoveryService.RefreshIfDueAsync();
@@ -1227,6 +1246,24 @@ namespace VerifiedXCore.Nodes
                 var casterList = Globals.BlockCasters.ToList();
                 var wasCaster = Globals.IsBlockCaster;
                 var selfInList = casterList.Exists(x => x.ValidatorAddress == Globals.ValidatorAddress);
+                // SEAT-HEAL: in the record era the record decides (MonitorCasters' SelfRecovery uses the same rule, so the
+                // two loops can't flip the flag back and forth); keep our own entry in the live list.
+                var seatRecord = CasterMembershipStore.GetCurrent();
+                var selfSeat = seatRecord?.Casters.FirstOrDefault(c => c.Address == Globals.ValidatorAddress);
+                if (seatRecord != null)
+                {
+                    if (selfSeat != null && !selfInList)
+                        CasterDiscoveryService.AddBlockCasterIfRoomAndUnique(new Peers
+                        {
+                            IsValidator = true,
+                            PeerIP = selfSeat.PeerIP,
+                            ValidatorAddress = selfSeat.Address,
+                            ValidatorPublicKey = selfSeat.PublicKey,
+                            WalletVersion = Globals.CLIVersion,
+                        });
+                    selfInList = selfSeat != null;
+                    casterList = Globals.BlockCasters.ToList();
+                }
                 Globals.IsBlockCaster = selfInList;
 
                 // A3: on becoming a caster, verify height + tip-hash agreement with the majority
@@ -1340,11 +1377,30 @@ namespace VerifiedXCore.Nodes
                     // live-list rules — a non-member's votes and attestations counted toward its quorum — and committed
                     // the block that forked the chain.
                     var recordHold = await RecordHoldAsync(Height);
+                    CasterSeatService.HeldByRecord = recordHold != null;
                     if (recordHold != null)
                     {
                         if (Environment.TickCount64 - _lastRecordHoldLogTicks >= 15_000)
                         {
                             CasterLogUtility.Log($"RECORD-HOLD: sitting out round {Height} — {recordHold}.", "ROUND");
+                            _lastRecordHoldLogTicks = Environment.TickCount64;
+                        }
+                        await Task.Delay(Math.Max(2000, Globals.BlockTime / 4));
+                        continue;
+                    }
+
+                    // RESUME: a restart is not an automatic return to the seat. The member proves the record still lists
+                    // it, the chain shows it was gone less than the grace period, and enough members approve that no
+                    // removal can also succeed (CasterSeatService). Sep 30: restarted members were re-added by
+                    // reachability and evicted for not casting, in a loop. A seed bootstrap casts without resuming.
+                    if (Globals.IsBootstrapMode)
+                        CasterSeatService.ConfirmCasting("cast during a seed bootstrap");
+                    var resumeHold = await CasterSeatService.TryResumeAsync();
+                    if (resumeHold != null)
+                    {
+                        if (Environment.TickCount64 - _lastRecordHoldLogTicks >= 15_000)
+                        {
+                            CasterLogUtility.Log($"RESUME-HOLD: sitting out round {Height} — {resumeHold}.", "ROUND");
                             _lastRecordHoldLogTicks = Environment.TickCount64;
                         }
                         await Task.Delay(Math.Max(2000, Globals.BlockTime / 4));
@@ -4032,13 +4088,30 @@ namespace VerifiedXCore.Nodes
         }
 
         /// <summary>
+        /// Pure: the validators contained in at least <paramref name="required"/> of the committed proof sets, sorted; null
+        /// when fewer than <paramref name="required"/> sets were received.
+        /// </summary>
+        internal static List<string>? QuorumPresenceSet(IEnumerable<List<string>?> committedSets, int required)
+        {
+            var sets = committedSets.Where(x => x != null).Select(x => x!.ToHashSet(StringComparer.Ordinal)).ToList();
+            if (required < 1 || sets.Count < required) return null;
+            return sets.SelectMany(x => x)
+                .GroupBy(a => a, StringComparer.Ordinal)
+                .Where(g => g.Count() >= required)
+                .Select(g => g.Key)
+                .OrderBy(a => a, StringComparer.Ordinal)
+                .ToList();
+        }
+
+        /// <summary>
         /// CONSENSUS-V2 (Fix #5): Reach supermajority agreement on the proof-set hash for a
         /// given block height. Each caster broadcasts its <see cref="ProofSetCommitment"/>;
         /// receivers tally by <see cref="ProofSetCommitment.CommitmentHash"/>. If a single
         /// hash group has supermajority count, we adopt that group's sorted address list as
-        /// the canonical proof-address set. If no supermajority emerges before the timeout,
-        /// returns <see langword="null"/> and the caller falls back to local-snapshot semantics
-        /// (preserves current behavior so a Phase-2 regression cannot deadlock production).
+        /// the canonical proof-address set. If no supermajority emerges before the timeout, the
+        /// validators present in a quorum of the commitments (<see cref="QuorumPresenceSet"/>);
+        /// with fewer commitments than a quorum, returns <see langword="null"/> and the caller falls
+        /// back to local-snapshot semantics (so a Phase-2 regression cannot deadlock production).
         /// </summary>
         public static async Task<List<string>?> ReachProofSetAgreementAsync(
             long height,
@@ -4152,6 +4225,21 @@ namespace VerifiedXCore.Nodes
 
             if (winningHash == null || winningCount < requiredAgreement)
             {
+                // SEAT-HEAL C.8 (Sep 30): with 3 of 5 members live every round needed unanimity, and validators
+                // restarting in batches left each caster's proof set slightly different — no hash reached quorum, each
+                // fell back to its own set, and they picked different winners. Instead take every validator that a
+                // quorum of the received commitments contains: casters holding the same commitments reach the same set,
+                // and no single caster can add or drop a validator.
+                var presence = QuorumPresenceSet(
+                    commitsForHeight.Where(kv => IsCommitteeCaster(kv.Key)).Select(kv => kv.Value?.ProofAddressesSorted),
+                    requiredAgreement);
+                if (presence != null && presence.Count > 0)
+                {
+                    CasterLogUtility.Log(
+                        $"[CONSENSUS-V2] ProofSetAgreement: no single set reached quorum after {sw.ElapsedMilliseconds}ms — using the {presence.Count} validators present in ≥{requiredAgreement} of {commitsForHeight.Count} commitments.",
+                        "AGREEMENT");
+                    return presence;
+                }
                 CasterLogUtility.Log(
                     $"[CONSENSUS-V2] ProofSetAgreement: TIMEOUT after {sw.ElapsedMilliseconds}ms — no supermajority. " +
                     $"Falling back to local snapshot (votes={commitsForHeight.Count}, need={requiredAgreement}).",

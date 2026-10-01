@@ -263,6 +263,12 @@ namespace VerifiedXCore.Commands
                     Globals.StopConsoleOutput = false;
                     commandResult = "_EXIT";
                     break;
+                case "/maintenance":
+                    // SEAT-HEAL: before a planned caster restart — peers hold the seat for 10 minutes instead of 5.
+                    Globals.StopConsoleOutput = true;
+                    Console.WriteLine(await CasterSeatService.AnnounceMaintenanceAsync());
+                    Globals.StopConsoleOutput = false;
+                    break;
                 case "/safe-update":
                     // Wave 2: depart gracefully → download latest release for this OS → apply → restart.
                     Globals.StopConsoleOutput = true;
