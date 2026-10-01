@@ -16,14 +16,14 @@ namespace VerifiedXCore.Tests
     /// </summary>
     public class FrostAggregateParticipantOrderTests
     {
-        private static readonly List<string> DkgParticipants = new() { "xAlpha", "xBravo", "xCharlie", "xDelta", "xEcho" };
+        internal static readonly List<string> DkgParticipants = new() { "xAlpha", "xBravo", "xCharlie", "xDelta", "xEcho" };
         private const ushort MinSigners = 3;
         private const string MessageHash = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
 
         private static string Id(int i) => i.ToString("x").PadLeft(64, '0');
 
         /// <summary>A real DKG over <see cref="DkgParticipants"/>: identifier i belongs to the i-th address in sorted order.</summary>
-        private static (Dictionary<string, string> KeyPackages, string PubkeyPackage) RealDkg()
+        internal static (Dictionary<string, string> KeyPackages, string PubkeyPackage) RealDkg()
         {
             var sorted = DkgParticipants.OrderBy(a => a, System.StringComparer.Ordinal).ToList();
             int n = sorted.Count;
@@ -73,7 +73,7 @@ namespace VerifiedXCore.Tests
         /// Signs with <paramref name="signers"/> the way validators do (each with its DKG identifier), then aggregates
         /// with the coordinator's identifier map built from <paramref name="coordinatorOrder"/>.
         /// </summary>
-        private static int SignAndAggregate(List<string> signers, List<string> coordinatorOrder)
+        internal static int SignAndAggregate(List<string> signers, List<string> coordinatorOrder)
         {
             var (keyPackages, pubkeyPackage) = RealDkg();
             var dkgIds = FrostMPCService.BuildAddressToFrostIdentifierMap(DkgParticipants);
@@ -111,7 +111,7 @@ namespace VerifiedXCore.Tests
             return code;
         }
 
-        private static readonly List<string> SignersWithoutBravo = new() { "xAlpha", "xCharlie", "xDelta", "xEcho" };
+        internal static readonly List<string> SignersWithoutBravo = new() { "xAlpha", "xCharlie", "xDelta", "xEcho" };
 
         [Fact]
         public void NumberingTheReachableSigners_FailsWhenAParticipantIsMissing()

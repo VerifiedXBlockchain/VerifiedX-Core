@@ -1749,7 +1749,7 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>The contract's DKG participants (ValidatorAddressesSnapshot), from the local DB or State Trei.</summary>
-        private static List<string>? GetContractDkgParticipants(string scUID)
+        internal static List<string>? GetContractDkgParticipants(string scUID)
         {
             try
             {
