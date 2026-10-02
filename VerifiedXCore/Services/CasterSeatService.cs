@@ -348,15 +348,16 @@ namespace VerifiedXCore.Services
         /// live list and its absence timer is cleared.</summary>
         public static bool HandleResumedNotice(CasterResumedNotice notice)
         {
-            var req = notice?.Request;
             var head = CasterMembershipStore.GetCurrent();
-            if (req == null || head == null) return false;
-            if (!string.Equals(head.RecordHash, req.RecordHash, StringComparison.OrdinalIgnoreCase)) return false;
-            if (!SignatureService.VerifySignature(req.Address, ResumeRequestMessage(req), req.Signature)) return false;
-            var member = head.Casters.FirstOrDefault(c => c.Address == req.Address);
-            if (member == null) return false;
-            var approvers = ValidApprovers(req, head, notice!.Approvals ?? new(), SignatureService.VerifySignature);
-            if (approvers.Count < ResumeNeed(head.Casters.Count)) return false;
+            var refusal = ResumedNoticeRefusal(notice, head, TimeUtil.GetTime(), SignatureService.VerifySignature);
+            if (refusal != null)
+            {
+                CasterLogUtility.Log($"SEAT: ignored resumed notice for {notice?.Request?.Address} — {refusal}.", "SEAT");
+                return false;
+            }
+            var req = notice.Request!;
+            var member = head!.Casters.First(c => c.Address == req.Address);
+            var approvers = ValidApprovers(req, head, notice.Approvals ?? new(), SignatureService.VerifySignature);
 
             _absent.TryRemove(req.Address, out _);
             CasterDiscoveryService.AddBlockCasterIfRoomAndUnique(new Peers
@@ -371,6 +372,24 @@ namespace VerifiedXCore.Services
             Globals.SyncKnownCastersFromBlockCasters();
             CasterLogUtility.Log($"SEAT: {req.Address} resumed with {approvers.Count} approvals — back in the live list.", "SEAT");
             return true;
+        }
+
+        /// <summary>
+        /// Pure: why a resumed notice is ignored, or null. It must be recent: the notice stays validly signed for as long
+        /// as the record is unchanged, so without the age check anyone holding one could replay it to clear a dead
+        /// member's absence timer every few minutes and keep its seat from being removed.
+        /// </summary>
+        internal static string? ResumedNoticeRefusal(CasterResumedNotice? notice, CasterMembershipRecord? head, long nowUnix, Func<string, string, string, bool> verify)
+        {
+            var req = notice?.Request;
+            if (req == null || head == null) return "no request or no record";
+            if (Math.Abs(nowUnix - req.Timestamp) > RequestSkewSeconds) return "stale notice";
+            if (!string.Equals(head.RecordHash, req.RecordHash, StringComparison.OrdinalIgnoreCase)) return "different record";
+            if (string.IsNullOrEmpty(req.Address) || !verify(req.Address, ResumeRequestMessage(req), req.Signature)) return "bad signature";
+            if (!head.Casters.Any(c => c.Address == req.Address)) return "not in the record";
+            var approvers = ValidApprovers(req, head, notice!.Approvals ?? new(), verify);
+            var need = ResumeNeed(head.Casters.Count);
+            return approvers.Count < need ? $"{approvers.Count}/{need} approvals" : null;
         }
 
         // ── Resume (requester side) ─────────────────────────────────────────────────────────────────
@@ -560,12 +579,27 @@ namespace VerifiedXCore.Services
                 catch { return false; }
             }))).Count(x => x);
 
+            // The longer hold is real only when enough members know about it: the ones that missed the notice still use
+            // the normal grace period, and must be too few to sign a removal by themselves.
+            var need = MaintenanceAcksNeeded(head.Casters.Count);
+            if (acks < need)
+            {
+                CasterLogUtility.Log($"SEAT: maintenance NOT in effect — {acks}/{others.Count} members acknowledged, need {need}.", "SEAT");
+                return $"Maintenance NOT in effect: only {acks} of {others.Count} committee members acknowledged (need {need}). " +
+                       $"Peers still use the normal {GraceSeconds / 60}-minute grace period and this node's exit behaves as usual. " +
+                       "Run /maintenance again once the other casters are reachable.";
+            }
+
             MaintenanceAnnounced = true;
             try { File.WriteAllText(MaintenanceMarkerPath(), ts.ToString()); } catch { }
-            CasterLogUtility.Log($"SEAT: maintenance announced to {acks}/{others.Count} members.", "SEAT");
-            return $"Maintenance announced to {acks} of {others.Count} committee members. Your seat is held for {MaintenanceGraceSeconds / 60} minutes; " +
+            CasterLogUtility.Log($"SEAT: maintenance announced to {acks}/{others.Count} members (need {need}).", "SEAT");
+            return $"Maintenance acknowledged by {acks} of {others.Count} committee members. Your seat is held for {MaintenanceGraceSeconds / 60} minutes; " +
                    "stop the node normally now (the exit will not give up the seat). On restart it must pass the resume checks.";
         }
+
+        /// <summary>Pure: acknowledgements that make the longer hold dependable — enough that the members who missed the
+        /// notice cannot form a removal majority, and enough to approve the resume after the normal grace period.</summary>
+        internal static int MaintenanceAcksNeeded(int committeeSize) => ResumeNeed(committeeSize);
 
         public static bool HandleMaintenanceNotice(CasterMaintenanceNotice notice)
         {

@@ -197,6 +197,43 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void AResumedNotice_IsHonouredOnlyWhileFresh()
+        {
+            var head = Head();
+            var req = Request("RBQT6", head, T0);
+            CasterResumeApproval Ok(string signer) => new()
+            {
+                SignerAddress = signer, Address = "RBQT6", RecordSeq = head.RecordSeq, RecordHash = head.RecordHash, Timestamp = T0, Approve = true,
+                Signature = Sign(signer, CasterSeatService.ResumeApprovalMessage("RBQT6", head.RecordSeq, head.RecordHash, T0)),
+            };
+            var notice = new CasterResumedNotice { Request = req, Approvals = new() { Ok("RH9XA"), Ok("RFzuJ") } };
+
+            Assert.Null(CasterSeatService.ResumedNoticeRefusal(notice, head, T0 + 5, AnySig));
+            // The same, validly signed notice replayed later (the record unchanged) must not clear the absence timer again.
+            Assert.Equal("stale notice", CasterSeatService.ResumedNoticeRefusal(notice, head, T0 + CasterSeatService.RequestSkewSeconds + 1, AnySig));
+
+            Assert.Equal("different record", CasterSeatService.ResumedNoticeRefusal(notice, Head(5), T0 + 5, AnySig));
+            var thin = new CasterResumedNotice { Request = req, Approvals = new() { Ok("RH9XA") } };
+            Assert.Equal("1/2 approvals", CasterSeatService.ResumedNoticeRefusal(thin, head, T0 + 5, AnySig));
+            var forged = new CasterResumedNotice { Request = Request("RBQT6", head, T0), Approvals = notice.Approvals };
+            forged.Request!.Signature = "x";
+            Assert.Equal("bad signature", CasterSeatService.ResumedNoticeRefusal(forged, head, T0 + 5, AnySig));
+        }
+
+        [Fact]
+        public void MaintenanceHold_NeedsEnoughMembersToKnowAboutIt()
+        {
+            // 5-member committee: removal takes 3 signers among the 4 others, so at most 2 may have missed the notice.
+            Assert.Equal(2, CasterSeatService.MaintenanceAcksNeeded(5));
+            for (var n = 2; n <= 9; n++)
+            {
+                var need = CasterSeatService.MaintenanceAcksNeeded(n);
+                var missed = (n - 1) - need;
+                Assert.True(missed < n / 2 + 1, $"n={n}: {missed} members without the notice could still sign a removal");
+            }
+        }
+
+        [Fact]
         public void DuringARollingUpgrade_OlderPeersDontStrandAResumingMember()
         {
             // 5-member committee: 4 others, need 2. Three older builds (404) leave one that could approve.
