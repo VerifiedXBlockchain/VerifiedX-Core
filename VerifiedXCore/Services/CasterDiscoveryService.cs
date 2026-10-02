@@ -2194,8 +2194,10 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
-        /// The membership-record head sequence each peer reported on the last pull (-1 = no record). Unverified claims:
-        /// callers act on a majority of them, never on one peer's.
+        /// The membership-record head sequence each peer reported on the round loop's last pull (-1 = no record).
+        /// Unverified claims: callers act on a majority of them, never on one peer's. Only that pull writes this — it
+        /// asks the live casters and record members; other callers ask other peers (any validator, or a single caster)
+        /// and used to overwrite it.
         /// </summary>
         public static IReadOnlyList<long> LastObservedPeerHeads { get; private set; } = Array.Empty<long>();
 
@@ -2208,7 +2210,7 @@ namespace VerifiedXCore.Services
         /// adopts the highest valid seq, heals stragglers by pushing them the records they miss,
         /// and returns the adopted committee as a Peers list (null = no record available anywhere).
         /// </summary>
-        internal static async Task<List<Peers>?> FetchAndAdoptMembershipAsync(List<string> peerIPs, bool reconcileWhenUnchanged = true)
+        internal static async Task<List<Peers>?> FetchAndAdoptMembershipAsync(List<string> peerIPs, bool reconcileWhenUnchanged = true, bool observeHeads = false)
         {
             var localHead = CasterMembershipStore.GetCurrent();
             var localHeadSeq = localHead?.RecordSeq ?? -1;
@@ -2235,7 +2237,7 @@ namespace VerifiedXCore.Services
                 catch { /* unreachable */ }
             });
             await Task.WhenAll(tasks);
-            if (!responses.IsEmpty)
+            if (observeHeads && !responses.IsEmpty)
                 LastObservedPeerHeads = responses.Select(x => x.HeadSeq).ToList();
 
             // Apply the longest chains first — every record is fully validated on append.

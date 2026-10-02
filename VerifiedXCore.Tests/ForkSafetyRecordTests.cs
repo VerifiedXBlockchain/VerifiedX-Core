@@ -39,6 +39,24 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void WithoutARecord_ACasterCastsOnlyWhenPeersConfirmNoneExists()
+        {
+            // A promoted caster whose record pull got no answer: it used to cast under the old live-list rules.
+            Assert.NotNull(BlockcasterNode.RecordHoldReason(null, Array.Empty<long>(), null, "RCwBk"));
+            Assert.NotNull(BlockcasterNode.RecordHoldReason(null, new long[] { -1 }, null, "RCwBk"));       // one answer is not enough
+            Assert.NotNull(BlockcasterNode.RecordHoldReason(null, new long[] { 7, -1 }, null, "RCwBk"));    // split answers
+            // A network that has no record yet: peers say so, and casting goes on as before.
+            Assert.Null(BlockcasterNode.RecordHoldReason(null, new long[] { -1, -1 }, null, "RCwBk"));
+            Assert.Null(BlockcasterNode.RecordHoldReason(null, new long[] { -1, -1, 7 }, null, "RCwBk"));   // one unverified claim doesn't hold it
+            // Seeds restarting a stalled chain mint the record, so they cast without one.
+            Assert.Null(BlockcasterNode.RecordHoldReason(null, Array.Empty<long>(), null, "RSeed1", seedBootstrap: true));
+            // ...but a seed that peers show is behind still holds.
+            Assert.NotNull(BlockcasterNode.RecordHoldReason(null, new long[] { 7, 7 }, null, "RSeed1", seedBootstrap: true));
+            // A caster with a record is unaffected by silence.
+            Assert.Null(BlockcasterNode.RecordHoldReason(7, Array.Empty<long>(), Committee, "RH9XA"));
+        }
+
+        [Fact]
         public void OnePeersNewerHead_NeverHoldsACaster()
         {
             // Head claims are unverified: a single peer (or a minority) claiming a newer record is not enough.

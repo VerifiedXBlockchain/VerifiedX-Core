@@ -2289,8 +2289,12 @@ namespace VerifiedXCore.Nodes
         private static async Task<string?> RecordHoldAsync(long height)
         {
             var head = CasterMembershipStore.GetCurrent();
+            // Seeds restarting a stalled chain cast before any record exists (they mint it, and blocks resume while they
+            // do): exempt from the no-record hold while the chain is stalled or their bootstrap agreement is active.
+            var seedBootstrap = Globals.IsLocalBootstrapCaster
+                && (Globals.IsChainStalledForBootstrap || BootstrapCoordinationService.AgreementActive);
             var reason = RecordHoldReason(head?.RecordSeq, CasterDiscoveryService.LastObservedPeerHeads,
-                CasterMembershipStore.GetCommitteeForHeight(height), Globals.ValidatorAddress);
+                CasterMembershipStore.GetCommitteeForHeight(height), Globals.ValidatorAddress, seedBootstrap);
             var since = (DateTime.UtcNow - _lastRecordPullUtc).TotalSeconds;
             if (since >= RECORD_PULL_SECONDS || (reason != null && since >= RECORD_PULL_BEHIND_SECONDS))
             {
@@ -2302,11 +2306,11 @@ namespace VerifiedXCore.Nodes
                     .Distinct().ToList();
                 if (peers.Count > 0)
                 {
-                    try { await CasterDiscoveryService.FetchAndAdoptMembershipAsync(peers, reconcileWhenUnchanged: false); } catch { }
+                    try { await CasterDiscoveryService.FetchAndAdoptMembershipAsync(peers, reconcileWhenUnchanged: false, observeHeads: true); } catch { }
                 }
                 PruneNonMembers(height);
                 reason = RecordHoldReason(CasterMembershipStore.GetCurrent()?.RecordSeq, CasterDiscoveryService.LastObservedPeerHeads,
-                    CasterMembershipStore.GetCommitteeForHeight(height), Globals.ValidatorAddress);
+                    CasterMembershipStore.GetCommitteeForHeight(height), Globals.ValidatorAddress, seedBootstrap);
             }
             return reason;
         }
@@ -2338,13 +2342,18 @@ namespace VerifiedXCore.Nodes
         /// <summary>
         /// Pure: why a caster may not cast, or null. Behind: a majority of the peers that answered (at least two) report a
         /// newer record than ours, or we have none while they do — one peer's unverified claim never holds a caster.
+        /// No record: without one of our own we cast only when a majority of at least two peers answer that they have
+        /// none either. Silence is not that answer — a promoted caster whose record pull failed used to cast under the
+        /// old live-list rules until the next pull. Seeds restarting a stalled chain are exempt (they mint the record).
         /// Not listed: a record exists and its committee for the height does not contain us.
         /// </summary>
-        internal static string? RecordHoldReason(long? localSeq, IReadOnlyList<long> peerHeads, HashSet<string>? committee, string? self)
+        internal static string? RecordHoldReason(long? localSeq, IReadOnlyList<long> peerHeads, HashSet<string>? committee, string? self, bool seedBootstrap = false)
         {
             var mine = localSeq ?? -1;
             if (peerHeads.Count >= 2 && peerHeads.Count(h => h > mine) * 2 > peerHeads.Count)
                 return $"membership record behind peers (ours {(localSeq?.ToString() ?? "none")}, peers report up to {peerHeads.Max()})";
+            if (localSeq == null && !seedBootstrap && !(peerHeads.Count >= 2 && peerHeads.Count(h => h < 0) * 2 > peerHeads.Count))
+                return $"no membership record here, and peers have not confirmed that none exists ({peerHeads.Count(h => h < 0)} of {peerHeads.Count} answers say none)";
             if (committee != null && (string.IsNullOrEmpty(self) || !committee.Contains(self)))
                 return "this node is not in the membership record's committee";
             return null;
