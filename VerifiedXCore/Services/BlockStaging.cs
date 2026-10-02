@@ -173,6 +173,22 @@ namespace VerifiedXCore.Services
             }
         }
 
+        /// <summary>Removes every staged candidate at the height except the block with <paramref name="keepHash"/>.</summary>
+        public static void KeepOnly(long height, string keepHash)
+        {
+            if (string.IsNullOrEmpty(keepHash)) return;
+            lock (_lock)
+            {
+                if (!BlockDownloadService.BlockDict.TryGetValue(height, out var list)) return;
+                var dropped = list.Where(b => b.block?.Hash != keepHash).ToList();
+                if (dropped.Count == 0) return;
+                var kept = list.Except(dropped).ToList();
+                if (kept.Count == 0) BlockDownloadService.BlockDict.TryRemove(new KeyValuePair<long, List<(Block block, string IPAddress)>>(height, list));
+                else BlockDownloadService.BlockDict.TryUpdate(height, kept, list);
+                foreach (var d in dropped) if (d.block?.Hash != null) _meta.TryRemove(d.block.Hash, out _);
+            }
+        }
+
         /// <summary>Test hook: run stale eviction now.</summary>
         internal static void EvictStaleNow() { lock (_lock) EvictStaleLocked(); }
 

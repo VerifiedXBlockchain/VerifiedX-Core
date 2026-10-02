@@ -49,7 +49,9 @@ namespace VerifiedXCore.Services
         /// accepted by a node ONLY while its own tip is at least <see cref="BootstrapResetMinStallSeconds"/>
         /// old — so a node on a moving chain can never adopt one. See BootstrapResetService.</summary>
         public const string BootstrapResetChangeType = "BootstrapReset";
-        public const long BootstrapResetMinStallSeconds = 1800;
+        /// <summary>SEAT-HEAL (Oct 2026): 30 → 10 minutes. Absent members are now removed after a 5-minute grace period
+        /// while a quorum is live; this backstop only covers the case where too few are live to sign a removal.</summary>
+        public const long BootstrapResetMinStallSeconds = 600;
 
         /// <summary>
         /// ROTATION-LIVENESS (Sep 2026): rotation records are built per proposer, and the record

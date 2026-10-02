@@ -83,6 +83,14 @@ namespace VerifiedXCore.Services
         /// respect to other promotion attempts on this node. Returns true only when the caster
         /// was actually added.
         /// </summary>
+        /// <summary>Pure: before any record exists, everyone; afterwards, members of the governing committee or of the newest record.</summary>
+        internal static bool IsRecordMember(string address, HashSet<string>? committee, CasterMembershipRecord? head)
+        {
+            if (committee == null && head == null) return true;
+            if (committee != null && committee.Contains(address)) return true;
+            return head?.Casters?.Any(c => c.Address == address) == true;
+        }
+
         internal static bool AddBlockCasterIfRoomAndUnique(Peers newCaster)
         {
             if (newCaster == null || string.IsNullOrEmpty(newCaster.ValidatorAddress))
@@ -99,6 +107,17 @@ namespace VerifiedXCore.Services
                 {
                     CasterLogUtility.Log(
                         $"AddBlockCasterIfRoomAndUnique REJECT — pool full ({Globals.BlockCasters.Count}/{MaxCasters}). candidate={newCaster.ValidatorAddress}",
+                        "CasterFlow");
+                    return false;
+                }
+                // Record era: nobody enters the live caster list without a record entry (a live non-member's votes and
+                // block answers counted at the mainnet fork, Oct 1: RVGy4). The newest signed record counts too: a
+                // rotation is reconciled into the live list when it is appended, a few blocks before it takes effect.
+                if (!IsRecordMember(newCaster.ValidatorAddress, CasterMembershipStore.GetCommitteeForHeight((Globals.LastBlock?.Height ?? 0) + 1),
+                        CasterMembershipStore.GetCurrent()))
+                {
+                    CasterLogUtility.Log(
+                        $"AddBlockCasterIfRoomAndUnique REJECT — {newCaster.ValidatorAddress} is not in the membership record.",
                         "CasterFlow");
                     return false;
                 }
@@ -255,6 +274,20 @@ namespace VerifiedXCore.Services
                     return;
                 }
 
+                // SEAT-HEAL (Sep 30): the record, not the live list, says whether a seat is free — a member evicted from
+                // the live list still holds its seat until a signed removal. Promoting into a full record failed at
+                // append and locked the signers for 10 minutes. One proposer, one candidate, at most once a minute.
+                var seatHead = CasterMembershipStore.GetCurrent();
+                if (seatHead != null)
+                {
+                    var seatRefusal = CasterSeatService.PromotionRefusal();
+                    if (seatRefusal != null)
+                    {
+                        CasterLogUtility.Log($"EvalTick SKIP — {seatRefusal}", "CasterFlow");
+                        return;
+                    }
+                }
+
                 var validators = Globals.NetworkValidators.Values.ToList();
                 if (!validators.Any())
                 {
@@ -266,6 +299,9 @@ namespace VerifiedXCore.Services
                     .Where(c => !string.IsNullOrEmpty(c.ValidatorAddress))
                     .Select(c => c.ValidatorAddress!)
                     .ToHashSet();
+                // Record members are not candidates even while missing from the live list.
+                foreach (var member in seatHead?.Casters ?? new List<CasterInfo>())
+                    currentCasterAddresses.Add(member.Address);
 
                 var candidates = validators
                     .Where(v => !string.IsNullOrEmpty(v.Address)
@@ -336,7 +372,7 @@ namespace VerifiedXCore.Services
                     .ThenBy(x => x.Validator.Address ?? "", StringComparer.Ordinal)
                     .ToList();
 
-                int slotsAvailable = MaxCasters - currentCasters.Count;
+                int slotsAvailable = seatHead != null ? 1 : MaxCasters - currentCasters.Count;
                 // FIX A: Iterate ALL ranked candidates (not .Take(slotsAvailable)) so that
                 // cooldown-blocked candidates don't waste promotion slots. We promote up to
                 // slotsAvailable and skip any that fail checks.
@@ -521,11 +557,14 @@ namespace VerifiedXCore.Services
                     // rotation failed, the candidate found itself in nobody's committee, stood down,
                     // and was disavowed ~30 s later — a 4↔5 pool flap every ~35 s for eleven hours
                     // on mainnet, with round timing reset on every change. No-op in the legacy era.
+                    if (seatHead != null)
+                        CasterSeatService.NotePromotionAttempt();
                     var rotationOk = await CasterMembershipService.ProposeRotationAsync(
                         "Promotion", v.Address,
                         new CasterInfo { Address = v.Address, PeerIP = ip, PublicKey = v.PublicKey ?? "" });
                     if (!rotationOk)
                     {
+                        TrackPromotionCooldown(v.Address, currentHeight);
                         CasterLogUtility.Log($"  <<  membership rotation FAILED for {v.Address} — promotion aborted (set unchanged, candidate not notified).", "CasterFlow");
                         ConsoleWriterService.OutputValCaster($"[CasterDiscovery] Promotion of {v.Address} aborted — membership record could not be signed by majority.");
                         continue;
@@ -856,12 +895,17 @@ namespace VerifiedXCore.Services
 
                     case VersionCheckResult.Outdated:
                         // Genuine version mismatch — demote immediately
+                        CasterSeatService.NoteOutdated(caster.ValidatorAddress);
                         toRemove.Add(caster.ValidatorAddress);
                         removalReasons[caster.ValidatorAddress] = "outdated version";
                         _auditFailCounts.TryRemove(caster.ValidatorAddress, out _);
                         break;
 
                     case VersionCheckResult.Unreachable:
+                        // SEAT-HEAL: in the record era an unreachable member is timed by CasterSeatService and removed
+                        // after its grace period; this audit no longer races it with a 3-strike demotion.
+                        if (CasterMembershipStore.RecordEraActive)
+                            break;
                         // Connectivity failure — only demote after consecutive failures
                         var failCount = _auditFailCounts.AddOrUpdate(
                             caster.ValidatorAddress, 1, (_, c) => c + 1);
@@ -1420,6 +1464,8 @@ namespace VerifiedXCore.Services
             {
                 Globals.IsBlockCaster = true;
             }
+            // A promotion is a majority-signed seat, so no resume is needed (the record still has to list us: RECORD-HOLD).
+            CasterSeatService.ConfirmCasting($"promoted by {promotion.PromoterAddress}");
 
             var afterAddrs = string.Join(",", Globals.BlockCasters.Select(c => c.ValidatorAddress ?? "?"));
             CasterLogUtility.Log(
@@ -1429,6 +1475,18 @@ namespace VerifiedXCore.Services
             ConsoleWriterService.OutputValCaster(
                 $"[CasterFlow] HandlePromotion ACCEPTED. BlockCasters now {Globals.BlockCasters.Count}: [{afterAddrs}]. IsBlockCaster={Globals.IsBlockCaster}");
             ConsoleWriterService.OutputValCaster("[CasterDiscovery] Caster list updated. Consensus loop will continue as caster.");
+
+            // RECORD-FIRST for the promoted node too: the record that lists us was signed before we were told, but our own
+            // store may be empty or behind (mainnet Oct 1: a promoted caster never had the record and cast under the
+            // legacy live-list rules, counting a non-member's votes). Pull and verify the chain from the casters that
+            // promoted us; the round loop does not let us cast until our record is current and lists us.
+            var recordPeers = promotion.CasterList.Select(c => (c.PeerIP ?? "").Replace("::ffff:", ""))
+                .Where(ip => ip.Length > 0).Distinct().ToList();
+            _ = Task.Run(async () =>
+            {
+                try { await FetchAndAdoptMembershipAsync(recordPeers).ConfigureAwait(false); }
+                catch { /* the round loop's record pull retries */ }
+            });
             return Task.FromResult("accepted");
         }
 
@@ -1444,6 +1502,8 @@ namespace VerifiedXCore.Services
                 ErrorLogUtility.LogError($"Invalid departure signature for {departure.DepartingAddress}", "CasterDiscoveryService");
                 return;
             }
+            // SEAT-HEAL: signers sign a Departure removal only on the member's own signed notice.
+            CasterSeatService.NoteDeparture(departure.DepartingAddress);
 
             var casterList = Globals.BlockCasters.ToList();
             if (!casterList.Any(c => c.ValidatorAddress == departure.DepartingAddress))
@@ -2134,14 +2194,24 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
+        /// The membership-record head sequence each peer reported on the last pull (-1 = no record). Unverified claims:
+        /// callers act on a majority of them, never on one peer's.
+        /// </summary>
+        public static IReadOnlyList<long> LastObservedPeerHeads { get; private set; } = Array.Empty<long>();
+
+        /// <summary>Test hook.</summary>
+        internal static void SetObservedPeerHeadsForTests(params long[] heads) => LastObservedPeerHeads = heads;
+
+        /// <summary>
         /// Wave 3: record-era adoption. Pulls membership records after our head from up to 10 peers
         /// in parallel, verifies each chain locally (TryAppendChain runs full successor validation),
         /// adopts the highest valid seq, heals stragglers by pushing them the records they miss,
         /// and returns the adopted committee as a Peers list (null = no record available anywhere).
         /// </summary>
-        internal static async Task<List<Peers>?> FetchAndAdoptMembershipAsync(List<string> peerIPs)
+        internal static async Task<List<Peers>?> FetchAndAdoptMembershipAsync(List<string> peerIPs, bool reconcileWhenUnchanged = true)
         {
-            var localHeadSeq = CasterMembershipStore.GetCurrent()?.RecordSeq ?? -1;
+            var localHead = CasterMembershipStore.GetCurrent();
+            var localHeadSeq = localHead?.RecordSeq ?? -1;
 
             var responses = new System.Collections.Concurrent.ConcurrentBag<(string Ip, long HeadSeq, List<CasterMembershipRecord> Records)>();
             var tasks = peerIPs.Select(async ip =>
@@ -2165,6 +2235,8 @@ namespace VerifiedXCore.Services
                 catch { /* unreachable */ }
             });
             await Task.WhenAll(tasks);
+            if (!responses.IsEmpty)
+                LastObservedPeerHeads = responses.Select(x => x.HeadSeq).ToList();
 
             // Apply the longest chains first — every record is fully validated on append.
             foreach (var r in responses.OrderByDescending(x => x.HeadSeq))
@@ -2203,7 +2275,10 @@ namespace VerifiedXCore.Services
                 });
             }
 
-            CasterMembershipService.ReconcileBlockCastersToRecord(head);
+            // The round loop's periodic pull passes false: a full reconcile re-adds members that eviction just removed,
+            // bypassing the heal probe streak; it only prunes non-members (BlockcasterNode.RecordHoldAsync).
+            if (reconcileWhenUnchanged || head.RecordHash != localHead?.RecordHash)
+                CasterMembershipService.ReconcileBlockCastersToRecord(head);
 
             return head.Casters.Select(c => new Peers
             {
@@ -2228,6 +2303,11 @@ namespace VerifiedXCore.Services
         {
             if (!Globals.IsBlockCaster || string.IsNullOrEmpty(Globals.ValidatorAddress))
                 return false;
+
+            // SEAT-HEAL: in the record era the signed record is the answer. Peers' live lists drop a restarted member
+            // until it resumes, so "nobody lists us" there would stand down every member mid-resume.
+            if (CasterMembershipStore.GetCurrent() is { } seatHead)
+                return !seatHead.Casters.Any(c => c.Address == Globals.ValidatorAddress);
 
             var peerCasters = Globals.BlockCasters.ToList()
                 .Where(c => !string.IsNullOrEmpty(c.PeerIP) && c.ValidatorAddress != Globals.ValidatorAddress)

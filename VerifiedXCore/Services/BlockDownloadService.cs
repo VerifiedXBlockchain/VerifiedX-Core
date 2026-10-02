@@ -31,7 +31,22 @@ namespace VerifiedXCore.Services
             
             if (competingBlocks.Count == 1)
                 return competingBlocks[0].block;
-            
+
+            // A caster takes the block it agreed on, then a block with a valid committee certificate. "Lowest hash" alone
+            // picked a peer's uncertified block over the agreed one at the mainnet fork (7,414,815: 71aa… < 8d0b…).
+            var height = competingBlocks[0].block?.Height ?? -1;
+            if (Globals.IsBlockCaster && Globals.CasterApprovedBlockHashDict.TryGetValue(height, out var approved) && !string.IsNullOrEmpty(approved))
+            {
+                var agreed = competingBlocks.FirstOrDefault(b => b.block?.Hash == approved).block;
+                if (agreed != null) return agreed;
+            }
+            var certified = competingBlocks
+                .Where(b => b.block != null && ConsensusCertificateVerifier.HasValidCertificate(b.block))
+                .OrderBy(b => b.block.Hash, StringComparer.Ordinal)
+                .Select(b => b.block)
+                .FirstOrDefault();
+            if (certified != null) return certified;
+
             // Fork-choice rule: Select block with lowest hash value (deterministic across all nodes)
             var selectedBlock = competingBlocks
                 .OrderBy(b => b.block.Hash, StringComparer.Ordinal)

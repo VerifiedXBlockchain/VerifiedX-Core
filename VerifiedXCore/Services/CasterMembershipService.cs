@@ -44,6 +44,13 @@ namespace VerifiedXCore.Services
                         return false;
                     if (!newSet.Any(c => c.Address == addedCaster.Address))
                         newSet.Add(new CasterInfo { Address = addedCaster.Address, PeerIP = (addedCaster.PeerIP ?? "").Replace("::ffff:", ""), PublicKey = addedCaster.PublicKey ?? "" });
+                    // SEAT-HEAL: a promotion into a full record can never append (cap), and used to lock every signer's
+                    // sequence for 10 minutes (Sep 30). Refuse before anyone signs.
+                    if (newSet.Count > CasterDiscoveryService.MaxCasters)
+                    {
+                        CasterLogUtility.Log($"MEMBERSHIP: promotion of {addedCaster.Address} REFUSED — record is full ({head.Casters.Count}/{CasterDiscoveryService.MaxCasters}); a seat frees only after a removal.", "MEMBERSHIP");
+                        return false;
+                    }
                 }
                 else // Demotion | Departure
                 {
@@ -125,6 +132,8 @@ namespace VerifiedXCore.Services
                 if (!CasterMembershipStore.TryAppend(candidate, out var reason))
                 {
                     CasterLogUtility.Log($"MEMBERSHIP: rotation append failed — {reason}.", "MEMBERSHIP");
+                    // Only the proposer holds the signed candidate, so it can never land now: free our own sequence.
+                    CasterMembershipStore.ReleaseSignedMark(candidate.RecordSeq, CasterMembershipStore.ComputeCasterSetHash(candidate));
                     return false;
                 }
 
@@ -263,7 +272,9 @@ namespace VerifiedXCore.Services
             if (missing.Count == 0)
                 return 0;
 
-            probe ??= Nodes.BlockcasterNode.IsCasterReachableAsync;
+            // SEAT-HEAL: re-add members that cast, not merely answer — a restarted member that is reachable but not yet
+            // resumed was re-added here and evicted for disavowing, in a loop (Sep 30). It returns via its resume notice.
+            probe ??= CasterSeatService.IsCastingAsync;
 
             var added = 0;
             foreach (var member in missing)
@@ -319,6 +330,39 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
+        /// SEAT-HEAL: the endpoint's signing path. A removal (Demotion/Departure) is signed only on this node's own
+        /// evidence (<see cref="CasterSeatService.RemovalRefusal"/>); an outdated-version claim is checked here directly.
+        /// Everything else goes through <see cref="HandleSignRequest"/>.
+        /// </summary>
+        public static async Task<RecordSignature?> HandleSignRequestAsync(MembershipSignRequest request)
+        {
+            var candidate = request?.Candidate;
+            var head = CasterMembershipStore.GetCurrent();
+            var isRemoval = candidate != null && head != null && (candidate.ChangeType == "Demotion" || candidate.ChangeType == "Departure");
+            if (isRemoval)
+            {
+                var target = candidate!.ChangedAddress;
+                var refusal = CasterSeatService.RemovalRefusal(candidate.ChangeType, target, head!, TimeUtil.GetTime());
+                if (refusal != null && candidate.ChangeType == "Demotion")
+                {
+                    var ip = head!.Casters.FirstOrDefault(c => c.Address == target)?.PeerIP;
+                    if (!string.IsNullOrEmpty(ip)
+                        && (await CasterDiscoveryService.CheckCandidateVersionDetailed(ip.Replace("::ffff:", ""), target)).Status == CasterDiscoveryService.VersionCheckResult.Outdated)
+                        refusal = null;
+                }
+                if (refusal != null)
+                {
+                    CasterLogUtility.Log($"MEMBERSHIP: REFUSED to sign {candidate.ChangeType} of {target} at seq {candidate.RecordSeq} — {refusal}. Proposer={request!.ProposerAddress}", "MEMBERSHIP");
+                    return null;
+                }
+            }
+            var sig = HandleSignRequest(request!);
+            if (sig != null && isRemoval)
+                CasterSeatService.NoteRemovalSigned(candidate!.ChangedAddress, candidate.RecordSeq);
+            return sig;
+        }
+
+        /// <summary>
         /// Endpoint-side signing decision: verifies the candidate derives from OUR head, that we
         /// are a member of the previous set, and that we have not signed a different record at
         /// this seq. Returns our signature or null.
@@ -350,6 +394,12 @@ namespace VerifiedXCore.Services
             if (!string.Equals(candidate.PrevRecordHash, head.RecordHash, StringComparison.OrdinalIgnoreCase)) return null;
             if (candidate.EffectiveFromHeight <= head.EffectiveFromHeight) return null;
             if (candidate.Casters == null || candidate.Casters.Count < CasterMembershipStore.MinCommitteeSize) return null;
+            // SEAT-HEAL: the append rejects a set above the cap, so signing one only locks our sequence (Sep 30).
+            if (candidate.Casters.Count > CasterDiscoveryService.MaxCasters)
+            {
+                CasterLogUtility.Log($"MEMBERSHIP: REFUSED to sign seq {candidate.RecordSeq} — {candidate.Casters.Count} casters exceeds the cap {CasterDiscoveryService.MaxCasters}. Proposer={request.ProposerAddress}", "MEMBERSHIP");
+                return null;
+            }
             if (CasterMembershipStore.ComputeRecordHash(candidate) != candidate.RecordHash) return null;
 
             // The change must be a single add/remove consistent with ChangeType/ChangedAddress.

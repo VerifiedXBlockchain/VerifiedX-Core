@@ -434,7 +434,10 @@ namespace VerifiedXCore.Controllers
         [Route("GetBlock/{blockHeight}")]
         public ActionResult<string?> GetBlock(long blockHeight)
         {
-            if(Globals.CasterRoundDict.ContainsKey(blockHeight))
+            // A committed height serves the committed block only. The round draft used to come first, so a caster whose
+            // draft was another producer's block (mainnet fork at 7,414,815) served that block while GetBlockHash
+            // reported its committed hash — and a forked peer's resolution, fetching from it, never got the right block.
+            if (blockHeight > (Globals.LastBlock?.Height ?? -1) && Globals.CasterRoundDict.ContainsKey(blockHeight))
             {
                 var round = Globals.CasterRoundDict[blockHeight];
                 if(round == null)
@@ -1388,14 +1391,45 @@ namespace VerifiedXCore.Controllers
         /// </summary>
         [HttpPost]
         [Route("SignMembershipRecord")]
-        public ActionResult<string> SignMembershipRecord([FromBody] MembershipSignRequest? request)
+        public async Task<ActionResult<string>> SignMembershipRecord([FromBody] MembershipSignRequest? request)
         {
             if (request?.Candidate == null)
                 return BadRequest();
-            var signature = CasterMembershipService.HandleSignRequest(request);
+            var signature = await CasterMembershipService.HandleSignRequestAsync(request);
             if (signature == null)
                 return Conflict("Refused to sign.");
             return Ok(JsonConvert.SerializeObject(signature));
+        }
+
+        /// <summary>SEAT-HEAL: a restarted committee member asks for its seat back. Always answers (approve or refuse, with
+        /// our head sequence so a requester behind on the record can catch up).</summary>
+        [HttpPost]
+        [Route("RequestCasterResume")]
+        public ActionResult<string> RequestCasterResume([FromBody] CasterResumeRequest? request)
+        {
+            if (request == null || string.IsNullOrEmpty(request.Address))
+                return BadRequest();
+            return Ok(JsonConvert.SerializeObject(CasterSeatService.HandleResumeRequest(request)));
+        }
+
+        /// <summary>SEAT-HEAL: a member resumed; verified against our record before it re-enters our live list.</summary>
+        [HttpPost]
+        [Route("AnnounceCasterResumed")]
+        public ActionResult<string> AnnounceCasterResumed([FromBody] CasterResumedNotice? notice)
+        {
+            if (notice?.Request == null)
+                return BadRequest();
+            return CasterSeatService.HandleResumedNotice(notice) ? Ok("1") : Conflict("0");
+        }
+
+        /// <summary>SEAT-HEAL: /maintenance — a member about to restart asks for the longer grace period.</summary>
+        [HttpPost]
+        [Route("AnnounceCasterMaintenance")]
+        public ActionResult<string> AnnounceCasterMaintenance([FromBody] CasterMaintenanceNotice? notice)
+        {
+            if (notice == null)
+                return BadRequest();
+            return CasterSeatService.HandleMaintenanceNotice(notice) ? Ok("1") : Conflict("0");
         }
 
         /// <summary>
@@ -1447,6 +1481,8 @@ namespace VerifiedXCore.Controllers
                 IsChainSynced = Globals.IsChainSynced,
                 IsValidator = !string.IsNullOrEmpty(Globals.ValidatorAddress),
                 IsBlockCaster = Globals.IsBlockCaster,
+                // SEAT-HEAL: casting right now (resumed, record current). Peers time a member's absence by this.
+                Casting = CasterSeatService.CastingNow,
                 InBootstrap = Globals.IsBootstrapMode,
                 BootstrapState = BootstrapCoordinationService.State.ToString(),
                 StateTreiSynced = StateTreiStatusService.IsSynced(),
@@ -1791,6 +1827,7 @@ namespace VerifiedXCore.Controllers
                     CertEnforcementActive = tip >= 0 && tip + 1 >= Globals.CertEnforceHeight,
                     Globals.ConsensusVersion,
                     MembershipRecordSeq = head?.RecordSeq ?? -1,
+                    Seat = CasterSeatService.Snapshot(),
                     Committee = head?.Casters?.Select(c => c.Address).ToList() ?? new List<string>(),
                     BlockCasters = Globals.BlockCasters.ToList()
                         .Select(c => new { Address = c.ValidatorAddress, PeerIP = (c.PeerIP ?? "").Replace("::ffff:", "") })

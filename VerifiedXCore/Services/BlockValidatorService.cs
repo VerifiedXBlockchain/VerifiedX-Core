@@ -292,6 +292,28 @@ namespace VerifiedXCore.Services
                 await Task.Delay(4);
         }
 
+        internal enum CasterGate { Allow, HashMismatch, Pending, Uncertified }
+
+        /// <summary>
+        /// A caster's commit rule (pure). With an agreed hash for the height, the block must match it — at the live tip
+        /// even when the caller asked to skip the caster check (the download loop does). Without one, a live-tip block
+        /// is refused on the normal commit path (agreement still pending), and accepted from a download only when it
+        /// carries a valid committee certificate. Blocks away from the live tip (catch-up, recovery, bootstrap) keep
+        /// their exemptions.
+        /// </summary>
+        internal static CasterGate LiveTipCasterGate(string? approvedHash, string? blockHash, bool liveTip, bool skipCasterCheck,
+            bool blockDownloads, Func<bool> hasValidCertificate)
+        {
+            if (!string.IsNullOrEmpty(approvedHash))
+            {
+                if (approvedHash == blockHash) return CasterGate.Allow;
+                return !skipCasterCheck || liveTip ? CasterGate.HashMismatch : CasterGate.Allow;
+            }
+            if (!liveTip) return CasterGate.Allow;
+            if (!skipCasterCheck && !blockDownloads) return CasterGate.Pending;
+            return hasValidCertificate() ? CasterGate.Allow : CasterGate.Uncertified;
+        }
+
         public static async Task ValidateBlocks(bool skipCasterCheck = false)
         {
             try
@@ -586,27 +608,43 @@ namespace VerifiedXCore.Services
                 // Now: If this node is a caster and the approved hash dict has an entry for this
                 // height, the block hash MUST match. If no entry exists yet (single-caster or
                 // agreement still pending), allow the block through.
-                if (Globals.IsBlockCaster && !validateOnly && !skipCasterCheck)
+                // LIVE-TIP GATE (Oct 2026, mainnet fork at 7,414,815): the download loop validates with
+                // skipCasterCheck and, while any download holds the semaphore, blockDownloads — so a block
+                // fetched from a peer at the live tip skipped BOTH the agreed-hash check and the certificate
+                // check. A caster committed a peer's block from a rejected round while its own round was
+                // committing the agreed one. At the live tip a caster now commits only the agreed block, or
+                // (no agreement yet) a block carrying a valid committee certificate, whatever path delivered it.
+                if (Globals.IsBlockCaster && !validateOnly)
                 {
-                    if (Globals.CasterApprovedBlockHashDict.TryGetValue(block.Height, out var approvedHash))
+                    var liveTip = !ForkRecoveryUtility.IsInDownloadPhase
+                                  && !Globals.IsResyncing
+                                  && !Globals.IsBootstrapMode
+                                  && Globals.IsChainSynced
+                                  && block.Height == Globals.LastBlock.Height + 1;
+                    Globals.CasterApprovedBlockHashDict.TryGetValue(block.Height, out var approvedHash);
+                    var gate = LiveTipCasterGate(approvedHash, block.Hash, liveTip, skipCasterCheck, blockDownloads,
+                        () => block.Height < Globals.CertEnforceHeight || ConsensusCertificateVerifier.HasValidCertificate(block));
+
+                    if (gate == CasterGate.HashMismatch)
                     {
-                        if (!string.IsNullOrEmpty(approvedHash) && approvedHash != block.Hash)
-                        {
-                            LogUtility.Log(
-                                $"[ValidateBlock] CASTER-HASH-REJECT: Block {block.Height} hash={block.Hash?[..Math.Min(16, block.Hash?.Length ?? 0)]} " +
-                                $"does not match caster-approved hash={approvedHash[..Math.Min(16, approvedHash.Length)]}. " +
-                                $"Rejecting to prevent fork.",
-                                "BlockValidatorService");
-                            DbContext.Rollback("BlockValidatorService.ValidateBlock()-casterHashMismatch");
-                            return result;
-                        }
+                        LogUtility.Log(
+                            $"[ValidateBlock] CASTER-HASH-REJECT: Block {block.Height} hash={block.Hash?[..Math.Min(16, block.Hash?.Length ?? 0)]} " +
+                            $"does not match caster-approved hash={approvedHash![..Math.Min(16, approvedHash!.Length)]} (source={source ?? "unknown"}). " +
+                            $"Rejecting to prevent fork.",
+                            "BlockValidatorService");
+                        DbContext.Rollback("BlockValidatorService.ValidateBlock()-casterHashMismatch");
+                        return result;
                     }
-                    else if (!blockDownloads
-                             && !ForkRecoveryUtility.IsInDownloadPhase
-                             && !Globals.IsResyncing
-                             && !Globals.IsBootstrapMode
-                             && Globals.IsChainSynced
-                             && block.Height == Globals.LastBlock.Height + 1)
+                    if (gate == CasterGate.Uncertified)
+                    {
+                        var msg = $"[ValidateBlock] LIVE-TIP-GATE: refusing block {block.Height} hash={block.Hash?[..Math.Min(16, block.Hash?.Length ?? 0)]} " +
+                                  $"producer={block.Validator} source={source ?? "unknown"} — no agreed hash and no valid committee certificate.";
+                        LogUtility.Log(msg, "BlockValidatorService");
+                        CasterLogUtility.Log(msg, "PENDING-GATE");
+                        DbContext.Rollback("BlockValidatorService.ValidateBlock()-liveTipUncertified");
+                        return result;
+                    }
+                    if (gate == CasterGate.Pending)
                     {
                         // SPLIT-GUARD: the "agreement still pending → allow through" window is closed for
                         // LIVE tip commits. Every legitimate caster commit publishes the agreed/attested

@@ -241,6 +241,16 @@ namespace VerifiedXCore.Nodes
                         "CasterFlow");
                 }
 
+                // SEAT-HEAL: in the record era the record decides whether this node holds a seat; peers' live lists
+                // don't (they drop a restarted member until it resumes). The round loop's resume gate decides when it
+                // may cast. Before a record exists the old majority-of-live-lists rule below still applies.
+                if (!Globals.IsBlockCaster && CasterMembershipStore.GetCurrent() is { } seatHead
+                    && seatHead.Casters.Any(c => c.Address == Globals.ValidatorAddress))
+                {
+                    CasterLogUtility.Log($"SelfRecovery: record seq {seatHead.RecordSeq} lists this node — IsBlockCaster=true; casting waits for the resume checks.", "CasterFlow");
+                    Globals.IsBlockCaster = true;
+                }
+
                 if (!Globals.IsBlockCaster)
                 {
                     // FIX 4: Self-recovery heartbeat — poll a peer caster's /GetCasters endpoint.
@@ -388,6 +398,14 @@ namespace VerifiedXCore.Nodes
                     catch (Exception ex) { CasterLogUtility.Log($"HEAL error: {ex.Message}", "CasterFlow"); }
                 }
 
+                // SEAT-HEAL: time every member's absence, and past the grace period remove one (seat proposer only).
+                try
+                {
+                    await CasterSeatService.ObserveCommitteeAsync();
+                    await CasterSeatService.TryRemoveAbsentAsync();
+                }
+                catch (Exception ex) { CasterLogUtility.Log($"SEAT error: {ex.Message}", "SEAT"); }
+
                 // WATCHDOG: height-delta stall detector — the only signal a silently-failing round
                 // cannot reset. Escalation re-kicks heal + the fork check on its own cadence.
                 await ChainProgressWatchdog.TickAsync("MonitorCasters");
@@ -422,7 +440,8 @@ namespace VerifiedXCore.Nodes
 
                 var casterList = Globals.BlockCasters.ToList();
 
-                if (!Globals.IsBootstrapMode && casterList.Count < Globals.MaxBlockCasters)
+                // Legacy live-list replacement; in the record era seats change only through signed records.
+                if (!Globals.IsBootstrapMode && !CasterMembershipStore.RecordEraActive && casterList.Count < Globals.MaxBlockCasters)
                     await InitiateReplacement(Globals.LastBlock.Height);
 
                 await CasterDiscoveryService.RefreshIfDueAsync();
@@ -1227,6 +1246,24 @@ namespace VerifiedXCore.Nodes
                 var casterList = Globals.BlockCasters.ToList();
                 var wasCaster = Globals.IsBlockCaster;
                 var selfInList = casterList.Exists(x => x.ValidatorAddress == Globals.ValidatorAddress);
+                // SEAT-HEAL: in the record era the record decides (MonitorCasters' SelfRecovery uses the same rule, so the
+                // two loops can't flip the flag back and forth); keep our own entry in the live list.
+                var seatRecord = CasterMembershipStore.GetCurrent();
+                var selfSeat = seatRecord?.Casters.FirstOrDefault(c => c.Address == Globals.ValidatorAddress);
+                if (seatRecord != null)
+                {
+                    if (selfSeat != null && !selfInList)
+                        CasterDiscoveryService.AddBlockCasterIfRoomAndUnique(new Peers
+                        {
+                            IsValidator = true,
+                            PeerIP = selfSeat.PeerIP,
+                            ValidatorAddress = selfSeat.Address,
+                            ValidatorPublicKey = selfSeat.PublicKey,
+                            WalletVersion = Globals.CLIVersion,
+                        });
+                    selfInList = selfSeat != null;
+                    casterList = Globals.BlockCasters.ToList();
+                }
                 Globals.IsBlockCaster = selfInList;
 
                 // A3: on becoming a caster, verify height + tip-hash agreement with the majority
@@ -1318,6 +1355,8 @@ namespace VerifiedXCore.Nodes
                     else if (CasterRoundAudit.BlockHeight == Height)
                     {
                         CasterRoundAudit.AddStep($"Retry at height {Height}…", false);
+                        // A retry starts without the previous attempt's block: peers must not see it as this round's.
+                        ClearStaleRoundDraft(Height);
                     }
 
                     var roundSw = Stopwatch.StartNew(); // Track total round time
@@ -1333,10 +1372,60 @@ namespace VerifiedXCore.Nodes
                         await Task.Delay(Math.Max(2000, Globals.BlockTime / 4));
                     }
 
+                    // RECORD-HOLD: a caster casts only with the current membership record, and only while that record
+                    // lists it. Mainnet Oct 1: a promoted caster that never received the record cast under the legacy
+                    // live-list rules — a non-member's votes and attestations counted toward its quorum — and committed
+                    // the block that forked the chain.
+                    var recordHold = await RecordHoldAsync(Height);
+                    CasterSeatService.HeldByRecord = recordHold != null;
+                    if (recordHold != null)
+                    {
+                        if (Environment.TickCount64 - _lastRecordHoldLogTicks >= 15_000)
+                        {
+                            CasterLogUtility.Log($"RECORD-HOLD: sitting out round {Height} — {recordHold}.", "ROUND");
+                            _lastRecordHoldLogTicks = Environment.TickCount64;
+                        }
+                        await Task.Delay(Math.Max(2000, Globals.BlockTime / 4));
+                        continue;
+                    }
+
+                    // RESUME: a restart is not an automatic return to the seat. The member proves the record still lists
+                    // it, the chain shows it was gone less than the grace period, and enough members approve that no
+                    // removal can also succeed (CasterSeatService). Sep 30: restarted members were re-added by
+                    // reachability and evicted for not casting, in a loop. A seed bootstrap casts without resuming.
+                    if (Globals.IsBootstrapMode)
+                        CasterSeatService.ConfirmCasting("cast during a seed bootstrap");
+                    var resumeHold = await CasterSeatService.TryResumeAsync();
+                    if (resumeHold != null)
+                    {
+                        if (Environment.TickCount64 - _lastRecordHoldLogTicks >= 15_000)
+                        {
+                            CasterLogUtility.Log($"RESUME-HOLD: sitting out round {Height} — {resumeHold}.", "ROUND");
+                            _lastRecordHoldLogTicks = Environment.TickCount64;
+                        }
+                        await Task.Delay(Math.Max(2000, Globals.BlockTime / 4));
+                        continue;
+                    }
+
                     // FIX 1 (CRITICAL): Block hash sync before VRF computation.
                     // If our LastBlock.Hash differs from peer casters, VRF seeds diverge and
                     // casters pick different winners → fork. Sync BEFORE generating proofs.
                     await SyncBlockHashWithPeersAsync();
+
+                    // MINORITY-HOLD: a caster whose tip a committee quorum does not hold never casts on it — no proofs,
+                    // votes or attestations — until fork resolution has moved it to the majority block. Repeated holds
+                    // at one height escalate to full fork recovery, as stuck rounds do.
+                    if (IsHoldingOnMinorityFork())
+                    {
+                        var heldAt = Globals.LastBlock.Height;
+                        if (_forkStuckHeight != heldAt) { _forkStuckHeight = heldAt; _forkStuckRounds = 0; }
+                        _forkStuckRounds++;
+                        CasterLogUtility.Log($"MINORITY-HOLD: sitting out round {Height} (hold {_forkStuckRounds}) — a committee quorum holds a different block at {heldAt}.", "ROUND");
+                        if (_forkStuckRounds >= FORK_RECOVERY_THRESHOLD)
+                            await ForkRecoveryAsync(heldAt);
+                        await Task.Delay(Math.Max(2000, Globals.BlockTime / 4));
+                        continue;
+                    }
 
                     if (PreviousHeight != Height)
                     {
@@ -2104,7 +2193,14 @@ namespace VerifiedXCore.Nodes
         /// <summary>
         /// FIX 1 (CRITICAL): Before each round, verify our LastBlock.Hash matches peer casters.
         /// If hashes diverge, VRF seeds diverge → different winners → fork.
-        /// Fetches the correct block from the majority if we're the outlier.
+        ///
+        /// MINORITY-HOLD (Oct 2026, mainnet fork at 7,414,815): only committee members vote, and a different hash counts
+        /// only when a quorum of them holds it. This used to count every live caster (a caster outside the record
+        /// included), act on the plurality, try to "apply" the majority block on top of a height already committed (which
+        /// always fails), and after three failures skip the check and keep casting on the losing branch. Now a caster
+        /// whose tip a committee quorum disagrees with is marked as on a minority fork: it sits out rounds
+        /// (<see cref="IsHoldingOnMinorityFork"/>) and hands the switch to ForkDetectionService, which rolls back and
+        /// adopts the majority block. The failure counter still feeds the FORK-STUCK escalation.
         /// </summary>
         private static async Task SyncBlockHashWithPeersAsync()
         {
@@ -2112,20 +2208,12 @@ namespace VerifiedXCore.Nodes
             {
                 var myHeight = Globals.LastBlock.Height;
                 var myHash = Globals.LastBlock.Hash;
-                var casters = Globals.BlockCasters.ToList()
+                var (quorumCasters, committeeCount) = GetQuorumCasters(myHeight);
+                var casters = quorumCasters
                     .Where(c => !string.IsNullOrEmpty(c.PeerIP) && c.ValidatorAddress != Globals.ValidatorAddress)
                     .ToList();
-                
-                if (casters.Count == 0) return;
 
-                // FIX 2: Escape hatch — if we've failed to sync at the same height too many times,
-                // skip and proceed. This breaks the infinite HASHSYNC MISMATCH loop caused by
-                // stale CasterRoundDict data (now fixed in GetBlockHash endpoint).
-                if (_hashSyncFailHeight == myHeight && _hashSyncFailCount >= HASH_SYNC_MAX_RETRIES)
-                {
-                    CasterLogUtility.Log($"BlockHashSync: SKIP — {_hashSyncFailCount} consecutive failures at height {myHeight}. Proceeding with consensus.", "HASHSYNC");
-                    return;
-                }
+                if (casters.Count == 0 || string.IsNullOrEmpty(myHash)) return;
 
                 var peerTasks = casters.Select(async caster =>
                 {
@@ -2142,115 +2230,153 @@ namespace VerifiedXCore.Nodes
                             {
                                 var peerResult = JsonConvert.DeserializeAnonymousType(body, new { Hash = "", Validator = "", Height = 0L });
                                 if (peerResult != null && peerResult.Height == myHeight && !string.IsNullOrEmpty(peerResult.Hash))
-                                    return (hash: peerResult.Hash, ip: caster.PeerIP!);
+                                    return peerResult.Hash;
                             }
                         }
                     }
                     catch { }
-                    return (hash: (string?)null, ip: "");
+                    return (string?)null;
                 }).ToList();
 
-                var results = await Task.WhenAll(peerTasks);
-                
-                var hashVotes = new Dictionary<string, int>();
-                if (!string.IsNullOrEmpty(myHash))
-                    hashVotes[myHash] = 1;
-                
-                var hashToIP = new Dictionary<string, string>();
-                foreach (var r in results)
-                {
-                    if (r.hash != null)
-                    {
-                        if (!hashVotes.ContainsKey(r.hash))
-                            hashVotes[r.hash] = 0;
-                        hashVotes[r.hash]++;
-                        if (!hashToIP.ContainsKey(r.hash))
-                            hashToIP[r.hash] = r.ip;
-                    }
-                }
+                var peerHashes = (await Task.WhenAll(peerTasks)).Where(h => h != null).Select(h => h!).ToList();
+                var required = ConsensusQuorum.Required(committeeCount);
+                // A tip other than the block this caster signed at the height is a wrong block whatever the vote says
+                // (mainnet 7,414,815: RFoK signed 8d0b…, committed 71aa…, and the committee split 2–2).
+                var majorityHash = SignedElsewhere(myHeight, myHash) ?? MinorityForkHash(myHash, peerHashes, required);
 
-                if (hashVotes.Count <= 1)
+                if (majorityHash == null)
                 {
-                    // All agree or no responses — reset failure counter
+                    if (_minorityFork.Height == myHeight)
+                        CasterLogUtility.Log($"BlockHashSync: minority-fork hold released at height {myHeight} — no committee quorum disagrees with {Short16(myHash)}.", "HASHSYNC");
+                    _minorityFork = (-1, "");
                     _hashSyncFailHeight = -1;
                     _hashSyncFailCount = 0;
                     return;
                 }
 
-                var majority = hashVotes.OrderByDescending(kv => kv.Value).First();
-                
-                if (majority.Key == myHash)
-                {
-                    CasterLogUtility.Log($"BlockHashSync: OK — all agree on {myHash?[..Math.Min(16, myHash?.Length ?? 0)]}", "HASHSYNC");
-                    // Reset failure counter on success
-                    _hashSyncFailHeight = -1;
-                    _hashSyncFailCount = 0;
-                    return;
-                }
-
-                CasterLogUtility.Log($"BlockHashSync: MISMATCH! ours={myHash?[..Math.Min(16, myHash?.Length ?? 0)]} majority={majority.Key[..Math.Min(16, majority.Key.Length)]} votes={majority.Value}", "HASHSYNC");
-
-                bool syncSucceeded = false;
-                if (hashToIP.TryGetValue(majority.Key, out var sourceIP))
-                {
-                    try
-                    {
-                        using var client = Globals.HttpClientFactory.CreateClient();
-                        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                        var uri = $"http://{sourceIP.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/GetBlock/{myHeight}";
-                        var resp = await client.GetAsync(uri, cts.Token);
-                        if (resp.IsSuccessStatusCode)
-                        {
-                            var json = await resp.Content.ReadAsStringAsync();
-                            if (!string.IsNullOrEmpty(json) && json != "0")
-                            {
-                                var correctBlock = JsonConvert.DeserializeObject<Block>(json);
-                                if (correctBlock != null && correctBlock.Hash == majority.Key)
-                                {
-                                    var result = await BlockValidatorService.ValidateBlock(correctBlock, true, false, false, true, source: $"BlockHashSync:{sourceIP}");
-                    if (result)
-                                    {
-                                        CasterLogUtility.Log($"BlockHashSync: Applied majority block. New hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}", "HASHSYNC");
-                                        syncSucceeded = true;
-                                        // PHASE 2: Push fork correction to all connected validators
-                                        await BroadcastForkCorrectionToValidators(myHeight, json);
-                                    }
-                                    else
-                                        CasterLogUtility.Log($"BlockHashSync: Majority block validation FAILED.", "HASHSYNC");
-                                }
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        CasterLogUtility.Log($"BlockHashSync: Error fetching majority block: {ex.Message}", "HASHSYNC");
-                    }
-                }
-
-                // FIX 2: Track consecutive failures to enable escape hatch
-                if (!syncSucceeded)
-                {
-                    if (_hashSyncFailHeight == myHeight)
-                    {
-                        _hashSyncFailCount++;
-                        CasterLogUtility.Log($"BlockHashSync: Sync failed {_hashSyncFailCount}/{HASH_SYNC_MAX_RETRIES} at height {myHeight}", "HASHSYNC");
-                    }
-                    else
-                    {
-                        _hashSyncFailHeight = myHeight;
-                        _hashSyncFailCount = 1;
-                    }
-                }
+                var votes = peerHashes.Count(h => h == majorityHash);
+                CasterLogUtility.Log(
+                    $"BlockHashSync: MINORITY FORK at height {myHeight} — ours={Short16(myHash)}, {votes} of {committeeCount} committee members hold {Short16(majorityHash)} (quorum {required}). " +
+                    $"Holding rounds and resolving to the majority block.",
+                    "HASHSYNC");
+                _minorityFork = (myHeight, majorityHash);
+                if (_hashSyncFailHeight == myHeight)
+                    _hashSyncFailCount++;
                 else
                 {
-                    _hashSyncFailHeight = -1;
-                    _hashSyncFailCount = 0;
+                    _hashSyncFailHeight = myHeight;
+                    _hashSyncFailCount = 1;
                 }
+                _ = ForkDetectionService.CheckAsync("BlockHashSync");
             }
             catch (Exception ex)
             {
                 CasterLogUtility.Log($"BlockHashSync: Exception: {ex.Message}", "HASHSYNC");
             }
+        }
+
+        private static (long Height, string MajorityHash) _minorityFork = (-1, "");
+
+        private static long _lastRecordHoldLogTicks;
+        private static DateTime _lastRecordPullUtc = DateTime.MinValue;
+        private const int RECORD_PULL_SECONDS = 60;
+        private const int RECORD_PULL_BEHIND_SECONDS = 10;
+
+        /// <summary>
+        /// Pulls the membership record from peers (every minute, every 10 s while behind) and returns why this caster must
+        /// sit out the round, or null. The pull also reconciles the live caster list to the record.
+        /// </summary>
+        private static async Task<string?> RecordHoldAsync(long height)
+        {
+            var head = CasterMembershipStore.GetCurrent();
+            var reason = RecordHoldReason(head?.RecordSeq, CasterDiscoveryService.LastObservedPeerHeads,
+                CasterMembershipStore.GetCommitteeForHeight(height), Globals.ValidatorAddress);
+            var since = (DateTime.UtcNow - _lastRecordPullUtc).TotalSeconds;
+            if (since >= RECORD_PULL_SECONDS || (reason != null && since >= RECORD_PULL_BEHIND_SECONDS))
+            {
+                _lastRecordPullUtc = DateTime.UtcNow;
+                var peers = Globals.BlockCasters.ToList().Select(c => c.PeerIP)
+                    .Concat((head?.Casters ?? new List<CasterInfo>()).Select(c => c.PeerIP))
+                    .Select(ip => (ip ?? "").Replace("::ffff:", ""))
+                    .Where(ip => ip.Length > 0 && ip != Globals.ReportedIP)
+                    .Distinct().ToList();
+                if (peers.Count > 0)
+                {
+                    try { await CasterDiscoveryService.FetchAndAdoptMembershipAsync(peers, reconcileWhenUnchanged: false); } catch { }
+                }
+                PruneNonMembers(height);
+                reason = RecordHoldReason(CasterMembershipStore.GetCurrent()?.RecordSeq, CasterDiscoveryService.LastObservedPeerHeads,
+                    CasterMembershipStore.GetCommitteeForHeight(height), Globals.ValidatorAddress);
+            }
+            return reason;
+        }
+
+        /// <summary>
+        /// Removes live casters that are in neither the governing committee nor the newest record (a promotion announce
+        /// or a legacy-era list can leave one behind). Remove-only: re-adding evicted members stays with the probed heal.
+        /// </summary>
+        private static void PruneNonMembers(long height)
+        {
+            var committee = CasterMembershipStore.GetCommitteeForHeight(height);
+            var head = CasterMembershipStore.GetCurrent();
+            var live = Globals.BlockCasters.ToList();
+            var strays = NonMembers(live, committee, head);
+            if (strays.Count == 0) return;
+            Globals.BlockCasters = new ConcurrentBag<Peers>(live.Where(p => !strays.Contains(p.ValidatorAddress ?? "")));
+            Globals.SyncKnownCastersFromBlockCasters();
+            CasterLogUtility.Log($"RECORD-PRUNE: removed {string.Join(", ", strays)} from the live caster list — not in the membership record.", "ROUND");
+        }
+
+        /// <summary>Pure: live caster addresses outside the record (self excluded; nothing before a record exists).</summary>
+        internal static HashSet<string> NonMembers(IEnumerable<Peers> live, HashSet<string>? committee, CasterMembershipRecord? head)
+        {
+            return live.Select(p => p.ValidatorAddress ?? "")
+                .Where(a => a.Length > 0 && a != Globals.ValidatorAddress && !CasterDiscoveryService.IsRecordMember(a, committee, head))
+                .ToHashSet(StringComparer.Ordinal);
+        }
+
+        /// <summary>
+        /// Pure: why a caster may not cast, or null. Behind: a majority of the peers that answered (at least two) report a
+        /// newer record than ours, or we have none while they do — one peer's unverified claim never holds a caster.
+        /// Not listed: a record exists and its committee for the height does not contain us.
+        /// </summary>
+        internal static string? RecordHoldReason(long? localSeq, IReadOnlyList<long> peerHeads, HashSet<string>? committee, string? self)
+        {
+            var mine = localSeq ?? -1;
+            if (peerHeads.Count >= 2 && peerHeads.Count(h => h > mine) * 2 > peerHeads.Count)
+                return $"membership record behind peers (ours {(localSeq?.ToString() ?? "none")}, peers report up to {peerHeads.Max()})";
+            if (committee != null && (string.IsNullOrEmpty(self) || !committee.Contains(self)))
+                return "this node is not in the membership record's committee";
+            return null;
+        }
+
+        /// <summary>True while a committee quorum holds a different block at this caster's tip: the caster sits out rounds.</summary>
+        internal static bool IsHoldingOnMinorityFork() =>
+            _minorityFork.Height >= 0 && _minorityFork.Height == Globals.LastBlock.Height;
+
+        /// <summary>
+        /// Pure: the hash a committee quorum holds at our tip when it is not ours, else null. Our own vote counts for our
+        /// hash; a different hash needs <paramref name="required"/> votes from the other committee members.
+        /// </summary>
+        internal static string? MinorityForkHash(string myHash, IReadOnlyCollection<string> peerHashes, int required)
+        {
+            var best = peerHashes.Where(h => h != myHash)
+                .GroupBy(h => h, StringComparer.Ordinal)
+                .OrderByDescending(g => g.Count())
+                .ThenBy(g => g.Key, StringComparer.Ordinal)
+                .FirstOrDefault();
+            if (best == null || best.Count() < required) return null;
+            var mine = 1 + peerHashes.Count(h => h == myHash);
+            return best.Count() > mine ? best.Key : null;
+        }
+
+        private static string Short16(string? hash) => string.IsNullOrEmpty(hash) ? "" : hash[..Math.Min(16, hash.Length)];
+
+        /// <summary>The block this caster signed at the height when it is not the committed one, else null.</summary>
+        internal static string? SignedElsewhere(long height, string? committedHash)
+        {
+            var signed = AttestationGuard.SignedAt(height);
+            return !string.IsNullOrEmpty(signed) && !string.Equals(signed, committedHash, StringComparison.Ordinal) ? signed : null;
         }
 
         #endregion
@@ -2461,6 +2587,8 @@ namespace VerifiedXCore.Nodes
                     else if (CasterRoundAudit.BlockHeight == Height)
                     {
                         CasterRoundAudit.AddStep($"Retry at height {Height}…", false);
+                        // A retry starts without the previous attempt's block: peers must not see it as this round's.
+                        ClearStaleRoundDraft(Height);
                     }
 
                     if (PreviousHeight != Height)
@@ -3960,13 +4088,30 @@ namespace VerifiedXCore.Nodes
         }
 
         /// <summary>
+        /// Pure: the validators contained in at least <paramref name="required"/> of the committed proof sets, sorted; null
+        /// when fewer than <paramref name="required"/> sets were received.
+        /// </summary>
+        internal static List<string>? QuorumPresenceSet(IEnumerable<List<string>?> committedSets, int required)
+        {
+            var sets = committedSets.Where(x => x != null).Select(x => x!.ToHashSet(StringComparer.Ordinal)).ToList();
+            if (required < 1 || sets.Count < required) return null;
+            return sets.SelectMany(x => x)
+                .GroupBy(a => a, StringComparer.Ordinal)
+                .Where(g => g.Count() >= required)
+                .Select(g => g.Key)
+                .OrderBy(a => a, StringComparer.Ordinal)
+                .ToList();
+        }
+
+        /// <summary>
         /// CONSENSUS-V2 (Fix #5): Reach supermajority agreement on the proof-set hash for a
         /// given block height. Each caster broadcasts its <see cref="ProofSetCommitment"/>;
         /// receivers tally by <see cref="ProofSetCommitment.CommitmentHash"/>. If a single
         /// hash group has supermajority count, we adopt that group's sorted address list as
-        /// the canonical proof-address set. If no supermajority emerges before the timeout,
-        /// returns <see langword="null"/> and the caller falls back to local-snapshot semantics
-        /// (preserves current behavior so a Phase-2 regression cannot deadlock production).
+        /// the canonical proof-address set. If no supermajority emerges before the timeout, the
+        /// validators present in a quorum of the commitments (<see cref="QuorumPresenceSet"/>);
+        /// with fewer commitments than a quorum, returns <see langword="null"/> and the caller falls
+        /// back to local-snapshot semantics (so a Phase-2 regression cannot deadlock production).
         /// </summary>
         public static async Task<List<string>?> ReachProofSetAgreementAsync(
             long height,
@@ -4080,6 +4225,21 @@ namespace VerifiedXCore.Nodes
 
             if (winningHash == null || winningCount < requiredAgreement)
             {
+                // SEAT-HEAL C.8 (Sep 30): with 3 of 5 members live every round needed unanimity, and validators
+                // restarting in batches left each caster's proof set slightly different — no hash reached quorum, each
+                // fell back to its own set, and they picked different winners. Instead take every validator that a
+                // quorum of the received commitments contains: casters holding the same commitments reach the same set,
+                // and no single caster can add or drop a validator.
+                var presence = QuorumPresenceSet(
+                    commitsForHeight.Where(kv => IsCommitteeCaster(kv.Key)).Select(kv => kv.Value?.ProofAddressesSorted),
+                    requiredAgreement);
+                if (presence != null && presence.Count > 0)
+                {
+                    CasterLogUtility.Log(
+                        $"[CONSENSUS-V2] ProofSetAgreement: no single set reached quorum after {sw.ElapsedMilliseconds}ms — using the {presence.Count} validators present in ≥{requiredAgreement} of {commitsForHeight.Count} commitments.",
+                        "AGREEMENT");
+                    return presence;
+                }
                 CasterLogUtility.Log(
                     $"[CONSENSUS-V2] ProofSetAgreement: TIMEOUT after {sw.ElapsedMilliseconds}ms — no supermajority. " +
                     $"Falling back to local snapshot (votes={commitsForHeight.Count}, need={requiredAgreement}).",
@@ -4372,14 +4532,15 @@ namespace VerifiedXCore.Nodes
             var nextHeight = Globals.LastBlock.Height + 1;
             var currentHeight = block.Height;
 
-            if (!BlockDownloadService.BlockDict.ContainsKey(currentHeight))
-            {
-                BlockStaging.Stage(block, producerIp); // VX-19: de-duplicated staging (our own agreed block)
-                if (nextHeight == currentHeight)
-                    await BlockValidatorService.ValidateBlocks();
-                if (nextHeight < currentHeight)
-                    await BlockDownloadService.GetAllBlocks();
-            }
+            // The agreed block is always the one staged for this height. This used to stage only when nothing was
+            // queued for the height yet — so a peer's block the download loop had queued (mainnet fork at 7,414,815: a
+            // block from a rejected round) was validated instead, and the agreed block was never staged.
+            DropOtherCandidates(currentHeight, block.Hash);
+            BlockStaging.Stage(block, producerIp); // VX-19: de-duplicated staging (our own agreed block)
+            if (nextHeight == currentHeight)
+                await BlockValidatorService.ValidateBlocks();
+            if (nextHeight < currentHeight)
+                await BlockDownloadService.GetAllBlocks();
 
             // CERT-FIX(2): unified broadcast. The old winnerCraftedLayout branch was dead code —
             // its outer `currentHeight < nextHeight` contradicted every inner condition — so a
@@ -4434,9 +4595,32 @@ namespace VerifiedXCore.Nodes
             Interlocked.Exchange(ref _casterConsensusHalted, 0);
         }
 
+        /// <summary>A block-hash vote counts for this round only when the block was produced by the round's agreed winner.</summary>
+        internal static bool IsVoteForWinner(string? producer, string? terminalWinner) =>
+            string.IsNullOrEmpty(terminalWinner) || string.Equals(producer, terminalWinner, StringComparison.Ordinal);
+
+        /// <summary>Removes every queued candidate for the height except the agreed block.</summary>
+        internal static void DropOtherCandidates(long height, string? agreedHash)
+        {
+            if (!string.IsNullOrEmpty(agreedHash))
+                BlockStaging.KeepOnly(height, agreedHash);
+        }
+
+        /// <summary>
+        /// Drops this caster's draft block for a height that is not committed yet. A draft from an earlier, failed round
+        /// at the same height used to stay in CasterRoundDict, where GetBlockHash (agreement votes) and GetBlock served it
+        /// to peers as if it were current.
+        /// </summary>
+        internal static void ClearStaleRoundDraft(long height)
+        {
+            if (height > Globals.LastBlock.Height && Globals.CasterRoundDict.TryGetValue(height, out var round) && round != null)
+                round.Block = null;
+        }
+
         private static async Task OnBlockHashAgreementRoundRejectedAsync(long height, string? terminalWinner)
         {
             ClearPendingCasterBlockHash(height);
+            ClearStaleRoundDraft(height);
             _consecutiveBlockHashAgreementFailures++;
             CasterLogUtility.Log($"BlockHashAgreement: round rejected at height {height} (streak {_consecutiveBlockHashAgreementFailures}).", "AGREEMENT");
 
@@ -4616,7 +4800,10 @@ namespace VerifiedXCore.Nodes
                                 if (!string.IsNullOrEmpty(body) && body != "0")
                                 {
                                     var peerResult = JsonConvert.DeserializeAnonymousType(body, new { Hash = "", Validator = "", Height = 0L });
-                                    if (peerResult != null && !string.IsNullOrEmpty(peerResult.Hash))
+                                    // Only a block from this round's agreed winner is a vote for this round. A peer
+                                    // still holding another producer's block (a failed earlier round, or a block it
+                                    // committed on its own) is not one.
+                                    if (peerResult != null && !string.IsNullOrEmpty(peerResult.Hash) && IsVoteForWinner(peerResult.Validator, terminalWinner))
                                         return (hash: peerResult.Hash, ip: caster.PeerIP!);
                                 }
                             }
@@ -4682,7 +4869,7 @@ namespace VerifiedXCore.Nodes
                     new Peers { PeerIP = sourceIP },
                     height,
                     terminalWinner);
-                if (peerBlock != null && peerBlock.Hash == majorityHash)
+                if (peerBlock != null && peerBlock.Hash == majorityHash && IsVoteForWinner(peerBlock.Validator, terminalWinner))
                 {
                     CasterRoundAudit?.AddStep($"[BlockHashAgreement] Replaced local block with majority block from {sourceIP}.", true);
                     _consecutiveMajorityBlockFetchFailures = 0;
