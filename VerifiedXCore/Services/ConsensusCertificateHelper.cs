@@ -113,7 +113,10 @@ namespace VerifiedXCore.Services
             if (!AttestationGuard.TryClaim(block.Height, block.Hash))
             {
                 var signed = AttestationGuard.SignedAt(block.Height) ?? "";
-                CasterLogUtility.Log($"ATTEST-GUARD: refusing to sign block {block.Hash?[..Math.Min(16, block.Hash?.Length ?? 0)]} at height {block.Height} — already signed {signed[..Math.Min(16, signed.Length)]} there.", "CERT");
+                var why = signed.Length > 0
+                    ? $"already signed {signed[..Math.Min(16, signed.Length)]} there"
+                    : "the signed-height store could not be read or written";
+                CasterLogUtility.Log($"ATTEST-GUARD: refusing to sign block {block.Hash?[..Math.Min(16, block.Hash?.Length ?? 0)]} at height {block.Height} — {why}.", "CERT");
                 return false;
             }
 

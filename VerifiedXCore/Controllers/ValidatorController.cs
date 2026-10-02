@@ -1328,6 +1328,23 @@ namespace VerifiedXCore.Controllers
         }
 
         /// <summary>
+        /// LOCALHOST ONLY: forgets which block this caster signed at each height (AttestationGuard). The claims are stored
+        /// on disk so a restart keeps them; this is the deliberate way to release a height that can never be certified
+        /// with the block this node signed.
+        /// </summary>
+        [HttpGet]
+        [Route("ClearAttestationGuard")]
+        public ActionResult<string> ClearAttestationGuard()
+        {
+            var remoteIp = HttpContext.Connection.RemoteIpAddress;
+            var mapped = remoteIp != null && remoteIp.IsIPv4MappedToIPv6 ? remoteIp.MapToIPv4() : remoteIp;
+            if (mapped == null || !System.Net.IPAddress.IsLoopback(mapped))
+                return Unauthorized(JsonConvert.SerializeObject(new { Success = false, Message = "ClearAttestationGuard is localhost-only." }));
+
+            return Ok(JsonConvert.SerializeObject(new { Success = true, ClaimsRemoved = AttestationGuard.ClearForOperatorReset() }));
+        }
+
+        /// <summary>
         /// BOOTSTRAP-RESET (Sep 2026), LOCALHOST ONLY: the operator's answer to the one question the
         /// node cannot decide — a stalled chain whose committee majority does not answer the survey
         /// (dead, or partitioned and producing elsewhere?). Arms the next survey window on THIS seed
