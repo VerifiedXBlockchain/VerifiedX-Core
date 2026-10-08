@@ -83,6 +83,11 @@ namespace VerifiedXCore.Privacy
                 var zk = ValidateZkPrivate(txRequest, payload!);
                 if (!zk.ok)
                     return zk;
+                // Fund-loss audit item 1 (stage 1): supply floor, required nullifier/root, outer fields bound to the
+                // payload. Block validation judges at the block's own height; admission at the height it would mine into.
+                var supplyRules = PrivateTxSupplyRules.Check(txRequest, payload!, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+                if (!supplyRules.ok)
+                    return supplyRules;
                 var merkle = ValidatePayloadMerkleRootRecency(payload!, blockDownloads);
                 if (!merkle.ok)
                     return merkle;

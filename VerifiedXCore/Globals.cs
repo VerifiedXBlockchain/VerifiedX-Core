@@ -260,6 +260,24 @@ namespace VerifiedXCore
         /// <summary>Covers FrostDkgAttestation.MaxParticipants (512 participants is ~221 KB).</summary>
         public const int MaxVbtcVaultTxSizeBytes = 256 * 1024;
 
+        // ── Fund-loss audit (Oct 2026) ─────────────────────────────────────────────────────────────────────────
+        // One release, one fork point: every consensus rule from the Oct 8 2026 fund-loss audit activates at the same
+        // mainnet height. Each rule keeps its own constant (so one can be moved alone if ever needed); all are set to
+        // FundLossAuditHeight. Must be above the tip when every validator runs this build. Testnet values in Program.cs.
+        /// <summary>Shared mainnet activation height of the fund-loss audit rules (set from the live tip at build).</summary>
+        public const long FundLossAuditHeight = 7_490_000L;
+        /// <summary>Testnet activation of the same rules (Program.cs / WardenService). TODO: set above the testnet tip at deploy.</summary>
+        public const long FundLossAuditTestnetHeight = 1_040_000L;
+
+        /// <summary>
+        /// Item 1 (stage 1): a ZK-authorized private transaction (VFX/vBTC unshield, private transfer) may not take more
+        /// than its shielded pool holds, must carry at least one nullifier and a Merkle root, and an unshield's outer
+        /// recipient and amount must equal the ones inside its (hashed) payload. Before this height no proof was ever
+        /// required or attached, so a forged unshield minted VFX from nothing (used on mainnet 2026-09-08: 100,033 VFX
+        /// against 4.5 ever shielded). Stage 2 (real PLONK proofs required and verified) follows under its own height.
+        /// </summary>
+        public static long PrivateTxSupplyRulesHeight = FundLossAuditHeight;
+
         /// <summary>
         /// Base (vBTC.b) minting validator set = registered vBTC validators that are ALSO members of
         /// the caster committee. vBTC validator registration is a free self-transaction gated only

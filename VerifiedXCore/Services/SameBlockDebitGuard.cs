@@ -26,7 +26,7 @@ namespace VerifiedXCore.Services
     /// </summary>
     public static class SameBlockDebitGuard
     {
-        public enum LedgerKind { VbtcV2, VbtcV1, Token, Native }
+        public enum LedgerKind { VbtcV2, VbtcV1, Token, Native, ShieldedPool }
 
         /// <summary>ContractUid of the native VFX key (not a contract).</summary>
         public const string NativeUid = "VFX";
@@ -66,6 +66,22 @@ namespace VerifiedXCore.Services
                 var native = tx.Amount + tx.Fee + SaleCompletionPayments(tx);
                 if (native > 0M)
                     debits.Add((new DebitKey(LedgerKind.Native, NativeUid, tx.FromAddress), native));
+            }
+
+            // Fund-loss audit item 1: an unshield / private transfer debits its shielded pool's supply. The per-transaction
+            // supply floor reads committed state, so two in one block each passed against the same supply. Same height
+            // source as the escrow case below; before PrivateTxSupplyRulesHeight the pool was never judged.
+            if (Privacy.PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType))
+            {
+                var zkHeight = tx.Height > 0 ? tx.Height : (Globals.LastBlock?.Height ?? 0) + 1;
+                if (zkHeight >= Globals.PrivateTxSupplyRulesHeight && !string.IsNullOrEmpty(tx.Data)
+                    && PrivateTxPayloadCodec.TryDecode(tx.Data, out var zkPayload, out _))
+                {
+                    var poolDebit = Privacy.PrivateTxSupplyRules.PoolDebit(tx, zkPayload);
+                    if (poolDebit > 0M)
+                        debits.Add((new DebitKey(LedgerKind.ShieldedPool, zkPayload.Asset, Privacy.PrivacyConstants.ShieldedPoolAddress), poolDebit));
+                }
+                return debits;
             }
 
             if (string.IsNullOrEmpty(tx.Data))
@@ -190,6 +206,8 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static decimal? CommittedBalance(DebitKey key)
         {
+            if (key.Kind == LedgerKind.ShieldedPool)
+                return Privacy.PrivateTxSupplyRules.CommittedSupply(key.ContractUid); // ContractUid holds the asset ("VFX", "VBTC:…")
             if (key.Kind == LedgerKind.Native)
             {
                 // No account: VerifyTX allows that only for TKNZ_WD_ARB (arbiters); not judged here.
@@ -259,7 +277,7 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static DebitKey Canonical(DebitKey key, Dictionary<string, string>? cache = null)
         {
-            if (key.Kind == LedgerKind.Token || key.Kind == LedgerKind.Native)
+            if (key.Kind == LedgerKind.Token || key.Kind == LedgerKind.Native || key.Kind == LedgerKind.ShieldedPool)
                 return key;
             if (cache == null || !cache.TryGetValue(key.ContractUid, out var uid))
             {

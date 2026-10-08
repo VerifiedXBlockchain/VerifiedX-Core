@@ -139,6 +139,8 @@ namespace VerifiedXCore
             Globals.VbtcV2DkgAttestationHeight = Globals.IsTestNet ? 1_002_979 : Globals.VbtcV2DkgAttestationHeight;
             Globals.VbtcV1RetirementHeight = Globals.IsTestNet ? 1_002_979 : Globals.VbtcV1RetirementHeight;
             Globals.VbtcVaultTxSizeHeight = Globals.IsTestNet ? 1 : Globals.VbtcVaultTxSizeHeight;
+            // Fund-loss audit (Oct 2026): one activation for all its rules. TODO testnet: set ABOVE the testnet tip at deploy.
+            Globals.PrivateTxSupplyRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PrivateTxSupplyRulesHeight;
 
             //Perform network time sync
             _ = NetworkTimeService.Run();
