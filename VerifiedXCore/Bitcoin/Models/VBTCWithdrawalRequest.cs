@@ -126,6 +126,30 @@ namespace VerifiedXCore.Bitcoin.Models
         }
         #endregion
 
+        #region UniqueId reuse (fund-loss audit item 6)
+        /// <summary>
+        /// Consensus: the reason a request from <paramref name="address"/> on <paramref name="scUID"/> under
+        /// <paramref name="uniqueId"/> reuses a key under which a DIFFERENT request was already mined, or null. Local
+        /// pre-registration rows (no TransactionHash) and the same request re-validated do not count. Reads mined rows
+        /// only, which exist on every node.
+        /// </summary>
+        public static string? UniqueIdReuseError(string? address, string? uniqueId, string? scUID, string? requestTxHash)
+        {
+            if (string.IsNullOrEmpty(address) || string.IsNullOrEmpty(uniqueId) || string.IsNullOrEmpty(scUID))
+                return null;
+            var vwrDb = GetVBTCWithdrawalRequestDb();
+            if (vwrDb == null)
+                return null;
+            var mined = vwrDb.Query()
+                .Where(x => x.RequestorAddress == address && x.OriginalUniqueId == uniqueId && x.SmartContractUID == scUID)
+                .ToList()
+                .FirstOrDefault(x => !string.IsNullOrEmpty(x.TransactionHash) && !string.Equals(x.TransactionHash, requestTxHash, StringComparison.Ordinal));
+            return mined == null
+                ? null
+                : $"UniqueId {uniqueId} was already used by withdrawal request {mined.TransactionHash} on contract {scUID}; a withdrawal request's UniqueId cannot be reused.";
+        }
+        #endregion
+
         #region Check for Incomplete Requests
         /// <summary>
         /// Check if there are any incomplete withdrawal requests for this address and contract
@@ -420,10 +444,21 @@ namespace VerifiedXCore.Bitcoin.Models
             // FIND-005: If not found by TxHash, try composite key (for raw withdrawal flow)
             if (existingRequest == null && !string.IsNullOrEmpty(request.OriginalUniqueId))
             {
-                existingRequest = vwrDb.FindOne(x => 
-                    x.RequestorAddress == request.RequestorAddress && 
-                    x.OriginalUniqueId == request.OriginalUniqueId && 
+                existingRequest = vwrDb.FindOne(x =>
+                    x.RequestorAddress == request.RequestorAddress &&
+                    x.OriginalUniqueId == request.OriginalUniqueId &&
                     x.SmartContractUID == request.SmartContractUID);
+
+                // Fund-loss audit item 6: a composite-key match upgrades only this node's local pre-registration row
+                // (no TransactionHash yet) or the same mined request. A row of a DIFFERENT mined request is that
+                // request's row - it used to be overwritten (status reset, old Amount and destination kept) by any later
+                // request reusing the UniqueId. From the height such a request is refused by validation; here the
+                // later row is inserted on its own either way.
+                if (existingRequest != null
+                    && request.RequestBlockHeight >= Globals.WithdrawalUniqueIdRulesHeight
+                    && !string.IsNullOrEmpty(existingRequest.TransactionHash)
+                    && !string.Equals(existingRequest.TransactionHash, request.TransactionHash, StringComparison.Ordinal))
+                    existingRequest = null;
             }
 
             if (existingRequest != null)

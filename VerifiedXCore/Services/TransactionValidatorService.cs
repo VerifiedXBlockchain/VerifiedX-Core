@@ -128,6 +128,15 @@ namespace VerifiedXCore.Services
                 if (scState == null)
                     return (false, $"vBTC V2 contract not found in state trei: {input.SCUID}");
 
+                // Fund-loss audit item 6: one row per input shares the request's UniqueId; none may reuse a mined key.
+                if ((blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.WithdrawalUniqueIdRulesHeight)
+                {
+                    var wdUniqueId = jobj["UniqueId"]?.ToObject<string?>() ?? txRequest.Hash;
+                    var reuseError = VBTCWithdrawalRequest.UniqueIdReuseError(requesterAddress, wdUniqueId, input.SCUID, txRequest.Hash);
+                    if (reuseError != null)
+                        return (false, reuseError);
+                }
+
                 // VX-01: same contract-type rule as the single shape.
                 if (!Bitcoin.Services.VBTCService.IsVbtcV2Contract(scState))
                     return (false, $"Contract {input.SCUID} is not a vBTC V2 contract.");
@@ -3314,6 +3323,16 @@ namespace VerifiedXCore.Services
                             // any minted smart contract used to be accepted as a withdrawal target.
                             if (!Bitcoin.Services.VBTCService.IsVbtcV2Contract(scState))
                                 return (txResult, $"Contract {scUID} is not a vBTC V2 contract.");
+
+                            // Fund-loss audit item 6: a (requester, UniqueId, contract) key under which a request was
+                            // already mined cannot be reused (the row store matched on it and reopened the old row).
+                            if ((blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.WithdrawalUniqueIdRulesHeight)
+                            {
+                                var wdUniqueId = jobj["UniqueId"]?.ToObject<string?>() ?? txRequest.Hash; // the apply's fallback
+                                var reuseError = VBTCWithdrawalRequest.UniqueIdReuseError(requesterAddress, wdUniqueId, scUID, txRequest.Hash);
+                                if (reuseError != null)
+                                    return (txResult, reuseError);
+                            }
 
                             // S3C §0: per-CONTRACT active-withdrawal gate (was per-user) — rejects if
                             // the contract already has a mined active request (anti-grief expiry inside).

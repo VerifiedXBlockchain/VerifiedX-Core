@@ -330,6 +330,16 @@ namespace VerifiedXCore
         public static long SaleStartBidRulesHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// Item 6: a vBTC withdrawal REQUEST may not reuse a (requester, UniqueId, contract) key under which a request was
+        /// already mined. The holder chooses UniqueId, nothing in consensus read it, and the row store's save matched on
+        /// that key and kept the old row's Amount and destination: a dust request with an old UniqueId reopened a
+        /// completed withdrawal at its old amount (cancel refunded it; FROST would pay it again) and erased the old
+        /// Completed row's owner add-back. From this height the request is refused and a mined row is never overwritten
+        /// by a later request. No reuse exists on mainnet (history scan 2026-10-08: 17 requests).
+        /// </summary>
+        public static long WithdrawalUniqueIdRulesHeight = FundLossAuditHeight;
+
+        /// <summary>
         /// Item 1 (freeze, owner decision 2026-10-08): from this height no transaction may be sent from an address in
         /// FrozenAddresses. The one entry received 100,033 VFX through the forged unshields of 2026-09-08 (blocks up to
         /// 7,257,080) and still holds about 100,028; whether to burn that balance is a separate decision. Receiving stays
