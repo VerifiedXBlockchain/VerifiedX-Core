@@ -47,6 +47,7 @@ namespace VerifiedXCore.Services
                 Globals.VbtcCancellationVoteRulesHeight = Globals.VbtcCancellationVoteRulesHeight; // TODO testnet height (same value as Program.cs)
                 Globals.PrivateTxSupplyRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PrivateTxSupplyRulesHeight; // fund-loss audit (Oct 2026)
                 Globals.AddressFreezeHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.AddressFreezeHeight;
+                Globals.SaleCompleteContractRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.SaleCompleteContractRulesHeight;
                 if (Globals.IsTestNet) Globals.ShieldedSupplyCorrections.Clear(); // the testnet pool was never forged against
             }
             else
@@ -68,6 +69,7 @@ namespace VerifiedXCore.Services
                 Globals.VbtcCancellationVoteRulesHeight = Globals.VbtcCancellationVoteRulesHeight; // TODO mainnet height (same value as Program.cs)
                 Globals.PrivateTxSupplyRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PrivateTxSupplyRulesHeight; // fund-loss audit (Oct 2026)
                 Globals.AddressFreezeHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.AddressFreezeHeight;
+                Globals.SaleCompleteContractRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.SaleCompleteContractRulesHeight;
                 if (Globals.IsTestNet) Globals.ShieldedSupplyCorrections.Clear(); // the testnet pool was never forged against
             }
 

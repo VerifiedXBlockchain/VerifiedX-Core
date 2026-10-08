@@ -1057,6 +1057,10 @@ namespace VerifiedXCore.Services
                                                     return (txResult, "You are attempting to evolve a Smart contract you don't own.");
                                                 }
                                             }
+                                            else if ((blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.SaleCompleteContractRulesHeight)
+                                            {
+                                                return (txResult, "SC does not exist."); // fund-loss audit item 2: no missing else
+                                            }
                                             //Run the Trillium REPL To ensure new state is valid again.
                                             break;
                                         }
@@ -1079,6 +1083,10 @@ namespace VerifiedXCore.Services
                                                 {
                                                     return (txResult, "You are attempting to devolve a Smart contract you don't own.");
                                                 }
+                                            }
+                                            else if ((blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.SaleCompleteContractRulesHeight)
+                                            {
+                                                return (txResult, "SC does not exist."); // fund-loss audit item 2: no missing else
                                             }
                                             //Run the Trillium REPL To ensure new state is valid again.
                                             break;
@@ -1791,7 +1799,20 @@ namespace VerifiedXCore.Services
 
                             if (scUID != null && transactions != null && keySign != null)
                             {
+                                // Fund-loss audit item 2: the payments' positivity rule (NEW-17) ran only inside the
+                                // "record exists" branch below, and that branch had no else - a completion naming a
+                                // contract never minted skipped every check while its apply still moved the inner
+                                // payments. Both are judged first, at the block's height (admission: tip + 1).
+                                var saleRulesHeight = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
+                                if (saleRulesHeight >= Globals.SaleCompleteContractRulesHeight)
+                                {
+                                    var saleAmountError = LedgerIntegrityRules.SaleAmounts(txRequest);
+                                    if (saleAmountError != null)
+                                        return (txResult, saleAmountError);
+                                }
                                 var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                                if (scStateTreiRec == null && saleRulesHeight >= Globals.SaleCompleteContractRulesHeight)
+                                    return (txResult, "SC does not exist.");
                                 if (scStateTreiRec != null)
                                 {
                                     var scMain = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);

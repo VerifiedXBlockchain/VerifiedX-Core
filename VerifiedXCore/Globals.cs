@@ -293,6 +293,15 @@ namespace VerifiedXCore
         };
 
         /// <summary>
+        /// Item 2: Sale_Complete / M_Sale_Complete naming a contract with no state record is refused (every sale check sat
+        /// inside "if the record exists" with no else, so the apply credited the inner payment and debited the signer
+        /// against no contract: VFX from nothing, or a negative inner amount draining any address), the inner-payment
+        /// positivity rule runs before the record lookup, Evolve()/Devolve() on a missing contract are refused, and the
+        /// sale apply is a no-op without a record. No such transaction exists on mainnet (history scan 2026-10-08).
+        /// </summary>
+        public static long SaleCompleteContractRulesHeight = FundLossAuditHeight;
+
+        /// <summary>
         /// Item 1 (freeze, owner decision 2026-10-08): from this height no transaction may be sent from an address in
         /// FrozenAddresses. The one entry received 100,033 VFX through the forged unshields of 2026-09-08 (blocks up to
         /// 7,257,080) and still holds about 100,028; whether to burn that balance is a separate decision. Receiving stays

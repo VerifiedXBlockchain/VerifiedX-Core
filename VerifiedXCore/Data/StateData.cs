@@ -2420,6 +2420,10 @@ namespace VerifiedXCore.Data
             //var locator = jobj["Locators"]?.ToObject<string?>();
 
             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+            // Fund-loss audit item 2: validation refuses a completion without a record from this height; the apply agrees
+            // and moves nothing (before it, the inner payments were applied against no contract).
+            if (scStateTreiRec == null && block.Height >= Globals.SaleCompleteContractRulesHeight)
+                return;
             if (scStateTreiRec != null)
             {
                 scStateTreiRec.NextOwner = null;
