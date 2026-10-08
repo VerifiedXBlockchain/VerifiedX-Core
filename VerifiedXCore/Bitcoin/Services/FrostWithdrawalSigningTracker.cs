@@ -220,6 +220,71 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// Fund-loss audit item 7: CheckWithdrawalSigning and RecordSigningStarted under ONE acquisition of the
+        /// withdrawal's lock. Separately, two sign/starts for one withdrawal input with different sighashes both
+        /// passed the check before either was recorded, and both ceremonies then ran: one withdrawal, two payable
+        /// Bitcoin transactions. Returns (true, reason) when the start is refused; nothing is recorded then.
+        /// </summary>
+        public static (bool Blocked, string Reason) TryBeginSigning(
+            string scUID,
+            string withdrawalRequestHash,
+            string sessionId,
+            int inputIndex = 0,
+            string? messageHash = null,
+            List<string>? allInputSighashes = null,
+            List<string>? txInputOutpoints = null,
+            ISet<string>? reclaimablePins = null)
+        {
+            if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
+                return (false, string.Empty); // Non-withdrawal signing, allow (nothing to record)
+
+            var key = BuildKey(scUID, withdrawalRequestHash);
+            var record = _withdrawals.GetOrAdd(key, _ => new WithdrawalRecord
+            {
+                ScUID = scUID,
+                WithdrawalRequestHash = withdrawalRequestHash
+            });
+            lock (record.Lock) // re-entered by the two calls below (Monitor is re-entrant on this thread)
+            {
+                var (blocked, reason) = CheckWithdrawalSigning(scUID, withdrawalRequestHash, inputIndex, messageHash, allInputSighashes, txInputOutpoints, reclaimablePins);
+                if (blocked)
+                    return (true, reason);
+                RecordSigningStarted(scUID, withdrawalRequestHash, sessionId, inputIndex, messageHash, allInputSighashes);
+                return (false, string.Empty);
+            }
+        }
+
+        /// <summary>
+        /// Fund-loss audit item 7 (round 2): whether <paramref name="sessionId"/> is the ceremony this tracker holds
+        /// for the withdrawal input, signing the recorded sighash. Round 2 is where the share is produced, and it
+        /// re-checked nothing: a session that lost (or bypassed) the start check could still get its share. A
+        /// withdrawal input with no record here (expired, reset) is refused too: the coordinator starts again.
+        /// </summary>
+        public static (bool Ok, string Reason) ConfirmSessionHoldsInput(string? scUID, string? withdrawalRequestHash, int inputIndex, string? sessionId, string? messageHash)
+        {
+            if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
+                return (true, string.Empty); // Non-withdrawal signing
+            if (!_withdrawals.TryGetValue(BuildKey(scUID, withdrawalRequestHash), out var record))
+                return (false, $"No signing record for withdrawal {withdrawalRequestHash} input {inputIndex} on this validator; start the ceremony again.");
+            lock (record.Lock)
+            {
+                if (!record.Inputs.TryGetValue(inputIndex, out var input))
+                    return (false, $"No signing record for withdrawal {withdrawalRequestHash} input {inputIndex} on this validator; start the ceremony again.");
+                if (!string.IsNullOrEmpty(messageHash) && !string.IsNullOrEmpty(input.MessageHash)
+                    && !string.Equals(input.MessageHash, messageHash, StringComparison.OrdinalIgnoreCase))
+                    return (false, $"Session {sessionId} signs a sighash that is not the one recorded for withdrawal {withdrawalRequestHash} input {inputIndex}.");
+                if (record.PinnedSighashes != null && !string.IsNullOrEmpty(messageHash)
+                    && (inputIndex >= record.PinnedSighashes.Count || !string.Equals(record.PinnedSighashes[inputIndex], messageHash, StringComparison.OrdinalIgnoreCase)))
+                    return (false, $"Session {sessionId} signs a sighash that is not the one announced for withdrawal {withdrawalRequestHash} input {inputIndex}.");
+                if (input.State == SigningState.InProgress && !string.Equals(input.SessionId, sessionId, StringComparison.Ordinal))
+                    return (false, $"Session {sessionId} is not the ceremony this validator accepted for withdrawal {withdrawalRequestHash} input {inputIndex} (session {input.SessionId}).");
+                if (input.State == SigningState.Failed)
+                    return (false, $"The ceremony this validator accepted for withdrawal {withdrawalRequestHash} input {inputIndex} failed; start again.");
+                return (true, string.Empty);
+            }
+        }
+
+        /// <summary>
         /// Record that a signing ceremony is starting for a withdrawal input.
         /// Called when the validator accepts a /frost/sign/start request. Pins the announced
         /// sighash set on first sight.

@@ -1815,6 +1815,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // withdrawal input, and that no other withdrawal's signed tx is outstanding
                             // for the contract unless this tx conflicts with it. This is the network-level
                             // defense against double-spend — even if the coordinator's code is modified.
+                            ISet<string>? reclaimablePinsForStart = null; // fund-loss audit item 7: reused by the atomic record below
                             if (!string.IsNullOrEmpty(request.WithdrawalRequestHash))
                             {
                                 var (blocked, reason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
@@ -1840,6 +1841,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                         await TryReleaseContractPinIfObservedOnChain(request.SmartContractUID);
                                     }
 
+                                    reclaimablePinsForStart = reclaimable;
                                     (blocked, reason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
                                         .CheckWithdrawalSigning(request.SmartContractUID, request.WithdrawalRequestHash,
                                             request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints, reclaimable);
@@ -2110,12 +2112,29 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // FIND-028: Record signing started for withdrawal dedup
+                            // FIND-028: Record signing started for withdrawal dedup.
+                            // Fund-loss audit item 7: check and record under one lock. The check at the top of this
+                            // handler is a fast refusal; between it and here another start for the same input (a
+                            // different sighash) could pass the same check, and both ceremonies then ran. The record
+                            // is now the decision: the loser's session is dropped here and refused.
                             if (!string.IsNullOrEmpty(request.WithdrawalRequestHash))
                             {
-                                VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                                    .RecordSigningStarted(request.SmartContractUID, request.WithdrawalRequestHash, request.SessionId,
-                                        request.InputIndex, request.MessageHash, request.AllInputSighashes);
+                                var (beginBlocked, beginReason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
+                                    .TryBeginSigning(request.SmartContractUID, request.WithdrawalRequestHash, request.SessionId,
+                                        request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints, reclaimablePinsForStart);
+                                if (beginBlocked)
+                                {
+                                    FrostSessionStorage.SigningSessions.TryRemove(request.SessionId, out _);
+                                    LogUtility.Log($"[FROST Dedup] BLOCKED signing start (at record) for withdrawal {request.WithdrawalRequestHash} input {request.InputIndex}: {beginReason}",
+                                        "FrostStartup.SignStart");
+                                    context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                    {
+                                        Success = false,
+                                        Message = $"FIND-028: {beginReason}"
+                                    }));
+                                    return;
+                                }
                             }
 
                             LogUtility.Log($"[FROST] Signing ceremony started with real nonce generation. Session: {request.SessionId}", "FrostStartup.SignStart");
@@ -2324,6 +2343,22 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 LogUtility.Log($"[FROST] WARNING: Sign Round 2 could not remap nonces - using raw body. SignerAddresses count: {session.SignerAddresses?.Count ?? 0}", "FrostStartup.SignRound2");
                             }
 
+                            // Fund-loss audit item 7: the share is produced here, so the tracker's decision is re-checked
+                            // here - this session must be the ceremony this validator accepted for the withdrawal input,
+                            // signing the sighash it announced.
+                            if (!string.IsNullOrEmpty(session.WithdrawalRequestHash)
+                                && !session.WithdrawalRequestHash.StartsWith(FrostSigningAuthorization.BtcExitPrefix, StringComparison.OrdinalIgnoreCase))
+                            {
+                                var (holds, holdReason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
+                                    .ConfirmSessionHoldsInput(session.SmartContractUID, session.WithdrawalRequestHash, session.InputIndex, sessionId, session.MessageHash);
+                                if (!holds)
+                                {
+                                    ErrorLogUtility.LogError($"FROST Sign Round 2 REFUSED for session {sessionId}: {holdReason}", "FrostStartup.SignRound2");
+                                    context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = holdReason }));
+                                    return;
+                                }
+                            }
                             // Consume the secret nonce atomically: it is wiped here and can never be used again,
                             // even if share generation below fails (fail closed; the coordinator starts a new session).
                             if (!session.TryConsumeNonceSecret(out var nonceSecretOnce) || string.IsNullOrEmpty(nonceSecretOnce))
