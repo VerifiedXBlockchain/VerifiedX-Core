@@ -143,6 +143,7 @@ namespace VerifiedXCore
             Globals.PrivateTxSupplyRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PrivateTxSupplyRulesHeight;
             Globals.AddressFreezeHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.AddressFreezeHeight;
             Globals.SaleCompleteContractRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.SaleCompleteContractRulesHeight;
+            Globals.ReserveRecoverRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ReserveRecoverRulesHeight;
             if (Globals.IsTestNet) Globals.ShieldedSupplyCorrections.Clear(); // the testnet pool was never forged against
 
             //Perform network time sync

@@ -302,6 +302,15 @@ namespace VerifiedXCore
         public static long SaleCompleteContractRulesHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// Item 3: a reserve Recover() must carry RecoveryAddress, RecoverySigScript and SignatureTime (every recovery
+        /// check sat under "if both strings are non-empty", and a missing SignatureTime threw into an empty catch, so the
+        /// vault key alone swept a reserve at once to any address named in the transaction), a malformed RESERVE
+        /// transaction is refused instead of swallowed, and the apply sends the sweep to the recovery address recorded in
+        /// state, not the one carried. All 5 mainnet recoveries carried a signature (history scan 2026-10-08).
+        /// </summary>
+        public static long ReserveRecoverRulesHeight = FundLossAuditHeight;
+
+        /// <summary>
         /// Item 1 (freeze, owner decision 2026-10-08): from this height no transaction may be sent from an address in
         /// FrozenAddresses. The one entry received 100,033 VFX through the forged unshields of 2026-09-08 (blocks up to
         /// 7,257,080) and still holds about 100,028; whether to burn that balance is a separate decision. Receiving stays

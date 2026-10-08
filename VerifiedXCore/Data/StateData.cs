@@ -587,6 +587,19 @@ namespace VerifiedXCore.Data
                                         case "Recover()":
                                             string recoveryAddress = jobj["RecoveryAddress"].ToObject<string>();
                                             string recoverySigScript = jobj["RecoverySigScript"].ToObject<string>();
+                                            // Fund-loss audit item 3: the sweep goes to the recovery address recorded in state
+                                            // (validation now requires the carried one to equal it); a reserve without one is
+                                            // left untouched rather than swept to whatever the transaction named.
+                                            if (block.Height >= Globals.ReserveRecoverRulesHeight)
+                                            {
+                                                var recordedRecovery = GetSpecificAccountStateTrei(tx.FromAddress)?.RecoveryAccount;
+                                                if (string.IsNullOrEmpty(recordedRecovery))
+                                                {
+                                                    ErrorLogUtility.LogError($"Recover() {tx.Hash} from {tx.FromAddress}: no recovery address in state; nothing swept.", "StateData.UpdateTreis()");
+                                                    break;
+                                                }
+                                                recoveryAddress = recordedRecovery;
+                                            }
                                             await RecoverReserveAccountTx(recoveryAddress, tx.FromAddress, block.StateRoot,
                                                 HistoricalTransactionExceptions.KeepsReversedTransferPending(tx, block.Height)); // historical, see there
                                             break;

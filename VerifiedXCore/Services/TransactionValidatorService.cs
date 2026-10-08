@@ -2535,6 +2535,9 @@ namespace VerifiedXCore.Services
                 if(txRequest.TransactionType == TransactionType.RESERVE)
                 {
                     var txData = txRequest.Data;
+                    // Fund-loss audit item 3: from this height a RESERVE transaction that throws while being read is
+                    // refused (the empty catch below let it through), and Recover() must carry its recovery signature.
+                    var reserveRulesActive = (blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.ReserveRecoverRulesHeight;
                     if (txData != null)
                     {
                         try
@@ -2647,6 +2650,17 @@ namespace VerifiedXCore.Services
                                     if (function == "Recover()")
                                     {
                                         runReserveCheck = false;
+                                        if (reserveRulesActive)
+                                        {
+                                            // Item 3: every recovery check below sits under "both strings non-empty"; with an
+                                            // empty RecoverySigScript nothing ran, and a missing SignatureTime threw into the
+                                            // catch at the end of this block, which swallowed it.
+                                            var sigTimeToken = jobj["SignatureTime"];
+                                            if (string.IsNullOrEmpty(jobj["RecoveryAddress"]?.ToObject<string?>())
+                                                || string.IsNullOrEmpty(jobj["RecoverySigScript"]?.ToObject<string?>())
+                                                || sigTimeToken == null || sigTimeToken.Type == JTokenType.Null)
+                                                return (txResult, "Recover() requires RecoveryAddress, RecoverySigScript and SignatureTime.");
+                                        }
                                         string recoveryAddress = jobj["RecoveryAddress"].ToObject<string>();
                                         string recoverySigScript = jobj["RecoverySigScript"].ToObject<string>();
                                         long sigTime = jobj["SignatureTime"].ToObject<long>();
@@ -2683,7 +2697,13 @@ namespace VerifiedXCore.Services
                                 }
                             }
                         }
-                        catch { }
+                        catch
+                        {
+                            // Item 3: a RESERVE transaction this block could not read is refused from the height (it was
+                            // swallowed, so a Recover() with no SignatureTime passed with every recovery check skipped).
+                            if (reserveRulesActive)
+                                return (txResult, "Reserve transaction not formatted properly.");
+                        }
                     }
 
                 }
