@@ -2,6 +2,7 @@ using Newtonsoft.Json.Linq;
 using Newtonsoft.Json;
 using VerifiedXCore.Data;
 using VerifiedXCore.Models;
+using VerifiedXCore.Models.DST;
 using VerifiedXCore.Models.SmartContracts;
 using VerifiedXCore.Utilities;
 using System.Security.Principal;
@@ -152,8 +153,18 @@ namespace VerifiedXCore.Services
                             var keySign = jobj["KeySign"]?.ToObject<string?>();
                             var amountSoldFor = jobj["SoldFor"]?.ToObject<decimal?>();
 
-                            //if you have a bid or buy now this should auto start the process.
-                            _ = SmartContractService.CompleteSaleSmartContractTX(scUID, tx.FromAddress, amountSoldFor.Value, keySign);
+                            // Fund-loss audit item 5: only a sale this wallet actually bid on is completed from its balance.
+                            // A Sale_Start that got past the bid signature (the "manual" bypass, or a bid signature replayed
+                            // from another listing) names this wallet as the buyer; without a matching local bid it is ignored.
+                            if (amountSoldFor.HasValue && Bid.HasLocalSentBid(toAddress ?? account.Address, keySign, amountSoldFor.Value))
+                            {
+                                //if you have a bid or buy now this should auto start the process.
+                                _ = SmartContractService.CompleteSaleSmartContractTX(scUID, tx.FromAddress, amountSoldFor.Value, keySign);
+                            }
+                            else
+                            {
+                                SCLogUtility.Log($"Incoming Sale_Start for {scUID} names {toAddress} as buyer for {amountSoldFor} with purchase key {keySign}, but this wallet placed no such bid; not completing the sale.", "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            }
                         }
 
                         if(function == "Sale_Complete()")

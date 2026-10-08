@@ -321,6 +321,15 @@ namespace VerifiedXCore
         public static long VaultRewriteRulesHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// Item 5: the "manual" bid-signature bypass is honoured only for M_Sale_Start() (the validator set it for that
+        /// function but tested the string, so a plain Sale_Start() carrying "manual" skipped the bid signature and named
+        /// any address as the buyer; that address's own wallet then auto-signed the completion from its balance). The
+        /// wallet-side guard - auto-complete only against a bid this wallet placed - is ungated. No Sale_Start on
+        /// mainnet carries "manual" (history scan 2026-10-08).
+        /// </summary>
+        public static long SaleStartBidRulesHeight = FundLossAuditHeight;
+
+        /// <summary>
         /// Item 1 (freeze, owner decision 2026-10-08): from this height no transaction may be sent from an address in
         /// FrozenAddresses. The one entry received 100,033 VFX through the forged unshields of 2026-09-08 (blocks up to
         /// 7,257,080) and still holds about 100,028; whether to burn that balance is a separate decision. Receiving stays

@@ -1742,7 +1742,11 @@ namespace VerifiedXCore.Services
                                     
                                     var signatureVerify = Bid.VerifyBidSignature(keySign, amountSoldFor.Value, toAddress, bidSignature);
 
-                                    if (bidSignature == "manual")
+                                    // Fund-loss audit item 5: "manual" is set above for M_Sale_Start() only, but the string was
+                                    // tested, so a plain Sale_Start() carrying it skipped the bid signature. From the height the
+                                    // bypass is honoured only for M_Sale_Start().
+                                    var saleStartRulesActive = (blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.SaleStartBidRulesHeight;
+                                    if (bidSignature == "manual" && (function == "M_Sale_Start()" || !saleStartRulesActive))
                                         signatureVerify = true;
 
                                     if(!signatureVerify)

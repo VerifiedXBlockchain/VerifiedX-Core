@@ -275,6 +275,30 @@ namespace VerifiedXCore.Models.DST
 
         #endregion
 
+        #region Local bid lookup (fund-loss audit item 5)
+        /// <summary>
+        /// Whether THIS wallet placed a bid that a Sale_Start naming <paramref name="bidderAddress"/> as the next owner can
+        /// legitimately conclude: a sent bid from that address under <paramref name="purchaseKey"/> whose amount (or
+        /// auto-bid ceiling) covers <paramref name="amount"/>. The incoming-sale handler auto-signed the completion from
+        /// the wallet with no such check, so a Sale_Start that skipped the bid signature made the named wallet pay.
+        /// </summary>
+        public static bool HasLocalSentBid(string? bidderAddress, string? purchaseKey, decimal amount)
+        {
+            if (string.IsNullOrEmpty(bidderAddress) || string.IsNullOrEmpty(purchaseKey) || amount <= 0M)
+                return false;
+            try
+            {
+                var bids = GetAllBids(BidSendReceive.Sent);
+                if (bids == null) return false;
+                return bids.Any(b => b != null
+                    && string.Equals(b.BidAddress, bidderAddress, StringComparison.Ordinal)
+                    && string.Equals(b.PurchaseKey, purchaseKey, StringComparison.Ordinal)
+                    && Math.Max(b.BidAmount, b.MaxBidAmount) >= amount);
+            }
+            catch { return false; }
+        }
+        #endregion
+
         #region Verify Bid Signature
         public static bool VerifyBidSignature(string keySign, decimal amount, string address, string bidSignature)
         {
