@@ -3,6 +3,7 @@ using VerifiedXCore.Data;
 using VerifiedXCore.Extensions;
 using VerifiedXCore.Models;
 using VerifiedXCore.Models.Privacy;
+using VerifiedXCore.Utilities;
 
 namespace VerifiedXCore.Privacy
 {
@@ -16,13 +17,68 @@ namespace VerifiedXCore.Privacy
 
         public static Task<(bool Success, string Message)> TryRebuildFromBlocksAsync(
             LiteDatabase privacyDb,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            Action<string>? progress = null)
         {
             var col = BlockchainData.GetBlocks();
             if (col == null)
                 return Task.FromResult((false, "Blockchain blocks collection unavailable."));
-            var blocks = col.Query().OrderBy(x => x.Height).ToList();
+            // One streaming pass in height order (ToList() of every block exhausted memory on mainnet); only the blocks
+            // that carry a private transaction are kept, which is a handful.
+            var blocks = CollectBlocksWithPrivateTransactions(col.Query().OrderBy(x => x.Height).ToEnumerable(), cancellationToken, progress);
             return TryReplayPrivateBlocksAsync(blocks, privacyDb, cancellationToken);
+        }
+
+        /// <summary>The blocks of <paramref name="blocksInHeightOrder"/> that carry at least one private transaction.</summary>
+        public static List<Block> CollectBlocksWithPrivateTransactions(IEnumerable<Block> blocksInHeightOrder, CancellationToken cancellationToken = default, Action<string>? progress = null)
+        {
+            var kept = new List<Block>();
+            long scanned = 0;
+            foreach (var block in blocksInHeightOrder)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                scanned++;
+                if (progress != null && scanned % 500_000 == 0)
+                    progress($"privacy rebuild: scanned {scanned} blocks (height {block.Height}), {kept.Count} carry private transactions");
+                if (block.Transactions != null && block.Transactions.Any(t => PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)))
+                    kept.Add(block);
+            }
+            progress?.Invoke($"privacy rebuild: scanned {scanned} blocks, {kept.Count} carry private transactions");
+            return kept;
+        }
+
+        /// <summary>Marker written next to the databases once this build has rebuilt the privacy store from the chain.</summary>
+        public const string RebuiltMarkerFileName = "DB_Privacy.rebuilt-v1";
+
+        /// <summary>
+        /// Fund-loss audit item 1 (stage 1): the shielded pool supply becomes consensus state at
+        /// Globals.PrivateTxSupplyRulesHeight, so every node must hold the figure the chain implies. DB_Privacy was never
+        /// rebuilt in the field and older builds replayed state without wiping it, so nodes drifted (one mainnet node
+        /// recorded -100,025.80 VFX where the chain implies -100,028.90). This runs the rebuild once per database
+        /// folder, synchronously at startup before any networking, and leaves a marker so later starts skip it.
+        /// A failed rebuild leaves no marker (retried next start) and is logged as an error.
+        /// </summary>
+        public static async Task EnsureRebuiltOnceAtStartupAsync(Action<string>? log = null)
+        {
+            log ??= Console.WriteLine;
+            string markerPath;
+            try { markerPath = Path.Combine(GetPathUtility.GetDatabasePath(), RebuiltMarkerFileName); }
+            catch (Exception ex) { ErrorLogUtility.LogError($"Privacy rebuild: database path unavailable: {ex.Message}", "PrivacyDbRebuildService.EnsureRebuiltOnceAtStartupAsync()"); return; }
+            if (File.Exists(markerPath))
+                return;
+            log("Privacy store: one-time rebuild from the chain (fund-loss audit item 1); this scans every block once...");
+            var started = DateTime.UtcNow;
+            var (ok, message) = await TryRebuildFromBlocksAsync(PrivacyDbContext.GetPrivacyDb(), default, log).ConfigureAwait(false);
+            if (!ok)
+            {
+                ErrorLogUtility.LogError($"Privacy store rebuild FAILED (will retry at next start): {message}", "PrivacyDbRebuildService.EnsureRebuiltOnceAtStartupAsync()");
+                log($"Privacy store rebuild FAILED: {message}");
+                return;
+            }
+            try { File.WriteAllText(markerPath, $"{DateTime.UtcNow:O} {message}"); }
+            catch (Exception ex) { ErrorLogUtility.LogError($"Privacy rebuild: could not write marker {markerPath}: {ex.Message}", "PrivacyDbRebuildService.EnsureRebuiltOnceAtStartupAsync()"); }
+            var vfx = ShieldedPoolService.GetState("VFX");
+            log($"Privacy store rebuilt in {(DateTime.UtcNow - started).TotalSeconds:F0}s: {message} VFX pool supply {vfx?.TotalShieldedSupply ?? 0M}, commitments {vfx?.TotalCommitments ?? 0}.");
         }
 
         /// <summary>

@@ -71,11 +71,17 @@ namespace VerifiedXCore.Privacy
             return null;
         }
 
-        /// <summary>Committed shielded supply of an asset (0 when the pool has no row yet).</summary>
+        /// <summary>
+        /// Committed shielded supply of an asset as the floor judges it: the pool row's TotalShieldedSupply (0 when there
+        /// is no row yet) plus the asset's entry in Globals.ShieldedSupplyCorrections, which adds back what the forged
+        /// mainnet unshields subtracted from the recorded counter (see there).
+        /// </summary>
         public static decimal CommittedSupply(string asset)
         {
-            try { return ShieldedPoolService.GetState(asset)?.TotalShieldedSupply ?? 0M; }
-            catch { return 0M; }
+            decimal recorded;
+            try { recorded = ShieldedPoolService.GetState(asset)?.TotalShieldedSupply ?? 0M; }
+            catch { recorded = 0M; }
+            return recorded + (Globals.ShieldedSupplyCorrections.TryGetValue(asset ?? "", out var correction) ? correction : 0M);
         }
 
         /// <summary>All rules of this stage for one transaction at <paramref name="height"/>; (true, "") when inert or passing.</summary>

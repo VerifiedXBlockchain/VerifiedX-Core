@@ -142,6 +142,7 @@ namespace VerifiedXCore
             // Fund-loss audit (Oct 2026): one activation for all its rules. TODO testnet: set ABOVE the testnet tip at deploy.
             Globals.PrivateTxSupplyRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PrivateTxSupplyRulesHeight;
             Globals.AddressFreezeHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.AddressFreezeHeight;
+            if (Globals.IsTestNet) Globals.ShieldedSupplyCorrections.Clear(); // the testnet pool was never forged against
 
             //Perform network time sync
             _ = NetworkTimeService.Run();
@@ -404,6 +405,10 @@ namespace VerifiedXCore
                 _ = NFTAssetFileUtility.AssociateDefaultVBTCLogosForExistingContracts(); //associates default logo with existing vBTC V2 contracts (no beacons)
 
             _ = Bitcoin.Services.VBTCService.BackfillLocalVBTCContracts(); //creates missing local vBTC V2 records for contracts local accounts own or hold balances on
+
+            // Fund-loss audit item 1: the shielded pool supply is consensus state from PrivateTxSupplyRulesHeight, so the
+            // privacy store is rebuilt from the chain once per database folder (synchronous, before networking).
+            await PrivacyDbRebuildService.EnsureRebuiltOnceAtStartupAsync();
 
             // PLONK params: auto-download if not present, then load into native FFI (background — non-blocking)
             _ = Task.Run(async () =>

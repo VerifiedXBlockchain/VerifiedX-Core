@@ -279,6 +279,20 @@ namespace VerifiedXCore
         public static long PrivateTxSupplyRulesHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// Item 1 (stage 1): what the supply floor adds back to a pool's recorded TotalShieldedSupply before judging a
+        /// transaction. The four forged VFX unshields of 2026-09-08 (blocks 7,255,776 to 7,257,080) subtracted
+        /// 2 + 2 + 29 + 100,000 VFX plus four fixed fees of 0.000003 from the VFX pool counter, which now reads about
+        /// -100,029 while honest holders' notes (about 4.1 VFX) are unspent in the tree. Without this the floor would
+        /// refuse every honest unshield until that much VFX was shielded again. The counter itself is left as the chain
+        /// wrote it (no state write, nothing to replay or rebuild); only the judgement is corrected. Mainnet only: the
+        /// testnet pool was never forged against (Program.cs clears it there).
+        /// </summary>
+        public static Dictionary<string, decimal> ShieldedSupplyCorrections = new(StringComparer.Ordinal)
+        {
+            ["VFX"] = 100_033.000012M,
+        };
+
+        /// <summary>
         /// Item 1 (freeze, owner decision 2026-10-08): from this height no transaction may be sent from an address in
         /// FrozenAddresses. The one entry received 100,033 VFX through the forged unshields of 2026-09-08 (blocks up to
         /// 7,257,080) and still holds about 100,028; whether to burn that balance is a separate decision. Receiving stays

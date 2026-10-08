@@ -30,6 +30,7 @@ namespace VerifiedXCore.Tests
         private readonly Block _priorLastBlock;
         private readonly long _priorGate;
         private readonly string _root;
+        private readonly System.Collections.Generic.Dictionary<string, decimal> _priorCorrections;
 
         public FundLoss01_PrivateTxSupplyRulesTests()
         {
@@ -40,6 +41,9 @@ namespace VerifiedXCore.Tests
             _priorLastBlock = Globals.LastBlock;
             _priorGate = Globals.PrivateTxSupplyRulesHeight;
             Globals.PrivateTxSupplyRulesHeight = Gate;
+            // The mainnet counter correction is not part of these fixtures (one test sets it explicitly).
+            _priorCorrections = new(Globals.ShieldedSupplyCorrections, StringComparer.Ordinal);
+            Globals.ShieldedSupplyCorrections.Clear();
             DbContext.Initialize();
 
             _root = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
@@ -54,6 +58,8 @@ namespace VerifiedXCore.Tests
             try { DbContext.CloseDB(); } catch { }
             Globals.LastBlock = _priorLastBlock;
             Globals.PrivateTxSupplyRulesHeight = _priorGate;
+            Globals.ShieldedSupplyCorrections.Clear();
+            foreach (var (k, v) in _priorCorrections) Globals.ShieldedSupplyCorrections[k] = v;
             Globals.CustomPath = _priorCustomPath;
             try { Directory.Delete(_tempRoot, recursive: true); } catch { }
         }
@@ -250,6 +256,50 @@ namespace VerifiedXCore.Tests
             Assert.Equal(SameBlockDebitGuard.LedgerKind.ShieldedPool, debit.Key.Kind);
             Assert.Equal("VFX", debit.Key.ContractUid);
             Assert.Equal(0.3M + Globals.PrivateTxFixedFee, debit.Amount);
+        }
+
+        // ── Mainnet counter correction: the forged debits are added back to the judgement, not to the counter ─────
+
+        [Fact]
+        public async Task RecordedCounterDrivenNegativeByForgedUnshields_HonestUnshieldStillPasses_WithTheCorrection()
+        {
+            var prior = new System.Collections.Generic.Dictionary<string, decimal>(Globals.ShieldedSupplyCorrections, StringComparer.Ordinal);
+            try
+            {
+                // The mainnet shape: honest notes 4.099985 outstanding, counter 4.099985 - 100,033.000012.
+                var pool = ShieldedPoolService.GetOrCreateState("VFX");
+                pool.TotalShieldedSupply = 4.099985M - 100_033.000012M;
+                PrivacyDbContext.PoolState().Update(pool);
+                TipAtGate();
+
+                Globals.ShieldedSupplyCorrections.Clear();
+                var (okNoCorrection, msgNoCorrection) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 1M));
+                Assert.False(okNoCorrection);
+                Assert.StartsWith(PrivateTxSupplyRules.SupplyReasonPrefix, msgNoCorrection);
+
+                Globals.ShieldedSupplyCorrections["VFX"] = 100_033.000012M;
+                Assert.Equal(4.099985M, PrivateTxSupplyRules.CommittedSupply("VFX"));
+                var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 1M));
+                Assert.True(ok, msg);
+                var (okTooMuch, msgTooMuch) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 4.2M));
+                Assert.False(okTooMuch);
+                Assert.StartsWith(PrivateTxSupplyRules.SupplyReasonPrefix, msgTooMuch);
+
+                // The counter itself is untouched.
+                Assert.Equal(4.099985M - 100_033.000012M, ShieldedPoolService.GetState("VFX")!.TotalShieldedSupply);
+            }
+            finally
+            {
+                Globals.ShieldedSupplyCorrections.Clear();
+                foreach (var (k, v) in prior) Globals.ShieldedSupplyCorrections[k] = v;
+            }
+        }
+
+        [Fact]
+        public void TheMainnetCorrection_IsTheSumOfTheFourForgedDebits()
+        {
+            var fee = Globals.PrivateTxFixedFee;
+            Assert.Equal((2M + fee) + (2M + fee) + (29M + fee) + (100_000M + fee), _priorCorrections["VFX"]); // the build's value, snapshotted by the fixture
         }
 
         // ── Pure rule unit checks ─────────────────────────────────────────────────────────────────────────────────
