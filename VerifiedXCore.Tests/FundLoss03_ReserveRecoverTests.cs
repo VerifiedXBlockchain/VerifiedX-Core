@@ -44,8 +44,12 @@ namespace VerifiedXCore.Tests
             Globals.ReserveRecoverRulesHeight = Gate;
             DbContext.Initialize();
 
-            _vault = NewKey();
-            _reserve = ReserveAccount.GetHumanAddress(_vault.Pub);
+            // Not every key yields the xRBX prefix (the audit's own tests hit this); keep drawing until one does.
+            do
+            {
+                _vault = NewKey();
+                _reserve = ReserveAccount.GetHumanAddress(_vault.Pub);
+            } while (!_reserve.StartsWith("xRBX", StringComparison.Ordinal));
             _recovery = NewKey();
             _recoveryAddress = AccountData.GetHumanAddress(_recovery.Pub);
             StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = _reserve, Balance = 1000M, Nonce = 0, RecoveryAccount = _recoveryAddress });
