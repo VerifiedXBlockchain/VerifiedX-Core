@@ -1,0 +1,186 @@
+using System;
+using System.IO;
+using System.Threading.Tasks;
+using Newtonsoft.Json;
+using VerifiedXCore;
+using VerifiedXCore.Bitcoin.FROST;
+using VerifiedXCore.Data;
+using VerifiedXCore.EllipticCurve;
+using VerifiedXCore.Extensions;
+using VerifiedXCore.Models;
+using VerifiedXCore.Services;
+using VerifiedXCore.Utilities;
+using Xunit;
+
+namespace VerifiedXCore.Tests
+{
+    /// <summary>
+    /// Fund-loss audit item 4. Consensus (Globals.VaultRewriteRulesHeight): Update(), Transfer(), Evolve() and
+    /// Devolve() may not give a contract that is not a vBTC V2 vault a TokenizationV2 feature - the attestation runs on
+    /// creations only and the vault-code freeze only covers contracts already recognised as vaults. Validator-local:
+    /// a FROST key-share record filed under another on-chain contract is never adopted for a different contract.
+    /// </summary>
+    [Collection("DbContextSequential")]
+    public class FundLoss04_VaultRewriteTests : IDisposable
+    {
+        private const long Gate = 1000;
+        private const string Refused = "A contract that is not a vBTC V2 vault cannot be given a TokenizationV2 feature";
+        private readonly string _tempRoot;
+        private readonly string? _priorCustomPath;
+        private readonly Block _priorLastBlock;
+        private readonly long _priorGate;
+        private readonly (PrivateKey Key, string Pub, string Address) _owner;
+
+        public FundLoss04_VaultRewriteTests()
+        {
+            _tempRoot = Path.Combine(Path.GetTempPath(), $"fl04_{Guid.NewGuid():N}") + Path.DirectorySeparatorChar;
+            Directory.CreateDirectory(_tempRoot);
+            _priorCustomPath = Globals.CustomPath;
+            Globals.CustomPath = _tempRoot;
+            _priorLastBlock = Globals.LastBlock;
+            _priorGate = Globals.VaultRewriteRulesHeight;
+            Globals.VaultRewriteRulesHeight = Gate;
+            DbContext.Initialize();
+            _owner = NewKey();
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = _owner.Address, Balance = 1000M, Nonce = 0 });
+        }
+
+        public void Dispose()
+        {
+            try { DbContext.CloseDB(); } catch { }
+            Globals.LastBlock = _priorLastBlock;
+            Globals.VaultRewriteRulesHeight = _priorGate;
+            Globals.CustomPath = _priorCustomPath;
+            try { Directory.Delete(_tempRoot, recursive: true); } catch { }
+        }
+
+        private static (PrivateKey Key, string Pub, string Address) NewKey()
+        {
+            var key = new PrivateKey("secp256k1");
+            var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+            return (key, pub, AccountData.GetHumanAddress(pub));
+        }
+
+        private string PlainNft()
+        {
+            var uid = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
+            {
+                SmartContractUID = uid, ContractData = VbtcTestContracts.PlainNftContractData,
+                MinterAddress = _owner.Address, OwnerAddress = _owner.Address, IsLocked = false, Nonce = 0,
+            });
+            return uid;
+        }
+
+        private string Vault(string depositAddress, string groupKey)
+        {
+            var uid = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
+            {
+                SmartContractUID = uid, ContractData = VbtcTestContracts.VaultContractData(uid, "xVictimMinter", depositAddress, groupKey),
+                MinterAddress = "xVictimMinter", OwnerAddress = "xVictimMinter", IsLocked = false, Nonce = 0,
+            });
+            return uid;
+        }
+
+        private Transaction Rewrite(string function, string scUid, string body, TransactionType type = TransactionType.NFT_TX, string? to = null)
+        {
+            var tx = new Transaction
+            {
+                FromAddress = _owner.Address, ToAddress = to ?? _owner.Address, Amount = 0M, Fee = 0.00000100M, Nonce = 0,
+                Timestamp = TimeUtil.GetTime(), TransactionType = type,
+                Data = JsonConvert.SerializeObject(new[] { new { Function = function, ContractUID = scUid, Data = body, MD5List = "NA", ToAddress = to ?? _owner.Address } }),
+            };
+            tx.Build();
+            tx.Signature = SignatureService.CreateSignature(tx.Hash, _owner.Key, _owner.Pub);
+            return tx;
+        }
+
+        private const string VictimDeposit = "bc1pvictimvictimvictimvictimvictimvictimvictimvictimvictim00";
+        private const string VictimGroupKey = "02" + "ab" + "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+
+        private static void TipBelowGate() => Globals.LastBlock = new Block { Height = Gate - 2 };
+        private static void TipAtGate() => Globals.LastBlock = new Block { Height = Gate - 1 };
+
+        // ── Consensus rule ────────────────────────────────────────────────────────────────────────────────────────
+
+        [Theory]
+        [InlineData("Update()")]
+        [InlineData("Evolve()")]
+        [InlineData("Devolve()")]
+        public async Task PlainNftRewrittenIntoAVault_PassesBelowGate_RefusedAtGate(string function)
+        {
+            var uid = PlainNft();
+            var forgedVault = VbtcTestContracts.VaultContractData(uid, _owner.Address, VictimDeposit, VictimGroupKey);
+
+            TipBelowGate();
+            var (okBelow, msgBelow) = await TransactionValidatorService.VerifyTX(Rewrite(function, uid, forgedVault));
+            Assert.True(okBelow, msgBelow); // the hole
+
+            TipAtGate();
+            var (okAt, msgAt) = await TransactionValidatorService.VerifyTX(Rewrite(function, uid, forgedVault));
+            Assert.False(okAt);
+            Assert.StartsWith(Refused, msgAt);
+        }
+
+        [Fact]
+        public async Task TransferCarryingAVaultBody_ForAPlainNft_RefusedAtGate()
+        {
+            var uid = PlainNft();
+            var forgedVault = VbtcTestContracts.VaultContractData(uid, _owner.Address, VictimDeposit, VictimGroupKey);
+            TipAtGate();
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(Rewrite("Transfer()", uid, forgedVault, to: NewKey().Address));
+            Assert.False(ok);
+            Assert.StartsWith(Refused, msg);
+        }
+
+        [Fact]
+        public async Task HonestRewrites_PassAtGate()
+        {
+            TipAtGate();
+            var uid = PlainNft();
+            // Update with a plain body (changed description) is still a plain NFT.
+            var plainChanged = VbtcTestContracts.BuildContractData(uid, _owner.Address, null, description: "a new description");
+            var (okUpdate, msgUpdate) = await TransactionValidatorService.VerifyTX(Rewrite("Update()", uid, plainChanged));
+            Assert.True(okUpdate, msgUpdate);
+            // A transfer resending the stored body unchanged.
+            var (okTransfer, msgTransfer) = await TransactionValidatorService.VerifyTX(Rewrite("Transfer()", uid, VbtcTestContracts.PlainNftContractData, to: NewKey().Address));
+            Assert.True(okTransfer, msgTransfer);
+        }
+
+        [Fact]
+        public void Rule_IsInertBelowGate_AndLeavesVaultsToTheExistingFreeze()
+        {
+            var nft = PlainNft();
+            var forgedVault = VbtcTestContracts.VaultContractData(nft, _owner.Address, VictimDeposit, VictimGroupKey);
+            Assert.Null(LedgerIntegrityRules.VaultNotCreatedByRewrite(Rewrite("Update()", nft, forgedVault), Gate - 1));
+            Assert.NotNull(LedgerIntegrityRules.VaultNotCreatedByRewrite(Rewrite("Update()", nft, forgedVault), Gate));
+
+            var vault = Vault(VictimDeposit, VictimGroupKey);
+            var tx = Rewrite("Update()", vault, VbtcTestContracts.PlainNftContractData);
+            Assert.Null(LedgerIntegrityRules.VaultNotCreatedByRewrite(tx, Gate)); // a stored vault is VaultCodeUnchanged's business
+            Assert.NotNull(LedgerIntegrityRules.VaultCodeUnchanged(tx));
+
+            Assert.Null(LedgerIntegrityRules.VaultNotCreatedByRewrite(Rewrite("Update()", "never:1", forgedVault), Gate)); // missing: the function's own rule
+            Assert.True(LedgerIntegrityRules.CarriesTokenizationV2(forgedVault));
+            Assert.False(LedgerIntegrityRules.CarriesTokenizationV2(VbtcTestContracts.PlainNftContractData));
+            Assert.False(LedgerIntegrityRules.CarriesTokenizationV2("not a body"));
+        }
+
+        // ── Validator-local: the FROST key-share fallback ─────────────────────────────────────────────────────────
+
+        [Fact]
+        public void KeyShareFiledUnderAnotherOnChainContract_IsNeverAdopted()
+        {
+            var victim = Vault(VictimDeposit, VictimGroupKey);
+            var forged = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
+
+            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(victim, forged, out var reason));
+            Assert.Contains(victim, reason);
+
+            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(victim, victim, out _));                       // its own contract
+            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(Guid.NewGuid().ToString("N"), forged, out _)); // still filed under a ceremony id
+            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(null, forged, out _));
+        }
+    }
+}

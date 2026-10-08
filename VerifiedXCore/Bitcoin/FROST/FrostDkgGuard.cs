@@ -52,6 +52,27 @@ namespace VerifiedXCore.Bitcoin.FROST
         }
 
         /// <summary>
+        /// Fund-loss audit item 4 (validator-local): whether a key-store record filed under <paramref name="recordScUid"/>
+        /// may be used - and relabelled - for a signing request on <paramref name="requestScUid"/>. A record is adopted only
+        /// while it is still filed under its ceremony id (or under the requested contract itself). One filed under a
+        /// DIFFERENT contract that exists on chain is that contract's share: the group-key fallbacks matched on the key
+        /// alone, so a contract body copying a victim vault's group key had the victim's share signed to its own
+        /// withdrawals and the record relabelled to the forged contract.
+        /// </summary>
+        public static bool MayAdoptKeyRecord(string? recordScUid, string requestScUid, out string reason)
+        {
+            reason = "";
+            if (string.IsNullOrEmpty(recordScUid) || string.Equals(recordScUid, requestScUid, StringComparison.Ordinal))
+                return true;
+            SmartContractStateTrei? other = null;
+            try { other = SmartContractStateTrei.GetSmartContractState(recordScUid); } catch { }
+            if (other == null)
+                return true; // a ceremony id, never a contract
+            reason = $"the key share found by group key is filed under contract {other.SmartContractUID}, which exists on chain; it is that vault's share and is not used for {requestScUid}.";
+            return false;
+        }
+
+        /// <summary>
         /// Group public key for a contract from the local contract record or the state trei
         /// (TokenizationV2 feature). Empty when the contract does not exist yet.
         /// </summary>

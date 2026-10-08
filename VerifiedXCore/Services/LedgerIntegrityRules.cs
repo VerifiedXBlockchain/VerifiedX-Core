@@ -2,6 +2,7 @@ using Newtonsoft.Json.Linq;
 using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Bitcoin.Services;
 using VerifiedXCore.Models;
+using VerifiedXCore.Models.SmartContracts;
 using VerifiedXCore.Utilities;
 
 namespace VerifiedXCore.Services
@@ -126,6 +127,44 @@ namespace VerifiedXCore.Services
             return string.Equals(payload.Data, stored.ContractData, StringComparison.Ordinal)
                 ? null
                 : "A vBTC V2 vault's contract code cannot be changed after creation.";
+        }
+
+        // ── Fund-loss audit item 4: a contract that is not a vault cannot become one by rewrite ──────────────────
+
+        /// <summary>
+        /// From Globals.VaultRewriteRulesHeight, the body carried by a rewriting function for a stored contract that is
+        /// NOT a vBTC V2 vault must not decompile to a TokenizationV2 feature. The DKG attestation (NEW-26) runs on
+        /// creations only and VaultCodeUnchanged only protects contracts already recognised as vaults, so an owner could
+        /// Update() a plain NFT into a vault naming any deposit address and FROST group key. A body identical to the
+        /// stored one is never decompiled (honest transfers resend it unchanged). Null when the rule passes.
+        /// </summary>
+        public static string? VaultNotCreatedByRewrite(Transaction tx, long height)
+        {
+            if (tx?.Data == null || height < Globals.VaultRewriteRulesHeight) return null;
+            var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+            if (payload.Function == null || !ContractRewritingFunctions.Contains(payload.Function)
+                || string.IsNullOrEmpty(payload.ContractUID) || string.IsNullOrEmpty(payload.Data))
+                return null;
+            var stored = SmartContractStateTrei.GetSmartContractState(payload.ContractUID);
+            if (stored == null || VBTCService.IsVbtcV2Contract(stored))
+                return null; // missing: the function's own rule; a vault: VaultCodeUnchanged
+            if (string.Equals(payload.Data, stored.ContractData, StringComparison.Ordinal))
+                return null;
+            return CarriesTokenizationV2(payload.Data)
+                ? "A contract that is not a vBTC V2 vault cannot be given a TokenizationV2 feature; vaults are created only with a validator-attested key ceremony."
+                : null;
+        }
+
+        /// <summary>Whether a carried contract body decompiles to a contract with a TokenizationV2 feature. Never throws.</summary>
+        public static bool CarriesTokenizationV2(string? body)
+        {
+            if (string.IsNullOrEmpty(body)) return false;
+            try
+            {
+                var scMain = SmartContractMain.GenerateSmartContractInMemory(body);
+                return scMain?.Features?.Any(f => f != null && f.FeatureName == FeatureName.TokenizationV2) == true;
+            }
+            catch { return false; }
         }
 
         // ── vBTC V2 vault transaction size ─────────────────────────────────────────────────────────────────────

@@ -1945,10 +1945,20 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 if (keyStore != null && !string.IsNullOrEmpty(keyStore.KeyPackage)
                                     && !string.Equals(keyStore.SmartContractUID, request.SmartContractUID, StringComparison.Ordinal))
                                 {
-                                    LogUtility.Log($"[FROST] Key found via vault group key for SC={request.SmartContractUID} (was stored as {keyStore.SmartContractUID}). Auto-updating.",
-                                        "FrostStartup.SignStart");
-                                    if (FrostValidatorKeyStore.UpdateSmartContractUID(keyStore.Id, request.SmartContractUID))
-                                        keyStore.SmartContractUID = request.SmartContractUID;
+                                    // Fund-loss audit item 4: a record filed under ANOTHER on-chain contract is that
+                                    // contract's share; a body copying its group key must not borrow (and relabel) it.
+                                    if (!FrostDkgGuard.MayAdoptKeyRecord(keyStore.SmartContractUID, request.SmartContractUID, out var adoptReason))
+                                    {
+                                        ErrorLogUtility.LogError($"FROST sign/start REFUSED for SC={request.SmartContractUID}: {adoptReason}", "FrostStartup.SignStart");
+                                        keyStore = null;
+                                    }
+                                    else
+                                    {
+                                        LogUtility.Log($"[FROST] Key found via vault group key for SC={request.SmartContractUID} (was stored as {keyStore.SmartContractUID}). Auto-updating.",
+                                            "FrostStartup.SignStart");
+                                        if (FrostValidatorKeyStore.UpdateSmartContractUID(keyStore.Id, request.SmartContractUID))
+                                            keyStore.SmartContractUID = request.SmartContractUID;
+                                    }
                                 }
                             }
 
@@ -1963,6 +1973,11 @@ namespace VerifiedXCore.Bitcoin.FROST
                                     {
                                         ErrorLogUtility.LogError($"FROST sign/start: CeremonyId fallback key for SC={request.SmartContractUID} has group key {keyStore.GroupPublicKey} but the vault key is {expectedGroupKey}; refusing to relabel or use it.",
                                             "FrostStartup.SignStart");
+                                        keyStore = null;
+                                    }
+                                    else if (!FrostDkgGuard.MayAdoptKeyRecord(keyStore.SmartContractUID, request.SmartContractUID, out var adoptReason))
+                                    {
+                                        ErrorLogUtility.LogError($"FROST sign/start REFUSED for SC={request.SmartContractUID}: {adoptReason}", "FrostStartup.SignStart");
                                         keyStore = null;
                                     }
                                     else
@@ -1983,7 +1998,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 {
                                     keyStore = FrostValidatorKeyStore.GetKeyPackageByGroupPublicKey(vbtcContract.FrostGroupPublicKey, myAddr);
                                     if (keyStore != null && !string.IsNullOrEmpty(keyStore.KeyPackage)
-                                        && FrostDkgGuard.KeyPackageMatchesContract(keyStore.GroupPublicKey, expectedGroupKey))
+                                        && FrostDkgGuard.KeyPackageMatchesContract(keyStore.GroupPublicKey, expectedGroupKey)
+                                        && FrostDkgGuard.MayAdoptKeyRecord(keyStore.SmartContractUID, request.SmartContractUID, out _)) // fund-loss audit item 4
                                     {
                                         // Auto-fix: update the key store record to use the real SCUID
                                         LogUtility.Log($"[FROST] Key found via GroupPublicKey fallback for SC={request.SmartContractUID} (was stored as {keyStore.SmartContractUID}). Auto-updating.",

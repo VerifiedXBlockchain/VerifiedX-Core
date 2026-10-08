@@ -311,6 +311,16 @@ namespace VerifiedXCore
         public static long ReserveRecoverRulesHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// Item 4: vault-ness is immutable in both directions. NEW-26 freezes a stored vault's code; this adds the inverse:
+        /// a contract that is not a vault cannot be given a TokenizationV2 feature by Update(), Transfer(), Evolve(),
+        /// Devolve() or ChangeEvolveStateSpecific() (the DKG attestation runs on creations only, so an NFT owner could
+        /// rewrite a plain NFT into a vault carrying any deposit address and FROST group key - including a victim
+        /// vault's). No such rewrite exists on mainnet (history scan 2026-10-08: 30 body-changing rewrites, none adds
+        /// TokenizationV2).
+        /// </summary>
+        public static long VaultRewriteRulesHeight = FundLossAuditHeight;
+
+        /// <summary>
         /// Item 1 (freeze, owner decision 2026-10-08): from this height no transaction may be sent from an address in
         /// FrozenAddresses. The one entry received 100,033 VFX through the forged unshields of 2026-09-08 (blocks up to
         /// 7,257,080) and still holds about 100,028; whether to burn that balance is a separate decision. Receiving stays

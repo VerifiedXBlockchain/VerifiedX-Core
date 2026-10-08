@@ -503,6 +503,11 @@ namespace VerifiedXCore.Services
             if (vaultCodeError != null)
                 return (txResult, vaultCodeError);
 
+            // Fund-loss audit item 4: the inverse - a contract that is not a vault cannot be rewritten into one.
+            var vaultRewriteError = LedgerIntegrityRules.VaultNotCreatedByRewrite(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (vaultRewriteError != null)
+                return (txResult, vaultRewriteError);
+
             // NEW-28: legacy V1 vBTC is retired and frozen (height-gated; block height at verify, tip + 1 at admission).
             var v1FrozenError = LedgerIntegrityRules.VbtcV1Frozen(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1));
             if (v1FrozenError != null)
