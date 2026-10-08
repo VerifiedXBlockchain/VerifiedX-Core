@@ -384,11 +384,22 @@ namespace VerifiedXCore.Bitcoin.Models
         /// </summary>
         public static decimal GetCompletedWithdrawalAmount(string address, string scUID, long currentHeight)
         {
+            var completedWithdrawals = GetCompletedWithdrawalRows(scUID, currentHeight, address);
+            return completedWithdrawals.Any() ? completedWithdrawals.Sum(x => x.Amount) : 0M;
+        }
+
+        /// <summary>
+        /// The Completed rows the owner add-back counts on <paramref name="scUID"/> at <paramref name="currentHeight"/>
+        /// (before V2WithdrawalOwnerAddBackFixHeight only <paramref name="requesterFilter"/>'s). Fund-loss audit item 8
+        /// reads the same rows to find the ones whose Bitcoin transaction has not confirmed.
+        /// </summary>
+        public static List<VBTCWithdrawalRequest> GetCompletedWithdrawalRows(string scUID, long currentHeight, string? requesterFilter = null)
+        {
             var vwrDb = GetVBTCWithdrawalRequestDb();
             if (vwrDb == null)
             {
-                ErrorLogUtility.LogError("GetVBTCWithdrawalRequestDb() returned a null value.", "VBTCWithdrawalRequest.GetCompletedWithdrawalAmount()");
-                return 0M;
+                ErrorLogUtility.LogError("GetVBTCWithdrawalRequestDb() returned a null value.", "VBTCWithdrawalRequest.GetCompletedWithdrawalRows()");
+                return new List<VBTCWithdrawalRequest>();
             }
 
             // Status must be Completed, not merely IsCompleted: cancellation votes
@@ -403,14 +414,9 @@ namespace VerifiedXCore.Bitcoin.Models
 
             var fixActive = currentHeight >= Globals.V2WithdrawalOwnerAddBackFixHeight;
             if (!fixActive)
-                completedWithdrawals = completedWithdrawals.Where(x => x.RequestorAddress == address).ToList();
+                completedWithdrawals = completedWithdrawals.Where(x => x.RequestorAddress == requesterFilter).ToList();
 
-            if (completedWithdrawals.Any())
-            {
-                return completedWithdrawals.Sum(x => x.Amount);
-            }
-
-            return 0M;
+            return completedWithdrawals;
         }
         #endregion
 

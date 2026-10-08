@@ -175,7 +175,7 @@ namespace VerifiedXCore.Services
                     ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scState, requesterAddress, gateHeight);
 
                     deposit = await VbtcOwnerDeposit.CheckAsync(() => Bitcoin.Services.VBTCService.ResolveDepositAddress(scState, null),
-                        input.Amount - ledgerBalance, blockDownloads, blockVerify);
+                        input.Amount - ledgerBalance, blockDownloads, blockVerify, scState.SmartContractUID, blockHeight ?? Globals.LastBlock?.Height ?? 0); // fund-loss audit item 8
                     if (deposit.Status == OwnerDepositStatus.Unverifiable)
                         return (false, $"{VbtcOwnerDeposit.UnverifiableReason} (contract {input.SCUID})");
 
@@ -1535,7 +1535,7 @@ namespace VerifiedXCore.Services
 
                                                     // Owner: deposit address balance (Electrum, never for mined blocks) plus ledger.
                                                     var deposit = await VbtcOwnerDeposit.CheckAsync(() => Bitcoin.Services.VBTCService.ResolveDepositAddress(scStateTreiRec, null),
-                                                        amount.Value - ledgerBalance, blockDownloads, blockVerify);
+                                                        amount.Value - ledgerBalance, blockDownloads, blockVerify, scStateTreiRec.SmartContractUID, blockHeight ?? Globals.LastBlock?.Height ?? 0); // fund-loss audit item 8
                                                     if (deposit.Status == OwnerDepositStatus.Unverifiable)
                                                         return (txResult, VbtcOwnerDeposit.UnverifiableReason);
                                                     decimal depositBalance = deposit.DepositBalance;
@@ -2898,7 +2898,7 @@ namespace VerifiedXCore.Services
                                     ledgerBalanceMulti = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateMulti, txRequest.FromAddress, blockHeight ?? Globals.LastBlock?.Height ?? 0);
 
                                     var depositMulti = await VbtcOwnerDeposit.CheckAsync(() => Bitcoin.Services.VBTCService.ResolveDepositAddress(scStateMulti, null),
-                                        input.Amount - ledgerBalanceMulti, blockDownloads, blockVerify);
+                                        input.Amount - ledgerBalanceMulti, blockDownloads, blockVerify, scStateMulti.SmartContractUID, blockHeight ?? Globals.LastBlock?.Height ?? 0); // fund-loss audit item 8
                                     if (depositMulti.Status == OwnerDepositStatus.Unverifiable)
                                         return (txResult, $"{VbtcOwnerDeposit.UnverifiableReason} (contract {input.SCUID})");
                                     decimal depositBalanceMulti = depositMulti.DepositBalance;
@@ -3040,7 +3040,7 @@ namespace VerifiedXCore.Services
 
                                     // Owner: deposit address balance (Electrum, never for mined blocks) plus ledger.
                                     var deposit = await VbtcOwnerDeposit.CheckAsync(() => Bitcoin.Services.VBTCService.ResolveDepositAddress(scStateTreiRec, null),
-                                        amount.Value - ledgerBalance + pendingReserveOut, blockDownloads, blockVerify);
+                                        amount.Value - ledgerBalance + pendingReserveOut, blockDownloads, blockVerify, scStateTreiRec.SmartContractUID, blockHeight ?? Globals.LastBlock?.Height ?? 0); // fund-loss audit item 8
                                     if (deposit.Status == OwnerDepositStatus.Unverifiable)
                                         return (txResult, VbtcOwnerDeposit.UnverifiableReason);
                                     decimal depositBalance = deposit.DepositBalance;
@@ -3423,7 +3423,7 @@ namespace VerifiedXCore.Services
                                     // Deposit address balance: Electrum is never asked during block validation (the
                                     // owner-shortfall check below is bypassed under blockVerify regardless).
                                     deposit = await VbtcOwnerDeposit.CheckAsync(() => Bitcoin.Services.VBTCService.ResolveDepositAddress(scState, null),
-                                        amount.Value - ledgerBalance, blockDownloads, blockVerify);
+                                        amount.Value - ledgerBalance, blockDownloads, blockVerify, scState.SmartContractUID, blockHeight ?? Globals.LastBlock?.Height ?? 0); // fund-loss audit item 8
                                     if (deposit.Status == OwnerDepositStatus.Unverifiable)
                                         return (txResult, VbtcOwnerDeposit.UnverifiableReason);
                                     totalBalance = deposit.DepositBalance + ledgerBalance;
@@ -4265,7 +4265,7 @@ namespace VerifiedXCore.Services
                 ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateTreiRec, fromAddress, currentHeight);
 
                 var deposit = await VbtcOwnerDeposit.CheckAsync(() => Bitcoin.Services.VBTCService.ResolveDepositAddress(scStateTreiRec, null),
-                    amount - ledgerBalance, blockDownloads, blockVerify);
+                    amount - ledgerBalance, blockDownloads, blockVerify, scStateTreiRec.SmartContractUID, Globals.LastBlock?.Height ?? 0); // fund-loss audit item 8
                 if (deposit.Status == OwnerDepositStatus.Unverifiable)
                     return (false, VbtcOwnerDeposit.UnverifiableReason);
                 decimal depositBalance = deposit.DepositBalance;

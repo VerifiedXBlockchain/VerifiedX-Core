@@ -390,6 +390,12 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (!answer.Answered)
                         return (false, ledgerBalance, VbtcOwnerDeposit.UnverifiableReason);
                     btcDepositBalance = answer.ConfirmedBtc;
+                    // Fund-loss audit item 8: a Completed withdrawal whose Bitcoin transaction has not confirmed is
+                    // still in that confirmed balance, so its add-back (inside ledgerBalance) is taken out again.
+                    var unconfirmed = await CompletedWithdrawalConfirmation.UnconfirmedAmountAsync(scUid, blockHeight ?? Globals.LastBlock?.Height ?? 0);
+                    if (unconfirmed == null)
+                        return (false, ledgerBalance, VbtcOwnerDeposit.UnverifiableReason);
+                    btcDepositBalance -= unconfirmed.Value;
                 }
 
                 return (true, btcDepositBalance + ledgerBalance, null);
