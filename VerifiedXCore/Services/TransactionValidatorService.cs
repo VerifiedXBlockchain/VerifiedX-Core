@@ -517,6 +517,11 @@ namespace VerifiedXCore.Services
             if (vaultRewriteError != null)
                 return (txResult, vaultRewriteError);
 
+            // Fund-loss audit item 9: a contract's Royalty feature never changes after creation.
+            var royaltyRewriteError = LedgerIntegrityRules.RoyaltyUnchangedByRewrite(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (royaltyRewriteError != null)
+                return (txResult, royaltyRewriteError);
+
             // NEW-28: legacy V1 vBTC is retired and frozen (height-gated; block height at verify, tip + 1 at admission).
             var v1FrozenError = LedgerIntegrityRules.VbtcV1Frozen(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1));
             if (v1FrozenError != null)

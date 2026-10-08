@@ -167,6 +167,56 @@ namespace VerifiedXCore.Services
             catch { return false; }
         }
 
+        // ── Fund-loss audit item 9: a contract's Royalty feature never changes after creation ────────────────────
+
+        /// <summary>
+        /// From Globals.RoyaltyRewriteRulesHeight, the body carried by a rewriting function must keep the stored body's
+        /// Royalty feature exactly (present or not, amount, pay-to address). Evolve()/Devolve() check only not-locked,
+        /// sender == minter and recipient == owner, then overwrite the body, and a sale reads the royalty from the current
+        /// body: the original minter could rewrite a sold NFT to a 99.99% royalty to itself whenever it was unlocked. A
+        /// body identical to the stored one is never decompiled. Null when the rule passes.
+        /// </summary>
+        public static string? RoyaltyUnchangedByRewrite(Transaction tx, long height)
+        {
+            if (tx?.Data == null || height < Globals.RoyaltyRewriteRulesHeight) return null;
+            var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+            if (payload.Function == null || !ContractRewritingFunctions.Contains(payload.Function)
+                || string.IsNullOrEmpty(payload.ContractUID) || string.IsNullOrEmpty(payload.Data))
+                return null;
+            var stored = SmartContractStateTrei.GetSmartContractState(payload.ContractUID);
+            if (stored == null || string.Equals(payload.Data, stored.ContractData, StringComparison.Ordinal))
+                return null;
+            var before = RoyaltyOf(stored.ContractData);
+            var after = RoyaltyOf(payload.Data);
+            if (before == null && after == null) return null;
+            if (before != null && after != null
+                && before.Value.Amount == after.Value.Amount
+                && string.Equals(before.Value.PayTo, after.Value.PayTo, StringComparison.Ordinal))
+                return null;
+            return $"A contract's Royalty feature cannot be changed after creation (stored: {Describe(before)}; carried: {Describe(after)}).";
+        }
+
+        private static string Describe((decimal Amount, string PayTo)? r) => r == null ? "none" : $"{r.Value.Amount} to {r.Value.PayTo}";
+
+        /// <summary>The Royalty feature (amount, pay-to) a contract body decompiles to, or null when it has none. Never throws.</summary>
+        public static (decimal Amount, string PayTo)? RoyaltyOf(string? body)
+        {
+            if (string.IsNullOrEmpty(body)) return null;
+            try
+            {
+                var scMain = SmartContractMain.GenerateSmartContractInMemory(body);
+                var feat = scMain?.Features?.FirstOrDefault(f => f != null && f.FeatureName == FeatureName.Royalty);
+                if (feat == null) return null;
+                var rf = feat.FeatureFeatures as RoyaltyFeature;
+                if (rf == null)
+                {
+                    try { rf = Newtonsoft.Json.JsonConvert.DeserializeObject<RoyaltyFeature>(feat.FeatureFeatures?.ToString() ?? ""); } catch { }
+                }
+                return rf == null ? null : (rf.RoyaltyAmount, rf.RoyaltyPayToAddress ?? "");
+            }
+            catch { return null; }
+        }
+
         // ── vBTC V2 vault transaction size ─────────────────────────────────────────────────────────────────────
 
         public const int DefaultMaxTxSizeBytes = 30 * 1024;

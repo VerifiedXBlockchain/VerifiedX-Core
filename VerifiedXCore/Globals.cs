@@ -340,6 +340,15 @@ namespace VerifiedXCore
         public static long WithdrawalUniqueIdRulesHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// Item 9: a contract's Royalty feature (present or not, amount, pay-to) cannot be changed by Update(),
+        /// Transfer(), Evolve(), Devolve() or ChangeEvolveStateSpecific(). Evolve()/Devolve() check only not-locked,
+        /// sender == minter and recipient == owner and then overwrite the body, and the next sale reads the royalty
+        /// from the current body, so the original minter could rewrite a sold NFT to a 99.99% royalty to itself whenever
+        /// it was unlocked. No such rewrite exists on mainnet (history scan 2026-10-08).
+        /// </summary>
+        public static long RoyaltyRewriteRulesHeight = FundLossAuditHeight;
+
+        /// <summary>
         /// Item 1 (freeze, owner decision 2026-10-08): from this height no transaction may be sent from an address in
         /// FrozenAddresses. The one entry received 100,033 VFX through the forged unshields of 2026-09-08 (blocks up to
         /// 7,257,080) and still holds about 100,028; whether to burn that balance is a separate decision. Receiving stays
