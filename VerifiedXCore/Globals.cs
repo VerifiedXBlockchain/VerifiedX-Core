@@ -349,6 +349,15 @@ namespace VerifiedXCore
         public static long RoyaltyRewriteRulesHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// Item 10 (owner decision 2026-10-08: refuse rather than build the deferral): a reserve (xRBX) account cannot
+        /// send or burn fungible tokens. FTKN_TX was whitelisted for reserves and got a Pending row and unlock time, but
+        /// the token apply moved the balance at once and neither CallBack() nor Recover() touches token accounts, so a
+        /// stolen vault key could empty a reserve's tokens with no 24h window and no recovery. No FTKN_TX from a reserve
+        /// exists on mainnet (history scan 2026-10-08).
+        /// </summary>
+        public static long ReserveTokenRulesHeight = FundLossAuditHeight;
+
+        /// <summary>
         /// Item 1 (freeze, owner decision 2026-10-08): from this height no transaction may be sent from an address in
         /// FrozenAddresses. The one entry received 100,033 VFX through the forged unshields of 2026-09-08 (blocks up to
         /// 7,257,080) and still holds about 100,028; whether to burn that balance is a separate decision. Receiving stays

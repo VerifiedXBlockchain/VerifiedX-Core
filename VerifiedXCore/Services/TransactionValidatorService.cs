@@ -262,6 +262,13 @@ namespace VerifiedXCore.Services
             if (frozenError != null)
                 return (false, frozenError);
 
+            // Fund-loss audit item 10: a reserve cannot send or burn fungible tokens. FTKN_TX is whitelisted for
+            // reserves and gets a Pending row, but the token apply moves the balance at once and neither CallBack()
+            // nor Recover() restores token accounts - no 24h window, no recovery. Refused from the height.
+            var reserveTokenError = LedgerIntegrityRules.ReserveTokenTransfer(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (reserveTokenError != null)
+                return (false, reserveTokenError);
+
 
             // Height-gated vBTC privacy disable (inert until VbtcPrivacyDisableHeight is set).
             // Deterministic under replay/sync: block validation passes the block's own height;

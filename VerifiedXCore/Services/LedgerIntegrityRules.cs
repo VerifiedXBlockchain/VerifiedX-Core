@@ -465,6 +465,27 @@ namespace VerifiedXCore.Services
                 : null;
         }
 
+        // ── Fund-loss audit item 10: a reserve cannot send or burn fungible tokens ───────────────────────────────
+
+        /// <summary>
+        /// From Globals.ReserveTokenRulesHeight an FTKN_TX TokenTransfer() or TokenBurn() sent from a reserve (xRBX)
+        /// address is refused: the transfer was whitelisted for reserves and got a Pending row, but the token apply moved
+        /// the balance at once and neither CallBack() nor Recover() restores token accounts, so a stolen vault key emptied
+        /// a reserve's tokens with no 24h window and no recovery. Other token functions (votes) are untouched. Null when
+        /// the rule passes.
+        /// </summary>
+        public static string? ReserveTokenTransfer(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.ReserveTokenRulesHeight || tx.TransactionType != TransactionType.FTKN_TX
+                || string.IsNullOrEmpty(tx.FromAddress) || !tx.FromAddress.StartsWith("xRBX") || string.IsNullOrEmpty(tx.Data))
+                return null;
+            string? function = null;
+            try { function = JObject.Parse(tx.Data)["Function"]?.ToObject<string?>(); } catch { }
+            return function == "TokenTransfer()" || function == "TokenBurn()"
+                ? "A reserve account cannot send or burn fungible tokens: token transfers are not deferred, callable back or recoverable."
+                : null;
+        }
+
         // ── NEW-16: a coinbase transaction is a plain reward/fee record ─────────────────────────────────────────
 
         public static bool IsCoinbase(Transaction tx) => tx?.FromAddress == "Coinbase_BlkRwd" || tx?.FromAddress == "Coinbase_TrxFees";
