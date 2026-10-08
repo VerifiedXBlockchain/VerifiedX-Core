@@ -362,6 +362,20 @@ namespace VerifiedXCore.Services
             return null;
         }
 
+        // ── Fund-loss audit item 1 (freeze): no transaction from a frozen address ────────────────────────────────
+
+        /// <summary>
+        /// From Globals.AddressFreezeHeight a transaction whose sender is in Globals.FrozenAddresses is refused, whatever
+        /// its type (an NFT sale's inner payments come from the same sender, so they are covered). Null when it passes.
+        /// </summary>
+        public static string? FrozenSender(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.AddressFreezeHeight || string.IsNullOrEmpty(tx.FromAddress)) return null;
+            return Globals.FrozenAddresses.Contains(tx.FromAddress)
+                ? $"Transactions from {tx.FromAddress} are frozen."
+                : null;
+        }
+
         // ── NEW-16: a coinbase transaction is a plain reward/fee record ─────────────────────────────────────────
 
         public static bool IsCoinbase(Transaction tx) => tx?.FromAddress == "Coinbase_BlkRwd" || tx?.FromAddress == "Coinbase_TrxFees";

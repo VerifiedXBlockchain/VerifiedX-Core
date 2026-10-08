@@ -279,6 +279,19 @@ namespace VerifiedXCore
         public static long PrivateTxSupplyRulesHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// Item 1 (freeze, owner decision 2026-10-08): from this height no transaction may be sent from an address in
+        /// FrozenAddresses. The one entry received 100,033 VFX through the forged unshields of 2026-09-08 (blocks up to
+        /// 7,257,080) and still holds about 100,028; whether to burn that balance is a separate decision. Receiving stays
+        /// open. Checked at admission (tip + 1) and in block validation (the block's height), so replay below the height
+        /// is unchanged.
+        /// </summary>
+        public static long AddressFreezeHeight = FundLossAuditHeight;
+        public static readonly HashSet<string> FrozenAddresses = new(StringComparer.Ordinal)
+        {
+            "RB3eeBH258arkuePCJf5NMVMSaUyhyy9g6",
+        };
+
+        /// <summary>
         /// Base (vBTC.b) minting validator set = registered vBTC validators that are ALSO members of
         /// the caster committee. vBTC validator registration is a free self-transaction gated only
         /// by a wallet balance, so mirroring the raw registry onto the Base contract would let a

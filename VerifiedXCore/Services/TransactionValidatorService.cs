@@ -248,6 +248,11 @@ namespace VerifiedXCore.Services
             if (contractUidError != null)
                 return (false, contractUidError);
 
+            // Fund-loss audit item 1 (freeze): nothing is sent from a frozen address at/after AddressFreezeHeight.
+            var frozenError = LedgerIntegrityRules.FrozenSender(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (frozenError != null)
+                return (false, frozenError);
+
 
             // Height-gated vBTC privacy disable (inert until VbtcPrivacyDisableHeight is set).
             // Deterministic under replay/sync: block validation passes the block's own height;

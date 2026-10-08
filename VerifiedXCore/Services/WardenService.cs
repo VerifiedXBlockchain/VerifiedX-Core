@@ -46,6 +46,7 @@ namespace VerifiedXCore.Services
                 Globals.VbtcWithdrawalConcurrencyHeight = Globals.VbtcWithdrawalConcurrencyHeight; // TODO testnet height (above the tip at deploy)
                 Globals.VbtcCancellationVoteRulesHeight = Globals.VbtcCancellationVoteRulesHeight; // TODO testnet height (same value as Program.cs)
                 Globals.PrivateTxSupplyRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PrivateTxSupplyRulesHeight; // fund-loss audit (Oct 2026)
+                Globals.AddressFreezeHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.AddressFreezeHeight;
             }
             else
             {
@@ -65,6 +66,7 @@ namespace VerifiedXCore.Services
                 Globals.VbtcWithdrawalConcurrencyHeight = Globals.VbtcWithdrawalConcurrencyHeight; // TODO mainnet height (at or after WithdrawalEscrowHeight)
                 Globals.VbtcCancellationVoteRulesHeight = Globals.VbtcCancellationVoteRulesHeight; // TODO mainnet height (same value as Program.cs)
                 Globals.PrivateTxSupplyRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PrivateTxSupplyRulesHeight; // fund-loss audit (Oct 2026)
+                Globals.AddressFreezeHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.AddressFreezeHeight;
             }
 
             Config.Config.EstablishConfigFile();
