@@ -264,10 +264,10 @@ namespace VerifiedXCore
         // One release, one fork point: every consensus rule from the Oct 8 2026 fund-loss audit activates at the same
         // mainnet height. Each rule keeps its own constant (so one can be moved alone if ever needed); all are set to
         // FundLossAuditHeight. Must be above the tip when every validator runs this build. Testnet values in Program.cs.
-        /// <summary>Shared mainnet activation height of the fund-loss audit rules (set from the live tip at build).</summary>
-        public const long FundLossAuditHeight = 7_490_000L;
-        /// <summary>Testnet activation of the same rules (Program.cs / WardenService). TODO: set above the testnet tip at deploy.</summary>
-        public const long FundLossAuditTestnetHeight = 1_040_000L;
+        /// <summary>Shared mainnet activation height of the fund-loss audit rules: tip 7,465,190 on 2026-10-08 plus ~24 h (~6,730 blocks/day).</summary>
+        public const long FundLossAuditHeight = 7_472_000L;
+        /// <summary>Testnet activation of the same rules (Program.cs / WardenService): tip 1,092,619 on 2026-10-08 plus ~24 h (~6,500 blocks/day).</summary>
+        public const long FundLossAuditTestnetHeight = 1_099_400L;
 
         /// <summary>
         /// Item 1 (stage 1): a ZK-authorized private transaction (VFX/vBTC unshield, private transfer) may not take more
