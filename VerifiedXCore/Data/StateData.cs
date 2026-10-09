@@ -51,11 +51,38 @@ namespace VerifiedXCore.Data
             await aTrei.InsertBulkSafeAsync(accStTrei);
         }
 
+        /// <summary>
+        /// Fund-loss audit item 1 (burn): at exactly Globals.ForgedVfxBurnHeight, before the block's transactions apply,
+        /// each listed address loses min(balance, listed amount) of VFX. Nothing is credited: the supply shrinks by what
+        /// the forged unshields created. Deterministic (state at the block) and bounded below at zero.
+        /// </summary>
+        public static async Task ApplyForgedVfxBurnsAsync(Block block)
+        {
+            if (block == null || block.Height != Globals.ForgedVfxBurnHeight || Globals.ForgedVfxBurns.Count == 0)
+                return;
+            var accStTrei = GetAccountStateTrei();
+            foreach (var (address, listed) in Globals.ForgedVfxBurns)
+            {
+                var account = GetSpecificAccountStateTrei(address);
+                if (account == null || account.Balance <= 0M || listed <= 0M)
+                {
+                    LogUtility.Log($"Forged-VFX burn at block {block.Height}: {address} holds nothing to burn.", "StateData.ApplyForgedVfxBurnsAsync()");
+                    continue;
+                }
+                var burned = Math.Min(account.Balance, listed);
+                account.Balance -= burned;
+                account.StateRoot = block.StateRoot;
+                await accStTrei.UpdateSafeAsync(account);
+                LogUtility.Log($"Forged-VFX burn at block {block.Height}: {burned} VFX burned from {address} (listed {listed}); balance now {account.Balance}.", "StateData.ApplyForgedVfxBurnsAsync()");
+            }
+        }
+
         public static async Task<bool> UpdateTreis(Block block)
         {
             Globals.TreisUpdating = true;
             StateWriteContext.SetHeight(block.Height); //stamp LastModifiedHeight on state writes for snapshot diffing
             LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13: every apply path uses the block's height
+            await ApplyForgedVfxBurnsAsync(block); // fund-loss audit item 1 (burn): at ForgedVfxBurnHeight, before the block's transactions
             var txList = block.Transactions.ToList();
             var txCount = txList.Count();
             int txTreiUpdateSuccessCount = 0;

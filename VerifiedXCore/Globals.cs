@@ -358,6 +358,20 @@ namespace VerifiedXCore
         public static long ReserveTokenRulesHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// Item 1 (burn, owner decision 2026-10-08): at exactly this block, before its transactions apply, each address in
+        /// ForgedVfxBurns loses the VFX it received from nothing - the four forged unshields of 2026-09-08 paid
+        /// 100,033 VFX plus fees to one address, which still holds about 100,028 (5 went to a reserve registration).
+        /// The burn takes min(balance, listed amount), so the balance never goes below zero and a re-apply of the block
+        /// after a state restore burns the same amount once. Nothing is credited anywhere: the supply shrinks.
+        /// Same height as the freeze (shared FundLossAuditHeight); mainnet only (Program.cs clears it on testnet).
+        /// </summary>
+        public static long ForgedVfxBurnHeight = FundLossAuditHeight;
+        public static Dictionary<string, decimal> ForgedVfxBurns = new(StringComparer.Ordinal)
+        {
+            ["RB3eeBH258arkuePCJf5NMVMSaUyhyy9g6"] = 100_033.000012M,
+        };
+
+        /// <summary>
         /// Item 1 (freeze, owner decision 2026-10-08): from this height no transaction may be sent from an address in
         /// FrozenAddresses. The one entry received 100,033 VFX through the forged unshields of 2026-09-08 (blocks up to
         /// 7,257,080) and still holds about 100,028; whether to burn that balance is a separate decision. Receiving stays
