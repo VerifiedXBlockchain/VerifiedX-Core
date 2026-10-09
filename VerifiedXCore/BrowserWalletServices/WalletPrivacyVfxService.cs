@@ -328,7 +328,13 @@ namespace VerifiedXCore.BrowserWalletServices
                 proofProvingImplemented = PLONKSetup.IsProofProvingImplemented,
                 enforcePlonkProofsForZk = Globals.EnforcePlonkProofsForZk,
                 nativeCapabilities = caps,
-                paramsBytesMirrored = Globals.PLONKParamsFileSize
+                paramsBytesMirrored = Globals.PLONKParamsFileSize,
+                // Fund-loss audit item 1, stage 2: what this node can do once proofs are required.
+                vfxPi2VerifyAvailable = PLONKSetup.IsVfxPi2VerifyAvailable,
+                v1ProvingAvailable = PLONKSetup.IsV1ProvingAvailable,
+                circuitPoseidonAvailable = PoseidonV1.IsAvailable,
+                proofRulesHeight = Globals.PrivateTxProofRulesHeight,
+                proofRulesActive = PrivacyEpoch.ProofRulesActive((Globals.LastBlock?.Height ?? 0) + 1)
             };
         }
 
