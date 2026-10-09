@@ -80,8 +80,16 @@
     <None Include="Plonk\win\plonk_ffi.dll" Link="plonk_ffi.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Include="Plonk\linux\libplonk_ffi.so" Link="libplonk_ffi.so">
+    <!-- x64 .so excluded on linux-arm64 publishes: the arm rule below links the SAME output
+         filename (libplonk_ffi.so) and the two must not collide (re-audit 9 Oct 2026: arm64 shipped the x86-64 file). -->
+    <None Include="Plonk\linux\libplonk_ffi.so" Link="libplonk_ffi.so" Condition="'$(RuntimeIdentifier)' != 'linux-arm64'">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+    <None Update="Plonk\linux-arm\libplonk_ffi.so" Condition="'$(RuntimeIdentifier)' == 'linux-arm64' And Exists('Plonk\linux-arm\libplonk_ffi.so')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Link>libplonk_ffi.so</Link>
     </None>
     <None Include="Plonk\mac\libplonk_ffi.dylib" Link="libplonk_ffi.dylib">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
