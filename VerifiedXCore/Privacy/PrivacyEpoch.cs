@@ -9,13 +9,14 @@ namespace VerifiedXCore.Privacy
     /// compute), the circuit-compatible tree starts with the public dummy note at leaf 0, and from then on a private
     /// transaction must carry a proof that verifies against its on-chain fields.
     ///
-    /// The dummy note (amount 0, randomness 0, spent with viewing key 0) fills the circuits' second input when a wallet
+    /// The dummy note (amount 0, randomness 0, owner key of nullifier key 0, spent with nullifier key 0) fills the circuits' second input when a wallet
     /// spends a single note. Its nullifier is one public constant: consensus never records it as spent and never counts
     /// it as a spend, and a transaction may carry it at most once.
     /// </summary>
     public static class PrivacyEpoch
     {
         private static readonly object Lock = new();
+        private static byte[]? _dummyOwnerPk;
         private static byte[]? _dummyNoteHash;
         private static byte[]? _dummyNullifier;
         private static byte[]? _dummyCommitment;
@@ -26,10 +27,16 @@ namespace VerifiedXCore.Privacy
         /// <summary>The one block in which the pools are reset. No private transaction is valid in it.</summary>
         public static bool IsResetBlock(long height) => height == Globals.PrivateTxProofRulesHeight;
 
-        /// <summary><c>Poseidon(0, 0)</c>: the dummy note's hash, leaf 0 of every epoch tree.</summary>
+        /// <summary><c>Poseidon(OwnerPkDomain, 0)</c>: the dummy note's owner key (nullifier key 0).</summary>
+        public static byte[] DummyOwnerPk
+        {
+            get { lock (Lock) { return (byte[])(_dummyOwnerPk ??= PoseidonV1.OwnerPk(PrivacyField.Zero32)).Clone(); } }
+        }
+
+        /// <summary><c>Poseidon(0, 0, DummyOwnerPk)</c>: the dummy note's hash, leaf 0 of every epoch tree (v2 owner-bound note).</summary>
         public static byte[] DummyNoteHash
         {
-            get { lock (Lock) { return (byte[])(_dummyNoteHash ??= PoseidonV1.NoteHash(0, PrivacyField.Zero32)).Clone(); } }
+            get { lock (Lock) { return (byte[])(_dummyNoteHash ??= PoseidonV1.NoteHashV2(0, PrivacyField.Zero32, DummyOwnerPk)).Clone(); } }
         }
 
         /// <summary><c>Poseidon(0, DummyNoteHash, 0)</c>: the one nullifier every single-note spend carries.</summary>

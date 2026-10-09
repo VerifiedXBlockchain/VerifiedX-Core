@@ -11,7 +11,7 @@ namespace VerifiedXCore.Privacy
     /// <list type="bullet">
     /// <item>before Globals.PrivateTxProofRulesHeight: the original Phase 3 shape (legacy note hashes and nullifiers, one or
     /// two inputs, v0 proof population when that prover exists - it never did in the field);</item>
-    /// <item>from the height (fund-loss audit item 1, stage 2): circuit-compatible note hashes and nullifiers, exactly two
+    /// <item>from the height (fund-loss audit item 1, stage 2): circuit-compatible owner-bound note hashes and nullifiers (stage 3), exactly two
     /// spent notes (the public dummy note fills a single-note spend), always a change output, canonical randomness, and a
     /// real PLONK proof produced by <see cref="PrivateTxProverV1"/> and verified locally before the transaction leaves.</item>
     /// </list>
@@ -56,9 +56,15 @@ namespace VerifiedXCore.Privacy
                 error = "Transparent fee must be positive.";
                 return false;
             }
-            if (!ShieldedAddressCodec.TryDecodeEncryptionKey(recipientZfxAddress, out _, out var zerr))
+            if (!ShieldedAddressCodec.TryDecode(recipientZfxAddress, out _, out var recipientOwnerPk, out var zerr))
             {
                 error = zerr ?? "Invalid recipient zfx address.";
+                return false;
+            }
+            if (epoch && recipientOwnerPk == null)
+            {
+                // Stage 3: a note names its owner; a v1 address carries none, so nothing sent to it could ever be spent.
+                error = "The recipient's zfx_ address carries no owner key (a pre-stage-3 address); ask the recipient for their current zfx_ address.";
                 return false;
             }
             if (!PrivacyPedersenAmount.TryCommitAmount(shieldAmount, out var r32, out var g1, out var perr))
@@ -82,7 +88,7 @@ namespace VerifiedXCore.Privacy
             string? noteHashB64 = null;
             ulong scaledAmt = 0;
             if (PrivacyPedersenAmount.TryToScaledU64(shieldAmount, out scaledAmt, out _))
-                noteHashB64 = Convert.ToBase64String(NoteHashService.ComputeAt(height, scaledAmt, r32));
+                noteHashB64 = Convert.ToBase64String(NoteHashService.ComputeAt(height, scaledAmt, r32, recipientOwnerPk));
 
             var merkle = ShieldedPoolService.GetCurrentMerkleRootB64(AssetVfx, privacyDb);
             var payload = new PrivateTxPayload
@@ -122,7 +128,7 @@ namespace VerifiedXCore.Privacy
 
             if (epoch)
             {
-                if (!PrivateTxProverV1.TryProveShield(scaledAmt, r32, out var proof, out var pErr)
+                if (!PrivateTxProverV1.TryProveShield(scaledAmt, r32, recipientOwnerPk!, out var proof, out var pErr)
                     || !PrivateTxProverV1.TryAttachAndVerify(tx, payload, proof!, out pErr))
                 {
                     tx = null;
@@ -190,7 +196,8 @@ namespace VerifiedXCore.Privacy
             var ordered = inputs.OrderBy(x => x.TreePosition).ToList();
             var nulls = new List<string>();
             var positions = new List<long>();
-            byte[]? vkCanonical = epoch ? PrivacyField.ReduceLe(keys.ViewingKey32) : null;
+            byte[]? nkCanonical = epoch ? keys.NullifierKey32 : null; // v2: the nullifier key whose owner key is in our notes
+            byte[]? selfOwnerPk = epoch ? keys.OwnerPk32 : null;
             var spentNotes = new List<PrivateTxProverV1.SpentNote>();
             foreach (var inp in ordered)
             {
@@ -198,7 +205,7 @@ namespace VerifiedXCore.Privacy
                 {
                     if (!TryEpochNote(inp, out var note, out var nErr)) { error = nErr; return false; }
                     spentNotes.Add(note!);
-                    nulls.Add(Convert.ToBase64String(PrivateTxProverV1.NullifierFor(note!, vkCanonical!)));
+                    nulls.Add(Convert.ToBase64String(PrivateTxProverV1.NullifierFor(note!, nkCanonical!)));
                 }
                 else
                 {
@@ -233,8 +240,8 @@ namespace VerifiedXCore.Privacy
                 string? chNoteHash = null;
                 if (PrivacyPedersenAmount.TryToScaledU64(change, out var chScaled, out _))
                 {
-                    chNoteHash = Convert.ToBase64String(NoteHashService.ComputeAt(height, chScaled, rCh));
-                    changeNote = new PrivateTxProverV1.OutputNote(chScaled, rCh);
+                    chNoteHash = Convert.ToBase64String(NoteHashService.ComputeAt(height, chScaled, rCh, selfOwnerPk));
+                    changeNote = new PrivateTxProverV1.OutputNote(chScaled, rCh, selfOwnerPk ?? PrivacyField.Zero32);
                 }
                 var plainCh = PrivacyPedersenAmount.CreatePlainNote(change, rCh, AssetVfx);
                 byte[] sealedCh;
@@ -290,7 +297,7 @@ namespace VerifiedXCore.Privacy
 
             if (epoch)
             {
-                if (!TryBuildWitnesses(spentNotes, vkCanonical!, privacyDb, out var witnesses, out var root, out var wErr))
+                if (!TryBuildWitnesses(spentNotes, nkCanonical!, privacyDb, out var witnesses, out var root, out var wErr))
                 {
                     tx = null; error = wErr; return false;
                 }
@@ -299,7 +306,7 @@ namespace VerifiedXCore.Privacy
                 {
                     tx = null; error = sErr; return false;
                 }
-                if (!PrivateTxProverV1.TryProveUnshield(witnesses!, transparentScaled, changeNote!, feeScaled, root!, out var proof, out var pErr)
+                if (!PrivateTxProverV1.TryProveUnshield(witnesses!, transparentScaled, changeNote!, feeScaled, root!, PlonkPublicInputsV2.RecipientTag32(transparentToAddress), out var proof, out var pErr)
                     || !PrivateTxProverV1.TryAttachAndVerify(tx, payload, proof!, out pErr))
                 {
                     tx = null; error = pErr; return false;
@@ -343,9 +350,15 @@ namespace VerifiedXCore.Privacy
                 error = "Payment amount must be positive.";
                 return false;
             }
-            if (!ShieldedAddressCodec.TryDecodeEncryptionKey(recipientZfxAddress, out _, out var zerr))
+            if (!ShieldedAddressCodec.TryDecode(recipientZfxAddress, out _, out var recipientOwnerPk, out var zerr))
             {
                 error = zerr ?? "Invalid recipient zfx address.";
+                return false;
+            }
+            if (epoch && recipientOwnerPk == null)
+            {
+                // Stage 3: a note names its owner; a v1 address carries none, so nothing sent to it could ever be spent.
+                error = "The recipient's zfx_ address carries no owner key (a pre-stage-3 address); ask the recipient for their current zfx_ address.";
                 return false;
             }
             var fee = Globals.PrivateTxFixedFee;
@@ -360,7 +373,8 @@ namespace VerifiedXCore.Privacy
             var ordered = inputs.OrderBy(x => x.TreePosition).ToList();
             var nulls = new List<string>();
             var positions = new List<long>();
-            byte[]? vkCanonical = epoch ? PrivacyField.ReduceLe(keys.ViewingKey32) : null;
+            byte[]? nkCanonical = epoch ? keys.NullifierKey32 : null; // v2: the nullifier key whose owner key is in our notes
+            byte[]? selfOwnerPk = epoch ? keys.OwnerPk32 : null;
             var spentNotes = new List<PrivateTxProverV1.SpentNote>();
             foreach (var inp in ordered)
             {
@@ -368,7 +382,7 @@ namespace VerifiedXCore.Privacy
                 {
                     if (!TryEpochNote(inp, out var note, out var nErr)) { error = nErr; return false; }
                     spentNotes.Add(note!);
-                    nulls.Add(Convert.ToBase64String(PrivateTxProverV1.NullifierFor(note!, vkCanonical!)));
+                    nulls.Add(Convert.ToBase64String(PrivateTxProverV1.NullifierFor(note!, nkCanonical!)));
                 }
                 else
                 {
@@ -408,7 +422,7 @@ namespace VerifiedXCore.Privacy
             string? payNoteHash = null;
             ulong payScaled = 0;
             if (PrivacyPedersenAmount.TryToScaledU64(paymentAmount, out payScaled, out _))
-                payNoteHash = Convert.ToBase64String(NoteHashService.ComputeAt(height, payScaled, rPay));
+                payNoteHash = Convert.ToBase64String(NoteHashService.ComputeAt(height, payScaled, rPay, recipientOwnerPk));
 
             var outs = new List<PrivateShieldedOutput>
             {
@@ -420,7 +434,7 @@ namespace VerifiedXCore.Privacy
                     EncryptedNoteB64 = Convert.ToBase64String(sealedPay)
                 }
             };
-            var outputNotes = new List<PrivateTxProverV1.OutputNote> { new(payScaled, rPay) };
+            var outputNotes = new List<PrivateTxProverV1.OutputNote> { new(payScaled, rPay, recipientOwnerPk ?? PrivacyField.Zero32) };
 
             if (change > 0 || epoch)
             {
@@ -432,7 +446,7 @@ namespace VerifiedXCore.Privacy
                 string? chNoteHash = null;
                 ulong chScaled = 0;
                 if (PrivacyPedersenAmount.TryToScaledU64(change, out chScaled, out _))
-                    chNoteHash = Convert.ToBase64String(NoteHashService.ComputeAt(height, chScaled, rCh));
+                    chNoteHash = Convert.ToBase64String(NoteHashService.ComputeAt(height, chScaled, rCh, selfOwnerPk));
                 var plainCh = PrivacyPedersenAmount.CreatePlainNote(change, rCh, AssetVfx);
                 try
                 {
@@ -444,7 +458,7 @@ namespace VerifiedXCore.Privacy
                         NoteHashB64 = chNoteHash,
                         EncryptedNoteB64 = Convert.ToBase64String(sealedCh)
                     });
-                    outputNotes.Add(new PrivateTxProverV1.OutputNote(chScaled, rCh));
+                    outputNotes.Add(new PrivateTxProverV1.OutputNote(chScaled, rCh, selfOwnerPk ?? PrivacyField.Zero32));
                 }
                 catch (Exception ex)
                 {
@@ -490,7 +504,7 @@ namespace VerifiedXCore.Privacy
 
             if (epoch)
             {
-                if (!TryBuildWitnesses(spentNotes, vkCanonical!, privacyDb, out var witnesses, out var root, out var wErr))
+                if (!TryBuildWitnesses(spentNotes, nkCanonical!, privacyDb, out var witnesses, out var root, out var wErr))
                 {
                     tx = null; error = wErr; return false;
                 }
@@ -541,7 +555,7 @@ namespace VerifiedXCore.Privacy
             return true;
         }
 
-        private static bool TryBuildWitnesses(List<PrivateTxProverV1.SpentNote> notes, byte[] vkCanonical, LiteDB.LiteDatabase? privacyDb,
+        private static bool TryBuildWitnesses(List<PrivateTxProverV1.SpentNote> notes, byte[] nkCanonical, LiteDB.LiteDatabase? privacyDb,
             out PlonkProverV1.TransferInputWitness[]? witnesses, out byte[]? root, out string? error)
         {
             witnesses = null;
@@ -551,7 +565,7 @@ namespace VerifiedXCore.Privacy
             for (var i = 0; i < notes.Count; i++)
             {
                 var isDummy = notes[i].AmountScaled == 0 && notes[i].TreePosition == 0;
-                if (!PrivateTxProverV1.TryBuildInput(AssetVfx, notes[i], isDummy ? PrivacyField.Zero32 : vkCanonical, privacyDb, out var w, out var r, out error))
+                if (!PrivateTxProverV1.TryBuildInput(AssetVfx, notes[i], isDummy ? PrivacyField.Zero32 : nkCanonical, privacyDb, out var w, out var r, out error))
                     return false;
                 list[i] = w!;
                 root ??= r;

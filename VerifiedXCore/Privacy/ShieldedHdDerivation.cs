@@ -54,7 +54,7 @@ namespace VerifiedXCore.Privacy
             var encPriv = DeriveValidPrivateKeyScalar(viewing, EncPrivDomain);
             var encKey = new Key(encPriv);
             var pub33 = encKey.PubKey.ToBytes();
-            var zfx = ShieldedAddressCodec.EncodeEncryptionKey(pub33);
+            var zfx = ShieldedAddressCodec.Encode(pub33, ShieldedKeyMaterial.OwnerPkFromViewingKey(viewing)); // v2: carries the owner key (stage 3)
 
             return new ShieldedKeyMaterial
             {
@@ -109,7 +109,7 @@ namespace VerifiedXCore.Privacy
             var encPriv = DeriveValidPrivateKeyScalar(viewing, EncPrivDomain);
             var encKey = new Key(encPriv);
             var pub33 = encKey.PubKey.ToBytes();
-            var zfx = ShieldedAddressCodec.EncodeEncryptionKey(pub33);
+            var zfx = ShieldedAddressCodec.Encode(pub33, ShieldedKeyMaterial.OwnerPkFromViewingKey(viewing)); // v2: carries the owner key (stage 3)
 
             return new ShieldedKeyMaterial
             {

@@ -13,6 +13,10 @@ namespace VerifiedXCore.Privacy
         private static int _v1CircuitsProbe = -1;
         private static int _v1ProveProbe = -1;
         private static int _vfxPi2Probe = -1;
+        private static int _v2CircuitsProbe = -1;
+
+        /// <summary>Whether the loaded library carries the v2 owner-bound circuits (<see cref="PlonkNative.CapV2Circuits"/>, VXPLNK04). The proof-rules epoch requires it.</summary>
+        public static bool IsV2CircuitsAvailable => _v2CircuitsProbe == 1;
 
         /// <summary>
         /// Whether the loaded library verifies v1 proofs against VFXPI1 version-2 public inputs (<see cref="PlonkNative.CapVfxPi2Verify"/>).
@@ -37,6 +41,7 @@ namespace VerifiedXCore.Privacy
                 _v1CircuitsProbe = (caps & PlonkNative.CapV1Circuits) != 0 ? 1 : 0;
                 _v1ProveProbe = (caps & PlonkNative.CapV1Prove) != 0 ? 1 : 0;
                 _vfxPi2Probe = (caps & PlonkNative.CapVfxPi2Verify) != 0 ? 1 : 0;
+                _v2CircuitsProbe = (caps & PlonkNative.CapV2Circuits) != 0 ? 1 : 0;
             }
             catch
             {
@@ -45,6 +50,7 @@ namespace VerifiedXCore.Privacy
                 _v1CircuitsProbe = 0;
                 _v1ProveProbe = 0;
                 _vfxPi2Probe = 0;
+                _v2CircuitsProbe = 0;
             }
         }
 

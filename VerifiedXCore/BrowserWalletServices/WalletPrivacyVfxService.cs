@@ -24,7 +24,8 @@ namespace VerifiedXCore.BrowserWalletServices
 
                 return new
                 {
-                    zfxAddress = w.ShieldedAddress,
+                    zfxAddress = ShieldedWalletService.CurrentAddress(w), // v2 (carries the owner key): the address to receive at from stage 3
+                    legacyZfxAddress = w.ShieldedAddress,
                     transparentSourceAddress = w.TransparentSourceAddress ?? "",
                     vfxShieldedBalance = vfxBal,
                     unspentNotes = (w.UnspentCommitments ?? new List<UnspentCommitment>())

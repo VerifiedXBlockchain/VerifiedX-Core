@@ -56,7 +56,7 @@ namespace VerifiedXCore.Tests
                 L($"pedersen_commit(field random): {PlonkNative.pedersen_commit(amount, rand, g1f)}");
                 L($"note hash (NoteHashService, falls back to poseidon_hash when poseidon_note_hash is absent): {Convert.ToHexString(NoteHashService.Compute(amount, rand))}");
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                var code = PlonkProverV1.TryProveShield(amount, rand, out var proof, out var pi);
+                var code = PlonkProverV1.TryProveShield(amount, rand, PoseidonV1.OwnerPk(PrivacyField.Zero32), out var proof, out var pi);
                 L($"shield prove: code={code} proofLen={proof?.Length} piLen={pi?.Length} in {sw.ElapsedMilliseconds} ms");
                 if (code == PlonkNative.Success && proof != null && pi != null)
                 {
@@ -128,7 +128,7 @@ namespace VerifiedXCore.Tests
                         var indices = new byte[PlonkNative.ScalarSize * PlonkNative.TreeDepth];
                         for (var lvl = 0; lvl < PlonkNative.TreeDepth; lvl++)
                             indices[lvl * PlonkNative.ScalarSize] = (byte)((idx >> lvl) & 1); // LE field element: low byte first
-                        inputs[k] = new PlonkProverV1.TransferInputWitness { AmountScaled = notes[idx].Amount, Randomness32 = notes[idx].Rand, ViewingKey32 = vk, TreePosition = (ulong)idx, MerklePath = padded, MerkleIndices = indices };
+                        inputs[k] = new PlonkProverV1.TransferInputWitness { AmountScaled = notes[idx].Amount, Randomness32 = notes[idx].Rand, NullifierKey32 = vk, TreePosition = (ulong)idx, MerklePath = padded, MerkleIndices = indices };
                     }
                     L($"[{variant}] root={Convert.ToHexString(treeRoot!)}");
                 ulong fee = 300; // 0.000003 VFX scaled
@@ -136,7 +136,7 @@ namespace VerifiedXCore.Tests
                 ulong change = 300_000_000 + 200_000_000 - transparent - fee;
                 var changeRand = FieldRandom();
                 sw.Restart();
-                code = PlonkProverV1.TryProveUnshield(inputs, transparent, change, changeRand, fee, treeRoot!, out proof, out pi);
+                code = PlonkProverV1.TryProveUnshield(inputs, transparent, change, changeRand, PoseidonV1.OwnerPk(vk), fee, treeRoot!, PrivacyField.Zero32, out proof, out pi);
                 L($"[{variant}] unshield prove: code={code} proofLen={proof?.Length} piLen={pi?.Length} in {sw.ElapsedMilliseconds} ms");
                 if (code == PlonkNative.Success && proof != null && pi != null)
                 {

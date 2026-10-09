@@ -130,7 +130,7 @@ namespace VerifiedXCore.Tests
         public void PublicInputsV2_LayoutMatchesTheNativeLibrary()
         {
             Assert.Equal(112, PlonkPublicInputsV2.TotalLength(PlonkCircuitType.Shield));
-            Assert.Equal(184, PlonkPublicInputsV2.TotalLength(PlonkCircuitType.Unshield));
+            Assert.Equal(216, PlonkPublicInputsV2.TotalLength(PlonkCircuitType.Unshield)); // v3: + recipient tag
             Assert.Equal(208, PlonkPublicInputsV2.TotalLength(PlonkCircuitType.Transfer));
             Assert.Equal(144, PlonkPublicInputsV2.TotalLength(PlonkCircuitType.Fee));
 
@@ -139,9 +139,9 @@ namespace VerifiedXCore.Tests
             var tx = Unshield(4M, new[] { n0, PrivacyEpoch.DummyNullifier }, new[] { change });
             Assert.True(PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _));
             Assert.True(PlonkPublicInputsV2.TryBuild(tx, payload!, out var blob, out var err), err);
-            Assert.Equal(184, blob.Length);
+            Assert.Equal(216, blob.Length);
             Assert.Equal("VFXPI1", System.Text.Encoding.ASCII.GetString(blob, 0, 6));
-            Assert.Equal(2, blob[6]);
+            Assert.Equal(3, blob[6]);
             Assert.Equal((byte)PlonkCircuitType.Unshield, blob[7]);
             Assert.Equal(PlonkPublicInputsV2.AssetTag32("VFX"), blob[8..40]);
             Assert.Equal(_root, blob[40..72]);
@@ -150,6 +150,9 @@ namespace VerifiedXCore.Tests
             Assert.Equal(n0, blob[88..120]);
             Assert.Equal(PrivacyEpoch.DummyNullifier, blob[120..152]);
             Assert.Equal(Convert.FromBase64String(change.NoteHashB64!), blob[152..184]);
+            Assert.Equal(PlonkPublicInputsV2.RecipientTag32(tx.ToAddress), blob[184..216]); // stage 3: the recipient is a public input
+            Assert.True(PrivacyField.IsCanonicalLe(blob[184..216]));
+            Assert.NotEqual(PlonkPublicInputsV2.RecipientTag32(NewAddress()), blob[184..216]);
 
             var shield = Shield();
             PrivateTxPayloadCodec.TryDecode(shield.Data, out var sp, out _);

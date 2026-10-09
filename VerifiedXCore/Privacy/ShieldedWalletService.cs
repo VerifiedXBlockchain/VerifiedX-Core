@@ -53,8 +53,34 @@ namespace VerifiedXCore.Privacy
         public static ShieldedWallet? FindByZfxAddress(string zfxAddress, LiteDatabase? db = null)
         {
             var target = db ?? PrivacyDbContext.GetPrivacyDb();
-            return target.GetCollection<ShieldedWallet>(PrivacyDbContext.PRIV_WALLETS)
-                .FindOne(x => x.ShieldedAddress == zfxAddress);
+            var col = target.GetCollection<ShieldedWallet>(PrivacyDbContext.PRIV_WALLETS);
+            var exact = col.FindOne(x => x.ShieldedAddress == zfxAddress);
+            if (exact != null)
+                return exact;
+            // Stage 3: the same keys have a v1 and a v2 address string; a row stored under one is found by the other.
+            if (!ShieldedAddressCodec.TryDecodeEncryptionKey(zfxAddress, out var enc, out _))
+                return null;
+            foreach (var w in col.FindAll())
+            {
+                if (ShieldedAddressCodec.TryDecodeEncryptionKey(w.ShieldedAddress, out var e2, out _) && e2.AsSpan().SequenceEqual(enc))
+                    return w;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// The address this wallet row should be paid at now: the v2 encoding (encryption key + owner key) of its keys,
+        /// whatever string the row was created with. Falls back to the stored string when the keys cannot be read.
+        /// </summary>
+        public static string CurrentAddress(ShieldedWallet w)
+        {
+            try
+            {
+                if (w?.ViewingKey == null || w.ViewingKey.Length != 32) return w?.ShieldedAddress ?? "";
+                if (!ShieldedAddressCodec.TryDecodeEncryptionKey(w.ShieldedAddress, out var enc, out _)) return w.ShieldedAddress;
+                return ShieldedAddressCodec.Encode(enc, ShieldedKeyMaterial.OwnerPkFromViewingKey(w.ViewingKey));
+            }
+            catch { return w?.ShieldedAddress ?? ""; }
         }
 
         /// <summary>Builds a wallet row from HD material; optionally wraps spending+encryption secrets with <paramref name="password"/>.</summary>

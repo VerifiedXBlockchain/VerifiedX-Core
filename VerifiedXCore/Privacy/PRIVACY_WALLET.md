@@ -59,11 +59,31 @@ Notes for integrators:
 | GET | `GetShieldedVBTCBalance` | Per-contract shielded balance |
 | GET | `GetShieldedVBTCPoolState/{scUID}` | Pool state |
 
+## Stage 3: owner-bound notes (fund-loss re-audit, Oct 2026)
+
+The stage-2 circuits let anyone who knew a note's amount and randomness (its sender always does) spend it with any key,
+once per key, and an unshield could be copied with another recipient. From the proof-rules epoch the v2 circuits apply:
+
+- **A note names its owner**: `note_hash = Poseidon(amount, randomness, owner_pk)` with
+  `owner_pk = Poseidon("VFX_OWNR", nullifier_key)`; a spend proves knowledge of the nullifier key, so only the owner can
+  spend and the nullifier is unique per note. The nullifier key is the viewing key reduced into the field
+  (`ShieldedKeyMaterial.NullifierKey32`), so the viewing key remains spend authority as before.
+- **The unshield recipient is a public input** (`recipient_tag` = SHA-256 of the address, reduced): a redirected copy
+  fails its proof.
+- **v2 `zfx_` addresses** carry the owner key next to the encryption key. The same keys have a v1 and a v2 string; both
+  decode, rows created under v1 are found by either, and `GetShieldedAddresses` reports `zfxAddress` (v2, what to be
+  paid at) plus `legacyZfxAddress`. In the epoch a v1 recipient address is refused ("carries no owner key").
+- **Params**: `VXPLNK04` (`vfx_plonk_v2.params`, 405 MB, deterministic setup); `VXPLNK03` is refused by the library.
+  Public-input blobs are `VFXPI1` version 3; capability bit 64 (`CapV2Circuits`).
+- Tests: `PrivacyStage2_RoundTripTests.AStrangerWhoKnowsTheNote_CannotSpendIt_WithAnotherKey` and the redirect check in
+  `UnshieldOneNote_...` reproduce both re-audit attacks against the new circuits; the plonk repository's
+  `v1_vfxpi2.rs` does the same natively.
+
 ## Parameters & PLONK
 
 - Universal params: env **`VFX_PLONK_PARAMS_PATH`**, file formats **`VXPLNK01`** / **`VXPLNK02`** — see [`../Plonk/PARAMS.md`](../Plonk/PARAMS.md).
 - **`VXPLNK02`** required for native **`plonk_prove_v0`** (legacy stub proving).
-- **`VXPLNK03`** (prover keys for the v1 circuits) required for real proving and for the `PrivacyStage2_RoundTripTests` / `PrivacyStage2_RawApiTests` proof tests (`VFX_PLONK_PARAMS`).
+- **`VXPLNK04`** (`vfx_plonk_v2.params`; prover keys for the v2 owner-bound circuits) required for real proving and for the `PrivacyStage2_RoundTripTests` / `PrivacyStage2_RawApiTests` proof tests (`VFX_PLONK_PARAMS`). `VXPLNK03` is refused.
 
 ## Automated tests (privacy only)
 

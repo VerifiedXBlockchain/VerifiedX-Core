@@ -9,16 +9,16 @@ namespace VerifiedXCore.Privacy
     /// </summary>
     public static class PLONKParamsDownloader
     {
-        /// <summary>GitHub Release URL for the VXPLNK03 params file.</summary>
+        /// <summary>GitHub Release URL for the VXPLNK04 params file (stage 3, v2 owner-bound circuits; deterministic setup, 405 MB).</summary>
         public const string DownloadUrl =
-            "https://github.com/VerifiedXBlockchain/plonk/releases/download/v1/vfx_plonk_v1.params";
+            "https://github.com/VerifiedXBlockchain/plonk/releases/download/v2/vfx_plonk_v2.params";
 
         /// <summary>Expected SHA-256 hash (lowercase hex) of the params file.</summary>
         public const string ExpectedSha256 =
-            "e4ea423e068eb949c5b1321908da1b263fd472700272e879058dc5f55166d85c";
+            "ca06d521f197a3e91b7bf03e464321ac0e395b3bec8490632b10dadbc1288d6c";
 
         /// <summary>Local filename stored inside the PlonkParams directory.</summary>
-        public const string ParamsFileName = "vfx_plonk_v1.params";
+        public const string ParamsFileName = "vfx_plonk_v2.params";
 
         /// <summary>
         /// Ensures the PLONK params file is available locally.

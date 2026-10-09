@@ -98,6 +98,40 @@ namespace VerifiedXCore.Tests
             Assert.NotEqual(PoseidonV1.NoteHash(100_000_000, r), PoseidonV1.NoteHash(100_000_000, PrivacyField.RandomCanonical()));
         }
 
+        /// <summary>Stage 3: the v2 note names its owner; the owner key is a domain-separated Poseidon of the nullifier key.</summary>
+        [Fact]
+        public void OwnerKeyAndNoteHashV2_AreWhatTheCircuitsCompute()
+        {
+            var nk = PrivacyField.RandomCanonical();
+            var r = PrivacyField.RandomCanonical();
+            var owner = PoseidonV1.OwnerPk(nk);
+            Assert.Equal(PoseidonV1.Hash2(PrivacyField.FromUInt64(PoseidonV1.OwnerPkDomain), nk), owner);
+            Assert.Equal(0x524E574F5F584656UL, PoseidonV1.OwnerPkDomain);
+            Assert.Equal("VFX_OWNR", System.Text.Encoding.ASCII.GetString(BitConverter.GetBytes(PoseidonV1.OwnerPkDomain)));
+            Assert.Equal(PoseidonV1.Hash3(Fr(100_000_000), r, owner), PoseidonV1.NoteHashV2(100_000_000, r, owner));
+            Assert.NotEqual(PoseidonV1.NoteHashV2(100_000_000, r, owner), PoseidonV1.NoteHashV2(100_000_000, r, PoseidonV1.OwnerPk(PrivacyField.RandomCanonical())));
+            Assert.NotEqual(PoseidonV1.NoteHashV2(100_000_000, r, owner), PoseidonV1.NoteHash(100_000_000, r));
+            Assert.Throws<ArgumentException>(() => PoseidonV1.OwnerPk(new byte[] { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }));
+            // Key material: nullifier key = viewing key reduced into the field; owner key from it.
+            var m = ShieldedHdDerivation.DeriveShieldedKeyMaterial("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40", ShieldedAddressConstants.DefaultBip44CoinType, 3);
+            Assert.Equal(PrivacyField.ReduceLe(m.ViewingKey32), m.NullifierKey32);
+            Assert.Equal(PoseidonV1.OwnerPk(m.NullifierKey32), m.OwnerPk32);
+            // The v2 address carries encryption key and owner key; the v1 encoding of the same keys decodes with no owner key.
+            Assert.True(ShieldedAddressCodec.TryDecode(m.ZfxAddress, out var enc, out var owner2, out _));
+            Assert.Equal(m.EncryptionPublicKey33, enc);
+            Assert.Equal(m.OwnerPk32, owner2);
+            var v1 = ShieldedAddressCodec.EncodeEncryptionKey(m.EncryptionPublicKey33);
+            Assert.NotEqual(v1, m.ZfxAddress);
+            Assert.True(ShieldedAddressCodec.TryDecode(v1, out var enc1, out var owner1, out _));
+            Assert.Equal(m.EncryptionPublicKey33, enc1);
+            Assert.Null(owner1);
+            Assert.False(ShieldedAddressCodec.TryDecodeOwnerKey(v1, out _, out var why));
+            Assert.Contains("owner key", why);
+            Assert.True(ShieldedAddressCodec.HasOwnerKey(m.ZfxAddress));
+            Assert.False(ShieldedAddressCodec.HasOwnerKey(v1));
+            Assert.False(ShieldedAddressCodec.TryDecode("zfx_nonsense", out _, out _, out _));
+        }
+
         // ── Fixed-depth tree ──────────────────────────────────────────────────────────────────────────────────
 
         [Fact]
@@ -157,7 +191,8 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void DummyNote_ConstantsAreWhatTheyClaim()
         {
-            Assert.Equal(PoseidonV1.NoteHash(0, PrivacyField.Zero32), PrivacyEpoch.DummyNoteHash);
+            Assert.Equal(PoseidonV1.OwnerPk(PrivacyField.Zero32), PrivacyEpoch.DummyOwnerPk);
+            Assert.Equal(PoseidonV1.NoteHashV2(0, PrivacyField.Zero32, PrivacyEpoch.DummyOwnerPk), PrivacyEpoch.DummyNoteHash);
             Assert.Equal(PoseidonV1.Hash3(PrivacyField.Zero32, PrivacyEpoch.DummyNoteHash, PrivacyField.Zero32), PrivacyEpoch.DummyNullifier);
             Assert.True(PrivacyEpoch.IsDummyNullifier(PrivacyEpoch.DummyNullifierB64));
             Assert.False(PrivacyEpoch.IsDummyNullifier(Convert.ToBase64String(PoseidonV1.Nullifier(PrivacyField.RandomCanonical(), PrivacyEpoch.DummyNoteHash, 0))));

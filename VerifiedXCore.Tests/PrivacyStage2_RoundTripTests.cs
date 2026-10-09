@@ -171,7 +171,15 @@ namespace VerifiedXCore.Tests
             // The proof binds the amount to the note hash: changing either is refused.
             var moreAmount = Tampered(shield, (p, t) => { t.Amount = 6M; p.TransparentAmount = 6M; });
             Assert.False(Consensus(moreAmount, Height + 1).ok);
-            var otherNote = Tampered(shield, (p, _) => p.Outs[0].NoteHashB64 = Convert.ToBase64String(PoseidonV1.NoteHash(500_000_000, PrivacyField.RandomCanonical())));
+            var otherNote = Tampered(shield, (p, _) => p.Outs[0].NoteHashB64 = Convert.ToBase64String(PoseidonV1.NoteHashV2(500_000_000, PrivacyField.RandomCanonical(), _alice.OwnerPk32)));
+            Assert.False(Consensus(otherNote, Height + 1).ok);
+            // Re-addressing the note to Bob (same amount and randomness, his owner key) is refused: the proof binds the owner.
+            PrivateTxPayloadCodec.TryDecode(shield.Data, out var sp0, out _);
+            ShieldedNoteEncryption.TryOpen(Convert.FromBase64String(sp0!.Outs[0].EncryptedNoteB64!), _alice.EncryptionPrivateKey32, out var plain0, out _);
+            ShieldedPlainNoteCodec.TryDeserializeUtf8(plain0!, out var note0, out _);
+            var toBob = Tampered(shield, (p, _) => p.Outs[0].NoteHashB64 = Convert.ToBase64String(PoseidonV1.NoteHashV2(500_000_000, Convert.FromBase64String(note0!.RandomnessB64), _bob.OwnerPk32)));
+            Assert.False(Consensus(toBob, Height + 1).ok);
+            var unchanged = otherNote;
             Assert.False(Consensus(otherNote, Height + 1).ok);
             // Without the proof it is refused outright.
             var noProof = Tampered(shield, (p, _) => p.ProofB64 = null);
@@ -209,12 +217,19 @@ namespace VerifiedXCore.Tests
             // Tampering: a larger payout, another recipient, a changed root, a swapped nullifier - all refused by the proof.
             Assert.False(Consensus(Tampered(unshield, (p, t) => { t.Amount = 4M; p.TransparentAmount = 4M; }), Height + 2).ok);
             Assert.False(Consensus(Tampered(unshield, (p, _) => p.MerkleRootB64 = Convert.ToBase64String(PoseidonV1.MerkleZero(32))), Height + 2).ok);
-            Assert.False(Consensus(Tampered(unshield, (p, _) => p.NullsB64[0] = Convert.ToBase64String(PoseidonV1.Nullifier(PrivacyField.RandomCanonical(), PoseidonV1.NoteHash(1, PrivacyField.Zero32), 1))), Height + 2).ok);
-            Assert.False(Consensus(Tampered(unshield, (p, _) => p.Outs[0].NoteHashB64 = Convert.ToBase64String(PoseidonV1.NoteHash(1, PrivacyField.RandomCanonical()))), Height + 2).ok);
-            // The recipient is bound by the tx hash (outer == payload, stage 1), not by the circuit: a changed outer address alone fails stage 1's binding.
+            Assert.False(Consensus(Tampered(unshield, (p, _) => p.NullsB64[0] = Convert.ToBase64String(PoseidonV1.Nullifier(PrivacyField.RandomCanonical(), PoseidonV1.NoteHashV2(1, PrivacyField.Zero32, _alice.OwnerPk32), 1))), Height + 2).ok);
+            Assert.False(Consensus(Tampered(unshield, (p, _) => p.Outs[0].NoteHashB64 = Convert.ToBase64String(PoseidonV1.NoteHashV2(1, PrivacyField.RandomCanonical(), _alice.OwnerPk32))), Height + 2).ok);
+            // The recipient is bound by the tx hash (outer == payload, stage 1) AND by the proof (stage 3): a changed outer
+            // address alone fails stage 1's binding, and a consistent redirect (outer and payload) fails the proof.
             var other = Tampered(unshield, (p, t) => t.ToAddress = NewAddress());
             PrivateTxPayloadCodec.TryDecode(other.Data, out var op, out _);
             Assert.NotNull(PrivateTxSupplyRules.StructureError(other, op!));
+            var thief = NewAddress();
+            var redirected = Tampered(unshield, (p, t) => { t.ToAddress = thief; p.TransparentOutput = thief; });
+            PrivateTxPayloadCodec.TryDecode(redirected.Data, out var rp, out _);
+            Assert.Null(PrivateTxSupplyRules.StructureError(redirected, rp!)); // consistent, so stage 1 lets it through...
+            var redirectVerdict = Consensus(redirected, Height + 2);
+            Assert.False(redirectVerdict.ok, "a redirected unshield verified");                 // ...and the proof refuses it
 
             await Apply(unshield, Height + 2);
             var state = ShieldedPoolService.GetState("VFX", Db)!;
@@ -272,10 +287,89 @@ namespace VerifiedXCore.Tests
             Assert.True(Consensus(bobUnshield!, Height + 3).ok, Consensus(bobUnshield!, Height + 3).message);
             var alicesChange = NoteOf(transfer, 1, _alice);
             Assert.Equal(5M - 2M - Globals.PrivateTxFixedFee, alicesChange.Amount);
-            // Alice cannot spend Bob's note: her viewing key gives a different nullifier, and the proof is made with her key -
-            // the builder would still produce a proof, but she does not know Bob's randomness in practice; the ledger/trees
-            // are indifferent. What consensus enforces is the circuit: the spent note must be in the tree with that amount.
+            // Alice built Bob's note, so she knows its amount and randomness. With the v1 circuits that was enough to spend it
+            // with her own key (re-audit finding 1). With the owner-bound notes the builder refuses: the leaf is Bob's.
+            var bobsNoteSeenByAlice = new UnspentCommitment { Commitment = bobsNote.Commitment, AssetType = "VFX", Amount = bobsNote.Amount, Randomness = bobsNote.Randomness, TreePosition = bobsNote.TreePosition };
+            Assert.False(VfxPrivateTransactionBuilder.TryBuildUnshield(new[] { bobsNoteSeenByAlice }, 1M, NewAddress(), _alice, 1_700_000_003, out _, out var stealErr, Db, Height + 3));
+            Assert.Contains("only the note's owner can spend it", stealErr);
             Assert.Equal(4, ShieldedPoolService.GetState("VFX", Db)!.TotalCommitments); // dummy, shield, two transfer outputs
+        }
+
+        // ── Re-audit finding 1: a note is its owner's ───────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// The drain the re-audit reproduced against the stage-2 circuits: one known note spent twice with two keys. With the
+        /// owner-bound circuits a stranger who knows the note (its sender always does) cannot produce a proof consensus
+        /// accepts, whether through the builder or by forcing a witness with their own key.
+        /// </summary>
+        [Fact]
+        public async Task AStrangerWhoKnowsTheNote_CannotSpendIt_WithAnotherKey()
+        {
+            if (!ParamsLoaded()) return;
+            var shield = ShieldFor(_alice, 10M);
+            await Apply(shield, Height + 1);
+            var note = NoteOf(shield, 0, _alice); // amount, randomness, position: what Mallory (the sender) knows
+            var payout = NewAddress();
+
+            // 1. The builder with Mallory's (Bob's) keys refuses: the stored leaf is Alice's.
+            Assert.False(VfxPrivateTransactionBuilder.TryBuildUnshield(new[] { note }, 9M, payout, _bob, 1_700_000_001, out _, out var err, Db, Height + 2));
+            Assert.Contains("only the note's owner can spend it", err);
+
+            // 2. Forcing it: a witness with Bob's nullifier key over Alice's note, proven directly. Whatever the prover
+            //    returns, consensus refuses the transaction (the proof cannot satisfy the Merkle membership of a leaf that
+            //    names Alice while the circuit recomputes it with Bob's owner key).
+            var store = new ShieldedMerkleStore("VFX", Db, fixedDepth: true);
+            store.LoadLeavesFromCommitments();
+            Assert.True(store.TryGetInclusionProof(note.TreePosition, out var path, out var root));
+            PrivacyPedersenAmount.TryToScaledU64(note.Amount, out var scaled, out _);
+            var forged = new PlonkProverV1.TransferInputWitness { AmountScaled = scaled, Randomness32 = note.Randomness, NullifierKey32 = _bob.NullifierKey32, TreePosition = (ulong)note.TreePosition, MerklePath = path, MerkleIndices = FixedDepthMerkleTree.IndicesFlat(note.TreePosition) };
+            Assert.True(PrivateTxProverV1.TryBuildInput("VFX", PrivateTxProverV1.Dummy, PrivacyField.Zero32, Db, out var dummy, out _, out var dErr), dErr);
+            PrivacyPedersenAmount.TryToScaledU64(9M, out var transparent, out _);
+            PrivacyPedersenAmount.TryToScaledU64(Globals.PrivateTxFixedFee, out var fee, out _);
+            var changeAmount = scaled - transparent - fee;
+            var changeRand = PrivacyField.RandomCanonical();
+            var changeHash = PoseidonV1.NoteHashV2(changeAmount, changeRand, _bob.OwnerPk32);
+            var bobNullifier = PoseidonV1.Nullifier(_bob.NullifierKey32, PoseidonV1.NoteHashV2(scaled, note.Randomness, _bob.OwnerPk32), (ulong)note.TreePosition);
+            var code = PlonkProverV1.TryProveUnshield(new[] { forged, dummy! }, transparent, changeAmount, changeRand, _bob.OwnerPk32, fee, root, PlonkPublicInputsV2.RecipientTag32(payout), out var proof, out _);
+            if (code == PlonkNative.Success && proof != null)
+            {
+                var g1 = new byte[PlonkNative.G1CompressedSize];
+                PlonkNative.pedersen_commit(changeAmount, changeRand, g1);
+                var payload = new PrivateTxPayload
+                {
+                    Version = 1, Kind = "unshield", SubType = "Unshield", Asset = "VFX",
+                    NullsB64 = { Convert.ToBase64String(bobNullifier), PrivacyEpoch.DummyNullifierB64 },
+                    SpentCommitmentTreePositions = { note.TreePosition, 0 }, SpentCommitmentB64s = new List<string> { note.Commitment },
+                    Outs = { new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(g1), NoteHashB64 = Convert.ToBase64String(changeHash) } },
+                    TransparentOutput = payout, TransparentAmount = 9M, Fee = Globals.PrivateTxFixedFee, MerkleRootB64 = Convert.ToBase64String(root), ProofB64 = Convert.ToBase64String(proof),
+                };
+                var tx = new Transaction { FromAddress = PrivacyConstants.ShieldedPoolAddress, ToAddress = payout, Amount = 9M, Fee = 0M, Nonce = 0, Timestamp = 1_700_000_001, TransactionType = TransactionType.VFX_UNSHIELD, Data = PrivateTxPayloadCodec.SerializeToJson(payload), Signature = PrivacyConstants.PlonkSignatureSentinel };
+                tx.BuildPrivate();
+                var verdict = Consensus(tx, Height + 2);
+                Assert.False(verdict.ok, "a stranger's spend of Alice's note verified");
+            }
+
+            // 3. Alice herself spends it, once; the pool ends where it should.
+            Assert.True(VfxPrivateTransactionBuilder.TryBuildUnshield(new[] { note }, 9M, payout, _alice, 1_700_000_002, out var honest, out err, Db, Height + 2), err);
+            Assert.True(Consensus(honest!, Height + 2).ok);
+            await Apply(honest!, Height + 2);
+            Assert.Equal(10M - 9M - Globals.PrivateTxFixedFee, ShieldedPoolService.GetState("VFX", Db)!.TotalShieldedSupply);
+        }
+
+        /// <summary>Stage 3: a v1 recipient address carries no owner key, so nothing can be sent to it in the epoch.</summary>
+        [Fact]
+        public async Task AVersionOneAddress_CannotReceive_InTheEpoch()
+        {
+            if (!ParamsLoaded()) return;
+            var v1 = ShieldedAddressCodec.EncodeEncryptionKey(_bob.EncryptionPublicKey33);
+            Assert.False(VfxPrivateTransactionBuilder.TryBuildShield(NewAddress(), 1M, 0.00000100M, 0, 1_700_000_000, v1, null, out _, out var err, Db, Height + 1));
+            Assert.Contains("owner key", err);
+            var shield = ShieldFor(_alice, 5M);
+            await Apply(shield, Height + 1);
+            Assert.False(VfxPrivateTransactionBuilder.TryBuildPrivateTransfer(new[] { NoteOf(shield, 0, _alice) }, 1M, v1, _alice, 1_700_000_001, out _, out err, Db, Height + 2));
+            Assert.Contains("owner key", err);
+            // Before the epoch a v1 address still receives (legacy regime).
+            Assert.True(VfxPrivateTransactionBuilder.TryBuildShield(NewAddress(), 1M, 0.00000100M, 0, 1_700_000_000, v1, null, out _, out err, Db, Height - 1), err);
         }
 
         // ── Before the height ─────────────────────────────────────────────────────────────────────────────────

@@ -59,16 +59,40 @@ namespace VerifiedXCore.Privacy
             return Call(o => PlonkNative.poseidon_hash_3(a, b, c, o), "poseidon_hash_3");
         }
 
-        /// <summary><c>note_hash = Poseidon(amount_scaled, randomness)</c>: the Merkle leaf the circuits bind.</summary>
+        /// <summary><c>note_hash = Poseidon(amount_scaled, randomness)</c>: the v1 (ownerless) leaf. No v2 circuit uses it; kept for tests and the probe harness.</summary>
         public static byte[] NoteHash(ulong amountScaled, byte[] randomness32)
         {
             RequireCanonical(randomness32, nameof(randomness32));
             return Call(o => PlonkNative.poseidon_note_hash(amountScaled, randomness32, o), "poseidon_note_hash");
         }
 
-        /// <summary><c>nullifier = Poseidon(viewing_key, note_hash, position)</c> as the circuits' nullifier gadget computes it.</summary>
-        public static byte[] Nullifier(byte[] viewingKeyCanonical32, byte[] noteHash32, ulong treePosition) =>
-            Hash3(viewingKeyCanonical32, noteHash32, PrivacyField.FromUInt64(treePosition));
+        /// <summary>
+        /// Domain separator of the owner key, <c>b"VFX_OWNR"</c> read little-endian: <c>owner_pk = Poseidon(OwnerPkDomain, nullifier_key)</c>.
+        /// Must equal <c>verifiedx-circuits::gadgets::note_hash::OWNER_PK_DOMAIN</c>.
+        /// </summary>
+        public const ulong OwnerPkDomain = 0x524E574F5F584656UL;
+
+        /// <summary><c>owner_pk = Poseidon(OwnerPkDomain, nullifier_key)</c>: the owner key a v2 note carries (stage 3).</summary>
+        public static byte[] OwnerPk(byte[] nullifierKeyCanonical32)
+        {
+            RequireCanonical(nullifierKeyCanonical32, nameof(nullifierKeyCanonical32));
+            return Call(o => PlonkNative.poseidon_owner_pk(nullifierKeyCanonical32, o), "poseidon_owner_pk");
+        }
+
+        /// <summary><c>note_hash = Poseidon(amount_scaled, randomness, owner_pk)</c>: the v2 owner-bound leaf the circuits bind (stage 3).</summary>
+        public static byte[] NoteHashV2(ulong amountScaled, byte[] randomness32, byte[] ownerPk32)
+        {
+            RequireCanonical(randomness32, nameof(randomness32));
+            RequireCanonical(ownerPk32, nameof(ownerPk32));
+            return Call(o => PlonkNative.poseidon_note_hash_v2(amountScaled, randomness32, ownerPk32, o), "poseidon_note_hash_v2");
+        }
+
+        /// <summary>
+        /// <c>nullifier = Poseidon(nullifier_key, note_hash, position)</c> as the circuits' nullifier gadget computes it. In the
+        /// v2 circuits the key is the owner's nullifier key, whose <see cref="OwnerPk"/> is inside the note.
+        /// </summary>
+        public static byte[] Nullifier(byte[] nullifierKeyCanonical32, byte[] noteHash32, ulong treePosition) =>
+            Hash3(nullifierKeyCanonical32, noteHash32, PrivacyField.FromUInt64(treePosition));
 
         /// <summary>The digest of an empty subtree of height <paramref name="level"/> (0 = the zero field element, i.e. an empty leaf).</summary>
         public static byte[] MerkleZero(int level)

@@ -41,6 +41,12 @@ namespace VerifiedXCore.Privacy
         /// <see cref="merkle_root_from_path_v1"/>). Fund-loss audit item 1, stage 2.
         /// </summary>
         public const uint CapVfxPi2Verify = 32;
+        /// <summary>
+        /// Bit 6: the v2 owner-bound circuits are loaded (<b>VXPLNK04</b>): notes carry an owner key, spends prove the owner's
+        /// nullifier key, the Unshield binds its recipient, <see cref="plonk_verify"/> takes VFXPI1 version-3 blobs, and the
+        /// witness formats below are the v2 ones. Fund-loss re-audit (stage 3), Oct 2026.
+        /// </summary>
+        public const uint CapV2Circuits = 64;
 
         /// <summary>Tree depth used by the v1 circuits (Merkle path = 32 sibling hashes).</summary>
         public const int TreeDepth = 32;
@@ -49,7 +55,7 @@ namespace VerifiedXCore.Privacy
         public const int TransferInputWireSize = 8 + ScalarSize + ScalarSize + 8 + ScalarSize * TreeDepth + ScalarSize * TreeDepth; // 2128
 
         /// <summary>Size of one output in the flat witness wire format (bytes).</summary>
-        public const int OutputWireSize = 8 + ScalarSize; // 40
+        public const int OutputWireSize = 8 + ScalarSize + ScalarSize; // 72 (v2: amount, randomness, owner_pk)
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern uint plonk_capabilities();
@@ -92,6 +98,12 @@ namespace VerifiedXCore.Privacy
         /// </summary>
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int poseidon_note_hash(ulong amountScaled, byte[] randomness, byte[] hashOut);
+        /// <summary><c>owner_pk = Poseidon(OWNER_PK_DOMAIN, nullifier_key)</c> (v2).</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int poseidon_owner_pk(byte[] nullifierKey, byte[] hashOut);
+        /// <summary><c>note_hash = Poseidon(amount_scaled, randomness, owner_pk)</c>: the v2 owner-bound leaf.</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int poseidon_note_hash_v2(ulong amountScaled, byte[] randomness, byte[] ownerPk, byte[] hashOut);
         /// <summary><c>out = Poseidon(a, b)</c> exactly as the circuits' Merkle parent hash.</summary>
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int poseidon_hash_2(byte[] a, byte[] b, byte[] hashOut);
@@ -121,19 +133,20 @@ namespace VerifiedXCore.Privacy
         public static extern int nullifier_derive_v1(byte[] viewingKey, byte[] noteHash, ulong treePosition, byte[] nullifierOut);
 
         /// <summary>
-        /// Generate a Shield circuit proof (v1). Requires VXPLNK03 with prover keys.
+        /// Generate a Shield circuit proof (v2: the output names its owner). Requires VXPLNK04 with prover keys.
         /// Returns proof bytes + public input bytes in separate output buffers.
         /// </summary>
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int plonk_prove_shield(
             ulong amountScaled,
             byte[] randomness,
+            byte[] ownerPk,
             byte[] proofOut, ref nuint proofOutLen,
             byte[] piOut, ref nuint piOutLen);
 
         /// <summary>
         /// Generate a Transfer circuit proof (v1, 2-in/2-out).
-        /// <paramref name="witnessData"/> is the flat witness blob (4384 bytes).
+        /// <paramref name="witnessData"/> is the flat witness blob (4448 bytes, v2).
         /// </summary>
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int plonk_prove_transfer(
@@ -143,7 +156,7 @@ namespace VerifiedXCore.Privacy
 
         /// <summary>
         /// Generate an Unshield circuit proof (v1).
-        /// <paramref name="witnessData"/> is the flat witness blob (4344 bytes).
+        /// <paramref name="witnessData"/> is the flat witness blob (4408 bytes, v2: + change owner key + recipient tag).
         /// </summary>
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int plonk_prove_unshield(
@@ -153,7 +166,7 @@ namespace VerifiedXCore.Privacy
 
         /// <summary>
         /// Generate a Fee circuit proof (v1, 1-in/1-out).
-        /// <paramref name="witnessData"/> is the flat witness blob (2208 bytes).
+        /// <paramref name="witnessData"/> is the flat witness blob (2240 bytes, v2: + change owner key).
         /// </summary>
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int plonk_prove_fee(

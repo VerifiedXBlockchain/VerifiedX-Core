@@ -60,11 +60,17 @@ namespace VerifiedXCore.Privacy
 
         /// <summary>
         /// The note hash for a note mined at <paramref name="height"/>: in the proof-rules epoch the circuits' Poseidon
-        /// (<see cref="PoseidonV1.NoteHash"/>, the only value a proof can be made for); before it the legacy hash above,
+        /// (<see cref="PoseidonV1.NoteHashV2"/> with the recipient's owner key, the only value a proof can be made for); before it the legacy hash above,
         /// kept so pre-epoch transactions replay unchanged.
         /// </summary>
-        public static byte[] ComputeAt(long height, ulong amountScaled, byte[] randomness32) =>
-            PrivacyEpoch.ProofRulesActive(height) ? PoseidonV1.NoteHash(amountScaled, randomness32) : Compute(amountScaled, randomness32);
+        public static byte[] ComputeAt(long height, ulong amountScaled, byte[] randomness32, byte[]? ownerPk32 = null)
+        {
+            if (!PrivacyEpoch.ProofRulesActive(height))
+                return Compute(amountScaled, randomness32);
+            if (ownerPk32 == null || ownerPk32.Length != PlonkNative.ScalarSize)
+                throw new InvalidOperationException("An epoch note needs its owner key (stage 3: notes are owner-bound).");
+            return PoseidonV1.NoteHashV2(amountScaled, randomness32, ownerPk32);
+        }
 
         /// <summary>
         /// Computes note hash from a C# decimal amount (applies 10^18 scaling) and 32-byte randomness.

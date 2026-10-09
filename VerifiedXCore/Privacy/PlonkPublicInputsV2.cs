@@ -6,14 +6,14 @@ using VerifiedXCore.Models.Privacy;
 namespace VerifiedXCore.Privacy
 {
     /// <summary>
-    /// VFXPI1 <b>version 2</b>: the public-input blob the v1 circuits are verified against, rebuilt by every validator from
+    /// VFXPI1 <b>version 3</b> (stage 3; the class keeps its name): the public-input blob the v2 owner-bound circuits are verified against, rebuilt by every validator from
     /// the transaction's own fields (fund-loss audit item 1, stage 2). Must stay byte-identical to
     /// <c>plonk-ffi/src/vfxpi1.rs</c>, which parses it and places the values at the circuits' public-input positions.
     ///
-    /// Header `VFXPI1` + version 2 + circuit byte (8), asset tag (32, SHA-256 of the asset string), Merkle root (32), then
+    /// Header `VFXPI1` + version 3 + circuit byte (8), asset tag (32, SHA-256 of the asset string), Merkle root (32), then
     /// <list type="bullet">
     /// <item>Shield (112): amount u64 LE, note_hash</item>
-    /// <item>Unshield (184): fee u64, transparent u64, nullifier0, nullifier1, change_note_hash</item>
+    /// <item>Unshield (216): fee u64, transparent u64, nullifier0, nullifier1, change_note_hash, recipient_tag</item>
     /// <item>Transfer (208): fee u64, nullifier0, nullifier1, out_note_hash0, out_note_hash1</item>
     /// <item>Fee (144): fee u64, nullifier, change_note_hash</item>
     /// </list>
@@ -22,18 +22,30 @@ namespace VerifiedXCore.Privacy
     /// </summary>
     public static class PlonkPublicInputsV2
     {
-        public const byte Version = 2;
+        /// <summary>Version 3 (stage 3, v2 circuits): version 2 plus the Unshield recipient tag. Must match <c>plonk-ffi/src/vfxpi1.rs</c> VERSION_3.</summary>
+        public const byte Version = 3;
         private static readonly byte[] Magic = Encoding.ASCII.GetBytes("VFXPI1");
         private const int HeaderLen = 8;
 
         public static int TotalLength(PlonkCircuitType c) => c switch
         {
             PlonkCircuitType.Shield => HeaderLen + 32 + 32 + 8 + 32,
-            PlonkCircuitType.Unshield => HeaderLen + 32 + 32 + 8 + 8 + 32 + 32 + 32,
+            PlonkCircuitType.Unshield => HeaderLen + 32 + 32 + 8 + 8 + 32 + 32 + 32 + 32, // + recipient_tag (v3)
             PlonkCircuitType.Transfer => HeaderLen + 32 + 32 + 8 + 32 + 32 + 32 + 32,
             PlonkCircuitType.Fee => HeaderLen + 32 + 32 + 8 + 32 + 32,
             _ => throw new ArgumentOutOfRangeException(nameof(c)),
         };
+
+        /// <summary>
+        /// The Unshield recipient as a field element: SHA-256 of the address text, reduced into the field. Consensus builds
+        /// it from the transaction's ToAddress, the wallet from the address it pays; a copied unshield with another
+        /// recipient has a different tag and its proof fails (stage 3).
+        /// </summary>
+        public static byte[] RecipientTag32(string? address)
+        {
+            if (string.IsNullOrWhiteSpace(address)) throw new InvalidOperationException("The unshield recipient (ToAddress) is required.");
+            return PrivacyField.ReduceLe(SHA256.HashData(Encoding.UTF8.GetBytes(address.Trim())));
+        }
 
         /// <summary>32-byte domain separator per asset string (same as version 1).</summary>
         public static byte[] AssetTag32(string asset) =>
@@ -70,6 +82,7 @@ namespace VerifiedXCore.Privacy
                         body.Add(nulls[0]);
                         body.Add(nulls[1]);
                         body.Add(NoteHash(payload.Outs[0], "change output"));
+                        body.Add(RecipientTag32(tx.ToAddress)); // v3: the transparent recipient is a public input
                         break;
                     }
                     case PlonkCircuitType.Transfer:
@@ -137,7 +150,7 @@ namespace VerifiedXCore.Privacy
                 Buffer.BlockCopy(part, 0, blob, o, part.Length);
                 o += part.Length;
             }
-            if (o != total) throw new InvalidOperationException($"VFXPI1 v2 layout error: wrote {o} of {total} bytes.");
+            if (o != total) throw new InvalidOperationException($"VFXPI1 v3 layout error: wrote {o} of {total} bytes.");
             return blob;
         }
 

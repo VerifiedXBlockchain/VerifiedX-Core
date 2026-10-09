@@ -18,7 +18,7 @@ namespace VerifiedXCore.Privacy
     /// finds the spendable notes, proves the spend and returns a complete ZK-authorised transaction (no signature) for the
     /// caller to submit.</item>
     /// </list>
-    /// In this scheme the viewing key is spend authority (the nullifier is Poseidon(vk, note, pos)), so a caller sends it
+    /// In this scheme the viewing key is spend authority (the nullifier key is the viewing key reduced into the field), so a caller sends it
     /// only to a node it trusts, over TLS. Built transactions wait in memory keyed by Hash for <see cref="PendingTtl"/>,
     /// as the vBTC raw routes do; a spend also goes stale when the pool's Merkle root moves, so submit promptly and rebuild
     /// on "merkle_root does not match".
@@ -268,12 +268,24 @@ namespace VerifiedXCore.Privacy
                     else if (pending) raw.Reason = "A pending transaction spends this note.";
                     else if (r32.Length != PlonkNative.ScalarSize) raw.Reason = "The note has no 32-byte randomness.";
                     else if (epochNext && !PrivacyField.IsCanonicalLe(r32)) raw.Reason = "Pre-epoch randomness; the note cannot be proven.";
+                    else if (epochNext && !OwnedByThisKey(rec, note.Amount, r32, keys)) raw.Reason = "This note names another owner key; only its owner can spend it.";
                     else raw.Spendable = true;
                 }
                 if (raw.Spent && !includeSpent)
                     return;
                 result.Notes.Add(raw);
             }
+        }
+
+        /// <summary>Stage 3: the stored leaf must be the owner-bound note hash for OUR owner key, else the note was addressed to someone else's key and we cannot spend it.</summary>
+        private static bool OwnedByThisKey(CommitmentRecord rec, decimal amount, byte[] r32, ShieldedKeyMaterial keys)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(rec.NoteHash) || !PrivacyPedersenAmount.TryToScaledU64(amount, out var scaled, out _)) return false;
+                return string.Equals(rec.NoteHash, Convert.ToBase64String(PoseidonV1.NoteHashV2(scaled, r32, keys.OwnerPk32)), StringComparison.Ordinal);
+            }
+            catch { return false; }
         }
 
         /// <summary>Spent on chain / pending in the mempool, checking every nullifier derivation a spend of this note could have used.</summary>
@@ -286,7 +298,10 @@ namespace VerifiedXCore.Privacy
                 try
                 {
                     if (PoseidonV1.IsAvailable && PrivacyField.IsCanonicalLe(r32))
-                        candidates.Add(Convert.ToBase64String(PoseidonV1.Nullifier(PrivacyField.ReduceLe(vk), PoseidonV1.NoteHash(scaled, r32), pos)));
+                    {
+                        var nk = PrivacyField.ReduceLe(vk);
+                        candidates.Add(Convert.ToBase64String(PoseidonV1.Nullifier(nk, PoseidonV1.NoteHashV2(scaled, r32, PoseidonV1.OwnerPk(nk)), pos)));
+                    }
                 }
                 catch { /* native unavailable */ }
                 try
