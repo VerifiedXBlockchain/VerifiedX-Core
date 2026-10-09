@@ -94,6 +94,9 @@ namespace VerifiedXCore.Controllers
             // ── Privacy (reads) ─────────────────────────────────────────────────────────────
             "PrivacyV1.GetPlonkStatus", "PrivacyV1.GetShieldedBalance", "PrivacyV1.GetShieldedPoolState",
             "PrivacyV1.GetShieldedVbtcBalance", "PrivacyV1.GetVbtcShieldedPoolState",
+            // Raw shielded flows: keys come from the caller, nothing on this node is unlocked or signed.
+            "PrivacyV1.GetRawShieldTxData", "PrivacyV1.GetShieldedNotesRaw", "PrivacyV1.GetRawUnshieldTxData",
+            "PrivacyV1.GetRawPrivateTransferTxData", "PrivacyV1.VerifyRawPrivateTx", "PrivacyV1.SendRawPrivateTx",
 
             // ── Bitcoin (reads; key-returning account routes are NOT listed) ─────────────────
             "BTCV2.Get", "BTCV2.GetDefaultAddressType", "BTCV2.GetAddressUTXOList", "BTCV2.GetAddressTXList",

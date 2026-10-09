@@ -51,7 +51,13 @@ namespace VerifiedXCore.Controllers
                     NativeCapabilities = caps,
                     CapVerifyV1 = (caps & PlonkNative.CapVerifyV1) != 0,
                     CapParsePublicInputsV1 = (caps & PlonkNative.CapParsePublicInputsV1) != 0,
-                    CapProveV1 = (caps & PlonkNative.CapProveV1) != 0
+                    CapProveV1 = (caps & PlonkNative.CapProveV1) != 0,
+                    // Fund-loss audit item 1, stage 2: what this node can do once proofs are required.
+                    VfxPi2VerifyAvailable = PLONKSetup.IsVfxPi2VerifyAvailable,
+                    V1ProvingAvailable = PLONKSetup.IsV1ProvingAvailable,
+                    CircuitPoseidonAvailable = PoseidonV1.IsAvailable,
+                    ProofRulesHeight = Globals.PrivateTxProofRulesHeight,
+                    ProofRulesActive = PrivacyEpoch.ProofRulesActive((Globals.LastBlock?.Height ?? 0) + 1)
                 }));
             }
             catch (Exception ex)
@@ -729,6 +735,124 @@ namespace VerifiedXCore.Controllers
             catch (Exception ex)
             {
                 return Task.FromResult(Fail(ApiErrorText.For(ex)));
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        //  Raw shielded VFX (externally held keys: web wallet and integrators)
+        //  Build here (the node reads the pool and runs the prover), sign / submit there.
+        //  Shield: GetRawShieldTxData → sign Hash → SendRawPrivateTx { Hash, Signature }.
+        //  Unshield / transfer: GetRaw*TxData (zfx + viewing key) → SendRawPrivateTx { Hash }.
+        // ═══════════════════════════════════════════════════════════════════════════
+
+        /// <summary>Unsigned, proven T→Z shield for a FromAddress this node does not hold. Sign the Hash and submit via SendRawPrivateTx.</summary>
+        [HttpPost("GetRawShieldTxData")]
+        public Task<string> GetRawShieldTxData([FromBody] RawShieldVfxRequest req)
+        {
+            try
+            {
+                if (req == null)
+                    return Task.FromResult(Fail("Request body is required."));
+                var r = PrivateRawTxService.BuildShield(req.FromAddress, req.RecipientZfxAddress, req.ShieldAmount, req.Memo, req.TransparentFee, DbContext.DB_Privacy);
+                return Task.FromResult(r.Success ? Ok(r) : Fail(r.Message ?? "Build failed."));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
+            }
+        }
+
+        /// <summary>
+        /// Stateless scan: the VFX notes a viewing key can open (position, spent / pending / spendable, randomness). Needs no
+        /// wallet row on this node. The viewing key is spend authority: send it only to a node you trust, over TLS.
+        /// </summary>
+        [HttpPost("GetShieldedNotesRaw")]
+        public Task<string> GetShieldedNotesRaw([FromBody] RawShieldedNotesRequest req)
+        {
+            try
+            {
+                if (req == null)
+                    return Task.FromResult(Fail("Request body is required."));
+                if (!PrivateRawTxService.TryParseKey32(req.ViewingKey, out var vk, out var kErr))
+                    return Task.FromResult(Fail(kErr ?? "Invalid viewing key."));
+                var r = PrivateRawTxService.ScanNotes(req.ZfxAddress, vk, req.FromHeight, req.ToHeight, req.IncludeSpent, DbContext.DB_Privacy);
+                return Task.FromResult(r.Success ? Ok(r) : Fail(r.Message ?? "Scan failed."));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
+            }
+        }
+
+        /// <summary>Complete, proven Z→T unshield from the caller's notes (found by viewing key). No signature; submit the Hash via SendRawPrivateTx.</summary>
+        [HttpPost("GetRawUnshieldTxData")]
+        public Task<string> GetRawUnshieldTxData([FromBody] RawUnshieldVfxRequest req)
+        {
+            try
+            {
+                if (req == null)
+                    return Task.FromResult(Fail("Request body is required."));
+                if (!PrivateRawTxService.TryParseKey32(req.ViewingKey, out var vk, out var kErr))
+                    return Task.FromResult(Fail(kErr ?? "Invalid viewing key."));
+                var r = PrivateRawTxService.BuildUnshield(req.ZfxAddress, vk, req.TransparentToAddress, req.TransparentAmount, req.InputCommitments, DbContext.DB_Privacy);
+                return Task.FromResult(r.Success ? Ok(r) : Fail(r.Message ?? "Build failed."));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
+            }
+        }
+
+        /// <summary>Complete, proven Z→Z private transfer (pay another zfx address, or your own to consolidate). No signature; submit the Hash via SendRawPrivateTx.</summary>
+        [HttpPost("GetRawPrivateTransferTxData")]
+        public Task<string> GetRawPrivateTransferTxData([FromBody] RawPrivateTransferVfxRequest req)
+        {
+            try
+            {
+                if (req == null)
+                    return Task.FromResult(Fail("Request body is required."));
+                if (!PrivateRawTxService.TryParseKey32(req.ViewingKey, out var vk, out var kErr))
+                    return Task.FromResult(Fail(kErr ?? "Invalid viewing key."));
+                var r = PrivateRawTxService.BuildPrivateTransfer(req.ZfxAddress, vk, req.RecipientZfxAddress, req.PaymentAmount, req.InputCommitments, DbContext.DB_Privacy);
+                return Task.FromResult(r.Success ? Ok(r) : Fail(r.Message ?? "Build failed."));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
+            }
+        }
+
+        /// <summary>Dry run: the node's full verifier on a built transaction (with the signature for a shield), nothing broadcast.</summary>
+        [HttpPost("VerifyRawPrivateTx")]
+        public async Task<string> VerifyRawPrivateTx([FromBody] RawPrivateTxSubmission body)
+        {
+            try
+            {
+                if (body == null || string.IsNullOrWhiteSpace(body.Hash))
+                    return Fail("Hash is required.");
+                var (ok, message) = await PrivateRawTxService.VerifyAsync(body.Hash, body.Signature);
+                return ok ? Ok(new { Hash = body.Hash, Message = "Transaction verifies." }) : Fail(message);
+            }
+            catch (Exception ex)
+            {
+                return Fail(ApiErrorText.For(ex));
+            }
+        }
+
+        /// <summary>Submit a built transaction: shield with { Hash, Signature }, unshield / transfer with { Hash }.</summary>
+        [HttpPost("SendRawPrivateTx")]
+        public async Task<string> SendRawPrivateTx([FromBody] RawPrivateTxSubmission body)
+        {
+            try
+            {
+                if (body == null || string.IsNullOrWhiteSpace(body.Hash))
+                    return Fail("Hash is required.");
+                var (ok, message, hash) = await PrivateRawTxService.SendAsync(body.Hash, body.Signature);
+                return ok ? Ok(new { Hash = hash, Message = message }) : Fail(message);
+            }
+            catch (Exception ex)
+            {
+                return Fail(ApiErrorText.For(ex));
             }
         }
 

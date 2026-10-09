@@ -78,6 +78,13 @@ namespace VerifiedXCore.Privacy
             if (!result.Item1)
                 return (false, Newtonsoft.Json.JsonConvert.SerializeObject(new { Success = false, Message = result.Item2 }));
 
+            await BroadcastAdmittedPrivateTxAsync(tx);
+            return (true, Newtonsoft.Json.JsonConvert.SerializeObject(new { Success = true, Message = "Broadcast.", Hash = tx.Hash }));
+        }
+
+        /// <summary>The tail of <see cref="BroadcastVerifiedPrivateTxAsync"/>: rating, local mempool, peers. The caller has verified the transaction.</summary>
+        public static async Task BroadcastAdmittedPrivateTxAsync(Transaction tx)
+        {
             if (tx.TransactionRating == null)
             {
                 var rating = await TransactionRatingService.GetTransactionRating(tx);
@@ -86,7 +93,6 @@ namespace VerifiedXCore.Privacy
 
             await TransactionData.AddToPool(tx);
             await P2PClient.SendTXMempool(tx);
-            return (true, Newtonsoft.Json.JsonConvert.SerializeObject(new { Success = true, Message = "Broadcast.", Hash = tx.Hash }));
         }
 
         /// <summary>
