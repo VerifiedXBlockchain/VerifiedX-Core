@@ -56,6 +56,7 @@ namespace VerifiedXCore.Services
                 Globals.ReserveTokenRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ReserveTokenRulesHeight;
                 Globals.ForgedVfxBurnHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ForgedVfxBurnHeight;
                 if (Globals.IsTestNet) Globals.ForgedVfxBurns.Clear(); // the forged VFX exists on mainnet only
+                Globals.PrivateTxProofRulesHeight = Globals.IsTestNet ? Globals.PrivateTxProofRulesHeight /* TODO testnet stage-2 height */ : Globals.PrivateTxProofRulesHeight;
                 if (Globals.IsTestNet) Globals.ShieldedSupplyCorrections.Clear(); // the testnet pool was never forged against
             }
             else
@@ -86,6 +87,7 @@ namespace VerifiedXCore.Services
                 Globals.ReserveTokenRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ReserveTokenRulesHeight;
                 Globals.ForgedVfxBurnHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ForgedVfxBurnHeight;
                 if (Globals.IsTestNet) Globals.ForgedVfxBurns.Clear(); // the forged VFX exists on mainnet only
+                Globals.PrivateTxProofRulesHeight = Globals.IsTestNet ? Globals.PrivateTxProofRulesHeight /* TODO testnet stage-2 height */ : Globals.PrivateTxProofRulesHeight;
                 if (Globals.IsTestNet) Globals.ShieldedSupplyCorrections.Clear(); // the testnet pool was never forged against
             }
 

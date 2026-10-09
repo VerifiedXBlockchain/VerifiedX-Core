@@ -12,6 +12,13 @@ namespace VerifiedXCore.Privacy
         private static int _proveProbe = -1;
         private static int _v1CircuitsProbe = -1;
         private static int _v1ProveProbe = -1;
+        private static int _vfxPi2Probe = -1;
+
+        /// <summary>
+        /// Whether the loaded library verifies v1 proofs against VFXPI1 version-2 public inputs (<see cref="PlonkNative.CapVfxPi2Verify"/>).
+        /// Consensus from PrivateTxProofRulesHeight requires this; a node without it refuses private transactions (fail closed).
+        /// </summary>
+        public static bool IsVfxPi2VerifyAvailable => _vfxPi2Probe == 1;
 
         /// <summary>Environment variable pointing at a universal-params file (optional until Phase 4).</summary>
         public const string ParamsPathEnvironmentVariable = "VFX_PLONK_PARAMS_PATH";
@@ -29,6 +36,7 @@ namespace VerifiedXCore.Privacy
                 _proveProbe = (caps & PlonkNative.CapProveV1) != 0 ? 1 : 0;
                 _v1CircuitsProbe = (caps & PlonkNative.CapV1Circuits) != 0 ? 1 : 0;
                 _v1ProveProbe = (caps & PlonkNative.CapV1Prove) != 0 ? 1 : 0;
+                _vfxPi2Probe = (caps & PlonkNative.CapVfxPi2Verify) != 0 ? 1 : 0;
             }
             catch
             {
@@ -36,6 +44,7 @@ namespace VerifiedXCore.Privacy
                 _proveProbe = 0;
                 _v1CircuitsProbe = 0;
                 _v1ProveProbe = 0;
+                _vfxPi2Probe = 0;
             }
         }
 

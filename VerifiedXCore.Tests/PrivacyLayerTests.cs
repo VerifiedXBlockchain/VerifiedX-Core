@@ -104,6 +104,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void PlonkNative_Verify_IsStub()
         {
+            if ((PlonkNative.plonk_capabilities() & PlonkNative.CapV1Circuits) != 0) return; // another test loaded the real v1 params into the process-global native state
             int code = PlonkNative.plonk_verify(0, Array.Empty<byte>(), 0, Array.Empty<byte>(), 0);
             Assert.Equal(PlonkNative.ErrNotImplemented, code);
         }
@@ -111,6 +112,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void PLONKSetup_IsProofVerificationNotImplemented()
         {
+            if ((PlonkNative.plonk_capabilities() & PlonkNative.CapV1Circuits) != 0) return; // another test loaded the real v1 params into the process-global native state
             PLONKSetup.RefreshVerificationCapability();
             Assert.False(PLONKSetup.IsProofVerificationImplemented);
             Assert.False(PLONKSetup.IsProofProvingImplemented);
@@ -170,6 +172,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void PlonkProofVerifier_VerifyRaw_ValidPi_CryptoStillStub()
         {
+            if ((PlonkNative.plonk_capabilities() & PlonkNative.CapV1Circuits) != 0) return; // another test loaded the real v1 params into the process-global native state
             var payload = new PrivateTxPayload
             {
                 Asset = "VFX",

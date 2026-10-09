@@ -34,6 +34,13 @@ namespace VerifiedXCore.Privacy
 
         /// <summary>Bit 4: v1 prover keys available (VXPLNK03 with prover keys — full proving capability).</summary>
         public const uint CapV1Prove = 16;
+        /// <summary>
+        /// Bit 5: the library verifies v1 proofs against VFXPI1 <b>version 2</b> public inputs (rebuilt at the circuits' own
+        /// positions from on-chain fields) and exports the circuit-compatible Poseidon (<see cref="poseidon_hash_2"/>,
+        /// <see cref="poseidon_hash_3"/>, <see cref="poseidon_note_hash"/>, <see cref="poseidon_merkle_zero"/>,
+        /// <see cref="merkle_root_from_path_v1"/>). Fund-loss audit item 1, stage 2.
+        /// </summary>
+        public const uint CapVfxPi2Verify = 32;
 
         /// <summary>Tree depth used by the v1 circuits (Merkle path = 32 sibling hashes).</summary>
         public const int TreeDepth = 32;
@@ -73,12 +80,30 @@ namespace VerifiedXCore.Privacy
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int nullifier_derive(byte[] viewingKey, byte[] commitment, ulong treePosition, byte[] nullifierOut);
 
+        // ─── Circuit-compatible Poseidon (fund-loss audit item 1, stage 2; CapVfxPi2Verify) ─────────────
+        // Every field element crosses as 32 little-endian bytes in arkworks canonical form (exactly the encoding the
+        // plonk_prove_* witness blobs use); a value at or above the BLS12-381 scalar modulus returns ErrCrypto.
+        // These are the hashes the v1 circuits compute; the older poseidon_hash is a chained big-endian sponge and is
+        // NOT what the circuits compute for two inputs.
+
         /// <summary>
         /// Compute Poseidon note hash: <c>note_hash = Poseidon(amount_scaled, randomness_fr)</c>.
         /// This 32-byte digest is used as the Merkle leaf and for in-circuit amount binding.
         /// </summary>
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int poseidon_note_hash(ulong amountScaled, byte[] randomness, byte[] hashOut);
+        /// <summary><c>out = Poseidon(a, b)</c> exactly as the circuits' Merkle parent hash.</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int poseidon_hash_2(byte[] a, byte[] b, byte[] hashOut);
+        /// <summary><c>out = Poseidon(a, b, c)</c> (chained from zero) exactly as the circuits' nullifier hash.</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int poseidon_hash_3(byte[] a, byte[] b, byte[] c, byte[] hashOut);
+        /// <summary>The digest of an empty subtree of height <paramref name="level"/> (0 = the zero field element).</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int poseidon_merkle_zero(uint level, byte[] hashOut);
+        /// <summary>Root from a leaf, its position and a <see cref="TreeDepth"/> x 32-byte sibling path (bottom-up), as the circuits compute it.</summary>
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int merkle_root_from_path_v1(byte[] leaf, ulong position, byte[] path, nuint pathLen, byte[] rootOut);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int plonk_verify(byte circuitType, byte[] proof, nuint proofLen, byte[] publicInputs, nuint publicInputsLen);

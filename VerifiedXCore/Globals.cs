@@ -366,6 +366,17 @@ namespace VerifiedXCore
         /// Same height as the freeze (shared FundLossAuditHeight); mainnet only (Program.cs clears it on testnet).
         /// </summary>
         public static long ForgedVfxBurnHeight = FundLossAuditHeight;
+
+        /// <summary>
+        /// Item 1 (stage 2): the proof-rules epoch of the shielded pool (PrivacyEpoch). At exactly this block every
+        /// shielded pool is reset and the circuit-compatible tree starts (leaf 0 = the public dummy note); no private
+        /// transaction is valid in that block. From the next block a ZK-authorized private transaction must carry a PLONK
+        /// proof that verifies against VFXPI1 version-2 public inputs rebuilt from its own fields, and a node whose native
+        /// library cannot verify (no VXPLNK03 params, or a library without CapVfxPi2Verify) refuses it (fail closed).
+        /// Notes shielded before the height can never be proven and are abandoned (owner decision: test funds, ~4.1 VFX).
+        /// Sentinel 999,999,999,999 = inert; set at the stage-2 release, above the tip when every validator runs it.
+        /// </summary>
+        public static long PrivateTxProofRulesHeight = 999_999_999_999L;
         public static Dictionary<string, decimal> ForgedVfxBurns = new(StringComparer.Ordinal)
         {
             ["RB3eeBH258arkuePCJf5NMVMSaUyhyy9g6"] = 100_033.000012M,
