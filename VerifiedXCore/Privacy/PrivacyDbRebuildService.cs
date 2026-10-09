@@ -26,7 +26,7 @@ namespace VerifiedXCore.Privacy
             // One streaming pass in height order (ToList() of every block exhausted memory on mainnet); only the blocks
             // that carry a private transaction are kept, which is a handful.
             var blocks = CollectBlocksWithPrivateTransactions(col.Query().OrderBy(x => x.Height).ToEnumerable(), cancellationToken, progress);
-            return TryReplayPrivateBlocksAsync(blocks, privacyDb, cancellationToken);
+            return TryReplayPrivateBlocksAsync(blocks, privacyDb, cancellationToken, Globals.LastBlock?.Height);
         }
 
         /// <summary>The blocks of <paramref name="blocksInHeightOrder"/> that carry at least one private transaction.</summary>
@@ -87,7 +87,8 @@ namespace VerifiedXCore.Privacy
         public static Task<(bool Success, string Message)> TryReplayPrivateBlocksAsync(
             IReadOnlyList<Block> blocks,
             LiteDatabase privacyDb,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            long? tipHeight = null)
         {
             if (privacyDb == null)
                 return Task.FromResult((false, "privacyDb is required."));
@@ -122,12 +123,20 @@ namespace VerifiedXCore.Privacy
 
                 long maxHeight = 0;
                 var txCount = 0;
+                var epochStarted = false;
 
                 foreach (var block in blocks.OrderBy(b => b.Height))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     if (block.Transactions == null || block.Transactions.Count == 0)
                         continue;
+                    // Stage 2: the pools restart at PrivateTxProofRulesHeight, before that block's transactions (as block
+                    // application does). No private transaction is valid in the reset block itself.
+                    if (!epochStarted && PrivacyEpoch.ProofRulesActive(block.Height))
+                    {
+                        PrivacyEpochService.ResetPools(privacyDb, Globals.PrivateTxProofRulesHeight, block.Timestamp);
+                        epochStarted = true;
+                    }
                     if (block.Height > maxHeight)
                         maxHeight = block.Height;
 
@@ -146,23 +155,35 @@ namespace VerifiedXCore.Privacy
                     }
                 }
 
-                foreach (var a in affected)
+                // A tip at/after the height with no private transaction since: the epoch still started there.
+                if (!epochStarted && tipHeight.HasValue && PrivacyEpoch.ProofRulesActive(tipHeight.Value))
+                {
+                    PrivacyEpochService.ResetPools(privacyDb, Globals.PrivateTxProofRulesHeight, 0);
+                    epochStarted = true;
+                    if (maxHeight < Globals.PrivateTxProofRulesHeight) maxHeight = Globals.PrivateTxProofRulesHeight;
+                }
+                var fixedDepth = ShieldedMerkleStore.UsesFixedDepthAt(Math.Max(maxHeight, tipHeight ?? 0));
+                var assetsToRoot = new HashSet<string>(affected, StringComparer.Ordinal);
+                if (epochStarted)
+                    foreach (var a in PrivacyEpochService.PoolAssets(privacyDb)) assetsToRoot.Add(a);
+
+                foreach (var a in assetsToRoot)
                 {
                     var row = poolCol.FindOne(x => x.AssetType == a);
                     var supply = row?.TotalShieldedSupply ?? 0m;
-                    var store = new ShieldedMerkleStore(a, privacyDb);
+                    var store = new ShieldedMerkleStore(a, privacyDb, fixedDepth);
                     store.LoadLeavesFromCommitments();
                     store.RebuildAndPersistMerkleNodes();
                     store.UpdatePoolStateRoot(maxHeight, supply, store.LeafDigests.Count);
                 }
 
-                foreach (var a in affected)
+                foreach (var a in assetsToRoot)
                 {
                     if (privacyDb.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS).Count(x => x.AssetType == a) > 0)
                         continue;
                     var row = poolCol.FindOne(x => x.AssetType == a);
                     var supply = row?.TotalShieldedSupply ?? 0m;
-                    var empty = new ShieldedMerkleStore(a, privacyDb);
+                    var empty = new ShieldedMerkleStore(a, privacyDb, fixedDepth);
                     empty.UpdatePoolStateRoot(maxHeight, supply, 0);
                 }
 

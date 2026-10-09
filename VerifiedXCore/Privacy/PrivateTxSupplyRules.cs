@@ -72,15 +72,18 @@ namespace VerifiedXCore.Privacy
         }
 
         /// <summary>
-        /// Committed shielded supply of an asset as the floor judges it: the pool row's TotalShieldedSupply (0 when there
-        /// is no row yet) plus the asset's entry in Globals.ShieldedSupplyCorrections, which adds back what the forged
-        /// mainnet unshields subtracted from the recorded counter (see there).
+        /// Committed shielded supply of an asset as the floor judges it at <paramref name="height"/>: the pool row's
+        /// TotalShieldedSupply (0 when there is no row yet) plus, before the proof-rules epoch, the asset's entry in
+        /// Globals.ShieldedSupplyCorrections, which adds back what the forged mainnet unshields subtracted from the counter.
         /// </summary>
-        public static decimal CommittedSupply(string asset)
+        public static decimal CommittedSupply(string asset, long height)
         {
             decimal recorded;
             try { recorded = ShieldedPoolService.GetState(asset)?.TotalShieldedSupply ?? 0M; }
             catch { recorded = 0M; }
+            // The correction undoes the forged debits in the pre-epoch counter; the epoch pool starts from zero.
+            if (PrivacyEpoch.ProofRulesActive(height))
+                return recorded;
             return recorded + (Globals.ShieldedSupplyCorrections.TryGetValue(asset ?? "", out var correction) ? correction : 0M);
         }
 
@@ -92,7 +95,7 @@ namespace VerifiedXCore.Privacy
             var structure = StructureError(tx, payload);
             if (structure != null)
                 return (false, structure);
-            var supply = SupplyError(tx, payload, CommittedSupply(payload.Asset));
+            var supply = SupplyError(tx, payload, CommittedSupply(payload.Asset, height));
             if (supply != null)
                 return (false, supply);
             return (true, "");

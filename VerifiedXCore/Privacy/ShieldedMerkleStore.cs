@@ -7,18 +7,39 @@ namespace VerifiedXCore.Privacy
 {
     /// <summary>
     /// Persists shielded commitment Merkle state to <c>DB_Privacy</c>. Rebuilds stored tree levels from leaf digests (Phase 1; incremental updates can replace full rebuild later).
+    ///
+    /// Two tree shapes (fund-loss audit item 1, stage 2 - see <see cref="PrivacyEpoch"/>):
+    /// <list type="bullet">
+    /// <item>before PrivateTxProofRulesHeight: the original dynamic-depth tree (chained-Poseidon parents, duplicate-last-node
+    /// padding), kept exactly as mined so history replays unchanged;</item>
+    /// <item>from the height: the circuits' fixed-depth-32 tree (<see cref="FixedDepthMerkleTree"/>), with the public dummy note at leaf 0.</item>
+    /// </list>
+    /// The shape is chosen by the block height the caller is applying or validating at (<see cref="UsesFixedDepthAt"/>).
     /// </summary>
     public sealed class ShieldedMerkleStore
     {
         private readonly LiteDatabase _db;
         private readonly string _assetType;
+        private readonly bool _fixedDepth;
         private readonly List<byte[]> _leafDigests = new();
 
         public ShieldedMerkleStore(string assetType, LiteDatabase? privacyDb = null)
+            : this(assetType, privacyDb, UsesFixedDepthAt((Globals.LastBlock?.Height ?? 0) + 1))
+        {
+        }
+
+        /// <param name="fixedDepth">True for the proof-rules epoch's tree (<see cref="UsesFixedDepthAt"/> of the height being applied or validated).</param>
+        public ShieldedMerkleStore(string assetType, LiteDatabase? privacyDb, bool fixedDepth)
         {
             _assetType = assetType ?? throw new ArgumentNullException(nameof(assetType));
             _db = privacyDb ?? PrivacyDbContext.GetPrivacyDb();
+            _fixedDepth = fixedDepth;
         }
+
+        /// <summary>Whether the proof-rules epoch's fixed-depth tree is the pool's tree at <paramref name="height"/>.</summary>
+        public static bool UsesFixedDepthAt(long height) => PrivacyEpoch.ProofRulesActive(height);
+
+        public bool FixedDepth => _fixedDepth;
 
         public IReadOnlyList<byte[]> LeafDigests => _leafDigests;
 
@@ -111,6 +132,7 @@ namespace VerifiedXCore.Privacy
 
         /// <summary>
         /// Builds an inclusion proof for the leaf at <paramref name="treePosition"/> against the current in-memory leaf list.
+        /// Fixed-depth trees return the flat 32 x 32-byte sibling path the circuits and <see cref="PoseidonV1.RootFromPath"/> take.
         /// </summary>
         public bool TryGetInclusionProof(long treePosition, [NotNullWhen(true)] out byte[]? proof, [NotNullWhen(true)] out byte[]? root32)
         {
@@ -118,6 +140,13 @@ namespace VerifiedXCore.Privacy
             root32 = null;
             if (treePosition < 0 || treePosition >= _leafDigests.Count)
                 return false;
+            if (_fixedDepth)
+            {
+                var tree = new FixedDepthMerkleTree(_leafDigests);
+                proof = tree.PathFlat(treePosition);
+                root32 = tree.Root();
+                return true;
+            }
             if (!CommitmentMerkleTree.TryBuildProof(_leafDigests, treePosition, out proof))
                 return false;
             var root = GetRootBytes();
@@ -129,6 +158,8 @@ namespace VerifiedXCore.Privacy
 
         public byte[]? GetRootBytes()
         {
+            if (_fixedDepth)
+                return new FixedDepthMerkleTree(_leafDigests).Root(); // an empty epoch tree still has a root (the depth-32 zero digest)
             if (_leafDigests.Count == 0)
                 return null;
             var level = new List<byte[]>(_leafDigests);
@@ -152,7 +183,6 @@ namespace VerifiedXCore.Privacy
             merkle.DeleteManySafe(x => x.AssetType == _assetType);
             if (_leafDigests.Count == 0)
                 return;
-
             var level = new List<byte[]>(_leafDigests);
             var lvl = 0;
             while (true)
@@ -168,14 +198,14 @@ namespace VerifiedXCore.Privacy
                     };
                     merkle.InsertSafe(node);
                 }
-                if (level.Count <= 1)
+                if (_fixedDepth ? lvl >= FixedDepthMerkleTree.Depth : level.Count <= 1)
                     break;
                 var next = new List<byte[]>();
                 for (var i = 0; i < level.Count; i += 2)
                 {
                     var left = level[i];
-                    var right = i + 1 < level.Count ? level[i + 1] : left;
-                    next.Add(CommitmentMerkleTree.Combine(left, right));
+                    var right = i + 1 < level.Count ? level[i + 1] : (_fixedDepth ? PoseidonV1.MerkleZero(lvl) : left);
+                    next.Add(_fixedDepth ? PoseidonV1.Hash2(left, right) : CommitmentMerkleTree.Combine(left, right));
                 }
                 level = next;
                 lvl++;
@@ -193,6 +223,24 @@ namespace VerifiedXCore.Privacy
             state.TotalShieldedSupply = totalShieldedSupply;
             state.LastUpdateHeight = blockHeight;
             col.UpsertSafe(state);
+        }
+
+        /// <summary>
+        /// Starts the proof-rules epoch for this asset: every commitment, tree node and pool row of the asset goes
+        /// (notes from before the height can never be proven), the fixed-depth tree starts with the public dummy note
+        /// at leaf 0, and the supply counter is 0. Nullifiers are kept: they can never be spent again either way.
+        /// Only meaningful on a store created with fixedDepth = true.
+        /// </summary>
+        public void ResetForEpoch(long blockHeight, long timestamp)
+        {
+            if (!_fixedDepth)
+                throw new InvalidOperationException("ResetForEpoch is for the proof-rules epoch's fixed-depth tree.");
+            Commitments().DeleteManySafe(x => x.AssetType == _assetType);
+            MerkleNodes().DeleteManySafe(x => x.AssetType == _assetType);
+            PoolState().DeleteManySafe(x => x.AssetType == _assetType);
+            _leafDigests.Clear();
+            AppendCommitment(PrivacyEpoch.DummyCommitment, PrivacyEpoch.DummyNoteHash, blockHeight, timestamp);
+            UpdatePoolStateRoot(blockHeight, 0M, 1);
         }
     }
 }

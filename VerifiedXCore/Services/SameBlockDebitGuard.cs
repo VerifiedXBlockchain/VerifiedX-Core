@@ -207,7 +207,7 @@ namespace VerifiedXCore.Services
         public static decimal? CommittedBalance(DebitKey key)
         {
             if (key.Kind == LedgerKind.ShieldedPool)
-                return Privacy.PrivateTxSupplyRules.CommittedSupply(key.ContractUid); // ContractUid holds the asset ("VFX", "VBTC:…")
+                return Privacy.PrivateTxSupplyRules.CommittedSupply(key.ContractUid, (Globals.LastBlock?.Height ?? 0) + 1); // ContractUid holds the asset ("VFX", "VBTC:…"); admission height
             if (key.Kind == LedgerKind.Native)
             {
                 // No account: VerifyTX allows that only for TKNZ_WD_ARB (arbiters); not judged here.
@@ -310,7 +310,13 @@ namespace VerifiedXCore.Services
             internal decimal? BalanceOf(DebitKey key)
             {
                 if (!_balances.TryGetValue(key, out var b))
-                    _balances[key] = b = _balanceOf(key);
+                {
+                    // The shielded pool's supply is judged at the block's height (block validation) or at tip + 1.
+                    b = key.Kind == LedgerKind.ShieldedPool
+                        ? Privacy.PrivateTxSupplyRules.CommittedSupply(key.ContractUid, BlockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                        : _balanceOf(key);
+                    _balances[key] = b;
+                }
                 return b;
             }
         }

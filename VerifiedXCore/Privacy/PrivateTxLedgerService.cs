@@ -37,14 +37,19 @@ namespace VerifiedXCore.Privacy
             var supply = poolRow?.TotalShieldedSupply ?? 0m;
             supply = ApplyShieldedSupplyDelta(tx, payload, supply);
 
+            var epoch = PrivacyEpoch.ProofRulesActive(height);
             for (var ni = 0; ni < payload.NullsB64.Count; ni++)
             {
+                // Stage 2: the public dummy note's nullifier is spent by every single-note spend; it is never recorded
+                // and leaf 0 is never marked spent.
+                if (epoch && PrivacyEpoch.IsDummyNullifier(payload.NullsB64[ni]))
+                    continue;
                 NullifierService.TryRecordNullifier(payload.NullsB64[ni], payload.Asset, height, ts, db);
                 if (payload.SpentCommitmentTreePositions.Count == payload.NullsB64.Count)
                     CommitmentSpendService.TryMarkSpent(payload.Asset, payload.SpentCommitmentTreePositions[ni], db);
             }
 
-            var store = new ShieldedMerkleStore(payload.Asset, db);
+            var store = new ShieldedMerkleStore(payload.Asset, db, ShieldedMerkleStore.UsesFixedDepthAt(height));
             store.LoadLeavesFromCommitments();
 
             foreach (var o in payload.Outs.OrderBy(x => x.Index))

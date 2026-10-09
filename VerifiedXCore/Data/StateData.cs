@@ -83,6 +83,7 @@ namespace VerifiedXCore.Data
             StateWriteContext.SetHeight(block.Height); //stamp LastModifiedHeight on state writes for snapshot diffing
             LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13: every apply path uses the block's height
             await ApplyForgedVfxBurnsAsync(block); // fund-loss audit item 1 (burn): at ForgedVfxBurnHeight, before the block's transactions
+            PrivacyEpochService.ApplyIfResetBlock(block); // fund-loss audit item 1 (stage 2): shielded pools restart at PrivateTxProofRulesHeight
             var txList = block.Transactions.ToList();
             var txCount = txList.Count();
             int txTreiUpdateSuccessCount = 0;

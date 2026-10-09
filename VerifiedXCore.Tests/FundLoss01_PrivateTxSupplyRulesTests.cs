@@ -278,7 +278,7 @@ namespace VerifiedXCore.Tests
                 Assert.StartsWith(PrivateTxSupplyRules.SupplyReasonPrefix, msgNoCorrection);
 
                 Globals.ShieldedSupplyCorrections["VFX"] = 100_033.000012M;
-                Assert.Equal(4.099985M, PrivateTxSupplyRules.CommittedSupply("VFX"));
+                Assert.Equal(4.099985M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate));
                 var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 1M));
                 Assert.True(ok, msg);
                 var (okTooMuch, msgTooMuch) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 4.2M));

@@ -38,15 +38,16 @@ namespace VerifiedXCore.Privacy
             return string.IsNullOrWhiteSpace(st?.CurrentMerkleRoot) ? null : st!.CurrentMerkleRoot;
         }
 
-        /// <summary>Builds an inclusion proof against commitments persisted for <paramref name="assetType"/>.</summary>
+        /// <summary>Builds an inclusion proof against commitments persisted for <paramref name="assetType"/> (the tree shape of <paramref name="atHeight"/>, default tip + 1).</summary>
         public static bool TryGetInclusionProof(
             string assetType,
             long treePosition,
             LiteDatabase? db,
             [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out byte[]? proof,
-            [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out byte[]? root32)
+            [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out byte[]? root32,
+            long? atHeight = null)
         {
-            var store = new ShieldedMerkleStore(assetType, db);
+            var store = new ShieldedMerkleStore(assetType, db, ShieldedMerkleStore.UsesFixedDepthAt(atHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)));
             store.LoadLeavesFromCommitments();
             return store.TryGetInclusionProof(treePosition, out proof, out root32);
         }
