@@ -59,6 +59,14 @@ namespace VerifiedXCore.Privacy
             => Convert.ToBase64String(Compute(amountScaled, randomness32));
 
         /// <summary>
+        /// The note hash for a note mined at <paramref name="height"/>: in the proof-rules epoch the circuits' Poseidon
+        /// (<see cref="PoseidonV1.NoteHash"/>, the only value a proof can be made for); before it the legacy hash above,
+        /// kept so pre-epoch transactions replay unchanged.
+        /// </summary>
+        public static byte[] ComputeAt(long height, ulong amountScaled, byte[] randomness32) =>
+            PrivacyEpoch.ProofRulesActive(height) ? PoseidonV1.NoteHash(amountScaled, randomness32) : Compute(amountScaled, randomness32);
+
+        /// <summary>
         /// Computes note hash from a C# decimal amount (applies 10^18 scaling) and 32-byte randomness.
         /// </summary>
         public static byte[] ComputeFromDecimal(decimal amount, byte[] randomness32)

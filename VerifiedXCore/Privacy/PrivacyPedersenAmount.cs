@@ -38,8 +38,9 @@ namespace VerifiedXCore.Privacy
             commitmentG1 = Array.Empty<byte>();
             if (!TryToScaledU64(amount, out var scaled, out error))
                 return false;
-            randomness32 = new byte[PlonkNative.ScalarSize];
-            System.Security.Cryptography.RandomNumberGenerator.Fill(randomness32);
+            // Canonical (below the field modulus): the circuits deserialise randomness canonically and refuse half of all
+            // raw 32-byte values; Pedersen accepts both, so this changes nothing for the commitment itself.
+            randomness32 = PrivacyField.RandomCanonical();
             commitmentG1 = new byte[PlonkNative.G1CompressedSize];
             var code = PlonkNative.pedersen_commit(scaled, randomness32, commitmentG1);
             if (code != PlonkNative.Success)
