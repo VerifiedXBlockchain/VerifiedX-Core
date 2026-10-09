@@ -57,12 +57,50 @@ namespace VerifiedXCore.Tests
             try { Directory.Delete(_tempRoot, recursive: true); } catch { }
         }
 
-        private static Transaction Token(string from, string function) => new Transaction
+        private static Transaction Token(string from, string function, TransactionType type = TransactionType.FTKN_TX, bool arrayForm = false)
         {
-            FromAddress = from, ToAddress = "RBdwbhyqwJCTnoNe1n7vTXPJqi5HKc6NTH", Amount = 0M, Fee = 0.00000100M, Nonce = 0,
-            Timestamp = TimeUtil.GetTime(), TransactionType = TransactionType.FTKN_TX, Hash = Guid.NewGuid().ToString("N"),
-            Data = JsonConvert.SerializeObject(new { Function = function, ContractUID = "token:1", FromAddress = from, ToAddress = "RBdwbhyqwJCTnoNe1n7vTXPJqi5HKc6NTH", Amount = 10M }),
-        };
+            var body = new { Function = function, ContractUID = "token:1", FromAddress = from, ToAddress = "RBdwbhyqwJCTnoNe1n7vTXPJqi5HKc6NTH", Amount = 10M };
+            return new Transaction
+            {
+                FromAddress = from, ToAddress = "RBdwbhyqwJCTnoNe1n7vTXPJqi5HKc6NTH", Amount = 0M, Fee = 0.00000100M, Nonce = 0,
+                Timestamp = TimeUtil.GetTime(), TransactionType = type, Hash = Guid.NewGuid().ToString("N"),
+                Data = arrayForm ? JsonConvert.SerializeObject(new[] { body }) : JsonConvert.SerializeObject(body),
+            };
+        }
+
+        /// <summary>Re-audit (9 Oct 2026): the dispatchers run TokenTransfer() under every contract type and in the array Data form; so does the rule.</summary>
+        [Theory]
+        [InlineData(TransactionType.NFT_TX, false)]
+        [InlineData(TransactionType.SC_TX, false)]
+        [InlineData(TransactionType.TKNZ_TX, false)]
+        [InlineData(TransactionType.FTKN_TX, true)]
+        [InlineData(TransactionType.NFT_TX, true)]
+        public async Task ReserveTokenMove_RefusedUnderEveryContractType_AndArrayData(TransactionType type, bool arrayForm)
+        {
+            Globals.LastBlock = new Block { Height = Gate - 1 };
+            foreach (var function in new[] { "TokenTransfer()", "TokenBurn()" })
+            {
+                var (ok, msg) = await TransactionValidatorService.VerifyTX(Token(_reserve, function, type, arrayForm));
+                Assert.False(ok);
+                Assert.StartsWith(Refused, msg);
+                Assert.NotNull(LedgerIntegrityRules.ReserveTokenTransfer(Token(_reserve, function, type, arrayForm), Gate));
+                Assert.Null(LedgerIntegrityRules.ReserveTokenTransfer(Token(_reserve, function, type, arrayForm), Gate - 1));
+                Assert.Null(LedgerIntegrityRules.ReserveTokenTransfer(Token(_normal, function, type, arrayForm), Gate));
+            }
+            // A plain TX from a reserve is never a token move, whatever its Data says.
+            Assert.Null(LedgerIntegrityRules.ReserveTokenTransfer(Token(_reserve, "TokenTransfer()", TransactionType.TX), Gate));
+        }
+
+        [Fact]
+        public void ContractFunctionOf_ReadsBothDataForms()
+        {
+            Assert.Equal("TokenTransfer()", LedgerIntegrityRules.ContractFunctionOf(Token(_reserve, "TokenTransfer()").Data));
+            Assert.Equal("TokenTransfer()", LedgerIntegrityRules.ContractFunctionOf(Token(_reserve, "TokenTransfer()", arrayForm: true).Data));
+            Assert.Null(LedgerIntegrityRules.ContractFunctionOf("[]"));
+            Assert.Null(LedgerIntegrityRules.ContractFunctionOf("not json"));
+            Assert.Null(LedgerIntegrityRules.ContractFunctionOf(null));
+            Assert.Null(LedgerIntegrityRules.ContractFunctionOf("\"a string\""));
+        }
 
         [Theory]
         [InlineData("TokenTransfer()")]

@@ -476,14 +476,29 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static string? ReserveTokenTransfer(Transaction tx, long height)
         {
-            if (tx == null || height < Globals.ReserveTokenRulesHeight || tx.TransactionType != TransactionType.FTKN_TX
+            // Re-audit (9 Oct 2026): the apply and the validator dispatch TokenTransfer()/TokenBurn() by the Function in Data
+            // for NFT_TX, SC_TX, TKNZ_TX and FTKN_TX alike, so the rule judges the function, not the TransactionType; and
+            // Data may be the one-element array form the dispatchers also accept.
+            if (tx == null || height < Globals.ReserveTokenRulesHeight || tx.TransactionType == TransactionType.TX
                 || string.IsNullOrEmpty(tx.FromAddress) || !tx.FromAddress.StartsWith("xRBX") || string.IsNullOrEmpty(tx.Data))
                 return null;
-            string? function = null;
-            try { function = JObject.Parse(tx.Data)["Function"]?.ToObject<string?>(); } catch { }
+            var function = ContractFunctionOf(tx.Data);
             return function == "TokenTransfer()" || function == "TokenBurn()"
                 ? "A reserve account cannot send or burn fungible tokens: token transfers are not deferred, callable back or recoverable."
                 : null;
+        }
+
+        /// <summary>The contract Function named in a transaction's Data, whether Data is the object form or the one-element array form; null when neither.</summary>
+        public static string? ContractFunctionOf(string? data)
+        {
+            if (string.IsNullOrWhiteSpace(data)) return null;
+            try
+            {
+                var token = JToken.Parse(data);
+                if (token is JArray arr) token = arr.Count > 0 ? arr[0] : null;
+                return token is JObject obj ? obj["Function"]?.ToObject<string?>() : null;
+            }
+            catch { return null; }
         }
 
         // ── NEW-16: a coinbase transaction is a plain reward/fee record ─────────────────────────────────────────
