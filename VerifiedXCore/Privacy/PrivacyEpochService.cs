@@ -24,15 +24,18 @@ namespace VerifiedXCore.Privacy
             return assets.OrderBy(a => a, StringComparer.Ordinal).ToList();
         }
 
-        /// <summary>Resets every pool for the epoch at <paramref name="blockHeight"/>.</summary>
+        /// <summary>The pools the epoch resets: the VFX pool only. vBTC privacy has been refused since VbtcPrivacyDisableHeight, so its pool rows are history and stay.</summary>
+        public static readonly string[] ResetAssets = { "VFX" };
+
+        /// <summary>Resets the VFX pool for the epoch at <paramref name="blockHeight"/> (re-audit 9 Oct 2026: VFX only; vBTC pools are left as history).</summary>
         public static void ResetPools(LiteDatabase db, long blockHeight, long timestamp)
         {
-            foreach (var asset in PoolAssets(db))
+            foreach (var asset in ResetAssets)
             {
                 var store = new ShieldedMerkleStore(asset, db, fixedDepth: true);
                 store.ResetForEpoch(blockHeight, timestamp);
             }
-            LogUtility.Log($"Shielded pools reset for the proof-rules epoch at block {blockHeight}.", "PrivacyEpochService.ResetPools()");
+            LogUtility.Log($"Shielded VFX pool reset for the proof-rules epoch at block {blockHeight}.", "PrivacyEpochService.ResetPools()");
         }
 
         /// <summary>Block application: runs the reset when <paramref name="block"/> is the epoch's first block.</summary>

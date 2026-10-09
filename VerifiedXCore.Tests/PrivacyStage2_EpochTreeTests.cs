@@ -128,6 +128,27 @@ namespace VerifiedXCore.Tests
             Assert.Equal(PrivacyEpoch.DummyCommitment.Length, PlonkNative.G1CompressedSize);
         }
 
+        /// <summary>Re-audit (9 Oct 2026): the reset is the VFX pool's; a vBTC pool (privacy refused since VbtcPrivacyDisableHeight) is left as history.</summary>
+        [Fact]
+        public void AtTheHeight_OnlyTheVfxPoolIsReset_VbtcPoolRowsStay()
+        {
+            const string vbtc = "VBTC:test-vault";
+            var store = new ShieldedMerkleStore(vbtc, Db, fixedDepth: false);
+            var n = Note(50_000_000);
+            store.AppendCommitment(n.G1, n.NoteHash, Height - 10, 1);
+            var vbtcBefore = Db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS).Query().Where(x => x.AssetType == vbtc).ToList();
+            Assert.Single(vbtcBefore);
+            Assert.Contains(vbtc, PrivacyEpochService.PoolAssets(Db));
+
+            PrivacyEpochService.ApplyIfResetBlock(BlockAt(Height), Db);
+
+            var vbtcAfter = Db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS).Query().Where(x => x.AssetType == vbtc).ToList();
+            Assert.Equal(vbtcBefore.Single().Commitment, Assert.Single(vbtcAfter).Commitment);
+            var vfx = Db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS).Query().Where(x => x.AssetType == "VFX").ToList();
+            Assert.Equal(Convert.ToBase64String(PrivacyEpoch.DummyNoteHash), Assert.Single(vfx).NoteHash);
+            Assert.Equal(new[] { "VFX" }, PrivacyEpochService.ResetAssets);
+        }
+
         // ── Appending in the epoch ────────────────────────────────────────────────────────────────────────────
 
         [Fact]
