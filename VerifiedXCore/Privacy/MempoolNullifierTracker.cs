@@ -41,6 +41,9 @@ namespace VerifiedXCore.Privacy
                         error = "Nullifier entry is empty.";
                         return false;
                     }
+                    // Stage 2: the public dummy note's nullifier is shared by every single-note spend; it never conflicts.
+                    if (PrivacyEpoch.IsDummyNullifier(n))
+                        continue;
                     var key = MakeKey(assetType, n);
                     if (Globals.MempoolNullifiers.TryGetValue(key, out var holder) && holder != txHash)
                     {
@@ -51,6 +54,8 @@ namespace VerifiedXCore.Privacy
 
                 foreach (var n in nullifiersB64)
                 {
+                    if (PrivacyEpoch.IsDummyNullifier(n))
+                        continue;
                     var key = MakeKey(assetType, n);
                     Globals.MempoolNullifiers[key] = txHash;
                 }
@@ -70,6 +75,8 @@ namespace VerifiedXCore.Privacy
 
             foreach (var n in payload.NullsB64)
             {
+                if (PrivacyEpoch.IsDummyNullifier(n))
+                    continue; // stage 2: shared by every single-note spend in the block
                 var key = MakeKey(payload.Asset, n);
                 if (!blockNullifierKeys.Add(key))
                 {

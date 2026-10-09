@@ -54,6 +54,13 @@ namespace VerifiedXCore.Privacy
             if (!payload!.TryValidateStructure(out var structErr))
                 return (false, structErr ?? "Invalid private payload structure.");
 
+            // Fund-loss audit item 1 (stage 2): the shape proofs require (nothing in the reset block; note hashes on every
+            // output; two notes spent; the dummy note at most once). Block validation judges at the block's height.
+            var proofRulesHeight = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
+            var proofShapeError = PrivateTxProofRules.Check(txRequest, payload, proofRulesHeight);
+            if (proofShapeError != null)
+                return (false, proofShapeError);
+
             if (payload.NullsB64.Count > 0)
             {
                 foreach (var n in payload.NullsB64)
@@ -105,7 +112,7 @@ namespace VerifiedXCore.Privacy
 
             if (!skipPlonkProofVerification)
             {
-                var plonk = PlonkProofVerifier.TryValidatePrivateProofs(txRequest, payload!, blockDownloads);
+                var plonk = PlonkProofVerifier.TryValidatePrivateProofs(txRequest, payload!, blockDownloads, proofRulesHeight);
                 if (!plonk.ok)
                     return (false, plonk.message);
             }
