@@ -1,4 +1,4 @@
-﻿using LiteDB;
+using LiteDB;
 using VerifiedXCore.Data;
 using VerifiedXCore.Services;
 using VerifiedXCore.Utilities;
@@ -26,6 +26,13 @@ namespace VerifiedXCore.Models.DST
         public bool? IsProcessed { get; set; }// Bid Queue Item
         public int ListingId { get; set; }
         public int CollectionId { get; set; }
+        /// <summary>
+        /// Re-audit (9 Oct 2026): the contract the listing sells. The bid signature covers purchase key, amount and bidder
+        /// only, so the wallet records which contract it bid on and completes a sale only for that contract
+        /// (<see cref="HasLocalSentBid"/>). Filled by <see cref="Build"/> from the connected shop's listing when the client
+        /// did not send it; null on rows from before this field existed.
+        /// </summary>
+        public string? SmartContractUID { get; set; }
 
         public bool Build(bool thirdParty = false)
         {
@@ -41,6 +48,8 @@ namespace VerifiedXCore.Models.DST
             BidSendTime = TimeUtil.GetTime();
             MaxBidAmount = BidAmount;
             BidSendReceive = BidSendReceive.Sent;
+            if (string.IsNullOrWhiteSpace(SmartContractUID))
+                SmartContractUID = ListingContractFor(ListingId, PurchaseKey);
 
             var bidModifier = (BidAmount * Globals.BidModifier);
             var bidAmount = Convert.ToInt64(bidModifier);
@@ -282,9 +291,16 @@ namespace VerifiedXCore.Models.DST
         /// auto-bid ceiling) covers <paramref name="amount"/>. The incoming-sale handler auto-signed the completion from
         /// the wallet with no such check, so a Sale_Start that skipped the bid signature made the named wallet pay.
         /// </summary>
-        public static bool HasLocalSentBid(string? bidderAddress, string? purchaseKey, decimal amount)
+        /// <summary>
+        /// Whether this wallet placed a bid that the incoming sale can complete: same bidder, same purchase key, an amount
+        /// at or below what it bid, and (re-audit, 9 Oct 2026) on the same contract. The bid signature does not name the
+        /// contract, so a Sale_Start for another contract carrying a replayed signature must not make this wallet pay.
+        /// A bid whose contract cannot be established (a row from before the field, no shop listing to resolve it) is not
+        /// completed automatically.
+        /// </summary>
+        public static bool HasLocalSentBid(string? bidderAddress, string? purchaseKey, decimal amount, string? smartContractUID)
         {
-            if (string.IsNullOrEmpty(bidderAddress) || string.IsNullOrEmpty(purchaseKey) || amount <= 0M)
+            if (string.IsNullOrEmpty(bidderAddress) || string.IsNullOrEmpty(purchaseKey) || amount <= 0M || string.IsNullOrWhiteSpace(smartContractUID))
                 return false;
             try
             {
@@ -293,9 +309,36 @@ namespace VerifiedXCore.Models.DST
                 return bids.Any(b => b != null
                     && string.Equals(b.BidAddress, bidderAddress, StringComparison.Ordinal)
                     && string.Equals(b.PurchaseKey, purchaseKey, StringComparison.Ordinal)
-                    && Math.Max(b.BidAmount, b.MaxBidAmount) >= amount);
+                    && Math.Max(b.BidAmount, b.MaxBidAmount) >= amount
+                    && string.Equals(b.SmartContractUID ?? ListingContractFor(b.ListingId, b.PurchaseKey), smartContractUID, StringComparison.Ordinal));
             }
             catch { return false; }
+        }
+
+        /// <summary>
+        /// The contract a listing sells, from the shop data this node holds (the connected shop and any multi-shop
+        /// sessions): by purchase key first (random per listing), else by listing id. Null when unknown.
+        /// </summary>
+        public static string? ListingContractFor(int listingId, string? purchaseKey)
+        {
+            try
+            {
+                var sources = new List<IEnumerable<Listing>?> { Globals.DecShopData?.Listings };
+                foreach (var shop in Globals.MultiDecShopData.Values)
+                    sources.Add(shop?.Listings);
+                foreach (var listings in sources)
+                {
+                    if (listings == null) continue;
+                    var byKey = !string.IsNullOrEmpty(purchaseKey)
+                        ? listings.FirstOrDefault(l => l != null && string.Equals(l.PurchaseKey, purchaseKey, StringComparison.Ordinal))
+                        : null;
+                    var hit = byKey ?? (listingId > 0 ? listings.FirstOrDefault(l => l != null && l.Id == listingId) : null);
+                    if (hit != null && !string.IsNullOrWhiteSpace(hit.SmartContractUID))
+                        return hit.SmartContractUID;
+                }
+            }
+            catch { }
+            return null;
         }
         #endregion
 
