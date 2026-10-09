@@ -64,12 +64,34 @@ namespace VerifiedXCore.Bitcoin.FROST
             reason = "";
             if (string.IsNullOrEmpty(recordScUid) || string.Equals(recordScUid, requestScUid, StringComparison.Ordinal))
                 return true;
+            // Re-audit (9 Oct 2026): since NEW-26 a DKG runs under the contract UID it will create (FrostDkgAttestation.NewContractUid),
+            // so a record filed under a contract-shaped UID is that contract's share whether or not the contract exists on
+            // chain yet (a ceremony whose contract was never created included). It is never relabelled to another contract.
+            // Only pre-NEW-26 records, filed under a session id, keep the ceremony-id allowance below.
+            if (IsContractUid(recordScUid))
+            {
+                reason = $"the key share found by group key is filed under contract {recordScUid} (a NEW-26 ceremony names its contract); it is that vault's share and is not used for {requestScUid}.";
+                return false;
+            }
             SmartContractStateTrei? other = null;
             try { other = SmartContractStateTrei.GetSmartContractState(recordScUid); } catch { }
             if (other == null)
-                return true; // a ceremony id, never a contract
+                return true; // a pre-NEW-26 ceremony id, never a contract
             reason = $"the key share found by group key is filed under contract {other.SmartContractUID}, which exists on chain; it is that vault's share and is not used for {requestScUid}.";
             return false;
+        }
+
+        /// <summary>A smart contract UID as every creation path mints it: 32 hex characters, a colon, a unix timestamp.</summary>
+        public static bool IsContractUid(string? uid)
+        {
+            if (string.IsNullOrEmpty(uid) || uid.Length < 34) return false;
+            var colon = uid.IndexOf(':');
+            if (colon != 32 || colon == uid.Length - 1) return false;
+            for (var i = 0; i < 32; i++)
+                if (!Uri.IsHexDigit(uid[i])) return false;
+            for (var i = 33; i < uid.Length; i++)
+                if (uid[i] < '0' || uid[i] > '9') return false;
+            return true;
         }
 
         /// <summary>

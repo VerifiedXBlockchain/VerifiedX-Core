@@ -179,8 +179,35 @@ namespace VerifiedXCore.Tests
             Assert.Contains(victim, reason);
 
             Assert.True(FrostDkgGuard.MayAdoptKeyRecord(victim, victim, out _));                       // its own contract
-            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(Guid.NewGuid().ToString("N"), forged, out _)); // still filed under a ceremony id
+            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(Guid.NewGuid().ToString("N"), forged, out _)); // a pre-NEW-26 session id
+            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(Guid.NewGuid().ToString(), forged, out _));    // a pre-NEW-26 session id (dashed GUID)
             Assert.True(FrostDkgGuard.MayAdoptKeyRecord(null, forged, out _));
+        }
+
+        /// <summary>
+        /// Re-audit (9 Oct 2026): a NEW-26 ceremony runs under the UID of the contract it will create, so a share filed under a
+        /// contract-shaped UID whose contract was never created (never signed, nothing on chain) is still that contract's
+        /// share: a forged vault naming it as its ceremony id does not get it.
+        /// </summary>
+        [Fact]
+        public void KeyShareOfANeverCreatedContract_IsNeverAdoptedByAnotherContract()
+        {
+            var neverCreated = FrostDkgAttestation.NewContractUid();
+            Assert.Null(SmartContractStateTrei.GetSmartContractState(neverCreated));
+            var forged = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
+
+            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(neverCreated, forged, out var reason));
+            Assert.Contains(neverCreated, reason);
+            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(neverCreated, neverCreated, out _));
+
+            Assert.True(FrostDkgGuard.IsContractUid(neverCreated));
+            Assert.True(FrostDkgGuard.IsContractUid(forged));
+            Assert.False(FrostDkgGuard.IsContractUid(Guid.NewGuid().ToString("N")));
+            Assert.False(FrostDkgGuard.IsContractUid(Guid.NewGuid().ToString()));
+            Assert.False(FrostDkgGuard.IsContractUid("vault:1"));
+            Assert.False(FrostDkgGuard.IsContractUid(Guid.NewGuid().ToString("N") + ":"));
+            Assert.False(FrostDkgGuard.IsContractUid(Guid.NewGuid().ToString("N") + ":12a"));
+            Assert.False(FrostDkgGuard.IsContractUid(null));
         }
     }
 }
