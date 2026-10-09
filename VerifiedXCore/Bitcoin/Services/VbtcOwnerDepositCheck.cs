@@ -107,11 +107,12 @@ namespace VerifiedXCore.Bitcoin.Services
                 return new OwnerDepositCheck(OwnerDepositStatus.Checked, 0M);
 
             // Fund-loss audit item 8: the owner ledger added back every Completed withdrawal, but one whose Bitcoin
-            // transaction has not confirmed is still in the confirmed deposit, so the deposit must cover it too.
+            // transaction has not confirmed - or (re-audit) whose named transaction is not the withdrawal's - is still in
+            // the confirmed deposit, so the deposit must cover it too.
             decimal unconfirmedCompleted = 0M;
             if (!string.IsNullOrEmpty(scUID))
             {
-                var unconfirmed = await CompletedWithdrawalConfirmation.UnconfirmedAmountAsync(scUID, currentHeight);
+                var unconfirmed = await CompletedWithdrawalConfirmation.NotYetCountedAmountAsync(scUID, currentHeight);
                 if (unconfirmed == null)
                     return NoAnswer(mode);
                 unconfirmedCompleted = unconfirmed.Value;
