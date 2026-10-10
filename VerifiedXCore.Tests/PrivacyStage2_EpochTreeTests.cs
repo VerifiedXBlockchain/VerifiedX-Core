@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using VerifiedXCore;
 using VerifiedXCore.Data;
+using VerifiedXCore.Extensions;
 using VerifiedXCore.Models;
 using VerifiedXCore.Models.Privacy;
 using VerifiedXCore.Privacy;
@@ -180,8 +181,10 @@ namespace VerifiedXCore.Tests
             var leaf0 = Db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS).FindOne(x => x.AssetType == "VFX" && x.TreePosition == 0);
             Assert.False(leaf0.IsSpent); // the dummy is never marked spent
             // A second single-note spend by another wallet carries the same dummy nullifier and still applies.
+            // (An epoch unshield always carries its change output, here of amount zero: one without is not epoch-shaped and has no effect on the pool.)
             var vk2 = PrivacyField.RandomCanonical();
-            await ApplyPrivacy(BlockAt(Height + 3, Unshield(2M, new[] { PoseidonV1.Nullifier(vk2, b.NoteHash, 2), PrivacyEpoch.DummyNullifier }, tree.Root(), null, 2, 0)));
+            var zeroChange = Note(0);
+            await ApplyPrivacy(BlockAt(Height + 3, Unshield(2M, new[] { PoseidonV1.Nullifier(vk2, b.NoteHash, 2), PrivacyEpoch.DummyNullifier }, tree.Root(), (zeroChange.G1, zeroChange.NoteHash), 2, 0)));
             Assert.False(NullifierService.IsNullifierSpentInDb(PrivacyEpoch.DummyNullifierB64, "VFX", Db));
             Assert.Equal(5M - 1M - 0.000003M - 2M - 0.000003M, ShieldedPoolService.GetState("VFX", Db)!.TotalShieldedSupply);
         }
@@ -230,6 +233,168 @@ namespace VerifiedXCore.Tests
             Assert.True(ok3, msg3);
             Assert.Equal(1M, ShieldedPoolService.GetState("VFX", Db)!.TotalShieldedSupply);
             Assert.Equal(1, ShieldedPoolService.GetState("VFX", Db)!.TotalCommitments);
+        }
+
+        // ── The production entry point, with the tip not loaded (fourth review) ─────────────────────────────────
+
+        private static void StoreBlocks(params Block[] blocks)
+        {
+            foreach (var b in blocks)
+            {
+                b.Hash ??= "h" + b.Height;
+                BlockchainData.GetBlocks().InsertSafe(b);
+            }
+        }
+
+        private static readonly byte[] NonCanonical = Enumerable.Repeat((byte)0xFF, 32).ToArray(); // a legacy note hash: not a field element
+
+        private static Transaction VbtcShield(string uid, decimal amount, byte[] g1, byte[] noteHash)
+        {
+            var payload = new PrivateTxPayload
+            {
+                Asset = "VBTC:" + uid, Kind = "shield", VbtcContractUid = uid, VbtcTransparentAmount = amount, TransparentInput = "RSHIELDER",
+                Outs = { new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(g1), NoteHashB64 = Convert.ToBase64String(noteHash) } },
+            };
+            return new Transaction { TransactionType = TransactionType.VBTC_V2_SHIELD, FromAddress = "RSHIELDER", ToAddress = PrivacyConstants.ShieldedPoolAddress, Amount = 0M, Data = PrivateTxPayloadCodec.SerializeToJson(payload), Hash = Guid.NewGuid().ToString("N"), Timestamp = 1 };
+        }
+
+        /// <summary>
+        /// The one-time rebuild runs at startup BEFORE the tip is loaded into Globals.LastBlock (it is still Height -1). It
+        /// must read the tip from the stored blocks: a node that crossed the proof height on an older build, with no private
+        /// transaction since, otherwise keeps its pre-epoch pool and refuses every epoch transaction. (The earlier test
+        /// passed the tip in by hand, as the burn tests did.)
+        /// </summary>
+        [Fact]
+        public async Task StartupRebuild_ReadsTheStoredTip_WhileTheLiveTipIsStillUnloaded()
+        {
+            var prior = Globals.LastBlock;
+            try
+            {
+                Globals.LastBlock = new Block { Height = -1 }; // startup, before StartupService.SetLastBlock()
+                var pre = Note(100_000_000);
+                var preBlock = BlockAt(Height - 5, Shield(1M, pre.G1, pre.NoteHash));
+                StoreBlocks(preBlock, BlockAt(Height - 1), BlockAt(Height), BlockAt(Height + 3)); // the chain is past the height, nothing private since
+                await ApplyPrivacy(preBlock);                                                    // the pool as the old build left it
+                Assert.Equal(1M, ShieldedPoolService.GetState("VFX", Db)!.TotalShieldedSupply);
+
+                var (ok, msg) = await PrivacyDbRebuildService.TryRebuildFromBlocksAsync(Db);
+                Assert.True(ok, msg);
+                var vfx = ShieldedPoolService.GetState("VFX", Db)!;
+                Assert.Equal(Convert.ToBase64String(new FixedDepthMerkleTree(new[] { PrivacyEpoch.DummyNoteHash }).Root()), vfx.CurrentMerkleRoot);
+                Assert.Equal(0M, vfx.TotalShieldedSupply);
+                Assert.Equal(1, vfx.TotalCommitments);
+            }
+            finally { Globals.LastBlock = prior; }
+        }
+
+        /// <summary>
+        /// The epoch is the VFX pool only. A vBTC pool keeps its legacy tree: its leaves are legacy note hashes, which are
+        /// not field elements, so re-rooting it as an epoch tree throws and the whole rebuild fails (and is retried, and
+        /// fails, at every start).
+        /// </summary>
+        [Fact]
+        public async Task Rebuild_LeavesAVbtcPoolInItsLegacyShape_AndDoesNotFailOnItsLegacyLeaves()
+        {
+            var prior = Globals.LastBlock;
+            try
+            {
+                Globals.LastBlock = new Block { Height = -1 };
+                var n = Note(50_000_000);
+                var vfx = Note(100_000_000);
+                var shieldBlock = BlockAt(Height - 10, VbtcShield("vault-1", 0.5M, n.G1, NonCanonical), Shield(1M, vfx.G1, NonCanonical));
+                StoreBlocks(shieldBlock, BlockAt(Height + 2));
+
+                var (ok, msg) = await PrivacyDbRebuildService.TryRebuildFromBlocksAsync(Db);
+                Assert.True(ok, msg);
+
+                var vbtc = ShieldedPoolService.GetState("VBTC:vault-1", Db)!;
+                Assert.Equal(1, vbtc.TotalCommitments);
+                Assert.Equal(0.5M, vbtc.TotalShieldedSupply);
+                var legacy = new ShieldedMerkleStore("VBTC:vault-1", Db, fixedDepth: false);
+                legacy.LoadLeavesFromCommitments();
+                Assert.Equal(Convert.ToBase64String(legacy.GetRootBytes()!), vbtc.CurrentMerkleRoot);
+
+                var pool = ShieldedPoolService.GetState("VFX", Db)!;
+                Assert.Equal(Convert.ToBase64String(new FixedDepthMerkleTree(new[] { PrivacyEpoch.DummyNoteHash }).Root()), pool.CurrentMerkleRoot);
+                Assert.Equal(0M, pool.TotalShieldedSupply);
+                Assert.False(ShieldedMerkleStore.UsesFixedDepth("VBTC:vault-1", Height + 2));
+                Assert.True(ShieldedMerkleStore.UsesFixedDepth("VFX", Height + 2));
+                Assert.False(ShieldedMerkleStore.UsesFixedDepth("VFX", Height - 1));
+            }
+            finally { Globals.LastBlock = prior; }
+        }
+
+        /// <summary>
+        /// A block is applied with the tree of its own height, not the live tip: a full state rebuild replays pre-epoch
+        /// blocks while the tip is in the epoch. The VFX fee leg of a pre-epoch vBTC spend used the shape of the tip.
+        /// </summary>
+        [Fact]
+        public async Task APreEpochBlock_IsAppliedWithItsOwnTreeShape_WhateverTheLiveTipIs()
+        {
+            var prior = Globals.LastBlock;
+            try
+            {
+                Globals.LastBlock = new Block { Height = Height + 500 }; // the tip is in the epoch; the block being replayed is not
+                var vfx = Note(100_000_000);
+                await ApplyPrivacy(BlockAt(Height - 20, Shield(1M, vfx.G1, NonCanonical)));
+
+                var change = Note(40_000_000);
+                var payload = new PrivateTxPayload
+                {
+                    Asset = "VBTC:vault-1", Kind = "unshield", VbtcContractUid = "vault-1", VbtcTransparentAmount = 0.1M, TransparentOutput = "RRECIPIENT",
+                    NullsB64 = { Convert.ToBase64String(NonCanonical) }, SpentCommitmentTreePositions = { 0 }, Fee = Globals.PrivateTxFixedFee,
+                    FeeInputNullifierB64 = Convert.ToBase64String(Enumerable.Repeat((byte)0xEE, 32).ToArray()), FeeTreeMerkleRoot = "legacy-root", FeeInputSpentTreePosition = 0,
+                    FeeOutputCommitmentB64 = Convert.ToBase64String(change.G1), FeeOutputNoteHashB64 = Convert.ToBase64String(NonCanonical),
+                };
+                var spend = new Transaction { TransactionType = TransactionType.VBTC_V2_UNSHIELD, FromAddress = PrivacyConstants.ShieldedPoolAddress, ToAddress = "RRECIPIENT", Amount = 0M, Data = PrivateTxPayloadCodec.SerializeToJson(payload), Hash = Guid.NewGuid().ToString("N"), Timestamp = 1 };
+                PrivateTxLedgerService.ApplyPrivacyStore(spend, BlockAt(Height - 18, spend), payload, Db);
+
+                var pool = ShieldedPoolService.GetState("VFX", Db)!;
+                Assert.Equal(2, pool.TotalCommitments); // the shield and the fee change, in the legacy tree
+                Assert.Equal(1M - Globals.PrivateTxFixedFee, pool.TotalShieldedSupply);
+                var legacy = new ShieldedMerkleStore("VFX", Db, fixedDepth: false);
+                legacy.LoadLeavesFromCommitments();
+                Assert.Equal(Convert.ToBase64String(legacy.GetRootBytes()!), pool.CurrentMerkleRoot);
+            }
+            finally { Globals.LastBlock = prior; }
+        }
+
+        /// <summary>
+        /// History mined under the old rules after the height (by a node that had not upgraded) is not epoch-shaped. It has
+        /// no effect on the epoch pool, and it must not stop the rebuild or a replay.
+        /// </summary>
+        [Fact]
+        public async Task ALegacyShapedPrivateTransaction_PastTheHeight_DoesNotTouchTheEpochPool_OrBreakTheRebuild()
+        {
+            var prior = Globals.LastBlock;
+            try
+            {
+                Globals.LastBlock = new Block { Height = -1 };
+                var legacyNote = Note(100_000_000);
+                var good = Note(200_000_000);
+                var oldRules = BlockAt(Height + 2, Shield(1M, legacyNote.G1, NonCanonical));  // a legacy note hash: not a field element
+                var newRules = BlockAt(Height + 4, Shield(2M, good.G1, good.NoteHash));
+                StoreBlocks(oldRules, newRules);
+
+                var (ok, msg) = await PrivacyDbRebuildService.TryRebuildFromBlocksAsync(Db);
+                Assert.True(ok, msg);
+                var pool = ShieldedPoolService.GetState("VFX", Db)!;
+                Assert.Equal(2M, pool.TotalShieldedSupply);
+                Assert.Equal(new FixedDepthMerkleTree(new[] { PrivacyEpoch.DummyNoteHash, good.NoteHash }).Root(), Convert.FromBase64String(pool.CurrentMerkleRoot));
+                var rebuiltRoot = pool.CurrentMerkleRoot;
+
+                // Live application of the same history gives the same pool.
+                Db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS).DeleteAll();
+                Db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE).DeleteAll();
+                Db.GetCollection<MerkleTreeNodeRecord>(PrivacyDbContext.PRIV_MERKLE_NODES).DeleteAll();
+                PrivacyEpochService.ApplyIfResetBlock(BlockAt(Height), Db);
+                await ApplyPrivacy(oldRules);
+                await ApplyPrivacy(newRules);
+                var live = ShieldedPoolService.GetState("VFX", Db)!;
+                Assert.Equal(rebuiltRoot, live.CurrentMerkleRoot);
+                Assert.Equal(2M, live.TotalShieldedSupply);
+            }
+            finally { Globals.LastBlock = prior; }
         }
 
         // ── Supply floor in the epoch ─────────────────────────────────────────────────────────────────────────

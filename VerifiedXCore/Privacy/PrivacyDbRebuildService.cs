@@ -25,19 +25,30 @@ namespace VerifiedXCore.Privacy
                 return Task.FromResult((false, "Blockchain blocks collection unavailable."));
             // One streaming pass in height order (ToList() of every block exhausted memory on mainnet); only the blocks
             // that carry a private transaction are kept, which is a handful.
-            var blocks = CollectBlocksWithPrivateTransactions(col.Query().OrderBy(x => x.Height).ToEnumerable(), cancellationToken, progress);
-            return TryReplayPrivateBlocksAsync(blocks, privacyDb, cancellationToken, Globals.LastBlock?.Height);
+            // The tip is the highest STORED block, taken from the same pass. Never Globals.LastBlock: this runs at startup
+            // before the tip is loaded (it is still Height -1 there), and with that the epoch reset for a chain that is
+            // past the proof height with no private transaction since was silently skipped (fourth review, same cause as
+            // the burn catch-up that never ran).
+            var blocks = CollectBlocksWithPrivateTransactions(col.Query().OrderBy(x => x.Height).ToEnumerable(), out var storedTip, cancellationToken, progress);
+            return TryReplayPrivateBlocksAsync(blocks, privacyDb, cancellationToken, storedTip);
         }
 
         /// <summary>The blocks of <paramref name="blocksInHeightOrder"/> that carry at least one private transaction.</summary>
-        public static List<Block> CollectBlocksWithPrivateTransactions(IEnumerable<Block> blocksInHeightOrder, CancellationToken cancellationToken = default, Action<string>? progress = null)
+        public static List<Block> CollectBlocksWithPrivateTransactions(IEnumerable<Block> blocksInHeightOrder, CancellationToken cancellationToken = default, Action<string>? progress = null) =>
+            CollectBlocksWithPrivateTransactions(blocksInHeightOrder, out _, cancellationToken, progress);
+
+        /// <summary>As above; <paramref name="highestHeight"/> is the height of the last block seen (-1 for an empty chain).</summary>
+        public static List<Block> CollectBlocksWithPrivateTransactions(IEnumerable<Block> blocksInHeightOrder, out long highestHeight, CancellationToken cancellationToken = default, Action<string>? progress = null)
         {
             var kept = new List<Block>();
             long scanned = 0;
+            highestHeight = -1;
             foreach (var block in blocksInHeightOrder)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 scanned++;
+                if (block.Height > highestHeight)
+                    highestHeight = block.Height;
                 if (progress != null && scanned % 500_000 == 0)
                     progress($"privacy rebuild: scanned {scanned} blocks (height {block.Height}), {kept.Count} carry private transactions");
                 if (block.Transactions != null && block.Transactions.Any(t => PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)))
@@ -52,7 +63,9 @@ namespace VerifiedXCore.Privacy
         /// Versioned: v1 was the 8.2.0 rebuild (stage 1); v2 forces one more rebuild for stage 3, whose epoch tree differs (the
         /// owner-bound dummy leaf), so a node that crossed the proof height on an earlier build gets the right tree.
         /// </summary>
-        public const string RebuiltMarkerFileName = "DB_Privacy.rebuilt-v2";
+        /// <remarks>v3 (fourth review): the v2 rebuild read the tip from Globals.LastBlock at startup (-1), so on a node past the
+        /// proof height it could finish without resetting the pool; every node rebuilds once more with the stored tip.</remarks>
+        public const string RebuiltMarkerFileName = "DB_Privacy.rebuilt-v3";
 
         /// <summary>
         /// Fund-loss audit item 1 (stage 1): the shielded pool supply becomes consensus state at
@@ -81,6 +94,15 @@ namespace VerifiedXCore.Privacy
             }
             try { File.WriteAllText(markerPath, $"{DateTime.UtcNow:O} {message}"); }
             catch (Exception ex) { ErrorLogUtility.LogError($"Privacy rebuild: could not write marker {markerPath}: {ex.Message}", "PrivacyDbRebuildService.EnsureRebuiltOnceAtStartupAsync()"); }
+            // The rebuild rewrote the privacy collections outside block application, so every existing state snapshot now
+            // holds a privacy store that differs from the live one; a fork recovery restoring one would bring the old pool
+            // back, and nothing would rebuild it again. They are marked invalid and are re-taken by full copy from here.
+            try
+            {
+                Services.StateSnapshotService.InvalidateAbove(-1);
+                log("Privacy store: state snapshots taken before the rebuild were invalidated; new ones are taken from the rebuilt state.");
+            }
+            catch (Exception ex) { ErrorLogUtility.LogError($"Privacy rebuild: could not invalidate state snapshots: {ex.Message}", "PrivacyDbRebuildService.EnsureRebuiltOnceAtStartupAsync()"); }
             var vfx = ShieldedPoolService.GetState("VFX");
             log($"Privacy store rebuilt in {(DateTime.UtcNow - started).TotalSeconds:F0}s: {message} VFX pool supply {vfx?.TotalShieldedSupply ?? 0M}, commitments {vfx?.TotalCommitments ?? 0}.");
         }
@@ -166,16 +188,19 @@ namespace VerifiedXCore.Privacy
                     epochStarted = true;
                     if (maxHeight < Globals.PrivateTxProofRulesHeight) maxHeight = Globals.PrivateTxProofRulesHeight;
                 }
-                var fixedDepth = ShieldedMerkleStore.UsesFixedDepthAt(Math.Max(maxHeight, tipHeight ?? 0));
+                // Each pool is rooted in its own shape: the epoch's tree for the pools the epoch reset (VFX), the legacy
+                // tree for every other (vBTC pools are history and stay as mined; rooting one as an epoch tree throws on its
+                // legacy leaves and failed the whole rebuild).
                 var assetsToRoot = new HashSet<string>(affected, StringComparer.Ordinal);
                 if (epochStarted)
-                    foreach (var a in PrivacyEpochService.PoolAssets(privacyDb)) assetsToRoot.Add(a);
+                    foreach (var a in PrivacyEpochService.ResetAssets) assetsToRoot.Add(a);
+                bool FixedDepthFor(string asset) => epochStarted && PrivacyEpochService.IsEpochAsset(asset);
 
                 foreach (var a in assetsToRoot)
                 {
                     var row = poolCol.FindOne(x => x.AssetType == a);
                     var supply = row?.TotalShieldedSupply ?? 0m;
-                    var store = new ShieldedMerkleStore(a, privacyDb, fixedDepth);
+                    var store = new ShieldedMerkleStore(a, privacyDb, FixedDepthFor(a));
                     store.LoadLeavesFromCommitments();
                     store.RebuildAndPersistMerkleNodes();
                     store.UpdatePoolStateRoot(maxHeight, supply, store.LeafDigests.Count);
@@ -187,7 +212,7 @@ namespace VerifiedXCore.Privacy
                         continue;
                     var row = poolCol.FindOne(x => x.AssetType == a);
                     var supply = row?.TotalShieldedSupply ?? 0m;
-                    var empty = new ShieldedMerkleStore(a, privacyDb, fixedDepth);
+                    var empty = new ShieldedMerkleStore(a, privacyDb, FixedDepthFor(a));
                     empty.UpdatePoolStateRoot(maxHeight, supply, 0);
                 }
 

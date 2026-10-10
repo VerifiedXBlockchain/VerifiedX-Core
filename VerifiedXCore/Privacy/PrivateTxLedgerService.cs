@@ -32,6 +32,22 @@ namespace VerifiedXCore.Privacy
             var height = block.Height;
             var ts = tx.Timestamp;
 
+            // A private transaction in the proof-rules epoch that does not have the epoch's shape was mined under the old
+            // rules by a node that had not upgraded (current validation refuses it: PrivateTxProofRules, and the reset block
+            // admits none). It has no effect on any pool: its legacy note hashes are not field elements and cannot enter the
+            // circuits' tree, and the epoch pool holds only what the epoch's rules admitted. Without this, one such
+            // transaction in history stopped the store rebuild and threw in every replay. Its transparent side is the
+            // caller's (ApplyTransparentLedgerAsync) and still follows the chain.
+            if (PrivacyEpoch.ProofRulesActive(height))
+            {
+                var notEpochShaped = PrivateTxProofRules.Check(tx, payload, height);
+                if (notEpochShaped != null)
+                {
+                    LogUtility.Log($"Private transaction {tx.Hash} at block {height} is not epoch-shaped ({notEpochShaped}); it has no effect on the shielded pools.", "PrivateTxLedgerService.ApplyPrivacyStore()");
+                    return;
+                }
+            }
+
             var poolCol = db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE);
             var poolRow = poolCol.FindOne(x => x.AssetType == payload.Asset);
             var supply = poolRow?.TotalShieldedSupply ?? 0m;
@@ -49,7 +65,7 @@ namespace VerifiedXCore.Privacy
                     CommitmentSpendService.TryMarkSpent(payload.Asset, payload.SpentCommitmentTreePositions[ni], db);
             }
 
-            var store = new ShieldedMerkleStore(payload.Asset, db, ShieldedMerkleStore.UsesFixedDepthAt(height));
+            var store = new ShieldedMerkleStore(payload.Asset, db, ShieldedMerkleStore.UsesFixedDepth(payload.Asset, height));
             store.LoadLeavesFromCommitments();
 
             foreach (var o in payload.Outs.OrderBy(x => x.Index))
@@ -146,7 +162,7 @@ namespace VerifiedXCore.Privacy
             var poolCol = db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE);
             var vfxRow = poolCol.FindOne(x => x.AssetType == "VFX");
             var vfxSupply = (vfxRow?.TotalShieldedSupply ?? 0m) - fee;
-            var vfxStore = new ShieldedMerkleStore("VFX", db);
+            var vfxStore = new ShieldedMerkleStore("VFX", db, ShieldedMerkleStore.UsesFixedDepth("VFX", height)); // this block's tree, not the live tip's
             vfxStore.LoadLeavesFromCommitments();
             vfxStore.UpdatePoolStateRoot(height, vfxSupply, vfxStore.LeafDigests.Count);
         }
@@ -160,7 +176,7 @@ namespace VerifiedXCore.Privacy
             var poolCol = db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE);
             var vfxRow = poolCol.FindOne(x => x.AssetType == "VFX");
             var vfxSupply = (vfxRow?.TotalShieldedSupply ?? 0m) - fee;
-            var vfxStore = new ShieldedMerkleStore("VFX", db);
+            var vfxStore = new ShieldedMerkleStore("VFX", db, ShieldedMerkleStore.UsesFixedDepth("VFX", height)); // this block's tree, not the live tip's
             vfxStore.LoadLeavesFromCommitments();
 
             if (!string.IsNullOrWhiteSpace(payload.FeeOutputCommitmentB64))
@@ -176,7 +192,11 @@ namespace VerifiedXCore.Privacy
                             try
                             {
                                 var feeNh = Convert.FromBase64String(payload.FeeOutputNoteHashB64);
-                                if (feeNh.Length == PlonkNative.ScalarSize)
+                                if (vfxStore.FixedDepth && !PrivacyField.IsCanonicalLe(feeNh))
+                                {
+                                    // An epoch tree takes field elements only; a legacy fee-change hash is left out (vBTC privacy is refused in the epoch).
+                                }
+                                else if (feeNh.Length == PlonkNative.ScalarSize)
                                 {
                                     vfxStore.AppendCommitment(g, feeNh, height, ts);
                                 }

@@ -47,7 +47,7 @@ namespace VerifiedXCore.Privacy
             [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out byte[]? root32,
             long? atHeight = null)
         {
-            var store = new ShieldedMerkleStore(assetType, db, ShieldedMerkleStore.UsesFixedDepthAt(atHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)));
+            var store = new ShieldedMerkleStore(assetType, db, ShieldedMerkleStore.UsesFixedDepth(assetType, atHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)));
             store.LoadLeavesFromCommitments();
             return store.TryGetInclusionProof(treePosition, out proof, out root32);
         }

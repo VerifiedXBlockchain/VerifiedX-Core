@@ -14,7 +14,7 @@ namespace VerifiedXCore.Privacy
     /// padding), kept exactly as mined so history replays unchanged;</item>
     /// <item>from the height: the circuits' fixed-depth-32 tree (<see cref="FixedDepthMerkleTree"/>), with the public dummy note at leaf 0.</item>
     /// </list>
-    /// The shape is chosen by the block height the caller is applying or validating at (<see cref="UsesFixedDepthAt"/>).
+    /// The shape is chosen by the asset and the block height the caller is applying or validating at (<see cref="UsesFixedDepth"/>).
     /// </summary>
     public sealed class ShieldedMerkleStore
     {
@@ -23,12 +23,13 @@ namespace VerifiedXCore.Privacy
         private readonly bool _fixedDepth;
         private readonly List<byte[]> _leafDigests = new();
 
+        /// <summary>The tree as the NEXT block will see it (tip + 1). Wallet and API reads only: block application and replay pass the height of the block they apply.</summary>
         public ShieldedMerkleStore(string assetType, LiteDatabase? privacyDb = null)
-            : this(assetType, privacyDb, UsesFixedDepthAt((Globals.LastBlock?.Height ?? 0) + 1))
+            : this(assetType, privacyDb, UsesFixedDepth(assetType, (Globals.LastBlock?.Height ?? 0) + 1))
         {
         }
 
-        /// <param name="fixedDepth">True for the proof-rules epoch's tree (<see cref="UsesFixedDepthAt"/> of the height being applied or validated).</param>
+        /// <param name="fixedDepth">True for the proof-rules epoch's tree (<see cref="UsesFixedDepth"/> of the asset and the height being applied or validated).</param>
         public ShieldedMerkleStore(string assetType, LiteDatabase? privacyDb, bool fixedDepth)
         {
             _assetType = assetType ?? throw new ArgumentNullException(nameof(assetType));
@@ -36,8 +37,14 @@ namespace VerifiedXCore.Privacy
             _fixedDepth = fixedDepth;
         }
 
-        /// <summary>Whether the proof-rules epoch's fixed-depth tree is the pool's tree at <paramref name="height"/>.</summary>
-        public static bool UsesFixedDepthAt(long height) => PrivacyEpoch.ProofRulesActive(height);
+        /// <summary>
+        /// Whether <paramref name="assetType"/>'s pool is the proof-rules epoch's fixed-depth tree at <paramref name="height"/>.
+        /// Only the pools the epoch resets (VFX) ever are; a vBTC pool keeps its legacy tree for good - its leaves are legacy
+        /// note hashes, which are not field elements and cannot go into the circuits' tree at all. The height is that of the
+        /// block being applied or validated, never the live tip: a replay applies pre-epoch blocks while the tip is past it.
+        /// </summary>
+        public static bool UsesFixedDepth(string? assetType, long height) =>
+            PrivacyEpoch.ProofRulesActive(height) && PrivacyEpochService.IsEpochAsset(assetType);
 
         public bool FixedDepth => _fixedDepth;
 

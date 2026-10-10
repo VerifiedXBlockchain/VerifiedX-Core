@@ -27,6 +27,9 @@ namespace VerifiedXCore.Privacy
         /// <summary>The pools the epoch resets: the VFX pool only. vBTC privacy has been refused since VbtcPrivacyDisableHeight, so its pool rows are history and stay.</summary>
         public static readonly string[] ResetAssets = { "VFX" };
 
+        /// <summary>Whether <paramref name="asset"/>'s pool takes part in the proof-rules epoch (is reset at the height and uses the circuits' tree from it).</summary>
+        public static bool IsEpochAsset(string? asset) => asset != null && Array.IndexOf(ResetAssets, asset) >= 0;
+
         /// <summary>Resets the VFX pool for the epoch at <paramref name="blockHeight"/> (re-audit 9 Oct 2026: VFX only; vBTC pools are left as history).</summary>
         public static void ResetPools(LiteDatabase db, long blockHeight, long timestamp)
         {
