@@ -419,6 +419,8 @@ namespace VerifiedXCore
             // Fund-loss audit item 1: the shielded pool supply is consensus state from PrivateTxSupplyRulesHeight, so the
             // privacy store is rebuilt from the chain once per database folder (synchronous, before networking).
             await PrivacyDbRebuildService.EnsureRebuiltOnceAtStartupAsync();
+            // Fund-loss audit item 1 (burn): a node that crossed ForgedVfxBurnHeight on an older build runs the burn now.
+            await StateData.EnsureForgedVfxBurnAppliedAtStartupAsync();
 
             // PLONK params: auto-download if not present, then load into native FFI (background — non-blocking)
             _ = Task.Run(async () =>
