@@ -295,8 +295,8 @@ namespace VerifiedXCore.Models.DST
         /// Whether this wallet placed a bid that the incoming sale can complete: same bidder, same purchase key, an amount
         /// at or below what it bid, and (re-audit, 9 Oct 2026) on the same contract. The bid signature does not name the
         /// contract, so a Sale_Start for another contract carrying a replayed signature must not make this wallet pay.
-        /// A bid whose contract cannot be established (a row from before the field, no shop listing to resolve it) is not
-        /// completed automatically.
+        /// A bid row that records no contract (from before the field) is not completed automatically: resolving it from
+        /// the connected shop's listing would trust data the seller serves.
         /// </summary>
         public static bool HasLocalSentBid(string? bidderAddress, string? purchaseKey, decimal amount, string? smartContractUID)
         {
@@ -310,7 +310,7 @@ namespace VerifiedXCore.Models.DST
                     && string.Equals(b.BidAddress, bidderAddress, StringComparison.Ordinal)
                     && string.Equals(b.PurchaseKey, purchaseKey, StringComparison.Ordinal)
                     && Math.Max(b.BidAmount, b.MaxBidAmount) >= amount
-                    && string.Equals(b.SmartContractUID ?? ListingContractFor(b.ListingId, b.PurchaseKey), smartContractUID, StringComparison.Ordinal));
+                    && string.Equals(b.SmartContractUID, smartContractUID, StringComparison.Ordinal)); // no fallback: shop data is the seller's (re-audit)
             }
             catch { return false; }
         }

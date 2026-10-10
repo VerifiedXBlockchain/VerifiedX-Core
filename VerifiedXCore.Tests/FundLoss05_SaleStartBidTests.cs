@@ -181,9 +181,13 @@ namespace VerifiedXCore.Tests
             Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-9", 500M, ""));
         }
 
-        /// <summary>A bid row from before the field is tied to its contract through the shop's listing; with no listing it is not auto-completed.</summary>
+        /// <summary>
+        /// A bid row from before the field records no contract. It is never auto-completed (re-audit: resolving it from the
+        /// connected shop's listing would trust data the seller controls); the buyer bids again. Build() still records the
+        /// contract on a NEW bid from the listing the buyer is looking at when the client omits it.
+        /// </summary>
         [Fact]
-        public void LegacyBidRow_IsTiedToItsContractThroughTheShopListing_OrNotCompleted()
+        public void LegacyBidRow_IsNeverAutoCompleted_AndNewBidsRecordTheirContract()
         {
             var priorShop = Globals.DecShopData;
             try
@@ -198,20 +202,22 @@ namespace VerifiedXCore.Tests
                 });
 
                 Globals.DecShopData = null;
-                Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-10", 500M, nft)); // nothing to tie it to: not completed
+                Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-10", 500M, nft));
 
+                // Even when the (seller-served) shop data names the contract, a legacy row is not completed.
                 Globals.DecShopData = new DecShopData { Listings = new System.Collections.Generic.List<Listing> { new Listing { Id = 10, PurchaseKey = "key-10", SmartContractUID = nft } } };
-                Assert.Equal(nft, Bid.ListingContractFor(10, "key-10"));
-                Assert.Equal(nft, Bid.ListingContractFor(0, "key-10"));   // by purchase key alone
-                Assert.Equal(nft, Bid.ListingContractFor(10, null));      // by listing id alone
-                Assert.Null(Bid.ListingContractFor(11, "key-11"));
-                Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-10", 500M, nft));
+                Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-10", 500M, nft));
                 Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-10", 500M, other));
 
                 // Build() records the contract on a new bid from the shop listing when the client did not send it.
+                Assert.Equal(nft, Bid.ListingContractFor(10, "key-10"));
+                Assert.Null(Bid.ListingContractFor(11, "key-11"));
                 var built = new Bid { BidAddress = _victim.Address, PurchaseKey = "key-10", BidAmount = 500M, ListingId = 10, CollectionId = 1, RawBid = true };
                 Assert.True(built.Build());
                 Assert.Equal(nft, built.SmartContractUID);
+                Bid.SaveBid(built);
+                Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-10", 500M, nft));
+                Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-10", 500M, other));
             }
             finally
             {
