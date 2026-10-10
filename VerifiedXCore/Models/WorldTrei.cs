@@ -10,6 +10,12 @@ namespace VerifiedXCore.Models
 
         /// <summary>Hash of <c>DB_Privacy</c> shielded pool state after the block (see <see cref="VerifiedXCore.Privacy.ShieldedStateRoot.Compute"/>).</summary>
         public string ShieldedStateRoot { get; set; } = "";
+        /// <summary>
+        /// Fund-loss audit item 1 (burn): the block height at which the forged-VFX burn was applied to THIS state; 0 when it
+        /// has not been. It lives in the state it describes: a full rebuild wipes it with the balances, a snapshot copies
+        /// it and a restore brings back the value that matches the restored balances (see StateData.ApplyForgedVfxBurnsAsync).
+        /// </summary>
+        public long ForgedVfxBurnAppliedHeight { get; set; }
         public static WorldTrei GetWorldTreiRecord()
         {
             var wTrei = DbContext.DB_WorldStateTrei.GetCollection<WorldTrei>(DbContext.RSRV_WSTATE_TREI);

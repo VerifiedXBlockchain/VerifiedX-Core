@@ -52,16 +52,45 @@ namespace VerifiedXCore.Data
         }
 
         /// <summary>
-        /// Fund-loss audit item 1 (burn): at exactly Globals.ForgedVfxBurnHeight, before the block's transactions apply,
-        /// each listed address loses min(balance, listed amount) of VFX. Nothing is credited: the supply shrinks by what
-        /// the forged unshields created. Deterministic (state at the block) and bounded below at zero.
+        /// Fund-loss audit item 1 (burn): each listed address loses min(balance, listed amount) of VFX. Nothing is credited:
+        /// the supply shrinks by what the forged unshields created. Bounded below at zero.
+        ///
+        /// It runs in block application (<see cref="UpdateTreis"/>), before the block's transactions:
+        /// <list type="bullet">
+        /// <item>at exactly Globals.ForgedVfxBurnHeight on every node that applies that block with this code;</item>
+        /// <item>at the first block applied after that height on a state that has not been burned (a node that crossed the
+        /// height on an older build, or a state restored from a snapshot taken before the burn).</item>
+        /// </list>
+        /// Whether a state has been burned is recorded IN the state (<see cref="WorldTrei.ForgedVfxBurnAppliedHeight"/>): the
+        /// world record is wiped by a full rebuild, copied by every snapshot cycle and restored with a snapshot, so the
+        /// marker always describes the balances beside it. (Fourth review: the earlier startup catch-up read the tip
+        /// before it was loaded and never ran; a marker file beside the databases would also have outlived a restore,
+        /// and a write made at startup carries no snapshot stamp.) Running inside block application, the write is stamped
+        /// with the block's height like every other state write.
+        ///
+        /// A late node burns min(balance at that block, listed): the address is frozen from the same height, so its balance
+        /// can only have grown by receipts, and up to (listed - balance at the height) of those go too. Balances are not in
+        /// the state root, so this is not a fork; a node that must match to the unit re-syncs its state.
         /// </summary>
         public static async Task ApplyForgedVfxBurnsAsync(Block block)
         {
-            if (block == null || block.Height != Globals.ForgedVfxBurnHeight || Globals.ForgedVfxBurns.Count == 0)
+            if (block == null || Globals.ForgedVfxBurns.Count == 0 || block.Height < Globals.ForgedVfxBurnHeight)
                 return;
-            await BurnListedAsync(block.Height, block.StateRoot, "at block").ConfigureAwait(false);
-            WriteForgedVfxBurnMarker();
+            var atHeight = block.Height == Globals.ForgedVfxBurnHeight;
+            try
+            {
+                if (!atHeight && ForgedVfxBurnApplied())
+                    return;
+                if (!atHeight)
+                    LogUtility.Log($"Forged-VFX burn: this state passed block {Globals.ForgedVfxBurnHeight} without the burn (older build, or a snapshot from before it); applying it at block {block.Height}.", "StateData.ApplyForgedVfxBurnsAsync()");
+                await BurnListedAsync(block.Height, block.StateRoot, atHeight ? "at block" : "catch-up at block").ConfigureAwait(false);
+                MarkForgedVfxBurnApplied(block);
+            }
+            catch (Exception ex)
+            {
+                // No marker is written, so the next block tries again.
+                ErrorLogUtility.LogError($"Forged-VFX burn at block {block.Height} failed (retried at the next block): {ex}", "StateData.ApplyForgedVfxBurnsAsync()");
+            }
         }
 
         private static async Task BurnListedAsync(long height, string? stateRoot, string how)
@@ -83,44 +112,24 @@ namespace VerifiedXCore.Data
             }
         }
 
-        /// <summary>Marker that the burn ran on this database (at the height, or by the startup catch-up).</summary>
-        public const string ForgedVfxBurnMarkerFileName = "ForgedVfxBurn.applied-v1";
-
-        private static string? ForgedVfxBurnMarkerPath()
+        /// <summary>Whether this state already carries the burn (the world record's marker).</summary>
+        public static bool ForgedVfxBurnApplied()
         {
-            try { return Path.Combine(GetPathUtility.GetDatabasePath(), ForgedVfxBurnMarkerFileName); } catch { return null; }
+            var record = WorldTrei.GetWorldTrei().FindOne(x => true);
+            return record != null && record.ForgedVfxBurnAppliedHeight > 0;
         }
 
-        private static void WriteForgedVfxBurnMarker()
+        private static void MarkForgedVfxBurnApplied(Block block)
         {
-            try
+            var wTrei = WorldTrei.GetWorldTrei();
+            var record = wTrei.FindOne(x => true);
+            if (record == null)
             {
-                var p = ForgedVfxBurnMarkerPath();
-                if (p != null) File.WriteAllText(p, $"{Globals.ForgedVfxBurnHeight}\n{DateTime.UtcNow:O}\n");
+                wTrei.InsertSafe(new WorldTrei { StateRoot = block.StateRoot, ForgedVfxBurnAppliedHeight = block.Height });
+                return;
             }
-            catch (Exception ex) { ErrorLogUtility.LogError($"Forged-VFX burn marker not written: {ex.Message}", "StateData.WriteForgedVfxBurnMarker()"); }
-        }
-
-        /// <summary>
-        /// Third review: the burn is an exact-height step, so a node that processed Globals.ForgedVfxBurnHeight on an older
-        /// build never ran it and shows the forged balance forever (balances are not in the state root, so no fork - but the
-        /// explorer and API on that node disagree with the network). At startup, once the chain is past the height and no
-        /// marker says the burn ran here, it runs now with the same min(balance, listed) rule. The address has been frozen
-        /// since the height, so its balance can only have grown by receipts, which this cannot distinguish; a late node that
-        /// must be exact re-syncs its state instead.
-        /// </summary>
-        public static async Task<bool> EnsureForgedVfxBurnAppliedAtStartupAsync(Action<string>? log = null)
-        {
-            log ??= Console.WriteLine;
-            if (Globals.ForgedVfxBurns.Count == 0) return false;
-            var tip = Globals.LastBlock?.Height ?? 0;
-            if (tip < Globals.ForgedVfxBurnHeight) return false; // not yet: the block at the height will run it
-            var marker = ForgedVfxBurnMarkerPath();
-            if (marker == null || File.Exists(marker)) return false;
-            log($"Forged-VFX burn: this database passed block {Globals.ForgedVfxBurnHeight} without running the burn (older build); applying it now.");
-            await BurnListedAsync(tip, Globals.LastBlock?.StateRoot, "catch-up at tip").ConfigureAwait(false);
-            WriteForgedVfxBurnMarker();
-            return true;
+            record.ForgedVfxBurnAppliedHeight = block.Height;
+            wTrei.UpdateSafe(record);
         }
 
         public static async Task<bool> UpdateTreis(Block block)
