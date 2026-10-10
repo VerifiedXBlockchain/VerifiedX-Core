@@ -420,22 +420,22 @@ namespace VerifiedXCore
             // privacy store is rebuilt from the chain once per database folder (synchronous, before networking).
             await PrivacyDbRebuildService.EnsureRebuiltOnceAtStartupAsync();
 
-            // PLONK params: auto-download if not present, then load into native FFI (background — non-blocking)
-            _ = Task.Run(async () =>
+            // PLONK params: the cached file or a download, hash-verified, loaded into the native library; retried until it
+            // succeeds. In the background, except when the proof rules are active or within about a day of the stored tip:
+            // then the node waits for them, because one that takes blocks before it can verify refuses the first block
+            // that carries a private transaction. (The stored tip, read from the block store: Globals.LastBlock is not
+            // loaded yet at this point.)
+            var plonkLoad = Task.Run(() => PLONKSetup.EnsureLoadedAsync());
+            if (PrivacyEpoch.MustLoadParamsBeforeStart(BlockchainData.GetHeight()))
             {
-                try
+                Console.WriteLine("PLONK parameters: the proof rules are active or near; loading them before start (about a minute; longer on the first run, which downloads ~400 MB)...");
+                await Task.WhenAny(plonkLoad, Task.Delay(TimeSpan.FromMinutes(45)));
+                if (!plonkLoad.IsCompleted || !plonkLoad.Result)
                 {
-                    var plonkParamsPath = await PLONKParamsDownloader.EnsureParamsAvailableAsync();
-                    if (!string.IsNullOrEmpty(plonkParamsPath))
-                        PLONKSetup.TryLoadParamsFile(plonkParamsPath);
-                    PLONKSetup.RefreshVerificationCapability();
-                    LogUtility.Log("PLONK params loaded successfully in background.", "Program.Main()");
+                    Console.WriteLine("PLONK parameters are NOT loaded. Continuing; private transactions are refused until they load (retrying in the background).");
+                    ErrorLogUtility.LogError("PLONK parameters were not loaded before start although the proof rules are active or near.", "Program.Main()");
                 }
-                catch (Exception ex)
-                {
-                    ErrorLogUtility.LogError($"Background PLONK load failed: {ex}", "Program.Main()");
-                }
-            });
+            }
 
             // FROST FFI: Verify native library presence and full functionality (background — non-blocking)
             _ = Task.Run(() =>

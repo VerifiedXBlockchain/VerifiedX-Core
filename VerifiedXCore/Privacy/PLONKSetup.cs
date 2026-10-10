@@ -60,20 +60,16 @@ namespace VerifiedXCore.Privacy
         public static bool TryLoadParamsFromEnvironment()
         {
             var path = Environment.GetEnvironmentVariable(ParamsPathEnvironmentVariable);
-            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
-                return false;
-            // Third review: the operator-supplied path bypassed the pinned hash. A file that is not the published params is
-            // refused: proofs under any other universal parameters would verify against nothing the network agrees on.
-            if (!PLONKParamsDownloader.VerifyFileHash(path))
-            {
-                ErrorLogUtility.LogError($"PLONK params at {ParamsPathEnvironmentVariable}={path} do not match the pinned SHA-256 ({PLONKParamsDownloader.ExpectedSha256}); not loaded.", "PLONKSetup.TryLoadParamsFromEnvironment()");
-                return false;
-            }
-            return TryLoadParamsFile(path);
+            return !string.IsNullOrWhiteSpace(path) && TryLoadParamsFile(path);
         }
 
         /// <summary>
-        /// If <paramref name="paramsPath"/> exists, loads params via native FFI and records file size in <see cref="Globals.PLONKParamsFileSize"/>.
+        /// THE load point: every path that hands a params file to the native library comes through here, and here the file
+        /// must be the published one (<see cref="PLONKParamsDownloader.ExpectedSha256"/>). Proofs made or verified under
+        /// any other universal parameters agree with nothing the network uses. (Fourth review: the hash check had been
+        /// added to a method nothing in production calls, so an operator-supplied file still loaded unpinned; enforcing
+        /// it at the one place the library is called leaves no caller that can skip it.)
+        /// Records the file size in <see cref="Globals.PLONKParamsFileSize"/>.
         /// </summary>
         public static bool TryLoadParamsFile(string paramsPath)
         {
@@ -81,6 +77,13 @@ namespace VerifiedXCore.Privacy
                 return false;
             try
             {
+                if (!PLONKParamsDownloader.VerifyFileHash(paramsPath))
+                {
+                    var why = $"PLONK params at {paramsPath} do not match the pinned SHA-256 ({PLONKParamsDownloader.ExpectedSha256}); not loaded.";
+                    ErrorLogUtility.LogError(why, "PLONKSetup.TryLoadParamsFile()");
+                    Console.WriteLine($"PLONKSetup: {why}");
+                    return false;
+                }
                 Console.WriteLine($"PLONKSetup: Loading params from {paramsPath}");
                 var code = PlonkNative.plonk_load_params(paramsPath);
                 if (code != PlonkNative.Success)
@@ -96,6 +99,42 @@ namespace VerifiedXCore.Privacy
                 ErrorLogUtility.LogError(ex.ToString(), "PLONKSetup.TryLoadParamsFile()");
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Makes the params available (cached file, else download; both verified) and loads them, retrying until it
+        /// succeeds: a node that cannot verify refuses every private transaction in the proof-rules epoch, and with it the
+        /// blocks that carry one, so one failed download at startup must not leave it that way until the next restart.
+        /// Returns true once loaded; false only when cancelled or out of attempts.
+        /// </summary>
+        public static async Task<bool> EnsureLoadedAsync(CancellationToken cancellationToken = default, int maxAttempts = int.MaxValue)
+        {
+            for (var attempt = 1; attempt <= maxAttempts && !cancellationToken.IsCancellationRequested; attempt++)
+            {
+                var loaded = false;
+                try
+                {
+                    var path = await PLONKParamsDownloader.EnsureParamsAvailableAsync().ConfigureAwait(false);
+                    loaded = !string.IsNullOrEmpty(path) && TryLoadParamsFile(path!);
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"PLONK params load attempt {attempt} failed: {ex}", "PLONKSetup.EnsureLoadedAsync()");
+                }
+                RefreshVerificationCapability();
+                if (loaded)
+                {
+                    LogUtility.Log($"PLONK params loaded (attempt {attempt}); v2 circuits available: {IsV2CircuitsAvailable}, proving: {IsV1ProvingAvailable}.", "PLONKSetup.EnsureLoadedAsync()");
+                    return true;
+                }
+                if (attempt >= maxAttempts)
+                    break;
+                var wait = TimeSpan.FromMinutes(Math.Min(attempt, 10));
+                ErrorLogUtility.LogError($"PLONK params are not loaded (attempt {attempt}); private transactions are refused until they are. Retrying in {wait.TotalMinutes:0} min.", "PLONKSetup.EnsureLoadedAsync()");
+                try { await Task.Delay(wait, cancellationToken).ConfigureAwait(false); }
+                catch (TaskCanceledException) { break; }
+            }
+            return false;
         }
 
         /// <summary>

@@ -21,6 +21,16 @@ namespace VerifiedXCore.Privacy
         private static byte[]? _dummyNullifier;
         private static byte[]? _dummyCommitment;
 
+        /// <summary>
+        /// About a day of blocks. A node whose stored tip is within this of the proof-rules height (or past it) loads the
+        /// params BEFORE it starts taking blocks: one that joins unable to verify refuses the first block that carries a
+        /// private transaction.
+        /// </summary>
+        public const long StartupLoadMarginBlocks = 7_000;
+
+        /// <summary>Whether a node starting at <paramref name="storedTip"/> must have the params loaded before it takes blocks.</summary>
+        public static bool MustLoadParamsBeforeStart(long storedTip) => ProofRulesActive(storedTip + StartupLoadMarginBlocks);
+
         /// <summary>Whether the proof rules (and the new tree) apply to a transaction mined at <paramref name="height"/>.</summary>
         public static bool ProofRulesActive(long height) => height >= Globals.PrivateTxProofRulesHeight;
 

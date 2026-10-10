@@ -201,27 +201,71 @@ namespace VerifiedXCore.Tests
             Assert.Equal(1, PlonkNative.pedersen_verify(PrivacyEpoch.DummyCommitment, 0, PrivacyField.Zero32)); // 1 = valid, as the Pedersen round-trip test pins
         }
 
-        /// <summary>Third review: the operator path must carry the published file; anything else is refused by the pinned hash.</summary>
+        /// <summary>
+        /// The pinned hash is enforced where the library is called (PLONKSetup.TryLoadParamsFile), so no caller can load a
+        /// file that is not the published one; the operator override resolves to its path only when the hash matches.
+        /// (Fourth review: the check had been added to a method only tests called.)
+        /// </summary>
         [Fact]
-        public void OperatorParamsPath_RefusesAFileThatIsNotThePublishedOne()
+        public void NoPathLoadsAFileThatIsNotThePublishedOne()
         {
             var prior = Environment.GetEnvironmentVariable(PLONKSetup.ParamsPathEnvironmentVariable);
             var tmp = Path.Combine(Path.GetTempPath(), $"not-the-params-{Guid.NewGuid():N}.bin");
             try
             {
                 File.WriteAllBytes(tmp, System.Text.Encoding.ASCII.GetBytes("VXPLNK05 but not the real file"));
+                Assert.False(PLONKParamsDownloader.VerifyFileHash(tmp));
+
+                // The load point itself.
+                Assert.False(PLONKSetup.TryLoadParamsFile(tmp));
+                Assert.False(PLONKSetup.TryLoadParamsFile(Path.Combine(Path.GetTempPath(), "missing-" + Guid.NewGuid().ToString("N"))));
+                Assert.False(PLONKSetup.TryLoadParamsFile(""));
+
+                // The operator override: what startup resolves (EnsureParamsAvailableAsync step 1) and the direct loader.
                 Environment.SetEnvironmentVariable(PLONKSetup.ParamsPathEnvironmentVariable, tmp);
+                Assert.Null(PLONKParamsDownloader.ResolveOperatorPath());
                 Assert.False(PLONKSetup.TryLoadParamsFromEnvironment());
                 Environment.SetEnvironmentVariable(PLONKSetup.ParamsPathEnvironmentVariable, Path.Combine(Path.GetTempPath(), "missing-" + Guid.NewGuid().ToString("N")));
-                Assert.False(PLONKSetup.TryLoadParamsFromEnvironment());
+                Assert.Null(PLONKParamsDownloader.ResolveOperatorPath());
                 Environment.SetEnvironmentVariable(PLONKSetup.ParamsPathEnvironmentVariable, null);
+                Assert.Null(PLONKParamsDownloader.ResolveOperatorPath());
                 Assert.False(PLONKSetup.TryLoadParamsFromEnvironment());
+
+                // The published file, when this machine has it, resolves and is what startup then loads.
+                var real = Environment.GetEnvironmentVariable("VFX_PLONK_PARAMS");
+                if (!string.IsNullOrWhiteSpace(real) && File.Exists(real) && PLONKParamsDownloader.VerifyFileHash(real))
+                {
+                    Environment.SetEnvironmentVariable(PLONKSetup.ParamsPathEnvironmentVariable, real);
+                    Assert.Equal(real, PLONKParamsDownloader.ResolveOperatorPath());
+                    Assert.Equal(real, PLONKParamsDownloader.EnsureParamsAvailableAsync().GetAwaiter().GetResult());
+                    Assert.True(PLONKSetup.EnsureLoadedAsync(default, maxAttempts: 1).GetAwaiter().GetResult());
+                    Assert.True(PLONKSetup.IsV2CircuitsAvailable);
+                }
             }
             finally
             {
                 Environment.SetEnvironmentVariable(PLONKSetup.ParamsPathEnvironmentVariable, prior);
                 try { File.Delete(tmp); } catch { }
             }
+        }
+
+        /// <summary>A node at or within a day of the proof-rules height loads the params before it takes blocks.</summary>
+        [Fact]
+        public void StartupWaitsForTheParams_OnlyNearOrInTheEpoch()
+        {
+            var prior = Globals.PrivateTxProofRulesHeight;
+            try
+            {
+                Globals.PrivateTxProofRulesHeight = 1_000_000;
+                Assert.False(PrivacyEpoch.MustLoadParamsBeforeStart(-1));                                             // an empty store syncing from genesis
+                Assert.False(PrivacyEpoch.MustLoadParamsBeforeStart(1_000_000 - PrivacyEpoch.StartupLoadMarginBlocks - 1));
+                Assert.True(PrivacyEpoch.MustLoadParamsBeforeStart(1_000_000 - PrivacyEpoch.StartupLoadMarginBlocks));
+                Assert.True(PrivacyEpoch.MustLoadParamsBeforeStart(1_000_000));
+                Assert.True(PrivacyEpoch.MustLoadParamsBeforeStart(2_000_000));
+                Globals.PrivateTxProofRulesHeight = 999_999_999_999L;                                                  // mainnet today: never
+                Assert.False(PrivacyEpoch.MustLoadParamsBeforeStart(7_500_000));
+            }
+            finally { Globals.PrivateTxProofRulesHeight = prior; }
         }
 
         [Fact]
