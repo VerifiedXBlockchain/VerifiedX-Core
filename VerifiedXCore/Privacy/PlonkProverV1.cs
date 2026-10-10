@@ -1,7 +1,7 @@
 namespace VerifiedXCore.Privacy
 {
     /// <summary>
-    /// PLONK proving via the real circuit FFI exports (<b>VXPLNK04</b> params with prover keys; the v2 owner-bound circuits
+    /// PLONK proving via the real circuit FFI exports (<b>VXPLNK05</b> params with prover keys; the v2 owner-bound circuits
     /// since stage 3). Each method serializes the circuit-specific witness into the flat byte layout expected by
     /// <c>plonk-ffi</c>, calls the native prove function, and returns proof + public-input bytes.
     /// </summary>

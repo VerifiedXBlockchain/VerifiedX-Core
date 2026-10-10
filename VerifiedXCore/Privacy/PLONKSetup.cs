@@ -15,7 +15,7 @@ namespace VerifiedXCore.Privacy
         private static int _vfxPi2Probe = -1;
         private static int _v2CircuitsProbe = -1;
 
-        /// <summary>Whether the loaded library carries the v2 owner-bound circuits (<see cref="PlonkNative.CapV2Circuits"/>, VXPLNK04). The proof-rules epoch requires it.</summary>
+        /// <summary>Whether the loaded library carries the v2 owner-bound circuits (<see cref="PlonkNative.CapV2Circuits"/>, VXPLNK05). The proof-rules epoch requires it.</summary>
         public static bool IsV2CircuitsAvailable => _v2CircuitsProbe == 1;
 
         /// <summary>

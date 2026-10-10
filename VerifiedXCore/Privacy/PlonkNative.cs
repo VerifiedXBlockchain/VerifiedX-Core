@@ -42,7 +42,7 @@ namespace VerifiedXCore.Privacy
         /// </summary>
         public const uint CapVfxPi2Verify = 32;
         /// <summary>
-        /// Bit 6: the v2 owner-bound circuits are loaded (<b>VXPLNK04</b>): notes carry an owner key, spends prove the owner's
+        /// Bit 6: the v2 owner-bound circuits are loaded (<b>VXPLNK05</b>): notes carry an owner key, spends prove the owner's
         /// nullifier key, the Unshield binds its recipient, <see cref="plonk_verify"/> takes VFXPI1 version-3 blobs, and the
         /// witness formats below are the v2 ones. Fund-loss re-audit (stage 3), Oct 2026.
         /// </summary>
@@ -133,7 +133,7 @@ namespace VerifiedXCore.Privacy
         public static extern int nullifier_derive_v1(byte[] viewingKey, byte[] noteHash, ulong treePosition, byte[] nullifierOut);
 
         /// <summary>
-        /// Generate a Shield circuit proof (v2: the output names its owner). Requires VXPLNK04 with prover keys.
+        /// Generate a Shield circuit proof (v2: the output names its owner). Requires VXPLNK05 with prover keys.
         /// Returns proof bytes + public input bytes in separate output buffers.
         /// </summary>
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]

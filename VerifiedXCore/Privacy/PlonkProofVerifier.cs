@@ -10,13 +10,13 @@ namespace VerifiedXCore.Privacy
     /// forged mainnet unshields passed); that behaviour is kept for history. From the height (fund-loss audit item 1,
     /// stage 2) a ZK-authorized private transaction - and a shield - must carry a proof that verifies against the VFXPI1
     /// version-2 public inputs rebuilt from its own fields (<see cref="PlonkPublicInputsV2"/>), and a node whose native
-    /// library cannot verify (no VXPLNK04 params loaded, or a library without the v2 circuits) refuses the transaction
+    /// library cannot verify (no VXPLNK05 params loaded, or a library without the v2 circuits) refuses the transaction
     /// rather than letting it through. Historical sync (<c>blockDownloads</c>) still skips proofs: those blocks were
     /// accepted by the validators of their time.
     /// </summary>
     public static class PlonkProofVerifier
     {
-        public const string VerifierUnavailableReason = "This node cannot verify PLONK proofs (VXPLNK04 params not loaded or the native library lacks the v2 owner-bound circuits); private transactions are refused until it can.";
+        public const string VerifierUnavailableReason = "This node cannot verify PLONK proofs (VXPLNK05 params not loaded or the native library lacks the v2 owner-bound circuits); private transactions are refused until it can.";
 
         /// <summary>Replaceable for tests: whether this node can verify v1 proofs against version-2 public inputs.</summary>
         internal static Func<bool> VerifierAvailable = () =>

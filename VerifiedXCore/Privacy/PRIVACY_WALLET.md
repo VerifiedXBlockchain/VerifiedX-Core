@@ -73,8 +73,10 @@ once per key, and an unshield could be copied with another recipient. From the p
 - **v2 `zfx_` addresses** carry the owner key next to the encryption key. The same keys have a v1 and a v2 string; both
   decode, rows created under v1 are found by either, and `GetShieldedAddresses` reports `zfxAddress` (v2, what to be
   paid at) plus `legacyZfxAddress`. In the epoch a v1 recipient address is refused ("carries no owner key").
-- **Params**: `VXPLNK04` (`vfx_plonk_v2.params`, 405 MB, deterministic setup); `VXPLNK03` is refused by the library.
-  Public-input blobs are `VFXPI1` version 3; capability bit 64 (`CapV2Circuits`).
+- **Params**: `VXPLNK05` (`vfx_plonk_v3.params`): the v2 circuits compiled over the **Zcash Sapling Powers of Tau**
+  universal parameters (`phase1radix2m16`, imported by `vfx_plonk_setup --zcash`; generator and pairing checks on
+  import). `VXPLNK03` (ownerless circuits) and `VXPLNK04` (the seeded setup, whose tau is public and whose proofs are
+  therefore forgeable) are refused by the library. Public-input blobs are `VFXPI1` version 3; capability bit 64.
 - Tests: `PrivacyStage2_RoundTripTests.AStrangerWhoKnowsTheNote_CannotSpendIt_WithAnotherKey` and the redirect check in
   `UnshieldOneNote_...` reproduce both re-audit attacks against the new circuits; the plonk repository's
   `v1_vfxpi2.rs` does the same natively.
@@ -83,7 +85,7 @@ once per key, and an unshield could be copied with another recipient. From the p
 
 - Universal params: env **`VFX_PLONK_PARAMS_PATH`**, file formats **`VXPLNK01`** / **`VXPLNK02`** — see [`../Plonk/PARAMS.md`](../Plonk/PARAMS.md).
 - **`VXPLNK02`** required for native **`plonk_prove_v0`** (legacy stub proving).
-- **`VXPLNK04`** (`vfx_plonk_v2.params`; prover keys for the v2 owner-bound circuits) required for real proving and for the `PrivacyStage2_RoundTripTests` / `PrivacyStage2_RawApiTests` proof tests (`VFX_PLONK_PARAMS`). `VXPLNK03` is refused.
+- **`VXPLNK05`** (`vfx_plonk_v3.params`; v2 owner-bound circuits over the Zcash Powers of Tau, with prover keys) required for real proving and for the `PrivacyStage2_RoundTripTests` / `PrivacyStage2_RawApiTests` proof tests (`VFX_PLONK_PARAMS`). `VXPLNK03` and the seeded `VXPLNK04` are refused.
 
 ## Automated tests (privacy only)
 
