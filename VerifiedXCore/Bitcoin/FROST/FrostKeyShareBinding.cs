@@ -1,5 +1,6 @@
 using VerifiedXCore.Bitcoin.FROST.Models;
 using VerifiedXCore.Bitcoin.Services;
+using VerifiedXCore.Models;
 using VerifiedXCore.Utilities;
 
 namespace VerifiedXCore.Bitcoin.FROST
@@ -152,6 +153,7 @@ namespace VerifiedXCore.Bitcoin.FROST
 
             LogUtility.Log($"[FROST KeyStore] Session-id key shares: {result.Records} record(s), {result.Bound} bound now, {result.FiledUnderContract} already under a contract, {result.NoVault} with no vault, {result.Ambiguous} ambiguous, {result.Failed} failed.",
                 "FrostKeyShareBinding.BindSessionShares()");
+            Volatile.Write(ref _bindingHasRun, 1);
             return result;
         }
 
@@ -196,7 +198,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                     await Task.Delay(pollMilliseconds, cancellationToken).ConfigureAwait(false);
                 if (Interlocked.Exchange(ref _ran, 1) == 1)
                     return null;
-                return BindSessionShares();
+                var result = BindSessionShares();
+                LogVerdict();
+                return result;
             }
             catch (OperationCanceledException) { return null; }
             catch (Exception ex)
@@ -206,6 +210,144 @@ namespace VerifiedXCore.Bitcoin.FROST
             }
         }
 
-        internal static void ResetForTests() => Interlocked.Exchange(ref _ran, 0);
+        internal static void ResetForTests() { Interlocked.Exchange(ref _ran, 0); Volatile.Write(ref _bindingHasRun, 0); }
+
+        // ── What an operator checks after an upgrade ──────────────────────────────────────────────────────────
+
+        private static int _bindingHasRun;
+
+        public const string StateUnderContract = "contract";
+        /// <summary>Filed under its contract; another contract on chain carries the same key (it gets nothing from this record).</summary>
+        public const string StateUnderContractKeyCopied = "contract-key-copied";
+        /// <summary>Under a session id with exactly one vault for its key: the binding run files it there.</summary>
+        public const string StateSessionPendingBind = "session-pending-bind";
+        /// <summary>Under a session id and no contract carries its key (its ceremony's contract was never created). Normal; stays as it is.</summary>
+        public const string StateSessionNoVault = "session-no-vault";
+        /// <summary>Under a session id and more than one contract carries its key: used for none until an operator binds it.</summary>
+        public const string StateSessionAmbiguous = "session-ambiguous";
+
+        public sealed class ShareRow
+        {
+            public long Id { get; set; }
+            public string FiledUnder { get; set; } = "";
+            public bool IsContractUid { get; set; }
+            public bool ContractOnChain { get; set; }
+            public bool UnderSessionId { get; set; }
+            public bool AttestedVault { get; set; }
+            public string GroupPublicKey { get; set; } = "";
+            public List<string> ContractsCarryingKey { get; set; } = new();
+            public string State { get; set; } = "";
+            public string Status { get; set; } = "";
+            public bool HasKeyPackage { get; set; }
+            public long CreatedTimestamp { get; set; }
+        }
+
+        public sealed class ShareReport
+        {
+            public string? ValidatorAddress { get; set; }
+            public bool ChainSynced { get; set; }
+            /// <summary>Whether the binding has completed in this process (it runs by itself once the node is synced).</summary>
+            public bool BindingHasRun { get; set; }
+            public string? ChainStateError { get; set; }
+            public int Records { get; set; }
+            public int UnderSessionId { get; set; }
+            public int Ambiguous { get; set; }
+            public int PendingBind { get; set; }
+            public int NoVault { get; set; }
+            public int KeyCopied { get; set; }
+            /// <summary>True when nothing needs an operator: no share is ambiguous and none is waiting to be bound.</summary>
+            public bool Ok { get; set; }
+            /// <summary>One line: OK, WAIT (not synced / binding not run yet) or ACTION NEEDED, and why.</summary>
+            public string Verdict { get; set; } = "";
+            public List<ShareRow> Keys { get; set; } = new();
+        }
+
+        /// <summary>
+        /// This validator's key records and the one-line answer an operator needs after an upgrade (fifth review): is any
+        /// share ambiguous, or still waiting to be bound? A share whose ceremony never produced a contract stays under its
+        /// session id for good and is not a problem, so "nothing under a session id" is not the test; "nothing ambiguous and
+        /// nothing pending" is. No key material. <paramref name="validatorAddress"/> limits the rows to that validator.
+        /// </summary>
+        public static ShareReport Report(string? validatorAddress = null)
+        {
+            var report = new ShareReport { ValidatorAddress = validatorAddress, ChainSynced = Globals.IsChainSynced, BindingHasRun = Volatile.Read(ref _bindingHasRun) == 1 };
+            var vaultKeys = new List<(string ScUid, string GroupKey)>();
+            try { vaultKeys = OnChainVaultKeys(); }
+            catch (Exception ex) { report.ChainStateError = ex.Message; }
+
+            foreach (var k in FrostValidatorKeyStore.GetAllKeyPackages())
+            {
+                if (!string.IsNullOrEmpty(validatorAddress) && !string.Equals(k.ValidatorAddress, validatorAddress, StringComparison.Ordinal))
+                    continue;
+                var filedUnder = k.SmartContractUID ?? string.Empty;
+                var isContractUid = FrostDkgGuard.IsContractUid(filedUnder);
+                SmartContractStateTrei? onChain = null;
+                try { onChain = string.IsNullOrEmpty(filedUnder) ? null : SmartContractStateTrei.GetSmartContractState(filedUnder); } catch { }
+                var key = NormalizeKey(k.GroupPublicKey);
+                var carrying = key.Length == 0
+                    ? new List<string>()
+                    : vaultKeys.Where(v => NormalizeKey(v.GroupKey) == key).Select(v => v.ScUid).Distinct(StringComparer.Ordinal).OrderBy(u => u, StringComparer.Ordinal).ToList();
+                var underSession = !isContractUid && onChain == null;
+
+                string state, status;
+                if (!underSession)
+                {
+                    var others = carrying.Where(c => !string.Equals(c, filedUnder, StringComparison.Ordinal)).ToList();
+                    state = others.Count > 0 ? StateUnderContractKeyCopied : StateUnderContract;
+                    status = others.Count > 0
+                        ? $"filed under its contract; {string.Join(", ", others)} carries the same key and gets nothing from this record"
+                        : "filed under its contract";
+                }
+                else if (carrying.Count == 1) { state = StateSessionPendingBind; status = "under a session id; will be filed under " + carrying[0]; }
+                else if (carrying.Count == 0) { state = StateSessionNoVault; status = "under a session id; no contract carries its key (its ceremony's contract was never created); nothing to do"; }
+                else { state = StateSessionAmbiguous; status = $"under a session id; AMBIGUOUS: {string.Join(", ", carrying)} all carry its key; used for none until bound (POST /frost/keystore/bind/{k.Id}/{{scUID}}?confirm=true)"; }
+
+                report.Keys.Add(new ShareRow
+                {
+                    Id = k.Id, FiledUnder = filedUnder, IsContractUid = isContractUid, ContractOnChain = onChain != null, UnderSessionId = underSession,
+                    AttestedVault = onChain != null && FrostDkgGuard.ContractHasAttestedDkgProof(filedUnder),
+                    GroupPublicKey = k.GroupPublicKey ?? string.Empty, ContractsCarryingKey = carrying, State = state, Status = status,
+                    HasKeyPackage = !string.IsNullOrEmpty(k.KeyPackage), CreatedTimestamp = k.CreatedTimestamp,
+                });
+            }
+
+            report.Records = report.Keys.Count;
+            report.UnderSessionId = report.Keys.Count(r => r.UnderSessionId);
+            report.Ambiguous = report.Keys.Count(r => r.State == StateSessionAmbiguous);
+            report.PendingBind = report.Keys.Count(r => r.State == StateSessionPendingBind);
+            report.NoVault = report.Keys.Count(r => r.State == StateSessionNoVault);
+            report.KeyCopied = report.Keys.Count(r => r.State == StateUnderContractKeyCopied);
+            report.Ok = report.ChainStateError == null && report.Ambiguous == 0 && report.PendingBind == 0;
+
+            if (report.ChainStateError != null)
+                report.Verdict = $"UNKNOWN: chain state could not be read ({report.ChainStateError}).";
+            else if (report.Ambiguous > 0)
+                report.Verdict = $"ACTION NEEDED: {report.Ambiguous} key share(s) are ambiguous (more than one contract carries their key). This validator signs for none of those contracts until each share is bound: POST /frost/keystore/bind/{{id}}/{{scUID}}?confirm=true.";
+            else if (report.PendingBind > 0 && (!report.ChainSynced || !report.BindingHasRun))
+                report.Verdict = $"WAIT: {report.PendingBind} key share(s) are still under a session id. The binding runs by itself once the node is synced; check again then.";
+            else if (report.PendingBind > 0)
+                report.Verdict = $"ACTION NEEDED: {report.PendingBind} key share(s) are still under a session id although one vault carries their key. Run POST /frost/keystore/migrate and read its notes.";
+            else
+                report.Verdict = "OK: every key share that has a vault is filed under it; nothing is ambiguous."
+                    + (report.NoVault > 0 ? $" {report.NoVault} share(s) remain under a session id because no contract carries their key, which is normal." : "")
+                    + (report.KeyCopied > 0 ? $" Note: {report.KeyCopied} share(s) have their key copied by another contract; that contract gets nothing." : "");
+            return report;
+        }
+
+        private static void LogVerdict()
+        {
+            try
+            {
+                var report = Report();
+                if (report.Ok)
+                    LogUtility.Log("[FROST KeyStore] " + report.Verdict, "FrostKeyShareBinding");
+                else
+                {
+                    ErrorLogUtility.LogError("[FROST KeyStore] " + report.Verdict, "FrostKeyShareBinding");
+                    Console.WriteLine("[FROST KeyStore] " + report.Verdict + " See GET /frost/keystore on this machine.");
+                }
+            }
+            catch { }
+        }
     }
 }

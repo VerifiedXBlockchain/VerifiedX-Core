@@ -332,6 +332,112 @@ namespace VerifiedXCore.Tests
             Assert.True(FrostKeyShareBinding.BindByOperator(shareB.Id, vaultB).Ok);     // already there
         }
 
+        /// <summary>
+        /// Fifth review: after an upgrade each validator checks its key store. The answer is one line. "Nothing under a
+        /// session id" is not the test: a share whose ceremony never produced a contract stays there and is normal. The
+        /// test is nothing ambiguous and nothing still waiting to be bound.
+        /// </summary>
+        [Fact]
+        public void TheKeystoreReport_SaysWhetherAnOperatorHasAnythingToDo()
+        {
+            var priorSynced = Globals.IsChainSynced;
+            FrostKeyShareBinding.ResetForTests();
+            try
+            {
+                Globals.IsChainSynced = false;
+                var empty = FrostKeyShareBinding.Report(Me);
+                Assert.True(empty.Ok);
+                Assert.Equal(0, empty.Records);
+
+                var vaultA = LegacyVault(Key('a'));
+                var shareA = Share(Guid.NewGuid().ToString(), Key('a'));
+                var shareC = Share(Guid.NewGuid().ToString("N"), Key('c'));               // its ceremony's contract was never created
+                var vaultD = LegacyVault(Key('d'));
+                Share(vaultD, Key('d'));
+                Share(Guid.NewGuid().ToString(), Key('f'), "xValidatorOld");              // another validator's row: not in this one's report
+
+                // Before the node is synced: a share is waiting, and the report says wait, not act.
+                var before = FrostKeyShareBinding.Report(Me);
+                Assert.False(before.Ok);
+                Assert.Equal(3, before.Records);
+                Assert.Equal(1, before.PendingBind);
+                Assert.Equal(1, before.NoVault);
+                Assert.StartsWith("WAIT", before.Verdict);
+                Assert.Equal(FrostKeyShareBinding.StateSessionPendingBind, before.Keys.Single(k => k.Id == shareA.Id).State);
+                Assert.Equal(new[] { vaultA }, before.Keys.Single(k => k.Id == shareA.Id).ContractsCarryingKey);
+                Assert.Equal(4, FrostKeyShareBinding.Report().Records);                   // no filter: every row
+
+                // After the binding: OK, with the never-created ceremony's share still under its session id.
+                Globals.IsChainSynced = true;
+                Assert.Equal(1, FrostKeyShareBinding.BindSessionShares().Bound);          // (the unfiltered run also sees the other validator's row: no vault for it)
+                var after = FrostKeyShareBinding.Report(Me);
+                Assert.True(after.Ok);
+                Assert.True(after.BindingHasRun);
+                Assert.StartsWith("OK", after.Verdict);
+                Assert.Contains("which is normal", after.Verdict);
+                Assert.Equal(1, after.UnderSessionId);
+                Assert.Equal(1, after.NoVault);
+                Assert.Equal(0, after.PendingBind);
+                Assert.Equal(FrostKeyShareBinding.StateSessionNoVault, after.Keys.Single(k => k.Id == shareC.Id).State);
+                Assert.Equal(FrostKeyShareBinding.StateUnderContract, after.Keys.Single(k => k.Id == shareA.Id).State);
+
+                // A key copied AFTER the binding: the share is safe under its vault; the report notes the copy and stays OK.
+                var lateCopy = LegacyVault(Key('a'), proof: null);
+                var copied = FrostKeyShareBinding.Report(Me);
+                Assert.True(copied.Ok);
+                Assert.Equal(1, copied.KeyCopied);
+                Assert.Equal(FrostKeyShareBinding.StateUnderContractKeyCopied, copied.Keys.Single(k => k.Id == shareA.Id).State);
+                Assert.Contains(lateCopy, copied.Keys.Single(k => k.Id == shareA.Id).Status);
+
+                // A key copied BEFORE a share was bound: ambiguous, and the operator is told what to do.
+                var vaultB = LegacyVault(Key('b'));
+                var copyOfB = LegacyVault(Key('b'), proof: null);
+                var shareB = Share(Guid.NewGuid().ToString(), Key('b'));
+                Assert.Equal(0, FrostKeyShareBinding.BindSessionShares().Bound);
+                var ambiguous = FrostKeyShareBinding.Report(Me);
+                Assert.False(ambiguous.Ok);
+                Assert.Equal(1, ambiguous.Ambiguous);
+                Assert.StartsWith("ACTION NEEDED", ambiguous.Verdict);
+                Assert.Contains("/frost/keystore/bind/", ambiguous.Verdict);
+                var rowB = ambiguous.Keys.Single(k => k.Id == shareB.Id);
+                Assert.Equal(FrostKeyShareBinding.StateSessionAmbiguous, rowB.State);
+                Assert.Contains(vaultB, rowB.ContractsCarryingKey);
+                Assert.Contains(copyOfB, rowB.ContractsCarryingKey);
+
+                Assert.True(FrostKeyShareBinding.BindByOperator(shareB.Id, vaultB).Ok);
+                var resolved = FrostKeyShareBinding.Report(Me);
+                Assert.True(resolved.Ok);
+                Assert.Equal(2, resolved.KeyCopied);
+
+                // A share that could be bound but was not, on a synced node whose binding has run: act, do not wait.
+                var vaultE = LegacyVault(Key('e'));
+                Share(Guid.NewGuid().ToString(), Key('e'));
+                var late = FrostKeyShareBinding.Report(Me);
+                Assert.False(late.Ok);
+                Assert.StartsWith("ACTION NEEDED", late.Verdict);
+                Assert.Contains("/frost/keystore/migrate", late.Verdict);
+                Assert.Equal(1, FrostKeyShareBinding.BindSessionShares().Bound);
+                Assert.True(FrostKeyShareBinding.Report(Me).Ok);
+                Assert.NotNull(FrostValidatorKeyStore.GetKeyPackage(vaultE, Me));
+
+                // Chain state unreadable: the report does not say OK.
+                var priorKeys = FrostKeyShareBinding.OnChainVaultKeys;
+                try
+                {
+                    FrostKeyShareBinding.OnChainVaultKeys = () => throw new InvalidOperationException("state unavailable");
+                    var unknown = FrostKeyShareBinding.Report(Me);
+                    Assert.False(unknown.Ok);
+                    Assert.StartsWith("UNKNOWN", unknown.Verdict);
+                }
+                finally { FrostKeyShareBinding.OnChainVaultKeys = priorKeys; }
+            }
+            finally
+            {
+                Globals.IsChainSynced = priorSynced;
+                FrostKeyShareBinding.ResetForTests();
+            }
+        }
+
         /// <summary>The binding waits for the node to be at the network's height, and runs once per process.</summary>
         [Fact]
         public async Task TheBindingRun_WaitsForSync_AndRunsOnce()

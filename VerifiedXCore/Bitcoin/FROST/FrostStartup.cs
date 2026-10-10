@@ -136,10 +136,10 @@ namespace VerifiedXCore.Bitcoin.FROST
                 });
 
                 /// <summary>
-                /// GET /frost/keystore - this validator's FROST key records: the UID each share is filed under, whether that UID
-                /// is a contract on chain, whether the share still sits under a pre-NEW-26 session id, and which contracts on
-                /// chain carry its group key (exactly one: it is that vault's; more than one: it is used for none until an
-                /// operator binds it). Loopback only; no key material.
+                /// GET /frost/keystore - this validator's FROST key records and a one-line verdict (Ok / Verdict): after an
+                /// upgrade nothing should be ambiguous and nothing should be waiting to be bound. A share whose ceremony never
+                /// produced a contract stays under its session id and is normal. Each row shows the UID the share is filed
+                /// under and which contracts on chain carry its group key. Loopback only; no key material.
                 /// </summary>
                 endpoints.MapGet("/frost/keystore", async context =>
                 {
@@ -148,49 +148,23 @@ namespace VerifiedXCore.Bitcoin.FROST
                         await WriteForbiddenAsync(context);
                         return;
                     }
-                    var mine = Globals.ValidatorAddress;
-                    var vaultKeys = new List<(string ScUid, string GroupKey)>();
-                    string? chainError = null;
-                    try { vaultKeys = FrostKeyShareBinding.OnChainVaultKeys(); } catch (Exception ex) { chainError = ex.Message; }
-                    var rows = FrostValidatorKeyStore.GetAllKeyPackages()
-                        .Where(k => string.IsNullOrEmpty(mine) || string.Equals(k.ValidatorAddress, mine, StringComparison.Ordinal))
-                        .Select(k =>
-                        {
-                            var isContractUid = FrostDkgGuard.IsContractUid(k.SmartContractUID);
-                            VerifiedXCore.Models.SmartContractStateTrei? onChain = null;
-                            try { onChain = VerifiedXCore.Models.SmartContractStateTrei.GetSmartContractState(k.SmartContractUID); } catch { }
-                            var key = FrostKeyShareBinding.NormalizeKey(k.GroupPublicKey);
-                            var carrying = key.Length == 0 ? new List<string>() : vaultKeys.Where(v => FrostKeyShareBinding.NormalizeKey(v.GroupKey) == key).Select(v => v.ScUid).Distinct().ToList();
-                            var underSession = !isContractUid && onChain == null;
-                            return new
-                            {
-                                k.Id,
-                                FiledUnder = k.SmartContractUID,
-                                IsContractUid = isContractUid,
-                                ContractOnChain = onChain != null,
-                                UnderSessionId = underSession,
-                                AttestedVault = onChain != null && FrostDkgGuard.ContractHasAttestedDkgProof(k.SmartContractUID),
-                                GroupPublicKey = k.GroupPublicKey,
-                                ContractsCarryingKey = carrying,
-                                Status = !underSession ? (carrying.Count > 1 ? "filed under a contract; ANOTHER CONTRACT CARRIES THE SAME KEY (it gets nothing from this record)" : "filed under a contract")
-                                       : carrying.Count == 1 ? "session id; binds to " + carrying[0]
-                                       : carrying.Count == 0 ? "session id; no contract carries its key"
-                                       : "session id; AMBIGUOUS - used for none until bound (POST /frost/keystore/bind/{id}/{scUID})",
-                                HasKeyPackage = !string.IsNullOrEmpty(k.KeyPackage),
-                                k.CreatedTimestamp,
-                            };
-                        })
-                        .ToList();
+                    var report = FrostKeyShareBinding.Report(Globals.ValidatorAddress);
                     var response = JsonConvert.SerializeObject(new
                     {
                         Success = true,
-                        ValidatorAddress = mine,
-                        ChainSynced = Globals.IsChainSynced,
-                        ChainStateError = chainError,
-                        Records = rows.Count,
-                        UnderSessionId = rows.Count(r => r.UnderSessionId),
-                        Ambiguous = rows.Count(r => r.UnderSessionId && r.ContractsCarryingKey.Count > 1),
-                        Keys = rows,
+                        report.Ok,
+                        report.Verdict,
+                        report.ValidatorAddress,
+                        report.ChainSynced,
+                        report.BindingHasRun,
+                        report.ChainStateError,
+                        report.Records,
+                        report.UnderSessionId,
+                        report.Ambiguous,
+                        report.PendingBind,
+                        report.NoVault,
+                        report.KeyCopied,
+                        report.Keys,
                     }, Formatting.Indented);
                     context.Response.StatusCode = StatusCodes.Status200OK;
                     await context.Response.WriteAsync(response);
