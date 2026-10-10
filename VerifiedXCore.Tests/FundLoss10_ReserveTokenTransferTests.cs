@@ -20,7 +20,7 @@ namespace VerifiedXCore.Tests
     public class FundLoss10_ReserveTokenTransferTests : IDisposable
     {
         private const long Gate = 1000;
-        private const string Refused = "A reserve account cannot send or burn fungible tokens";
+        private const string Refused = "A reserve account cannot send, burn or mint fungible tokens";
         private readonly string _tempRoot;
         private readonly string? _priorCustomPath;
         private readonly Block _priorLastBlock;
@@ -78,7 +78,7 @@ namespace VerifiedXCore.Tests
         public async Task ReserveTokenMove_RefusedUnderEveryContractType_AndArrayData(TransactionType type, bool arrayForm)
         {
             Globals.LastBlock = new Block { Height = Gate - 1 };
-            foreach (var function in new[] { "TokenTransfer()", "TokenBurn()" })
+            foreach (var function in new[] { "TokenTransfer()", "TokenBurn()", "TokenMint()", "TokenContractOwnerChange()" })
             {
                 var (ok, msg) = await TransactionValidatorService.VerifyTX(Token(_reserve, function, type, arrayForm));
                 Assert.False(ok);
@@ -105,6 +105,8 @@ namespace VerifiedXCore.Tests
         [Theory]
         [InlineData("TokenTransfer()")]
         [InlineData("TokenBurn()")]
+        [InlineData("TokenMint()")]
+        [InlineData("TokenContractOwnerChange()")]
         public async Task ReserveTokenMove_RefusedAtGate_NotBelow(string function)
         {
             Globals.LastBlock = new Block { Height = Gate - 2 };
