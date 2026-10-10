@@ -201,6 +201,20 @@ namespace VerifiedXCore.Tests
             Assert.True(FrostDkgGuard.MayAdoptKeyRecord(neverCreated, neverCreated, out _));
 
             Assert.True(FrostDkgGuard.IsContractUid(neverCreated));
+
+            // Re-audit: a vault created with a NEW-26 DKG proof never adopts a session-id record, however old.
+            var prior = FrostDkgGuard.RequestHasDkgProof;
+            try
+            {
+                FrostDkgGuard.RequestHasDkgProof = uid => uid == forged;
+                Assert.False(FrostDkgGuard.MayAdoptKeyRecord(Guid.NewGuid().ToString(), forged, out var r2));
+                Assert.Contains("DKG proof", r2);
+                Assert.True(FrostDkgGuard.MayAdoptKeyRecord(forged, forged, out _)); // its own UID is always fine
+                var legacyVault = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
+                Assert.True(FrostDkgGuard.MayAdoptKeyRecord(Guid.NewGuid().ToString(), legacyVault, out _)); // a pre-NEW-26 vault may still adopt its session-id share
+            }
+            finally { FrostDkgGuard.RequestHasDkgProof = prior; }
+            Assert.False(FrostDkgGuard.ContractHasDkgProof(forged)); // not on chain: no proof
             Assert.True(FrostDkgGuard.IsContractUid(forged));
             Assert.False(FrostDkgGuard.IsContractUid(Guid.NewGuid().ToString("N")));
             Assert.False(FrostDkgGuard.IsContractUid(Guid.NewGuid().ToString()));

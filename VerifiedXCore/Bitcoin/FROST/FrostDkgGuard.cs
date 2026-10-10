@@ -59,11 +59,24 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// alone, so a contract body copying a victim vault's group key had the victim's share signed to its own
         /// withdrawals and the record relabelled to the forged contract.
         /// </summary>
+        /// <summary>Whether the contract carries a NEW-26 DKG proof (its ceremony ran under its UID). Replaceable for tests.</summary>
+        internal static Func<string, bool> RequestHasDkgProof = ContractHasDkgProof;
+
         public static bool MayAdoptKeyRecord(string? recordScUid, string requestScUid, out string reason)
         {
             reason = "";
             if (string.IsNullOrEmpty(recordScUid) || string.Equals(recordScUid, requestScUid, StringComparison.Ordinal))
                 return true;
+            // Re-audit (9 Oct 2026): a vault created with a NEW-26 DKG proof had its ceremony under its own UID, so its share
+            // is filed under that UID on every participant. Such a vault never needs - and never gets - a record filed under
+            // anything else, a pre-NEW-26 session id included.
+            bool hasProof;
+            try { hasProof = RequestHasDkgProof(requestScUid); } catch { hasProof = false; }
+            if (hasProof)
+            {
+                reason = $"contract {requestScUid} was created with a DKG proof, so its key share is filed under its own UID; the record under {recordScUid} is not used for it.";
+                return false;
+            }
             // Re-audit (9 Oct 2026): since NEW-26 a DKG runs under the contract UID it will create (FrostDkgAttestation.NewContractUid),
             // so a record filed under a contract-shaped UID is that contract's share whether or not the contract exists on
             // chain yet (a ceremony whose contract was never created included). It is never relabelled to another contract.
@@ -79,6 +92,23 @@ namespace VerifiedXCore.Bitcoin.FROST
                 return true; // a pre-NEW-26 ceremony id, never a contract
             reason = $"the key share found by group key is filed under contract {other.SmartContractUID}, which exists on chain; it is that vault's share and is not used for {requestScUid}.";
             return false;
+        }
+
+        /// <summary>True when the contract's TokenizationV2 feature carries a NEW-26 DKG proof (local record or state trei).</summary>
+        public static bool ContractHasDkgProof(string smartContractUID)
+        {
+            try
+            {
+                var st = SmartContractStateTrei.GetSmartContractState(smartContractUID);
+                if (st == null || string.IsNullOrEmpty(st.ContractData)) return false;
+                var sc = SmartContractMain.GenerateSmartContractInMemory(st.ContractData);
+                var feature = sc?.Features?
+                    .Where(x => x.FeatureName == FeatureName.TokenizationV2)
+                    .Select(x => x.FeatureFeatures)
+                    .FirstOrDefault();
+                return feature is TokenizationV2Feature t && !string.IsNullOrWhiteSpace(t.DKGProof);
+            }
+            catch { return false; }
         }
 
         /// <summary>A smart contract UID as every creation path mints it: 32 hex characters, a colon, a unix timestamp.</summary>
