@@ -60,7 +60,7 @@ namespace VerifiedXCore.Tests
         /// a vault, so routes that read the vault from chain state (VBTCChainView) see it.
         /// </summary>
         public static string VaultContractData(string embeddedUid, string embeddedMinter, string depositAddress, string? groupKey = null, bool isS3C = false,
-            IEnumerable<string>? snapshot = null)
+            IEnumerable<string>? snapshot = null, string? dkgProof = "proof")
             => BuildContractData(embeddedUid, embeddedMinter, new List<SmartContractFeatures>
             {
                 new SmartContractFeatures
@@ -70,7 +70,7 @@ namespace VerifiedXCore.Tests
                     {
                         AssetName = "vBTC", AssetTicker = "vBTC", DepositAddress = depositAddress, Version = 2,
                         ValidatorAddressesSnapshot = snapshot != null ? new List<string>(snapshot) : new List<string> { "xValidator1", "xValidator2", "xValidator3" },
-                        FrostGroupPublicKey = groupKey ?? "02" + new string('a', 64), RequiredThreshold = 51, DKGProof = "proof",
+                        FrostGroupPublicKey = groupKey ?? "02" + new string('a', 64), RequiredThreshold = 51, DKGProof = dkgProof,
                         ProofBlockHeight = 1, CeremonyId = embeddedUid, ImageBase = "default", IsS3C = isS3C,
                     },
                 },

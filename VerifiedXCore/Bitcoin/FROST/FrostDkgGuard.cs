@@ -59,22 +59,24 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// alone, so a contract body copying a victim vault's group key had the victim's share signed to its own
         /// withdrawals and the record relabelled to the forged contract.
         /// </summary>
-        /// <summary>Whether the contract carries a NEW-26 DKG proof (its ceremony ran under its UID). Replaceable for tests.</summary>
-        internal static Func<string, bool> RequestHasDkgProof = ContractHasDkgProof;
+        /// <summary>Whether the contract carries a NEW-26 attested DKG proof (its ceremony ran under its UID). Replaceable for tests.</summary>
+        internal static Func<string, bool> RequestHasDkgProof = ContractHasAttestedDkgProof;
 
         public static bool MayAdoptKeyRecord(string? recordScUid, string requestScUid, out string reason)
         {
             reason = "";
             if (string.IsNullOrEmpty(recordScUid) || string.Equals(recordScUid, requestScUid, StringComparison.Ordinal))
                 return true;
-            // Re-audit (9 Oct 2026): a vault created with a NEW-26 DKG proof had its ceremony under its own UID, so its share
-            // is filed under that UID on every participant. Such a vault never needs - and never gets - a record filed under
-            // anything else, a pre-NEW-26 session id included.
+            // Re-audit (9 Oct 2026): a vault created with a NEW-26 ATTESTED proof (DKG_ATTESTED_V2) had its ceremony under
+            // its own UID, so its share is filed under that UID on every participant. Such a vault never needs - and never
+            // gets - a record filed under anything else, a pre-NEW-26 session id included. Legacy vaults carry a
+            // DKG_COMPLETION_FROST_NATIVE proof: presence is not the test (third review), the attested type is; their shares
+            // stay under the ceremony id until first use and keep the group-key-matched adoption below.
             bool hasProof;
             try { hasProof = RequestHasDkgProof(requestScUid); } catch { hasProof = false; }
             if (hasProof)
             {
-                reason = $"contract {requestScUid} was created with a DKG proof, so its key share is filed under its own UID; the record under {recordScUid} is not used for it.";
+                reason = $"contract {requestScUid} was created with an attested DKG proof, so its key share is filed under its own UID; the record under {recordScUid} is not used for it.";
                 return false;
             }
             // Re-audit (9 Oct 2026): since NEW-26 a DKG runs under the contract UID it will create (FrostDkgAttestation.NewContractUid),
@@ -94,8 +96,11 @@ namespace VerifiedXCore.Bitcoin.FROST
             return false;
         }
 
-        /// <summary>True when the contract's TokenizationV2 feature carries a NEW-26 DKG proof (local record or state trei).</summary>
-        public static bool ContractHasDkgProof(string smartContractUID)
+        /// <summary>
+        /// True when the contract's TokenizationV2 feature carries a NEW-26 attested DKG proof (ProofType DKG_ATTESTED_V2) in
+        /// chain state. A legacy vault's DKG_COMPLETION_FROST_NATIVE proof, an unparsable proof or no proof is false.
+        /// </summary>
+        public static bool ContractHasAttestedDkgProof(string smartContractUID)
         {
             try
             {
@@ -106,9 +111,18 @@ namespace VerifiedXCore.Bitcoin.FROST
                     .Where(x => x.FeatureName == FeatureName.TokenizationV2)
                     .Select(x => x.FeatureFeatures)
                     .FirstOrDefault();
-                return feature is TokenizationV2Feature t && !string.IsNullOrWhiteSpace(t.DKGProof);
+                var t = feature as TokenizationV2Feature
+                    ?? (feature == null ? null : Newtonsoft.Json.JsonConvert.DeserializeObject<TokenizationV2Feature>(feature.ToString() ?? ""));
+                return IsAttestedDkgProof(t?.DKGProof);
             }
             catch { return false; }
+        }
+
+        /// <summary>Whether a DKGProof string is a NEW-26 attested proof (type DKG_ATTESTED_V2), as opposed to a legacy completion proof.</summary>
+        public static bool IsAttestedDkgProof(string? dkgProof)
+        {
+            var proof = FrostDkgAttestation.ParseProof(dkgProof);
+            return proof != null && string.Equals(proof.ProofType, FrostDkgAttestation.ProofType, StringComparison.Ordinal);
         }
 
         /// <summary>A smart contract UID as every creation path mints it: 32 hex characters, a colon, a unix timestamp.</summary>

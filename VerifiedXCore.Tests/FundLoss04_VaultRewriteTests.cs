@@ -214,8 +214,61 @@ namespace VerifiedXCore.Tests
                 Assert.True(FrostDkgGuard.MayAdoptKeyRecord(Guid.NewGuid().ToString(), legacyVault, out _)); // a pre-NEW-26 vault may still adopt its session-id share
             }
             finally { FrostDkgGuard.RequestHasDkgProof = prior; }
-            Assert.False(FrostDkgGuard.ContractHasDkgProof(forged)); // not on chain: no proof
-            Assert.True(FrostDkgGuard.IsContractUid(forged));
+            Assert.False(FrostDkgGuard.ContractHasAttestedDkgProof(forged)); // not on chain: no proof
+        }
+
+        /// <summary>
+        /// Third review: the predicate must test the proof TYPE. Every legacy vault carries a DKG_COMPLETION_FROST_NATIVE proof
+        /// and keeps its share under the ceremony id until first use; treating presence as "attested" locked those vaults
+        /// out of signing. The real predicate runs here against chain state, no mock.
+        /// </summary>
+        [Fact]
+        public void OnlyAnAttestedProof_MarksAVaultAsFiledUnderItsOwnUid()
+        {
+            var legacyProof = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(Newtonsoft.Json.JsonConvert.SerializeObject(new
+            {
+                SessionId = Guid.NewGuid().ToString(), GroupPublicKey = VictimGroupKey, PubkeyPackageHash = "ab", Timestamp = TimeUtil.GetTime(),
+                FrostVersion = "x", ProofType = "DKG_COMPLETION_FROST_NATIVE",
+            })));
+            var legacyVault = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
+            {
+                SmartContractUID = legacyVault, ContractData = VbtcTestContracts.VaultContractData(legacyVault, _owner.Address, VictimDeposit, VictimGroupKey, dkgProof: legacyProof),
+                MinterAddress = _owner.Address, OwnerAddress = _owner.Address, IsLocked = false, Nonce = 0,
+            });
+            var attestedVault = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
+            var attested = FrostDkgAttestation.BuildProof(attestedVault, VictimGroupKey, VictimDeposit, _owner.Address, 2, new[] { "xV1", "xV2", "xV3" }, Array.Empty<FrostDkgAttestation.Attestation>());
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
+            {
+                SmartContractUID = attestedVault, ContractData = VbtcTestContracts.VaultContractData(attestedVault, _owner.Address, VictimDeposit, VictimGroupKey, dkgProof: attested),
+                MinterAddress = _owner.Address, OwnerAddress = _owner.Address, IsLocked = false, Nonce = 0,
+            });
+            var proofless = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
+            {
+                SmartContractUID = proofless, ContractData = VbtcTestContracts.VaultContractData(proofless, _owner.Address, VictimDeposit, VictimGroupKey, dkgProof: null),
+                MinterAddress = _owner.Address, OwnerAddress = _owner.Address, IsLocked = false, Nonce = 0,
+            });
+
+            Assert.True(FrostDkgGuard.IsAttestedDkgProof(attested));
+            Assert.False(FrostDkgGuard.IsAttestedDkgProof(legacyProof));
+            Assert.False(FrostDkgGuard.IsAttestedDkgProof("proof"));
+            Assert.False(FrostDkgGuard.IsAttestedDkgProof(null));
+            Assert.True(FrostDkgGuard.ContractHasAttestedDkgProof(attestedVault));
+            Assert.False(FrostDkgGuard.ContractHasAttestedDkgProof(legacyVault));
+            Assert.False(FrostDkgGuard.ContractHasAttestedDkgProof(proofless));
+
+            var sessionId = Guid.NewGuid().ToString();
+            // The attested vault never adopts a session-id record.
+            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(sessionId, attestedVault, out var why));
+            Assert.Contains("attested DKG proof", why);
+            // The legacy vault keeps its path to its never-used share (group-key match is still required by the caller).
+            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(sessionId, legacyVault, out _));
+            // A proof-less body is a legacy-shaped vault too: adoption stays group-key gated, not proof gated.
+            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(sessionId, proofless, out _));
+            // Nothing adopts another on-chain contract's share.
+            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(legacyVault, proofless, out _));
+            Assert.True(FrostDkgGuard.IsContractUid(attestedVault));
             Assert.False(FrostDkgGuard.IsContractUid(Guid.NewGuid().ToString("N")));
             Assert.False(FrostDkgGuard.IsContractUid(Guid.NewGuid().ToString()));
             Assert.False(FrostDkgGuard.IsContractUid("vault:1"));

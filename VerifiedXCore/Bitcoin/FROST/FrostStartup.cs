@@ -136,6 +136,51 @@ namespace VerifiedXCore.Bitcoin.FROST
                 });
 
                 /// <summary>
+                /// GET /frost/keystore - this validator's FROST key records: the UID each share is filed under, whether that UID
+                /// is a contract on chain, and (third review) whether the share still sits under a pre-NEW-26 session id - the
+                /// shares a legacy vault relies on until its first signing relabels them. Loopback only; no key material.
+                /// </summary>
+                endpoints.MapGet("/frost/keystore", async context =>
+                {
+                    if (!IsLoopbackRequest(context))
+                    {
+                        await WriteForbiddenAsync(context);
+                        return;
+                    }
+                    var mine = Globals.ValidatorAddress;
+                    var rows = FrostValidatorKeyStore.GetAllKeyPackages()
+                        .Where(k => string.IsNullOrEmpty(mine) || string.Equals(k.ValidatorAddress, mine, StringComparison.Ordinal))
+                        .Select(k =>
+                        {
+                            var isContractUid = FrostDkgGuard.IsContractUid(k.SmartContractUID);
+                            VerifiedXCore.Models.SmartContractStateTrei? onChain = null;
+                            try { onChain = VerifiedXCore.Models.SmartContractStateTrei.GetSmartContractState(k.SmartContractUID); } catch { }
+                            return new
+                            {
+                                FiledUnder = k.SmartContractUID,
+                                IsContractUid = isContractUid,
+                                ContractOnChain = onChain != null,
+                                UnderSessionId = !isContractUid,
+                                AttestedVault = onChain != null && FrostDkgGuard.ContractHasAttestedDkgProof(k.SmartContractUID),
+                                GroupPublicKey = k.GroupPublicKey,
+                                HasKeyPackage = !string.IsNullOrEmpty(k.KeyPackage),
+                                k.CreatedTimestamp,
+                            };
+                        })
+                        .ToList();
+                    var response = JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        ValidatorAddress = mine,
+                        Records = rows.Count,
+                        UnderSessionId = rows.Count(r => r.UnderSessionId),
+                        Keys = rows,
+                    }, Formatting.Indented);
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    await context.Response.WriteAsync(response);
+                });
+
+                /// <summary>
                 /// POST /frost/pins/reconcile/{scUID} - Run the on-chain pin release check NOW instead
                 /// of waiting for the 5-minute reconciler. Intrinsically safe: it can only release a
                 /// pin when Bitcoin itself provides the evidence (pinned tx confirmed, or its inputs
