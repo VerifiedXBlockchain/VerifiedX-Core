@@ -23,9 +23,10 @@ namespace VerifiedXCore.Bitcoin.Services
     /// address and pays the request's destination. Validators that signed it know this already; every validator can
     /// check it from the chain (raw transaction and its inputs' previous outputs).
     ///
-    /// Verified txids are remembered for the life of the process (a confirmation never goes away, and a transaction's
-    /// inputs and outputs never change), so each Completed withdrawal costs one set of Electrum answers. No answer is
-    /// reported as null: the caller fails closed exactly as it does when the deposit balance itself cannot be read.
+    /// The facts of confirmed transactions are remembered for the life of the process (a confirmation never goes away,
+    /// and a transaction's inputs and outputs never change), so each txid costs one set of Electrum answers; every row is
+    /// still judged against its own destination, and a txid pays at most one row. No answer is reported as null: the
+    /// caller fails closed exactly as it does when the deposit balance itself cannot be read.
     /// </summary>
     public static class CompletedWithdrawalConfirmation
     {
@@ -40,8 +41,8 @@ namespace VerifiedXCore.Bitcoin.Services
             public List<(string Address, decimal Btc)> Outputs { get; } = new();
         }
 
-        /// <summary>A Completed withdrawal the owner add-back counts.</summary>
-        public sealed record Candidate(string BtcTxId, decimal Amount, string? Destination, string SmartContractUID);
+        /// <summary>A Completed withdrawal the owner add-back counts. <paramref name="CompletedAt"/> orders rows that name the same txid.</summary>
+        public sealed record Candidate(string BtcTxId, decimal Amount, string? Destination, string SmartContractUID, long CompletedAt = 0, string? RequestHash = null);
 
         /// <summary>The facts for a txid, or null when the servers gave no usable answer. Replaceable for tests.</summary>
         internal static Func<string, Task<BtcTxFacts?>> LookupTransaction = FetchFactsAsync;
@@ -50,16 +51,21 @@ namespace VerifiedXCore.Bitcoin.Services
         internal static Func<string, string?> ResolveDepositAddress = scUID => FrostSigningAuthorization.ResolveDepositAddressForContract(scUID);
 
         private const int MaxServersPerLookup = 3;
-        private static readonly ConcurrentDictionary<string, byte> _verified = new(StringComparer.OrdinalIgnoreCase);
+        /// <summary>
+        /// Facts of CONFIRMED transactions, by txid (a confirmed transaction's inputs and outputs never change). Only the facts
+        /// are cached: every candidate is still judged against its own destination, so a txid that completed one withdrawal
+        /// cannot vouch for another (re-audit, 9 Oct 2026).
+        /// </summary>
+        private static readonly ConcurrentDictionary<string, BtcTxFacts> _confirmedFacts = new(StringComparer.OrdinalIgnoreCase);
 
-        internal static void ResetForTests() => _verified.Clear();
+        internal static void ResetForTests() => _confirmedFacts.Clear();
 
         /// <summary>The Completed withdrawals on <paramref name="scUID"/> that the owner add-back counts, with their Bitcoin txids and destinations.</summary>
         public static List<Candidate> Candidates(string scUID, long currentHeight)
         {
             var rows = VBTCWithdrawalRequest.GetCompletedWithdrawalRows(scUID, currentHeight);
             return rows.Where(r => !string.IsNullOrWhiteSpace(r.BTCTxHash))
-                .Select(r => new Candidate(r.BTCTxHash!, r.Amount, r.BTCDestination, scUID))
+                .Select(r => new Candidate(r.BTCTxHash!, r.Amount, r.BTCDestination, scUID, r.CompletionTimestamp ?? r.Timestamp, r.TransactionHash))
                 .ToList();
         }
 
@@ -85,31 +91,67 @@ namespace VerifiedXCore.Bitcoin.Services
             return await NotYetCountedAmountAsync(candidates, deposit).ConfigureAwait(false);
         }
 
-        /// <summary>The same, over an explicit candidate list and vault deposit address (the unit-testable core).</summary>
+        /// <summary>
+        /// The same, over an explicit candidate list and vault deposit address (the unit-testable core). One Bitcoin
+        /// transaction pays one withdrawal: when several completed rows name the same txid, only the earliest completed
+        /// one can count; the others never do (re-audit: a prior withdrawal's txid completed a new one to any destination).
+        /// </summary>
         public static async Task<decimal?> NotYetCountedAmountAsync(IEnumerable<Candidate> candidates, string? depositAddress)
         {
+            var list = candidates.ToList();
+            var firstByTxid = list
+                .GroupBy(c => c.BtcTxId, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.OrderBy(c => c.CompletedAt).ThenBy(c => c.RequestHash, StringComparer.Ordinal).First(), StringComparer.OrdinalIgnoreCase);
+
             decimal notCounted = 0M;
-            foreach (var c in candidates)
+            foreach (var c in list)
             {
-                if (_verified.ContainsKey(c.BtcTxId))
-                    continue;
-                BtcTxFacts? facts;
-                try { facts = await LookupTransaction(c.BtcTxId).ConfigureAwait(false); }
-                catch (Exception ex)
+                if (!ReferenceEquals(firstByTxid[c.BtcTxId], c))
                 {
-                    ErrorLogUtility.LogError($"Lookup of completed withdrawal tx {c.BtcTxId} failed: {ex.Message}", "CompletedWithdrawalConfirmation.NotYetCountedAmountAsync()");
-                    facts = null;
+                    notCounted += c.Amount; // a reused txid: this row is never paid by that transaction
+                    continue;
                 }
-                if (facts == null)
-                    return null; // no answer: the caller fails closed
+                if (!_confirmedFacts.TryGetValue(c.BtcTxId, out var facts))
+                {
+                    try { facts = await LookupTransaction(c.BtcTxId).ConfigureAwait(false); }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"Lookup of completed withdrawal tx {c.BtcTxId} failed: {ex.Message}", "CompletedWithdrawalConfirmation.NotYetCountedAmountAsync()");
+                        facts = null;
+                    }
+                    if (facts == null)
+                        return null; // no answer: the caller fails closed
+                    if (facts.Confirmations >= 1)
+                        _confirmedFacts[c.BtcTxId] = facts;
+                }
                 if (facts.Confirmations >= 1 && IsTheWithdrawalsTransaction(facts, c.Destination, depositAddress, out _))
-                {
-                    _verified[c.BtcTxId] = 1;
                     continue;
-                }
                 notCounted += c.Amount; // unconfirmed (mempool, withheld), or confirmed but not this withdrawal's transaction
             }
             return notCounted;
+        }
+
+        /// <summary>
+        /// Whether a completed withdrawal row other than <paramref name="requestHash"/> already names <paramref name="btcTxHash"/>
+        /// (any vault). Validator-local: a COMPLETE that reuses a Bitcoin transaction is refused when the rows are known.
+        /// </summary>
+        public static bool IsBtcTxidAlreadyUsed(string? btcTxHash, string? requestHash, out string? usedBy)
+        {
+            usedBy = null;
+            if (string.IsNullOrWhiteSpace(btcTxHash)) return false;
+            try
+            {
+                var db = VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb();
+                if (db == null) return false;
+                var wanted = btcTxHash.Trim().ToLowerInvariant();
+                var other = db.Query().Where(x => x.IsCompleted && x.BTCTxHash != null).ToList()
+                    .FirstOrDefault(x => string.Equals(x.BTCTxHash!.Trim().ToLowerInvariant(), wanted, StringComparison.Ordinal)
+                                         && !string.Equals(x.TransactionHash, requestHash, StringComparison.Ordinal));
+                if (other == null) return false;
+                usedBy = other.TransactionHash;
+                return true;
+            }
+            catch { return false; }
         }
 
         /// <summary>

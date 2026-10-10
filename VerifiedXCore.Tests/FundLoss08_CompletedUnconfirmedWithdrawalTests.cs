@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using VerifiedXCore;
 using VerifiedXCore.Bitcoin.Models;
@@ -146,6 +147,39 @@ namespace VerifiedXCore.Tests
             Assert.False(IsTheWithdrawalsTransaction(legacy, "MKLEGACYDEST", "mkLegacyVault", out _));
         }
 
+        /// <summary>Re-audit: a txid that completed one withdrawal must not vouch for another. The cache holds facts, not verdicts.</summary>
+        [Fact]
+        public async Task ATxidThatPaidOneWithdrawal_DoesNotCountForAnother()
+        {
+            var real = Withdrawal(10, 0.49M); // spends the vault, pays Dest
+            LookupTransaction = txid => Task.FromResult<BtcTxFacts?>(txid == "btc-real" ? real : null);
+
+            // Verified once for A (to Dest)...
+            Assert.Equal(0M, await NotYetCountedAmountAsync(new[] { new Candidate("btc-real", 0.5M, Dest, "vault", 100, "A") }, Deposit));
+            // ...the same txid on B, to another destination, is still judged on its own: not counted.
+            Assert.Equal(0.7M, await NotYetCountedAmountAsync(new[] { new Candidate("btc-real", 0.7M, "tb1qelsewhere", "vault", 200, "B") }, Deposit));
+            // Two rows naming the same txid, both to Dest: the earliest completed one counts, the later never does.
+            var both = new[] { new Candidate("btc-real", 0.7M, Dest, "vault", 200, "B"), new Candidate("btc-real", 0.5M, Dest, "vault", 100, "A") };
+            Assert.Equal(0.7M, await NotYetCountedAmountAsync(both, Deposit));
+            // Order of the list does not matter; ties break on the request hash.
+            Assert.Equal(0.7M, await NotYetCountedAmountAsync(both.Reverse().ToArray(), Deposit));
+            var tie = new[] { new Candidate("btc-real", 0.7M, Dest, "vault", 100, "B"), new Candidate("btc-real", 0.5M, Dest, "vault", 100, "A") };
+            Assert.Equal(0.7M, await NotYetCountedAmountAsync(tie, Deposit));
+        }
+
+        /// <summary>Re-audit: COMPLETE naming a txid another completed row already carries is refused (validator-local).</summary>
+        [Fact]
+        public void ABtcTxidAlreadyOnACompletedRow_IsRecognised()
+        {
+            Row("H1", 0.5M, VBTCWithdrawalStatus.Completed, "AbC123");
+            Row("H2", 0.3M, VBTCWithdrawalStatus.Requested, null);
+            Assert.True(IsBtcTxidAlreadyUsed("abc123", "H9", out var by));
+            Assert.Equal("H1", by);
+            Assert.False(IsBtcTxidAlreadyUsed("abc123", "H1", out _)); // the row itself
+            Assert.False(IsBtcTxidAlreadyUsed("ffff", "H9", out _));
+            Assert.False(IsBtcTxidAlreadyUsed(null, "H9", out _));
+        }
+
         [Fact]
         public void Candidates_AreTheCompletedRowsTheAddBackCounts()
         {
@@ -156,8 +190,8 @@ namespace VerifiedXCore.Tests
             var height = Globals.V2WithdrawalOwnerAddBackFixHeight + 1;
             var candidates = Candidates(_vault, height);
             Assert.Equal(2, candidates.Count);
-            Assert.Contains(new Candidate("btc-1", 0.5M, Dest, _vault), candidates);
-            Assert.Contains(new Candidate("btc-2", 0.3M, Dest, _vault), candidates);
+            Assert.Contains(candidates, c => c.BtcTxId == "btc-1" && c.Amount == 0.5M && c.Destination == Dest && c.SmartContractUID == _vault && c.RequestHash == "H1" && c.CompletedAt > 0);
+            Assert.Contains(candidates, c => c.BtcTxId == "btc-2" && c.Amount == 0.3M && c.RequestHash == "H2");
             Assert.Equal(0.8M, VBTCWithdrawalRequest.GetCompletedWithdrawalAmount("xOwner", _vault, height));
         }
 
@@ -183,7 +217,9 @@ namespace VerifiedXCore.Tests
             var unrelated = await VbtcOwnerDeposit.CheckAsync(() => Deposit, 0.8M, false, false, _vault, height);
             Assert.Equal(0.6M, unrelated.DepositBalance);
 
-            // The real withdrawal, confirmed: counted, the full deposit stands.
+            // The real withdrawal, confirmed: counted, the full deposit stands. (A confirmed transaction's facts are cached,
+            // so the stranger's facts above must be dropped first: in reality a txid's facts never change.)
+            ResetForTests();
             LookupTransaction = _ => Task.FromResult<BtcTxFacts?>(Withdrawal(5, 0.39M));
             var real = await VbtcOwnerDeposit.CheckAsync(() => Deposit, 0.8M, false, false, _vault, height);
             Assert.Equal(1.0M, real.DepositBalance);

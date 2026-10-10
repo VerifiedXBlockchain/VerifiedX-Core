@@ -1,4 +1,4 @@
-﻿using NBitcoin.Protocol;
+using NBitcoin.Protocol;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using VerifiedXCore.Arbiter;
@@ -3532,6 +3532,11 @@ namespace VerifiedXCore.Services
                         // Validate Bitcoin transaction hash format (64 hex chars)
                         if (btcTxHash.Length != 64 || !System.Text.RegularExpressions.Regex.IsMatch(btcTxHash, "^[0-9a-fA-F]{64}$"))
                             return (txResult, $"Invalid Bitcoin transaction hash format: {btcTxHash}");
+
+                        // Fund-loss audit item 8 (re-audit): one Bitcoin transaction pays one withdrawal. When this node's
+                        // rows already show the txid on another completed withdrawal, the COMPLETE is refused (validator-local).
+                        if (Bitcoin.Services.CompletedWithdrawalConfirmation.IsBtcTxidAlreadyUsed(btcTxHash, withdrawalRequestHash, out var usedBy))
+                            return (txResult, $"Bitcoin transaction {btcTxHash} already completed withdrawal {usedBy}; a transaction pays one withdrawal.");
                     }
                     catch (Exception ex)
                     {
