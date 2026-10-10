@@ -3535,15 +3535,14 @@ namespace VerifiedXCore.Services
 
                         // Fund-loss audit item 8 (re-audit): validator-local checks at ADMISSION only (third review: block
                         // acceptance must not depend on this node's local rows, or a fresh / mid-rebuild node refuses blocks
-                        // its peers accept). One Bitcoin transaction pays one withdrawal, and when this node signed the
-                        // withdrawal, the COMPLETE must name the transaction it signed.
+                        // its peers accept). One Bitcoin transaction pays one withdrawal; a bridge exit's transaction pays
+                        // none; and when this node signed the withdrawal (its durable signing record - fourth review: every
+                        // signer, not only the node that ran the ceremony), the COMPLETE must name the transaction it signed.
                         if (!blockVerify && !blockDownloads)
                         {
-                            if (Bitcoin.Services.CompletedWithdrawalConfirmation.IsBtcTxidAlreadyUsed(btcTxHash, withdrawalRequestHash, out var usedBy))
-                                return (txResult, $"Bitcoin transaction {btcTxHash} already completed withdrawal {usedBy}; a transaction pays one withdrawal.");
-                            if (withdrawalRequest != null && !string.IsNullOrWhiteSpace(withdrawalRequest.LastSignedBtcTxId)
-                                && !string.Equals(withdrawalRequest.LastSignedBtcTxId.Trim(), btcTxHash.Trim(), StringComparison.OrdinalIgnoreCase))
-                                return (txResult, $"This node signed Bitcoin transaction {withdrawalRequest.LastSignedBtcTxId} for withdrawal {withdrawalRequestHash}; the COMPLETE names {btcTxHash}.");
+                            var refusal = Bitcoin.Services.CompletedWithdrawalConfirmation.AdmissionRefusal(scUID, withdrawalRequestHash, btcTxHash, withdrawalRequest?.LastSignedBtcTxId);
+                            if (refusal != null)
+                                return (txResult, refusal);
                         }
                     }
                     catch (Exception ex)
