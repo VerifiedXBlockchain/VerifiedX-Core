@@ -60,7 +60,16 @@ namespace VerifiedXCore.Privacy
         public static bool TryLoadParamsFromEnvironment()
         {
             var path = Environment.GetEnvironmentVariable(ParamsPathEnvironmentVariable);
-            return !string.IsNullOrWhiteSpace(path) && TryLoadParamsFile(path);
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+                return false;
+            // Third review: the operator-supplied path bypassed the pinned hash. A file that is not the published params is
+            // refused: proofs under any other universal parameters would verify against nothing the network agrees on.
+            if (!PLONKParamsDownloader.VerifyFileHash(path))
+            {
+                ErrorLogUtility.LogError($"PLONK params at {ParamsPathEnvironmentVariable}={path} do not match the pinned SHA-256 ({PLONKParamsDownloader.ExpectedSha256}); not loaded.", "PLONKSetup.TryLoadParamsFromEnvironment()");
+                return false;
+            }
+            return TryLoadParamsFile(path);
         }
 
         /// <summary>

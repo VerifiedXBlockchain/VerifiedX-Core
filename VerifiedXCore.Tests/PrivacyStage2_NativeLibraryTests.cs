@@ -201,6 +201,29 @@ namespace VerifiedXCore.Tests
             Assert.Equal(1, PlonkNative.pedersen_verify(PrivacyEpoch.DummyCommitment, 0, PrivacyField.Zero32)); // 1 = valid, as the Pedersen round-trip test pins
         }
 
+        /// <summary>Third review: the operator path must carry the published file; anything else is refused by the pinned hash.</summary>
+        [Fact]
+        public void OperatorParamsPath_RefusesAFileThatIsNotThePublishedOne()
+        {
+            var prior = Environment.GetEnvironmentVariable(PLONKSetup.ParamsPathEnvironmentVariable);
+            var tmp = Path.Combine(Path.GetTempPath(), $"not-the-params-{Guid.NewGuid():N}.bin");
+            try
+            {
+                File.WriteAllBytes(tmp, System.Text.Encoding.ASCII.GetBytes("VXPLNK05 but not the real file"));
+                Environment.SetEnvironmentVariable(PLONKSetup.ParamsPathEnvironmentVariable, tmp);
+                Assert.False(PLONKSetup.TryLoadParamsFromEnvironment());
+                Environment.SetEnvironmentVariable(PLONKSetup.ParamsPathEnvironmentVariable, Path.Combine(Path.GetTempPath(), "missing-" + Guid.NewGuid().ToString("N")));
+                Assert.False(PLONKSetup.TryLoadParamsFromEnvironment());
+                Environment.SetEnvironmentVariable(PLONKSetup.ParamsPathEnvironmentVariable, null);
+                Assert.False(PLONKSetup.TryLoadParamsFromEnvironment());
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(PLONKSetup.ParamsPathEnvironmentVariable, prior);
+                try { File.Delete(tmp); } catch { }
+            }
+        }
+
         [Fact]
         public void Epoch_HeightSemantics()
         {
