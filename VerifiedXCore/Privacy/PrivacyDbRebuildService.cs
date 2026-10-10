@@ -48,7 +48,11 @@ namespace VerifiedXCore.Privacy
         }
 
         /// <summary>Marker written next to the databases once this build has rebuilt the privacy store from the chain.</summary>
-        public const string RebuiltMarkerFileName = "DB_Privacy.rebuilt-v1";
+        /// <summary>
+        /// Versioned: v1 was the 8.2.0 rebuild (stage 1); v2 forces one more rebuild for stage 3, whose epoch tree differs (the
+        /// owner-bound dummy leaf), so a node that crossed the proof height on an earlier build gets the right tree.
+        /// </summary>
+        public const string RebuiltMarkerFileName = "DB_Privacy.rebuilt-v2";
 
         /// <summary>
         /// Fund-loss audit item 1 (stage 1): the shielded pool supply becomes consensus state at
