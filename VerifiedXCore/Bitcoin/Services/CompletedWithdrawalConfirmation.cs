@@ -42,7 +42,17 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>A Completed withdrawal the owner add-back counts. <paramref name="CompletedAt"/> orders rows that name the same txid.</summary>
-        public sealed record Candidate(string BtcTxId, decimal Amount, string? Destination, string SmartContractUID, long CompletedAt = 0, string? RequestHash = null);
+        public sealed record Candidate(string BtcTxId, decimal Amount, string? Destination, string SmartContractUID, long CompletedAt = 0, string? RequestHash = null,
+            int FeeRate = 0, string? SignedBtcTxId = null);
+
+        /// <summary>Confirmations before a transaction's facts are cached for the process (a reorg deeper than this is not planned for).</summary>
+        public const int CacheAfterConfirmations = 6;
+
+        /// <summary>
+        /// The most a withdrawal's payout may fall short of its amount: the Bitcoin fee comes out of the amount, bounded by the
+        /// request's fee rate over a generous 1,000 vbytes (a two-input Taproot spend is about 200). Never below 0.00001 BTC.
+        /// </summary>
+        public static decimal FeeAllowanceBtc(int feeRateSatPerVb) => Math.Max(0.00001M, Math.Max(feeRateSatPerVb, 1) * 1000M / 100_000_000M);
 
         /// <summary>The facts for a txid, or null when the servers gave no usable answer. Replaceable for tests.</summary>
         internal static Func<string, Task<BtcTxFacts?>> LookupTransaction = FetchFactsAsync;
@@ -65,7 +75,7 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             var rows = VBTCWithdrawalRequest.GetCompletedWithdrawalRows(scUID, currentHeight);
             return rows.Where(r => !string.IsNullOrWhiteSpace(r.BTCTxHash))
-                .Select(r => new Candidate(r.BTCTxHash!, r.Amount, r.BTCDestination, scUID, r.CompletionTimestamp ?? r.Timestamp, r.TransactionHash))
+                .Select(r => new Candidate(r.BTCTxHash!, r.Amount, r.BTCDestination, scUID, r.CompletionTimestamp ?? r.Timestamp, r.TransactionHash, r.FeeRate, r.LastSignedBtcTxId))
                 .ToList();
         }
 
@@ -111,6 +121,11 @@ namespace VerifiedXCore.Bitcoin.Services
                     notCounted += c.Amount; // a reused txid: this row is never paid by that transaction
                     continue;
                 }
+                if (!string.IsNullOrWhiteSpace(c.SignedBtcTxId) && !string.Equals(c.SignedBtcTxId.Trim(), c.BtcTxId.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    notCounted += c.Amount; // this node signed a different transaction for the withdrawal: the named one is not it
+                    continue;
+                }
                 if (!_confirmedFacts.TryGetValue(c.BtcTxId, out var facts))
                 {
                     try { facts = await LookupTransaction(c.BtcTxId).ConfigureAwait(false); }
@@ -121,10 +136,10 @@ namespace VerifiedXCore.Bitcoin.Services
                     }
                     if (facts == null)
                         return null; // no answer: the caller fails closed
-                    if (facts.Confirmations >= 1)
+                    if (facts.Confirmations >= CacheAfterConfirmations)
                         _confirmedFacts[c.BtcTxId] = facts;
                 }
-                if (facts.Confirmations >= 1 && IsTheWithdrawalsTransaction(facts, c.Destination, depositAddress, out _))
+                if (facts.Confirmations >= 1 && IsTheWithdrawalsTransaction(facts, c.Destination, depositAddress, c.Amount, c.FeeRate, out _))
                     continue;
                 notCounted += c.Amount; // unconfirmed (mempool, withheld), or confirmed but not this withdrawal's transaction
             }
@@ -156,8 +171,24 @@ namespace VerifiedXCore.Bitcoin.Services
 
         /// <summary>
         /// The transaction is the withdrawal's when it spends the vault's deposit address and pays the withdrawal's
-        /// destination. Bech32 addresses compare case-insensitively; base58 ones exactly.
+        /// destination at least the withdrawal amount less the fee allowance (third review: a small real payout to the same
+        /// destination must not complete a large withdrawal). Bech32 addresses compare case-insensitively; base58 exactly.
         /// </summary>
+        public static bool IsTheWithdrawalsTransaction(BtcTxFacts facts, string? destination, string? depositAddress, decimal amount, int feeRate, out string reason)
+        {
+            if (!IsTheWithdrawalsTransaction(facts, destination, depositAddress, out reason))
+                return false;
+            var paid = facts.Outputs.Where(o => SameAddress(o.Address, destination)).Sum(o => o.Btc);
+            var floor = amount - FeeAllowanceBtc(feeRate);
+            if (paid < floor)
+            {
+                reason = $"the transaction pays the destination {paid} BTC; the withdrawal is {amount} BTC (fee allowance {FeeAllowanceBtc(feeRate)})";
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>Spends the vault and pays the destination (any amount). The amount-aware overload is what the add-back uses.</summary>
         public static bool IsTheWithdrawalsTransaction(BtcTxFacts facts, string? destination, string? depositAddress, out string reason)
         {
             reason = "";

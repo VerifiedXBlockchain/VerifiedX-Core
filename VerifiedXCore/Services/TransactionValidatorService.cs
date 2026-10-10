@@ -3533,10 +3533,18 @@ namespace VerifiedXCore.Services
                         if (btcTxHash.Length != 64 || !System.Text.RegularExpressions.Regex.IsMatch(btcTxHash, "^[0-9a-fA-F]{64}$"))
                             return (txResult, $"Invalid Bitcoin transaction hash format: {btcTxHash}");
 
-                        // Fund-loss audit item 8 (re-audit): one Bitcoin transaction pays one withdrawal. When this node's
-                        // rows already show the txid on another completed withdrawal, the COMPLETE is refused (validator-local).
-                        if (Bitcoin.Services.CompletedWithdrawalConfirmation.IsBtcTxidAlreadyUsed(btcTxHash, withdrawalRequestHash, out var usedBy))
-                            return (txResult, $"Bitcoin transaction {btcTxHash} already completed withdrawal {usedBy}; a transaction pays one withdrawal.");
+                        // Fund-loss audit item 8 (re-audit): validator-local checks at ADMISSION only (third review: block
+                        // acceptance must not depend on this node's local rows, or a fresh / mid-rebuild node refuses blocks
+                        // its peers accept). One Bitcoin transaction pays one withdrawal, and when this node signed the
+                        // withdrawal, the COMPLETE must name the transaction it signed.
+                        if (!blockVerify && !blockDownloads)
+                        {
+                            if (Bitcoin.Services.CompletedWithdrawalConfirmation.IsBtcTxidAlreadyUsed(btcTxHash, withdrawalRequestHash, out var usedBy))
+                                return (txResult, $"Bitcoin transaction {btcTxHash} already completed withdrawal {usedBy}; a transaction pays one withdrawal.");
+                            if (withdrawalRequest != null && !string.IsNullOrWhiteSpace(withdrawalRequest.LastSignedBtcTxId)
+                                && !string.Equals(withdrawalRequest.LastSignedBtcTxId.Trim(), btcTxHash.Trim(), StringComparison.OrdinalIgnoreCase))
+                                return (txResult, $"This node signed Bitcoin transaction {withdrawalRequest.LastSignedBtcTxId} for withdrawal {withdrawalRequestHash}; the COMPLETE names {btcTxHash}.");
+                        }
                     }
                     catch (Exception ex)
                     {

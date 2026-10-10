@@ -74,7 +74,7 @@ namespace VerifiedXCore.Tests
 
         private static BtcTxFacts Withdrawal(int confirmations, decimal paid) => Facts(confirmations, new[] { Deposit }, (Dest, paid), (Deposit, 0.1M));
 
-        private static Candidate C(string txid, decimal amount) => new(txid, amount, Dest, "vault");
+        private static Candidate C(string txid, decimal amount) => new(txid, amount, Dest, "vault", 0, null, 10, null);
 
         private static Dictionary<string, BtcTxFacts?> Answers(params (string Txid, BtcTxFacts? Facts)[] a)
         {
@@ -86,7 +86,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task UnconfirmedCompletedWithdrawals_AreNotAddedBack_ConfirmedOnesAre()
         {
-            var answers = Answers(("btc-confirmed", Withdrawal(3, 0.49M)), ("btc-mempool", Facts(0, Array.Empty<string>())), ("btc-unknown", null));
+            var answers = Answers(("btc-confirmed", Withdrawal(6, 0.4999M)), ("btc-mempool", Facts(0, Array.Empty<string>())), ("btc-unknown", null));
             var asked = new List<string>();
             LookupTransaction = txid => { asked.Add(txid); return Task.FromResult(answers[txid]); };
 
@@ -114,7 +114,7 @@ namespace VerifiedXCore.Tests
                 ("btc-deposit-in", Facts(10, new[] { "tb1qsomeoneelse" }, (Deposit, 0.5M))),         // a deposit INTO the vault
                 ("btc-wrong-dest", Facts(10, new[] { Deposit }, ("tb1qattacker", 0.5M))),           // from the vault, to the wrong place
                 ("btc-zero-pay", Facts(10, new[] { Deposit }, (Dest, 0M))),                         // the destination named but unpaid
-                ("btc-real", Withdrawal(10, 0.49M)));
+                ("btc-real", Withdrawal(10, 0.4999M)));
             LookupTransaction = txid => Task.FromResult(answers[txid]);
 
             Assert.Equal(0.5M, await NotYetCountedAmountAsync(new[] { C("btc-strangers", 0.5M) }, Deposit));
@@ -127,7 +127,50 @@ namespace VerifiedXCore.Tests
             ResetForTests();
             Assert.Equal(0.5M, await NotYetCountedAmountAsync(new[] { C("btc-real", 0.5M) }, null));
             // A candidate with no destination likewise.
-            Assert.Equal(0.5M, await NotYetCountedAmountAsync(new[] { new Candidate("btc-real", 0.5M, null, "vault") }, Deposit));
+            Assert.Equal(0.5M, await NotYetCountedAmountAsync(new[] { new Candidate("btc-real", 0.5M, null, "vault", 0, null, 10, null) }, Deposit));
+        }
+
+        /// <summary>Third review: the payout must cover the withdrawal less the fee allowance; a small real payout cannot complete a large withdrawal.</summary>
+        [Fact]
+        public void APayoutSmallerThanTheWithdrawal_DoesNotCount()
+        {
+            Assert.Equal(0.0001M, FeeAllowanceBtc(10));
+            Assert.Equal(0.00001M, FeeAllowanceBtc(0));
+            Assert.Equal(0.001M, FeeAllowanceBtc(100));
+            Assert.True(IsTheWithdrawalsTransaction(Withdrawal(1, 0.4999M), Dest, Deposit, 0.5M, 10, out _));   // fee came out of the amount
+            Assert.False(IsTheWithdrawalsTransaction(Withdrawal(1, 0.01M), Dest, Deposit, 1.0M, 10, out var r)); // a 0.01 payout for a 1 BTC withdrawal
+            Assert.Contains("pays the destination", r);
+            Assert.True(IsTheWithdrawalsTransaction(Withdrawal(1, 0.01M), Dest, Deposit, 0.01M, 10, out _));
+            // A completed row of 1 BTC naming a confirmed 0.01 BTC payout to the same destination is not counted.
+            LookupTransaction = _ => Task.FromResult<BtcTxFacts?>(Withdrawal(10, 0.01M));
+            Assert.Equal(1.0M, NotYetCountedAmountAsync(new[] { new Candidate("btc-small", 1.0M, Dest, "vault", 1, "B", 10, null) }, Deposit).Result);
+            Assert.Equal(0M, NotYetCountedAmountAsync(new[] { new Candidate("btc-small", 0.01M, Dest, "vault", 1, "A", 10, null) }, Deposit).Result);
+        }
+
+        /// <summary>Third review: when this node signed the withdrawal, the COMPLETE must name that transaction.</summary>
+        [Fact]
+        public async Task ARowThisNodeSignedForAnotherTxid_IsNotCounted()
+        {
+            LookupTransaction = _ => Task.FromResult<BtcTxFacts?>(Withdrawal(10, 0.4999M));
+            Assert.Equal(0.5M, await NotYetCountedAmountAsync(new[] { new Candidate("btc-named", 0.5M, Dest, "vault", 1, "A", 10, "btc-signed") }, Deposit));
+            Assert.Equal(0M, await NotYetCountedAmountAsync(new[] { new Candidate("btc-named", 0.5M, Dest, "vault", 1, "A", 10, "BTC-NAMED") }, Deposit)); // same txid, any case
+            Assert.Equal(0M, await NotYetCountedAmountAsync(new[] { new Candidate("btc-named", 0.5M, Dest, "vault", 1, "A", 10, null) }, Deposit));        // not a signer: judged on the facts
+        }
+
+        /// <summary>Facts are cached only once a transaction is deep enough that a reorg is not planned for.</summary>
+        [Fact]
+        public async Task FactsAreCached_OnlyAfterSixConfirmations()
+        {
+            var calls = 0;
+            LookupTransaction = _ => { calls++; return Task.FromResult<BtcTxFacts?>(Withdrawal(2, 0.49M)); };
+            await NotYetCountedAmountAsync(new[] { C("btc-shallow", 0.5M) }, Deposit);
+            await NotYetCountedAmountAsync(new[] { C("btc-shallow", 0.5M) }, Deposit);
+            Assert.Equal(2, calls); // asked again: 2 confirmations is not cached
+            calls = 0;
+            LookupTransaction = _ => { calls++; return Task.FromResult<BtcTxFacts?>(Withdrawal(6, 0.49M)); };
+            await NotYetCountedAmountAsync(new[] { C("btc-deep", 0.5M) }, Deposit);
+            await NotYetCountedAmountAsync(new[] { C("btc-deep", 0.5M) }, Deposit);
+            Assert.Equal(1, calls);
         }
 
         [Fact]
@@ -151,19 +194,19 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task ATxidThatPaidOneWithdrawal_DoesNotCountForAnother()
         {
-            var real = Withdrawal(10, 0.49M); // spends the vault, pays Dest
+            var real = Withdrawal(10, 0.6999M); // spends the vault, pays Dest enough for either row
             LookupTransaction = txid => Task.FromResult<BtcTxFacts?>(txid == "btc-real" ? real : null);
 
             // Verified once for A (to Dest)...
-            Assert.Equal(0M, await NotYetCountedAmountAsync(new[] { new Candidate("btc-real", 0.5M, Dest, "vault", 100, "A") }, Deposit));
+            Assert.Equal(0M, await NotYetCountedAmountAsync(new[] { new Candidate("btc-real", 0.5M, Dest, "vault", 100, "A", 10, null) }, Deposit));
             // ...the same txid on B, to another destination, is still judged on its own: not counted.
-            Assert.Equal(0.7M, await NotYetCountedAmountAsync(new[] { new Candidate("btc-real", 0.7M, "tb1qelsewhere", "vault", 200, "B") }, Deposit));
+            Assert.Equal(0.7M, await NotYetCountedAmountAsync(new[] { new Candidate("btc-real", 0.7M, "tb1qelsewhere", "vault", 200, "B", 10, null) }, Deposit));
             // Two rows naming the same txid, both to Dest: the earliest completed one counts, the later never does.
-            var both = new[] { new Candidate("btc-real", 0.7M, Dest, "vault", 200, "B"), new Candidate("btc-real", 0.5M, Dest, "vault", 100, "A") };
+            var both = new[] { new Candidate("btc-real", 0.7M, Dest, "vault", 200, "B", 10, null), new Candidate("btc-real", 0.5M, Dest, "vault", 100, "A", 10, null) };
             Assert.Equal(0.7M, await NotYetCountedAmountAsync(both, Deposit));
             // Order of the list does not matter; ties break on the request hash.
             Assert.Equal(0.7M, await NotYetCountedAmountAsync(both.Reverse().ToArray(), Deposit));
-            var tie = new[] { new Candidate("btc-real", 0.7M, Dest, "vault", 100, "B"), new Candidate("btc-real", 0.5M, Dest, "vault", 100, "A") };
+            var tie = new[] { new Candidate("btc-real", 0.7M, Dest, "vault", 100, "B", 10, null), new Candidate("btc-real", 0.5M, Dest, "vault", 100, "A", 10, null) };
             Assert.Equal(0.7M, await NotYetCountedAmountAsync(tie, Deposit));
         }
 
@@ -190,7 +233,7 @@ namespace VerifiedXCore.Tests
             var height = Globals.V2WithdrawalOwnerAddBackFixHeight + 1;
             var candidates = Candidates(_vault, height);
             Assert.Equal(2, candidates.Count);
-            Assert.Contains(candidates, c => c.BtcTxId == "btc-1" && c.Amount == 0.5M && c.Destination == Dest && c.SmartContractUID == _vault && c.RequestHash == "H1" && c.CompletedAt > 0);
+            Assert.Contains(candidates, c => c.BtcTxId == "btc-1" && c.Amount == 0.5M && c.Destination == Dest && c.SmartContractUID == _vault && c.RequestHash == "H1" && c.CompletedAt > 0 && c.FeeRate == 10);
             Assert.Contains(candidates, c => c.BtcTxId == "btc-2" && c.Amount == 0.3M && c.RequestHash == "H2");
             Assert.Equal(0.8M, VBTCWithdrawalRequest.GetCompletedWithdrawalAmount("xOwner", _vault, height));
         }
@@ -220,7 +263,7 @@ namespace VerifiedXCore.Tests
             // The real withdrawal, confirmed: counted, the full deposit stands. (A confirmed transaction's facts are cached,
             // so the stranger's facts above must be dropped first: in reality a txid's facts never change.)
             ResetForTests();
-            LookupTransaction = _ => Task.FromResult<BtcTxFacts?>(Withdrawal(5, 0.39M));
+            LookupTransaction = _ => Task.FromResult<BtcTxFacts?>(Withdrawal(6, 0.3999M));
             var real = await VbtcOwnerDeposit.CheckAsync(() => Deposit, 0.8M, false, false, _vault, height);
             Assert.Equal(1.0M, real.DepositBalance);
 
