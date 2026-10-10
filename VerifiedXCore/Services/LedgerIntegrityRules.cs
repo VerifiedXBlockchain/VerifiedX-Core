@@ -485,7 +485,8 @@ namespace VerifiedXCore.Services
             var function = ContractFunctionOf(tx.Data);
             // Re-audit (9 Oct 2026): minting and handing over the token contract are the same kind of irreversible move.
             return function == "TokenTransfer()" || function == "TokenBurn()" || function == "TokenMint()" || function == "TokenContractOwnerChange()"
-                ? "A reserve account cannot send, burn or mint fungible tokens or hand over a token contract: these moves are not deferred, callable back or recoverable."
+                || function == "TokenPause()" || function == "TokenBanAddress()"
+                ? "A reserve account cannot send, burn or mint fungible tokens, hand over, pause or ban on a token contract: these moves are not deferred, callable back or recoverable."
                 : null;
         }
 
