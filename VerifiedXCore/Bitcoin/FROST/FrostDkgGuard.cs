@@ -51,27 +51,31 @@ namespace VerifiedXCore.Bitcoin.FROST
             return string.Equals(keyPackageGroupKey.Trim(), contractGroupKey.Trim(), StringComparison.OrdinalIgnoreCase);
         }
 
-        /// <summary>
-        /// Fund-loss audit item 4 (validator-local): whether a key-store record filed under <paramref name="recordScUid"/>
-        /// may be used - and relabelled - for a signing request on <paramref name="requestScUid"/>. A record is adopted only
-        /// while it is still filed under its ceremony id (or under the requested contract itself). One filed under a
-        /// DIFFERENT contract that exists on chain is that contract's share: the group-key fallbacks matched on the key
-        /// alone, so a contract body copying a victim vault's group key had the victim's share signed to its own
-        /// withdrawals and the record relabelled to the forged contract.
-        /// </summary>
         /// <summary>Whether the contract carries a NEW-26 attested DKG proof (its ceremony ran under its UID). Replaceable for tests.</summary>
         internal static Func<string, bool> RequestHasDkgProof = ContractHasAttestedDkgProof;
 
-        public static bool MayAdoptKeyRecord(string? recordScUid, string requestScUid, out string reason)
+        /// <summary>
+        /// Fund-loss audit item 4 (validator-local): whether a key-store record filed under <paramref name="recordScUid"/>,
+        /// carrying <paramref name="recordGroupKey"/>, may be used - and relabelled - for a signing request on
+        /// <paramref name="requestScUid"/>. The group-key fallbacks matched on the key alone, so a contract body copying a
+        /// victim vault's group key had the victim's share signed to its own withdrawals and relabelled to itself.
+        /// <list type="bullet">
+        /// <item>A record filed under the requested contract is that contract's.</item>
+        /// <item>A record filed under any other contract - on chain, or a NEW-26 ceremony's contract UID - is that
+        /// contract's share and is never used for another.</item>
+        /// <item>A vault created with an attested proof (DKG_ATTESTED_V2) had its ceremony under its own UID and never
+        /// takes a record filed under anything else. (The proof TYPE is the test: every legacy vault carries a
+        /// DKG_COMPLETION_FROST_NATIVE proof.)</item>
+        /// <item>A record still under a pre-NEW-26 session id belongs to the ONE vault on chain that carries its group
+        /// key (fourth review: it used to go to whichever body asked first, a copied key included). With two carriers
+        /// it is used for neither. See <see cref="FrostKeyShareBinding"/>, which also binds such records up front.</item>
+        /// </list>
+        /// </summary>
+        public static bool MayAdoptKeyRecord(string? recordScUid, string requestScUid, string? recordGroupKey, out string reason)
         {
             reason = "";
-            if (string.IsNullOrEmpty(recordScUid) || string.Equals(recordScUid, requestScUid, StringComparison.Ordinal))
+            if (!string.IsNullOrEmpty(recordScUid) && string.Equals(recordScUid, requestScUid, StringComparison.Ordinal))
                 return true;
-            // Re-audit (9 Oct 2026): a vault created with a NEW-26 ATTESTED proof (DKG_ATTESTED_V2) had its ceremony under
-            // its own UID, so its share is filed under that UID on every participant. Such a vault never needs - and never
-            // gets - a record filed under anything else, a pre-NEW-26 session id included. Legacy vaults carry a
-            // DKG_COMPLETION_FROST_NATIVE proof: presence is not the test (third review), the attested type is; their shares
-            // stay under the ceremony id until first use and keep the group-key-matched adoption below.
             bool hasProof;
             try { hasProof = RequestHasDkgProof(requestScUid); } catch { hasProof = false; }
             if (hasProof)
@@ -79,20 +83,24 @@ namespace VerifiedXCore.Bitcoin.FROST
                 reason = $"contract {requestScUid} was created with an attested DKG proof, so its key share is filed under its own UID; the record under {recordScUid} is not used for it.";
                 return false;
             }
-            // Re-audit (9 Oct 2026): since NEW-26 a DKG runs under the contract UID it will create (FrostDkgAttestation.NewContractUid),
-            // so a record filed under a contract-shaped UID is that contract's share whether or not the contract exists on
-            // chain yet (a ceremony whose contract was never created included). It is never relabelled to another contract.
-            // Only pre-NEW-26 records, filed under a session id, keep the ceremony-id allowance below.
+            // Since NEW-26 a DKG runs under the contract UID it will create (FrostDkgAttestation.NewContractUid), so a record
+            // filed under a contract-shaped UID is that contract's share whether or not the contract exists on chain yet.
             if (IsContractUid(recordScUid))
             {
                 reason = $"the key share found by group key is filed under contract {recordScUid} (a NEW-26 ceremony names its contract); it is that vault's share and is not used for {requestScUid}.";
                 return false;
             }
             SmartContractStateTrei? other = null;
-            try { other = SmartContractStateTrei.GetSmartContractState(recordScUid); } catch { }
-            if (other == null)
-                return true; // a pre-NEW-26 ceremony id, never a contract
-            reason = $"the key share found by group key is filed under contract {other.SmartContractUID}, which exists on chain; it is that vault's share and is not used for {requestScUid}.";
+            try { other = string.IsNullOrEmpty(recordScUid) ? null : SmartContractStateTrei.GetSmartContractState(recordScUid); } catch { }
+            if (other != null)
+            {
+                reason = $"the key share found by group key is filed under contract {other.SmartContractUID}, which exists on chain; it is that vault's share and is not used for {requestScUid}.";
+                return false;
+            }
+            // A pre-NEW-26 session id: the share belongs to the one vault that carries its key.
+            if (FrostKeyShareBinding.IsSoleVault(recordGroupKey, requestScUid, out var why))
+                return true;
+            reason = $"the key share filed under session id {recordScUid} is not used for {requestScUid}: {why}.";
             return false;
         }
 

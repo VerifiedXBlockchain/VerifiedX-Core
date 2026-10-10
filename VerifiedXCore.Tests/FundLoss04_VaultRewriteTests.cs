@@ -3,7 +3,9 @@ using System.IO;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using VerifiedXCore;
+using System.Linq;
 using VerifiedXCore.Bitcoin.FROST;
+using VerifiedXCore.Bitcoin.FROST.Models;
 using VerifiedXCore.Data;
 using VerifiedXCore.EllipticCurve;
 using VerifiedXCore.Extensions;
@@ -169,19 +171,195 @@ namespace VerifiedXCore.Tests
 
         // ── Validator-local: the FROST key-share fallback ─────────────────────────────────────────────────────────
 
+        private const string Me = "xValidatorMe";
+
+        private string LegacyVault(string groupKey, string? uid = null, string? proof = "legacy")
+        {
+            uid ??= Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
+            var dkgProof = proof == "legacy"
+                ? Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new
+                {
+                    SessionId = Guid.NewGuid().ToString(), GroupPublicKey = groupKey, PubkeyPackageHash = "ab", Timestamp = TimeUtil.GetTime(),
+                    FrostVersion = "x", ProofType = "DKG_COMPLETION_FROST_NATIVE",
+                })))
+                : proof;
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
+            {
+                SmartContractUID = uid, ContractData = VbtcTestContracts.VaultContractData(uid, _owner.Address, VictimDeposit, groupKey, dkgProof: dkgProof),
+                MinterAddress = _owner.Address, OwnerAddress = _owner.Address, IsLocked = false, Nonce = 0,
+            });
+            return uid;
+        }
+
+        private static string Key(char c) => "02" + new string(c, 64);
+
+        private static FrostValidatorKeyStore Share(string filedUnder, string groupKey, string validator = Me)
+        {
+            Assert.True(FrostValidatorKeyStore.SaveKeyPackage(new FrostValidatorKeyStore { SmartContractUID = filedUnder, ValidatorAddress = validator, KeyPackage = "share-of-" + groupKey, PubkeyPackage = "p", GroupPublicKey = groupKey }));
+            return FrostValidatorKeyStore.GetKeyPackage(filedUnder, validator)!;
+        }
+
         [Fact]
         public void KeyShareFiledUnderAnotherOnChainContract_IsNeverAdopted()
         {
             var victim = Vault(VictimDeposit, VictimGroupKey);
-            var forged = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
+            var forged = LegacyVault(VictimGroupKey, proof: null);
 
-            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(victim, forged, out var reason));
+            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(victim, forged, VictimGroupKey, out var reason));
             Assert.Contains(victim, reason);
+            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(victim, victim, VictimGroupKey, out _));   // its own contract
+        }
 
-            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(victim, victim, out _));                       // its own contract
-            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(Guid.NewGuid().ToString("N"), forged, out _)); // a pre-NEW-26 session id
-            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(Guid.NewGuid().ToString(), forged, out _));    // a pre-NEW-26 session id (dashed GUID)
-            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(null, forged, out _));
+        /// <summary>
+        /// Fourth review. A share still under its pre-NEW-26 session id went to whichever body asked for it, so a body that
+        /// copied a legacy vault's group key was handed the share when it asked first (the earlier test asserted exactly
+        /// that for a proof-less body). It now belongs to the one vault on chain that carries the key; with two carriers
+        /// it is used for neither.
+        /// </summary>
+        [Fact]
+        public void ASessionIdShare_BelongsToTheOneVaultThatCarriesItsKey()
+        {
+            var key = Key('a');
+            var legacyVault = LegacyVault(key);
+            var session = Guid.NewGuid().ToString();
+            var stranger = LegacyVault(Key('b'), proof: null);
+
+            // The vault's own share, never used: found by group key, adopted.
+            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(session, legacyVault, key, out _));
+            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(Guid.NewGuid().ToString("N"), legacyVault, key, out _));
+            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(null, legacyVault, key, out _));          // a record with no label is a session record
+            // A contract that does not carry the key gets nothing, whatever the caller matched on.
+            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(session, stranger, key, out var w0));
+            Assert.Contains(legacyVault, w0);
+            // A request for a contract that is not on chain gets nothing.
+            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(session, Guid.NewGuid().ToString("N") + ":1", key, out _));
+            // A share whose key no contract carries (its ceremony's contract was never created).
+            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(session, legacyVault, Key('c'), out var w1));
+            Assert.Contains("no contract on chain", w1);
+            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(session, legacyVault, "", out _));
+
+            // The attack: a body with no proof (or a legacy-type one) copies the vault's key and asks first.
+            var forged = LegacyVault(key, proof: null);
+            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(session, forged, key, out var w2));
+            Assert.Contains("2 contracts on chain carry group key", w2);
+            Assert.Contains(forged, w2);
+            Assert.Contains(legacyVault, w2);
+            // ...and the real vault's share is not handed out either until an operator says which is which.
+            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(session, legacyVault, key, out _));
+
+            // The copy may spell the key differently: x-only, upper case, 0x. It is the same key.
+            var key2 = Key('d');
+            var vault2 = LegacyVault(key2);
+            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(session, vault2, key2, out _));
+            foreach (var spelling in new[] { key2.Substring(2), key2.ToUpperInvariant(), "0x" + key2.Substring(2), " " + key2 + " ", "03" + key2.Substring(2) })
+            {
+                var copy = LegacyVault(spelling, proof: null);
+                Assert.False(FrostDkgGuard.MayAdoptKeyRecord(session, copy, key2, out _));
+                Assert.False(FrostDkgGuard.MayAdoptKeyRecord(session, vault2, key2, out _));
+                SmartContractStateTrei.DeleteSmartContract(SmartContractStateTrei.GetSmartContractState(copy)!);
+                Assert.True(FrostDkgGuard.MayAdoptKeyRecord(session, vault2, key2, out _));
+            }
+            Assert.Equal(new string('d', 64), FrostKeyShareBinding.NormalizeKey(" 0x" + new string('D', 64) + " "));
+            Assert.Equal("", FrostKeyShareBinding.NormalizeKey(null));
+        }
+
+        /// <summary>
+        /// The binding run (once the node is synced): every session-id share with exactly one vault for its key is filed
+        /// under that vault, so a body that copies the key afterwards finds a share filed under a contract - which is
+        /// never relabelled. Real key-store records and chain state throughout.
+        /// </summary>
+        [Fact]
+        public void BindSessionShares_FilesEachShareUnderItsOneVault_AndLeavesTheAmbiguousAlone()
+        {
+            var vaultA = LegacyVault(Key('a'));                                         // one vault, share never used
+            var shareA = Share(Guid.NewGuid().ToString(), Key('a'));
+            var vaultB = LegacyVault(Key('b'));                                         // its key was copied before this node migrated
+            var copyOfB = LegacyVault(Key('b').Substring(2).ToUpperInvariant(), proof: null);
+            var shareB = Share(Guid.NewGuid().ToString(), Key('b'));
+            var shareC = Share(Guid.NewGuid().ToString("N"), Key('c'));                 // a ceremony whose contract was never created
+            var vaultD = LegacyVault(Key('d'));                                         // already filed under its vault
+            var shareD = Share(vaultD, Key('d'));
+            var pending = FrostDkgAttestation.NewContractUid();                          // a NEW-26 ceremony's share, contract not created yet
+            var shareE = Share(pending, Key('e'));
+            var vaultF = LegacyVault(Key('f'));                                         // another validator address in the same store
+            var shareF = Share(Guid.NewGuid().ToString(), Key('f'), "xValidatorOld");
+
+            var result = FrostKeyShareBinding.BindSessionShares();
+            Assert.Equal(6, result.Records);
+            Assert.Equal(2, result.Bound);
+            Assert.Equal(2, result.FiledUnderContract);
+            Assert.Equal(1, result.NoVault);
+            Assert.Equal(1, result.Ambiguous);
+            Assert.Equal(0, result.Failed);
+            Assert.Contains(result.Notes, n => n.Contains(vaultB) && n.Contains(copyOfB) && n.Contains("NOT bound"));
+
+            string FiledUnder(FrostValidatorKeyStore r) => FrostValidatorKeyStore.GetAllKeyPackages().Single(x => x.Id == r.Id).SmartContractUID;
+            Assert.Equal(vaultA, FiledUnder(shareA));
+            Assert.Equal(shareB.SmartContractUID, FiledUnder(shareB));                   // untouched
+            Assert.Equal(shareC.SmartContractUID, FiledUnder(shareC));
+            Assert.Equal(vaultD, FiledUnder(shareD));
+            Assert.Equal(pending, FiledUnder(shareE));
+            Assert.Equal(vaultF, FiledUnder(shareF));
+            Assert.Equal("share-of-" + Key('a'), FrostValidatorKeyStore.GetKeyPackage(vaultA, Me)!.KeyPackage);
+
+            // Idempotent.
+            var again = FrostKeyShareBinding.BindSessionShares();
+            Assert.Equal(0, again.Bound);
+            Assert.Equal(4, again.FiledUnderContract);
+            Assert.Equal(1, again.Ambiguous);
+
+            // A copy of A's key made AFTER the binding gets nothing: the share is filed under vault A.
+            var lateCopy = LegacyVault(Key('a'), proof: null);
+            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(FiledUnder(shareA), lateCopy, Key('a'), out var why));
+            Assert.Contains(vaultA, why);
+            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(FiledUnder(shareA), vaultA, Key('a'), out _));
+            Assert.Equal(0, FrostKeyShareBinding.BindSessionShares().Bound);
+            Assert.Equal(vaultA, FiledUnder(shareA));
+
+            // The ambiguous share: neither carrier gets it at signing...
+            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(FiledUnder(shareB), vaultB, Key('b'), out _));
+            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(FiledUnder(shareB), copyOfB, Key('b'), out _));
+            // ...until an operator decides. Only onto a contract that carries the key; never a share already under a contract.
+            Assert.False(FrostKeyShareBinding.BindByOperator(shareB.Id, vaultA).Ok);
+            Assert.False(FrostKeyShareBinding.BindByOperator(shareB.Id, "not-a-contract").Ok);
+            Assert.False(FrostKeyShareBinding.BindByOperator(999_999, vaultB).Ok);
+            Assert.False(FrostKeyShareBinding.BindByOperator(shareB.Id, null).Ok);
+            Assert.False(FrostKeyShareBinding.BindByOperator(shareA.Id, lateCopy).Ok);  // filed under vault A: never moved, same key or not
+            Assert.False(FrostKeyShareBinding.BindByOperator(shareE.Id, vaultA).Ok);
+            Assert.True(FrostKeyShareBinding.BindByOperator(shareB.Id, vaultB).Ok);
+            Assert.Equal(vaultB, FiledUnder(shareB));
+            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(FiledUnder(shareB), copyOfB, Key('b'), out _));
+            Assert.True(FrostKeyShareBinding.BindByOperator(shareB.Id, vaultB).Ok);     // already there
+        }
+
+        /// <summary>The binding waits for the node to be at the network's height, and runs once per process.</summary>
+        [Fact]
+        public async Task TheBindingRun_WaitsForSync_AndRunsOnce()
+        {
+            var priorSynced = Globals.IsChainSynced;
+            FrostKeyShareBinding.ResetForTests();
+            try
+            {
+                var vault = LegacyVault(Key('a'));
+                var share = Share(Guid.NewGuid().ToString(), Key('a'));
+                Globals.IsChainSynced = false;
+                var run = FrostKeyShareBinding.RunOnceWhenSyncedAsync(default, pollMilliseconds: 20);
+                await Task.Delay(150);
+                Assert.False(run.IsCompleted);
+                Assert.Equal(share.SmartContractUID, FrostValidatorKeyStore.GetAllKeyPackages().Single().SmartContractUID); // not while catching up
+
+                Globals.IsChainSynced = true;
+                var result = await run;
+                Assert.NotNull(result);
+                Assert.Equal(1, result!.Bound);
+                Assert.Equal(vault, FrostValidatorKeyStore.GetAllKeyPackages().Single().SmartContractUID);
+                Assert.Null(await FrostKeyShareBinding.RunOnceWhenSyncedAsync(default, pollMilliseconds: 20));      // once
+            }
+            finally
+            {
+                Globals.IsChainSynced = priorSynced;
+                FrostKeyShareBinding.ResetForTests();
+            }
         }
 
         /// <summary>
@@ -194,27 +372,13 @@ namespace VerifiedXCore.Tests
         {
             var neverCreated = FrostDkgAttestation.NewContractUid();
             Assert.Null(SmartContractStateTrei.GetSmartContractState(neverCreated));
-            var forged = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
+            var forged = LegacyVault(VictimGroupKey, proof: null);                      // the only contract carrying the key
 
-            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(neverCreated, forged, out var reason));
+            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(neverCreated, forged, VictimGroupKey, out var reason));
             Assert.Contains(neverCreated, reason);
-            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(neverCreated, neverCreated, out _));
-
+            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(neverCreated, neverCreated, VictimGroupKey, out _));
             Assert.True(FrostDkgGuard.IsContractUid(neverCreated));
-
-            // Re-audit: a vault created with a NEW-26 DKG proof never adopts a session-id record, however old.
-            var prior = FrostDkgGuard.RequestHasDkgProof;
-            try
-            {
-                FrostDkgGuard.RequestHasDkgProof = uid => uid == forged;
-                Assert.False(FrostDkgGuard.MayAdoptKeyRecord(Guid.NewGuid().ToString(), forged, out var r2));
-                Assert.Contains("DKG proof", r2);
-                Assert.True(FrostDkgGuard.MayAdoptKeyRecord(forged, forged, out _)); // its own UID is always fine
-                var legacyVault = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
-                Assert.True(FrostDkgGuard.MayAdoptKeyRecord(Guid.NewGuid().ToString(), legacyVault, out _)); // a pre-NEW-26 vault may still adopt its session-id share
-            }
-            finally { FrostDkgGuard.RequestHasDkgProof = prior; }
-            Assert.False(FrostDkgGuard.ContractHasAttestedDkgProof(forged)); // not on chain: no proof
+            Assert.False(FrostDkgGuard.ContractHasAttestedDkgProof(Guid.NewGuid().ToString("N") + ":1")); // not on chain: no proof
         }
 
         /// <summary>
@@ -225,33 +389,16 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void OnlyAnAttestedProof_MarksAVaultAsFiledUnderItsOwnUid()
         {
-            var legacyProof = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(Newtonsoft.Json.JsonConvert.SerializeObject(new
-            {
-                SessionId = Guid.NewGuid().ToString(), GroupPublicKey = VictimGroupKey, PubkeyPackageHash = "ab", Timestamp = TimeUtil.GetTime(),
-                FrostVersion = "x", ProofType = "DKG_COMPLETION_FROST_NATIVE",
-            })));
-            var legacyVault = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
-            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
-            {
-                SmartContractUID = legacyVault, ContractData = VbtcTestContracts.VaultContractData(legacyVault, _owner.Address, VictimDeposit, VictimGroupKey, dkgProof: legacyProof),
-                MinterAddress = _owner.Address, OwnerAddress = _owner.Address, IsLocked = false, Nonce = 0,
-            });
+            var legacyKey = Key('1');
+            var legacyVault = LegacyVault(legacyKey);
+            var attestedKey = Key('2');
             var attestedVault = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
-            var attested = FrostDkgAttestation.BuildProof(attestedVault, VictimGroupKey, VictimDeposit, _owner.Address, 2, new[] { "xV1", "xV2", "xV3" }, Array.Empty<FrostDkgAttestation.Attestation>());
-            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
-            {
-                SmartContractUID = attestedVault, ContractData = VbtcTestContracts.VaultContractData(attestedVault, _owner.Address, VictimDeposit, VictimGroupKey, dkgProof: attested),
-                MinterAddress = _owner.Address, OwnerAddress = _owner.Address, IsLocked = false, Nonce = 0,
-            });
-            var proofless = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
-            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
-            {
-                SmartContractUID = proofless, ContractData = VbtcTestContracts.VaultContractData(proofless, _owner.Address, VictimDeposit, VictimGroupKey, dkgProof: null),
-                MinterAddress = _owner.Address, OwnerAddress = _owner.Address, IsLocked = false, Nonce = 0,
-            });
+            var attested = FrostDkgAttestation.BuildProof(attestedVault, attestedKey, VictimDeposit, _owner.Address, 2, new[] { "xV1", "xV2", "xV3" }, Array.Empty<FrostDkgAttestation.Attestation>());
+            LegacyVault(attestedKey, attestedVault, attested);
+            var prooflessKey = Key('3');
+            var proofless = LegacyVault(prooflessKey, proof: null);
 
             Assert.True(FrostDkgGuard.IsAttestedDkgProof(attested));
-            Assert.False(FrostDkgGuard.IsAttestedDkgProof(legacyProof));
             Assert.False(FrostDkgGuard.IsAttestedDkgProof("proof"));
             Assert.False(FrostDkgGuard.IsAttestedDkgProof(null));
             Assert.True(FrostDkgGuard.ContractHasAttestedDkgProof(attestedVault));
@@ -259,15 +406,17 @@ namespace VerifiedXCore.Tests
             Assert.False(FrostDkgGuard.ContractHasAttestedDkgProof(proofless));
 
             var sessionId = Guid.NewGuid().ToString();
-            // The attested vault never adopts a session-id record.
-            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(sessionId, attestedVault, out var why));
+            // The attested vault never adopts a session-id record, even as the only carrier of the key.
+            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(sessionId, attestedVault, attestedKey, out var why));
             Assert.Contains("attested DKG proof", why);
-            // The legacy vault keeps its path to its never-used share (group-key match is still required by the caller).
-            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(sessionId, legacyVault, out _));
-            // A proof-less body is a legacy-shaped vault too: adoption stays group-key gated, not proof gated.
-            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(sessionId, proofless, out _));
+            // The legacy vault keeps its path to its never-used share: it is the one vault carrying the key.
+            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(sessionId, legacyVault, legacyKey, out _));
+            // A proof-less body that is the one carrier of ITS key is a legacy-shaped vault with its own share.
+            Assert.True(FrostDkgGuard.MayAdoptKeyRecord(sessionId, proofless, prooflessKey, out _));
+            // The same body gets nothing for a key another vault carries.
+            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(sessionId, proofless, legacyKey, out _));
             // Nothing adopts another on-chain contract's share.
-            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(legacyVault, proofless, out _));
+            Assert.False(FrostDkgGuard.MayAdoptKeyRecord(legacyVault, proofless, legacyKey, out _));
             Assert.True(FrostDkgGuard.IsContractUid(attestedVault));
             Assert.False(FrostDkgGuard.IsContractUid(Guid.NewGuid().ToString("N")));
             Assert.False(FrostDkgGuard.IsContractUid(Guid.NewGuid().ToString()));

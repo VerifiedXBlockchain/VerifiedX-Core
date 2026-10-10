@@ -137,8 +137,9 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                 /// <summary>
                 /// GET /frost/keystore - this validator's FROST key records: the UID each share is filed under, whether that UID
-                /// is a contract on chain, and (third review) whether the share still sits under a pre-NEW-26 session id - the
-                /// shares a legacy vault relies on until its first signing relabels them. Loopback only; no key material.
+                /// is a contract on chain, whether the share still sits under a pre-NEW-26 session id, and which contracts on
+                /// chain carry its group key (exactly one: it is that vault's; more than one: it is used for none until an
+                /// operator binds it). Loopback only; no key material.
                 /// </summary>
                 endpoints.MapGet("/frost/keystore", async context =>
                 {
@@ -148,6 +149,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                         return;
                     }
                     var mine = Globals.ValidatorAddress;
+                    var vaultKeys = new List<(string ScUid, string GroupKey)>();
+                    string? chainError = null;
+                    try { vaultKeys = FrostKeyShareBinding.OnChainVaultKeys(); } catch (Exception ex) { chainError = ex.Message; }
                     var rows = FrostValidatorKeyStore.GetAllKeyPackages()
                         .Where(k => string.IsNullOrEmpty(mine) || string.Equals(k.ValidatorAddress, mine, StringComparison.Ordinal))
                         .Select(k =>
@@ -155,14 +159,23 @@ namespace VerifiedXCore.Bitcoin.FROST
                             var isContractUid = FrostDkgGuard.IsContractUid(k.SmartContractUID);
                             VerifiedXCore.Models.SmartContractStateTrei? onChain = null;
                             try { onChain = VerifiedXCore.Models.SmartContractStateTrei.GetSmartContractState(k.SmartContractUID); } catch { }
+                            var key = FrostKeyShareBinding.NormalizeKey(k.GroupPublicKey);
+                            var carrying = key.Length == 0 ? new List<string>() : vaultKeys.Where(v => FrostKeyShareBinding.NormalizeKey(v.GroupKey) == key).Select(v => v.ScUid).Distinct().ToList();
+                            var underSession = !isContractUid && onChain == null;
                             return new
                             {
+                                k.Id,
                                 FiledUnder = k.SmartContractUID,
                                 IsContractUid = isContractUid,
                                 ContractOnChain = onChain != null,
-                                UnderSessionId = !isContractUid,
+                                UnderSessionId = underSession,
                                 AttestedVault = onChain != null && FrostDkgGuard.ContractHasAttestedDkgProof(k.SmartContractUID),
                                 GroupPublicKey = k.GroupPublicKey,
+                                ContractsCarryingKey = carrying,
+                                Status = !underSession ? (carrying.Count > 1 ? "filed under a contract; ANOTHER CONTRACT CARRIES THE SAME KEY (it gets nothing from this record)" : "filed under a contract")
+                                       : carrying.Count == 1 ? "session id; binds to " + carrying[0]
+                                       : carrying.Count == 0 ? "session id; no contract carries its key"
+                                       : "session id; AMBIGUOUS - used for none until bound (POST /frost/keystore/bind/{id}/{scUID})",
                                 HasKeyPackage = !string.IsNullOrEmpty(k.KeyPackage),
                                 k.CreatedTimestamp,
                             };
@@ -172,12 +185,60 @@ namespace VerifiedXCore.Bitcoin.FROST
                     {
                         Success = true,
                         ValidatorAddress = mine,
+                        ChainSynced = Globals.IsChainSynced,
+                        ChainStateError = chainError,
                         Records = rows.Count,
                         UnderSessionId = rows.Count(r => r.UnderSessionId),
+                        Ambiguous = rows.Count(r => r.UnderSessionId && r.ContractsCarryingKey.Count > 1),
                         Keys = rows,
                     }, Formatting.Indented);
                     context.Response.StatusCode = StatusCodes.Status200OK;
                     await context.Response.WriteAsync(response);
+                });
+
+                /// <summary>
+                /// POST /frost/keystore/migrate - run the session-id share binding now (it runs by itself once the node is
+                /// synced): every share still under a session id is filed under the one vault that carries its group key.
+                /// Refused while the node is not synced, because the answer is read from chain state. Loopback only.
+                /// </summary>
+                endpoints.MapPost("/frost/keystore/migrate", async context =>
+                {
+                    if (!IsLoopbackRequest(context)) { await WriteForbiddenAsync(context); return; }
+                    if (!Globals.IsChainSynced)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status409Conflict;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Chain not synced; the binding is decided from current chain state." }));
+                        return;
+                    }
+                    var result = FrostKeyShareBinding.BindSessionShares();
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = result.Failed == 0, Result = result }, Formatting.Indented));
+                });
+
+                /// <summary>
+                /// POST /frost/keystore/bind/{id}/{scUID}?confirm=true - an operator's decision for a share left under its
+                /// session id because more than one contract carries its key: file record {id} under {scUID}. Only onto a
+                /// contract on chain that carries the record's group key; a share already under a contract is never moved.
+                /// Binding to the wrong contract hands this validator's share to it. Loopback only; never called automatically.
+                /// </summary>
+                endpoints.MapPost("/frost/keystore/bind/{id}/{scUID}", async context =>
+                {
+                    if (!IsLoopbackRequest(context)) { await WriteForbiddenAsync(context); return; }
+                    if (!long.TryParse(context.Request.RouteValues["id"]?.ToString(), out var id))
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "id must be a key record id (see GET /frost/keystore)" }));
+                        return;
+                    }
+                    if (context.Request.Query["confirm"] != "true")
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Add ?confirm=true. Binding to the wrong contract hands this validator's key share to it." }));
+                        return;
+                    }
+                    var (ok, message) = FrostKeyShareBinding.BindByOperator(id, context.Request.RouteValues["scUID"] as string);
+                    context.Response.StatusCode = ok ? StatusCodes.Status200OK : StatusCodes.Status409Conflict;
+                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = ok, Message = message }));
                 });
 
                 /// <summary>
@@ -1994,7 +2055,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 {
                                     // Fund-loss audit item 4: a record filed under ANOTHER on-chain contract is that
                                     // contract's share; a body copying its group key must not borrow (and relabel) it.
-                                    if (!FrostDkgGuard.MayAdoptKeyRecord(keyStore.SmartContractUID, request.SmartContractUID, out var adoptReason))
+                                    if (!FrostDkgGuard.MayAdoptKeyRecord(keyStore.SmartContractUID, request.SmartContractUID, keyStore.GroupPublicKey, out var adoptReason))
                                     {
                                         ErrorLogUtility.LogError($"FROST sign/start REFUSED for SC={request.SmartContractUID}: {adoptReason}", "FrostStartup.SignStart");
                                         keyStore = null;
@@ -2022,7 +2083,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                             "FrostStartup.SignStart");
                                         keyStore = null;
                                     }
-                                    else if (!FrostDkgGuard.MayAdoptKeyRecord(keyStore.SmartContractUID, request.SmartContractUID, out var adoptReason))
+                                    else if (!FrostDkgGuard.MayAdoptKeyRecord(keyStore.SmartContractUID, request.SmartContractUID, keyStore.GroupPublicKey, out var adoptReason))
                                     {
                                         ErrorLogUtility.LogError($"FROST sign/start REFUSED for SC={request.SmartContractUID}: {adoptReason}", "FrostStartup.SignStart");
                                         keyStore = null;
@@ -2046,7 +2107,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                     keyStore = FrostValidatorKeyStore.GetKeyPackageByGroupPublicKey(vbtcContract.FrostGroupPublicKey, myAddr);
                                     if (keyStore != null && !string.IsNullOrEmpty(keyStore.KeyPackage)
                                         && FrostDkgGuard.KeyPackageMatchesContract(keyStore.GroupPublicKey, expectedGroupKey)
-                                        && FrostDkgGuard.MayAdoptKeyRecord(keyStore.SmartContractUID, request.SmartContractUID, out _)) // fund-loss audit item 4
+                                        && FrostDkgGuard.MayAdoptKeyRecord(keyStore.SmartContractUID, request.SmartContractUID, keyStore.GroupPublicKey, out _)) // fund-loss audit item 4
                                     {
                                         // Auto-fix: update the key store record to use the real SCUID
                                         LogUtility.Log($"[FROST] Key found via GroupPublicKey fallback for SC={request.SmartContractUID} (was stored as {keyStore.SmartContractUID}). Auto-updating.",

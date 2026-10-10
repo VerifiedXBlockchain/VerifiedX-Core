@@ -437,6 +437,10 @@ namespace VerifiedXCore
                 }
             }
 
+            // Fund-loss audit item 4: once the node is at the network's height, every FROST key share still filed under a
+            // pre-NEW-26 session id is filed under the one vault that carries its group key (background; waits for sync).
+            _ = Bitcoin.FROST.FrostKeyShareBinding.RunOnceWhenSyncedAsync();
+
             // FROST FFI: Verify native library presence and full functionality (background — non-blocking)
             _ = Task.Run(() =>
             {
