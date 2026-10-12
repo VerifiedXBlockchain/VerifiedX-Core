@@ -117,7 +117,8 @@ namespace VerifiedXCore.Controllers
                     feeRate = fr;
 
                 var (success, message) = await WalletVbtcService.RequestWithdrawal(req.ScUID, req.OwnerAddress, req.BTCAddress, amount, feeRate);
-                return Ok(new { success, message });
+                // attested: the vault's signers pay the request; the wallet does not complete it.
+                return Ok(new { success, message, attested = Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(req.ScUID) });
             }
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
@@ -133,7 +134,8 @@ namespace VerifiedXCore.Controllers
                 var result = await WalletVbtcService.CompleteWithdrawal(req.ScUID, req.RequestHash);
 
                 if (result.success)
-                    return Ok(new { success = true, message = "Withdrawal completed!", vfxTxHash = result.vfxTxHash, btcTxHash = result.btcTxHash });
+                    return Ok(new { success = true, message = result.message, vfxTxHash = result.vfxTxHash, btcTxHash = result.btcTxHash,
+                        attested = Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(req.ScUID) });
                 else
                     return Ok(new { success = false, message = result.message });
             }
@@ -151,6 +153,35 @@ namespace VerifiedXCore.Controllers
 
                 var (success, message) = await WalletVbtcService.CancelWithdrawal(req.ScUID, req.OwnerAddress, req.RequestHash);
                 return Ok(new { success, message });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
+        }
+
+        /// <summary>Raise the Bitcoin fee of a pinned withdrawal on a vault the chain watches.</summary>
+        [HttpPost("api/vbtc/withdraw/bumpfee")]
+        public async Task<IActionResult> VBTCWithdrawBumpFee([FromBody] VBTCWDBump req)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.ScUID) || string.IsNullOrWhiteSpace(req.OwnerAddress) || string.IsNullOrWhiteSpace(req.RequestHash))
+                    return BadRequest(new { success = false, message = "scUID, ownerAddress, and requestHash are required." });
+                if (!long.TryParse(req.FeeRate, out var feeRate) || feeRate <= 0)
+                    return BadRequest(new { success = false, message = "Invalid fee rate." });
+
+                var (success, message) = await WalletVbtcService.BumpWithdrawalFee(req.ScUID, req.OwnerAddress, req.RequestHash, feeRate);
+                return Ok(new { success, message });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
+        }
+
+        /// <summary>Where a withdrawal from a vault the chain watches stands, with its Bitcoin transaction(s).</summary>
+        [HttpGet("api/vbtc/withdraw/pin/{scUID}/{requestHash}")]
+        public IActionResult VBTCWithdrawPin(string scUID, string requestHash)
+        {
+            try
+            {
+                var withdrawal = WalletVbtcService.GetWithdrawalPin(scUID, requestHash);
+                return Ok(new { success = withdrawal != null, withdrawal, message = withdrawal == null ? "No such withdrawal on a vault the chain watches." : null });
             }
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }

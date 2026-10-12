@@ -327,6 +327,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
             request.CompletionTxHash = report?.Hash;
             request.CompletionTimestamp = report?.Timestamp;
             VBTCWithdrawalRequest.Save(request, true);
+            VBTCWithdrawalRequest.SaveCompletionRecord(request.TransactionHash, request.SmartContractUID, report?.Hash, report?.Timestamp); // the report is its completion
+            NoteOnLocalRecord(request, completed: true);
             SCLogUtility.Log($"vBTC withdrawal {row.RequestHash} on {row.SmartContractUID} completed by Bitcoin transaction {txid} (reported in {report?.Hash}).", "BtcWithdrawals.Settle()");
         }
 
@@ -356,7 +358,47 @@ namespace VerifiedXCore.Bitcoin.Attestation
             VBTCWithdrawalRequest.Save(request, true);
             if (!StateData.RefundVbtcWithdrawalEscrow(row.SmartContractUID, request.RequestorAddress, request.Amount))
                 ErrorLogUtility.LogError($"Refund of {request.Amount} to {request.RequestorAddress} on {row.SmartContractUID} could not be written.", "BtcWithdrawals.Close()");
+            NoteOnLocalRecord(request, completed: false);
             SCLogUtility.Log($"vBTC withdrawal {row.RequestHash} on {row.SmartContractUID} closed ({state}): {why}. {request.Amount} refunded to {request.RequestorAddress}.", "BtcWithdrawals.Close()");
+        }
+
+        /// <summary>
+        /// The wallet's own record of a vault (present only on nodes whose wallet holds it; display only, never read by
+        /// consensus) stops showing a withdrawal as active when the chain ends it, and lists it once paid: what the
+        /// completion transaction's handler does for vaults the chain does not watch.
+        /// </summary>
+        private static void NoteOnLocalRecord(VBTCWithdrawalRequest request, bool completed)
+        {
+            try
+            {
+                var local = VBTCContractV2.GetContract(request.SmartContractUID);
+                if (local == null) return;
+                if (completed)
+                {
+                    local.WithdrawalHistory ??= new List<VBTCWithdrawalHistory>();
+                    if (!local.WithdrawalHistory.Any(h => h.RequestHash == request.TransactionHash))
+                        local.WithdrawalHistory.Add(new VBTCWithdrawalHistory
+                        {
+                            RequestHash = request.TransactionHash, CompletionHash = request.CompletionTxHash ?? "", BTCTransactionHash = request.BTCTxHash ?? "",
+                            Amount = request.Amount, BTCDestination = request.BTCDestination, RequestTime = request.Timestamp,
+                            CompletionTime = request.CompletionTimestamp ?? 0, FeeRate = request.FeeRate,
+                        });
+                }
+                if (local.ActiveWithdrawalRequestHash == request.TransactionHash)
+                {
+                    local.WithdrawalStatus = completed ? VBTCWithdrawalStatus.Completed : VBTCWithdrawalStatus.None;
+                    local.ActiveWithdrawalRequestHash = null;
+                    local.ActiveWithdrawalAmount = 0;
+                    local.ActiveWithdrawalBTCDestination = null;
+                    local.ActiveWithdrawalFeeRate = 0;
+                    local.ActiveWithdrawalRequestTime = 0;
+                }
+                VBTCContractV2.UpdateContract(local);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"The wallet's record of vault {request.SmartContractUID} could not be updated after withdrawal {request.TransactionHash} ended: {ex.Message}", "BtcWithdrawals.NoteOnLocalRecord()");
+            }
         }
 
         private static void ReleasePinnedCoins(VaultWithdrawalRow row, LiteDatabase? db)

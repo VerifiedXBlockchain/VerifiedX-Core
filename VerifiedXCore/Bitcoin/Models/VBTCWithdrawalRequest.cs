@@ -514,6 +514,27 @@ namespace VerifiedXCore.Bitcoin.Models
         }
         #endregion
 
+        /// <summary>
+        /// Records, on a request's row, the transaction that completed it and when (shown by the history routes on any
+        /// node). <see cref="Save"/> carries neither field; this writes just these two.
+        /// </summary>
+        public static void SaveCompletionRecord(string transactionHash, string scUID, string? completionTxHash, long? completionTimestamp)
+        {
+            try
+            {
+                var db = GetVBTCWithdrawalRequestDb();
+                var row = db?.FindOne(x => x.TransactionHash == transactionHash && x.SmartContractUID == scUID);
+                if (row == null) return;
+                row.CompletionTxHash = completionTxHash;
+                row.CompletionTimestamp = completionTimestamp;
+                db!.UpdateSafe(row);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Completion record for withdrawal {transactionHash} on {scUID} could not be written: {ex.Message}", "VBTCWithdrawalRequest.SaveCompletionRecord()");
+            }
+        }
+
         #region Complete Withdrawal Request
         /// <summary>
         /// Mark a withdrawal request as completed

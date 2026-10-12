@@ -81,7 +81,10 @@ namespace VerifiedXCore.Bitcoin.Services
             var requests = new List<object>();
             foreach (var r in VBTCWithdrawalRequest.GetOpenEscrowedRequests(address, scUID))
             {
-                var isExpired = !VBTCWithdrawalRequest.IsStillBlocking(r, height, now);
+                // A vault the chain watches: consensus closes and refunds a request that was never pinned, and a pinned
+                // one stays open until Bitcoin pays it. Nothing "expires and waits to be cancelled" there.
+                var watched = Attestation.BtcVaultView.Row(scUID, r.TransactionHash);
+                var isExpired = watched == null && !VBTCWithdrawalRequest.IsStillBlocking(r, height, now);
                 total += r.Amount;
                 if (isExpired)
                     expired += r.Amount;
@@ -94,8 +97,11 @@ namespace VerifiedXCore.Bitcoin.Services
                     r.RequestBlockHeight,
                     ExpiresAtHeight = r.RequestBlockHeight + VBTCWithdrawalRequest.EXPIRY_BLOCKS,
                     Expired = isExpired,
-                    Unpayable = GetUnpayableWithdrawalMessage(r) != null,
-                    CancellationPending = VBTCWithdrawalCancellation.HasPendingCancellation(r.TransactionHash, now, scUID),
+                    Unpayable = watched == null && GetUnpayableWithdrawalMessage(r) != null,
+                    CancellationPending = watched == null && VBTCWithdrawalCancellation.HasPendingCancellation(r.TransactionHash, now, scUID),
+                    Attested = watched != null,
+                    AttestedState = watched?.State.ToString(),
+                    BitcoinTxid = watched?.Pins.LastOrDefault(p => !p.Dead)?.Txid,
                 });
             }
             return (total, expired, requests);
@@ -315,8 +321,21 @@ namespace VerifiedXCore.Bitcoin.Services
         /// record), or when no server answers the last known value with Stale set. A failed lookup used to be shown,
         /// and saved, as zero.
         /// </summary>
-        public static async Task<(decimal Balance, bool Stale)> GetDepositBalanceForDisplay(string depositAddress, VBTCContractV2? local)
+        public static async Task<(decimal Balance, bool Stale)> GetDepositBalanceForDisplay(string depositAddress, VBTCContractV2? local, string? scUID = null)
         {
+            // A vault the chain watches: what is shown is what consensus counts, the vault's attested coins. No
+            // Electrum server is asked, and the figure is never stale (it is the chain's own).
+            if (Attestation.BtcAttestBalance.IsAttestedVault(scUID))
+            {
+                var attested = Attestation.BtcAttestBalance.DepositBtc(scUID!);
+                if (local != null && local.Balance != attested)
+                {
+                    local.Balance = attested;
+                    VBTCContractV2.UpdateContract(local);
+                }
+                return (attested, false);
+            }
+
             var answer = await DepositBalanceLookup.GetConfirmedBalanceAsync(depositAddress);
             if (!answer.Answered)
                 return (DepositBalanceLookup.LastKnownBalance(depositAddress) ?? local?.Balance ?? 0M, true);
@@ -1840,6 +1859,14 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
+                // A vault the chain watches: the vault's signers pay a withdrawal on their own and Bitcoin completes
+                // it. Nothing is signed or sent from here; the caller is told where the withdrawal stands.
+                if (Attestation.BtcAttestBalance.IsAttestedVault(scUID))
+                {
+                    var stands = Attestation.BtcVaultView.Completion(scUID, withdrawalRequestHash);
+                    return (stands.Success, stands.VfxTxHash, stands.BtcTxHash, stands.Success ? "" : stands.Message, null);
+                }
+
                 // Unified MPC: Any VFX wallet owner can now coordinate FROST signing directly.
                 // The leader check in FrostStartup.cs has been relaxed to accept any valid VFX
                 // signature, and FrostMPCService signs with AddressSignature (owner's key).
@@ -2749,6 +2776,76 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex)
             {
                 SCLogUtility.Log($"vBTC V2 Withdrawal Cancel Error: {ex.Message}", "VBTCService.CancelWithdrawal()");
+                return (false, $"Error: {ApiErrorText.For(ex)}");
+            }
+        }
+
+        /// <summary>
+        /// The unsigned transaction that raises the Bitcoin fee of a pinned withdrawal on a watched vault
+        /// (VBTC_V2_COIN_PIN; see Attestation.BtcWithdrawals.FeeBump). Shared by the wallet route, which signs it with a
+        /// key this node holds, and by the raw route, whose caller signs the hash.
+        /// </summary>
+        public static Transaction BuildWithdrawalFeeBumpTx(string scUID, string requestorAddress, string withdrawalRequestHash, long feeRate)
+        {
+            var tx = new Transaction
+            {
+                Timestamp = TimeUtil.GetTime(),
+                FromAddress = requestorAddress,
+                ToAddress = requestorAddress,
+                Amount = 0.0M,
+                Fee = 0.0M,
+                Nonce = AccountStateTrei.GetNextNonce(requestorAddress),
+                TransactionType = TransactionType.VBTC_V2_COIN_PIN,
+                Data = JsonConvert.SerializeObject(new
+                {
+                    Function = Attestation.BtcWithdrawals.FeeBumpFunction,
+                    ContractUID = scUID,
+                    WithdrawalRequestHash = withdrawalRequestHash,
+                    FeeRate = feeRate,
+                }),
+            };
+            tx.Fee = VerifiedXCore.Services.FeeCalcService.CalculateTXFee(tx);
+            tx.Build();
+            return tx;
+        }
+
+        /// <summary>
+        /// Raise the Bitcoin fee of a pinned withdrawal that is not confirming, signed by the requester's account on
+        /// this node. The replacement spends the same coins and the higher fee comes out of the withdrawal's amount.
+        /// </summary>
+        public static async Task<(bool, string)> BumpWithdrawalFee(string scUID, string requestorAddress, string withdrawalRequestHash, long feeRate)
+        {
+            try
+            {
+                var account = AccountData.GetSingleAccount(requestorAddress);
+                if (account == null)
+                    return (false, $"Account not found: {requestorAddress}");
+
+                var bumpTx = BuildWithdrawalFeeBumpTx(scUID, requestorAddress, withdrawalRequestHash, feeRate);
+                var privateKey = account.GetPrivKey;
+                if (privateKey == null)
+                    return (false, $"Private key was null for account {requestorAddress}");
+                var signature = VerifiedXCore.Services.SignatureService.CreateSignature(bumpTx.Hash, privateKey, account.PublicKey);
+                if (signature == "ERROR")
+                    return (false, $"TX Signature Failed. SCUID: {scUID}");
+                bumpTx.Signature = signature;
+
+                var result = await TransactionValidatorService.VerifyTX(bumpTx);
+                if (!result.Item1)
+                {
+                    SCLogUtility.Log($"vBTC V2 withdrawal fee bump refused: {scUID} / {withdrawalRequestHash}. Result: {result.Item2}", "VBTCService.BumpWithdrawalFee()");
+                    return (false, result.Item2);
+                }
+                await TransactionData.AddTxToWallet(bumpTx, true);
+                await AccountData.UpdateLocalBalance(requestorAddress, bumpTx.Fee + bumpTx.Amount);
+                await TransactionData.AddToPool(bumpTx);
+                await P2PClient.SendTXMempool(bumpTx);
+                SCLogUtility.Log($"vBTC V2 withdrawal fee bump sent. SCUID: {scUID}, withdrawal: {withdrawalRequestHash}, fee rate: {feeRate}, TxHash: {bumpTx.Hash}", "VBTCService.BumpWithdrawalFee()");
+                return (true, bumpTx.Hash);
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"vBTC V2 withdrawal fee bump error: {ex.Message}", "VBTCService.BumpWithdrawalFee()");
                 return (false, $"Error: {ApiErrorText.For(ex)}");
             }
         }

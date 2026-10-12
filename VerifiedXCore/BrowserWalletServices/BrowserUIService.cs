@@ -1003,11 +1003,12 @@ function renderVBTC(contracts){
   }
   var cards=contracts.map(function(c){
     var statusCls=c.withdrawalStatus==='None'?'badge-ok':c.withdrawalStatus==='Pending'?'badge-pend':'badge-tok';
-    var canRequest=c.balance>0&&(c.withdrawalStatus==='None'||c.withdrawalStatus==='Completed');
-    var canComplete=c.withdrawalStatus==='Requested';
+    /* Bitcoin attestation: a watched vault (c.attested) can have several withdrawals open and none is completed by hand; a frozen vault moves nothing. */
+    var canRequest=c.balance>0&&!c.frozen&&(c.attested||c.withdrawalStatus==='None'||c.withdrawalStatus==='Completed');
+    var canComplete=!c.attested&&!c.frozen&&c.withdrawalStatus==='Requested';
     var btns='<div class=""nft-actions"" style=""margin-top:6px"">';
-    if(c.balance>0)btns+='<button class=""act-btn prim"" onclick=""openVBTCTx('+jsa(c.scUID)+','+Number(c.balance)+')"">&rarr; Send vBTC</button>';
-    if(c.balance>0)btns+='<button class=""act-btn prim"" style=""background:rgba(88,166,255,.15);border-color:rgba(88,166,255,.4)"" onclick=""openBridge('+jsa(c.scUID)+','+jsa(c.ownerAddress)+','+Number(c.balance)+')"">&#127881; Bridge to Base</button>';
+    if(c.balance>0&&!c.frozen)btns+='<button class=""act-btn prim"" onclick=""openVBTCTx('+jsa(c.scUID)+','+Number(c.balance)+')"">&rarr; Send vBTC</button>';
+    if(c.balance>0&&!c.frozen)btns+='<button class=""act-btn prim"" style=""background:rgba(88,166,255,.15);border-color:rgba(88,166,255,.4)"" onclick=""openBridge('+jsa(c.scUID)+','+jsa(c.ownerAddress)+','+Number(c.balance)+')"">&#127881; Bridge to Base</button>';
     if(canRequest)btns+='<button class=""act-btn prim"" onclick=""openWD('+jsa(c.scUID)+','+jsa(c.ownerAddress)+','+Number(c.balance)+')"">&darr; Withdraw</button>';
     if(canComplete)btns+='<button class=""act-btn sec"" onclick=""openWDC('+jsa(c.scUID)+','+Number(c.activeWithdrawalAmount)+','+jsa(c.activeWithdrawalDest||'')+')"">&check; Complete Withdrawal</button>';
     btns+='</div>';
@@ -1015,8 +1016,11 @@ function renderVBTC(contracts){
       '<div class=""muted"" style=""font-size:11px;font-family:monospace"">'+esc(c.scUID||'')+'</div>'+
       '<div class=""vbtc-bal"">'+fmtBal(c.balance)+'<span>vBTC</span></div>'+
       '<div class=""vbtc-row""><span class=""k"">BTC Deposit</span><span class=""v"">'+esc(c.depositAddress||'N/A')+'</span></div>'+
-      '<div class=""vbtc-row""><span class=""k"">Withdrawal Status</span><span class=""badge '+statusCls+'"">'+esc(c.withdrawalStatus)+'</span></div>'+
-      (c.activeWithdrawalAmount?'<div class=""vbtc-row""><span class=""k"">Pending Withdrawal</span><span class=""v org"">'+Number(c.activeWithdrawalAmount)+' BTC &rarr; '+esc(c.activeWithdrawalDest||'')+'</span></div>':'')+
+      (c.attested?'<div class=""vbtc-row""><span class=""k"">Bitcoin</span><span class=""v"">recorded on chain</span></div>':'')+
+      (c.vaultNote?'<div class=""vbtc-row""><span class=""k"">Notice</span><span class=""v org"">'+esc(c.vaultNote)+'</span></div>':'')+
+      (c.attested?'':'<div class=""vbtc-row""><span class=""k"">Withdrawal Status</span><span class=""badge '+statusCls+'"">'+esc(c.withdrawalStatus)+'</span></div>')+
+      (!c.attested&&c.activeWithdrawalAmount?'<div class=""vbtc-row""><span class=""k"">Pending Withdrawal</span><span class=""v org"">'+Number(c.activeWithdrawalAmount)+' BTC &rarr; '+esc(c.activeWithdrawalDest||'')+'</span></div>':'')+
+      vbtcOpenWithdrawals(c)+
       '<div class=""vbtc-row""><span class=""k"">Validators</span><span class=""v"">'+c.totalValidators+' (threshold: '+c.requiredThreshold+')</span></div>'+
       '<div class=""vbtc-row""><span class=""k"">Proof Block</span><span class=""v"">#'+c.proofBlockHeight+'</span></div>'+
       btns+
@@ -1027,6 +1031,43 @@ function renderVBTC(contracts){
   startBridgePoll();
   el('burn-instructions').style.display='block';
 }
+
+/* ---- Withdrawals on a vault the chain watches: listed with their Bitcoin transaction; the vault signers pay them ---- */
+function vbtcOpenWithdrawals(c){
+  if(!c.attested||!c.openWithdrawals||!c.openWithdrawals.length)return '';
+  return c.openWithdrawals.map(function(w){
+    var b='';
+    if(w.canRaiseFee)b+=' <button class=""act-btn sec"" onclick=""doWDBump('+jsa(c.scUID)+','+jsa(w.requester)+','+jsa(w.requestHash)+','+Number(w.feeRate)+')"">Raise fee</button>';
+    if(w.canCancel)b+=' <button class=""act-btn sec"" onclick=""doWDCancel('+jsa(c.scUID)+','+jsa(w.requester)+','+jsa(w.requestHash)+')"">Cancel</button>';
+    var what=Number(w.amount)+' BTC &middot; '+Number(w.feeRate)+' sat/vB'+(w.bitcoinTxid?' &middot; tx '+esc(shn(w.bitcoinTxid,16)):'')+(w.waitingFor?' &middot; '+esc(w.waitingFor):'');
+    return '<div class=""vbtc-row""><span class=""k"">Withdrawal: '+esc(w.state)+'</span><span class=""v org"" title=""'+esc(w.bitcoinTxid||'')+'"">'+what+b+'</span></div>';
+  }).join('');
+}
+window.doWDBump=function(scUID,owner,hash,cur){
+  var v=prompt('This withdrawal pays '+cur+' sat/vB. Enter a higher Bitcoin fee rate in sat/vB. The extra fee comes out of the amount you receive:',String(cur+5));
+  if(v==null)return;
+  var rate=parseInt(v,10);
+  if(!(rate>cur)){alert('The new fee rate must be above '+cur+' sat/vB.');return;}
+  fetch('/wallet/api/vbtc/withdraw/bumpfee',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ScUID:scUID,OwnerAddress:owner,RequestHash:hash,FeeRate:String(rate)})
+  }).then(function(r){return r.json();}).then(function(d){
+    alert(d.message||(d.success?'Fee bump sent.':'Fee bump failed.'));
+    if(d.success){tabLoaded.vbtc=false;loadVBTC();}
+  }).catch(function(e){alert('Request failed: '+e);});
+};
+window.doWDCancel=function(scUID,owner,hash){
+  if(!confirm('Cancel this withdrawal? It can be cancelled only while no Bitcoin transaction is fixed for it. The vBTC is returned when the cancel is mined.'))return;
+  fetch('/wallet/api/vbtc/withdraw/cancel',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ScUID:scUID,OwnerAddress:owner,RequestHash:hash})
+  }).then(function(r){return r.json();}).then(function(d){
+    alert(d.success?'Cancel sent. The vBTC is returned when it is mined.':(d.message||'Cancel failed.'));
+    if(d.success){tabLoaded.vbtc=false;loadVBTC();}
+  }).catch(function(e){alert('Request failed: '+e);});
+};
 
 /* ---- Bridge to Base ---- */
 window.openBridge=function(scUID,owner,bal){
@@ -1419,7 +1460,7 @@ window.doWDRequest=function(){
   }).then(function(r){return r.json();}).then(function(d){
     btn.disabled=false;btn.textContent='Request Withdrawal';
     if(d.success){
-      showMsg('wd-msg','Withdrawal request submitted! Wait for it to be mined, then click Complete Withdrawal.','ok');
+      showMsg('wd-msg',d.attested?'Withdrawal request submitted. Nothing more to do: once it is mined the vault signers pay it, and it completes when Bitcoin confirms it.':'Withdrawal request submitted! Wait for it to be mined, then click Complete Withdrawal.','ok');
       setTimeout(function(){closeWD();tabLoaded.vbtc=false;loadVBTC();},3000);
     }else{
       showMsg('wd-msg',d.message||'Request failed.','err');
@@ -1467,7 +1508,7 @@ window.doWDComplete=function(){
   }).then(function(r){return r.json();}).then(function(d){
     btn.disabled=false;btn.textContent='Complete Withdrawal';
     if(d.success){
-      var msg='Withdrawal completed! BTC TX: '+(d.btcTxHash||'pending');
+      var msg=d.attested?(d.message||'This withdrawal is paid by the vault signers.'):'Withdrawal completed! BTC TX: '+(d.btcTxHash||'pending');
       if(d.vfxTxHash)msg+=' | VFX TX: '+d.vfxTxHash;
       showMsg('wdc-msg',msg,'ok');
       setTimeout(function(){closeWDC();tabLoaded.vbtc=false;loadVBTC();},4000);

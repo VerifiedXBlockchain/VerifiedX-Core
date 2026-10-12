@@ -147,7 +147,9 @@ namespace VerifiedXCore.Bitcoin.Services
                 // Give the request a moment to be mined so the contract's Active* fields are populated.
                 await Task.Delay(TimeSpan.FromSeconds(CeremonyPollSeconds));
                 var comp = await VBTCService.CompleteWithdrawal(s.S3CContractUID, reqTxHash);
-                if (!comp.Success)
+                // On a vault the chain watches nothing is completed from here: the vault's signers pay the request and
+                // the answer says it is in the chain's hands. That is not a failure; the next step waits for the BTC.
+                if (!comp.Success && !Attestation.BtcVaultView.IsInTheChainsHands(comp.ErrorMessage))
                 { Set(s, S3CAutoBridgeStatus.Failed, $"Withdrawal completion failed: {comp.ErrorMessage}. Funds still in the S3C contract."); return; }
 
                 // 4. Wait for the BTC to arrive at the companion deposit address (confirmed delta).

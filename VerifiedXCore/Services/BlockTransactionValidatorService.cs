@@ -1219,6 +1219,17 @@ namespace VerifiedXCore.Services
                     }
                 }
 
+                // A fee bump for a pinned withdrawal (watched vaults). Post-consensus wallet bookkeeping only: the rule
+                // was applied in state; here the wallet's own copy of the transaction is marked mined.
+                if (tx.TransactionType == TransactionType.VBTC_V2_COIN_PIN)
+                {
+                    var txdataBump = TransactionData.GetAll();
+                    tx.TransactionStatus = TransactionStatus.Success;
+                    txdataBump.InsertSafe(tx);
+                    SCLogUtility.Log($"VBTC_V2_COIN_PIN (withdrawal fee bump) in block: {tx.Hash}, from {tx.FromAddress}",
+                        "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                }
+
                 if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_LOCK ||
                     tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_UNLOCK ||
                     tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK ||

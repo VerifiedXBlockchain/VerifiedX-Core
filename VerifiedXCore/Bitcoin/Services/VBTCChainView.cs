@@ -91,6 +91,11 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>The contract's withdrawal that is still open (not completed, not expired), if any.</summary>
         public static VBTCWithdrawalRequest? ActiveWithdrawal(string scUID)
         {
+            // A vault the chain watches: a request is open until consensus closes it (paid, void, expired unpinned,
+            // cancelled). A pinned one does not age out: it is still going to be paid.
+            if (Attestation.BtcAttestBalance.IsAttestedVault(scUID))
+                return MinedWithdrawals(scUID).LastOrDefault(r => !r.IsCompleted);
+
             var height = Globals.LastBlock?.Height ?? 0;
             var now = TimeUtil.GetTime();
             return MinedWithdrawals(scUID).LastOrDefault(r => VBTCWithdrawalRequest.IsStillBlocking(r, height, now));

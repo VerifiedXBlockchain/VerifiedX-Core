@@ -1623,16 +1623,21 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                 if (result.Item1)
                 {
+                    var attested = VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(payload.SmartContractUID);
                     return JsonConvert.SerializeObject(new
                     {
                         Success = true,
-                        Message = "vBTC V2 withdrawal request created successfully",
+                        Message = attested
+                            ? "vBTC V2 withdrawal request created successfully. Nothing more is needed: when it is mined its Bitcoin transaction is fixed by the chain, the vault's signers sign and broadcast it, and it completes when Bitcoin confirms it. Follow it with GetWithdrawalPin."
+                            : "vBTC V2 withdrawal request created successfully",
                         RequestHash = result.Item2,
                         SmartContractUID = payload.SmartContractUID,
                         Amount = payload.Amount,
                         Destination = payload.BTCAddress,
                         FeeRate = payload.FeeRate,
-                        Status = "Requested"
+                        Status = "Requested",
+                        Attested = attested,
+                        CompleteWithdrawalNeeded = !attested
                     });
                 }
                 else
@@ -1693,7 +1698,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     FeeRate = payload.FeeRate,
                     Allocations = allocations,
                     BitcoinTransactions = allocations?.Count ?? 0,
-                    Status = "Requested"
+                    Status = "Requested",
+                    // Shares on vaults the chain watches are paid by those vaults' signers; CompleteWithdrawalMulti is
+                    // needed only for the others (it reports where the watched ones stand).
+                    AttestedContracts = allocations?.Where(a => VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(a.SCUID)).Select(a => a.SCUID).ToList()
                 });
             }
             catch (Exception ex)
@@ -1752,6 +1760,12 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                 if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.WithdrawalRequestHash))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
+
+                // A vault the chain watches: its signers pay the withdrawal and Bitcoin completes it. Nothing is signed
+                // or recorded from here; the answer says where the withdrawal stands.
+                var attestedAnswer = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.CompletionAnswer(payload.SmartContractUID, payload.WithdrawalRequestHash);
+                if (attestedAnswer != null)
+                    return JsonConvert.SerializeObject(attestedAnswer);
 
                 // Unified path: execute FROST withdrawal locally (owner signs with AddressSignature)
                 var result = await Services.VBTCService.CompleteWithdrawal(
@@ -1836,6 +1850,17 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var (ok, result) = await Services.VBTCService.CancelWithdrawal(payload.SmartContractUID, requester, payload.WithdrawalRequestHash);
                 if (!ok)
                     return JsonConvert.SerializeObject(new { Success = false, Message = result });
+
+                // A vault the chain watches: no vote. The cancel is accepted only while no Bitcoin transaction is fixed
+                // for the withdrawal, and takes effect in the block that mines it.
+                if (VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(payload.SmartContractUID))
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        Attested = true,
+                        Message = "Cancel transaction broadcast. When it is mined the withdrawal is closed and its vBTC returned at once; no vote is held.",
+                        CancelTxHash = result
+                    });
 
                 return JsonConvert.SerializeObject(new
                 {
@@ -1954,6 +1979,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     SmartContractUID = scUID,
                     WithdrawalRequestHash = withdrawalRequestHash,
                     WithdrawalStatus = request?.Status.ToString(),
+                    // A vault the chain watches holds no vote: a withdrawal there can be cancelled only before its
+                    // Bitcoin transaction is fixed, and the cancel takes effect when mined.
+                    Attested = VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(scUID),
+                    Withdrawal = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.Withdrawal(scUID, withdrawalRequestHash),
                     CurrentHeight = tip,
                     VotingRulesActive = rulesActive,
                     VotingRulesHeight = Globals.VbtcCancellationVoteRulesHeight,
@@ -2182,6 +2211,12 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (string.IsNullOrEmpty(payload.WithdrawalRequestHash))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "WithdrawalRequestHash is required" });
 
+                // A vault the chain watches: its signers pay the withdrawal and Bitcoin completes it. Nothing is signed
+                // or recorded from here; the answer says where the withdrawal stands.
+                var attestedAnswer = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.CompletionAnswer(payload.SmartContractUID, payload.WithdrawalRequestHash);
+                if (attestedAnswer != null)
+                    return JsonConvert.SerializeObject(attestedAnswer);
+
                 // Look up withdrawal request to return details for confirmation. Contract-scoped:
                 // a multi-contract request has one row per vault under this hash, and this prepares
                 // the ceremony for one of them.
@@ -2344,6 +2379,12 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     string.IsNullOrEmpty(payload.WithdrawalRequestHash) || string.IsNullOrEmpty(payload.SessionId) ||
                     string.IsNullOrEmpty(payload.StartSignature) || string.IsNullOrEmpty(payload.ShareDistributionSignature))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "All fields are required: OwnerAddress, SmartContractUID, WithdrawalRequestHash, SessionId, StartSignature, ShareDistributionSignature" });
+
+                // A vault the chain watches: its signers pay the withdrawal and Bitcoin completes it. Nothing is signed
+                // or recorded from here; the answer says where the withdrawal stands.
+                var attestedAnswer = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.CompletionAnswer(payload.SmartContractUID, payload.WithdrawalRequestHash);
+                if (attestedAnswer != null)
+                    return JsonConvert.SerializeObject(attestedAnswer);
 
                 // Verify the start signature
                 var startMessage = $"{payload.SessionId}.{payload.OwnerAddress}.{payload.StartTimestamp}";
@@ -3239,6 +3280,12 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (string.IsNullOrEmpty(payload.BTCDestination))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "BTCDestination is required" });
 
+                // A vault the chain watches: its signers pay the withdrawal and Bitcoin completes it. Nothing is signed
+                // or recorded from here; the answer says where the withdrawal stands.
+                var attestedAnswer = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.CompletionAnswer(payload.SmartContractUID, payload.WithdrawalRequestHash);
+                if (attestedAnswer != null)
+                    return JsonConvert.SerializeObject(attestedAnswer);
+
                 // Reclaim: a tx that took back a withheld withdrawal's coins is completed only once it confirms —
                 // until then the withheld tx can still replace it, and a mined completion would stand unpaid.
                 var completingRow = VBTCWithdrawalRequest.GetByTransactionHash(payload.WithdrawalRequestHash, payload.SmartContractUID);
@@ -3403,6 +3450,16 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 tx.Fee = FeeCalcService.CalculateTXFee(tx);
                 tx.Build();
 
+                // A vault the chain watches: say now, before the wallet signs, when this cancel cannot be accepted
+                // (its Bitcoin transaction is already fixed and may be signed).
+                var attestedCancel = VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(payload.SmartContractUID);
+                if (attestedCancel)
+                {
+                    var refusal = VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.Refusal(tx);
+                    if (refusal != null)
+                        return JsonConvert.SerializeObject(new { Success = false, Attested = true, Message = refusal, Withdrawal = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.Withdrawal(payload.SmartContractUID, payload.WithdrawalRequestHash) });
+                }
+
                 _pendingRawVbtcTxs[tx.Hash] = tx;
 
                 return JsonConvert.SerializeObject(new
@@ -3414,7 +3471,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Fee = tx.Fee,
                     Nonce = tx.Nonce,
                     TransactionType = tx.TransactionType.ToString(),
-                    Message = "Sign the Hash field and submit via SendRawCancelWithdrawalTx."
+                    Attested = attestedCancel,
+                    Message = attestedCancel
+                        ? "Sign the Hash field and submit via SendRawCancelWithdrawalTx. When it is mined the withdrawal is closed and its vBTC returned at once; no vote is held."
+                        : "Sign the Hash field and submit via SendRawCancelWithdrawalTx."
                 });
             }
             catch (Exception ex)
@@ -3460,6 +3520,101 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 await P2P.P2PClient.SendTXMempool(pendingTx);
 
                 return JsonConvert.SerializeObject(new { Success = true, Hash = pendingTx.Hash, Message = "Withdrawal cancel transaction broadcast successfully." });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
+            }
+        }
+
+        #endregion
+
+        #region Withdrawal Fee Bump Raw TX (vaults the chain watches)
+
+        /// <summary>
+        /// Build an unsigned VBTC_V2_COIN_PIN transaction for offline signing: the requester of a pinned withdrawal
+        /// that is not confirming asks for a higher Bitcoin fee rate. The chain then fixes a replacement that spends
+        /// the same coins, with the higher fee taken out of the withdrawal's own amount; whichever of the
+        /// withdrawal's transactions Bitcoin confirms completes it. Only for vaults the chain watches.
+        /// </summary>
+        [HttpPost("GetRawBumpWithdrawalFeeTxData")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetRawBumpWithdrawalFeeTxData([FromBody] VBTCWithdrawalFeeBumpPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+                if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.RequestorAddress) ||
+                    string.IsNullOrEmpty(payload.WithdrawalRequestHash))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
+                if (payload.FeeRate <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Fee rate must be greater than zero" });
+
+                var tx = Services.VBTCService.BuildWithdrawalFeeBumpTx(payload.SmartContractUID, payload.RequestorAddress, payload.WithdrawalRequestHash, payload.FeeRate);
+                // Before the wallet signs: the same rule block validation applies.
+                var refusal = VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.Refusal(tx);
+                if (refusal != null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = refusal, Withdrawal = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.Withdrawal(payload.SmartContractUID, payload.WithdrawalRequestHash) });
+
+                _pendingRawVbtcTxs[tx.Hash] = tx;
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Hash = tx.Hash,
+                    Timestamp = tx.Timestamp,
+                    FromAddress = tx.FromAddress,
+                    ToAddress = tx.ToAddress,
+                    Amount = tx.Amount,
+                    Fee = tx.Fee,
+                    Nonce = tx.Nonce,
+                    TransactionType = tx.TransactionType.ToString(),
+                    TransactionTypeId = (int)tx.TransactionType,
+                    Data = tx.Data,
+                    Message = "Sign the Hash field and submit via SendRawBumpWithdrawalFeeTx."
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
+            }
+        }
+
+        /// <summary>
+        /// Submit a pre-signed VBTC_V2_COIN_PIN (withdrawal fee bump) transaction.
+        /// </summary>
+        [HttpPost("SendRawBumpWithdrawalFeeTx")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> SendRawBumpWithdrawalFeeTx([FromBody] RawVBTCTxSubmission body)
+        {
+            try
+            {
+                if (body == null || string.IsNullOrWhiteSpace(body.Hash) || string.IsNullOrWhiteSpace(body.Signature) || string.IsNullOrWhiteSpace(body.PublicKey))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Hash, Signature, and PublicKey are required" });
+
+                if (!_pendingRawVbtcTxs.TryGetValue(body.Hash, out var pendingTx))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"No pending transaction found for hash {body.Hash}. Call GetRawBumpWithdrawalFeeTxData first." });
+
+                if (pendingTx.TransactionType != TransactionType.VBTC_V2_COIN_PIN)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Invalid TX type: {pendingTx.TransactionType}" });
+
+                pendingTx.Signature = body.Signature;
+
+                var (valid, reason) = await TransactionValidatorService.VerifyTX(pendingTx);
+                if (!valid)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction verification failed: {reason}" });
+
+                // Claimed only once it is known-good, so a bad signature does not destroy the build (as for the other raw routes).
+                if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out _))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction {body.Hash} was already submitted." });
+
+                await TransactionData.AddTxToWallet(pendingTx, true);
+                await AccountData.UpdateLocalBalance(pendingTx.FromAddress, pendingTx.Fee + pendingTx.Amount);
+                await TransactionData.AddToPool(pendingTx);
+                await P2P.P2PClient.SendTXMempool(pendingTx);
+
+                return JsonConvert.SerializeObject(new { Success = true, Hash = pendingTx.Hash, Message = "Fee bump transaction broadcast. When it is mined the replacement Bitcoin transaction is fixed and the vault's signers sign it." });
             }
             catch (Exception ex)
             {
@@ -4020,7 +4175,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     // balances resolve correctly on nodes with no local VBTCContractV2 record (e.g. casters).
                     var depositAddr = Services.VBTCService.ResolveDepositAddress(scState, contract);
                     if (!string.IsNullOrEmpty(depositAddr))
-                        (depositBalance, depositStale) = await Services.VBTCService.GetDepositBalanceForDisplay(depositAddr, contract);
+                        (depositBalance, depositStale) = await Services.VBTCService.GetDepositBalanceForDisplay(depositAddr, contract, scState.SmartContractUID);
                 }
 
                 // Owner balance = deposit address balance + ledger balance
@@ -4039,11 +4194,19 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 // Escrowed withdrawals are already out of Balance (debited at REQUEST), so PendingWithdrawals does
                 // not show them; an expired unpaid one comes back only by cancelling it.
                 var (escrowedAmount, expiredEscrowAmount, escrowedRequests) = Services.VBTCService.DescribeEscrowedWithdrawals(address, scUID);
+                var kind = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.KindOf(scUID);
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
                     Message = "Balance retrieved successfully",
+                    // Attested: the owner's deposit is the vault's Bitcoin as the chain records it (no Electrum).
+                    // Legacy: created before Bitcoin attestation; frozen from FreezeHeight.
+                    kind.Attested,
+                    kind.Legacy,
+                    kind.FreezeHeight,
+                    kind.Frozen,
+                    VaultNote = kind.Note,
                     Address = address,
                     SmartContractUID = scUID,
                     Balance = totalBalance,
@@ -4126,7 +4289,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                             ledgerBalance = Services.VBTCService.GetOwnerLedgerBalance(scState, address, Globals.LastBlock?.Height ?? 0);
 
                         if (isOwner && !string.IsNullOrEmpty(depositAddress))
-                            (depositBalance, depositStale) = await Services.VBTCService.GetDepositBalanceForDisplay(depositAddress, local);
+                            (depositBalance, depositStale) = await Services.VBTCService.GetDepositBalanceForDisplay(depositAddress, local, contract.SmartContractUID);
 
                         decimal contractBalance = isOwner ? depositBalance + ledgerBalance : ledgerBalance;
 
@@ -4146,9 +4309,14 @@ namespace VerifiedXCore.Bitcoin.Controllers
                                 ? ReserveTransactions.GetPendingVBTCTransferTotal(address, contract.SmartContractUID)
                                 : 0M;
 
+                            var kind = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.KindOf(contract.SmartContractUID);
                             contractBalances.Add(new
                             {
                                 SmartContractUID = contract.SmartContractUID,
+                                kind.Attested,
+                                kind.Legacy,
+                                kind.FreezeHeight,
+                                kind.Frozen,
                                 DepositAddress = depositAddress,
                                 Balance = contractBalance,
                                 DepositAddressBalance = isOwner ? depositBalance : (decimal?)null,
@@ -4226,6 +4394,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                                 Message = "Contract details retrieved (state trei — no local record)",
                                 Source = "state-trei",
                                 SmartContractUID = scUID,
+                                Vault = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.KindOf(scUID),
+                                Bitcoin = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.Vault(scUID),
                                 Contract = new
                                 {
                                     SmartContractUID = scUID,
@@ -4256,12 +4426,17 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 contract.WithdrawalRequestBlock = active?.RequestBlockHeight;
                 contract.ActiveWithdrawalFeeRate = active?.FeeRate ?? 0;
                 contract.ActiveWithdrawalRequestTime = active?.Timestamp ?? 0;
+                // A vault the chain watches: its balance is its attested Bitcoin (not saved here either).
+                if (VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(scUID))
+                    contract.Balance = VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.DepositBtc(contract.SmartContractUID);
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
                     Message = "Contract details retrieved",
                     SmartContractUID = scUID,
+                    Vault = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.KindOf(scUID),
+                    Bitcoin = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.Vault(scUID),
                     Contract = contract
                 });
             }
@@ -4354,7 +4529,11 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Message = "Withdrawal status retrieved",
                     SmartContractUID = scUID,
                     Status = Services.VBTCChainView.WithdrawalStatus(scUID).ToString(),
-                    HasActiveWithdrawal = Services.VBTCChainView.HasActiveWithdrawal(scUID)
+                    HasActiveWithdrawal = Services.VBTCChainView.HasActiveWithdrawal(scUID),
+                    // A vault the chain watches can have several withdrawals open at once; each is listed with its
+                    // Bitcoin transaction under Bitcoin.OpenWithdrawals.
+                    Attested = VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(scUID),
+                    Bitcoin = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.Vault(scUID)
                 });
             }
             catch (Exception ex)
@@ -4602,12 +4781,19 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 {
                     var c = VBTCContractV2.GetContract(v.SmartContractUID);
                     var active = Services.VBTCChainView.ActiveWithdrawal(v.SmartContractUID);
+                    var kind = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.KindOf(v.SmartContractUID);
                     return new
                     {
                         v.SmartContractUID,
                         v.OwnerAddress,
                         v.Feature.DepositAddress,
-                        Balance = c?.Balance ?? 0M,
+                        // Attested: the vault's Bitcoin as the chain records it. Legacy: created before Bitcoin
+                        // attestation and frozen from FreezeHeight.
+                        kind.Attested,
+                        kind.Legacy,
+                        kind.FreezeHeight,
+                        kind.Frozen,
+                        Balance = kind.Attested ? VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.DepositBtc(v.SmartContractUID) : c?.Balance ?? 0M,
                         v.Feature.ValidatorAddressesSnapshot,
                         v.Feature.FrostGroupPublicKey,
                         FrostPubkeyPackage = c?.FrostPubkeyPackage,
@@ -4642,6 +4828,155 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
             }
         }
+
+        #region Vaults the chain watches (Bitcoin attestation)
+
+        /// <summary>
+        /// Raise the Bitcoin fee of a pinned withdrawal that is not confirming, signed by the requester's account on
+        /// this node. The chain fixes a replacement that spends the same coins; the higher fee comes out of the
+        /// withdrawal's own amount. A web wallet uses GetRawBumpWithdrawalFeeTxData / SendRawBumpWithdrawalFeeTx.
+        /// </summary>
+        /// <param name="payload">SmartContractUID, RequestorAddress (the requester), WithdrawalRequestHash, FeeRate (sat/vB, above the current one)</param>
+        [HttpPost("BumpWithdrawalFee")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> BumpWithdrawalFee([FromBody] VBTCWithdrawalFeeBumpPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Payload cannot be null" });
+                if (string.IsNullOrEmpty(payload.SmartContractUID) || string.IsNullOrEmpty(payload.RequestorAddress) ||
+                    string.IsNullOrEmpty(payload.WithdrawalRequestHash))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Required fields cannot be null" });
+                if (payload.FeeRate <= 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Fee rate must be greater than zero" });
+                if (AccountData.GetSingleAccount(payload.RequestorAddress) == null)
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Message = $"This node does not hold the key for {payload.RequestorAddress}, so it cannot sign the fee bump. Build it with GetRawBumpWithdrawalFeeTxData, sign the hash, and submit it with SendRawBumpWithdrawalFeeTx."
+                    });
+
+                var (ok, result) = await Services.VBTCService.BumpWithdrawalFee(payload.SmartContractUID, payload.RequestorAddress, payload.WithdrawalRequestHash, payload.FeeRate);
+                if (!ok)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = result, Withdrawal = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.Withdrawal(payload.SmartContractUID, payload.WithdrawalRequestHash) });
+
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true,
+                    Message = "Fee bump transaction broadcast. When it is mined the replacement Bitcoin transaction is fixed and the vault's signers sign it. Follow it with GetWithdrawalPin.",
+                    FeeBumpTxHash = result,
+                    SmartContractUID = payload.SmartContractUID,
+                    WithdrawalRequestHash = payload.WithdrawalRequestHash,
+                    FeeRate = payload.FeeRate
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
+            }
+        }
+
+        /// <summary>
+        /// Where a withdrawal from a vault the chain watches stands: waiting for coins, its Bitcoin transaction fixed
+        /// (with every transaction fixed for it, their fees and the unsigned bytes), paid, or closed and refunded.
+        /// Answered from chain state, so any node gives the same answer for any vault.
+        /// </summary>
+        [HttpGet("GetWithdrawalPin/{scUID}/{withdrawalRequestHash}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public Task<string> GetWithdrawalPin(string scUID, string withdrawalRequestHash)
+        {
+            try
+            {
+                if (!VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(SmartContractStateTrei.GetSmartContractState(scUID)?.SmartContractUID ?? scUID))
+                    return Task.FromResult(JsonConvert.SerializeObject(new
+                    {
+                        Success = false,
+                        Attested = false,
+                        Message = "This vault is not one the chain watches (it was created before Bitcoin attestation). Its withdrawals are completed with CompleteWithdrawal.",
+                        Vault = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.KindOf(scUID)
+                    }));
+                var withdrawal = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.Withdrawal(scUID, withdrawalRequestHash);
+                return Task.FromResult(JsonConvert.SerializeObject(withdrawal == null
+                    ? new { Success = false, Attested = true, Message = "No such withdrawal request is recorded on this vault. If it was just sent, it has not been mined yet.", Withdrawal = (object?)null }
+                    : new { Success = true, Attested = true, Message = "Withdrawal retrieved", Withdrawal = (object?)withdrawal }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" }));
+            }
+        }
+
+        /// <summary>
+        /// The Bitcoin of a vault as consensus holds it: the deposit script, every unspent coin and what holds it, the
+        /// totals the owner's balance is computed from, and the withdrawals still open on it.
+        /// </summary>
+        [HttpGet("GetVaultBitcoin/{scUID}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public Task<string> GetVaultBitcoin(string scUID)
+        {
+            try
+            {
+                if (Services.VBTCChainView.GetVault(scUID) == null)
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = "Contract not found" }));
+                var bitcoin = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.Vault(scUID);
+                var kind = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.KindOf(scUID);
+                return Task.FromResult(JsonConvert.SerializeObject(new
+                {
+                    Success = bitcoin != null,
+                    Message = bitcoin != null ? "Vault Bitcoin retrieved" : kind.Note ?? "This vault is not one the chain watches.",
+                    SmartContractUID = scUID,
+                    Vault = kind,
+                    Bitcoin = bitcoin
+                }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" }));
+            }
+        }
+
+        /// <summary>
+        /// The Bitcoin attestation layer as this node's chain state holds it: the three heights, the Bitcoin tip the
+        /// chain has attested, how far vault events are recorded, the signer set, and the confirmations a Bitcoin
+        /// block needs before it is reported.
+        /// </summary>
+        [HttpGet("GetBitcoinAttestationStatus")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public Task<string> GetBitcoinAttestationStatus()
+        {
+            try
+            {
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = true, Message = "Bitcoin attestation status retrieved", Attestation = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.Network() }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" }));
+            }
+        }
+
+        /// <summary>
+        /// The bridge exit the chain holds for a Base burn: waiting, pinned, complete or failed, and for an exit on
+        /// vaults the chain watches each vault's part with its Bitcoin transaction.
+        /// </summary>
+        [HttpGet("GetBridgeExit/{baseBurnTxHash}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public Task<string> GetBridgeExit(string baseBurnTxHash)
+        {
+            try
+            {
+                var exit = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.Exit(baseBurnTxHash);
+                return Task.FromResult(JsonConvert.SerializeObject(exit == null
+                    ? new { Success = false, Message = "No bridge exit is recorded for this burn.", Exit = (object?)null }
+                    : new { Success = true, Message = "Bridge exit retrieved", Exit = (object?)exit }));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" }));
+            }
+        }
+
+        #endregion
 
         #region Privacy (vBTC shielded pool, Phase 7)
 
@@ -5511,6 +5846,17 @@ namespace VerifiedXCore.Bitcoin.Controllers
     }
 
     // Raw Withdrawal Cancel TX Payload
+
+    /// <summary>A requester raises the Bitcoin fee of its pinned withdrawal (vaults the chain watches).</summary>
+    public class VBTCWithdrawalFeeBumpPayload
+    {
+        public string SmartContractUID { get; set; } = "";
+        /// <summary>The address that requested the withdrawal; it signs the fee bump.</summary>
+        public string RequestorAddress { get; set; } = "";
+        public string WithdrawalRequestHash { get; set; } = "";
+        /// <summary>The new fee rate, sat/vB. Above the rate the withdrawal's newest Bitcoin transaction pays.</summary>
+        public long FeeRate { get; set; }
+    }
 
     public class VBTCWithdrawalCancelTxPayload
     {
