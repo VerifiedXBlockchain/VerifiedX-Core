@@ -489,7 +489,7 @@ namespace VerifiedXCore.Tests
             await Start();
             var watched = await CreateVault(H1 + 1);
             await Deposit(watched.Script, 1_000_000);
-            var watchedLock = await Lock(watched.Uid, 0.003M);   // the earlier lock: plain first-in-first-out would start here
+            var watchedLock = await Lock(watched.Uid, 0.003M);
             var olderLock = await Lock(older.Uid, 0.002M);
             Globals.BitcoinAttestationHeight = h2;                // restored by the base class
 
@@ -512,7 +512,9 @@ namespace VerifiedXCore.Tests
             await RefusedInBlock(onFrozen, "has been frozen since block " + h2, h2);
 
             // An unlock back to VFX is planned and judged the same way: it would hand out vBTC on a frozen vault.
-            Assert.Equal(new[] { watchedLock, olderLock }, BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.004M, h2 - 1)!.Select(a => a.LockId));
+            // (Both locks, in whichever order the pool holds them: they were mined in the same second.)
+            Assert.Equal(new[] { watchedLock, olderLock }.OrderBy(l => l, StringComparer.Ordinal),
+                BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.005M, h2 - 1)!.Select(a => a.LockId).OrderBy(l => l, StringComparer.Ordinal));
             Assert.Null(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.004M, h2));
             Assert.Equal(watchedLock, Assert.Single(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.003M, h2)!).LockId);
             VfxTx Unlock(params (string LockId, string Vault, decimal Amount)[] allocations) => SignedBy(Caster, Caster.Address, TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK, new
