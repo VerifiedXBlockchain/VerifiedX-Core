@@ -8,8 +8,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
     /// nothing but earlier headers, so every node reaches the same verdict with no network.
     ///
     /// Deliberately not checked: the "not more than two hours in the future" rule. It compares against a local clock,
-    /// which consensus cannot do, and it is not needed here: a header is reported only once it is buried under
-    /// further proof-of-work (the confirmation depth).
+    /// which consensus cannot do, and it is not needed here: a header counts only once it is buried under further
+    /// proof-of-work (the confirmation depth, which consensus enforces).
     /// docs/PLAN-vBTC-Bitcoin-Attestation.md, section 3.1.
     /// </summary>
     public sealed class BtcChainRules
@@ -25,11 +25,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <summary>BIP 94: how far before its parent the first block of an interval may be timed.</summary>
         public const int MaxTimewarp = 600;
 
-        /// <summary>The easiest target either network allows, compact form (00000000ffff... ).</summary>
+        /// <summary>The easiest target mainnet and testnet4 allow, compact form (00000000ffff...).</summary>
         public const uint PowLimitBits = 0x1d00ffff;
-        private static readonly BigInteger PowLimit = (BigInteger.One << 224) - BigInteger.One;
 
         public string Name { get; }
+        /// <summary>This network's easiest target, compact form.</summary>
+        public uint LimitBits { get; }
+        private readonly BigInteger _limit;
         /// <summary>Testnet rule: a block more than twenty minutes after its parent may use the easiest target.</summary>
         public bool AllowMinDifficulty { get; }
         /// <summary>
@@ -38,19 +40,35 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// interval may not be timed more than ten minutes before its parent.
         /// </summary>
         public bool EnforceBip94 { get; }
+        /// <summary>Test networks only: the target never changes (every header carries <see cref="LimitBits"/>).</summary>
+        public bool NoRetarget { get; }
 
-        private BtcChainRules(string name, bool allowMinDifficulty, bool enforceBip94)
+        private BtcChainRules(string name, uint limitBits, BigInteger limit, bool allowMinDifficulty, bool enforceBip94, bool noRetarget)
         {
             Name = name;
+            LimitBits = limitBits;
+            _limit = limit;
             AllowMinDifficulty = allowMinDifficulty;
             EnforceBip94 = enforceBip94;
+            NoRetarget = noRetarget;
         }
 
-        public static readonly BtcChainRules Mainnet = new("mainnet", allowMinDifficulty: false, enforceBip94: false);
-        public static readonly BtcChainRules Testnet4 = new("testnet4", allowMinDifficulty: true, enforceBip94: true);
+        private static readonly BigInteger MainLimit = (BigInteger.One << 224) - BigInteger.One;
+
+        public static readonly BtcChainRules Mainnet = new("mainnet", PowLimitBits, MainLimit, allowMinDifficulty: false, enforceBip94: false, noRetarget: false);
+        public static readonly BtcChainRules Testnet4 = new("testnet4", PowLimitBits, MainLimit, allowMinDifficulty: true, enforceBip94: true, noRetarget: false);
+
+        /// <summary>
+        /// Bitcoin's regression-test rules (easiest possible target, never retargeted), so that tests can produce valid
+        /// chains of headers. Reachable only through <see cref="OverrideForTests"/>, which production never sets.
+        /// </summary>
+        internal static readonly BtcChainRules Regtest = new("regtest", 0x207fffff, (BigInteger.One << 255) - BigInteger.One, allowMinDifficulty: false, enforceBip94: false, noRetarget: true);
+
+        /// <summary>Tests only. Null in every production process.</summary>
+        internal static BtcChainRules? OverrideForTests;
 
         /// <summary>The rules for the Bitcoin network this node's chain follows (testnet4 on VFX testnet, mainnet otherwise).</summary>
-        public static BtcChainRules Current => Globals.IsTestNet ? Testnet4 : Mainnet;
+        public static BtcChainRules Current => OverrideForTests ?? (Globals.IsTestNet ? Testnet4 : Mainnet);
 
         /// <summary>
         /// Checks <paramref name="header"/> as the block at <paramref name="height"/>. <paramref name="at"/> returns the
@@ -96,18 +114,20 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var prev = at(height - 1);
             if (prev == null) { reason = $"the header before height {height} is not known"; return false; }
 
+            if (NoRetarget) { bits = LimitBits; return true; }
+
             if (height % Interval != 0)
             {
                 if (!AllowMinDifficulty) { bits = prev.Bits; return true; }
 
                 // Testnet: more than twenty minutes after the parent, the easiest target is the required one.
-                if ((long)headerTime > (long)prev.Time + Spacing * 2) { bits = PowLimitBits; return true; }
+                if ((long)headerTime > (long)prev.Time + Spacing * 2) { bits = LimitBits; return true; }
 
                 // Otherwise: the target of the last block that was not one of those easy blocks, looking back no further
                 // than the first block of this interval.
                 var h = height - 1;
                 var cursor = prev;
-                while (h % Interval != 0 && cursor.Bits == PowLimitBits)
+                while (h % Interval != 0 && cursor.Bits == LimitBits)
                 {
                     var earlier = at(h - 1);
                     if (earlier == null) { reason = $"the header at height {h - 1} is not known (needed for the testnet target rule)"; return false; }
@@ -131,7 +151,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             { reason = $"the target {startFrom:x8} the retarget at {height} starts from cannot be decoded"; return false; }
 
             target = target * actual / Timespan;
-            if (target > PowLimit) target = PowLimit;
+            if (target > _limit) target = _limit;
             bits = BtcHeader.EncodeCompact(target);
             return true;
         }

@@ -122,10 +122,14 @@ namespace VerifiedXCore.Bitcoin.Attestation
     /// </summary>
     public static class BtcTxInclusion
     {
-        /// <summary>Largest transaction a report carries with its bytes (plan 3.2: larger ones use the signed-only form).</summary>
-        public const int MaxTxBytes = 100_000;
+        /// <summary>
+        /// Largest transaction a report carries with its bytes (plan 3.2: larger ones use the signed-only form). A vault
+        /// deposit or withdrawal is a few hundred bytes; this leaves room for a large payout that includes a vault.
+        /// </summary>
+        public const int MaxTxBytes = 40_000;
 
-        private static Network Net => Globals.BTCNetwork ?? FrostDkgAttestation.ConsensusNetwork;
+        /// <summary>The network the chain follows, from the chain's own setting: never from local configuration.</summary>
+        private static Network Net => FrostDkgAttestation.ConsensusNetwork;
 
         /// <summary>The serialization without witness data, lowercase hex: the form a report carries.</summary>
         public static string ToStrippedHex(Transaction tx) =>
@@ -162,6 +166,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (branch.Count != treeDepth)
                 return $"the proof has {branch.Count} levels; this block's tree has {treeDepth} (every transaction of a block sits at the same depth)";
             if (string.IsNullOrEmpty(strippedHex) || strippedHex.Length % 2 != 0) return "the transaction is not valid hex";
+            if (!string.Equals(strippedHex, strippedHex.ToLowerInvariant(), StringComparison.Ordinal)) return "the transaction is not lowercase hex";
             if (strippedHex.Length / 2 > MaxTxBytes) return $"the transaction is larger than {MaxTxBytes} bytes";
 
             byte[] bytes;
