@@ -286,6 +286,12 @@ namespace VerifiedXCore.Services
             if (VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(txRequest.TransactionType))
                 return await VerifiedXCore.Bitcoin.Attestation.BtcAttestTxValidator.Verify(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1), blockDownloads, admission: blockHeight == null);
 
+            // From the enforcement height: vaults created before the recording height are frozen, and the transactions
+            // only the earlier way of working needs are refused for every vault.
+            var legacyFreezeRefusal = VerifiedXCore.Bitcoin.Attestation.BtcLegacyFreeze.Refusal(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (legacyFreezeRefusal != null)
+                return (false, legacyFreezeRefusal);
+
             // Withdrawals on a vault the chain watches: no completion transaction, no vote, cancellation only before
             // the Bitcoin transaction is fixed, and a destination that is a Bitcoin address.
             var watchedWithdrawalRefusal = VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.Refusal(txRequest);

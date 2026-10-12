@@ -299,6 +299,9 @@ namespace VerifiedXCore.Privacy
 
             if (txRequest.TransactionType == TransactionType.VBTC_V2_SHIELD)
             {
+                var frozenVault = VerifiedXCore.Bitcoin.Attestation.BtcLegacyFreeze.Refusal(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+                if (frozenVault != null)
+                    return (false, frozenVault);
                 if (txRequest.Amount != 0.0M)
                     return (false, "VBTC shield must carry token amount in Data payload; transparent Amount must be 0.");
                 if (Globals.LastBlock.Height > Globals.TXHeightRule1
