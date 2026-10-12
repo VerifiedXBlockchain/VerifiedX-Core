@@ -609,6 +609,12 @@ namespace VerifiedXCore.Data
                             CompleteVBTCV2Withdrawal(tx);
                         }
 
+                        // A requester raises the Bitcoin fee of its pinned withdrawal (watched vaults).
+                        if (tx.TransactionType == TransactionType.VBTC_V2_COIN_PIN)
+                        {
+                            VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.ApplyFeeBump(tx, tx.Height);
+                        }
+
                         // FIND-018 Fix: vBTC V2 Withdrawal Cancellation/Vote governance handlers
                         if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
                         {

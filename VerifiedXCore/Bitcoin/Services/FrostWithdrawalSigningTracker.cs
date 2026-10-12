@@ -85,6 +85,9 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <param name="allInputSighashes">The full announced sighash set for the transaction (null = legacy single-input).</param>
         /// <param name="txInputOutpoints">"txid:vout" for every input of the transaction being signed (used by the contract-level conflict rule).</param>
         /// <param name="reclaimablePins">Withdrawal hashes whose pins FrostStartup found reclaimable (concurrency mode only).</param>
+        /// <param name="transactionScope">Null on a vault the chain does not watch: one Bitcoin transaction per withdrawal,
+        /// this validator's own rule. On a watched vault, the id of the transaction being signed: consensus may have
+        /// pinned several for one withdrawal (a fee bump), all on the same coins, so each has a record of its own.</param>
         public static (bool Blocked, string Reason) CheckWithdrawalSigning(
             string scUID,
             string withdrawalRequestHash,
@@ -92,12 +95,13 @@ namespace VerifiedXCore.Bitcoin.Services
             string? messageHash = null,
             List<string>? allInputSighashes = null,
             List<string>? txInputOutpoints = null,
-            ISet<string>? reclaimablePins = null)
+            ISet<string>? reclaimablePins = null,
+            string? transactionScope = null)
         {
             if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
                 return (false, string.Empty); // Non-withdrawal signing, allow
 
-            var key = BuildKey(scUID, withdrawalRequestHash);
+            var key = BuildKey(scUID, withdrawalRequestHash, transactionScope);
             var now = TimeUtil.GetTime();
 
             if (_withdrawals.TryGetValue(key, out var record))
@@ -233,12 +237,13 @@ namespace VerifiedXCore.Bitcoin.Services
             string? messageHash = null,
             List<string>? allInputSighashes = null,
             List<string>? txInputOutpoints = null,
-            ISet<string>? reclaimablePins = null)
+            ISet<string>? reclaimablePins = null,
+            string? transactionScope = null)
         {
             if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
                 return (false, string.Empty); // Non-withdrawal signing, allow (nothing to record)
 
-            var key = BuildKey(scUID, withdrawalRequestHash);
+            var key = BuildKey(scUID, withdrawalRequestHash, transactionScope);
             var record = _withdrawals.GetOrAdd(key, _ => new WithdrawalRecord
             {
                 ScUID = scUID,
@@ -246,10 +251,10 @@ namespace VerifiedXCore.Bitcoin.Services
             });
             lock (record.Lock) // re-entered by the two calls below (Monitor is re-entrant on this thread)
             {
-                var (blocked, reason) = CheckWithdrawalSigning(scUID, withdrawalRequestHash, inputIndex, messageHash, allInputSighashes, txInputOutpoints, reclaimablePins);
+                var (blocked, reason) = CheckWithdrawalSigning(scUID, withdrawalRequestHash, inputIndex, messageHash, allInputSighashes, txInputOutpoints, reclaimablePins, transactionScope);
                 if (blocked)
                     return (true, reason);
-                RecordSigningStarted(scUID, withdrawalRequestHash, sessionId, inputIndex, messageHash, allInputSighashes);
+                RecordSigningStarted(scUID, withdrawalRequestHash, sessionId, inputIndex, messageHash, allInputSighashes, transactionScope);
                 return (false, string.Empty);
             }
         }
@@ -260,11 +265,12 @@ namespace VerifiedXCore.Bitcoin.Services
         /// re-checked nothing: a session that lost (or bypassed) the start check could still get its share. A
         /// withdrawal input with no record here (expired, reset) is refused too: the coordinator starts again.
         /// </summary>
-        public static (bool Ok, string Reason) ConfirmSessionHoldsInput(string? scUID, string? withdrawalRequestHash, int inputIndex, string? sessionId, string? messageHash)
+        public static (bool Ok, string Reason) ConfirmSessionHoldsInput(string? scUID, string? withdrawalRequestHash, int inputIndex, string? sessionId, string? messageHash,
+            string? transactionScope = null)
         {
             if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
                 return (true, string.Empty); // Non-withdrawal signing
-            if (!_withdrawals.TryGetValue(BuildKey(scUID, withdrawalRequestHash), out var record))
+            if (!_withdrawals.TryGetValue(BuildKey(scUID, withdrawalRequestHash, transactionScope), out var record))
                 return (false, $"No signing record for withdrawal {withdrawalRequestHash} input {inputIndex} on this validator; start the ceremony again.");
             lock (record.Lock)
             {
@@ -290,12 +296,12 @@ namespace VerifiedXCore.Bitcoin.Services
         /// sighash set on first sight.
         /// </summary>
         public static void RecordSigningStarted(string scUID, string withdrawalRequestHash, string sessionId,
-            int inputIndex = 0, string? messageHash = null, List<string>? allInputSighashes = null)
+            int inputIndex = 0, string? messageHash = null, List<string>? allInputSighashes = null, string? transactionScope = null)
         {
             if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
                 return;
 
-            var key = BuildKey(scUID, withdrawalRequestHash);
+            var key = BuildKey(scUID, withdrawalRequestHash, transactionScope);
             var record = _withdrawals.GetOrAdd(key, _ => new WithdrawalRecord
             {
                 ScUID = scUID,
@@ -341,7 +347,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Also pins the transaction's input outpoints at the CONTRACT level (see the class summary).
         /// </summary>
         public static void RecordSigningCompleted(string scUID, string withdrawalRequestHash, string sessionId,
-            int inputIndex = 0, string? messageHash = null, List<string>? txInputOutpoints = null, string? btcTxId = null)
+            int inputIndex = 0, string? messageHash = null, List<string>? txInputOutpoints = null, string? btcTxId = null, string? transactionScope = null)
         {
             if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
                 return;
@@ -350,7 +356,7 @@ namespace VerifiedXCore.Bitcoin.Services
             // transaction of this withdrawal left this validator. Best effort; never blocks signing.
             try { FrostSignedWithdrawalEvidence.Record(scUID, withdrawalRequestHash, btcTxId, txInputOutpoints); } catch { }
 
-            var key = BuildKey(scUID, withdrawalRequestHash);
+            var key = BuildKey(scUID, withdrawalRequestHash, transactionScope);
             var record = _withdrawals.GetOrAdd(key, _ => new WithdrawalRecord
             {
                 ScUID = scUID,
@@ -435,12 +441,12 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Record that the signing ceremony failed for a withdrawal input. Allows retry after the
         /// cooldown. Never downgrades a Signed input.
         /// </summary>
-        public static void RecordSigningFailed(string scUID, string withdrawalRequestHash, string sessionId, int inputIndex = 0)
+        public static void RecordSigningFailed(string scUID, string withdrawalRequestHash, string sessionId, int inputIndex = 0, string? transactionScope = null)
         {
             if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
                 return;
 
-            var key = BuildKey(scUID, withdrawalRequestHash);
+            var key = BuildKey(scUID, withdrawalRequestHash, transactionScope);
             var record = _withdrawals.GetOrAdd(key, _ => new WithdrawalRecord
             {
                 ScUID = scUID,
@@ -595,8 +601,8 @@ namespace VerifiedXCore.Bitcoin.Services
             _contractPins.Clear();
         }
 
-        private static string BuildKey(string scUID, string withdrawalRequestHash)
-            => $"{scUID}:{withdrawalRequestHash}";
+        private static string BuildKey(string scUID, string withdrawalRequestHash, string? transactionScope = null)
+            => string.IsNullOrEmpty(transactionScope) ? $"{scUID}:{withdrawalRequestHash}" : $"{scUID}:{withdrawalRequestHash}#{transactionScope.ToLowerInvariant()}";
 
         private static ConcurrentDictionary<string, ContractOutpointPin> NewPinSet()
             => new ConcurrentDictionary<string, ContractOutpointPin>(StringComparer.OrdinalIgnoreCase);

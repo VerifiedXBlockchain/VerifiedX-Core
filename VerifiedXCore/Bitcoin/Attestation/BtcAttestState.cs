@@ -146,9 +146,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public long DestinationSats { get; set; }
         public long ChangeSats { get; set; }
         public long FeeSats { get; set; }
+        /// <summary>The fee rate this transaction was built at, sat/vB: the request's, or a later fee bump's.</summary>
+        public long FeeRate { get; set; }
         public long PinnedAtVfxHeight { get; set; }
         /// <summary>One of its coins was spent by another transaction: it can never confirm.</summary>
         public bool Dead { get; set; }
+        /// <summary>
+        /// A later transaction of the same withdrawal pays a higher fee. This one spends the same coins and is still
+        /// valid: if Bitcoin confirms it instead, it settles the withdrawal all the same.
+        /// </summary>
+        public bool Superseded { get; set; }
     }
 
     /// <summary>

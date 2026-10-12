@@ -1960,7 +1960,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                             {
                                 var (blocked, reason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
                                     .CheckWithdrawalSigning(request.SmartContractUID, request.WithdrawalRequestHash,
-                                        request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints);
+                                        request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints,
+                                        transactionScope: FrostSigningAuthorization.SigningScope(request.SmartContractUID, request.BtcTxId));
 
                                 // If blocked by a contract outpoint pin, check on-chain whether the pinned
                                 // tx(s) have since confirmed (or can no longer confirm) — released pins drop
@@ -1984,7 +1985,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                                     reclaimablePinsForStart = reclaimable;
                                     (blocked, reason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
                                         .CheckWithdrawalSigning(request.SmartContractUID, request.WithdrawalRequestHash,
-                                            request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints, reclaimable);
+                                            request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints, reclaimable,
+                                            FrostSigningAuthorization.SigningScope(request.SmartContractUID, request.BtcTxId));
                                 }
 
                                 if (blocked)
@@ -2241,7 +2243,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 if (!string.IsNullOrEmpty(request.WithdrawalRequestHash))
                                 {
                                     VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                                        .RecordSigningFailed(request.SmartContractUID, request.WithdrawalRequestHash, request.SessionId, request.InputIndex);
+                                        .RecordSigningFailed(request.SmartContractUID, request.WithdrawalRequestHash, request.SessionId, request.InputIndex,
+                                            FrostSigningAuthorization.SigningScope(request.SmartContractUID, request.BtcTxId));
                                 }
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
@@ -2261,7 +2264,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                             {
                                 var (beginBlocked, beginReason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
                                     .TryBeginSigning(request.SmartContractUID, request.WithdrawalRequestHash, request.SessionId,
-                                        request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints, reclaimablePinsForStart);
+                                        request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints, reclaimablePinsForStart,
+                                        FrostSigningAuthorization.SigningScope(request.SmartContractUID, request.BtcTxId));
                                 if (beginBlocked)
                                 {
                                     FrostSessionStorage.SigningSessions.TryRemove(request.SessionId, out _);
@@ -2490,7 +2494,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 && !session.WithdrawalRequestHash.StartsWith(FrostSigningAuthorization.BtcExitPrefix, StringComparison.OrdinalIgnoreCase))
                             {
                                 var (holds, holdReason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                                    .ConfirmSessionHoldsInput(session.SmartContractUID, session.WithdrawalRequestHash, session.InputIndex, sessionId, session.MessageHash);
+                                    .ConfirmSessionHoldsInput(session.SmartContractUID, session.WithdrawalRequestHash, session.InputIndex, sessionId, session.MessageHash,
+                                        FrostSigningAuthorization.SigningScope(session.SmartContractUID, session.BtcTxId));
                                 if (!holds)
                                 {
                                     ErrorLogUtility.LogError($"FROST Sign Round 2 REFUSED for session {sessionId}: {holdReason}", "FrostStartup.SignRound2");
@@ -2533,7 +2538,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                             {
                                 VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
                                     .RecordSigningCompleted(session.SmartContractUID, session.WithdrawalRequestHash, sessionId,
-                                        session.InputIndex, session.MessageHash, session.TxInputOutpoints, session.BtcTxId);
+                                        session.InputIndex, session.MessageHash, session.TxInputOutpoints, session.BtcTxId,
+                                        FrostSigningAuthorization.SigningScope(session.SmartContractUID, session.BtcTxId));
                             }
 
                             LogUtility.Log($"[FROST] Signing Round 2 signature share generated via native library for session {sessionId}", "FrostStartup.SignRound2");
@@ -2758,7 +2764,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                             if (!shareGenerated && !string.IsNullOrEmpty(session.WithdrawalRequestHash))
                             {
                                 VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                                    .RecordSigningFailed(session.SmartContractUID, session.WithdrawalRequestHash, request.SessionId, session.InputIndex);
+                                    .RecordSigningFailed(session.SmartContractUID, session.WithdrawalRequestHash, request.SessionId, session.InputIndex,
+                                        FrostSigningAuthorization.SigningScope(session.SmartContractUID, session.BtcTxId));
                             }
 
                             LogUtility.Log($"[FROST] Signing session {request.SessionId} aborted by leader {request.LeaderAddress}. ShareGenerated: {shareGenerated}",
@@ -3078,6 +3085,12 @@ namespace VerifiedXCore.Bitcoin.FROST
         {
             try
             {
+                // A vault the chain watches: which transactions may be signed for a withdrawal is fixed in state
+                // (FrostSigningAuthorization has just checked this one against it). They all spend the same coins, so
+                // at most one confirms; a replacement at a higher fee is one of them and must be signable.
+                if (VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(scUID))
+                    return (true, "");
+
                 var evidence = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.Get(scUID, withdrawalRequestHash);
                 if (evidence == null || string.IsNullOrEmpty(evidence.BtcTxId)) return (true, "");
                 if (string.Equals(evidence.BtcTxId, (requestedTxId ?? "").Trim(), StringComparison.OrdinalIgnoreCase)) return (true, "");

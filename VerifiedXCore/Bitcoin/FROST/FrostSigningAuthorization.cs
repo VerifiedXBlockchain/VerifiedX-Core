@@ -205,6 +205,16 @@ namespace VerifiedXCore.Bitcoin.FROST
         }
 
         /// <summary>
+        /// The transaction a withdrawal's signing record is kept under on this validator
+        /// (<see cref="Services.FrostWithdrawalSigningTracker"/>). On a vault the chain does not watch there is none:
+        /// the validator itself holds each withdrawal to one Bitcoin transaction. On a watched vault consensus fixes
+        /// which transactions may be signed, and a fee bump pins a second one on the same coins; the signer keeps one
+        /// record per pinned transaction, so the replacement can be signed and two ceremonies do not disturb each other.
+        /// </summary>
+        public static string? SigningScope(string? scUID, string? btcTxId) =>
+            !string.IsNullOrEmpty(btcTxId) && Attestation.BtcAttestBalance.IsAttestedVault(scUID) ? btcTxId.Trim().ToLowerInvariant() : null;
+
+        /// <summary>
         /// Who may lead a ceremony. A USER withdrawal is led only by its owner: every legitimate
         /// coordinator path sets the requester as leader, and letting any registered validator lead
         /// would let them sign-and-withhold a competing transaction, pinning the contract (FIND-028)

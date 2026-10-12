@@ -149,7 +149,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(2u, btc.Version);
             Assert.Equal(0u, btc.LockTime.Value);
             Assert.Equal(new OutPoint(deposit, 0), Assert.Single(btc.Inputs).PrevOut);
-            Assert.Equal(Sequence.Final, btc.Inputs[0].Sequence);
+            Assert.Equal(BtcCanonicalWithdrawal.InputSequence, btc.Inputs[0].Sequence.Value); // replaceable: a fee bump can follow
             Assert.Equal(BitcoinAddress.Create(BtcDest, Network.Main).ScriptPubKey, btc.Outputs[0].ScriptPubKey);
             Assert.Equal(98_460, btc.Outputs[0].Value.Satoshi);
             Assert.Equal(vault.Script, btc.Outputs[1].ScriptPubKey);

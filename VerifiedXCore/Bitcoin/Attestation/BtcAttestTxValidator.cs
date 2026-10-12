@@ -119,33 +119,35 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public sealed class State
         {
             public string? ReportHash;
+            /// <summary>The withdrawals a fee bump of this block has already raised.</summary>
+            public readonly HashSet<string> BumpedWithdrawals = new(StringComparer.Ordinal);
         }
 
         public const string OneReportReason = "A block carries at most one Bitcoin report.";
+        public const string OneBumpReason = "A block carries at most one fee bump for a withdrawal.";
 
+        /// <summary>
+        /// The same holds for fee bumps of one withdrawal: each is judged against the withdrawal's newest transaction
+        /// before the block, and the second would find the first has replaced it.
+        /// </summary>
         public static (bool Ok, string Reason) TryRegister(Transaction tx, State state)
         {
+            if (tx.TransactionType == TransactionType.VBTC_V2_COIN_PIN)
+            {
+                var bumped = BtcWithdrawals.FeeBumpRef(tx);
+                return bumped == null || state.BumpedWithdrawals.Add(bumped) ? (true, "") : (false, OneBumpReason);
+            }
             if (tx.TransactionType != TransactionType.VBTC_V2_BTC_REPORT) return (true, "");
             if (state.ReportHash != null) return (false, OneReportReason);
             state.ReportHash = tx.Hash;
             return (true, "");
         }
 
-        /// <summary>Block building: the first report stays, later ones wait in the mempool for the next block.</summary>
-        public static List<Transaction> KeepOneReport(List<Transaction> approved)
+        /// <summary>Block building: the first report and the first fee bump of each withdrawal stay; later ones wait in the mempool for the next block.</summary>
+        public static List<Transaction> KeepOnePerBlock(List<Transaction> approved)
         {
-            var seen = false;
-            var kept = new List<Transaction>(approved.Count);
-            foreach (var tx in approved)
-            {
-                if (tx.TransactionType == TransactionType.VBTC_V2_BTC_REPORT)
-                {
-                    if (seen) continue;
-                    seen = true;
-                }
-                kept.Add(tx);
-            }
-            return kept;
+            var state = new State();
+            return approved.Where(tx => TryRegister(tx, state).Ok).ToList();
         }
     }
 }

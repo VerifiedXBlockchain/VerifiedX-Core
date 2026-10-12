@@ -476,7 +476,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(BtcAttestBlockRules.OneReportReason, reason);
 
             // Block building (TransactionData.ProcessTxPool): the first stays, the rest wait for the next block.
-            Assert.Equal(new[] { "c", "a", "c" }, BtcAttestBlockRules.KeepOneReport(new List<VfxTx> { plain, first, second, plain }).Select(t => t.Hash));
+            Assert.Equal(new[] { "c", "a", "c" }, BtcAttestBlockRules.KeepOnePerBlock(new List<VfxTx> { plain, first, second, plain }).Select(t => t.Hash));
         }
 
         // ── Proofs ──────────────────────────────────────────────────────────────────────────────────────────

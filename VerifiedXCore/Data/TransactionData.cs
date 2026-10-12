@@ -610,6 +610,7 @@ namespace VerifiedXCore.Data
                                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
                                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE &&
                                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_CANCEL &&
+                                tx.TransactionType != TransactionType.VBTC_V2_COIN_PIN &&
                                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE &&
                                 tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_LOCK &&
                                 tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_UNLOCK &&
@@ -1195,7 +1196,7 @@ namespace VerifiedXCore.Data
             // see BlockValidatorService). Keep the first; drop a later one AND that sender's later transactions so the
             // proposal has no nonce gap. The dropped creation stays in the mempool and fails as "already deployed".
             // NEW-07: likewise for debits that together overspend a holder's balance on one contract.
-            return VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.KeepOneReport(SameBlockDebitGuard.DropSameBlockOverspends(DropDuplicateContractCreations(approvedMemPoolList)));
+            return VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.KeepOnePerBlock(SameBlockDebitGuard.DropSameBlockOverspends(DropDuplicateContractCreations(approvedMemPoolList)));
         }
 
         public static List<Transaction> DropDuplicateContractCreations(List<Transaction> approved)
@@ -1332,6 +1333,7 @@ namespace VerifiedXCore.Data
                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST &&
                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE &&
                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_CANCEL &&
+                tx.TransactionType != TransactionType.VBTC_V2_COIN_PIN &&
                 tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE &&
                 tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_LOCK &&
                 tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_UNLOCK &&

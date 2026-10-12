@@ -153,7 +153,7 @@ namespace VerifiedXCore.Models
         // Bitcoin facts in consensus (docs/PLAN-vBTC-Bitcoin-Attestation.md). Sender-less: From and To are
         // "BTC_Attestation", no amount, no fee; the authority is the validator signatures inside Data.
         VBTC_V2_BTC_REPORT = 43, // Bitcoin headers plus the transactions of one Bitcoin block that touch a vault
-        VBTC_V2_COIN_PIN = 44, // The exact Bitcoin transaction a withdrawal or bridge exit will sign (not enabled yet)
+        VBTC_V2_COIN_PIN = 44, // A requester pins its withdrawal again at a higher Bitcoin fee rate (fee bump; watched vaults)
         VBTC_V2_BTC_REORG = 45, // Rewind of reported Bitcoin events after a deep reorganisation (not enabled yet)
     }
 

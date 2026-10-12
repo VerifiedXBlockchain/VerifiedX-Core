@@ -145,9 +145,9 @@ namespace VerifiedXCore.Tests
             otherCoin.Outputs[1].Value = Money.Satoshis(50_000);
             Refused(otherCoin);
 
-            var replaceable = BtcTx.Parse(pin.TxHex, Network.Main);
-            replaceable.Inputs[0].Sequence = new Sequence(0xfffffffd);
-            Refused(replaceable);
+            var final = BtcTx.Parse(pin.TxHex, Network.Main);
+            final.Inputs[0].Sequence = Sequence.Final; // not replaceable any more: a different transaction
+            Refused(final);
 
             var locked = BtcTx.Parse(pin.TxHex, Network.Main);
             locked.LockTime = new LockTime(900_000);

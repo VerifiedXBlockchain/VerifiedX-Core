@@ -29,6 +29,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
     /// pin means no signer has signed anything.</item>
     /// <item><b>Cancel</b>: the requester may cancel only while there is no pin, for the same reason; it takes effect
     /// at once, with no vote.</item>
+    /// <item><b>Fee bump</b>: the requester of a pinned withdrawal that is not confirming may have it pinned again at a
+    /// higher fee rate, on the same coins (BtcWithdrawals.FeeBump.cs).</item>
     /// </list>
     /// </summary>
     public static partial class BtcWithdrawals
@@ -62,6 +64,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
                             : null;
                     case TransactionType.VBTC_V2_WITHDRAWAL_VOTE:
                         return IsWatched(tx) ? "Withdrawals from this vault are not cancelled by vote." : null;
+                    case TransactionType.VBTC_V2_COIN_PIN:
+                        return FeeBumpRefusal(tx, out _, out _, out _);
                     case TransactionType.VBTC_V2_WITHDRAWAL_CANCEL:
                     {
                         if (!IsWatched(tx)) return null;
@@ -289,7 +293,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             row.Pins.Add(new VaultPin
             {
                 Txid = tx.Txid, TxHex = tx.TxHex, Inputs = tx.Inputs, DestinationSats = tx.DestinationSats, ChangeSats = tx.ChangeSats,
-                FeeSats = tx.FeeSats, PinnedAtVfxHeight = vfxHeight,
+                FeeSats = tx.FeeSats, FeeRate = row.FeeRate, PinnedAtVfxHeight = vfxHeight,
             });
             row.State = VaultWithdrawalState.Pinned;
             row.WaitingReason = null;

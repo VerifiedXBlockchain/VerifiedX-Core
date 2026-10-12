@@ -9,11 +9,14 @@ using VerifiedXCore.Utilities;
 
 namespace VerifiedXCore.Bitcoin.Attestation
 {
-    /// <summary>The sender-less transaction types of the attestation layer.</summary>
+    /// <summary>
+    /// The sender-less transaction types of the attestation layer. (<see cref="TransactionType.VBTC_V2_COIN_PIN"/> is
+    /// not one: a fee bump is an ordinary transaction signed by the withdrawal's requester.)
+    /// </summary>
     public static class BtcAttestTx
     {
         public static bool IsAttestationType(TransactionType type) =>
-            type == TransactionType.VBTC_V2_BTC_REPORT || type == TransactionType.VBTC_V2_COIN_PIN || type == TransactionType.VBTC_V2_BTC_REORG;
+            type == TransactionType.VBTC_V2_BTC_REPORT || type == TransactionType.VBTC_V2_BTC_REORG;
     }
 
     /// <summary>

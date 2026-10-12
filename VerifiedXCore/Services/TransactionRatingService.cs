@@ -82,6 +82,7 @@ namespace VerifiedXCore.Services
                     tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST ||
                     tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE ||
                     tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL ||
+                    tx.TransactionType == TransactionType.VBTC_V2_COIN_PIN ||
                     tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE ||
                     tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_LOCK ||
                     tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_UNLOCK ||
