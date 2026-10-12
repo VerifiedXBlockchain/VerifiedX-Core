@@ -1,0 +1,365 @@
+using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Sockets;
+using NBitcoin;
+using VerifiedXCore.Bitcoin.FROST;
+using VerifiedXCore.Utilities;
+
+namespace VerifiedXCore.Bitcoin.Attestation.Net
+{
+    /// <summary>
+    /// The Bitcoin side of a signing validator (plan 2.5): a handful of Bitcoin peers found through the DNS seeds, the
+    /// header chain they serve from the checkpoint on, and the recent blocks of that chain, each checked against its
+    /// header before it is kept. No second process and no third party; an explorer is asked only when no peer delivers.
+    ///
+    /// Only validators that sign reports run this. Every other node judges a report from the report itself.
+    /// </summary>
+    public sealed class BtcLightClient : IBtcChainView, IDisposable
+    {
+        /// <summary>Peers kept connected. Each one is a few kilobytes a minute; four independent peers make withholding short-lived.</summary>
+        public const int TargetPeers = 4;
+        /// <summary>
+        /// Blocks kept on disk below the tip: two quiet ranges, which is everything report building can ask for again
+        /// (the unreported range and the look-back of a newly created vault), plus a margin. About 300 MB on mainnet.
+        /// </summary>
+        public const int KeepBlocks = 2 * BtcAttestRules.QuietBlocks + 32;
+        private const int BlocksInMemory = 6;
+
+        private static readonly string[] MainnetSeeds =
+        {
+            "seed.bitcoin.sipa.be", "dnsseed.bluematt.me", "seed.bitcoin.sprovoost.nl", "dnsseed.emzy.de",
+            "seed.bitcoin.wiz.biz", "seed.btc.petertodd.net", "seed.mainnet.achownodes.xyz", "dnsseed.bitcoin.dashjr.org",
+        };
+        // The bundled NBitcoin knows testnet4's port and message start but carries no DNS seeds for it.
+        private static readonly string[] Testnet4Seeds = { "seed.testnet4.bitcoin.sprovoost.nl", "seed.testnet4.wiz.biz" };
+
+        private readonly Network _network;
+        private readonly BtcHeaderChain _chain;
+        private readonly string _blockDir;
+        private readonly Func<Network, IPEndPoint, IBtcSource?> _connect;
+        private readonly Func<CancellationToken, Task<List<IPEndPoint>>> _discover;
+        private readonly List<IBtcSource> _fallbacks;
+        private readonly List<IBtcSource> _peers = new();
+        private readonly object _peerLock = new();
+        private readonly ConcurrentDictionary<string, DateTime> _avoidUntil = new();
+        private readonly ConcurrentDictionary<long, byte> _wanted = new();
+        private readonly LinkedList<(string Hash, Block Block)> _recent = new();
+        private readonly object _recentLock = new();
+        private List<IPEndPoint> _candidates = new();
+        private DateTime _candidatesAt = DateTime.MinValue;
+
+        public BtcHeaderChain Chain => _chain;
+        public long TipHeight => _chain.TipHeight;
+        public BtcHeader? HeaderAt(long height) => _chain.At(height);
+        public int PeerCount { get { lock (_peerLock) return _peers.Count(p => p.IsAlive); } }
+        public string? LastProblem { get; private set; }
+        public DateTime LastHeaderAtUtc { get; private set; }
+
+        /// <param name="connect">How a peer is reached (tests supply their own); the Bitcoin peer protocol by default.</param>
+        /// <param name="discover">Where peer addresses come from; the DNS seeds by default.</param>
+        /// <param name="fallbacks">Sources asked when no peer delivers; the public explorers by default.</param>
+        public BtcLightClient(Network network, BtcHeaderChain chain, string blockDir,
+            Func<Network, IPEndPoint, IBtcSource?>? connect = null, Func<CancellationToken, Task<List<IPEndPoint>>>? discover = null,
+            List<IBtcSource>? fallbacks = null)
+        {
+            _network = network;
+            _chain = chain;
+            _blockDir = blockDir;
+            _connect = connect ?? ((net, endpoint) => BtcPeerSource.Connect(net, endpoint, TimeSpan.FromSeconds(10)));
+            _discover = discover ?? DiscoverFromSeedsAsync;
+            _fallbacks = fallbacks ?? BtcEsploraSource.For(network).Cast<IBtcSource>().ToList();
+            Directory.CreateDirectory(_blockDir);
+        }
+
+        private bool IsPeer(IBtcSource source)
+        {
+            lock (_peerLock) return _peers.Contains(source);
+        }
+
+        private async Task<List<IPEndPoint>> DiscoverFromSeedsAsync(CancellationToken ct)
+        {
+            var found = new List<IPEndPoint>();
+            foreach (var seed in _network == Network.Main ? MainnetSeeds : Testnet4Seeds)
+            {
+                try
+                {
+                    foreach (var ip in await Dns.GetHostAddressesAsync(seed, ct))
+                        if (ip.AddressFamily == AddressFamily.InterNetwork)
+                            found.Add(new IPEndPoint(ip, _network.DefaultPort));
+                }
+                catch { }
+            }
+            // The addresses compiled into the library, for a node whose DNS is filtered.
+            try { found.AddRange(_network.SeedNodes.Select(s => s.Endpoint).OfType<IPEndPoint>().Where(e => e.AddressFamily == AddressFamily.InterNetwork)); } catch { }
+            return found;
+        }
+
+        // ── Blocks ──────────────────────────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// The block at a height of the best chain, from memory or disk, checked against its header. Null when it has
+        /// not been fetched; the height is then queued for the next pass of <see cref="RunOnceAsync"/>.
+        /// </summary>
+        public Block? BlockAt(long height)
+        {
+            var header = _chain.At(height);
+            if (header == null) return null;
+
+            lock (_recentLock)
+            {
+                for (var node = _recent.First; node != null; node = node.Next)
+                    if (node.Value.Hash == header.Hash)
+                    {
+                        _recent.Remove(node);
+                        _recent.AddFirst(node);
+                        return node.Value.Block;
+                    }
+            }
+
+            var path = PathOf(height, header.Hash);
+            if (File.Exists(path))
+            {
+                try
+                {
+                    var block = Block.Load(File.ReadAllBytes(path), _network);
+                    if (BtcBlockCheck.Verify(block, header) == null)
+                    {
+                        Remember(header.Hash, block);
+                        return block;
+                    }
+                }
+                catch { }
+                try { File.Delete(path); } catch { } // a damaged file: fetch it again
+            }
+
+            _wanted[height] = 0;
+            return null;
+        }
+
+        private string PathOf(long height, string hash) => Path.Combine(_blockDir, $"{height}_{hash}.blk");
+
+        private void Remember(string hash, Block block)
+        {
+            lock (_recentLock)
+            {
+                _recent.AddFirst((hash, block));
+                while (_recent.Count > BlocksInMemory) _recent.RemoveLast();
+            }
+        }
+
+        // ── One pass: peers, headers, wanted blocks, pruning ────────────────────────────────────────────────
+
+        public async Task RunOnceAsync(CancellationToken ct)
+        {
+            await EnsurePeersAsync(ct);
+            await SyncHeadersAsync(ct);
+            await FetchWantedAsync(ct);
+            Prune();
+        }
+
+        private List<IBtcSource> LivePeers()
+        {
+            lock (_peerLock)
+            {
+                foreach (var dead in _peers.Where(p => !p.IsAlive).ToList())
+                {
+                    _peers.Remove(dead);
+                    try { dead.Dispose(); } catch { }
+                }
+                return _peers.ToList();
+            }
+        }
+
+        private void Drop(IBtcSource peer, string why, TimeSpan avoidFor)
+        {
+            lock (_peerLock) _peers.Remove(peer);
+            _avoidUntil[peer.Name.Split(' ')[0]] = DateTime.UtcNow + avoidFor;
+            try { peer.Dispose(); } catch { }
+            LastProblem = $"dropped Bitcoin peer {peer.Name}: {why}";
+        }
+
+        private async Task EnsurePeersAsync(CancellationToken ct)
+        {
+            if (LivePeers().Count >= TargetPeers) return;
+
+            if (_candidates.Count == 0 || DateTime.UtcNow - _candidatesAt > TimeSpan.FromMinutes(30))
+            {
+                var found = await _discover(ct);
+                var random = new Random();
+                _candidates = found.GroupBy(e => e.ToString()).Select(g => g.First()).OrderBy(_ => random.Next()).ToList();
+                _candidatesAt = DateTime.UtcNow;
+            }
+
+            var attempts = 0;
+            while (LivePeers().Count < TargetPeers && _candidates.Count > 0 && attempts < 12 && !ct.IsCancellationRequested)
+            {
+                var endpoint = _candidates[0];
+                _candidates.RemoveAt(0);
+                if (_avoidUntil.TryGetValue(endpoint.ToString(), out var until) && until > DateTime.UtcNow) continue;
+                lock (_peerLock)
+                    if (_peers.Any(p => p.Name.StartsWith(endpoint.ToString() + " ", StringComparison.Ordinal))) continue;
+                attempts++;
+                var peer = await Task.Run(() => _connect(_network, endpoint), ct);
+                if (peer == null)
+                {
+                    _avoidUntil[endpoint.ToString()] = DateTime.UtcNow + TimeSpan.FromMinutes(20);
+                    continue;
+                }
+                lock (_peerLock) _peers.Add(peer);
+            }
+        }
+
+        private async Task SyncHeadersAsync(CancellationToken ct)
+        {
+            var sources = LivePeers();
+            // No peer at all: an explorer keeps the header chain moving, a few headers at a time.
+            if (sources.Count == 0) sources = _fallbacks.ToList();
+
+            foreach (var source in sources)
+            {
+                for (var round = 0; round < 60 && !ct.IsCancellationRequested; round++)
+                {
+                    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    timeout.CancelAfter(TimeSpan.FromSeconds(30));
+                    var headers = await source.GetHeadersAsync(_chain.Locator(), timeout.Token);
+                    if (headers == null)
+                    {
+                        if (IsPeer(source)) Drop(source, "no answer to a header request", TimeSpan.FromMinutes(10));
+                        break;
+                    }
+                    if (headers.Count == 0) break;
+
+                    var outcome = _chain.Add(headers, out var reason);
+                    if (outcome == BtcHeaderAdd.Extended || outcome == BtcHeaderAdd.Reorganised)
+                    {
+                        LastHeaderAtUtc = DateTime.UtcNow;
+                        if (outcome == BtcHeaderAdd.Reorganised)
+                            LogUtility.Log($"Bitcoin view: {reason} (now at {_chain.TipHeight} {_chain.Tip.Hash}).", "BtcLightClient.SyncHeadersAsync()");
+                    }
+                    else if (outcome == BtcHeaderAdd.Invalid || outcome == BtcHeaderAdd.Unconnected)
+                    {
+                        // Headers that are not Bitcoin, or another chain altogether: this peer is of no use.
+                        if (IsPeer(source)) Drop(source, reason ?? outcome.ToString(), TimeSpan.FromHours(6));
+                        break;
+                    }
+                    if (outcome != BtcHeaderAdd.Extended || headers.Count < 2000) break;
+                }
+            }
+        }
+
+        private async Task FetchWantedAsync(CancellationToken ct)
+        {
+            foreach (var height in _wanted.Keys.OrderBy(h => h).ToList())
+            {
+                if (ct.IsCancellationRequested) return;
+                var header = _chain.At(height);
+                if (header == null || File.Exists(PathOf(height, header.Hash)))
+                {
+                    _wanted.TryRemove(height, out _);
+                    continue;
+                }
+
+                Block? block = null;
+                foreach (var source in LivePeers().Concat(_fallbacks))
+                {
+                    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    timeout.CancelAfter(TimeSpan.FromSeconds(60));
+                    var candidate = await source.GetBlockAsync(header.Hash, timeout.Token);
+                    if (candidate == null) continue;
+                    var problem = BtcBlockCheck.Verify(candidate, header);
+                    if (problem != null)
+                    {
+                        if (IsPeer(source)) Drop(source, $"served a wrong block for {height}: {problem}", TimeSpan.FromHours(6));
+                        continue;
+                    }
+                    block = candidate;
+                    break;
+                }
+                if (block == null)
+                {
+                    LastProblem = $"no source delivered Bitcoin block {height} {header.Hash}";
+                    continue; // stays wanted; tried again on the next pass
+                }
+
+                try
+                {
+                    var path = PathOf(height, header.Hash);
+                    var temp = path + ".tmp";
+                    await File.WriteAllBytesAsync(temp, block.ToBytes(), ct);
+                    File.Move(temp, path, overwrite: true);
+                }
+                catch (Exception ex) { LastProblem = $"could not store Bitcoin block {height}: {ex.Message}"; }
+                Remember(header.Hash, block);
+                _wanted.TryRemove(height, out _);
+            }
+        }
+
+        /// <summary>Removes block files below the kept range, and files of blocks that are no longer on the best chain.</summary>
+        private void Prune()
+        {
+            try
+            {
+                var floor = _chain.TipHeight - KeepBlocks;
+                foreach (var file in Directory.EnumerateFiles(_blockDir, "*.blk"))
+                {
+                    var name = Path.GetFileNameWithoutExtension(file);
+                    var split = name.IndexOf('_');
+                    if (split <= 0 || !long.TryParse(name.Substring(0, split), out var height)) continue;
+                    var onChain = _chain.At(height)?.Hash == name.Substring(split + 1);
+                    if (height < floor || !onChain)
+                        try { File.Delete(file); } catch { }
+                }
+            }
+            catch { }
+        }
+
+        public void Dispose()
+        {
+            lock (_peerLock)
+            {
+                foreach (var peer in _peers) try { peer.Dispose(); } catch { }
+                _peers.Clear();
+            }
+        }
+
+        // ── The running instance ────────────────────────────────────────────────────────────────────────────
+
+        /// <summary>The client of this node, once started. Null on a node that does not sign reports.</summary>
+        public static BtcLightClient? Current { get; private set; }
+
+        /// <summary>
+        /// Creates the client for this node from the configured checkpoint, and brings its header chain up to the
+        /// headers the chain has already attested (they are in state, already checked). Null with the reason when the
+        /// checkpoint is not set.
+        /// </summary>
+        public static BtcLightClient? Create(out string? reason)
+        {
+            var checkpoint = BtcCheckpoint.Configured(out reason);
+            if (checkpoint == null) return null;
+            var network = FrostDkgAttestation.ConsensusNetwork;
+            var chain = new BtcHeaderChain(checkpoint, BtcChainRules.Current);
+
+            try
+            {
+                var meta = BtcAttestStore.GetMeta();
+                if (meta != null && meta.CheckpointHeight == checkpoint.Height)
+                {
+                    var batch = new List<BtcHeader>(2000);
+                    for (var h = checkpoint.Height + 1; h <= meta.TipHeight; h++)
+                    {
+                        var header = BtcAttestStore.HeaderAt(h);
+                        if (header == null) break;
+                        batch.Add(header);
+                        if (batch.Count == 2000) { chain.Add(batch, out _); batch.Clear(); }
+                    }
+                    if (batch.Count > 0) chain.Add(batch, out _);
+                }
+            }
+            catch { }
+
+            var dir = Path.Combine(GetPathUtility.GetDatabasePath(), "BtcBlocks");
+            Current = new BtcLightClient(network, chain, dir);
+            return Current;
+        }
+    }
+}

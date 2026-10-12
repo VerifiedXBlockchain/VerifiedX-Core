@@ -1,0 +1,422 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Net;
+using System.Threading;
+using System.Threading.Tasks;
+using NBitcoin;
+using VerifiedXCore.Bitcoin.Attestation;
+using VerifiedXCore.Bitcoin.Attestation.Net;
+using Xunit;
+using BtcBlock = NBitcoin.Block;
+
+namespace VerifiedXCore.Tests
+{
+    /// <summary>
+    /// Bitcoin facts in consensus, part 5: the node's own view of Bitcoin (plan 2.3 and 2.5). The header chain a
+    /// validator follows, the check a fetched block must pass, and the light client that keeps both, driven here by
+    /// sources the test controls: an honest one, one that lies, one on another chain.
+    /// </summary>
+    [Collection("DbContextSequential")]
+    public class BtcAttest05_BitcoinViewTests : BtcAttestTestBase
+    {
+        private const long Checkpoint = 4032;
+        private const long First = Checkpoint + 1;
+        private readonly Btc _btc = new(Checkpoint - 11);
+        private readonly string _blockDir = Path.Combine(Path.GetTempPath(), $"btcblocks_{Guid.NewGuid():N}");
+
+        public BtcAttest05_BitcoinViewTests() : base(realMainnetRules: false)
+        {
+            _btc.MineEmpty(12);
+        }
+
+        public override void Dispose()
+        {
+            base.Dispose();
+            try { Directory.Delete(_blockDir, recursive: true); } catch { }
+        }
+
+        private BtcHeaderChain NewChain()
+        {
+            Assert.True(BtcCheckpoint.TryParse(Checkpoint, string.Concat(_btc.HeaderHexes(Checkpoint - 11, Checkpoint)), out var checkpoint, out var why), why);
+            return new BtcHeaderChain(checkpoint!, BtcChainRules.Regtest);
+        }
+
+        private static List<BtcHeader> Headers(Btc from, long first, long last) =>
+            Enumerable.Range(0, (int)(last - first + 1)).Select(i => from.Header(first + i)).ToList();
+
+        // ── The header chain ────────────────────────────────────────────────────────────────────────────────
+
+        [Fact]
+        public void TheHeaderChain_FollowsTheValidBranchWithTheMostWork()
+        {
+            var chain = NewChain();
+            Assert.Equal(Checkpoint, chain.TipHeight);
+
+            _btc.MineEmpty(5);
+            Assert.Equal(BtcHeaderAdd.Extended, chain.Add(Headers(_btc, First, First + 4), out _));
+            Assert.Equal(First + 4, chain.TipHeight);
+            Assert.Equal(BtcHeaderAdd.Nothing, chain.Add(Headers(_btc, First, First + 4), out _));
+            Assert.Equal(BtcHeaderAdd.Nothing, chain.Add(new List<BtcHeader>(), out _));
+
+            // A run that starts inside what is held and goes on.
+            _btc.MineEmpty(1);
+            Assert.Equal(BtcHeaderAdd.Extended, chain.Add(Headers(_btc, First + 2, First + 5), out _));
+            Assert.Equal(First + 5, chain.TipHeight);
+
+            // A branch of equal work changes nothing.
+            var fork = _btc.ForkAfter(First + 2);
+            fork.MineEmpty(3);
+            Assert.Equal(BtcHeaderAdd.SideBranch, chain.Add(Headers(fork, First + 3, First + 5), out _));
+            Assert.Equal(_btc.Header(First + 5).Hash, chain.Tip.Hash);
+
+            // One more block of work and it becomes the best chain.
+            fork.MineEmpty(1);
+            Assert.Equal(BtcHeaderAdd.Reorganised, chain.Add(Headers(fork, First + 3, First + 6), out _));
+            Assert.Equal(First + 6, chain.TipHeight);
+            Assert.Equal(fork.Header(First + 4).Hash, chain.At(First + 4)!.Hash);
+            Assert.Equal(_btc.Header(First + 2).Hash, chain.At(First + 2)!.Hash);
+            Assert.Null(chain.HeightOf(_btc.Header(First + 5).Hash)); // the replaced headers are gone
+            Assert.Equal(First + 6, chain.HeightOf(fork.Header(First + 6).Hash));
+            Assert.Equal(fork.HeaderHexes(First + 3, First + 6), chain.Hexes(First + 3, First + 6));
+            Assert.Empty(chain.Hexes(First + 3, First + 7)); // not all held: nothing
+
+            var locator = chain.Locator();
+            Assert.Equal(chain.Tip.Hash, locator[0]);
+            Assert.Equal(_btc.Header(Checkpoint).Hash, locator[^1]);
+        }
+
+        [Fact]
+        public void TheHeaderChain_RefusesWhatIsNotBitcoin()
+        {
+            var chain = NewChain();
+            _btc.MineEmpty(4);
+            Assert.Equal(BtcHeaderAdd.Extended, chain.Add(Headers(_btc, First, First + 3), out _));
+
+            // Another chain altogether.
+            var other = new Btc(First, time: 1_770_000_000);
+            other.MineEmpty(3);
+            Assert.Equal(BtcHeaderAdd.Unconnected, chain.Add(Headers(other, First, First + 2), out var why));
+            Assert.Contains("does not connect", why);
+
+            // A gap: the run skips a header.
+            _btc.MineEmpty(3);
+            Assert.Equal(BtcHeaderAdd.Unconnected, chain.Add(Headers(_btc, First + 5, First + 6), out _));
+
+            // A header that claims an easier target than the rules require.
+            var real = _btc.Header(First + 4);
+            Assert.True(BtcHeader.TryParse(real.Hex.Substring(0, 144) + "ffff7f21" + real.Hex.Substring(152), out var easier));
+            Assert.Equal(BtcHeaderAdd.Invalid, chain.Add(new List<BtcHeader> { easier! }, out why));
+            Assert.Contains("the rules require", why);
+            Assert.Equal(First + 3, chain.TipHeight);
+
+            // A branch that leaves the chain below the checkpoint is not followed, however long.
+            var deep = _btc.ForkAfter(Checkpoint - 1);
+            deep.MineEmpty(30);
+            Assert.Equal(BtcHeaderAdd.Unconnected, chain.Add(Headers(deep, Checkpoint, Checkpoint + 20), out why));
+            Assert.Contains("below the checkpoint", why);
+            Assert.Equal(_btc.Header(Checkpoint).Hash, chain.At(Checkpoint)!.Hash);
+        }
+
+        [Fact]
+        public void TheHeaderChain_FollowsRealMainnet_FromARealCheckpoint()
+        {
+            var known = new Dictionary<long, BtcHeader>();
+            foreach (var line in File.ReadAllLines(Path.Combine(AppContext.BaseDirectory, "Fixtures", "btc-headers-mainnet.txt")))
+            {
+                var parts = line.Split(',');
+                if (parts.Length == 2 && BtcHeader.TryParse(parts[1].Trim(), out var h)) known[long.Parse(parts[0])] = h!;
+            }
+            const long checkpointHeight = 967_680;
+            var last = known.Keys.Max();
+            var hex = string.Concat(Enumerable.Range(0, 12).Select(i => known[checkpointHeight - 11 + i].Hex));
+            Assert.True(BtcCheckpoint.TryParse(checkpointHeight, hex, out var checkpoint, out var why), why);
+            var chain = new BtcHeaderChain(checkpoint!, BtcChainRules.Mainnet);
+
+            // As a peer serves them: at most 2,000 at a time. The range crosses a difficulty change.
+            for (var from = checkpointHeight + 1; from <= last; from += 2000)
+            {
+                var run = Enumerable.Range(0, (int)Math.Min(2000, last - from + 1)).Select(i => known[from + i]).ToList();
+                Assert.Equal(BtcHeaderAdd.Extended, chain.Add(run, out why));
+            }
+            Assert.Equal(last, chain.TipHeight);
+            Assert.Equal(known[last].Hash, chain.Tip.Hash);
+
+            // Regtest headers offered on top of real Bitcoin.
+            Assert.Equal(BtcHeaderAdd.Unconnected, chain.Add(Headers(_btc, Checkpoint - 5, Checkpoint), out _));
+        }
+
+        // ── A fetched block ─────────────────────────────────────────────────────────────────────────────────
+
+        [Fact]
+        public void AFetchedBlock_MustBeTheBlockOfItsHeader()
+        {
+            var vault = ScriptOf(NewTaprootAddress());
+            var at = _btc.Mine(Pay(vault, 1_000), Pay(vault, 2_000));
+            var other = _btc.Mine(Pay(vault, 3_000));
+            var header = _btc.Header(at);
+            BtcBlock Copy(long height) => BtcBlock.Load(_btc.Block(height).ToBytes(), Network.Main);
+
+            Assert.Null(BtcBlockCheck.Verify(Copy(at), header));
+            Assert.Equal("no block", BtcBlockCheck.Verify(null, header));
+            Assert.Contains("does not carry the header", BtcBlockCheck.Verify(Copy(other), header));
+
+            // A transaction swapped for another: the header no longer commits to the content.
+            var swapped = Copy(at);
+            swapped.Transactions[1] = Pay(vault, 9_999_999);
+            Assert.Contains("Merkle root", BtcBlockCheck.Verify(swapped, header));
+
+            // Bitcoin's tree pairs the last transaction of an odd row with itself, so repeating it keeps the root.
+            var repeated = Copy(at);
+            repeated.Transactions.Add(repeated.Transactions[2]);
+            Assert.Equal(BtcMerkle.RootOf(repeated.Transactions.Select(t => t.GetHash().ToString()).ToList()), header.MerkleRoot);
+            Assert.Contains("repeats a transaction", BtcBlockCheck.Verify(repeated, header));
+
+            var noCoinbase = Copy(at);
+            noCoinbase.Transactions.RemoveAt(0);
+            Assert.Contains("not a coinbase", BtcBlockCheck.Verify(noCoinbase, header));
+        }
+
+        // ── The light client, against sources the test controls ─────────────────────────────────────────────
+
+        private sealed class Source : IBtcSource
+        {
+            private readonly Func<Btc> _chain;
+            public string Name { get; }
+            public bool IsAlive { get; set; } = true;
+            public Func<long, BtcBlock, BtcBlock?>? Tamper;
+            public int BlockRequests;
+            public bool Silent;
+
+            public Source(string name, Func<Btc> chain)
+            {
+                Name = name + " test";
+                _chain = chain;
+            }
+
+            public Task<List<BtcHeader>?> GetHeadersAsync(IReadOnlyList<string> locator, CancellationToken ct)
+            {
+                if (Silent) return Task.FromResult<List<BtcHeader>?>(null);
+                var chain = _chain();
+                foreach (var hash in locator)
+                    for (var h = chain.Tip; h >= Checkpoint - 11; h--)
+                        if (chain.Header(h).Hash == hash)
+                            return Task.FromResult<List<BtcHeader>?>(Enumerable.Range(1, (int)Math.Min(2000, chain.Tip - h)).Select(i => chain.Header(h + i)).ToList());
+                // Knows none of them: answers from its own start, as a Bitcoin node does.
+                return Task.FromResult<List<BtcHeader>?>(Enumerable.Range(0, 5).Select(i => chain.Header(Checkpoint - 11 + i)).ToList());
+            }
+
+            public Task<BtcBlock?> GetBlockAsync(string hash, CancellationToken ct)
+            {
+                BlockRequests++;
+                if (Silent) return Task.FromResult<BtcBlock?>(null);
+                var chain = _chain();
+                for (var h = chain.Tip; h >= Checkpoint - 11; h--)
+                    if (chain.Header(h).Hash == hash)
+                    {
+                        var block = BtcBlock.Load(chain.Block(h).ToBytes(), Network.Main);
+                        return Task.FromResult(Tamper == null ? block : Tamper(h, block));
+                    }
+                return Task.FromResult<BtcBlock?>(null);
+            }
+
+            public void Dispose() { IsAlive = false; }
+        }
+
+        private BtcLightClient NewClient(IReadOnlyList<Source> peers, List<IBtcSource>? fallbacks = null)
+        {
+            var endpoints = peers.Select((_, i) => new IPEndPoint(IPAddress.Parse($"10.9.0.{i + 1}"), 8333)).ToList();
+            return new BtcLightClient(Network.Main, NewChain(), _blockDir,
+                connect: (_, endpoint) => peers[endpoints.FindIndex(e => e.Equals(endpoint))],
+                discover: _ => Task.FromResult(endpoints.ToList()),
+                fallbacks: fallbacks ?? new List<IBtcSource>());
+        }
+
+        [Fact]
+        public async Task TheLightClient_SyncsHeaders_FetchesBlocksOnRequest_AndKeepsThemOnDisk()
+        {
+            var vault = ScriptOf(NewTaprootAddress());
+            _btc.MineEmpty(3);
+            var at = _btc.Mine(Pay(vault, 5_000));
+            _btc.MineEmpty(2);
+            var peer = new Source("10.9.0.1:8333", () => _btc);
+            using var client = NewClient(new[] { peer });
+
+            await client.RunOnceAsync(CancellationToken.None);
+            Assert.Equal(1, client.PeerCount);
+            Assert.Equal(_btc.Tip, client.TipHeight);
+            Assert.Equal(_btc.Header(at).Hash, client.HeaderAt(at)!.Hash);
+            Assert.Equal(0, peer.BlockRequests); // headers only until a block is asked for
+
+            Assert.Null(client.BlockAt(at)); // not fetched: queued
+            await client.RunOnceAsync(CancellationToken.None);
+            var block = client.BlockAt(at);
+            Assert.NotNull(block);
+            Assert.Null(BtcBlockCheck.Verify(block, _btc.Header(at)));
+            Assert.Equal(1, peer.BlockRequests);
+            Assert.Single(Directory.GetFiles(_blockDir, "*.blk"));
+
+            // A new process finds the block on disk and asks nobody.
+            var idle = new Source("10.9.0.1:8333", () => _btc);
+            using var restarted = NewClient(new[] { idle });
+            await restarted.RunOnceAsync(CancellationToken.None);
+            Assert.NotNull(restarted.BlockAt(at));
+            Assert.Equal(0, idle.BlockRequests);
+
+            // A file damaged on disk is not believed: it is fetched again.
+            var file = Directory.GetFiles(_blockDir, "*.blk").Single();
+            var bytes = File.ReadAllBytes(file);
+            bytes[^5] ^= 0x01;
+            File.WriteAllBytes(file, bytes);
+            using var third = NewClient(new[] { idle });
+            await third.RunOnceAsync(CancellationToken.None);
+            Assert.Null(third.BlockAt(at));
+            await third.RunOnceAsync(CancellationToken.None);
+            Assert.NotNull(third.BlockAt(at));
+            Assert.Equal(1, idle.BlockRequests);
+        }
+
+        [Fact]
+        public async Task APeerThatLies_IsDropped_AndTheBlockComesFromAnother()
+        {
+            var vault = ScriptOf(NewTaprootAddress());
+            var at = _btc.Mine(Pay(vault, 5_000), Pay(vault, 6_000));
+            _btc.MineEmpty(2);
+            var liar = new Source("10.9.0.1:8333", () => _btc)
+            {
+                // Leaves a deposit out, and repeats another so that the transaction count still looks right.
+                Tamper = (_, block) => { block.Transactions[1] = block.Transactions[2]; return block; },
+            };
+            var honest = new Source("10.9.0.2:8333", () => _btc);
+            using var client = NewClient(new[] { liar, honest });
+            await client.RunOnceAsync(CancellationToken.None);
+            Assert.Equal(2, client.PeerCount);
+
+            Assert.Null(client.BlockAt(at));
+            await client.RunOnceAsync(CancellationToken.None);
+            var block = client.BlockAt(at);
+            Assert.NotNull(block);
+            Assert.Equal(3, block!.Transactions.Count);
+            Assert.Null(BtcBlockCheck.Verify(block, _btc.Header(at)));
+            Assert.False(liar.IsAlive);
+            Assert.Contains("served a wrong block", client.LastProblem);
+        }
+
+        [Fact]
+        public async Task APeerOnAnotherChain_IsDropped_AndAFallbackServesWhenNoPeerDoes()
+        {
+            var elsewhere = new Btc(Checkpoint - 11, time: 1_770_000_000);
+            elsewhere.MineEmpty(40);
+            _btc.MineEmpty(4);
+            var stranger = new Source("10.9.0.1:8333", () => elsewhere);
+            var explorer = new Source("explorer", () => _btc);
+            using var client = NewClient(new[] { stranger }, new List<IBtcSource> { explorer });
+
+            await client.RunOnceAsync(CancellationToken.None);
+            Assert.False(stranger.IsAlive); // its headers do not connect to the checkpoint
+            Assert.Equal(0, client.PeerCount);
+            Assert.Equal(Checkpoint, client.TipHeight);
+
+            // With no peer left, the fallback keeps the header chain moving, and serves blocks.
+            await client.RunOnceAsync(CancellationToken.None);
+            Assert.Equal(_btc.Tip, client.TipHeight);
+            Assert.Null(client.BlockAt(First));
+            await client.RunOnceAsync(CancellationToken.None);
+            Assert.NotNull(client.BlockAt(First));
+        }
+
+        [Fact]
+        public async Task WhenBitcoinReorganises_TheViewFollows_AndTheLosingBlocksAreRemoved()
+        {
+            var vault = ScriptOf(NewTaprootAddress());
+            _btc.MineEmpty(2);
+            var current = _btc;
+            var peer = new Source("10.9.0.1:8333", () => current);
+            using var client = NewClient(new[] { peer });
+            var losing = _btc.Mine(Pay(vault, 5_000));
+            await client.RunOnceAsync(CancellationToken.None);
+            Assert.Null(client.BlockAt(losing));
+            await client.RunOnceAsync(CancellationToken.None);
+            Assert.NotNull(client.BlockAt(losing));
+            var losingHash = _btc.Header(losing).Hash;
+
+            var fork = _btc.ForkAfter(losing - 1);
+            fork.MineEmpty(2);
+            current = fork;
+            await client.RunOnceAsync(CancellationToken.None);
+            Assert.Equal(fork.Tip, client.TipHeight);
+            Assert.Equal(fork.Header(losing).Hash, client.HeaderAt(losing)!.Hash);
+            Assert.DoesNotContain(Directory.GetFiles(_blockDir, "*.blk"), f => f.Contains(losingHash));
+
+            Assert.Null(client.BlockAt(losing)); // the block now at that height is another block
+            await client.RunOnceAsync(CancellationToken.None);
+            Assert.Single(client.BlockAt(losing)!.Transactions); // the fork's block: a coinbase only
+        }
+
+        /// <summary>
+        /// The real thing, when asked for (set VFX_BTC_LIVE=1; it needs the Internet): real peers found through the DNS
+        /// seeds, on mainnet and on testnet4, from the real checkpoints in the fixtures. The header chain must pass the
+        /// fixture's last header and agree with it, and a recent block must arrive and check out against its header.
+        /// </summary>
+        [Fact]
+        public async Task Live_TheLightClient_FollowsRealBitcoin_OnBothNetworks()
+        {
+            if (Environment.GetEnvironmentVariable("VFX_BTC_LIVE") != "1") return;
+
+            foreach (var (network, rules, fixture, checkpointHeight) in new[]
+            {
+                (Network.Main, BtcChainRules.Mainnet, "btc-headers-mainnet.txt", 967_680L),
+                (Network.TestNet4, BtcChainRules.Testnet4, "btc-headers-testnet4.txt", 153_216L),
+            })
+            {
+                var known = new Dictionary<long, BtcHeader>();
+                foreach (var line in File.ReadAllLines(Path.Combine(AppContext.BaseDirectory, "Fixtures", fixture)))
+                {
+                    var parts = line.Split(',');
+                    if (parts.Length == 2 && BtcHeader.TryParse(parts[1].Trim(), out var h)) known[long.Parse(parts[0])] = h!;
+                }
+                var top = known.Keys.Max();
+                var hex = string.Concat(Enumerable.Range(0, 12).Select(i => known[checkpointHeight - 11 + i].Hex));
+                Assert.True(BtcCheckpoint.TryParse(checkpointHeight, hex, out var checkpoint, out var why), why);
+                var dir = Path.Combine(_blockDir, network.Name);
+                using var client = new BtcLightClient(network, new BtcHeaderChain(checkpoint!, rules), dir);
+
+                for (var i = 0; i < 8 && client.TipHeight <= top; i++)
+                    await client.RunOnceAsync(CancellationToken.None);
+                Assert.True(client.PeerCount >= 1, $"{network.Name}: no Bitcoin peer ({client.LastProblem})");
+                Assert.True(client.TipHeight > top, $"{network.Name}: headers stopped at {client.TipHeight} ({client.LastProblem})");
+                Assert.Equal(known[top].Hash, client.HeaderAt(top)!.Hash);
+
+                var recent = client.TipHeight - 3;
+                Assert.Null(client.BlockAt(recent));
+                for (var i = 0; i < 4 && client.BlockAt(recent) == null; i++)
+                    await client.RunOnceAsync(CancellationToken.None);
+                var block = client.BlockAt(recent);
+                Assert.True(block != null, $"{network.Name}: block {recent} did not arrive ({client.LastProblem})");
+                Assert.Null(BtcBlockCheck.Verify(block, client.HeaderAt(recent)!));
+                Assert.DoesNotContain(block!.Transactions, t => t.HasWitness); // asked for without witness data
+            }
+        }
+
+        [Fact]
+        public async Task OldBlocksAreRemoved_PastWhatReportBuildingCanAskFor()
+        {
+            var vault = ScriptOf(NewTaprootAddress());
+            var early = _btc.Mine(Pay(vault, 5_000));
+            var peer = new Source("10.9.0.1:8333", () => _btc);
+            using var client = NewClient(new[] { peer });
+            await client.RunOnceAsync(CancellationToken.None);
+            Assert.Null(client.BlockAt(early));
+            await client.RunOnceAsync(CancellationToken.None);
+            Assert.Single(Directory.GetFiles(_blockDir, "*.blk"));
+
+            _btc.MineEmpty(BtcLightClient.KeepBlocks);
+            await client.RunOnceAsync(CancellationToken.None);
+            Assert.Single(Directory.GetFiles(_blockDir, "*.blk")); // exactly at the edge: kept
+            _btc.MineEmpty(1);
+            await client.RunOnceAsync(CancellationToken.None);
+            Assert.Empty(Directory.GetFiles(_blockDir, "*.blk"));
+        }
+    }
+}
