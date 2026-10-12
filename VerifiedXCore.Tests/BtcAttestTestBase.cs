@@ -92,11 +92,21 @@ namespace VerifiedXCore.Tests
                 });
                 h++;
             }
+            AppliedBlocks.Clear();
+            SeedAccounts();
+        }
+
+        /// <summary>The balances the fixture starts from (state that no block of the test creates; seeded again before a replay).</summary>
+        protected virtual void SeedAccounts()
+        {
             foreach (var v in Signers)
                 StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = v.Address, Balance = 5_000M, Nonce = 0 });
             StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = Unfunded.Address, Balance = 4_999M, Nonce = 0 });
             StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = Minter.Address, Balance = 100M, Nonce = 0 });
         }
+
+        /// <summary>Every block applied by this test, in order.</summary>
+        protected static readonly List<VfxBlock> AppliedBlocks = new();
 
         public virtual void Dispose()
         {
@@ -143,6 +153,7 @@ namespace VerifiedXCore.Tests
             var block = new VfxBlock { Height = height, Hash = $"b{height}", StateRoot = "root" + height, Timestamp = TimeUtil.GetTime(), Transactions = txs.ToList() };
             Assert.True(await StateData.UpdateTreis(block));
             Globals.LastBlock = block;
+            AppliedBlocks.Add(block);
         }
 
         /// <summary>Block validation's verdict on a transaction of the block at <paramref name="height"/>.</summary>

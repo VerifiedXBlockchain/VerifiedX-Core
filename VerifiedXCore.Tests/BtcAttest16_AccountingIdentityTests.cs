@@ -64,6 +64,11 @@ namespace VerifiedXCore.Tests
             Globals.BitcoinCheckpointHeadersMainnet = string.Concat(_btc.HeaderHexes(Checkpoint - 11, Checkpoint));
             Globals.BridgeIntraBlockGuardHeight = 1;
             Globals.BootstrapCasterAddresses.Add(Caster.Address);
+        }
+
+        protected override void SeedAccounts()
+        {
+            base.SeedAccounts();
             foreach (var h in _holders)
                 StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = h.Address, Balance = 100M, Nonce = 0 });
         }
@@ -323,7 +328,9 @@ namespace VerifiedXCore.Tests
         [InlineData(4)]
         [InlineData(5)]
         [InlineData(6)]
-        public async Task TheVaultsBitcoin_AlwaysEqualsEveryonesClaims(int seed)
+        public Task TheVaultsBitcoin_AlwaysEqualsEveryonesClaims(int seed) => Run(seed);
+
+        private async Task Run(int seed)
         {
             _rng = new Random(seed);
             await Start();
@@ -356,6 +363,76 @@ namespace VerifiedXCore.Tests
 
             _out.WriteLine($"seed {seed}: " + string.Join(", ", _done.OrderBy(d => d.Key).Select(d => $"{d.Key} x{d.Value}")));
             Assert.True(_done.GetValueOrDefault("deposit") >= 2 && _done.ContainsKey("transfer") && _done.ContainsKey("request"), "the run did too little to mean anything");
+        }
+
+        // ── Replay ──────────────────────────────────────────────────────────────────────────────────────────
+
+        /// <summary>Every row of the chain-derived tables a vault's accounting lives in, as text, table by table.</summary>
+        private static Dictionary<string, List<string>> EveryTable()
+        {
+            var tables = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+            // Left out of the comparison: a row number the database hands out (it keeps counting after a wipe), and
+            // the wall-clock time a node noted when it recorded a consumed burn. Neither is read by any rule.
+            void Add(string label, LiteDB.LiteDatabase db, IEnumerable<string> collections, bool numbered = false, params string[] notCompared)
+            {
+                foreach (var name in collections.OrderBy(n => n, StringComparer.Ordinal))
+                    tables[$"{label}/{name}"] = db.GetCollection(name).FindAll().Select(d =>
+                    {
+                        if (numbered && d["_id"].IsNumber) d.Remove("_id");
+                        foreach (var field in notCompared) d.Remove(field);
+                        return LiteDB.JsonSerializer.Serialize(d);
+                    }).OrderBy(t => t, StringComparer.Ordinal).ToList();
+            }
+            Add("attestation", DbContext.DB_BtcAttest, BtcAttestStore.AllCollections);
+            Add("withdrawals and bridge", DbContext.DB_VBTCWithdrawalRequests, new[]
+            {
+                DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS, VBTCBridgeLockState.CollectionName, VBTCBridgeBtcExitState.CollectionName,
+            }, numbered: true);
+            Add("withdrawals and bridge", DbContext.DB_VBTCWithdrawalRequests, new[] { VBTCBridgeConsumedBurn.CollectionName }, numbered: true, "Timestamp");
+            Add("contract state", DbContext.DB_SmartContractStateTrei, DbContext.DB_SmartContractStateTrei.GetCollectionNames(), numbered: true);
+            tables["accounts"] = StateData.GetAccountStateTrei().FindAll().Select(a => $"{a.Key} {a.Balance} {a.Nonce}").OrderBy(t => t, StringComparer.Ordinal).ToList();
+            return tables;
+        }
+
+        /// <summary>
+        /// A node that rebuilds its state from the blocks (a resync, a replay after a fault) must arrive at the same
+        /// tables as a node that followed the chain live: the same coins, pins, settlements, voids, refunds, locks and
+        /// balances, row for row. The state is wiped the way the node wipes it before a replay, and the same blocks are
+        /// applied again.
+        /// </summary>
+        [Theory]
+        [InlineData(3)]
+        [InlineData(5)]
+        public async Task ReplayingTheSameBlocks_RebuildsTheSameState_RowForRow(int seed)
+        {
+            await Run(seed);
+            var live = EveryTable();
+            var blocks = AppliedBlocks.ToList();
+            Assert.True(blocks.Count > 50);
+            Assert.NotEmpty(live["attestation/" + BtcAttestStore.Withdrawals]);
+
+            BlockRollbackUtility.WipeChainDerivedState();
+            Assert.All(BtcAttestStore.AllCollections, name => Assert.Equal(0, DbContext.DB_BtcAttest.GetCollection(name).Count()));
+            SeedAccounts();
+            StateWriteContext.Clear();
+            Globals.LastBlock = new VerifiedXCore.Models.Block { Height = H1 - 2 };
+            foreach (var block in blocks)
+            {
+                Assert.True(await StateData.UpdateTreis(block), $"block {block.Height} did not apply on replay");
+                Globals.LastBlock = block;
+            }
+
+            var replayed = EveryTable();
+            Assert.Equal(live.Keys.OrderBy(k => k), replayed.Keys.OrderBy(k => k));
+            foreach (var (table, rows) in live)
+            {
+                var again = replayed[table];
+                var onlyLive = rows.Except(again).Take(3).ToList();
+                var onlyReplay = again.Except(rows).Take(3).ToList();
+                Assert.True(onlyLive.Count == 0 && onlyReplay.Count == 0 && rows.Count == again.Count,
+                    $"{table}: {rows.Count} rows live, {again.Count} after replay.\nOnly live:\n  {string.Join("\n  ", onlyLive)}\nOnly after replay:\n  {string.Join("\n  ", onlyReplay)}");
+            }
+            await Check("replay");
         }
 
         /// <summary>
