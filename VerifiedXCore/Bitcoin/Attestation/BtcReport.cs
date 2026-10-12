@@ -12,19 +12,22 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <summary>Their Signature field: the authority is the validator signatures inside the data.</summary>
         public const string SignatureSentinel = "BTC_ATTESTED";
 
+        /// <summary>The most headers one report may carry.</summary>
+        public const int MaxHeaders = 500;
         /// <summary>
-        /// Headers a report may carry. A report about a block carries at most this many; a report that carries headers
-        /// only (a long stretch of Bitcoin blocks with no vault activity) carries exactly this many, about three and a
-        /// half days of blocks, so that there is nothing to choose about its range.
+        /// A quiet report covers exactly this many Bitcoin blocks (about a day): when the next this-many blocks above
+        /// the events-through height hold no vault event, the signers say so once, and the events-through height moves
+        /// on. Without it a long stretch with no vault activity would leave that height, and everything measured from
+        /// it (which blocks a new vault is watched from, what a validator must keep and rescan), arbitrarily far
+        /// behind Bitcoin. The range is fixed by state, so there is nothing to choose.
         /// </summary>
-        public const int HeadersOnlyBatch = 500;
+        public const int QuietBlocks = 144;
         public const int MaxEventsPerReport = 2000;
         /// <summary>
         /// The size, in characters of canonical text without signatures, that a builder keeps one part of a report
         /// under. The transaction cap is Globals.MaxVbtcVaultTxSizeBytes (256 KB); the rest is room for signatures.
         /// </summary>
         public const int PartTextBudget = 170_000;
-        public const int MaxParts = 64;
         /// <summary>
         /// The largest coinbase transaction a report builder carries as the anchor of a block's proofs. Coinbase
         /// transactions are a few hundred bytes; above this the builder lists the block's events instead. With the
@@ -110,7 +113,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         [JsonProperty(Order = 1)] public int V { get; set; } = 1;
         /// <summary>"all" for a forward report; a vault's contract UID for a backfill report.</summary>
         [JsonProperty(Order = 2)] public string Scope { get; set; } = ScopeAll;
-        /// <summary>The Bitcoin block the events are in; 0 for a report that only carries headers.</summary>
+        /// <summary>The Bitcoin block the events are in; 0 for a quiet report or a header replacement, which carry no events.</summary>
         [JsonProperty(Order = 3)] public long BlockHeight { get; set; }
         /// <summary>
         /// Usually 0. When set, the headers do not extend the attested tip: they replace every attested header above
@@ -122,8 +125,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
         [JsonProperty(Order = 6)] public string? CoinbaseTxHex { get; set; }
         [JsonProperty(Order = 7)] public List<string>? CoinbaseBranch { get; set; }
         [JsonProperty(Order = 8)] public List<BtcReportEvent> Events { get; set; } = new();
+        /// <summary>A block with more events than one transaction holds is reported in parts, applied in order from 1.</summary>
         [JsonProperty(Order = 9)] public int Part { get; set; } = 1;
-        [JsonProperty(Order = 10)] public int Parts { get; set; } = 1;
+        /// <summary>
+        /// True on the last part of a block's report (and on every report that has only one). The parts that follow a
+        /// mined part are built from the state it left, so the number of parts is not fixed in advance.
+        /// </summary>
+        [JsonProperty(Order = 10)] public bool Final { get; set; } = true;
         /// <summary>The stored signer set the signatures are checked against.</summary>
         [JsonProperty(Order = 11)] public long SignerEpoch { get; set; }
         [JsonProperty(Order = 12)] public List<BtcReportSignature>? Signatures { get; set; }

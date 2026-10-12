@@ -20,13 +20,43 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// carries (enough to bury the block). The parts are unsigned.
         /// </summary>
         public static List<BtcReport> BuildForward(Block block, long blockHeight, IReadOnlyList<string> headers, long signerEpoch, LiteDatabase? db = null) =>
-            Build(block, blockHeight, BtcReport.ScopeAll, headers, signerEpoch, db);
+            Build(block, blockHeight, BtcReport.ScopeAll, headers, signerEpoch, db, afterPosition: -1, firstPart: 1);
+
+        /// <summary>
+        /// The rest of a block's report once some of its parts are mined: built from the state those parts left, the
+        /// events after <paramref name="afterPosition"/> only, numbered from <paramref name="nextPart"/>. Never empty:
+        /// when nothing is left, one part with no events closes the block.
+        /// </summary>
+        public static List<BtcReport> BuildForwardRest(Block block, long blockHeight, long afterPosition, int nextPart, long signerEpoch, LiteDatabase? db = null) =>
+            Build(block, blockHeight, BtcReport.ScopeAll, Array.Empty<string>(), signerEpoch, db, afterPosition, nextPart);
 
         /// <summary>The backfill report for one vault in one already-reported block; empty when the block holds nothing new for it.</summary>
         public static List<BtcReport> BuildBackfill(Block block, long blockHeight, string scUID, long signerEpoch, LiteDatabase? db = null) =>
-            Build(block, blockHeight, scUID, Array.Empty<string>(), signerEpoch, db);
+            Build(block, blockHeight, scUID, Array.Empty<string>(), signerEpoch, db, afterPosition: -1, firstPart: 1);
 
-        private static List<BtcReport> Build(Block block, long blockHeight, string scope, IReadOnlyList<string> headers, long signerEpoch, LiteDatabase? db)
+        /// <summary>
+        /// The vaults for which an already-reported block still holds something unrecorded (a deposit mined before the
+        /// vault was known, a spend of a coin recorded since). One pass, whatever the number of vaults; each vault found
+        /// then gets its own backfill report.
+        /// </summary>
+        public static List<string> VaultsWithUnrecordedEvents(Block block, long blockHeight, LiteDatabase? db = null)
+        {
+            var effects = new List<BtcCoinEffect>();
+            if (block == null || block.Transactions.Count == 0) return new List<string>();
+            var overlay = new Dictionary<string, VaultCoinStatus>(StringComparer.Ordinal);
+            for (var position = 0; position < block.Transactions.Count; position++)
+            {
+                var tx = block.Transactions[position];
+                var isCoinbase = position == 0 && tx.IsCoinBase;
+                var spends = isCoinbase ? new List<string>() : tx.Inputs.Select(i => BtcAttestStore.OutpointKey(i.PrevOut.Hash.ToString(), i.PrevOut.N)).ToList();
+                var outputs = tx.Outputs.Select((o, i) => ((long)i, o.ScriptPubKey.ToHex().ToLowerInvariant(), o.Value.Satoshi)).ToList();
+                BtcReportVerifier.DeriveEffects(tx.GetHash().ToString(), isCoinbase, spends, outputs, blockHeight, null, overlay, effects, db);
+            }
+            return effects.Select(e => e.SmartContractUID).Distinct(StringComparer.Ordinal).OrderBy(u => u, StringComparer.Ordinal).ToList();
+        }
+
+        private static List<BtcReport> Build(Block block, long blockHeight, string scope, IReadOnlyList<string> headers, long signerEpoch, LiteDatabase? db,
+            long afterPosition, int firstPart)
         {
             var result = new List<BtcReport>();
             if (block == null || block.Transactions.Count == 0) return result;
@@ -41,7 +71,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var effects = new List<BtcCoinEffect>();
             var events = new List<BtcReportEvent>();
 
-            for (var position = 0; position < block.Transactions.Count; position++)
+            // Transactions at or before afterPosition belong to parts already mined. They are skipped whole, as the
+            // verifier does: anything of theirs that is still unrecorded (a vault created since) is a backfill later.
+            for (var position = (int)Math.Max(0, afterPosition + 1); position < block.Transactions.Count; position++)
             {
                 var tx = block.Transactions[position];
                 var isCoinbase = position == 0 && tx.IsCoinBase;
@@ -74,7 +106,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     });
                 }
             }
-            if (events.Count == 0) return result;
+            if (events.Count == 0)
+            {
+                if (firstPart > 1)
+                    result.Add(new BtcReport { Scope = scope, BlockHeight = blockHeight, SignerEpoch = signerEpoch, Part = firstPart, Final = true });
+                return result;
+            }
 
             var coinbaseBranch = BtcMerkle.BranchFor(txids, 0)!;
 
@@ -101,8 +138,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
             for (var i = 0; i < result.Count; i++)
             {
-                result[i].Part = i + 1;
-                result[i].Parts = result.Count;
+                result[i].Part = firstPart + i;
+                result[i].Final = i == result.Count - 1;
                 if (result[i].Events.All(e => e.TxHex == null))
                 {
                     // Nothing in this part rests on the coinbase.
@@ -113,8 +150,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
             return result;
         }
 
-        /// <summary>A report that only carries headers: exactly <see cref="BtcAttestRules.HeadersOnlyBatch"/> of them, extending the attested tip.</summary>
-        public static BtcReport BuildHeadersOnly(IReadOnlyList<string> headers, long signerEpoch) =>
+        /// <summary>
+        /// A quiet report: the next <see cref="BtcAttestRules.QuietBlocks"/> blocks above the events-through height hold
+        /// no vault event. <paramref name="headers"/> are the headers from the attested tip + 1 through the last of
+        /// those blocks + the depth (none when they are attested already).
+        /// </summary>
+        public static BtcReport BuildQuiet(IReadOnlyList<string> headers, long signerEpoch) =>
             new() { Scope = BtcReport.ScopeAll, BlockHeight = 0, Headers = headers.ToList(), SignerEpoch = signerEpoch };
 
         /// <summary>A report that replaces the attested headers above <paramref name="replaceAbove"/> with a heavier branch.</summary>

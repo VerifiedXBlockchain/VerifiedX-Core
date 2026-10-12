@@ -92,9 +92,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public long EventsThroughHeight { get; set; }
         /// <summary>A multi-part forward report in progress: its Bitcoin block (0 when none).</summary>
         public long PendingPartBlockHeight { get; set; }
-        /// <summary>The next part expected, and how many there are in all.</summary>
+        /// <summary>The next part expected (0 when none).</summary>
         public int PendingNextPart { get; set; }
-        public int PendingParts { get; set; }
         /// <summary>The block position of the last event applied from the parts so far (parts continue in block order).</summary>
         public long PendingLastPosition { get; set; }
         public long LastModifiedHeight { get; set; }

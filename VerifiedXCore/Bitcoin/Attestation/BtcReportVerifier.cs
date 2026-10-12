@@ -32,6 +32,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public List<BtcCoinEffect> Effects { get; init; } = new();
         /// <summary>True for the last part of a forward report: the events-through height moves to the report's block.</summary>
         public bool AdvancesEventsThrough { get; init; }
+        /// <summary>For a quiet report: the height the events-through height moves to (0 otherwise).</summary>
+        public long QuietThroughHeight { get; init; }
         /// <summary>The position of the last event (parts continue in block order).</summary>
         public long LastPosition { get; init; }
 
@@ -67,10 +69,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
             // ── Shape ───────────────────────────────────────────────────────────────────────────────────────
             if (report.V != 1) return BtcReportOutcome.Fail("unknown report version");
             if (string.IsNullOrEmpty(report.Scope)) return BtcReportOutcome.Fail("a report names its scope");
-            if (report.Headers.Count > BtcAttestRules.HeadersOnlyBatch) return BtcReportOutcome.Fail($"a report carries at most {BtcAttestRules.HeadersOnlyBatch} headers");
+            if (report.Headers.Count > BtcAttestRules.MaxHeaders) return BtcReportOutcome.Fail($"a report carries at most {BtcAttestRules.MaxHeaders} headers");
             if (report.Events.Count > BtcAttestRules.MaxEventsPerReport) return BtcReportOutcome.Fail($"a report carries at most {BtcAttestRules.MaxEventsPerReport} events");
-            if (report.Parts < 1 || report.Parts > BtcAttestRules.MaxParts || report.Part < 1 || report.Part > report.Parts)
-                return BtcReportOutcome.Fail("the report's part numbers are out of range");
+            if (report.Part < 1) return BtcReportOutcome.Fail("the report's part number is out of range");
             if (report.BlockHeight < 0 || report.ReplaceAbove < 0) return BtcReportOutcome.Fail("heights cannot be negative");
             if (report.Part > 1 && (report.Headers.Count > 0 || report.ReplaceAbove != 0))
                 return BtcReportOutcome.Fail("only the first part of a report carries headers");
@@ -89,7 +90,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (report.ReplaceAbove != 0)
             {
                 // A reorganisation of headers whose blocks have had no events reported: nothing but headers changes.
-                if (report.BlockHeight != 0 || !forward || report.Events.Count != 0 || report.Parts != 1)
+                if (report.BlockHeight != 0 || !forward || report.Events.Count != 0 || report.Part != 1 || !report.Final
+                    || report.CoinbaseTxHex != null || report.CoinbaseBranch != null)
                     return BtcReportOutcome.Fail("a header replacement carries headers only");
                 if (meta.PendingNextPart != 0) return BtcReportOutcome.Fail("a header replacement cannot interrupt a multi-part report");
                 if (report.ReplaceAbove < meta.EventsThroughHeight || report.ReplaceAbove < meta.CheckpointHeight)
@@ -129,20 +131,28 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 return new BtcReportOutcome { ReportHash = hash, NewHeaders = newHeaders, ReplacesFromHeight = replacesFrom, NewTipHeight = newTip, NewTipHash = newTipHash };
             }
 
-            // ── Headers only ────────────────────────────────────────────────────────────────────────────────
+            // ── A quiet report: the next QuietBlocks blocks hold no vault event ─────────────────────────────
             if (report.BlockHeight == 0)
             {
-                if (!forward || report.Events.Count != 0 || report.Parts != 1 || report.CoinbaseTxHex != null || report.CoinbaseBranch != null)
+                if (!forward || report.Events.Count != 0 || report.Part != 1 || !report.Final || report.CoinbaseTxHex != null || report.CoinbaseBranch != null)
                     return BtcReportOutcome.Fail("a report without a block carries headers only");
-                if (report.Headers.Count != BtcAttestRules.HeadersOnlyBatch)
-                    return BtcReportOutcome.Fail($"a headers-only report carries exactly {BtcAttestRules.HeadersOnlyBatch} headers");
-                return new BtcReportOutcome { ReportHash = hash, NewHeaders = newHeaders, NewTipHeight = newTip, NewTipHash = newTipHash };
+                if (meta.PendingNextPart != 0) return BtcReportOutcome.Fail("a quiet report cannot interrupt a multi-part report");
+                // The range is fixed by state: exactly the next QuietBlocks blocks, buried like any reported block. It
+                // carries the headers that bury them and no others, so every validator builds the same report.
+                var quietThrough = meta.EventsThroughHeight + BtcAttestRules.QuietBlocks;
+                var buriedAt = quietThrough + BtcAttestRules.Depth;
+                if (report.Headers.Count != Math.Max(0, buriedAt - meta.TipHeight))
+                    return BtcReportOutcome.Fail($"a quiet report covers blocks {meta.EventsThroughHeight + 1} to {quietThrough} and carries the headers through {buriedAt}, no more and no fewer");
+                return new BtcReportOutcome { ReportHash = hash, NewHeaders = newHeaders, NewTipHeight = newTip, NewTipHash = newTipHash, QuietThroughHeight = quietThrough };
             }
 
             // ── The reported block ──────────────────────────────────────────────────────────────────────────
             var block = report.BlockHeight;
             if (block <= meta.CheckpointHeight) return BtcReportOutcome.Fail("blocks at or below the checkpoint are not reported");
-            if (report.Events.Count == 0) return BtcReportOutcome.Fail("a report about a block carries at least one event");
+            // The one report about a block that may be empty: a last part that only closes the block (what was left
+            // for it when the earlier parts were built has since been reported another way).
+            if (report.Events.Count == 0 && !(forward && report.Part > 1 && report.Final))
+                return BtcReportOutcome.Fail("a report about a block carries at least one event");
 
             VaultDepositScriptRow? scopedVault = null;
             long afterPosition = -1;
@@ -155,14 +165,14 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 }
                 else
                 {
-                    if (block != meta.PendingPartBlockHeight || report.Part != meta.PendingNextPart || report.Parts != meta.PendingParts)
-                        return BtcReportOutcome.Fail($"part {meta.PendingNextPart} of {meta.PendingParts} for block {meta.PendingPartBlockHeight} is expected next");
+                    if (block != meta.PendingPartBlockHeight || report.Part != meta.PendingNextPart)
+                        return BtcReportOutcome.Fail($"part {meta.PendingNextPart} for block {meta.PendingPartBlockHeight} is expected next");
                     afterPosition = meta.PendingLastPosition;
                 }
             }
             else
             {
-                if (report.Parts != 1) return BtcReportOutcome.Fail("a backfill report has one part");
+                if (report.Part != 1 || !report.Final) return BtcReportOutcome.Fail("a backfill report has one part");
                 scopedVault = BtcAttestStore.ScriptRowForVault(report.Scope, db);
                 if (scopedVault == null) return BtcReportOutcome.Fail($"no vault {report.Scope} is known to the Bitcoin view");
                 if (block > meta.EventsThroughHeight) return BtcReportOutcome.Fail("a backfill report is for a block whose events were already reported");
@@ -243,7 +253,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             return new BtcReportOutcome
             {
                 ReportHash = hash, NewHeaders = newHeaders, NewTipHeight = newTip, NewTipHash = newTipHash, Effects = effects,
-                AdvancesEventsThrough = forward && report.Part == report.Parts, LastPosition = lastPosition,
+                AdvancesEventsThrough = forward && report.Final, LastPosition = lastPosition,
             };
         }
 
