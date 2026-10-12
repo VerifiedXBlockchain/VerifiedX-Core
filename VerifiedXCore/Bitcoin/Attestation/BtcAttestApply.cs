@@ -36,6 +36,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     Initialize(vfxHeight, db);
                 if (BtcAttestRules.IsEpochStart(vfxHeight))
                     StoreSignerSet(vfxHeight, db);
+                BtcWithdrawals.OnBlockStart(vfxHeight, db); // requests never pinned and past their window: closed, refunded
             }
             catch (Exception ex)
             {
@@ -209,6 +210,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 }
             }
             BtcAttestStore.SaveMeta(meta, db);
+            // The coins have moved: settle what Bitcoin now shows, void what can no longer confirm, pin what was waiting.
+            BtcWithdrawals.OnCoinsChanged(outcome.Effects, tx!, vfxHeight, db);
             return outcome;
         }
 

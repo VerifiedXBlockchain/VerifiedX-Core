@@ -3280,6 +3280,13 @@ namespace VerifiedXCore.Data
             return AppendWithdrawalLedgerRow(scUID, new SmartContractStateTreiTokenizationTX { Amount = amount, FromAddress = "+", ToAddress = address });
         }
 
+        /// <summary>
+        /// The escrow refund for a withdrawal on a watched vault that will never be paid (void, expired, or cancelled
+        /// before it was pinned): decided by <see cref="VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals"/> during block application.
+        /// </summary>
+        internal static bool RefundVbtcWithdrawalEscrow(string scUID, string address, decimal amount) =>
+            WriteWithdrawalRefundCredit(scUID, address, amount);
+
         private static bool AppendWithdrawalLedgerRow(string scUID, SmartContractStateTreiTokenizationTX row)
         {
             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
@@ -3710,6 +3717,9 @@ namespace VerifiedXCore.Data
                         ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal: escrow debit could not be written for {scUID} (contract state missing)", "StateData.RequestVBTCV2Withdrawal()");
                 }
 
+                // A vault the chain watches: the Bitcoin transaction that will pay this request is fixed now, from state.
+                VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.OnRequestApplied(scUID, tx.Hash, tx.Height);
+
                 // Also update contract-level tracking for backward compatibility (local DB only — informational)
                 // Remote nodes won't have VBTCContractV2 locally, so this is conditional.
                 var contract = VBTCContractV2.GetContract(scUID);
@@ -3805,6 +3815,8 @@ namespace VerifiedXCore.Data
                             ErrorLogUtility.LogError($"RequestVBTCV2WithdrawalMulti: escrow debit could not be written for {input.SCUID} (contract state missing)", "StateData.RequestVBTCV2WithdrawalMulti()");
                     }
 
+                    VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.OnRequestApplied(input.SCUID, tx.Hash, tx.Height);
+
                     // Local-only informational contract tracking (remote nodes have no local record).
                     var contract = VBTCContractV2.GetContract(input.SCUID);
                     if (contract != null)
@@ -3832,6 +3844,10 @@ namespace VerifiedXCore.Data
         {
             try
             {
+                // A watched vault's withdrawals are completed by the Bitcoin report that shows their transaction.
+                if (VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.IsWatched(tx))
+                    return;
+
                 // Parse transaction data
                 var jobj = JObject.Parse(tx.Data);
                 var scUID = jobj["ContractUID"]?.ToObject<string?>();
@@ -3952,6 +3968,10 @@ namespace VerifiedXCore.Data
         {
             try
             {
+                // A watched vault: cancelled at once when nothing is pinned, never by vote.
+                if (VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.ApplyCancel(tx, tx.Height))
+                    return;
+
                 // VbtcCancellationVoteRulesHeight: the shared rules create the record (stamped with its mined height).
                 if (Bitcoin.Services.VBTCCancellationVoting.RulesActive(tx.Height))
                 {
@@ -4097,6 +4117,8 @@ namespace VerifiedXCore.Data
         /// </summary>
         private static void VoteOnVBTCV2Cancellation(Transaction tx)
         {
+            if (VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.IsWatched(tx))
+                return;
             try
             {
                 if (Bitcoin.Services.VBTCCancellationVoting.RulesActive(tx.Height))

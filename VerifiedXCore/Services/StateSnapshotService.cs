@@ -81,6 +81,7 @@ namespace VerifiedXCore.Services
             new SnapColl { Tag = "btctotal", SourceDb = () => DbContext.DB_BtcAttest, SourceColl = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.Totals, DiffTracked = true },
             new SnapColl { Tag = "btcmeta", SourceDb = () => DbContext.DB_BtcAttest, SourceColl = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.Meta },
             new SnapColl { Tag = "btcsigners", SourceDb = () => DbContext.DB_BtcAttest, SourceColl = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.SignerSets, DiffTracked = true },
+            new SnapColl { Tag = "btcwd", SourceDb = () => DbContext.DB_BtcAttest, SourceColl = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.Withdrawals, DiffTracked = true },
             // Shielded pool chain state (~229 KB today). CommitmentRecord mutates (IsSpent), so
             // full-copy is required for correctness anyway; promote to diff-tracking if the pool
             // ever grows into the tens of MB.

@@ -65,6 +65,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public long SpentInHeight { get; set; }
         /// <summary>The withdrawal request or bridge-exit reference the coin is pinned to.</summary>
         public string? PinnedToRef { get; set; }
+        /// <summary>
+        /// The vault's UID while the coin is Unspent, otherwise null. Indexed, so a vault's free coins are found
+        /// without reading every coin it ever held. Set by <see cref="BtcAttestStore.SaveCoin"/> from the status.
+        /// </summary>
+        public string? FreeOf { get; set; }
         public long LastModifiedHeight { get; set; }
     }
 
@@ -110,6 +115,60 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public long LastModifiedHeight { get; set; }
     }
 
+    public enum VaultWithdrawalState
+    {
+        /// <summary>Requested; the vault's free coins cannot pay it yet. No transaction is fixed and nothing is signed.</summary>
+        Waiting = 0,
+        /// <summary>Its Bitcoin transaction is fixed and its coins are held for it.</summary>
+        Pinned = 1,
+        /// <summary>Bitcoin shows its transaction: completed.</summary>
+        Settled = 2,
+        /// <summary>A pinned coin was spent by another transaction; closed and refunded.</summary>
+        Void = 3,
+        /// <summary>Never pinned within the window; closed and refunded.</summary>
+        Expired = 4,
+        /// <summary>Cancelled by its requester before it was pinned; refunded.</summary>
+        Cancelled = 5,
+    }
+
+    /// <summary>One Bitcoin transaction fixed for a withdrawal.</summary>
+    public sealed class VaultPin
+    {
+        public string Txid { get; set; } = "";
+        /// <summary>The unsigned transaction without witness data: what the vault's signers sign.</summary>
+        public string TxHex { get; set; } = "";
+        public List<string> Inputs { get; set; } = new();
+        public long DestinationSats { get; set; }
+        public long ChangeSats { get; set; }
+        public long FeeSats { get; set; }
+        public long PinnedAtVfxHeight { get; set; }
+        /// <summary>One of its coins was spent by another transaction: it can never confirm.</summary>
+        public bool Dead { get; set; }
+    }
+
+    /// <summary>
+    /// A withdrawal from a watched vault as consensus follows it (plan section 5). The id is the request's transaction
+    /// hash and the contract ("hash|scUID"): a multi-vault request has one row per vault.
+    /// </summary>
+    public sealed class VaultWithdrawalRow
+    {
+        [BsonId] public string Ref { get; set; } = "";
+        public string SmartContractUID { get; set; } = "";
+        public string RequestHash { get; set; } = "";
+        public string Requester { get; set; } = "";
+        public long AmountSats { get; set; }
+        public string DestinationScriptHex { get; set; } = "";
+        public long FeeRate { get; set; }
+        public long RequestVfxHeight { get; set; }
+        public VaultWithdrawalState State { get; set; }
+        public List<VaultPin> Pins { get; set; } = new();
+        public string? SettledTxid { get; set; }
+        public long ClosedAtVfxHeight { get; set; }
+        /// <summary>Why it is not pinned, or why it was closed. For people; nothing reads it.</summary>
+        public string? WaitingReason { get; set; }
+        public long LastModifiedHeight { get; set; }
+    }
+
     /// <summary>
     /// Reads and writes of the attestation tables. Every write goes through here and is stamped with the height of the
     /// block being applied (<see cref="StateWriteContext.StampHeight"/>), which is what the snapshot diff copies by.
@@ -123,9 +182,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public const string Totals = "btc_vault_totals";
         public const string Meta = "btc_attest_meta";
         public const string SignerSets = "btc_attest_signers";
+        public const string Withdrawals = "btc_vault_withdrawals";
 
         /// <summary>Every collection of this layer (state wipe, chain-reference migration, snapshot list).</summary>
-        public static readonly string[] AllCollections = { Headers, Scripts, Coins, Totals, Meta, SignerSets };
+        public static readonly string[] AllCollections = { Headers, Scripts, Coins, Totals, Meta, SignerSets, Withdrawals };
 
         public static LiteDatabase Db => DbContext.DB_BtcAttest;
 
@@ -137,9 +197,14 @@ namespace VerifiedXCore.Bitcoin.Attestation
             scripts.EnsureIndex(x => x.LastModifiedHeight);
             var coins = db.GetCollection<VaultCoinRow>(Coins);
             coins.EnsureIndex(x => x.SmartContractUID);
+            coins.EnsureIndex(x => x.FreeOf);
             coins.EnsureIndex(x => x.LastModifiedHeight);
             db.GetCollection<VaultDepositTotalRow>(Totals).EnsureIndex(x => x.LastModifiedHeight);
             db.GetCollection<AttestationSignerSetRow>(SignerSets).EnsureIndex(x => x.LastModifiedHeight);
+            var withdrawals = db.GetCollection<VaultWithdrawalRow>(Withdrawals);
+            withdrawals.EnsureIndex(x => x.SmartContractUID);
+            withdrawals.EnsureIndex(x => x.State);
+            withdrawals.EnsureIndex(x => x.LastModifiedHeight);
         }
 
         // ── Meta ────────────────────────────────────────────────────────────────────────────────────────────
@@ -196,6 +261,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public static List<VaultCoinRow> CoinsOf(string scUID, LiteDatabase? db = null) =>
             (db ?? Db).GetCollection<VaultCoinRow>(Coins).Find(x => x.SmartContractUID == scUID).ToList();
 
+        /// <summary>The vault's Unspent coins (not pinned, not spent).</summary>
+        public static List<VaultCoinRow> FreeCoinsOf(string scUID, LiteDatabase? db = null) =>
+            (db ?? Db).GetCollection<VaultCoinRow>(Coins).Find(x => x.FreeOf == scUID).Where(c => c.Status == VaultCoinStatus.Unspent && c.SmartContractUID == scUID).ToList();
+
         public static VaultDepositTotalRow Total(string scUID, LiteDatabase? db = null) =>
             (db ?? Db).GetCollection<VaultDepositTotalRow>(Totals).FindById(scUID) ?? new VaultDepositTotalRow { SmartContractUID = scUID };
 
@@ -208,6 +277,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         {
             var d = db ?? Db;
             coin.Outpoint = coin.Outpoint.ToLowerInvariant();
+            coin.FreeOf = coin.Status == VaultCoinStatus.Unspent ? coin.SmartContractUID : null;
             coin.LastModifiedHeight = StateWriteContext.StampHeight;
             d.GetCollection<VaultCoinRow>(Coins).Upsert(coin);
 
@@ -239,6 +309,27 @@ namespace VerifiedXCore.Bitcoin.Attestation
             row.LastModifiedHeight = StateWriteContext.StampHeight;
             (db ?? Db).GetCollection<AttestationSignerSetRow>(SignerSets).Upsert(row);
         }
+
+        // ── Withdrawals ─────────────────────────────────────────────────────────────────────────────────────
+
+        public static VaultWithdrawalRow? Withdrawal(string? reference, LiteDatabase? db = null) =>
+            string.IsNullOrEmpty(reference) ? null : (db ?? Db).GetCollection<VaultWithdrawalRow>(Withdrawals).FindById(reference);
+
+        public static void SaveWithdrawal(VaultWithdrawalRow row, LiteDatabase? db = null)
+        {
+            row.LastModifiedHeight = StateWriteContext.StampHeight;
+            (db ?? Db).GetCollection<VaultWithdrawalRow>(Withdrawals).Upsert(row);
+        }
+
+        public static List<VaultWithdrawalRow> WithdrawalsOf(string scUID, VaultWithdrawalState state, LiteDatabase? db = null) =>
+            (db ?? Db).GetCollection<VaultWithdrawalRow>(Withdrawals).Find(x => x.SmartContractUID == scUID && x.State == state).ToList();
+
+        public static List<VaultWithdrawalRow> WithdrawalsInState(VaultWithdrawalState state, LiteDatabase? db = null) =>
+            (db ?? Db).GetCollection<VaultWithdrawalRow>(Withdrawals).Find(x => x.State == state).ToList();
+
+        /// <summary>The requests still waiting for a pin that were mined before <paramref name="vfxHeight"/>.</summary>
+        public static List<VaultWithdrawalRow> WaitingWithdrawalsRequestedBefore(long vfxHeight, LiteDatabase? db = null) =>
+            (db ?? Db).GetCollection<VaultWithdrawalRow>(Withdrawals).Find(x => x.State == VaultWithdrawalState.Waiting && x.RequestVfxHeight < vfxHeight).ToList();
 
         /// <summary>Empties every table of this layer (state wipe before a replay; chain-reference migration).</summary>
         public static void WipeAll(LiteDatabase? db = null)

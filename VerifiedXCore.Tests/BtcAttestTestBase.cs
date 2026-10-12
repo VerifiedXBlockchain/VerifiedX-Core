@@ -42,6 +42,12 @@ namespace VerifiedXCore.Tests
         private readonly long _priorEnforce = Globals.BitcoinAttestationHeight;
         private readonly long _priorCheckpointHeight = Globals.BitcoinCheckpointHeightMainnet;
         private readonly string _priorCheckpointHeaders = Globals.BitcoinCheckpointHeadersMainnet;
+        // The withdrawal rules that both networks are already past. The recording height is always above them.
+        private readonly long[] _priorWithdrawalGates =
+        {
+            Globals.WithdrawalEscrowHeight, Globals.V2WithdrawalExpiryFixHeight, Globals.V2WithdrawalOwnerAddBackFixHeight,
+            Globals.VbtcWithdrawalConcurrencyHeight, Globals.VbtcCancellationVoteRulesHeight, Globals.WithdrawalUniqueIdRulesHeight,
+        };
 
         /// <summary>Four registered validators that hold the validator balance.</summary>
         protected readonly List<V> Signers = Enumerable.Range(0, 4).Select(_ => NewKey()).ToList();
@@ -59,6 +65,12 @@ namespace VerifiedXCore.Tests
             Globals.BitcoinAttestationRecordHeight = H1;
             BtcChainRules.OverrideForTests = realMainnetRules ? null : BtcChainRules.Regtest;
             BtcAttestRules.DepthOverride = realMainnetRules ? null : 3;
+            Globals.WithdrawalEscrowHeight = 1;
+            Globals.V2WithdrawalExpiryFixHeight = 1;
+            Globals.V2WithdrawalOwnerAddBackFixHeight = 1;
+            Globals.VbtcWithdrawalConcurrencyHeight = 1;
+            Globals.VbtcCancellationVoteRulesHeight = 1;
+            Globals.WithdrawalUniqueIdRulesHeight = 1;
             StateWriteContext.Clear();
             DbContext.Initialize();
             Globals.LastBlock = new VfxBlock { Height = H1 - 2 }; // a chain two blocks short of the recording height
@@ -97,6 +109,12 @@ namespace VerifiedXCore.Tests
             Globals.BitcoinAttestationHeight = _priorEnforce;
             Globals.BitcoinCheckpointHeightMainnet = _priorCheckpointHeight;
             Globals.BitcoinCheckpointHeadersMainnet = _priorCheckpointHeaders;
+            Globals.WithdrawalEscrowHeight = _priorWithdrawalGates[0];
+            Globals.V2WithdrawalExpiryFixHeight = _priorWithdrawalGates[1];
+            Globals.V2WithdrawalOwnerAddBackFixHeight = _priorWithdrawalGates[2];
+            Globals.VbtcWithdrawalConcurrencyHeight = _priorWithdrawalGates[3];
+            Globals.VbtcCancellationVoteRulesHeight = _priorWithdrawalGates[4];
+            Globals.WithdrawalUniqueIdRulesHeight = _priorWithdrawalGates[5];
             Globals.IsTestNet = _priorTestNet;
             Globals.LastBlock = _priorLastBlock;
             Globals.CustomPath = _priorCustomPath;

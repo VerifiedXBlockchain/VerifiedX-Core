@@ -286,6 +286,15 @@ namespace VerifiedXCore.Services
             if (VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(txRequest.TransactionType))
                 return await VerifiedXCore.Bitcoin.Attestation.BtcAttestTxValidator.Verify(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1), blockDownloads, admission: blockHeight == null);
 
+            // Withdrawals on a vault the chain watches: no completion transaction, no vote, cancellation only before
+            // the Bitcoin transaction is fixed, and a destination that is a Bitcoin address.
+            var watchedWithdrawalRefusal = VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.Refusal(txRequest);
+            if (watchedWithdrawalRefusal != null)
+                return (false, watchedWithdrawalRefusal);
+            // A cancellation on such a vault has passed its whole rule just above; the vote-based rules below are not its.
+            var watchedCancel = txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL
+                && VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.IsWatched(txRequest);
+
             var accStTrei = StateData.GetAccountStateTrei();
             var from = StateData.GetSpecificAccountStateTrei(txRequest.FromAddress);
 
@@ -3569,7 +3578,7 @@ namespace VerifiedXCore.Services
             // for validation, apply and the store rebuild). Below it the legacy checks that follow apply unchanged.
             var cancelVoteHeight = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
             var cancelVoteRulesActive = Bitcoin.Services.VBTCCancellationVoting.RulesActive(cancelVoteHeight);
-            if (cancelVoteRulesActive && (txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL
+            if (cancelVoteRulesActive && !watchedCancel && (txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL
                                           || txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE))
             {
                 try
@@ -3587,7 +3596,7 @@ namespace VerifiedXCore.Services
                 }
             }
 
-            if (!cancelVoteRulesActive && txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
+            if (!cancelVoteRulesActive && !watchedCancel && txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
             {
                 if (!string.IsNullOrWhiteSpace(txRequest.Data))
                 {

@@ -419,6 +419,7 @@ namespace VerifiedXCore.Tests
             BtcAttestStore.SaveCoin(coin, null);
             BtcAttestStore.SaveMeta(new AttestationMetaRow { CheckpointHeight = 800, TipHeight = 900, TipHash = first!.Hash, EventsThroughHeight = 900 });
             BtcAttestStore.SaveSignerSet(new AttestationSignerSetRow { Epoch = 0, AtVfxHeight = 30, Addresses = new List<string> { "a", "b", "c" } });
+            BtcAttestStore.SaveWithdrawal(new VaultWithdrawalRow { Ref = "req|v:1", SmartContractUID = "v:1", RequestHash = "req", Requester = "alice", AmountSats = 4_000, State = VaultWithdrawalState.Waiting, RequestVfxHeight = 35 });
             StateWriteContext.Clear();
 
             await StateSnapshotService.UpdateCycleAsync(40);
@@ -430,6 +431,10 @@ namespace VerifiedXCore.Tests
             BtcAttestStore.SaveHeader(901, second!, 45);
             BtcAttestStore.SaveMeta(new AttestationMetaRow { CheckpointHeight = 800, TipHeight = 901, TipHash = second!.Hash, EventsThroughHeight = 901 });
             BtcAttestStore.SaveSignerSet(new AttestationSignerSetRow { Epoch = 1, AtVfxHeight = 45, Addresses = new List<string> { "a", "b", "c", "d" } });
+            var pinned = BtcAttestStore.Withdrawal("req|v:1")!;
+            pinned.State = VaultWithdrawalState.Pinned;
+            pinned.Pins.Add(new VaultPin { Txid = "bb", TxHex = "00", Inputs = new List<string> { "aa:0" }, DestinationSats = 3_000, FeeSats = 1_000, PinnedAtVfxHeight = 45 });
+            BtcAttestStore.SaveWithdrawal(pinned);
             StateWriteContext.Clear();
             Assert.Equal(0, BtcAttestStore.Total("v:1").HeldSats);
 
@@ -447,6 +452,8 @@ namespace VerifiedXCore.Tests
             Assert.Equal(second.Hash, BtcAttestStore.HeaderAt(901)!.Hash);
             Assert.Equal(901, BtcAttestStore.GetMeta()!.TipHeight);
             Assert.Equal(4, BtcAttestStore.SignerSet(1)!.Addresses.Count);
+            Assert.Equal("bb", Assert.Single(BtcAttestStore.Withdrawal("req|v:1")!.Pins).Txid);
+            Assert.Empty(BtcAttestStore.FreeCoinsOf("v:1"));
 
             Accounts().DeleteAllSafe();
             BtcAttestStore.WipeAll();
@@ -460,6 +467,9 @@ namespace VerifiedXCore.Tests
             Assert.Equal(900, meta.EventsThroughHeight);
             Assert.Equal(new[] { "a", "b", "c" }, BtcAttestStore.SignerSet(0)!.Addresses);
             Assert.Null(BtcAttestStore.SignerSet(1));
+            Assert.Equal(VaultWithdrawalState.Waiting, BtcAttestStore.Withdrawal("req|v:1")!.State);
+            Assert.Empty(BtcAttestStore.Withdrawal("req|v:1")!.Pins);
+            Assert.Equal("aa:0", Assert.Single(BtcAttestStore.FreeCoinsOf("v:1")).Outpoint); // found through its index after the restore
             Assert.Equal("v:1", BtcAttestStore.ScriptRow("5120aa")!.SmartContractUID);
         }
 
