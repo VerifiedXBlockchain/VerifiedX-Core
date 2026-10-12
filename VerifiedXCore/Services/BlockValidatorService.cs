@@ -938,6 +938,7 @@ namespace VerifiedXCore.Services
                         var blockBridgeState = new Bitcoin.Services.BridgeIntraBlockGuard.State();
                         // NEW-07: one running debit per (ledger, contract, holder) across every debit-writing type.
                         var blockDebitState = new SameBlockDebitGuard.State { BlockHeight = block.Height };
+                        var blockAttestState = new VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.State(); // one Bitcoin report per block
                         var uniqueAddresses = block.Transactions
                             .Where(x => x.FromAddress != "Coinbase_TrxFees" && x.FromAddress != "Coinbase_BlkRwd")
                             .Select(x => x.FromAddress)
@@ -1024,6 +1025,12 @@ namespace VerifiedXCore.Services
                                     if (!debitOk) effectiveTxResult = (false, debitReason);
                                 }
 
+                                if (effectiveTxResult.Item1)
+                                {
+                                    var (attestOk, attestReason) = VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.TryRegister(blkTransaction, blockAttestState);
+                                    if (!attestOk) effectiveTxResult = (false, attestReason);
+                                }
+
                                 // Bridge: one redemption per Base burn and one draw per lock within a block
                                 // (height-gated; see Globals.BridgeIntraBlockGuardHeight).
                                 if (effectiveTxResult.Item1 && block.Height >= Globals.BridgeIntraBlockGuardHeight
@@ -1076,7 +1083,8 @@ namespace VerifiedXCore.Services
                                     blkTransaction.TransactionType != TransactionType.VFX_PRIVATE_TRANSFER &&
                                     blkTransaction.TransactionType != TransactionType.VBTC_V2_SHIELD &&
                                     blkTransaction.TransactionType != TransactionType.VBTC_V2_UNSHIELD &&
-                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_PRIVATE_TRANSFER)
+                                    blkTransaction.TransactionType != TransactionType.VBTC_V2_PRIVATE_TRANSFER &&
+                                    !VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(blkTransaction.TransactionType))
                                 {
                                     if (blkTransaction.Data != null)
                                     {
@@ -2001,6 +2009,7 @@ namespace VerifiedXCore.Services
                 var blockPrivateNullifierKeys = new HashSet<string>();
                 var blockBridgeStateTask = new Bitcoin.Services.BridgeIntraBlockGuard.State();
                 var blockDebitStateTask = new SameBlockDebitGuard.State { BlockHeight = block.Height }; // NEW-07
+                var blockAttestStateTask = new VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.State(); // one Bitcoin report per block
                 LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13
                 foreach (Transaction transaction in block.Transactions)
                 {
@@ -2023,6 +2032,11 @@ namespace VerifiedXCore.Services
                         {
                             var (debitOk, debitReason) = SameBlockDebitGuard.TryRegister(transaction, blockDebitStateTask);
                             if (!debitOk) effectiveTxResult = (false, debitReason);
+                        }
+                        if (effectiveTxResult.Item1)
+                        {
+                            var (attestOk, attestReason) = VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.TryRegister(transaction, blockAttestStateTask);
+                            if (!attestOk) effectiveTxResult = (false, attestReason);
                         }
                         rejectBlock = effectiveTxResult.Item1 == false ? rejectBlock = true : false;
                         if (rejectBlock)

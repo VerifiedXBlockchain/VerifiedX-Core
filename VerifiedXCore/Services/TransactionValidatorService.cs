@@ -281,6 +281,11 @@ namespace VerifiedXCore.Services
             if (PrivateTransactionTypes.IsPrivateTransaction(txRequest.TransactionType))
                 return await PrivateTransactionValidatorService.VerifyPrivateTX(txRequest, blockDownloads, blockVerify, twSkipVerify, processedNonces, skipPrivatePlonkProofVerification, blockHeight);
 
+            // Bitcoin attestation: sender-less transactions with their own rules, judged from chain state alone. Block
+            // validation passes the block's height; admission the height the transaction would be mined at.
+            if (VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(txRequest.TransactionType))
+                return await VerifiedXCore.Bitcoin.Attestation.BtcAttestTxValidator.Verify(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1), blockDownloads, admission: blockHeight == null);
+
             var accStTrei = StateData.GetAccountStateTrei();
             var from = StateData.GetSpecificAccountStateTrei(txRequest.FromAddress);
 

@@ -1,0 +1,151 @@
+using VerifiedXCore.Data;
+using VerifiedXCore.Models;
+using VerifiedXCore.Services;
+using VerifiedXCore.Utilities;
+
+namespace VerifiedXCore.Bitcoin.Attestation
+{
+    /// <summary>
+    /// Admission and block-validation rules for the attestation transactions (plan sections 3.1 and 6). These
+    /// transactions have no sender: their authority is the validator signatures inside the data. Everything here reads
+    /// chain state only, so the mempool, the block builder and block validation always agree.
+    /// </summary>
+    public static class BtcAttestTxValidator
+    {
+        /// <summary>Builds the transaction that carries <paramref name="canonicalData"/> (a report's canonical text).</summary>
+        public static Transaction Create(TransactionType type, string canonicalData, long? timestamp = null)
+        {
+            var tx = new Transaction
+            {
+                Timestamp = timestamp ?? TimeUtil.GetTime(),
+                FromAddress = BtcAttestRules.SystemAddress,
+                ToAddress = BtcAttestRules.SystemAddress,
+                Amount = 0.0M, // one decimal place, like every transaction: the hash text survives a JSON round trip
+                Fee = 0.0M,
+                Nonce = 0,
+                TransactionType = type,
+                Data = canonicalData,
+                Signature = BtcAttestRules.SignatureSentinel,
+            };
+            tx.Build();
+            return tx;
+        }
+
+        /// <param name="height">The block's height in block validation; the height it would be mined at (tip + 1) at admission.</param>
+        /// <param name="admission">True when the transaction is being judged for the mempool or for a block proposal,
+        /// false in block validation. Only admission reads the mempool.</param>
+        public static async Task<(bool, string)> Verify(Transaction tx, long height, bool blockDownloads, bool admission = false)
+        {
+            if (!BtcAttestRules.Recording(height))
+                return (false, "Bitcoin attestation transactions are not accepted before the recording height.");
+
+            // ── The envelope: no sender, no value, no fee ────────────────────────────────────────────────────
+            if (tx.FromAddress != BtcAttestRules.SystemAddress || tx.ToAddress != BtcAttestRules.SystemAddress)
+                return (false, $"A Bitcoin attestation transaction is from and to {BtcAttestRules.SystemAddress}.");
+            if (tx.Amount != 0M || tx.Fee != 0M || tx.Nonce != 0)
+                return (false, "A Bitcoin attestation transaction carries no amount, no fee and nonce 0.");
+            if (tx.Signature != BtcAttestRules.SignatureSentinel)
+                return (false, "A Bitcoin attestation transaction carries the attestation sentinel as its signature.");
+            if (tx.UnlockTime != null)
+                return (false, "A Bitcoin attestation transaction has no unlock time.");
+            if (string.IsNullOrEmpty(tx.Data))
+                return (false, "A Bitcoin attestation transaction carries data.");
+            if (!TransactionValidatorService.VerifyTXSize(tx, Globals.MaxVbtcVaultTxSizeBytes))
+                return (false, $"This transaction is too large. Max size allowed is {Globals.MaxVbtcVaultTxSizeBytes / 1024} kb.");
+            if (!string.Equals(tx.Hash, tx.GetHash(), StringComparison.Ordinal))
+                return (false, "This transaction's hash is not the hash of its content.");
+
+            if (!blockDownloads)
+            {
+                if (await TransactionData.IsTxTimestampStale(tx, allowHistorical: false))
+                    return (false, "The timestamp of this transaction is too old or too far in the future.");
+            }
+
+            switch (tx.TransactionType)
+            {
+                case TransactionType.VBTC_V2_BTC_REPORT:
+                {
+                    if (!BtcReport.TryParse(tx.Data, out var report, out var parseReason) || report == null)
+                        return (false, parseReason ?? "The Bitcoin report does not parse.");
+                    var outcome = BtcReportVerifier.Verify(report, height);
+                    if (!outcome.Ok)
+                        return (false, $"Bitcoin report refused: {outcome.Error}");
+                    if (admission && EarlierCopyInMempool(tx, outcome.ReportHash, height))
+                        return (false, "This Bitcoin report is already in the mempool.");
+                    return (true, "Transaction has been verified.");
+                }
+                default:
+                    return (false, "This Bitcoin attestation transaction type is not enabled yet.");
+            }
+        }
+
+        /// <summary>
+        /// A report carries no fee and no sender signature, and the same signed report can be wrapped in any number of
+        /// transactions (another timestamp, another choice among the signatures). The mempool keeps one per report: the
+        /// earliest by timestamp, then by hash. Every node applies the same order, so they settle on the same copy.
+        /// A copy counts only while its own signatures are good: the content is the same report just verified, so that
+        /// is all that can differ, and a copy that cannot be mined must not hold a good one out.
+        /// A mempool rule only: block validation never reads the mempool.
+        /// </summary>
+        private static bool EarlierCopyInMempool(Transaction tx, string reportHash, long height)
+        {
+            try
+            {
+                var pending = TransactionData.GetPool().Find(x => x.TransactionType == TransactionType.VBTC_V2_BTC_REPORT).ToList();
+                foreach (var other in pending)
+                {
+                    if (string.Equals(other.Hash, tx.Hash, StringComparison.Ordinal)) continue;
+                    var earlier = other.Timestamp < tx.Timestamp
+                        || (other.Timestamp == tx.Timestamp && string.CompareOrdinal(other.Hash, tx.Hash) < 0);
+                    if (!earlier) continue;
+                    if (BtcReport.TryParse(other.Data, out var held, out _) && held != null && held.Hash() == reportHash
+                        && BtcReportVerifier.CheckSignatures(held, reportHash, height) == null)
+                        return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// What a block may carry of these transactions. A report is verified against the state before the block; two reports
+    /// in one block would each be valid on their own and the second could find the first has moved the state under it.
+    /// One report per block keeps "valid when validated" equal to "valid when applied" (a Bitcoin block arrives every
+    /// ten minutes, a VFX block every twelve seconds).
+    /// </summary>
+    public static class BtcAttestBlockRules
+    {
+        public sealed class State
+        {
+            public string? ReportHash;
+        }
+
+        public const string OneReportReason = "A block carries at most one Bitcoin report.";
+
+        public static (bool Ok, string Reason) TryRegister(Transaction tx, State state)
+        {
+            if (tx.TransactionType != TransactionType.VBTC_V2_BTC_REPORT) return (true, "");
+            if (state.ReportHash != null) return (false, OneReportReason);
+            state.ReportHash = tx.Hash;
+            return (true, "");
+        }
+
+        /// <summary>Block building: the first report stays, later ones wait in the mempool for the next block.</summary>
+        public static List<Transaction> KeepOneReport(List<Transaction> approved)
+        {
+            var seen = false;
+            var kept = new List<Transaction>(approved.Count);
+            foreach (var tx in approved)
+            {
+                if (tx.TransactionType == TransactionType.VBTC_V2_BTC_REPORT)
+                {
+                    if (seen) continue;
+                    seen = true;
+                }
+                kept.Add(tx);
+            }
+            return kept;
+        }
+    }
+}

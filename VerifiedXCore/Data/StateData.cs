@@ -139,6 +139,7 @@ namespace VerifiedXCore.Data
             LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13: every apply path uses the block's height
             await ApplyForgedVfxBurnsAsync(block); // fund-loss audit item 1 (burn): at ForgedVfxBurnHeight, before the block's transactions
             PrivacyEpochService.ApplyIfResetBlock(block); // fund-loss audit item 1 (stage 2): shielded pools restart at PrivateTxProofRulesHeight
+            VerifiedXCore.Bitcoin.Attestation.BtcAttestApply.OnBlockStart(block.Height); // Bitcoin attestation: the checkpoint at the recording height, the signer set at each epoch
             var txList = block.Transactions.ToList();
             var txCount = txList.Count();
             int txTreiUpdateSuccessCount = 0;
@@ -166,8 +167,10 @@ namespace VerifiedXCore.Data
                     else
                     {
                         // ZK private txs use FromAddress Shielded_Pool with nonce 0 — skip AccountStateTrei from updates.
+                        // Bitcoin attestation transactions have no sender: no account, no nonce, no fee.
                         if (tx.FromAddress != "Coinbase_TrxFees" && tx.FromAddress != "Coinbase_BlkRwd"
-                            && !PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType))
+                            && !PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType)
+                            && !VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(tx.TransactionType))
                         {
                             var from = GetSpecificAccountStateTrei(tx.FromAddress);
 
@@ -332,6 +335,8 @@ namespace VerifiedXCore.Data
                                 {
                                     case "Mint()":
                                         AddNewlyMintedContract(tx);
+                                        // A vault created from the recording height on has its deposit script watched.
+                                        VerifiedXCore.Bitcoin.Attestation.BtcAttestApply.RegisterVaultIfAny(scUID, block.Height);
                                         break;
                                     case "Update()":
                                         UpdateSmartContract(tx);
@@ -696,6 +701,9 @@ namespace VerifiedXCore.Data
 
                     if (PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType))
                         await PrivateTxLedgerService.ApplyBlockTransactionAsync(tx, block);
+
+                    if (tx.TransactionType == TransactionType.VBTC_V2_BTC_REPORT)
+                        VerifiedXCore.Bitcoin.Attestation.BtcAttestApply.ApplyReport(tx, block.Height);
 
                     txTreiUpdateSuccessCount += 1;
                 }

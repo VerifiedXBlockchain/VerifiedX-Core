@@ -622,7 +622,8 @@ namespace VerifiedXCore.Data
                                 tx.TransactionType != TransactionType.VFX_PRIVATE_TRANSFER &&
                                 tx.TransactionType != TransactionType.VBTC_V2_SHIELD &&
                                 tx.TransactionType != TransactionType.VBTC_V2_UNSHIELD &&
-                                tx.TransactionType != TransactionType.VBTC_V2_PRIVATE_TRANSFER)
+                                tx.TransactionType != TransactionType.VBTC_V2_PRIVATE_TRANSFER &&
+                                !VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(tx.TransactionType))
                             {
                                 var scInfo = TransactionUtility.GetSCTXFunctionAndUID(tx);
                                 if (!scInfo.Item1)
@@ -999,7 +1000,9 @@ namespace VerifiedXCore.Data
                                 // ZK-authorized private TXs (z2z, z2t) use PLONK sentinel signature
                                 // and FromAddress = Shielded_Pool — skip ECDSA sig + balance check.
                                 // VerifyTX delegates to PrivateTransactionValidatorService for proof verification.
-                                bool isZkPrivate = PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType);
+                                // Bitcoin attestation transactions have no sender either: VerifyTX checks their validator signatures.
+                                bool isZkPrivate = PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType)
+                                    || VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(tx.TransactionType);
 
                                 bool passedPreCheck;
                                 if (isZkPrivate)
@@ -1192,7 +1195,7 @@ namespace VerifiedXCore.Data
             // see BlockValidatorService). Keep the first; drop a later one AND that sender's later transactions so the
             // proposal has no nonce gap. The dropped creation stays in the mempool and fails as "already deployed".
             // NEW-07: likewise for debits that together overspend a holder's balance on one contract.
-            return SameBlockDebitGuard.DropSameBlockOverspends(DropDuplicateContractCreations(approvedMemPoolList));
+            return VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.KeepOneReport(SameBlockDebitGuard.DropSameBlockOverspends(DropDuplicateContractCreations(approvedMemPoolList)));
         }
 
         public static List<Transaction> DropDuplicateContractCreations(List<Transaction> approved)
@@ -1341,7 +1344,8 @@ namespace VerifiedXCore.Data
                 tx.TransactionType != TransactionType.VFX_PRIVATE_TRANSFER &&
                 tx.TransactionType != TransactionType.VBTC_V2_SHIELD &&
                 tx.TransactionType != TransactionType.VBTC_V2_UNSHIELD &&
-                tx.TransactionType != TransactionType.VBTC_V2_PRIVATE_TRANSFER)
+                tx.TransactionType != TransactionType.VBTC_V2_PRIVATE_TRANSFER &&
+                !VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(tx.TransactionType))
             {
                 if(tx.Data != null)
                 {
