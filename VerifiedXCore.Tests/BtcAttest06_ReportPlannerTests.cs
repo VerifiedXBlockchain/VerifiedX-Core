@@ -312,21 +312,100 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public async Task AReorganisationBelowTheReportedEvents_StopsReports_AndSaysWhy()
+        public async Task AReorganisationBelowTheReportedEvents_IsARewind_AndTheNewBranchIsReportedFromThere()
         {
             await Start();
             var vault = await CreateVault(H1 + 1);
-            var at = _btc.Mine(Pay(vault.Script, 150_000));
+            var deposit = Pay(vault.Script, 150_000);
+            var at = _btc.Mine(deposit);
             _btc.MineEmpty(BtcAttestRules.Depth);
             var view = new View(_btc);
             Assert.Single(await Drive(view));
+            Assert.Equal(150_000, BtcAttestStore.Total(vault.Uid).HeldSats);
 
-            var fork = _btc.ForkAfter(at - 1); // the deposit's own block is gone
-            fork.MineEmpty(10);
+            // The deposit's own block is gone. The other branch is, so far, as long as what it replaces: no heavier.
+            var fork = _btc.ForkAfter(at - 1);
+            fork.MineEmpty(BtcAttestRules.Depth + 1);
             view.Chain = fork;
             var plan = _planner.Plan(view, Tip);
             Assert.Empty(plan.Reports);
-            Assert.Contains("deep-reorganisation", plan.Waiting);
+            Assert.Contains("does not yet carry more work", plan.Waiting);
+
+            // It grows. The validators sign a rewind to the last shared block, with the fewest headers that outweigh
+            // the ones replaced; every validator on that branch builds the same bytes.
+            fork.MineEmpty(6);
+            var planned = Assert.Single(_planner.Plan(view, Tip).Reports);
+            Assert.Equal(BtcPlannedReport.Rewind, planned.Kind);
+            Assert.True(planned.Report.Rewind);
+            Assert.Equal(at - 1, planned.Report.ReplaceAbove);
+            Assert.Equal(fork.HeaderHexes(at, at + BtcAttestRules.Depth + 1), planned.Report.Headers);
+            Assert.Equal(planned.Report.Hash(), Assert.Single(new BtcReportPlanner().Plan(view, Tip).Reports).Report.Hash());
+
+            Assert.Equal(new[] { BtcPlannedReport.Rewind }, await Drive(view));
+            Assert.Equal(at - 1, Meta.EventsThroughHeight);
+            Assert.Equal(fork.Header(Meta.TipHeight).Hash, Meta.TipHash);
+            Assert.Equal(0, BtcAttestStore.Total(vault.Uid).HeldSats);
+            Assert.Equal(VaultCoinStatus.Orphaned, BtcAttestStore.Coin(Outpoint(deposit, 0))!.Status);
+
+            // The deposit confirms again on the new branch, in a later block: reported like any other block.
+            var again = fork.Mine(deposit);
+            fork.MineEmpty(BtcAttestRules.Depth);
+            Assert.Equal(new[] { BtcPlannedReport.Forward }, await Drive(view));
+            Assert.Equal(again, BtcAttestStore.Coin(Outpoint(deposit, 0))!.CreatedInHeight);
+            Assert.Equal(VaultCoinStatus.Unspent, BtcAttestStore.Coin(Outpoint(deposit, 0))!.Status);
+            Assert.Equal(150_000, BtcAttestStore.Total(vault.Uid).HeldSats);
+            Assert.Equal(again, Meta.EventsThroughHeight);
+        }
+
+        [Fact]
+        public async Task WhenBitcoinDropsABlockWhoseReportIsUnderWay_TheMinedPartsAreTakenBack()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var at = _btc.Mine(Enumerable.Range(0, 450).Select(i => Pay(vault.Script, 1_000 + i)).ToArray());
+            _btc.MineEmpty(BtcAttestRules.Depth);
+            var view = new View(_btc);
+            Assert.Equal(new[] { BtcPlannedReport.Forward }, await Drive(view, most: 1));     // the first part only
+            Assert.Equal(2, Meta.PendingNextPart);
+            Assert.Equal(at, Meta.PendingPartBlockHeight);
+            Assert.True(BtcAttestStore.Total(vault.Uid).HeldSats > 0);
+            Assert.True(Meta.EventsThroughHeight < at);
+
+            var fork = _btc.ForkAfter(at - 1);
+            fork.MineEmpty(BtcAttestRules.Depth + 3);
+            view.Chain = fork;
+            // Its remaining parts can never be built (the block is gone), and its first part's coins do not exist.
+            Assert.Equal(new[] { BtcPlannedReport.Rewind }, await Drive(view));
+            Assert.Equal(0, Meta.PendingNextPart);
+            Assert.Equal(0, Meta.PendingPartBlockHeight);
+            Assert.Equal(0, BtcAttestStore.Total(vault.Uid).HeldSats);
+            Assert.All(BtcAttestStore.CoinsOf(vault.Uid), c => Assert.Equal(VaultCoinStatus.Orphaned, c.Status));
+            Assert.Equal(fork.Header(Meta.TipHeight).Hash, Meta.TipHash);
+        }
+
+        [Fact]
+        public async Task WhenBitcoinReorganisesAboveABlockWhoseReportIsUnderWay_TheBlockIsFinishedFirst()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var at = _btc.Mine(Enumerable.Range(0, 450).Select(i => Pay(vault.Script, 1_000 + i)).ToArray());
+            _btc.MineEmpty(BtcAttestRules.Depth);
+            var view = new View(_btc);
+            Assert.Equal(new[] { BtcPlannedReport.Forward }, await Drive(view, most: 1));
+            Assert.Equal(2, Meta.PendingNextPart);
+
+            // The block itself stays; two of the blocks that buried it are replaced.
+            var fork = _btc.ForkAfter(at + 1);
+            fork.MineEmpty(BtcAttestRules.Depth + 2);
+            view.Chain = fork;
+            var kinds = await Drive(view);
+            Assert.True(kinds.Count >= 2);
+            Assert.All(kinds.Take(kinds.Count - 1), k => Assert.Equal(BtcPlannedReport.Part, k));
+            Assert.Equal(BtcPlannedReport.Replacement, kinds[^1]);
+            Assert.Equal(0, Meta.PendingNextPart);
+            Assert.Equal(at, Meta.EventsThroughHeight);
+            Assert.Equal(450, BtcAttestStore.CoinsOf(vault.Uid).Count(c => c.Status == VaultCoinStatus.Unspent));
+            Assert.Equal(fork.Header(Meta.TipHeight).Hash, Meta.TipHash);
         }
 
         // ── Everything together ─────────────────────────────────────────────────────────────────────────────

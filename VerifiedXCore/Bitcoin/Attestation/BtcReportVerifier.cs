@@ -36,6 +36,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public long QuietThroughHeight { get; init; }
         /// <summary>The position of the last event (parts continue in block order).</summary>
         public long LastPosition { get; init; }
+        /// <summary>True for a rewind: the events of every block from <see cref="ReplacesFromHeight"/> up are taken back.</summary>
+        public bool IsRewind { get; init; }
 
         public bool Ok => Error == null;
         internal static BtcReportOutcome Fail(string reason) => new() { Error = reason };
@@ -68,6 +70,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
             // ── Shape ───────────────────────────────────────────────────────────────────────────────────────
             if (report.V != 1) return BtcReportOutcome.Fail("unknown report version");
+            if (report.Rewind != null) return BtcReportOutcome.Fail("a rewind is carried by its own transaction type, not by a report");
             if (string.IsNullOrEmpty(report.Scope)) return BtcReportOutcome.Fail("a report names its scope");
             if (report.Headers.Count > BtcAttestRules.MaxHeaders) return BtcReportOutcome.Fail($"a report carries at most {BtcAttestRules.MaxHeaders} headers");
             if (report.Events.Count > BtcAttestRules.MaxEventsPerReport) return BtcReportOutcome.Fail($"a report carries at most {BtcAttestRules.MaxEventsPerReport} events");
@@ -95,7 +98,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     return BtcReportOutcome.Fail("a header replacement carries headers only");
                 if (meta.PendingNextPart != 0) return BtcReportOutcome.Fail("a header replacement cannot interrupt a multi-part report");
                 if (report.ReplaceAbove < meta.EventsThroughHeight || report.ReplaceAbove < meta.CheckpointHeight)
-                    return BtcReportOutcome.Fail("headers at or below the events-through height cannot be replaced by this report");
+                    return BtcReportOutcome.Fail("headers at or below the events-through height cannot be replaced by this report (that takes a rewind)");
                 if (report.ReplaceAbove >= meta.TipHeight) return BtcReportOutcome.Fail("there is nothing above that height to replace");
                 if (report.Headers.Count == 0) return BtcReportOutcome.Fail("a header replacement carries the replacing headers");
                 baseHeight = report.ReplaceAbove;
@@ -258,6 +261,71 @@ namespace VerifiedXCore.Bitcoin.Attestation
         }
 
         /// <summary>
+        /// Decides whether a rewind is valid (plan section 7). A rewind is for a Bitcoin reorganisation that reaches
+        /// blocks whose vault events this chain has already applied: it names the last height the two branches share,
+        /// carries the headers of the branch that replaced the rest, and takes the applied events back. It rests on
+        /// the same things as a report: the headers are Bitcoin (each extends the last and meets its target), the
+        /// replacing branch carries more work than the one it replaces, and two thirds of the epoch's signers say this
+        /// is the branch to follow. It carries no events; the new branch's blocks are reported afterwards like any others.
+        /// </summary>
+        public static BtcReportOutcome VerifyRewind(BtcReport report, long vfxHeight, LiteDatabase? db = null)
+        {
+            db ??= BtcAttestStore.Db;
+            if (report == null) return BtcReportOutcome.Fail("no rewind");
+            if (!BtcAttestRules.Recording(vfxHeight)) return BtcReportOutcome.Fail("Bitcoin rewinds are not accepted before the recording height");
+            var meta = BtcAttestStore.GetMeta(db);
+            if (meta == null) return BtcReportOutcome.Fail("the Bitcoin view has not been initialised (no checkpoint)");
+
+            if (report.V != 1) return BtcReportOutcome.Fail("unknown rewind version");
+            if (report.Rewind != true) return BtcReportOutcome.Fail("a rewind says that it is one");
+            if (report.Scope != BtcReport.ScopeAll || report.BlockHeight != 0 || report.Events.Count != 0 || report.Part != 1 || !report.Final
+                || report.CoinbaseTxHex != null || report.CoinbaseBranch != null)
+                return BtcReportOutcome.Fail("a rewind carries a height and headers only");
+            if (report.Headers.Count == 0) return BtcReportOutcome.Fail("a rewind carries the replacing headers");
+            if (report.Headers.Count > BtcAttestRules.MaxHeaders) return BtcReportOutcome.Fail($"a rewind carries at most {BtcAttestRules.MaxHeaders} headers");
+
+            var to = report.ReplaceAbove;
+            if (to < meta.CheckpointHeight) return BtcReportOutcome.Fail("a rewind cannot go below the checkpoint");
+            if (to >= meta.TipHeight) return BtcReportOutcome.Fail("there is nothing above that height to rewind");
+            // Needed only when something of the replaced blocks was applied: their events, or the mined parts of a
+            // block's report that is still under way. Otherwise a report's header replacement does it.
+            var appliedAbove = to < meta.EventsThroughHeight || (meta.PendingNextPart != 0 && to < meta.PendingPartBlockHeight);
+            if (!appliedAbove) return BtcReportOutcome.Fail("no events were applied above that height; a report's header replacement is enough");
+
+            var hash = report.Hash();
+            var signatureError = CheckSignatures(report, hash, vfxHeight, db);
+            if (signatureError != null) return BtcReportOutcome.Fail(signatureError);
+
+            if (BtcAttestStore.HeaderAt(to, db) == null) return BtcReportOutcome.Fail($"the header at {to} is not attested");
+            var rules = BtcChainRules.Current;
+            var accepted = new Dictionary<long, BtcHeader>();
+            BtcHeader? Lookup(long h) => h > to ? (accepted.TryGetValue(h, out var a) ? a : null) : BtcAttestStore.HeaderAt(h, db);
+            var newHeaders = new List<(long, BtcHeader)>(report.Headers.Count);
+            var height = to;
+            foreach (var hex in report.Headers)
+            {
+                if (!BtcHeader.TryParse(hex, out var header) || header == null || !string.Equals(header.Hex, hex, StringComparison.Ordinal))
+                    return BtcReportOutcome.Fail("a header is not 80 bytes of lowercase hex");
+                height++;
+                var reason = rules.Validate(header, height, Lookup);
+                if (reason != null) return BtcReportOutcome.Fail(reason);
+                accepted[height] = header;
+                newHeaders.Add((height, header));
+            }
+
+            var oldWork = BigInteger.Zero;
+            for (var h = to + 1; h <= meta.TipHeight; h++)
+                oldWork += BtcAttestStore.HeaderAt(h, db)?.Work() ?? BigInteger.Zero;
+            var newWork = newHeaders.Aggregate(BigInteger.Zero, (sum, x) => sum + x.Item2.Work());
+            if (newWork <= oldWork) return BtcReportOutcome.Fail("the replacing headers do not carry more work than the headers they replace");
+
+            return new BtcReportOutcome
+            {
+                ReportHash = hash, NewHeaders = newHeaders, ReplacesFromHeight = to + 1, NewTipHeight = height, NewTipHash = newHeaders[^1].Item2.Hash, IsRewind = true,
+            };
+        }
+
+        /// <summary>
         /// What one Bitcoin transaction of block <paramref name="block"/> does to vault coins, appended to
         /// <paramref name="effects"/>; returns how many effects it has. The rule is the whole of "what counts":
         /// an input that is a coin this layer holds (and has not seen spent) spends it; an output that pays the deposit
@@ -274,7 +342,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             {
                 var coin = BtcAttestStore.Coin(outpoint, db);
                 var status = overlay.TryGetValue(outpoint, out var touched) ? touched : coin?.Status;
-                if (status == null || status == VaultCoinStatus.Spent) continue;
+                if (status == null || status == VaultCoinStatus.Spent || status == VaultCoinStatus.Orphaned) continue;
                 var created = coin == null ? effects.First(e => !e.IsSpend && e.Outpoint == outpoint) : null;
                 var owner = coin?.SmartContractUID ?? created!.SmartContractUID;
                 if (scopedVault != null && owner != scopedVault) continue;
@@ -289,7 +357,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 if (row == null || row.WatchFromBitcoinHeight > block) continue;
                 if (scopedVault != null && row.SmartContractUID != scopedVault) continue;
                 var outpoint = BtcAttestStore.OutpointKey(txid, vout);
-                if (overlay.ContainsKey(outpoint) || BtcAttestStore.Coin(outpoint, db) != null) continue; // already known: one coin, once
+                // Already known: one coin, once. (A coin a rewind orphaned is not known: its transaction confirming again creates it again.)
+                if (overlay.ContainsKey(outpoint) || BtcAttestStore.Coin(outpoint, db) is { Status: not VaultCoinStatus.Orphaned }) continue;
                 effects.Add(new BtcCoinEffect { Outpoint = outpoint, SmartContractUID = row.SmartContractUID, Sats = sats, Txid = txid, BitcoinHeight = block, IsCoinbase = isCoinbase });
                 overlay[outpoint] = VaultCoinStatus.Unspent;
             }

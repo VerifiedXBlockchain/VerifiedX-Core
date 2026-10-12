@@ -66,6 +66,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
             {
                 var pin = row.Pins.LastOrDefault(p => !p.Dead);
                 if (pin == null) continue;
+                // After a deep Bitcoin reorganisation a pinned transaction can spend a coin that is not there (yet):
+                // it cannot be broadcast until that coin's own transaction has confirmed again.
+                if (pin.Inputs.Any(o => BtcAttestStore.Coin(o)?.Status != VaultCoinStatus.Pinned)) continue;
                 var signers = SignersOf(row.SmartContractUID);
                 if (!signers.Contains(me, StringComparer.Ordinal)) continue;
                 if (tipHeight < pin.PinnedAtVfxHeight + (long)Turn(pin.Txid, me, signers) * TurnBlocks) continue;

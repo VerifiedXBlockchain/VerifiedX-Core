@@ -201,7 +201,9 @@ namespace VerifiedXCore.Tests
             return Tx(report);
         }
 
-        protected static VfxTx Tx(BtcReport report) => BtcAttestTxValidator.Create(TransactionType.VBTC_V2_BTC_REPORT, report.ToCanonicalJson());
+        /// <summary>The transaction that carries a report; a rewind travels in its own type.</summary>
+        protected static VfxTx Tx(BtcReport report) =>
+            BtcAttestTxValidator.Create(report.Rewind == true ? TransactionType.VBTC_V2_BTC_REORG : TransactionType.VBTC_V2_BTC_REPORT, report.ToCanonicalJson());
 
         /// <summary>The event for the transaction at <paramref name="position"/> of a block, with its proof.</summary>
         protected static BtcReportEvent EventFor(BtcBlock block, int position)

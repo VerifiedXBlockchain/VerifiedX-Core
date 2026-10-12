@@ -48,6 +48,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <summary>Committed to a withdrawal or bridge exit by a mined pin; still in the vault.</summary>
         Pinned = 1,
         Spent = 2,
+        /// <summary>
+        /// Created by a Bitcoin block that a deep reorganisation removed. The coin does not exist: it counts for
+        /// nothing and is never selected. Rows are not deleted; if the same transaction confirms again the coin comes
+        /// back under the same outpoint.
+        /// </summary>
+        Orphaned = 3,
     }
 
     /// <summary>One Bitcoin output held by a vault. The id is the outpoint, "txid:vout", lowercase.</summary>
@@ -218,6 +224,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var coins = db.GetCollection<VaultCoinRow>(Coins);
             coins.EnsureIndex(x => x.SmartContractUID);
             coins.EnsureIndex(x => x.FreeOf);
+            coins.EnsureIndex(x => x.CreatedInHeight);
+            coins.EnsureIndex(x => x.SpentInHeight);
             coins.EnsureIndex(x => x.LastModifiedHeight);
             db.GetCollection<VaultDepositTotalRow>(Totals).EnsureIndex(x => x.LastModifiedHeight);
             db.GetCollection<AttestationSignerSetRow>(SignerSets).EnsureIndex(x => x.LastModifiedHeight);
@@ -281,6 +289,15 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
         public static List<VaultCoinRow> CoinsOf(string scUID, LiteDatabase? db = null) =>
             (db ?? Db).GetCollection<VaultCoinRow>(Coins).Find(x => x.SmartContractUID == scUID).ToList();
+
+        /// <summary>Every coin created or spent by a Bitcoin block above <paramref name="bitcoinHeight"/> (what a rewind to that height takes back).</summary>
+        public static List<VaultCoinRow> CoinsTouchedAbove(long bitcoinHeight, LiteDatabase? db = null)
+        {
+            var coins = (db ?? Db).GetCollection<VaultCoinRow>(Coins);
+            return coins.Find(x => x.CreatedInHeight > bitcoinHeight)
+                .Concat(coins.Find(x => x.SpentInHeight > bitcoinHeight))
+                .GroupBy(c => c.Outpoint, StringComparer.Ordinal).Select(g => g.First()).ToList();
+        }
 
         /// <summary>The vault's Unspent coins (not pinned, not spent).</summary>
         public static List<VaultCoinRow> FreeCoinsOf(string scUID, LiteDatabase? db = null) =>

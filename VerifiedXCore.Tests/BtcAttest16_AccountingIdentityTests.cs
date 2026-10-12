@@ -23,7 +23,8 @@ namespace VerifiedXCore.Tests
     /// test 6 of section 11). A random sequence of everything that can happen to a watched vault is driven through
     /// VerifyTX and UpdateTreis: deposits, transfers between several holders, withdrawal requests, fee bumps,
     /// confirmations of either transaction of a request, cancellations, expiries, bridge locks, bridge exits and their
-    /// confirmations, and a pinned coin spent by a transaction nobody pinned. After every step:
+    /// confirmations, a pinned coin spent by a transaction nobody pinned, and Bitcoin reorganisations that drop blocks
+    /// whose events were already applied (a rewind, then the new branch reported again). After every step:
     ///
     ///   the vault's Bitcoin as the chain records it
     ///     = the coins really unspent on the Bitcoin chain
@@ -39,7 +40,7 @@ namespace VerifiedXCore.Tests
         private const string BtcDest = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
         private const decimal Sat = 0.00000001M;
         private readonly ITestOutputHelper _out;
-        private readonly Btc _btc = new(Checkpoint - 11);
+        private Btc _btc = new(Checkpoint - 11);
         private readonly List<V> _holders = Enumerable.Range(0, 3).Select(_ => NewKey()).ToList();
         private readonly long _priorGuard = Globals.BridgeIntraBlockGuardHeight;
 
@@ -50,6 +51,8 @@ namespace VerifiedXCore.Tests
         private readonly List<string> _log = new();
         private readonly Dictionary<string, int> _done = new();
         private long _lostToForeignSpends;
+        /// <summary>Deposits a reorganisation dropped that have not confirmed again yet (they do, in the end).</summary>
+        private readonly List<BtcTx> _notYetBack = new();
         private Random _rng = new(1);
 
         private V Caster => Signers[0];
@@ -114,16 +117,29 @@ namespace VerifiedXCore.Tests
             Assert.True(ok, why);
             await Apply(Tip + 1, report);
 
-            // What Bitcoin itself now holds for the vault.
-            foreach (var tx in txs)
-            {
-                foreach (var input in tx.Inputs)
-                    _onBitcoin.Remove(BtcAttestStore.OutpointKey(input.PrevOut.Hash.ToString(), input.PrevOut.N));
-                for (var i = 0; i < tx.Outputs.Count; i++)
-                    if (tx.Outputs[i].ScriptPubKey == _vault.Script)
-                        _onBitcoin[BtcAttestStore.OutpointKey(tx.GetHash().ToString(), i)] = tx.Outputs[i].Value.Satoshi;
-            }
+            Recount();
         }
+
+        /// <summary>What Bitcoin itself holds for the vault: read off the chain the validators follow, block by block.</summary>
+        private void Recount()
+        {
+            _onBitcoin.Clear();
+            for (var h = Checkpoint - 11; h <= _btc.Tip; h++)
+                foreach (var tx in _btc.Block(h).Transactions)
+                {
+                    if (!tx.IsCoinBase)
+                        foreach (var input in tx.Inputs)
+                            _onBitcoin.Remove(BtcAttestStore.OutpointKey(input.PrevOut.Hash.ToString(), input.PrevOut.N));
+                    for (var i = 0; i < tx.Outputs.Count; i++)
+                        if (tx.Outputs[i].ScriptPubKey == _vault.Script)
+                            _onBitcoin[BtcAttestStore.OutpointKey(tx.GetHash().ToString(), i)] = tx.Outputs[i].Value.Satoshi;
+                }
+        }
+
+        /// <summary>Whether Bitcoin could confirm this transaction now: every vault coin it spends is there.</summary>
+        private bool Spendable(BtcTx tx) =>
+            tx.Inputs.All(i => !(BtcAttestStore.Coin(BtcAttestStore.OutpointKey(i.PrevOut.Hash.ToString(), i.PrevOut.N)) is { } coin)
+                               || coin.Status == VaultCoinStatus.Unspent || coin.Status == VaultCoinStatus.Pinned);
 
         private async Task<decimal> Spendable(V who) =>
             (await VBTCService.TryGetAvailableTransparentVbtcBalance(_vault.Uid, who.Address)).availableBalance;
@@ -183,7 +199,8 @@ namespace VerifiedXCore.Tests
         /// <summary>Bitcoin confirms one of the transactions fixed for a withdrawal or an exit part: not always the newest.</summary>
         private async Task Confirm()
         {
-            var pinned = Rows(VaultWithdrawalState.Pinned);
+            // (After a reorganisation a pinned transaction can be waiting for a coin that is not back yet.)
+            var pinned = Rows(VaultWithdrawalState.Pinned).Where(r => r.Pins.Any(p => !p.Dead && Spendable(BtcTx.Parse(p.TxHex, Network.Main)))).ToList();
             if (pinned.Count == 0) return;
             var row = Pick(pinned);
             var pin = Pick(row.Pins.Where(p => !p.Dead).ToList());
@@ -249,7 +266,7 @@ namespace VerifiedXCore.Tests
         /// <summary>A pinned coin leaves in a transaction nobody pinned (signers that signed something else): most of it comes back to the vault, some is gone.</summary>
         private async Task ForeignSpend()
         {
-            var pinned = Rows(VaultWithdrawalState.Pinned);
+            var pinned = Rows(VaultWithdrawalState.Pinned).Where(r => BtcAttestStore.Coin(r.Pins.Last(p => !p.Dead).Inputs[0])!.Status == VaultCoinStatus.Pinned).ToList();
             if (pinned.Count == 0) return;
             var row = Pick(pinned);
             var outpoint = row.Pins.Last(p => !p.Dead).Inputs[0];
@@ -265,6 +282,50 @@ namespace VerifiedXCore.Tests
             Did(row.IsBridgeExit ? "exit part void" : "withdrawal void", $"{outpoint[..12]} spent by another transaction");
         }
 
+        /// <summary>
+        /// Bitcoin drops the last one to three blocks that held vault transactions, and everything mined on top of
+        /// them, for a longer branch. The validators sign a rewind. On the new branch the dropped transactions confirm
+        /// again in their old order, each when Bitcoin could confirm it; now and then a deposit does not come back
+        /// for a while.
+        /// </summary>
+        private async Task DeepReorg()
+        {
+            var meta = BtcAttestStore.GetMeta()!;
+            var withVaultTxs = Enumerable.Range(0, (int)(meta.EventsThroughHeight - Checkpoint))
+                .Select(i => meta.EventsThroughHeight - i)
+                .Where(h => _btc.Block(h).Transactions.Count > 1)
+                .Take(_rng.Next(1, 4)).ToList();
+            if (withVaultTxs.Count == 0) return;
+            var shared = withVaultTxs.Min() - 1;
+            if (shared <= Checkpoint) return;
+            var dropped = Enumerable.Range((int)shared + 1, (int)(_btc.Tip - shared)).SelectMany(h => _btc.Block(h).Transactions.Skip(1)).ToList();
+
+            var branch = _btc.ForkAfter(shared);
+            branch.MineEmpty((int)(meta.TipHeight - shared) + 1);
+            var rewind = Signed(BtcBlockScanner.BuildRewind(shared, branch.HeaderHexes(shared + 1, branch.Tip), BtcAttestRules.EpochOf(Tip + 1)));
+            var (ok, why) = await Verify(rewind, Tip + 1);
+            Assert.True(ok, why);
+            await Apply(Tip + 1, rewind);
+            _btc = branch;
+            Recount();
+            _notYetBack.AddRange(dropped.Where(IsDepositFromOutside));
+            Did("deep reorg", $"back to {shared}: {dropped.Count} transaction(s) dropped");
+            await Check("deep reorg (rewound)");
+
+            foreach (var tx in dropped)
+            {
+                if (IsDepositFromOutside(tx) && _rng.Next(4) == 0) continue;   // this one does not confirm again for now
+                if (!Spendable(tx)) continue;                                   // it needs a coin that is not back
+                await MineAndReport(tx);
+                _notYetBack.Remove(tx);
+                await Check("deep reorg (a dropped transaction confirmed again)");
+            }
+        }
+
+        private bool IsDepositFromOutside(BtcTx tx) =>
+            tx.Outputs.Any(o => o.ScriptPubKey == _vault.Script)
+            && tx.Inputs.All(i => BtcAttestStore.Coin(BtcAttestStore.OutpointKey(i.PrevOut.Hash.ToString(), i.PrevOut.N)) == null);
+
         // ── The identity ────────────────────────────────────────────────────────────────────────────────────
 
         private async Task Check(string after)
@@ -273,7 +334,7 @@ namespace VerifiedXCore.Tests
             var coins = BtcAttestStore.CoinsOf(_vault.Uid);
 
             // The chain's record of the vault's coins is what Bitcoin holds, coin by coin.
-            var recorded = coins.Where(c => c.Status != VaultCoinStatus.Spent).ToDictionary(c => c.Outpoint, c => c.ValueSats, StringComparer.Ordinal);
+            var recorded = coins.Where(c => c.Status != VaultCoinStatus.Spent && c.Status != VaultCoinStatus.Orphaned).ToDictionary(c => c.Outpoint, c => c.ValueSats, StringComparer.Ordinal);
             Assert.True(recorded.Count == _onBitcoin.Count && recorded.All(c => _onBitcoin.TryGetValue(c.Key, out var v) && v == c.Value),
                 Fail(after, $"coins recorded {recorded.Values.Sum()} sats in {recorded.Count}, on Bitcoin {_onBitcoin.Values.Sum()} sats in {_onBitcoin.Count}"));
             Assert.Equal(recorded.Values.Sum(), total.HeldSats);
@@ -284,7 +345,7 @@ namespace VerifiedXCore.Tests
                 Assert.True(BtcAttestStore.Withdrawal(coin.PinnedToRef)?.State == VaultWithdrawalState.Pinned, Fail(after, $"coin {coin.Outpoint} is held for {coin.PinnedToRef}, which is not pinned"));
             foreach (var row in Rows(VaultWithdrawalState.Pinned))
                 foreach (var outpoint in row.Pins.Where(p => !p.Dead).SelectMany(p => p.Inputs).Distinct())
-                    Assert.True(BtcAttestStore.Coin(outpoint) is { Status: VaultCoinStatus.Pinned } c && c.PinnedToRef == row.Ref, Fail(after, $"{row.Ref} does not hold its coin {outpoint}"));
+                    Assert.True(BtcAttestStore.Coin(outpoint) is { Status: VaultCoinStatus.Pinned or VaultCoinStatus.Orphaned } c && c.PinnedToRef == row.Ref, Fail(after, $"{row.Ref} does not hold its coin {outpoint}"));
 
             // Claims.
             var owner = await Spendable(Minter);
@@ -302,8 +363,10 @@ namespace VerifiedXCore.Tests
 
             Assert.True(held == owner + holders + escrowed + locked,
                 Fail(after, $"vault holds {held}; owner {owner} + holders {holders} + escrowed {escrowed} + locked for the bridge {locked} = {owner + holders + escrowed + locked}"));
-            // Only what left in transactions nobody pinned can take the owner below zero, and by no more than that.
-            Assert.True(owner >= -Btc8(_lostToForeignSpends), Fail(after, $"owner is at {owner} with {_lostToForeignSpends} sats lost to foreign spends"));
+            // Only what left in transactions nobody pinned, and deposits Bitcoin dropped after they were spent
+            // against, can take the owner below zero, and by no more than that.
+            var gone = _lostToForeignSpends + _notYetBack.Sum(tx => tx.Outputs.Where(o => o.ScriptPubKey == _vault.Script).Sum(o => o.Value.Satoshi));
+            Assert.True(owner >= -Btc8(gone), Fail(after, $"owner is at {owner} with {gone} sats lost to foreign spends and dropped deposits"));
 
             // And block validation holds the owner to that figure, to the satoshi.
             if (owner >= Sat)
@@ -343,6 +406,7 @@ namespace VerifiedXCore.Tests
             {
                 (6, "deposit", Deposit), (14, "transfer", Transfer), (20, "request", Request), (8, "fee bump", FeeBump), (12, "confirm", Confirm),
                 (6, "cancel", Cancel), (4, "expiry", LetWindowsEnd), (9, "lock", Lock), (9, "exit", Exit), (3, "foreign spend", ForeignSpend),
+                (4, "deep reorg", DeepReorg),
             };
             var weights = steps.Sum(s => s.Weight);
             for (var i = 0; i < 90 && Tip < H1 + BtcAttestRules.EpochBlocks - 20; i++)
@@ -353,8 +417,15 @@ namespace VerifiedXCore.Tests
                 await Check(step.Name);
             }
 
-            // Wind down: everything still to be paid is paid, and the identity holds with nothing open.
-            for (var i = 0; i < 40 && Rows(VaultWithdrawalState.Pinned).Count > 0; i++)
+            // Wind down: the deposits that were dropped confirm after all, everything still to be paid is paid, and
+            // the identity holds with nothing open.
+            foreach (var deposit in _notYetBack.ToList())
+            {
+                await MineAndReport(deposit);
+                _notYetBack.Remove(deposit);
+                await Check("a dropped deposit confirmed after all");
+            }
+            for (var i = 0; i < 60 && Rows(VaultWithdrawalState.Pinned).Count > 0; i++)
             {
                 await Confirm();
                 await Check("confirm (winding down)");

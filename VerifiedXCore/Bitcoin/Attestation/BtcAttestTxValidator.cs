@@ -74,6 +74,17 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         return (false, "This Bitcoin report is already in the mempool.");
                     return (true, "Transaction has been verified.");
                 }
+                case TransactionType.VBTC_V2_BTC_REORG:
+                {
+                    if (!BtcReport.TryParse(tx.Data, out var rewind, out var parseReason) || rewind == null)
+                        return (false, parseReason ?? "The Bitcoin rewind does not parse.");
+                    var outcome = BtcReportVerifier.VerifyRewind(rewind, height);
+                    if (!outcome.Ok)
+                        return (false, $"Bitcoin rewind refused: {outcome.Error}");
+                    if (admission && EarlierCopyInMempool(tx, outcome.ReportHash, height))
+                        return (false, "This Bitcoin rewind is already in the mempool.");
+                    return (true, "Transaction has been verified.");
+                }
                 default:
                     return (false, "This Bitcoin attestation transaction type is not enabled yet.");
             }
@@ -91,7 +102,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
         {
             try
             {
-                var pending = TransactionData.GetPool().Find(x => x.TransactionType == TransactionType.VBTC_V2_BTC_REPORT).ToList();
+                var type = tx.TransactionType;
+                var pending = TransactionData.GetPool().Find(x => x.TransactionType == type).ToList();
                 foreach (var other in pending)
                 {
                     if (string.Equals(other.Hash, tx.Hash, StringComparison.Ordinal)) continue;
@@ -123,7 +135,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             public readonly HashSet<string> BumpedWithdrawals = new(StringComparer.Ordinal);
         }
 
-        public const string OneReportReason = "A block carries at most one Bitcoin report.";
+        public const string OneReportReason = "A block carries at most one Bitcoin report or rewind.";
         public const string OneBumpReason = "A block carries at most one fee bump for a withdrawal.";
 
         /// <summary>
@@ -137,7 +149,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 var bumped = BtcWithdrawals.FeeBumpRef(tx);
                 return bumped == null || state.BumpedWithdrawals.Add(bumped) ? (true, "") : (false, OneBumpReason);
             }
-            if (tx.TransactionType != TransactionType.VBTC_V2_BTC_REPORT) return (true, "");
+            // A rewind takes the report's place in a block: each is judged against the state before the block.
+            if (tx.TransactionType != TransactionType.VBTC_V2_BTC_REPORT && tx.TransactionType != TransactionType.VBTC_V2_BTC_REORG) return (true, "");
             if (state.ReportHash != null) return (false, OneReportReason);
             state.ReportHash = tx.Hash;
             return (true, "");

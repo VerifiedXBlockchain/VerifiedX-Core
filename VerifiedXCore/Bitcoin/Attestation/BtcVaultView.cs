@@ -93,10 +93,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 total.UnspentSats,
                 total.PinnedSats,
                 PaidOutForBridgeExitsSats = total.SettledExitSats,
-                Coins = coins.Where(c => c.Status != VaultCoinStatus.Spent)
+                Coins = coins.Where(c => c.Status != VaultCoinStatus.Spent && c.Status != VaultCoinStatus.Orphaned)
                     .OrderBy(c => c.CreatedInHeight).ThenBy(c => c.Outpoint, StringComparer.Ordinal)
                     .Select(c => new { c.Outpoint, c.ValueSats, Status = c.Status.ToString(), c.CreatedInHeight, c.IsCoinbase, HeldFor = c.PinnedToRef }).ToList(),
                 SpentCoinCount = coins.Count(c => c.Status == VaultCoinStatus.Spent),
+                // Created by a Bitcoin block that a deep reorganisation removed: not counted, back if the transaction confirms again.
+                OrphanedCoins = coins.Where(c => c.Status == VaultCoinStatus.Orphaned)
+                    .OrderBy(c => c.Outpoint, StringComparer.Ordinal).Select(c => new { c.Outpoint, c.ValueSats, HeldFor = c.PinnedToRef }).ToList(),
                 OpenWithdrawals = open.Select(Describe).ToList(),
             };
         }

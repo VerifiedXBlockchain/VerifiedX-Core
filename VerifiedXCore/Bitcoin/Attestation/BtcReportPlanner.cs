@@ -8,6 +8,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
     public sealed class BtcPlannedReport
     {
         public const string Replacement = "header replacement";
+        public const string Rewind = "rewind";
         public const string Part = "next part";
         public const string Backfill = "backfill";
         public const string Forward = "forward";
@@ -41,7 +42,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
     /// bytes and their signatures meet on one hash.
     ///
     /// <list type="number">
-    /// <item>The attested headers are no longer Bitcoin's best chain: the header replacement, and nothing else.</item>
+    /// <item>The attested headers are no longer Bitcoin's best chain: the header replacement, and nothing else; or,
+    /// when the reorganisation reaches blocks whose events were applied, the rewind. (When a block's report is under
+    /// way and that block is still on the chain, its remaining parts come first.)</item>
     /// <item>A block's report is under way: its next part, built from the state the mined parts left, and nothing else.</item>
     /// <item>Otherwise both of these, when they exist:
     ///   <list type="bullet">
@@ -99,8 +102,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 plan.Waiting = $"this node's Bitcoin headers end at {view.TipHeight}, below the attested tip {meta.TipHeight}";
                 return plan;
             }
-            if (!string.Equals(mine.Hash, meta.TipHash, StringComparison.Ordinal))
-                return PlanReplacement(plan, view, meta, epoch, db);
+            if (!string.Equals(mine.Hash, meta.TipHash, StringComparison.Ordinal) && PlanReplacement(plan, view, meta, epoch, db))
+                return plan;
 
             // ── 2. A block's report under way ───────────────────────────────────────────────────────────────
             if (meta.PendingNextPart != 0)
@@ -171,26 +174,32 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// The attested headers above some height are not on the chain this node follows. The replacement carries this
         /// node's headers from the last shared height up to the first one at which they outweigh what they replace:
         /// the shortest proof that the other branch is heavier, and the same for every validator on that branch.
+        ///
+        /// When the last shared height is below something this chain already applied (reported events, or the mined
+        /// parts of a block's report that is still under way) it is a rewind instead: the same headers, and the
+        /// applied events are taken back.
+        ///
+        /// Returns false in one case, in which the caller goes on: a block's report is under way and that block is
+        /// still on this node's chain. Its remaining parts are built first (they need no new headers); the headers
+        /// are replaced once the block is closed.
         /// </summary>
-        private static BtcPlan PlanReplacement(BtcPlan plan, IBtcChainView view, AttestationMetaRow meta, long epoch, LiteDatabase db)
+        private static bool PlanReplacement(BtcPlan plan, IBtcChainView view, AttestationMetaRow meta, long epoch, LiteDatabase db)
         {
-            var floor = Math.Max(meta.EventsThroughHeight, meta.CheckpointHeight);
             long shared = -1;
-            for (var h = meta.TipHeight - 1; h >= floor; h--)
+            for (var h = meta.TipHeight - 1; h >= meta.CheckpointHeight; h--)
             {
                 var attested = BtcAttestStore.HeaderAt(h, db);
                 if (attested != null && view.HeaderAt(h)?.Hash == attested.Hash) { shared = h; break; }
             }
             if (shared < 0)
             {
-                plan.Waiting = $"Bitcoin reorganised at or below the events-through height {meta.EventsThroughHeight}: reports cannot continue until the deep-reorganisation rule exists";
-                return plan;
+                plan.Waiting = $"this node's Bitcoin chain shares no header with the attested chain at or above the checkpoint {meta.CheckpointHeight}";
+                return true;
             }
-            if (meta.PendingNextPart != 0)
-            {
-                plan.Waiting = "the attested headers changed while a block's report is under way";
-                return plan;
-            }
+            var pending = meta.PendingNextPart != 0;
+            if (pending && shared >= meta.PendingPartBlockHeight)
+                return false;
+            var rewind = shared < meta.EventsThroughHeight || pending;
 
             var replaced = BigInteger.Zero;
             for (var h = shared + 1; h <= meta.TipHeight; h++)
@@ -204,10 +213,14 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 headers.Add(header.Hex);
                 work += header.Work();
                 if (work > replaced)
-                    return plan.With(BtcPlannedReport.Replacement, BtcBlockScanner.BuildHeaderReplacement(shared, headers, epoch));
+                {
+                    if (rewind) plan.With(BtcPlannedReport.Rewind, BtcBlockScanner.BuildRewind(shared, headers, epoch));
+                    else plan.With(BtcPlannedReport.Replacement, BtcBlockScanner.BuildHeaderReplacement(shared, headers, epoch));
+                    return true;
+                }
             }
             plan.Waiting = $"this node's Bitcoin branch above {shared} does not yet carry more work than the attested one";
-            return plan;
+            return true;
         }
 
         /// <summary>

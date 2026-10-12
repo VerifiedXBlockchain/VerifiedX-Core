@@ -158,6 +158,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public static BtcReport BuildQuiet(IReadOnlyList<string> headers, long signerEpoch) =>
             new() { Scope = BtcReport.ScopeAll, BlockHeight = 0, Headers = headers.ToList(), SignerEpoch = signerEpoch };
 
+        /// <summary>
+        /// A rewind to <paramref name="rewindTo"/>: the attested headers above it are replaced by a heavier branch, and
+        /// the events this chain applied from the replaced blocks are taken back. Carried by VBTC_V2_BTC_REORG.
+        /// </summary>
+        public static BtcReport BuildRewind(long rewindTo, IReadOnlyList<string> headers, long signerEpoch) =>
+            new() { Scope = BtcReport.ScopeAll, BlockHeight = 0, ReplaceAbove = rewindTo, Headers = headers.ToList(), SignerEpoch = signerEpoch, Rewind = true };
+
         /// <summary>A report that replaces the attested headers above <paramref name="replaceAbove"/> with a heavier branch.</summary>
         public static BtcReport BuildHeaderReplacement(long replaceAbove, IReadOnlyList<string> headers, long signerEpoch) =>
             new() { Scope = BtcReport.ScopeAll, BlockHeight = 0, ReplaceAbove = replaceAbove, Headers = headers.ToList(), SignerEpoch = signerEpoch };

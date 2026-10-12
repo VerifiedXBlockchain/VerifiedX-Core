@@ -286,7 +286,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var held = BtcReportSignatures.For(reportHash, report.SignerEpoch).Where(s => members.Contains(s.ValidatorAddress)).ToList();
             if (held.Count < required) return null;
             report.Signatures = held.Take(required).ToList();
-            return BtcAttestTxValidator.Create(TransactionType.VBTC_V2_BTC_REPORT, report.ToCanonicalJson());
+            return BtcAttestTxValidator.Create(report.Rewind == true ? TransactionType.VBTC_V2_BTC_REORG : TransactionType.VBTC_V2_BTC_REPORT, report.ToCanonicalJson());
         }
 
         /// <summary>

@@ -400,15 +400,19 @@ namespace VerifiedXCore
         /// </summary>
         public static long BitcoinAttestationObserveHeight = long.MaxValue;
         /// <summary>
-        /// H1, recording: the Bitcoin report, coin pin and reorg transactions are accepted and applied; balances are still
-        /// computed the old way. The new types are a hard fork for a node that does not know them, so this must be above
-        /// the height at which every validator and caster runs this release. It is also the height from which a peer
-        /// must be on this major version (<see cref="MinimumPeerMajorVersion"/>). Sentinel until set.
+        /// H1, recording: the Bitcoin report and rewind transactions are accepted and applied, and a vault created from
+        /// this height on is watched: its deposit script is in state, its owner's balance is its attested coins, and its
+        /// withdrawals and bridge exits follow pin / settle / void (with the requester's fee bump). Vaults created before
+        /// this height keep the earlier rules until H2. The new types are a hard fork for a node that does not know
+        /// them, so this must be above the height at which every validator and caster runs this release. It is also the
+        /// height from which a peer must be on this major version (<see cref="MinimumPeerMajorVersion"/>). Sentinel until set.
         /// </summary>
         public static long BitcoinAttestationRecordHeight = long.MaxValue;
         /// <summary>
-        /// H2, enforcement: a vault owner's balance is computed from attested coins, withdrawals follow pin / settle /
-        /// void, and vaults created before this height are frozen. Sentinel until set.
+        /// H2, enforcement: vaults created before H1 are frozen (nothing debits a balance on them, and no bridge exit or
+        /// unlock draws on their locks), and the transactions only the earlier way of working needs (withdrawal
+        /// completion, cancellation vote, bridge exit completion) are refused for every vault. The time between H1 and
+        /// H2 is for moving to a new vault. Sentinel until set.
         /// </summary>
         public static long BitcoinAttestationHeight = long.MaxValue;
 

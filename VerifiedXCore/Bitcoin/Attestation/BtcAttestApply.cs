@@ -184,10 +184,14 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 }
                 else
                 {
+                    // A coin a rewind orphaned, confirmed again: held again for the withdrawal whose pinned transaction
+                    // spends it, if that withdrawal is still to be paid.
+                    var heldFor = existing == null ? null : BtcWithdrawals.HeldFor(existing, db);
                     BtcAttestStore.SaveCoin(new VaultCoinRow
                     {
                         Outpoint = effect.Outpoint, SmartContractUID = effect.SmartContractUID, ValueSats = effect.Sats,
-                        Status = VaultCoinStatus.Unspent, CreatedInHeight = effect.BitcoinHeight, IsCoinbase = effect.IsCoinbase,
+                        Status = heldFor != null ? VaultCoinStatus.Pinned : VaultCoinStatus.Unspent, PinnedToRef = heldFor,
+                        CreatedInHeight = effect.BitcoinHeight, IsCoinbase = effect.IsCoinbase,
                     }, existing, db);
                 }
             }
@@ -215,6 +219,54 @@ namespace VerifiedXCore.Bitcoin.Attestation
             BtcAttestStore.SaveMeta(meta, db);
             // The coins have moved: settle what Bitcoin now shows, void what can no longer confirm, pin what was waiting.
             BtcWithdrawals.OnCoinsChanged(outcome.Effects, tx!, vfxHeight, db);
+            return outcome;
+        }
+
+        /// <summary>
+        /// Applies a mined rewind (transaction type VBTC_V2_BTC_REORG). Verified again here against the state it lands
+        /// on. Everything the events of the replaced blocks did is taken back, the headers above the shared height are
+        /// replaced, and the events-through height returns to the shared height: the new branch's blocks are then
+        /// reported like any others.
+        /// </summary>
+        public static BtcReportOutcome ApplyRewind(VerifiedXCore.Models.Transaction tx, long vfxHeight, LiteDatabase? db = null)
+        {
+            if (!BtcReport.TryParse(tx?.Data, out var report, out var parseReason) || report == null)
+                return BtcReportOutcome.Fail(parseReason ?? "the Bitcoin rewind does not parse");
+            var outcome = BtcReportVerifier.VerifyRewind(report, vfxHeight, db);
+            if (!outcome.Ok)
+            {
+                ErrorLogUtility.LogError($"Bitcoin rewind {tx!.Hash} at block {vfxHeight} was not applied: {outcome.Error}", "BtcAttestApply.ApplyRewind()");
+                return outcome;
+            }
+
+            var meta = BtcAttestStore.GetMeta(db)!;
+            var to = outcome.ReplacesFromHeight - 1;
+            var before = (meta.TipHeight, meta.EventsThroughHeight);
+
+            // The events first, while the state still shows what they did.
+            BtcWithdrawals.OnRewind(to, tx!, vfxHeight, db);
+
+            foreach (var (height, header) in outcome.NewHeaders)
+                BtcAttestStore.SaveHeader(height, header, vfxHeight, db);
+            var headers = (db ?? BtcAttestStore.Db).GetCollection<AttestedHeaderRow>(BtcAttestStore.Headers);
+            for (var h = outcome.NewTipHeight + 1; h <= meta.TipHeight; h++)
+            {
+                var stale = headers.FindById(h);
+                if (stale == null || !stale.Active) continue;
+                stale.Active = false;
+                stale.LastModifiedHeight = StateWriteContext.StampHeight;
+                headers.Update(stale);
+            }
+
+            meta.TipHeight = outcome.NewTipHeight;
+            meta.TipHash = outcome.NewTipHash;
+            meta.EventsThroughHeight = Math.Min(meta.EventsThroughHeight, to);
+            meta.PendingPartBlockHeight = 0;
+            meta.PendingNextPart = 0;
+            meta.PendingLastPosition = 0;
+            BtcAttestStore.SaveMeta(meta, db);
+            ErrorLogUtility.LogError($"Bitcoin rewind {tx!.Hash} applied at block {vfxHeight}: Bitcoin reorganised below reported events. Back to block {to} (events were applied through {before.EventsThroughHeight}, attested tip was {before.TipHeight}); the attested tip is now {outcome.NewTipHeight}. The new branch is reported from {to + 1}.",
+                "BtcAttestApply.ApplyRewind()");
             return outcome;
         }
 

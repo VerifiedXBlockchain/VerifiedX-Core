@@ -135,6 +135,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <summary>The stored signer set the signatures are checked against.</summary>
         [JsonProperty(Order = 11)] public long SignerEpoch { get; set; }
         [JsonProperty(Order = 12)] public List<BtcReportSignature>? Signatures { get; set; }
+        /// <summary>
+        /// Absent on a report. True on a rewind (transaction type VBTC_V2_BTC_REORG): the headers replace everything
+        /// above <see cref="ReplaceAbove"/> although events of those blocks were already applied, and those events are
+        /// taken back. Part of what is signed, so a signature for one can never serve as a signature for the other.
+        /// </summary>
+        [JsonProperty(Order = 13)] public bool? Rewind { get; set; }
 
         private static readonly JsonSerializerSettings Canonical = new()
         {

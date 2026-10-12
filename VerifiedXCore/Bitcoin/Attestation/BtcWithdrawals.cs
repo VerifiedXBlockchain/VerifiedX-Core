@@ -202,15 +202,21 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         BtcAttestStore.SaveWithdrawal(row, db);
                 }
 
-                foreach (var vault in vaults)
-                    foreach (var waiting in BtcAttestStore.WithdrawalsOf(vault, VaultWithdrawalState.Waiting, db)
-                                 .OrderBy(w => w.RequestVfxHeight).ThenBy(w => w.Ref, StringComparer.Ordinal))
-                        TryPin(waiting, vfxHeight, db);
+                RetryWaiting(vaults, vfxHeight, db);
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Settling withdrawals after Bitcoin report {report?.Hash} failed: {ex}", "BtcWithdrawals.OnCoinsChanged()");
             }
+        }
+
+        /// <summary>The requests still waiting on these vaults are tried again, oldest first: their coins have changed.</summary>
+        private static void RetryWaiting(IEnumerable<string> vaults, long vfxHeight, LiteDatabase? db)
+        {
+            foreach (var vault in vaults)
+                foreach (var waiting in BtcAttestStore.WithdrawalsOf(vault, VaultWithdrawalState.Waiting, db)
+                             .OrderBy(w => w.RequestVfxHeight).ThenBy(w => w.Ref, StringComparer.Ordinal))
+                    TryPin(waiting, vfxHeight, db);
         }
 
         /// <summary>Before a block's transactions: requests that were never pinned and are past their window are closed and refunded.</summary>
