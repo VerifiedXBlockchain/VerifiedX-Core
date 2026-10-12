@@ -117,19 +117,11 @@ namespace VerifiedXCore.Utilities
                 // Step 2: Check if all transactions can be incrementally reversed.
                 // Only simple TX types are safe to undo. Complex types (smart contracts,
                 // reserves, token operations, etc.) require a full state rebuild.
-                foreach (var block in blocksToRemove)
+                var whyNot = WhyNotIncremental(blocksToRemove, targetHeight);
+                if (whyNot != null)
                 {
-                    foreach (var tx in block.Transactions)
-                    {
-                        if (!CanIncrementallyReverse(tx))
-                        {
-                            LogUtility.Log(
-                                $"[RollbackFast] Block {block.Height} contains non-reversible tx type {tx.TransactionType} " +
-                                $"(hash={tx.Hash?[..Math.Min(12, tx.Hash?.Length ?? 0)]}). Falling back to full rollback.",
-                                "BlockRollback");
-                            return await RollbackBlocks(numBlocksRollback, manageIsResyncing: false);
-                        }
-                    }
+                    LogUtility.Log($"[RollbackFast] {whyNot} Falling back to full rollback.", "BlockRollback");
+                    return await RollbackBlocks(numBlocksRollback, manageIsResyncing: false);
                 }
 
                 // Step 3: Reverse state changes for each block (newest first)
@@ -313,6 +305,27 @@ namespace VerifiedXCore.Utilities
                     removed++;
             }
             return removed;
+        }
+
+        /// <summary>
+        /// Why the blocks above <paramref name="targetHeight"/> cannot be undone one transaction at a time; null when
+        /// they can. Two reasons: a transaction whose effects are more than a balance move, or state that Bitcoin
+        /// attestation wrote in one of those blocks. That layer writes at the start of a block whatever the block
+        /// carries (an unpinned withdrawal or bridge exit past its window is closed and refunded; a signer set is
+        /// stored). Undoing only the block's transactions would leave those writes in place, and a different block at
+        /// the same height could then be judged against a state it never produced.
+        /// </summary>
+        internal static string? WhyNotIncremental(IEnumerable<Block> blocksToRemove, long targetHeight)
+        {
+            foreach (var block in blocksToRemove)
+                foreach (var tx in block.Transactions)
+                    if (!CanIncrementallyReverse(tx))
+                        return $"Block {block.Height} contains non-reversible tx type {tx.TransactionType} (hash={tx.Hash?[..Math.Min(12, tx.Hash?.Length ?? 0)]}).";
+
+            bool attestationChanged;
+            try { attestationChanged = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.ChangedAbove(targetHeight); }
+            catch { attestationChanged = true; }
+            return attestationChanged ? $"Bitcoin attestation state was written above block {targetHeight}." : null;
         }
 
         /// <summary>

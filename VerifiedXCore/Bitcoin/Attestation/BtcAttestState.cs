@@ -366,6 +366,26 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public static List<VaultWithdrawalRow> WaitingWithdrawalsRequestedBefore(long vfxHeight, LiteDatabase? db = null) =>
             (db ?? Db).GetCollection<VaultWithdrawalRow>(Withdrawals).Find(x => x.State == VaultWithdrawalState.Waiting && x.RequestVfxHeight < vfxHeight).ToList();
 
+        /// <summary>
+        /// Whether any row of this layer was written by a block above <paramref name="vfxHeight"/>. Every write here
+        /// is stamped with its block's height, and some are made by a block that carries no transaction of this layer:
+        /// at the start of a block an unpinned withdrawal or bridge exit past its window is closed, and at the start of
+        /// an epoch the signer set is stored. A rollback that undoes blocks one transaction at a time would leave those
+        /// writes behind; it asks this first.
+        /// </summary>
+        public static bool ChangedAbove(long vfxHeight, LiteDatabase? db = null)
+        {
+            var d = db ?? Db;
+            if (d == null) return false;
+            return d.GetCollection<AttestationMetaRow>(Meta).Exists(x => x.LastModifiedHeight > vfxHeight)
+                || d.GetCollection<VaultWithdrawalRow>(Withdrawals).Exists(x => x.LastModifiedHeight > vfxHeight)
+                || d.GetCollection<VaultCoinRow>(Coins).Exists(x => x.LastModifiedHeight > vfxHeight)
+                || d.GetCollection<VaultDepositTotalRow>(Totals).Exists(x => x.LastModifiedHeight > vfxHeight)
+                || d.GetCollection<VaultDepositScriptRow>(Scripts).Exists(x => x.LastModifiedHeight > vfxHeight)
+                || d.GetCollection<AttestationSignerSetRow>(SignerSets).Exists(x => x.LastModifiedHeight > vfxHeight)
+                || d.GetCollection<AttestedHeaderRow>(Headers).Exists(x => x.LastModifiedHeight > vfxHeight);
+        }
+
         /// <summary>Empties every table of this layer (state wipe before a replay; chain-reference migration).</summary>
         public static void WipeAll(LiteDatabase? db = null)
         {
