@@ -769,6 +769,8 @@ namespace VerifiedXCore
             // Bitcoin attestation: validators follow Bitcoin and sign reports. Idle before the observation height
             // and on a node that is not a validator.
             _ = Task.Run(() => Bitcoin.Attestation.BtcReportService.RunLoop(CancellationToken.None));
+            // ... and sign the Bitcoin transaction consensus has pinned for a withdrawal from a vault they hold shares of.
+            _ = Task.Run(() => Bitcoin.Attestation.BtcWithdrawalSigner.RunLoop(CancellationToken.None));
 
             //API Port URL
             string url = !Globals.TestURL ? "http://*:" + Globals.APIPort : "https://*:" + Globals.APIPortSSL;

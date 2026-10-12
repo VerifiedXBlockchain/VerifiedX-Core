@@ -155,12 +155,15 @@ namespace VerifiedXCore.Tests
         /// <summary>The block at the recording height: the Bitcoin view starts and the first signer set is stored.</summary>
         protected static Task Start() => Apply(H1);
 
-        /// <summary>Creates a vBTC V2 vault on chain (a contract creation applied in a block) and returns its identity.</summary>
-        protected async Task<(string Uid, string Address, NBitcoin.Script Script)> CreateVault(long vfxHeight, string? depositAddress = null)
+        /// <summary>
+        /// Creates a vBTC V2 vault on chain (a contract creation applied in a block) and returns its identity.
+        /// <paramref name="keyHolders"/> are the validators that hold its key shares (the four funded validators when given).
+        /// </summary>
+        protected async Task<(string Uid, string Address, NBitcoin.Script Script)> CreateVault(long vfxHeight, string? depositAddress = null, IEnumerable<V>? keyHolders = null)
         {
             var address = depositAddress ?? NewTaprootAddress();
             var uid = FrostDkgAttestation.NewContractUid();
-            var body = VbtcTestContracts.VaultContractData(uid, Minter.Address, address);
+            var body = VbtcTestContracts.VaultContractData(uid, Minter.Address, address, snapshot: keyHolders?.Select(k => k.Address));
             var tx = new VfxTx
             {
                 Timestamp = TimeUtil.GetTime(), FromAddress = Minter.Address, ToAddress = Minter.Address, Amount = 0M, Fee = 0M, Nonce = 0,

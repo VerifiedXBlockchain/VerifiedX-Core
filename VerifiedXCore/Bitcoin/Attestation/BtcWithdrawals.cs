@@ -89,6 +89,21 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
         }
 
+        /// <summary>
+        /// Whether <paramref name="txid"/> is the Bitcoin transaction fixed in state for this withdrawal: the only one
+        /// a signer of the vault may sign for it. The reason when it is not.
+        /// </summary>
+        public static (bool Ok, string Reason) IsPinnedTransaction(string requestHash, string scUID, string txid)
+        {
+            var row = BtcAttestStore.Withdrawal(RefOf(requestHash, Stored(scUID) ?? scUID));
+            if (row == null) return (false, "This withdrawal is not recorded for the vault in state");
+            if (row.State != VaultWithdrawalState.Pinned)
+                return (false, $"No Bitcoin transaction is fixed in state for this withdrawal ({row.State}); nothing may be signed for it");
+            return row.Pins.Any(p => !p.Dead && string.Equals(p.Txid, txid, StringComparison.OrdinalIgnoreCase))
+                ? (true, "")
+                : (false, "Only the Bitcoin transaction fixed in state for this withdrawal may be signed");
+        }
+
         /// <summary>Whether a complete, cancel or vote transaction names a vault the chain watches.</summary>
         public static bool IsWatched(Transaction tx)
         {

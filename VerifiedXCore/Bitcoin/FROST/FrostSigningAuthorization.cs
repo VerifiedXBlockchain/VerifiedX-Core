@@ -119,6 +119,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 long maxDestinationSats;
                 bool leaderIsOwner = false;
                 bool isBridgeExit = false;
+                bool leaderIsVaultSignerOfPinned = false;
 
                 var wrh = request.WithdrawalRequestHash.Trim();
                 if (wrh.StartsWith(BtcExitPrefix, StringComparison.OrdinalIgnoreCase))
@@ -146,6 +147,18 @@ namespace VerifiedXCore.Bitcoin.FROST
                     destination = wr!.BTCDestination;
                     maxDestinationSats = (long)(wr.Amount * 100_000_000M);
                     leaderIsOwner = string.Equals(wr.RequestorAddress, request.LeaderAddress, StringComparison.Ordinal);
+
+                    // A vault the chain watches: consensus has fixed the one transaction that pays this withdrawal,
+                    // before anyone signed. A share is given for that transaction and for no other, so "nothing is
+                    // pinned" means "no signature exists", which is what expiry and cancellation rely on. And since
+                    // no other transaction can be signed, any signer of the vault may lead the ceremony.
+                    if (Attestation.BtcAttestBalance.IsAttestedVault(wr.SmartContractUID))
+                    {
+                        var (pinned, pinReason) = Attestation.BtcWithdrawals.IsPinnedTransaction(wrh, wr.SmartContractUID, txId);
+                        if (!pinned) return (false, pinReason);
+                        leaderIsVaultSignerOfPinned = Attestation.BtcWithdrawalSigner.SignersOf(wr.SmartContractUID)
+                            .Contains(request.LeaderAddress, StringComparer.Ordinal);
+                    }
                 }
 
                 Script destinationScript;
@@ -168,7 +181,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 if (!boundsOk) return (false, boundsReason);
 
                 // ── 5. Leader: the withdrawal owner for user withdrawals; a committee caster for exits ─
-                var (leaderOk, leaderReason) = IsLeaderAllowed(isBridgeExit, leaderIsOwner, IsKnownCaster(request.LeaderAddress));
+                var (leaderOk, leaderReason) = IsLeaderAllowed(isBridgeExit, leaderIsOwner || leaderIsVaultSignerOfPinned, IsKnownCaster(request.LeaderAddress));
                 if (!leaderOk) return (false, leaderReason);
 
                 return (true, "");
