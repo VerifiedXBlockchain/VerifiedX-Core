@@ -31,7 +31,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
     /// at once, with no vote.</item>
     /// </list>
     /// </summary>
-    public static class BtcWithdrawals
+    public static partial class BtcWithdrawals
     {
         public static string RefOf(string requestHash, string scUID) => $"{requestHash}|{scUID}";
 
@@ -93,9 +93,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// Whether <paramref name="txid"/> is the Bitcoin transaction fixed in state for this withdrawal: the only one
         /// a signer of the vault may sign for it. The reason when it is not.
         /// </summary>
-        public static (bool Ok, string Reason) IsPinnedTransaction(string requestHash, string scUID, string txid)
+        public static (bool Ok, string Reason) IsPinnedTransaction(string requestHash, string scUID, string txid) =>
+            IsPinnedTransactionOf(RefOf(requestHash, Stored(scUID) ?? scUID), txid);
+
+        /// <summary>As <see cref="IsPinnedTransaction"/>, for one vault's part of a bridge exit.</summary>
+        public static (bool Ok, string Reason) IsPinnedExitTransaction(VBTCBridgeBtcExitState exit, string scUID, string txid) =>
+            IsPinnedTransactionOf(ExitRefOf(exit, Stored(scUID) ?? scUID), txid);
+
+        private static (bool Ok, string Reason) IsPinnedTransactionOf(string reference, string txid)
         {
-            var row = BtcAttestStore.Withdrawal(RefOf(requestHash, Stored(scUID) ?? scUID));
+            var row = BtcAttestStore.Withdrawal(reference);
             if (row == null) return (false, "This withdrawal is not recorded for the vault in state");
             if (row.State != VaultWithdrawalState.Pinned)
                 return (false, $"No Bitcoin transaction is fixed in state for this withdrawal ({row.State}); nothing may be signed for it");
@@ -207,9 +214,15 @@ namespace VerifiedXCore.Bitcoin.Attestation
         {
             try
             {
+                var exits = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var row in BtcAttestStore.WaitingWithdrawalsRequestedBefore(vfxHeight - VBTCWithdrawalRequest.EXPIRY_BLOCKS, db)
                              .OrderBy(w => w.RequestVfxHeight).ThenBy(w => w.Ref, StringComparer.Ordinal))
-                    Close(row, VaultWithdrawalState.Expired, vfxHeight, db, $"it could not be pinned within {VBTCWithdrawalRequest.EXPIRY_BLOCKS} blocks ({row.WaitingReason})");
+                {
+                    if (!row.IsBridgeExit)
+                        Close(row, VaultWithdrawalState.Expired, vfxHeight, db, $"it could not be pinned within {VBTCWithdrawalRequest.EXPIRY_BLOCKS} blocks ({row.WaitingReason})");
+                    else if (exits.Add($"{row.RequestHash}@{row.RequestVfxHeight}"))
+                        ExpireExit(row, vfxHeight, db); // an exit is failed as a whole, once
+                }
             }
             catch (Exception ex)
             {
@@ -243,18 +256,28 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
         private static bool TryPin(VaultWithdrawalRow row, long vfxHeight, LiteDatabase? db)
         {
+            if (row.IsBridgeExit) return TryPinExit(row, vfxHeight, db); // with the exit's other vaults, or not at all
             if (row.State != VaultWithdrawalState.Waiting || string.IsNullOrEmpty(row.DestinationScriptHex)) return false;
             var tx = BtcCanonicalWithdrawal.Build(row.SmartContractUID, row.DestinationScriptHex, row.AmountSats, row.FeeRate, out var reason, db);
             if (tx == null)
             {
-                if (row.WaitingReason != reason)
-                {
-                    row.WaitingReason = reason;
-                    BtcAttestStore.SaveWithdrawal(row, db);
-                }
+                NoteWaiting(row, reason, db);
                 return false;
             }
+            Pin(row, tx, vfxHeight, db);
+            return true;
+        }
 
+        private static void NoteWaiting(VaultWithdrawalRow row, string? reason, LiteDatabase? db)
+        {
+            if (row.WaitingReason == reason) return;
+            row.WaitingReason = reason;
+            BtcAttestStore.SaveWithdrawal(row, db);
+        }
+
+        /// <summary>Records a transaction as the one that pays this row, and holds its coins for it.</summary>
+        private static void Pin(VaultWithdrawalRow row, BtcCanonicalTx tx, long vfxHeight, LiteDatabase? db)
+        {
             foreach (var outpoint in tx.Inputs)
             {
                 var coin = BtcAttestStore.Coin(outpoint, db)!;
@@ -271,7 +294,6 @@ namespace VerifiedXCore.Bitcoin.Attestation
             row.State = VaultWithdrawalState.Pinned;
             row.WaitingReason = null;
             BtcAttestStore.SaveWithdrawal(row, db);
-            return true;
         }
 
         private static void Settle(VaultWithdrawalRow row, string txid, Transaction report, long vfxHeight, LiteDatabase? db)
@@ -281,6 +303,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
             row.ClosedAtVfxHeight = vfxHeight;
             BtcAttestStore.SaveWithdrawal(row, db);
             ReleasePinnedCoins(row, db); // those of the request's other transactions; the ones this transaction spent are Spent already
+            if (row.IsBridgeExit)
+            {
+                SettleExitPart(row, txid, report, vfxHeight, db);
+                return;
+            }
 
             var request = VBTCWithdrawalRequest.GetByTransactionHash(row.RequestHash, row.SmartContractUID);
             if (request == null)
@@ -307,6 +334,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
             row.WaitingReason = why;
             BtcAttestStore.SaveWithdrawal(row, db);
             ReleasePinnedCoins(row, db);
+            if (row.IsBridgeExit)
+            {
+                VoidExitPart(row, vfxHeight, db, why);
+                return;
+            }
 
             var request = VBTCWithdrawalRequest.GetByTransactionHash(row.RequestHash, row.SmartContractUID);
             if (request == null)

@@ -112,6 +112,21 @@ namespace VerifiedXCore.Bitcoin.Models
         }
 
         /// <summary>
+        /// Gives back what an exit reserved on a lock when that exit is failed by rule before anything was signed for
+        /// it. The lock stays in use: nothing is wrong with it.
+        /// </summary>
+        public static bool RestoreUnlock(string lockId, decimal restoreAmount, long restoreSats)
+        {
+            var col = GetCollection();
+            var rec = col.FindOne(x => x.LockId == lockId);
+            if (rec == null || restoreAmount <= 0) return false;
+            rec.UnlockedAmount = Math.Max(0, rec.UnlockedAmount - restoreAmount);
+            rec.UnlockedAmountSats = Math.Max(0, rec.UnlockedAmountSats - restoreSats);
+            rec.IsUnlocked = false;
+            return col.Update(rec);
+        }
+
+        /// <summary>
         /// Returns the total amount of vBTC currently available in the bridge lock pool.
         /// </summary>
         public static decimal GetTotalAvailableAmount()

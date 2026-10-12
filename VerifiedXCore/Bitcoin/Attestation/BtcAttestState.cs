@@ -79,6 +79,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
         [BsonId] public string SmartContractUID { get; set; } = "";
         public long UnspentSats { get; set; }
         public long PinnedSats { get; set; }
+        /// <summary>
+        /// Bitcoin this vault has paid out for bridge exits, in all. Added back to the owner's figure: the vBTC behind
+        /// it was debited when it was locked for the bridge, so the Bitcoin leaving must not count against the owner again.
+        /// </summary>
+        public long SettledExitSats { get; set; }
         public long LastModifiedHeight { get; set; }
 
         /// <summary>What the vault holds on Bitcoin: unspent coins and coins pinned to a withdrawal not yet confirmed.</summary>
@@ -161,6 +166,14 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public long FeeRate { get; set; }
         public long RequestVfxHeight { get; set; }
         public VaultWithdrawalState State { get; set; }
+        /// <summary>
+        /// One vault's part of a bridge exit rather than a withdrawal request. The id is then "exit:exitTx@height|scUID";
+        /// <see cref="RequestHash"/> is the exit transaction and <see cref="RequestVfxHeight"/> its block, which the
+        /// parts of one exit share.
+        /// </summary>
+        public bool IsBridgeExit { get; set; }
+        /// <summary>For a bridge exit: the Base burn it pays, as its exit record holds it.</summary>
+        public string? ExitBurnHash { get; set; }
         public List<VaultPin> Pins { get; set; } = new();
         public string? SettledTxid { get; set; }
         public long ClosedAtVfxHeight { get; set; }
@@ -204,6 +217,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var withdrawals = db.GetCollection<VaultWithdrawalRow>(Withdrawals);
             withdrawals.EnsureIndex(x => x.SmartContractUID);
             withdrawals.EnsureIndex(x => x.State);
+            withdrawals.EnsureIndex(x => x.RequestHash);
             withdrawals.EnsureIndex(x => x.LastModifiedHeight);
         }
 
@@ -298,6 +312,15 @@ namespace VerifiedXCore.Bitcoin.Attestation
             d.GetCollection<VaultDepositTotalRow>(Totals).Upsert(total);
         }
 
+        public static void AddSettledExit(string scUID, long sats, LiteDatabase? db = null)
+        {
+            var d = db ?? Db;
+            var total = Total(scUID, d);
+            total.SettledExitSats += sats;
+            total.LastModifiedHeight = StateWriteContext.StampHeight;
+            d.GetCollection<VaultDepositTotalRow>(Totals).Upsert(total);
+        }
+
         // ── Signer sets ─────────────────────────────────────────────────────────────────────────────────────
 
         public static AttestationSignerSetRow? SignerSet(long epoch, LiteDatabase? db = null) =>
@@ -326,6 +349,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
         public static List<VaultWithdrawalRow> WithdrawalsInState(VaultWithdrawalState state, LiteDatabase? db = null) =>
             (db ?? Db).GetCollection<VaultWithdrawalRow>(Withdrawals).Find(x => x.State == state).ToList();
+
+        /// <summary>Every vault's part of one bridge exit (the exit transaction, and the block it was applied in).</summary>
+        public static List<VaultWithdrawalRow> ExitParts(string exitTxHash, long exitVfxHeight, LiteDatabase? db = null) =>
+            (db ?? Db).GetCollection<VaultWithdrawalRow>(Withdrawals).Find(x => x.RequestHash == exitTxHash)
+                .Where(x => x.IsBridgeExit && x.RequestVfxHeight == exitVfxHeight).ToList();
 
         /// <summary>The requests still waiting for a pin that were mined before <paramref name="vfxHeight"/>.</summary>
         public static List<VaultWithdrawalRow> WaitingWithdrawalsRequestedBefore(long vfxHeight, LiteDatabase? db = null) =>

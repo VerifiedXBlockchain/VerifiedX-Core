@@ -235,6 +235,11 @@ namespace VerifiedXCore.Bitcoin.Services
             if (currentHeight >= Globals.V2WithdrawalOwnerAddBackFixHeight)
                 ledgerBalance += NegativeNonOwnerPositions(scState, ownerAddress);
 
+            // A vault the chain watches: Bitcoin it paid out for bridge exits is added back, as a completed withdrawal
+            // is. The vBTC behind an exit was debited when it was locked for the bridge.
+            if (Attestation.BtcAttestBalance.IsAttestedVault(scState.SmartContractUID))
+                ledgerBalance += Attestation.BtcAttestBalance.SettledExitBtc(scState.SmartContractUID);
+
             return ledgerBalance;
         }
 

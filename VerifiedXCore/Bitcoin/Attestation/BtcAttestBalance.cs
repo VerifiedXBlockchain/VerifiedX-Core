@@ -31,5 +31,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// </summary>
         public static decimal DepositBtc(string scUID, LiteDatabase? db = null) =>
             BtcAttestStore.Total(scUID, db).HeldSats / SatsPerBtc;
+
+        /// <summary>
+        /// What the vault has paid out for bridge exits, in BTC: part of its owner's ledger figure. A lock for the bridge
+        /// debits the locker at once and the Bitcoin stays in the vault; when an exit later pays that Bitcoin out, the
+        /// deposit falls and nothing else moves. Without this term the owner's figure would fall for the same vBTC twice.
+        /// </summary>
+        public static decimal SettledExitBtc(string scUID, LiteDatabase? db = null) =>
+            BtcAttestStore.Total(scUID, db).SettledExitSats / SatsPerBtc;
     }
 }

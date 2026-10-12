@@ -16,6 +16,12 @@ namespace VerifiedXCore.Bitcoin.Models
         public long AmountSats { get; set; }
         public string BtcDestination { get; set; } = string.Empty;
         public string ExitTxHash { get; set; } = string.Empty;
+        /// <summary>
+        /// The block the exit transaction was applied in (recorded from the Bitcoin attestation recording height on; 0
+        /// before). With <see cref="ExitTxHash"/> it names one attempt at this exit, even if a later attempt were to
+        /// carry a transaction with the same hash.
+        /// </summary>
+        public long ExitVfxHeight { get; set; }
         public long CreatedTimestamp { get; set; }
         public bool IsComplete { get; set; }
 

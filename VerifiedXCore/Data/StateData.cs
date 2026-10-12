@@ -3534,10 +3534,14 @@ namespace VerifiedXCore.Data
                     IsComplete = false,
                     AllocationsJson = JsonConvert.SerializeObject(allocations)
                 };
+                if (VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(tx.Height))
+                    exitState.ExitVfxHeight = tx.Height;
                 // A prior FAILED record for this burn (locks already restored) is superseded by the re-exit.
                 if (tx.Height >= Globals.BridgeIntraBlockGuardHeight)
                     VBTCBridgeBtcExitState.DeleteFailedRecord(baseBurnTxHash.Trim());
-                VBTCBridgeBtcExitState.TryInsert(exitState);
+                // Vaults the chain watches: the Bitcoin transaction for each vault this exit draws on is fixed now, from state.
+                if (VBTCBridgeBtcExitState.TryInsert(exitState))
+                    VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.OnExitApplied(exitState, tx.Height);
 
                 SCLogUtility.Log(
                     $"ApplyVBTCBridgeExitToBTC (V3): burn={baseBurnTxHash}, totalAmount={totalAmount.Value} BTC, " +
@@ -3555,6 +3559,9 @@ namespace VerifiedXCore.Data
             try
             {
                 if (tx.FromAddress != tx.ToAddress)
+                    return;
+                // An exit on watched vaults is completed by the Bitcoin report that shows its last transaction.
+                if (VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.ExitRefusal(tx) != null)
                     return;
                 var jobj = JObject.Parse(tx.Data);
                 var baseBurnTxHash = jobj["BaseBurnTxHash"]?.ToObject<string>();
@@ -3602,6 +3609,9 @@ namespace VerifiedXCore.Data
                     ErrorLogUtility.LogError("ApplyVBTCBridgeExitToBTCFail: empty FailedAllocations", "StateData.ApplyVBTCBridgeExitToBTCFail()");
                     return;
                 }
+                // An exit on watched vaults is failed by rule, never by a transaction.
+                if (VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.ExitRefusal(tx) != null)
+                    return;
 
                 // For each failed allocation: restore the partial unlock and blacklist the lock
                 foreach (var alloc in failedAllocations)

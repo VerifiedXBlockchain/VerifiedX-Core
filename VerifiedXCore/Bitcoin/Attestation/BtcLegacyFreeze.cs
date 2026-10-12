@@ -14,6 +14,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
     /// such a vault is frozen: nothing debits a balance on it, for the owner or for a holder. People move to a vault
     /// created after the recording height before then; what is left on an old vault stays there.
     ///
+    /// The bridge follows: no exit to Bitcoin and no unlock back to VFX may draw on a lock that belongs to such a
+    /// vault (an unlock would hand somebody vBTC on a frozen vault).
+    ///
     /// The transactions that only the old way of working needs are refused for every vault from the same height:
     /// the owner-sent withdrawal completion, the cancellation vote, and the caster-sent bridge exit completion.
     /// (Watched vaults never accept the first two; see <see cref="BtcWithdrawals"/>.)
@@ -51,6 +54,27 @@ namespace VerifiedXCore.Bitcoin.Attestation
             foreach (var (key, _) in SameBlockDebitGuard.GetDebits(tx))
                 if (key.Kind == SameBlockDebitGuard.LedgerKind.VbtcV2 && IsLegacyVault(key.ContractUid))
                     return Frozen(key.ContractUid);
+
+            // Neither an exit to Bitcoin nor an unlock back to VFX may draw on the locks of a frozen vault. The vault
+            // is the one the lock's own record names, whatever the transaction says.
+            if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC || tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK
+                || tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_UNLOCK)
+            {
+                try
+                {
+                    var data = JObject.Parse(tx.Data);
+                    var allocations = data["Allocations"] is JArray listed
+                        ? listed.ToObject<List<VerifiedXCore.Bitcoin.Models.PoolUnlockAllocation>>() ?? new()
+                        : new List<VerifiedXCore.Bitcoin.Models.PoolUnlockAllocation>();
+                    var vaults = allocations
+                        .Select(a => VerifiedXCore.Bitcoin.Models.VBTCBridgeLockState.GetByLockId(a.LockId)?.SmartContractUID ?? a.SmartContractUID)
+                        .Append(VerifiedXCore.Bitcoin.Models.VBTCBridgeLockState.GetByLockId(data["LockId"]?.ToObject<string?>() ?? "")?.SmartContractUID)
+                        .Append(data["ContractUID"]?.ToObject<string?>());
+                    foreach (var vault in vaults)
+                        if (IsLegacyVault(vault)) return Frozen(vault!);
+                }
+                catch { }
+            }
 
             if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
             {

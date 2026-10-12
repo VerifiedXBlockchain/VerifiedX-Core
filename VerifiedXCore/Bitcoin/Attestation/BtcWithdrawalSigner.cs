@@ -114,8 +114,30 @@ namespace VerifiedXCore.Bitcoin.Attestation
         {
             var vault = VBTCChainView.GetVault(row.SmartContractUID);
             var script = BtcAttestStore.ScriptRowForVault(row.SmartContractUID);
-            var request = VBTCWithdrawalRequest.GetByTransactionHash(row.RequestHash, row.SmartContractUID);
-            if (vault == null || script == null || request == null) return (false, "the vault or the request is not in state");
+            if (vault == null || script == null) return (false, "the vault is not in state");
+
+            // What the ceremony is told it is signing for. The transaction itself is the pinned one either way.
+            string reference, destination;
+            decimal amount;
+            long feeRate;
+            if (row.IsBridgeExit)
+            {
+                var exit = VBTCBridgeBtcExitState.GetByBurnHash(row.ExitBurnHash ?? "");
+                if (exit == null) return (false, "the bridge exit is not in state");
+                reference = BtcWithdrawals.ExitSigningReference(exit.BaseBurnTxHash, row.SmartContractUID);
+                destination = exit.BtcDestination;
+                amount = row.AmountSats / BtcAttestBalance.SatsPerBtc;
+                feeRate = row.FeeRate;
+            }
+            else
+            {
+                var request = VBTCWithdrawalRequest.GetByTransactionHash(row.RequestHash, row.SmartContractUID);
+                if (request == null) return (false, "the withdrawal request is not in state");
+                reference = row.RequestHash;
+                destination = request.BTCDestination;
+                amount = request.Amount;
+                feeRate = request.FeeRate;
+            }
 
             // The coins exactly as state holds them: the signers check every sighash against these.
             var coins = new List<PinnedWithdrawalCoin>();
@@ -138,8 +160,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var threshold = VBTCThresholdCalculator.CalculateAdjustedThreshold(snapshot.Count, reachable.Count, vault.Feature.ProofBlockHeight, Globals.LastBlock?.Height ?? 0);
 
             var result = await BitcoinTransactionService.ExecuteFROSTWithdrawal(
-                script.DepositAddress, request.BTCDestination, request.Amount, request.FeeRate, row.SmartContractUID, reachable, threshold,
-                broadcast: true, coordinatorAddress: Globals.ValidatorAddress, withdrawalRequestHash: row.RequestHash,
+                script.DepositAddress, destination, amount, feeRate, row.SmartContractUID, reachable, threshold,
+                broadcast: true, coordinatorAddress: Globals.ValidatorAddress, withdrawalRequestHash: reference,
                 pinnedUnsignedTxHex: pin.TxHex, pinnedCoins: coins);
             if (!result.Success) return (false, result.ErrorMessage);
             return string.Equals(result.TxHash, pin.Txid, StringComparison.OrdinalIgnoreCase)

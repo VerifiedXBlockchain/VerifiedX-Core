@@ -294,7 +294,8 @@ namespace VerifiedXCore.Services
 
             // Withdrawals on a vault the chain watches: no completion transaction, no vote, cancellation only before
             // the Bitcoin transaction is fixed, and a destination that is a Bitcoin address.
-            var watchedWithdrawalRefusal = VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.Refusal(txRequest);
+            var watchedWithdrawalRefusal = VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.Refusal(txRequest)
+                ?? VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.ExitRefusal(txRequest);
             if (watchedWithdrawalRefusal != null)
                 return (false, watchedWithdrawalRefusal);
             // A cancellation on such a vault has passed its whole rule just above; the vote-based rules below are not its.

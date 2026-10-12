@@ -69,6 +69,51 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// The allocation plan for an unlock back to VFX. From the enforcement height it leaves out the locks of frozen
+        /// vaults: consensus refuses them, and vBTC handed out on a frozen vault could never be moved.
+        /// </summary>
+        public static List<PoolUnlockAllocation>? ComputeUnlockAllocationPlan(decimal amountBtc, long height)
+        {
+            if (!Attestation.BtcLegacyFreeze.Active(height))
+                return ComputeAllocationPlan(amountBtc);
+            var frozen = (VBTCBridgeLockState.GetAvailableLocksFIFO() ?? new List<VBTCBridgeLockState>())
+                .Select(l => l.SmartContractUID).Distinct(StringComparer.Ordinal)
+                .Where(c => Attestation.BtcLegacyFreeze.IsLegacyVault(c)).ToHashSet(StringComparer.Ordinal);
+            return ComputeAllocationPlan(amountBtc, frozen);
+        }
+
+        /// <summary>
+        /// The allocation plan for an exit that pays Bitcoin. From the recording height an exit draws on one kind of
+        /// vault only: older vaults (paid the earlier way, by the handling caster) or vaults the chain watches (paid by
+        /// the transaction consensus pins). Older vaults go first while they may still pay, so that they empty before
+        /// they are frozen at the enforcement height; from then on only watched vaults are used.
+        /// </summary>
+        public static List<PoolUnlockAllocation>? ComputeExitAllocationPlan(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs, long height)
+        {
+            if (!Attestation.BtcAttestRules.Recording(height))
+                return ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs);
+
+            var contracts = (VBTCBridgeLockState.GetAvailableLocksFIFO() ?? new List<VBTCBridgeLockState>())
+                .Select(l => l.SmartContractUID).Distinct(StringComparer.Ordinal).ToList();
+            var watched = contracts.Where(c => Attestation.BtcAttestBalance.IsAttestedVault(c)).ToHashSet(StringComparer.Ordinal);
+            var older = contracts.Where(c => !watched.Contains(c)).ToHashSet(StringComparer.Ordinal);
+            HashSet<string> Without(HashSet<string> kind) =>
+                new HashSet<string>((excludeContractUIDs ?? new HashSet<string>()).Concat(kind), StringComparer.Ordinal);
+
+            if (!Attestation.BtcLegacyFreeze.Active(height))
+            {
+                var fromOlder = ComputeAllocationPlan(exitAmountBtc, Without(watched));
+                if (fromOlder != null) return fromOlder;
+            }
+            var fromWatched = ComputeAllocationPlan(exitAmountBtc, Without(older));
+            if (fromWatched == null) return null;
+            // A vault is never asked for less than a Bitcoin transaction can pay (the exit would be refused).
+            var tooSmall = fromWatched.GroupBy(a => a.SmartContractUID, StringComparer.Ordinal)
+                .Any(g => (long)(g.Sum(a => a.UnlockAmount) * Attestation.BtcAttestBalance.SatsPerBtc) < Attestation.BtcWithdrawals.MinExitPartSats);
+            return tooSmall ? null : fromWatched;
+        }
+
+        /// <summary>
         /// Build, sign, and broadcast a VBTC_V2_BRIDGE_POOL_UNLOCK transaction.
         /// Called by the caster after consensus on a VfxExitBurned event.
         /// 

@@ -131,6 +131,16 @@ namespace VerifiedXCore.Bitcoin.FROST
                     destination = exit.BtcDestination;
                     // Cap at THIS contract's share of the exit, never the whole exit amount.
                     maxDestinationSats = capSats;
+
+                    // A vault the chain watches: only the transaction consensus pinned for this vault's part of the exit
+                    // is signed, and any signer of the vault may lead (as for a withdrawal, below).
+                    if (Attestation.BtcAttestBalance.IsAttestedVault(request.SmartContractUID))
+                    {
+                        var (pinned, pinReason) = Attestation.BtcWithdrawals.IsPinnedExitTransaction(exit, request.SmartContractUID, txId);
+                        if (!pinned) return (false, pinReason);
+                        leaderIsVaultSignerOfPinned = Attestation.BtcWithdrawalSigner.SignersOf(request.SmartContractUID)
+                            .Contains(request.LeaderAddress, StringComparer.Ordinal);
+                    }
                 }
                 else
                 {
@@ -181,7 +191,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                 if (!boundsOk) return (false, boundsReason);
 
                 // ── 5. Leader: the withdrawal owner for user withdrawals; a committee caster for exits ─
-                var (leaderOk, leaderReason) = IsLeaderAllowed(isBridgeExit, leaderIsOwner || leaderIsVaultSignerOfPinned, IsKnownCaster(request.LeaderAddress));
+                var (leaderOk, leaderReason) = IsLeaderAllowed(isBridgeExit, leaderIsOwner || leaderIsVaultSignerOfPinned,
+                    IsKnownCaster(request.LeaderAddress) || (isBridgeExit && leaderIsVaultSignerOfPinned));
                 if (!leaderOk) return (false, leaderReason);
 
                 return (true, "");
