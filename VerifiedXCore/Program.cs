@@ -766,6 +766,10 @@ namespace VerifiedXCore
             // V2 Bridge: Caster consensus for burn exits
             _ = Task.Run(() => Bitcoin.Services.BurnExitConsensusService.ConsensusLoop(CancellationToken.None));
 
+            // Bitcoin attestation: validators follow Bitcoin and sign reports. Idle before the observation height
+            // and on a node that is not a validator.
+            _ = Task.Run(() => Bitcoin.Attestation.BtcReportService.RunLoop(CancellationToken.None));
+
             //API Port URL
             string url = !Globals.TestURL ? "http://*:" + Globals.APIPort : "https://*:" + Globals.APIPortSSL;
             //P2P Port URL

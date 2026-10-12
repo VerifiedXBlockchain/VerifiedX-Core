@@ -1,0 +1,211 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using VerifiedXCore.Bitcoin.Attestation;
+using VerifiedXCore.Bitcoin.Attestation.Net;
+using VerifiedXCore.Bitcoin.FROST;
+using VerifiedXCore.Data;
+using VerifiedXCore.Extensions;
+using VerifiedXCore.Models;
+using VerifiedXCore.Services;
+using Xunit;
+using BtcBlock = NBitcoin.Block;
+
+namespace VerifiedXCore.Tests
+{
+    /// <summary>
+    /// Bitcoin facts in consensus, part 7: validators sign a report and bring their signatures together (plan 3.4).
+    /// Nobody is chosen: each validator works out the report, signs its hash, exchanges signatures with the others,
+    /// and whoever holds two thirds submits. The mempool keeps one copy and a block carries it.
+    /// </summary>
+    [Collection("DbContextSequential")]
+    public class BtcAttest07_ReportServiceTests : BtcAttestTestBase
+    {
+        private const long Checkpoint = 4032;
+        private readonly Btc _btc = new(Checkpoint - 11);
+        private readonly string? _priorValidator = Globals.ValidatorAddress;
+
+        public BtcAttest07_ReportServiceTests() : base(realMainnetRules: false)
+        {
+            _btc.MineEmpty(12);
+            Globals.BitcoinCheckpointHeightMainnet = Checkpoint;
+            Globals.BitcoinCheckpointHeadersMainnet = string.Concat(_btc.HeaderHexes(Checkpoint - 11, Checkpoint));
+            BtcReportSignatures.Clear();
+            BtcReportService.SubmitWaitOverride = TimeSpan.Zero;
+            // Each validator's key is in its own wallet; here they share one process, so one wallet holds them all.
+            foreach (var v in Signers.Append(Unfunded))
+                AccountData.GetAccounts().InsertSafe(new Account { Address = v.Address, PublicKey = v.Pub, PrivateKey = "0" + v.Key.secret.ToString("x") });
+        }
+
+        public override void Dispose()
+        {
+            BtcReportSignatures.Clear();
+            BtcReportService.SubmitWaitOverride = null;
+            Globals.ValidatorAddress = _priorValidator;
+            base.Dispose();
+        }
+
+        private sealed class View : IBtcChainView
+        {
+            private readonly Btc _chain;
+            public View(Btc chain) { _chain = chain; }
+            public long TipHeight => _chain.Tip;
+            public BtcHeader? HeaderAt(long height) => height >= Checkpoint - 11 && height <= TipHeight ? _chain.Header(height) : null;
+            public BtcBlock? BlockAt(long height) => height >= Checkpoint - 11 && height <= TipHeight ? _chain.Block(height) : null;
+        }
+
+        private static long Tip => Globals.LastBlock.Height;
+        private static readonly Func<BtcReport, string, BtcReportSignature?, CancellationToken, Task> NoNetwork = (_, _, _, _) => Task.CompletedTask;
+
+        /// <summary>One validator's round. They share this process's signature store, which stands in for the exchange between them.</summary>
+        private Task StepAs(V validator, IBtcChainView view)
+        {
+            Globals.ValidatorAddress = validator.Address;
+            return BtcReportService.StepAsync(view, NoNetwork, CancellationToken.None);
+        }
+
+        private static List<VerifiedXCore.Models.Transaction> ReportsInMempool() =>
+            TransactionData.GetPool().Find(x => x.TransactionType == TransactionType.VBTC_V2_BTC_REPORT).ToList();
+
+        [Fact]
+        public async Task Validators_EachSignTheSameReport_AndTheOneThatReachesTwoThirdsSubmitsIt()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var deposit = Pay(vault.Script, 150_000);
+            var at = _btc.Mine(deposit);
+            _btc.MineEmpty(BtcAttestRules.Depth);
+            var view = new View(_btc);
+
+            await StepAs(Signers[0], view);
+            await StepAs(Signers[1], view);
+            Assert.Empty(ReportsInMempool()); // two of four: not two thirds
+
+            // A validator that is registered but does not hold the validator balance signs nothing that counts.
+            await StepAs(Unfunded, view);
+            Assert.Empty(ReportsInMempool());
+
+            await StepAs(Signers[2], view);
+            var tx = Assert.Single(ReportsInMempool());
+            Assert.Equal(TransactionRating.A, tx.TransactionRating);
+            Assert.True(BtcReport.TryParse(tx.Data, out var report, out _));
+            Assert.Equal(at, report!.BlockHeight);
+            // Exactly the signatures required, in address order.
+            Assert.Equal(3, report.Signatures!.Count);
+            Assert.Equal(Signers.Take(3).Select(s => s.Address).OrderBy(a => a, StringComparer.Ordinal), report.Signatures.Select(s => s.ValidatorAddress));
+
+            // The fourth validator arrives late: the report is already in the mempool, and it adds nothing.
+            await StepAs(Signers[3], view);
+            Assert.Single(ReportsInMempool());
+
+            // The block builder takes it, the block is applied, and the deposit is in state.
+            var chosen = await TransactionData.ProcessTxPool();
+            Assert.Equal(tx.Hash, Assert.Single(chosen).Hash);
+            await Apply(Tip + 1, chosen.ToArray());
+            Assert.Equal(150_000, BtcAttestStore.Total(vault.Uid).HeldSats);
+
+            // Nothing is left to sign, for any of them.
+            foreach (var v in Signers) await StepAs(v, view);
+            Assert.Empty(await TransactionData.ProcessTxPool());
+            Assert.Empty(BtcReportService.Status.Offered);
+        }
+
+        [Fact]
+        public async Task ASignature_IsKeptOnlyWhenValid_AndFromASignerOfItsEpoch()
+        {
+            await Start();
+            var hash = new string('a', 64);
+            string Sig(V v, string h) => SignatureService.CreateSignature(BtcReport.SigningMessage(h), v.Key, v.Pub);
+
+            Assert.True(BtcReportSignatures.Accept(hash, 0, Signers[1].Address, Sig(Signers[1], hash), Tip).Ok);
+            Assert.True(BtcReportSignatures.Accept(hash, 0, Signers[0].Address, Sig(Signers[0], hash), Tip).Ok);
+            Assert.True(BtcReportSignatures.Accept(hash, 0, Signers[0].Address, Sig(Signers[0], hash), Tip).Ok); // again: no harm
+            var held = BtcReportSignatures.For(hash, 0);
+            Assert.Equal(new[] { Signers[0].Address, Signers[1].Address }.OrderBy(a => a, StringComparer.Ordinal), held.Select(s => s.ValidatorAddress));
+
+            var stranger = NewKey();
+            Assert.Contains("is not a signer", BtcReportSignatures.Accept(hash, 0, stranger.Address, Sig(stranger, hash), Tip).Why);
+            Assert.Contains("is not a signer", BtcReportSignatures.Accept(hash, 0, Unfunded.Address, Sig(Unfunded, hash), Tip).Why);
+            Assert.Contains("not valid", BtcReportSignatures.Accept(hash, 0, Signers[2].Address, Sig(Signers[3], hash), Tip).Why);
+            Assert.Contains("not valid", BtcReportSignatures.Accept(hash, 0, Signers[2].Address, Sig(Signers[2], new string('b', 64)), Tip).Why);
+            Assert.Contains("not a report hash", BtcReportSignatures.Accept("xyz", 0, Signers[2].Address, Sig(Signers[2], hash), Tip).Why);
+            Assert.Contains("not a report hash", BtcReportSignatures.Accept(hash.ToUpperInvariant(), 0, Signers[2].Address, Sig(Signers[2], hash), Tip).Why);
+            Assert.Contains("is not the current epoch", BtcReportSignatures.Accept(hash, 3, Signers[2].Address, Sig(Signers[2], hash), Tip).Why);
+            Assert.Equal(2, BtcReportSignatures.For(hash, 0).Count);
+
+            // A signer cannot make this node hold signatures without end: the oldest of its reports gives way.
+            for (var i = 0; i < BtcReportSignatures.MaxReportsPerSigner; i++)
+            {
+                var other = i.ToString("x").PadLeft(64, 'c');
+                Assert.True(BtcReportSignatures.Accept(other, 0, Signers[1].Address, Sig(Signers[1], other), Tip).Ok);
+            }
+            Assert.Equal(Signers[0].Address, Assert.Single(BtcReportSignatures.For(hash, 0)).ValidatorAddress);
+        }
+
+        [Fact]
+        public async Task TheSignatureRoute_KeepsAValidSignature_AndAnswersWithTheOnesHeld()
+        {
+            await Start();
+            var hash = new string('d', 64);
+            BtcReportSignatureMessage From(V v, string h) => new()
+            {
+                ReportHash = h, SignerEpoch = 0, ValidatorAddress = v.Address,
+                Signature = SignatureService.CreateSignature(BtcReport.SigningMessage(h), v.Key, v.Pub),
+            };
+            using var server = new TestServer(new WebHostBuilder().UseStartup<FrostStartup>());
+            var client = server.CreateClient();
+            async Task<(HttpStatusCode Code, JObject? Body)> Post(string body)
+            {
+                var r = await client.PostAsync("/frost/btcreport/signature", new StringContent(body, Encoding.UTF8, "application/json"));
+                var text = await r.Content.ReadAsStringAsync();
+                return (r.StatusCode, string.IsNullOrEmpty(text) ? null : JObject.Parse(text));
+            }
+
+            var first = await Post(JsonConvert.SerializeObject(From(Signers[0], hash)));
+            Assert.Equal(HttpStatusCode.OK, first.Code);
+            Assert.True(first.Body!.Value<bool>("Success"));
+            Assert.Single(first.Body["Signatures"]!);
+
+            // The second signer gets the first one's signature back with its own.
+            var second = await Post(JsonConvert.SerializeObject(From(Signers[1], hash)));
+            Assert.Equal(2, second.Body!["Signatures"]!.Count());
+
+            // A stranger learns nothing and leaves nothing.
+            var stranger = await Post(JsonConvert.SerializeObject(From(NewKey(), hash)));
+            Assert.False(stranger.Body!.Value<bool>("Success"));
+            Assert.Empty(stranger.Body["Signatures"]!);
+            Assert.Equal(2, BtcReportSignatures.For(hash, 0).Count);
+
+            Assert.Equal(HttpStatusCode.BadRequest, (await Post("not json")).Code);
+            Assert.Equal(HttpStatusCode.RequestEntityTooLarge, (await Post(new string('x', 5000))).Code);
+
+            // The status route is for the operator at the machine.
+            var status = await client.GetAsync("/frost/btcreport/status");
+            Assert.True(status.StatusCode == HttpStatusCode.OK || status.StatusCode == HttpStatusCode.Forbidden);
+        }
+
+        [Fact]
+        public async Task BeforeTheRecordingHeight_AValidatorFollowsBitcoin_AndSignsNothing()
+        {
+            _btc.MineEmpty(5);
+            Globals.ValidatorAddress = Signers[0].Address;
+            await BtcReportService.StepAsync(new View(_btc), NoNetwork, CancellationToken.None);
+            var status = BtcReportService.Status;
+            Assert.True(status.Running);
+            Assert.Equal(_btc.Tip, status.BitcoinTipHeight);
+            Assert.Equal(_btc.Header(_btc.Tip).Hash, status.BitcoinTipHash);
+            Assert.Contains("starts at the recording height", status.Idle);
+            Assert.Empty(status.Offered);
+            Assert.Empty(ReportsInMempool());
+        }
+    }
+}

@@ -136,6 +136,66 @@ namespace VerifiedXCore.Bitcoin.FROST
                 });
 
                 /// <summary>
+                /// POST /frost/btcreport/signature - one validator hands another its signature over a Bitcoin report hash
+                /// (docs/PLAN-vBTC-Bitcoin-Attestation.md, 3.4). The signature is kept only when it is valid and its signer
+                /// is in the stored signer set of the epoch it names, so the route needs no other authentication. The answer
+                /// carries the signatures this node holds for the same report.
+                /// </summary>
+                endpoints.MapPost("/frost/btcreport/signature", async context =>
+                {
+                    try
+                    {
+                        if (context.Request.ContentLength > 4096)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+                            return;
+                        }
+                        var buffer = new char[4097];
+                        int read;
+                        using (var reader = new StreamReader(context.Request.Body))
+                            read = await reader.ReadBlockAsync(buffer, 0, buffer.Length);
+                        if (read > 4096)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+                            return;
+                        }
+                        var message = JsonConvert.DeserializeObject<VerifiedXCore.Bitcoin.Attestation.BtcReportSignatureMessage>(new string(buffer, 0, read));
+                        context.Response.StatusCode = StatusCodes.Status200OK;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(VerifiedXCore.Bitcoin.Attestation.BtcReportService.HandleSignature(message)));
+                    }
+                    catch
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "The request is not a report signature." }));
+                    }
+                });
+
+                /// <summary>
+                /// GET /frost/btcreport/status - what this validator's Bitcoin reporting is doing: its Bitcoin tip and
+                /// peers, the tip the chain has attested, the reports it is offering to sign with their signature counts,
+                /// and what it is waiting for. Operators compare the Bitcoin tip between validators. Loopback only.
+                /// </summary>
+                endpoints.MapGet("/frost/btcreport/status", async context =>
+                {
+                    if (!IsLoopbackRequest(context))
+                    {
+                        await WriteForbiddenAsync(context);
+                        return;
+                    }
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        ValidatorAddress = Globals.ValidatorAddress,
+                        ObserveHeight = Globals.BitcoinAttestationObserveHeight,
+                        RecordHeight = Globals.BitcoinAttestationRecordHeight,
+                        EnforceHeight = Globals.BitcoinAttestationHeight,
+                        Depth = VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Depth,
+                        Status = VerifiedXCore.Bitcoin.Attestation.BtcReportService.Status,
+                    }, Formatting.Indented));
+                });
+
+                /// <summary>
                 /// GET /frost/keystore - this validator's FROST key records and a one-line verdict (Ok / Verdict): after an
                 /// upgrade nothing should be ambiguous and nothing should be waiting to be bound. A share whose ceremony never
                 /// produced a contract stays under its session id and is normal. Each row shows the UID the share is filed
