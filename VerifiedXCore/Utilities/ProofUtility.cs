@@ -389,7 +389,8 @@ namespace VerifiedXCore.Utilities
         }
 
         /// <summary>
-        /// Checks if a wallet version string has a major version matching Globals.MajorVer.
+        /// Checks if a wallet version string has a major version this node accepts at its current height
+        /// (Globals.MinimumPeerMajorVersion: the previous release until this release's first fork height, then this one).
         /// Returns false for null/empty/malformed versions.
         /// </summary>
         internal static bool IsMajorVersionCurrent(string? walletVersion)
@@ -401,7 +402,7 @@ namespace VerifiedXCore.Utilities
                 var parts = walletVersion!.Split('.');
                 if (parts.Length < 1) return false;
                 var major = Convert.ToInt32(parts[0]);
-                return major >= Globals.MajorVer;
+                return major >= Globals.MinimumPeerMajorVersion(Globals.LastBlock?.Height ?? 0);
             }
             catch { return false; }
         }

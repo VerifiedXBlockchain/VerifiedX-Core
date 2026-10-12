@@ -586,10 +586,11 @@ namespace VerifiedXCore.Models
                         var parts = cleanVersion.Split('.');
                         if (parts.Length > 0 && int.TryParse(parts[0], out var major))
                         {
-                            if (major < Globals.MajorVer)
+                            var requiredMajor = Globals.MinimumPeerMajorVersion(Globals.LastBlock?.Height ?? 0);
+                            if (major < requiredMajor)
                             {
                                 toRemove.Add(kvp.Key);
-                                LogUtility.Log($"LIVENESS-SWEEP: {kvp.Key} at {ip} — version '{cleanVersion}' outdated (need major >= {Globals.MajorVer}). Removing.", "NetworkValidator.RunPostSyncLivenessSweep");
+                                LogUtility.Log($"LIVENESS-SWEEP: {kvp.Key} at {ip} — version '{cleanVersion}' outdated (need major >= {requiredMajor}). Removing.", "NetworkValidator.RunPostSyncLivenessSweep");
                                 continue;
                             }
                         }
@@ -642,7 +643,7 @@ namespace VerifiedXCore.Models
                     var parts = cleanVersion.Split('.');
                     if (parts.Length > 0 && int.TryParse(parts[0], out var major))
                     {
-                        if (major < Globals.MajorVer)
+                        if (major < Globals.MinimumPeerMajorVersion(Globals.LastBlock?.Height ?? 0))
                             return false;
                     }
                 }

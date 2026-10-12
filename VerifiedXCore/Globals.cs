@@ -390,6 +390,56 @@ namespace VerifiedXCore
         /// is unchanged.
         /// </summary>
         public static long AddressFreezeHeight = FundLossAuditHeight;
+
+        // ── Bitcoin facts in consensus (docs/PLAN-vBTC-Bitcoin-Attestation.md). Nothing here is active until the heights
+        //    are set: every value below is a sentinel or empty in this build. ──────────────────────────────────────────
+
+        /// <summary>
+        /// H0, observation: validators watch Bitcoin blocks and build reports locally; nothing is sent. Needs no
+        /// coordination. Sentinel until set (testnet value in Program.cs).
+        /// </summary>
+        public static long BitcoinAttestationObserveHeight = long.MaxValue;
+        /// <summary>
+        /// H1, recording: the Bitcoin report, coin pin and reorg transactions are accepted and applied; balances are still
+        /// computed the old way. The new types are a hard fork for a node that does not know them, so this must be above
+        /// the height at which every validator and caster runs this release. It is also the height from which a peer
+        /// must be on this major version (<see cref="MinimumPeerMajorVersion"/>). Sentinel until set.
+        /// </summary>
+        public static long BitcoinAttestationRecordHeight = long.MaxValue;
+        /// <summary>
+        /// H2, enforcement: a vault owner's balance is computed from attested coins, withdrawals follow pin / settle /
+        /// void, and vaults created before this height are frozen. Sentinel until set.
+        /// </summary>
+        public static long BitcoinAttestationHeight = long.MaxValue;
+
+        /// <summary>The major version peers were required to run before this release.</summary>
+        public const int PriorMajorVer = 8;
+
+        /// <summary>
+        /// The lowest major version a peer may run at <paramref name="height"/>. A node on <see cref="MajorVer"/> used to
+        /// refuse every peer on a lower major version at once, which cut a newly upgraded node off from a network still
+        /// on the previous release and made a one-node-at-a-time upgrade impossible. The two releases agree on every
+        /// rule until H1 (<see cref="BitcoinAttestationRecordHeight"/>), so until then a peer on the previous major
+        /// version is accepted; from H1 a node that has not upgraded cannot follow the chain and is refused.
+        /// </summary>
+        public static int MinimumPeerMajorVersion(long height) =>
+            height >= BitcoinAttestationRecordHeight ? MajorVer : Math.Min(MajorVer, PriorMajorVer);
+
+        /// <summary>
+        /// Where this chain's view of Bitcoin starts on mainnet (plan section 8.1). Height of the LAST of the twelve
+        /// checkpoint headers; it must be the first block of a difficulty interval (divisible by 2016). 0 = not set.
+        /// </summary>
+        public static long BitcoinCheckpointHeightMainnet = 0;
+        /// <summary>
+        /// The twelve consecutive Bitcoin mainnet headers ending at <see cref="BitcoinCheckpointHeightMainnet"/>, 80 bytes
+        /// each in hex, oldest first, joined (whitespace and commas between them are ignored). Paste from any block
+        /// explorer at release time; the node checks that they link and that each meets its own proof-of-work.
+        /// </summary>
+        public static string BitcoinCheckpointHeadersMainnet = "";
+        /// <summary>As <see cref="BitcoinCheckpointHeightMainnet"/>, for Bitcoin testnet4 (the VFX testnet).</summary>
+        public static long BitcoinCheckpointHeightTestnet = 0;
+        /// <summary>As <see cref="BitcoinCheckpointHeadersMainnet"/>, for Bitcoin testnet4.</summary>
+        public static string BitcoinCheckpointHeadersTestnet = "";
         public static readonly HashSet<string> FrozenAddresses = new(StringComparer.Ordinal)
         {
             "RB3eeBH258arkuePCJf5NMVMSaUyhyy9g6",
@@ -446,9 +496,9 @@ namespace VerifiedXCore
         public static int APIPort = 7292;
         public static int ValAPIPort = 7294;
         public static int APIPortSSL = 7777;
-        public static int MajorVer = 8;
-        public static int MinorVer = 2;
-        public static int RevisionVer = 1;
+        public static int MajorVer = 9;
+        public static int MinorVer = 0;
+        public static int RevisionVer = 0;
         public static int BuildVer = 0;
         public static int SCVersion = 1;
         public static int ValidatorIssueCount = 0;

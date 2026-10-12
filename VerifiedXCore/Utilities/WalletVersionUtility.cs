@@ -17,8 +17,9 @@
                     var major = Convert.ToInt32(walletVerSplit[0]);
                     var minor = Convert.ToInt32(walletVerSplit[1]);
 
-                    //if (major < Globals.MajorVer && Globals.LastBlock.Height >= Globals.BlockLock)
-                    if (major < Globals.MajorVer)
+                    // The required major version depends on the height (Globals.MinimumPeerMajorVersion): the previous
+                    // release is accepted until this release's first fork height.
+                    if (major < Globals.MinimumPeerMajorVersion(Globals.LastBlock?.Height ?? 0))
                     {
                         return output;
                     }
