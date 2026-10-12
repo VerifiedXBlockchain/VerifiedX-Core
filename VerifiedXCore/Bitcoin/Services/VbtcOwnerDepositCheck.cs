@@ -58,6 +58,11 @@ namespace VerifiedXCore.Bitcoin.Services
         Trusted,
         /// <summary>No server answered; the transaction must not be accepted or proposed on an unverified deposit.</summary>
         Unverifiable,
+        /// <summary>
+        /// DepositBalance is the vault's Bitcoin as the chain has attested it (a vault created from the recording
+        /// height on). The same figure on every node and in every mode, block validation included.
+        /// </summary>
+        Attested,
     }
 
     public readonly record struct OwnerDepositCheck(OwnerDepositStatus Status, decimal DepositBalance);
@@ -80,6 +85,15 @@ namespace VerifiedXCore.Bitcoin.Services
 
         public static bool IsUnverifiable(string? reason) => reason != null && reason.StartsWith(UnverifiableReason, StringComparison.Ordinal);
 
+        /// <summary>
+        /// Whether an owner's shortfall found during block validation is left to the block's producer. That was the
+        /// rule for every vault, because the deposit was an Electrum answer and block validation cannot ask Electrum.
+        /// For a vault whose Bitcoin is attested there is nothing to leave to anyone: the shortfall is a fact of state
+        /// and the transaction is refused in the block as it is at admission.
+        /// </summary>
+        public static bool LeftToTheProducer(OwnerDepositCheck deposit, bool blockVerify) =>
+            blockVerify && deposit.Status != OwnerDepositStatus.Attested;
+
         /// <param name="resolveDepositAddress">The vault's Bitcoin deposit address; called only when a query is needed
         /// (it may decompile the contract).</param>
         /// <param name="neededFromDeposit">What the deposit must cover once the owner ledger is counted (amount minus ledger).</param>
@@ -91,6 +105,10 @@ namespace VerifiedXCore.Bitcoin.Services
         public static async Task<OwnerDepositCheck> CheckAsync(Func<string?> resolveDepositAddress, decimal neededFromDeposit, bool blockDownloads, bool blockVerify,
             string? scUID = null, long currentHeight = 0)
         {
+            // A vault the chain watches: its deposit is in state. No mode, no Electrum, no exception for blocks.
+            if (Attestation.BtcAttestBalance.IsAttestedVault(scUID))
+                return new OwnerDepositCheck(OwnerDepositStatus.Attested, Attestation.BtcAttestBalance.DepositBtc(scUID!));
+
             if (blockDownloads || blockVerify)
                 return new OwnerDepositCheck(OwnerDepositStatus.NotQueried, 0M);
 

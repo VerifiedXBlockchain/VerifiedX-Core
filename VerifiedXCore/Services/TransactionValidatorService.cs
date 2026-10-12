@@ -186,7 +186,7 @@ namespace VerifiedXCore.Services
                 {
                     // Owner branch at block verification trusts the crafter's ElectrumX check —
                     // same rule as the single shape.
-                    if (!(isRequesterOwner && blockVerify))
+                    if (!(isRequesterOwner && VbtcOwnerDeposit.LeftToTheProducer(deposit, blockVerify)))
                         return (false, $"Insufficient vBTC balance for withdrawal input {input.SCUID}. Available: {totalBalance}, Requested: {input.Amount}");
                 }
             }
@@ -1567,7 +1567,7 @@ namespace VerifiedXCore.Services
                                                         // rejecting blocks whose crafter verified the deposit live, and turning any
                                                         // local withdrawal-store divergence into block rejections.
                                                         var legacyBypassHeight = blockHeight ?? Globals.LastBlock?.Height ?? 0;
-                                                        if (blockVerify && legacyBypassHeight >= Globals.VbtcLegacyTransferBypassFixHeight)
+                                                        if (VbtcOwnerDeposit.LeftToTheProducer(deposit, blockVerify) && legacyBypassHeight >= Globals.VbtcLegacyTransferBypassFixHeight)
                                                         {
                                                             // Trust the block crafter's ElectrumX verification
                                                         }
@@ -2924,7 +2924,7 @@ namespace VerifiedXCore.Services
                                     {
                                         // At block verification, trust the crafter's ElectrumX check —
                                         // same owner-branch rule as the single shape.
-                                        if (!blockVerify)
+                                        if (!VbtcOwnerDeposit.LeftToTheProducer(depositMulti, blockVerify))
                                             return (txResult, $"Insufficient vBTC balance (owner) for transfer input {input.SCUID}. Available: {depositBalanceMulti + ledgerBalanceMulti}, Requested: {input.Amount}");
                                     }
                                 }
@@ -3067,7 +3067,8 @@ namespace VerifiedXCore.Services
                                     {
                                         // During block verification, skip deposit balance check for owner.
                                         // The block crafter already verified via ElectrumX during mempool admission.
-                                        if (blockVerify)
+                                        // (Not for a vault whose Bitcoin is attested: that is checked here.)
+                                        if (VbtcOwnerDeposit.LeftToTheProducer(deposit, blockVerify))
                                         {
                                             // Trust the block crafter's ElectrumX verification
                                         }
@@ -3453,7 +3454,7 @@ namespace VerifiedXCore.Services
                                     // Deposit balance is external Bitcoin chain state — if ElectrumX is temporarily
                                     // unavailable during block validation, we trust the crafter's prior verification.
                                     // This matches the v1 TransferCoin() pattern where owner balance is not checked.
-                                    if (isRequesterOwner && blockVerify)
+                                    if (isRequesterOwner && VbtcOwnerDeposit.LeftToTheProducer(deposit, blockVerify))
                                     {
                                         // Trust the block crafter's ElectrumX verification
                                     }
@@ -4302,7 +4303,7 @@ namespace VerifiedXCore.Services
                 decimal ownerBalance = depositBalance + ledgerBalance;
                 if (ownerBalance < amount && deposit.Status != OwnerDepositStatus.Trusted)
                 {
-                    if (!blockVerify)
+                    if (!VbtcOwnerDeposit.LeftToTheProducer(deposit, blockVerify))
                         return (false, $"Insufficient vBTC balance (owner) for bridge lock. Available: {ownerBalance} (deposit: {depositBalance}, ledger: {ledgerBalance}), Requested: {amount}");
                 }
             }

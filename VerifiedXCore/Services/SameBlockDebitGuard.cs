@@ -314,10 +314,28 @@ namespace VerifiedXCore.Services
                     // The shielded pool's supply is judged at the block's height (block validation) or at tip + 1.
                     b = key.Kind == LedgerKind.ShieldedPool
                         ? Privacy.PrivateTxSupplyRules.CommittedSupply(key.ContractUid, BlockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
-                        : _balanceOf(key);
+                        : AttestedOwnerBalance(key) ?? _balanceOf(key);
                     _balances[key] = b;
                 }
                 return b;
+            }
+
+            /// <summary>
+            /// The owner of a vault whose Bitcoin is attested has a balance in state like any holder, so its debits within
+            /// one block are added up in block validation too (for other vaults the owner is judged at admission and
+            /// proposal only, see <see cref="PolicyBalance"/>). Null for every other key.
+            /// </summary>
+            private decimal? AttestedOwnerBalance(DebitKey key)
+            {
+                if (key.Kind != LedgerKind.VbtcV2) return null;
+                var sc = SmartContractStateTrei.GetSmartContractState(key.ContractUid);
+                if (sc == null || key.Holder != sc.OwnerAddress || !Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(sc.SmartContractUID))
+                    return null;
+                var balance = Bitcoin.Services.VBTCService.AttestedOwnerSpendable(sc, key.Holder, BlockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+                // Reserve sends debit at unlock; their pending rows are netted as they are for a reserve holder.
+                if (key.Holder.StartsWith("xRBX"))
+                    balance -= ReserveTransactions.GetPendingVBTCTransferTotal(key.Holder, key.ContractUid);
+                return balance;
             }
         }
 

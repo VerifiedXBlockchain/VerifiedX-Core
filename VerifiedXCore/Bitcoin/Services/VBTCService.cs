@@ -239,6 +239,13 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// The owner's spendable vBTC on a vault whose Bitcoin is attested: the attested coins plus the owner ledger
+        /// (docs/PLAN-vBTC-Bitcoin-Attestation.md, 4.2). Read from state only; the same on every node.
+        /// </summary>
+        public static decimal AttestedOwnerSpendable(SmartContractStateTrei scState, string ownerAddress, long currentHeight) =>
+            Attestation.BtcAttestBalance.DepositBtc(scState.SmartContractUID) + GetOwnerLedgerBalance(scState, ownerAddress, currentHeight);
+
+        /// <summary>
         /// The sum of the ledger positions below zero held by addresses other than <paramref name="ownerAddress"/> (a former
         /// owner's leftover owner-era debits). Each address's position is computed exactly as its own balance is: the sum
         /// of the rows it appears in. Returns zero or less.
@@ -346,6 +353,15 @@ namespace VerifiedXCore.Bitcoin.Services
                         var sent = transactions.Where(x => x.FromAddress == fromAddress).Sum(x => x.Amount);
                         ledgerBalance = received + sent;
                     }
+                }
+
+                // A vault the chain watches: owner and deposit both come from state, never from this node's wallet
+                // records or from Electrum.
+                if (Attestation.BtcAttestBalance.IsAttestedVault(scState.SmartContractUID))
+                {
+                    if (scState.OwnerAddress != fromAddress)
+                        return (true, ledgerBalance, null);
+                    return (true, AttestedOwnerSpendable(scState, fromAddress, blockHeight ?? Globals.LastBlock?.Height ?? 0), null);
                 }
 
                 // Determine owner address and deposit address.

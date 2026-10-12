@@ -311,8 +311,11 @@ namespace VerifiedXCore.Privacy
                 // Mined shields from a vault owner are not re-checked: the owner's balance includes the Bitcoin
                 // deposit, and Electrum is never asked during block validation (the producer checked it). Non-owner
                 // balances are ledger-only and are still checked.
+                // A vault whose Bitcoin is attested is the exception to that: its owner's balance is in state.
+                var shieldVault = SmartContractStateTrei.GetSmartContractState(payload.VbtcContractUid ?? "");
                 var ownerInBlock = blockContext
-                    && SmartContractStateTrei.GetSmartContractState(payload.VbtcContractUid ?? "")?.OwnerAddress == txRequest.FromAddress;
+                    && shieldVault?.OwnerAddress == txRequest.FromAddress
+                    && !VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(shieldVault?.SmartContractUID);
 
                 if (!ownerInBlock
                     && !string.IsNullOrWhiteSpace(payload.VbtcContractUid)
