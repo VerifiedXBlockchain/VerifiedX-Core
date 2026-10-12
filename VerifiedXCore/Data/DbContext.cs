@@ -69,6 +69,8 @@ namespace VerifiedXCore.Data
         public static LiteDatabase DB_vBTC { set; get; } // stores vBTC V2 data (validators, contracts, cancellations)
         public static LiteDatabase DB_Shares { set; get; }
         public static LiteDatabase DB_Privacy { set; get; }
+        /// <summary>Bitcoin facts in consensus: attested headers, vault scripts, vault coins, signer sets. Chain-derived only; no secrets.</summary>
+        public static LiteDatabase DB_BtcAttest { set; get; }
         public static LiteDatabase DB_Snapshot { set; get; } //rotating chain-state snapshots for fast fork/crash recovery
 
 
@@ -101,6 +103,7 @@ namespace VerifiedXCore.Data
         public const string RSRV_DB_VBTC = @"rsrvvbtc.db";
         public const string RSRV_DB_SHARES = @"rsrvshares.db";
         public const string RSRV_DB_PRIVACY = @"DB_Privacy.db";
+        public const string RSRV_DB_BTC_ATTEST = @"rsrvbtcattest.db";
         public const string RSRV_DB_SNAPSHOT = @"rsrvsnapshot.db";
 
         //Database tables
@@ -199,9 +202,11 @@ namespace VerifiedXCore.Data
             DB_vBTC = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Shares = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SHARES, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Privacy = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_PRIVACY, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
+            DB_BtcAttest = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_BTC_ATTEST, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
             DB_Snapshot = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SNAPSHOT, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
 
             PrivacyDbContext.EnsurePrivacyIndexes(DB_Privacy);
+            VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.EnsureIndexes(DB_BtcAttest);
 
             var blocks = DB.GetCollection<Block>(RSRV_BLOCKS);
             blocks.EnsureIndexSafe(x => x.Height);
@@ -345,6 +350,7 @@ namespace VerifiedXCore.Data
             DB_vBTC.Commit();
             DB_Shares.Commit();
             DB_Privacy.Commit();
+            DB_BtcAttest.Commit();
         }
 
         public static void Rollback(string location = "", string message = "")
@@ -388,6 +394,7 @@ namespace VerifiedXCore.Data
             //DB_Settings.Rollback();
             DB_Reserve.Rollback();
             DB_Privacy.Rollback();
+            DB_BtcAttest.Rollback();
         }
 
         public static void DeleteCorruptDb()
@@ -434,6 +441,7 @@ namespace VerifiedXCore.Data
             DB_vBTC.Commit();
             DB_Shares.Commit();
             DB_Privacy.Commit();
+            DB_BtcAttest.Commit();
 
             //dispose connection to DB
             CloseDB();
@@ -482,6 +490,7 @@ namespace VerifiedXCore.Data
             File.Delete(path + RSRV_DB_BITCOIN);
             File.Delete(path + RSRV_DB_TOKENIZED_WITHDRAWALS);
             File.Delete(path + RSRV_DB_VBTC_WITHDRAWAL_REQUESTS);
+            File.Delete(path + RSRV_DB_BTC_ATTEST);
             File.Delete(path + RSRV_DB_SNAPSHOT);
 
             // SECRET-BEARING FILES ARE NEVER DELETED — they hold local material that cannot be
@@ -527,9 +536,11 @@ namespace VerifiedXCore.Data
             DB_vBTC = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Shares = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SHARES, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Privacy = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_PRIVACY, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
+            DB_BtcAttest = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_BTC_ATTEST, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
             DB_Snapshot = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SNAPSHOT, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
 
             PrivacyDbContext.EnsurePrivacyIndexes(DB_Privacy);
+            VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.EnsureIndexes(DB_BtcAttest);
 
             // The preserved secret-bearing files still contain OLD-chain consensus state — clear
             // only those collections (secrets stay): vBTC V2 contracts/cancellations/validators
@@ -604,6 +615,7 @@ namespace VerifiedXCore.Data
             DB_vBTC.Dispose();
             DB_Shares.Dispose();
             DB_Privacy.Dispose();
+            DB_BtcAttest.Dispose();
             DB_Snapshot.Dispose();
         }
 
@@ -742,6 +754,11 @@ namespace VerifiedXCore.Data
             try
             {
                 DB_Privacy.Checkpoint();
+            }
+            catch { }
+            try
+            {
+                DB_BtcAttest.Checkpoint();
             }
             catch { }
         }

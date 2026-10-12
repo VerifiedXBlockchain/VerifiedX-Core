@@ -511,6 +511,17 @@ namespace VerifiedXCore.Utilities
                 Console.WriteLine($"[WipeChainDerivedState] Warning: Could not wipe DB_VBTCWithdrawalRequests: {ex.Message}");
             }
 
+            // Bitcoin facts in consensus (attested headers, vault scripts and coins, signer sets): rebuilt by the replay
+            // from the report, pin and vault-creation transactions.
+            try
+            {
+                VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.WipeAll();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WipeChainDerivedState] Warning: Could not wipe DB_BtcAttest: {ex.Message}");
+            }
+
             // NOTE: DB_Shares (arbiter secret shares) is deliberately NOT wiped — it is local
             // secret material, not chain-derived state, and was previously destroyed here in error.
 
@@ -545,6 +556,7 @@ namespace VerifiedXCore.Utilities
             try { DbContext.DB_vBTC?.Checkpoint(); } catch { }
             try { DbContext.DB_TokenizedWithdrawals?.Checkpoint(); } catch { }
             try { DbContext.DB_VBTCWithdrawalRequests?.Checkpoint(); } catch { }
+            try { DbContext.DB_BtcAttest?.Checkpoint(); } catch { }
             try { DbContext.DB_Privacy?.Checkpoint(); } catch { }
         }
 

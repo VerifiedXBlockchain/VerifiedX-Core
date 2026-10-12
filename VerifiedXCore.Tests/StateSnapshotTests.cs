@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using LiteDB;
 using VerifiedXCore;
+using VerifiedXCore.Bitcoin.Attestation;
 using VerifiedXCore.Data;
 using VerifiedXCore.Extensions;
 using VerifiedXCore.Models;
@@ -50,6 +51,7 @@ namespace VerifiedXCore.Tests
             DbContext.DB_VBTCWithdrawalRequests = _live;
             DbContext.DB_vBTC = _live;
             DbContext.DB_Privacy = _live;
+            DbContext.DB_BtcAttest = _live;
             DbContext.DB_Snapshot = _snap;
 
             Globals.TreisUpdating = false;
@@ -78,6 +80,7 @@ namespace VerifiedXCore.Tests
             DbContext.DB_VBTCWithdrawalRequests = null;
             DbContext.DB_vBTC = null;
             DbContext.DB_Privacy = null;
+            DbContext.DB_BtcAttest = null;
             DbContext.DB_Snapshot = null;
             try { if (File.Exists(_livePath)) File.Delete(_livePath); } catch { }
             try { if (File.Exists(_snapPath)) File.Delete(_snapPath); } catch { }
@@ -395,6 +398,69 @@ namespace VerifiedXCore.Tests
             Assert.Equal(100m, alice.Balance);
             Assert.Null(Accounts().FindOne(x => x.Key == "mallory"));
             Assert.NotNull(Contracts().FindOne(x => x.SmartContractUID == "sc:keep"));
+        }
+
+        /// <summary>
+        /// The Bitcoin attestation tables are chain state: a snapshot holds them as they stood at its height, and a
+        /// restore brings exactly that back (a coin spent after the snapshot is unspent again, a later header is gone).
+        /// Most of them are copied by the LastModifiedHeight stamp, so the second cycle must pick up the later writes.
+        /// </summary>
+        [Fact]
+        public async Task BitcoinAttestationTables_AreSnapshotByStamp_AndRestoredAsTheyStood()
+        {
+            Assert.True(BtcHeader.TryParse(new string('1', 160), out var first));
+            Assert.True(BtcHeader.TryParse(new string('2', 160), out var second));
+            SeedAccount("alice", 100m, stamp: 35);
+
+            StateWriteContext.SetHeight(35);
+            BtcAttestStore.SaveHeader(900, first!, 35);
+            BtcAttestStore.SaveScript(new VaultDepositScriptRow { ScriptHex = "5120aa", SmartContractUID = "v:1", DepositAddress = "bc1p", CreatedAtVfxHeight = 35, WatchFromBitcoinHeight = 890 });
+            var coin = new VaultCoinRow { Outpoint = "aa:0", SmartContractUID = "v:1", ValueSats = 5_000, Status = VaultCoinStatus.Unspent, CreatedInHeight = 900 };
+            BtcAttestStore.SaveCoin(coin, null);
+            BtcAttestStore.SaveMeta(new AttestationMetaRow { CheckpointHeight = 800, TipHeight = 900, TipHash = first!.Hash, EventsThroughHeight = 900 });
+            BtcAttestStore.SaveSignerSet(new AttestationSignerSetRow { Epoch = 0, AtVfxHeight = 30, Addresses = new List<string> { "a", "b", "c" } });
+            StateWriteContext.Clear();
+
+            await StateSnapshotService.UpdateCycleAsync(40);
+            var early = StateSnapshotService.PickSlotForRestore(40)!;
+
+            // After the snapshot: the coin is spent, a header and a signer set are added, the tip moves.
+            StateWriteContext.SetHeight(45);
+            BtcAttestStore.SaveCoin(new VaultCoinRow { Outpoint = "aa:0", SmartContractUID = "v:1", ValueSats = 5_000, Status = VaultCoinStatus.Spent, CreatedInHeight = 900, SpentByTxid = "bb", SpentInHeight = 901 }, coin);
+            BtcAttestStore.SaveHeader(901, second!, 45);
+            BtcAttestStore.SaveMeta(new AttestationMetaRow { CheckpointHeight = 800, TipHeight = 901, TipHash = second!.Hash, EventsThroughHeight = 901 });
+            BtcAttestStore.SaveSignerSet(new AttestationSignerSetRow { Epoch = 1, AtVfxHeight = 45, Addresses = new List<string> { "a", "b", "c", "d" } });
+            StateWriteContext.Clear();
+            Assert.Equal(0, BtcAttestStore.Total("v:1").HeldSats);
+
+            // A later cycle copies the rows written since, by their stamp.
+            await StateSnapshotService.UpdateCycleAsync(50);
+            var late = StateSnapshotService.PickSlotForRestore(50)!;
+            Assert.NotEqual(early.SlotId, late.SlotId);
+
+            // The restore path wipes chain state first (BlockRollbackUtility.WipeChainDerivedState).
+            Accounts().DeleteAllSafe();
+            BtcAttestStore.WipeAll();
+            Assert.True(StateSnapshotService.RestoreSlotToLive(late.SlotId));
+            Assert.Equal(VaultCoinStatus.Spent, BtcAttestStore.Coin("aa:0")!.Status);
+            Assert.Equal(0, BtcAttestStore.Total("v:1").HeldSats);
+            Assert.Equal(second.Hash, BtcAttestStore.HeaderAt(901)!.Hash);
+            Assert.Equal(901, BtcAttestStore.GetMeta()!.TipHeight);
+            Assert.Equal(4, BtcAttestStore.SignerSet(1)!.Addresses.Count);
+
+            Accounts().DeleteAllSafe();
+            BtcAttestStore.WipeAll();
+            Assert.True(StateSnapshotService.RestoreSlotToLive(early.SlotId));
+            Assert.Equal(VaultCoinStatus.Unspent, BtcAttestStore.Coin("aa:0")!.Status);
+            Assert.Equal(5_000, BtcAttestStore.Total("v:1").HeldSats);
+            Assert.Equal(first.Hash, BtcAttestStore.HeaderAt(900)!.Hash);
+            Assert.Null(BtcAttestStore.HeaderAt(901));
+            var meta = BtcAttestStore.GetMeta()!;
+            Assert.Equal(900, meta.TipHeight);
+            Assert.Equal(900, meta.EventsThroughHeight);
+            Assert.Equal(new[] { "a", "b", "c" }, BtcAttestStore.SignerSet(0)!.Addresses);
+            Assert.Null(BtcAttestStore.SignerSet(1));
+            Assert.Equal("v:1", BtcAttestStore.ScriptRow("5120aa")!.SmartContractUID);
         }
 
         [Fact]

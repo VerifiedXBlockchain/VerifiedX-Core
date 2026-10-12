@@ -73,6 +73,14 @@ namespace VerifiedXCore.Services
             new SnapColl { Tag = "bridgeburns", SourceDb = () => DbContext.DB_VBTCWithdrawalRequests, SourceColl = VBTCBridgeConsumedBurn.CollectionName },
             new SnapColl { Tag = "vbtcv2c", SourceDb = () => DbContext.DB_vBTC, SourceColl = DbContext.RSRV_VBTC_V2_CONTRACTS },
             new SnapColl { Tag = "vbtcv2x", SourceDb = () => DbContext.DB_vBTC, SourceColl = DbContext.RSRV_VBTC_V2_CANCELLATIONS },
+            // Bitcoin facts in consensus. These grow with the number of vaults and deposits, so they are copied by
+            // stamp, not whole. Their rows are never deleted (a status changes instead), so no tombstones are needed.
+            new SnapColl { Tag = "btchdr", SourceDb = () => DbContext.DB_BtcAttest, SourceColl = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.Headers, DiffTracked = true },
+            new SnapColl { Tag = "btcscript", SourceDb = () => DbContext.DB_BtcAttest, SourceColl = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.Scripts, DiffTracked = true },
+            new SnapColl { Tag = "btccoin", SourceDb = () => DbContext.DB_BtcAttest, SourceColl = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.Coins, DiffTracked = true },
+            new SnapColl { Tag = "btctotal", SourceDb = () => DbContext.DB_BtcAttest, SourceColl = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.Totals, DiffTracked = true },
+            new SnapColl { Tag = "btcmeta", SourceDb = () => DbContext.DB_BtcAttest, SourceColl = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.Meta },
+            new SnapColl { Tag = "btcsigners", SourceDb = () => DbContext.DB_BtcAttest, SourceColl = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.SignerSets, DiffTracked = true },
             // Shielded pool chain state (~229 KB today). CommitmentRecord mutates (IsSpent), so
             // full-copy is required for correctness anyway; promote to diff-tracking if the pool
             // ever grows into the tens of MB.

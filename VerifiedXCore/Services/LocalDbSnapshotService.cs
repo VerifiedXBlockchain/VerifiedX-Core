@@ -37,6 +37,7 @@ namespace VerifiedXCore.Services
             DbContext.RSRV_DB_RESERVE,
             DbContext.RSRV_DB_TOKENIZED_WITHDRAWALS,
             DbContext.RSRV_DB_VBTC_WITHDRAWAL_REQUESTS,
+            DbContext.RSRV_DB_BTC_ATTEST,
         };
 
         internal static Task CreateChainSnapshotAsync()
