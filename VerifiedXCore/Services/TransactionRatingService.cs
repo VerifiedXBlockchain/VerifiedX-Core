@@ -88,6 +88,7 @@ namespace VerifiedXCore.Services
                     tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC ||
                     tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE ||
                     tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK ||
+                    tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL || // was never named: rated F, dropped by every peer
                     VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(tx.TransactionType))
                 {
                     rating = TransactionRating.A;
