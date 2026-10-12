@@ -288,10 +288,12 @@ namespace VerifiedXCore.Tests
                 // Leaves a deposit out, and repeats another so that the transaction count still looks right.
                 Tamper = (_, block) => { block.Transactions[1] = block.Transactions[2]; return block; },
             };
-            var honest = new Source("10.9.0.2:8333", () => _btc);
-            using var client = NewClient(new[] { liar, honest });
+            // The liar is the only peer, so it is the one asked; the honest source stands behind it. (Peers are tried
+            // in the order they connected, which is shuffled, so two peers would make "who was asked" a coin toss.)
+            var honest = new Source("explorer", () => _btc);
+            using var client = NewClient(new[] { liar }, new List<IBtcSource> { honest });
             await client.RunOnceAsync(CancellationToken.None);
-            Assert.Equal(2, client.PeerCount);
+            Assert.Equal(1, client.PeerCount);
 
             Assert.Null(client.BlockAt(at));
             await client.RunOnceAsync(CancellationToken.None);
@@ -299,8 +301,21 @@ namespace VerifiedXCore.Tests
             Assert.NotNull(block);
             Assert.Equal(3, block!.Transactions.Count);
             Assert.Null(BtcBlockCheck.Verify(block, _btc.Header(at)));
+            Assert.Equal(1, liar.BlockRequests);
             Assert.False(liar.IsAlive);
             Assert.Contains("served a wrong block", client.LastProblem);
+            Assert.Equal(1, honest.BlockRequests);
+
+            // With two peers, one of them lying, the block that is kept is the right one whichever is asked first.
+            Directory.Delete(_blockDir, recursive: true);
+            var liar2 = new Source("10.9.0.1:8333", () => _btc) { Tamper = liar.Tamper };
+            var peer2 = new Source("10.9.0.2:8333", () => _btc);
+            using var both = NewClient(new[] { liar2, peer2 });
+            await both.RunOnceAsync(CancellationToken.None);
+            Assert.Null(both.BlockAt(at));
+            await both.RunOnceAsync(CancellationToken.None);
+            Assert.Null(BtcBlockCheck.Verify(both.BlockAt(at), _btc.Header(at)));
+            Assert.Equal(liar2.BlockRequests == 1, !liar2.IsAlive); // asked means caught
         }
 
         [Fact]
