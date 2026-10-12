@@ -316,8 +316,13 @@ namespace VerifiedXCore.Bitcoin.Services
         // §12.4: dedicated poll of the companion deposit address for the confirmed arrival delta.
         private static async Task<decimal> WaitForBtcArrival(string companionScUID, string requester, decimal before)
         {
+            // A companion the chain watches is credited when consensus counts the deposit: after the withdrawal's
+            // transaction is signed by the vault's signers, mined, and buried under the confirmation depth (six blocks
+            // on mainnet, about an hour on its own). The window that suited a one-confirmation Electrum balance is too
+            // short for that.
+            var window = Attestation.BtcAttestBalance.IsAttestedVault(companionScUID) ? BtcArrivalMaxSeconds * 4 : BtcArrivalMaxSeconds;
             var waited = 0;
-            while (waited < BtcArrivalMaxSeconds)
+            while (waited < window)
             {
                 var bal = await VBTCService.TryGetAvailableTransparentVbtcBalance(companionScUID, requester);
                 if (bal.success && bal.availableBalance > before)

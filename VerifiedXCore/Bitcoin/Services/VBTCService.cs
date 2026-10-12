@@ -497,6 +497,19 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (string.IsNullOrEmpty(contract.DepositAddress))
                     return 0M;
 
+                // A vault the chain watches: its balance is its attested coins, which the chain already holds. No
+                // Electrum server is asked (and a deposit counts when consensus counts it, not when a server first sees it).
+                if (Attestation.BtcAttestBalance.IsAttestedVault(contract.SmartContractUID))
+                {
+                    var attested = Attestation.BtcAttestBalance.DepositBtc(contract.SmartContractUID);
+                    if (contract.Balance != attested)
+                    {
+                        contract.Balance = attested;
+                        VBTCContractV2.UpdateContract(contract);
+                    }
+                    return attested;
+                }
+
                 var utxoLookup = await BitcoinTransactionService.GetTaprootUTXOs(contract.DepositAddress);
                 if (!utxoLookup.Success)
                 {
