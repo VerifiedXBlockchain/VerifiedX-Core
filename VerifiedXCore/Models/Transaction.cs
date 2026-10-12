@@ -150,8 +150,9 @@ namespace VerifiedXCore.Models
         VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE = 41, // After BTC broadcast / completion
         VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL = 42, // FROST failed for some locks → blacklist + reverse + retry
 
-        // Bitcoin facts in consensus (docs/PLAN-vBTC-Bitcoin-Attestation.md). Sender-less: From and To are
-        // "BTC_Attestation", no amount, no fee; the authority is the validator signatures inside Data.
+        // Bitcoin facts in consensus (docs/PLAN-vBTC-Bitcoin-Attestation.md). 43 and 45 are sender-less: From and To
+        // are "BTC_Attestation", no amount, no fee; the authority is the validator signatures inside Data. 44 is an
+        // ordinary transaction signed by the withdrawal's requester.
         VBTC_V2_BTC_REPORT = 43, // Bitcoin headers plus the transactions of one Bitcoin block that touch a vault
         VBTC_V2_COIN_PIN = 44, // A requester pins its withdrawal again at a higher Bitcoin fee rate (fee bump; watched vaults)
         VBTC_V2_BTC_REORG = 45, // Rewind: Bitcoin reorganised below reported events; they are taken back and the headers replaced

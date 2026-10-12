@@ -6,6 +6,7 @@ using NBitcoin;
 using Newtonsoft.Json;
 using VerifiedXCore.Bitcoin.Attestation;
 using VerifiedXCore.Bitcoin.Models;
+using VerifiedXCore.Bitcoin.Services;
 using VerifiedXCore.Data;
 using VerifiedXCore.Extensions;
 using VerifiedXCore.Models;
@@ -49,6 +50,30 @@ namespace VerifiedXCore.Tests
 
         private static string? Undoing(params long[] heights) =>
             BlockRollbackUtility.WhyNotIncremental(heights.OrderByDescending(h => h).Select(h => PlainBlock(h)), heights.Min() - 1);
+
+        private async Task<VfxTx> Cancel(string vault, string requestHash)
+        {
+            var tx = new VfxTx
+            {
+                Timestamp = TimeUtil.GetTime(), FromAddress = Minter.Address, ToAddress = Minter.Address, Amount = 0.0M, Fee = 0, Nonce = 0,
+                TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_CANCEL,
+                Data = JsonConvert.SerializeObject(new { Function = "VBTCWithdrawalCancel()", ContractUID = vault, WithdrawalRequestHash = requestHash, FailureProof = "" }),
+            };
+            tx.Fee = VerifiedXCore.Services.FeeCalcService.CalculateTXFee(tx);
+            tx.Build();
+            tx.Signature = VerifiedXCore.Services.SignatureService.CreateSignature(tx.Hash, Minter.Key, Minter.Pub);
+            var (ok, why) = await Verify(tx, Tip + 1);
+            Assert.True(ok, why);
+            await Apply(Tip + 1, tx);
+            return tx;
+        }
+
+        private async Task Report(params BtcTx[] txs)
+        {
+            var at = _btc.Mine(txs);
+            _btc.MineEmpty(BtcAttestRules.Depth);
+            await Apply(Tip + 1, Signed(Assert.Single(BtcBlockScanner.BuildForward(_btc.Block(at), at, _btc.HeaderHexes(BtcAttestStore.GetMeta()!.TipHeight + 1, _btc.Tip), 0))));
+        }
 
         private async Task<VfxTx> Request(string vault, decimal amount)
         {
@@ -124,6 +149,59 @@ namespace VerifiedXCore.Tests
             Assert.NotNull(Undoing(epochStart));
             await Apply(epochStart + 1);
             Assert.Null(Undoing(epochStart + 1));
+        }
+
+        /// <summary>
+        /// The withdrawal table is written from blocks, and a node that lost it puts it back by scanning the blocks
+        /// for withdrawal transactions. On a vault the chain watches no such transaction ends a withdrawal: a report
+        /// completes it, or the chain closes it by rule. The rebuilt table must still say what the chain says, or that
+        /// node would count the owner's balance differently from every other.
+        /// </summary>
+        [Fact]
+        public async Task AWithdrawalTableRebuiltFromBlocks_SaysWhatTheChainSays_ForAWatchedVault()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Report(Pay(vault.Script, 150_000));
+            var paid = await Request(vault.Uid, 0.001M);
+            await Report(BtcTx.Parse(BtcAttestStore.Withdrawal(BtcWithdrawals.RefOf(paid.Hash, vault.Uid))!.Pins[0].TxHex, Network.Main));
+            var open = await Request(vault.Uid, 0.0003M);        // pinned on the change, not paid yet
+            var cancelled = await Request(vault.Uid, 0.0001M);   // waits for coins
+            await Cancel(vault.Uid, cancelled.Hash);
+            var expires = await Request(vault.Uid, 0.00005M);    // waits, and runs out of its window
+            await Apply(expires.Height + VBTCWithdrawalRequest.EXPIRY_BLOCKS + 1);
+
+            (VBTCWithdrawalStatus Status, bool IsCompleted, string? BtcTx, decimal Amount, long Height) Of(VfxTx request)
+            {
+                var row = VBTCWithdrawalRequest.GetByTransactionHash(request.Hash, vault.Uid)!;
+                return (row.Status, row.IsCompleted, row.BTCTxHash, row.Amount, row.RequestBlockHeight);
+            }
+            var requests = new[] { paid, open, cancelled, expires };
+            var before = requests.Select(Of).ToList();
+            Assert.Equal(new[] { VBTCWithdrawalStatus.Completed, VBTCWithdrawalStatus.Requested, VBTCWithdrawalStatus.Cancelled, VBTCWithdrawalStatus.Cancelled }, before.Select(b => b.Status));
+            var ownerBefore = (await VBTCService.TryGetAvailableTransparentVbtcBalance(vault.Uid, Minter.Address)).availableBalance;
+            Assert.Equal(0.0002M, ownerBefore);   // 0.0015 - 0.001 paid - 0.0003 open
+
+            // The node loses the table and rebuilds it from its blocks.
+            foreach (var block in AppliedBlocks)
+                BlockchainData.GetBlocks().InsertSafe(block);
+            VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()!.DeleteAll();
+            Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash(paid.Hash, vault.Uid));
+            var result = await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test");
+            Assert.True(result.Success, result.Message);
+            Assert.Equal(4, result.RequestsInserted);
+            Assert.Equal(3, result.AttestedOutcomesApplied);
+            Assert.Equal(0, result.Errors);
+
+            Assert.Equal(before, requests.Select(Of).ToList());
+            Assert.Equal(ownerBefore, (await VBTCService.TryGetAvailableTransparentVbtcBalance(vault.Uid, Minter.Address)).availableBalance);
+            // The cancel of a watched vault's request opened no vote.
+            Assert.Empty(VBTCWithdrawalCancellation.GetCancellationsFor(cancelled.Hash, vault.Uid));
+            // Running it again changes nothing.
+            var again = await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test, again");
+            Assert.Equal(0, again.RequestsInserted);
+            Assert.Equal(0, again.AttestedOutcomesApplied);
+            Assert.Equal(before, requests.Select(Of).ToList());
         }
     }
 }

@@ -58,6 +58,8 @@ namespace VerifiedXCore.Bitcoin.Services
             public int RequestsAlreadyPresent { get; set; }
             public int CompletionsApplied { get; set; }
             public int CancellationsCreated { get; set; }
+            /// <summary>Rows on vaults the chain watches brought to the state the attestation table holds for them.</summary>
+            public int AttestedOutcomesApplied { get; set; }
             public int VotesApplied { get; set; }
             public int Skipped { get; set; }
             public int Errors { get; set; }
@@ -173,6 +175,8 @@ namespace VerifiedXCore.Bitcoin.Services
                         await Task.Delay(1);
                 }
 
+                ApplyAttestedOutcomes(result);
+
                 var meta = GetMeta() ?? new RebuildMeta();
                 meta.LastScanHeight = result.EndHeight;
                 meta.LastScanUtc = TimeUtil.GetTime();
@@ -184,7 +188,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 result.FinishedUtc = TimeUtil.GetTime();
                 result.Message = $"Scanned {result.BlocksScanned} blocks to height {result.EndHeight}: " +
                                  $"{result.RequestsInserted} requests inserted, {result.RequestsAlreadyPresent} already present, " +
-                                 $"{result.CompletionsApplied} completions applied, {result.CancellationsCreated} cancellations created, " +
+                                 $"{result.CompletionsApplied} completions applied, {result.AttestedOutcomesApplied} attested outcomes applied, {result.CancellationsCreated} cancellations created, " +
                                  $"{result.VotesApplied} votes applied, {result.Skipped} skipped, {result.Errors} errors.";
                 LogUtility.Log($"vBTC withdrawal store rebuild finished: {result.Message}", "VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync()");
             }
@@ -439,9 +443,54 @@ namespace VerifiedXCore.Bitcoin.Services
                 result.Errors++;
         }
 
+        /// <summary>
+        /// A withdrawal on a vault the chain watches is not ended by a transaction this scan sees: Bitcoin completes
+        /// it (a report), or the chain closes it by rule (void, expiry) or at once on its requester's cancel. All of
+        /// that is in the attestation table, written from blocks like this store. A row this scan has just put back is
+        /// "requested"; here it is brought to where the attestation table says its withdrawal ended. Merge-only like
+        /// the rest: a row is loaded, changed and saved; one that already agrees is left alone.
+        /// </summary>
+        private static void ApplyAttestedOutcomes(RebuildResult result)
+        {
+            try
+            {
+                var closed = new[] { Attestation.VaultWithdrawalState.Settled, Attestation.VaultWithdrawalState.Void, Attestation.VaultWithdrawalState.Expired, Attestation.VaultWithdrawalState.Cancelled };
+                foreach (var attested in closed.SelectMany(state => Attestation.BtcAttestStore.WithdrawalsInState(state)).Where(w => !w.IsBridgeExit))
+                {
+                    var row = VBTCWithdrawalRequest.GetByTransactionHash(attested.RequestHash, attested.SmartContractUID);
+                    if (row == null) continue;
+                    var paid = attested.State == Attestation.VaultWithdrawalState.Settled;
+                    var status = paid ? VBTCWithdrawalStatus.Completed : VBTCWithdrawalStatus.Cancelled;
+                    if (row.IsCompleted && row.Status == status && (!paid || row.BTCTxHash == attested.SettledTxid)) continue;
+                    row.Status = status;
+                    row.IsCompleted = true;
+                    row.BTCTxHash = paid ? attested.SettledTxid : row.BTCTxHash;
+                    if (VBTCWithdrawalRequest.Save(row, update: true))
+                        result.AttestedOutcomesApplied++;
+                    else
+                        result.Errors++;
+                }
+            }
+            catch (Exception ex)
+            {
+                result.Errors++;
+                ErrorLogUtility.LogError($"Withdrawal-store rebuild: applying the attested outcomes failed: {ex.Message}", "VBTCWithdrawalStoreRebuildService.ApplyAttestedOutcomes()");
+            }
+        }
+
         private static void ReplayCancel(Transaction tx, RebuildResult result)
         {
             if (string.IsNullOrEmpty(tx.Data)) { result.Skipped++; return; }
+
+            // A vault the chain watches holds no cancellation vote: its cancel took effect when mined, and the outcome
+            // is applied from the attestation table (ApplyAttestedOutcomes). No cancellation record is created for it.
+            string? cancelledOn = null;
+            try { cancelledOn = JObject.Parse(tx.Data)["ContractUID"]?.ToObject<string?>(); } catch { }
+            if (Attestation.BtcAttestBalance.IsAttestedVault(SmartContractStateTrei.GetSmartContractState(cancelledOn ?? "")?.SmartContractUID ?? cancelledOn))
+            {
+                result.Skipped++;
+                return;
+            }
 
             // VbtcCancellationVoteRulesHeight: the same method live processing uses (skips a record that exists).
             if (VBTCCancellationVoting.RulesActive(tx.Height))
