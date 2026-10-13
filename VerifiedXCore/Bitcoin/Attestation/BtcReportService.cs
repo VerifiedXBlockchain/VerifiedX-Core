@@ -42,7 +42,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
             Planned[reportHash] = DateTime.UtcNow;
             if (Planned.Count > 256)
                 foreach (var old in Planned.Where(p => DateTime.UtcNow - p.Value > TimeSpan.FromHours(2)).ToList())
+                {
                     Planned.TryRemove(old.Key, out _);
+                    // Its signatures go with it (they were kept outside the per-signer queue while it was planned).
+                    foreach (var key in ByReport.Keys.Where(k => k.StartsWith(old.Key + "|", StringComparison.Ordinal)).ToList())
+                        ByReport.TryRemove(key, out _);
+                }
         }
 
         private static bool IsPlanned(string key) => Planned.ContainsKey(key.Substring(0, 64));
@@ -321,9 +326,17 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// its address and the report, so that most find the report already in the mempool and submit nothing.
         /// Not a turn order: whoever is still without it after its wait submits.
         /// </summary>
+        /// <summary>How long after submitting a report this node looks whether it is still on its way.</summary>
+        internal static int ResubmitAfterSeconds = 60;
+
         private static bool ReadyToSubmit(string reportHash)
         {
-            if (Submitted.ContainsKey(reportHash)) return false;
+            // Submitted, and still on its way: nothing to do. Submitted a while ago and no copy of it is in the mempool
+            // any more although it is still planned (so it was not mined): it was lost on the way and is sent again.
+            // (It used to be marked as submitted for two hours whatever became of it.)
+            if (Submitted.TryGetValue(reportHash, out var sent)
+                && (DateTime.UtcNow - sent < TimeSpan.FromSeconds(ResubmitAfterSeconds) || BtcAttestTxValidator.ReportInMempool(reportHash)))
+                return false;
             var since = FirstReady.GetOrAdd(reportHash, _ => DateTime.UtcNow);
             var digest = SHA256.HashData(Encoding.UTF8.GetBytes(reportHash + "|" + Globals.ValidatorAddress));
             var wait = SubmitWaitOverride ?? TimeSpan.FromSeconds(digest[0] % 4 * LoopSeconds);

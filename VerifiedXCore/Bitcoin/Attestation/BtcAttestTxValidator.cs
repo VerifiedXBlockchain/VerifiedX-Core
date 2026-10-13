@@ -61,6 +61,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     return (false, "The timestamp of this transaction is too old or too far in the future.");
             }
 
+            // A report's transaction has no sender and its timestamp is anybody's to choose, and the mempool keeps the
+            // earliest copy of a report. A copy timed at the far edge of what is still accepted would be the earliest,
+            // push the honest copies out, and itself be too old to mine a second later. So a copy enters a mempool only
+            // while it is fresh; one already held is judged as before (it was fresh when it came).
+            if (admission && tx.Timestamp < TimeUtil.GetTime() - MaxAgeAtAdmissionSeconds && !HeldInMempool(tx))
+                return (false, $"A Bitcoin attestation transaction is admitted within {MaxAgeAtAdmissionSeconds} seconds of its timestamp.");
+
             switch (tx.TransactionType)
             {
                 case TransactionType.VBTC_V2_BTC_REPORT:
@@ -123,6 +130,28 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 }
             }
             catch { }
+        }
+
+        /// <summary>How old a report's transaction may be when a mempool first takes it, in seconds.</summary>
+        public const int MaxAgeAtAdmissionSeconds = 120;
+
+        private static bool HeldInMempool(Transaction tx)
+        {
+            try { return TransactionData.GetPool().Exists(x => x.Hash == tx.Hash); }
+            catch { return false; }
+        }
+
+        /// <summary>Whether a copy of this report (or rewind) is waiting in this node's mempool.</summary>
+        public static bool ReportInMempool(string reportHash)
+        {
+            try
+            {
+                foreach (var held in TransactionData.GetPool().Find(x => x.TransactionType == TransactionType.VBTC_V2_BTC_REPORT || x.TransactionType == TransactionType.VBTC_V2_BTC_REORG).ToList())
+                    if (BtcReport.TryParse(held.Data, out var report, out _) && report != null && report.Hash() == reportHash)
+                        return true;
+            }
+            catch { }
+            return false;
         }
 
         private static bool EarlierCopyInMempool(Transaction tx, string reportHash, long height)

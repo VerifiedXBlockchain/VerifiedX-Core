@@ -450,6 +450,18 @@ namespace VerifiedXCore.Tests
             Assert.NotNull(pool.FindOne(x => x.Hash == first.Hash));
             await Accepted(second, H1 + 2);
 
+            // A copy enters a mempool only while it is fresh: one timed at the far edge of what is still accepted would
+            // be "the earliest", push the honest copies out, and be too old to mine a moment later. A copy already held
+            // is judged as before, and a block may carry a copy of any accepted age.
+            var old = Tx(report);
+            old.Timestamp = first.Timestamp - 600;
+            old.Build();
+            var (fresh, staleWhy) = await TransactionValidatorService.VerifyTX(old);
+            Assert.False(fresh);
+            Assert.Contains("admitted within 120 seconds", staleWhy);
+            Assert.NotNull(pool.FindOne(x => x.Hash == first.Hash));        // and it pushed nothing out
+            await Accepted(old, H1 + 2);
+
             var chosen = await TransactionData.ProcessTxPool();
             Assert.Equal(first.Hash, Assert.Single(chosen).Hash);
             Assert.Null(pool.FindOne(x => x.Hash == unsigned.Hash)); // never valid: deleted
