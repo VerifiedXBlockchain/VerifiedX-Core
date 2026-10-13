@@ -3582,9 +3582,11 @@ namespace VerifiedXCore.Services
                         var completeHeight = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
                         if (withdrawalRequest == null && completeHeight >= Globals.PathAuditRulesHeight)
                         {
-                            if (blockVerify || blockDownloads)
-                                withdrawalRequest = Bitcoin.Services.VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain(withdrawalRequestHash, completeHeight, scUID);
-                            if (withdrawalRequest == null)
+                            // (Read from the blocks, nothing written: the missing row is rebuilt when the completion
+                            // is applied, and a block that is refused leaves no trace.)
+                            var mined = (blockVerify || blockDownloads)
+                                && Bitcoin.Services.VBTCWithdrawalStoreRebuildService.MinedRequestNames(withdrawalRequestHash, scUID, completeHeight);
+                            if (!mined)
                                 return (txResult, $"No withdrawal request {withdrawalRequestHash} exists on contract {scUID}.");
                         }
 

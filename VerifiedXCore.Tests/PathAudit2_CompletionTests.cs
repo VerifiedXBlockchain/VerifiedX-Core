@@ -184,18 +184,45 @@ namespace VerifiedXCore.Tests
 
             var (ok, why) = await VerifyInBlock(real, Rule);
             Assert.True(ok, why);
-            var rebuilt = Row();
-            Assert.Equal(VBTCWithdrawalStatus.Requested, rebuilt.Status);
-            Assert.Equal(0.25M, rebuilt.Amount);
-            Assert.Equal(_requester.Address, rebuilt.RequestorAddress);
+            // Validation wrote nothing (a block that is then refused must leave no trace); the row is rebuilt at apply.
+            Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash(_requestHash, _vault));
 
             await Apply(Rule, real);
             Assert.Equal(VBTCWithdrawalStatus.Completed, Row().Status);
+            Assert.Equal(0.25M, Row().Amount);
+            Assert.Equal(_requester.Address, Row().RequestorAddress);
             // Completed, it is not opened again by anything that asks for a recovery.
             Assert.NotNull(VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain(_requestHash, Rule + 5, _vault));
             Assert.Equal(VBTCWithdrawalStatus.Completed, Row().Status);
             Assert.Null(VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain(_requestHash, Rule + 5, _other));
             Assert.Equal(VBTCWithdrawalStatus.Completed, Row().Status);
+        }
+
+        /// <summary>
+        /// Two requests mined before the rule that both ended, the first row lost on this node. The recovery of the
+        /// first must not land on the second's row: saving falls back to (requester, UniqueId, contract), and the two
+        /// carry the same UniqueId.
+        /// </summary>
+        [Fact]
+        public void TheRecovery_NeverWritesOverTheRowOfAnotherRequestWithTheSameUniqueId()
+        {
+            const string laterHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+            // The request of block 150 carries no UniqueId of its own, so its hash is its UniqueId; a later request
+            // of the same requester reused that value, was paid, and is the only row this node holds.
+            Assert.True(VBTCWithdrawalRequest.Save(new VBTCWithdrawalRequest
+            {
+                RequestorAddress = _requester.Address, SmartContractUID = _vault, Amount = 0.1M, BTCDestination = "tb1q066af78la3rqmnchc396keujllva6turs52749",
+                FeeRate = 10, Timestamp = 1_755_000_160, TransactionHash = laterHash, OriginalUniqueId = _requestHash,
+                Status = VBTCWithdrawalStatus.Completed, IsCompleted = true, BTCTxHash = new string('d', 64), RequestBlockHeight = 160,
+            }));
+
+            var recovered = VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain(_requestHash, Rule + 5, _vault);
+            Assert.NotNull(recovered);
+            Assert.Equal(_requestHash, recovered!.TransactionHash);
+            var later = VBTCWithdrawalRequest.GetByTransactionHash(laterHash, _vault)!;
+            Assert.Equal(VBTCWithdrawalStatus.Completed, later.Status);     // untouched
+            Assert.Equal(0.1M, later.Amount);
+            Assert.Equal(new string('d', 64), later.BTCTxHash);
         }
     }
 }

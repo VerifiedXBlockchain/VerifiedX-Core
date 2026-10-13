@@ -426,7 +426,10 @@ namespace VerifiedXCore.Bitcoin.Models
         /// FIND-005 FIX: Use composite key (RequestorAddress, OriginalUniqueId, SmartContractUID) for uniqueness
         /// Also supports lookup by TransactionHash for FIND-002 multi-user tracking
         /// </summary>
-        public static bool Save(VBTCWithdrawalRequest request, bool update = false)
+        /// <param name="neverOverAnotherRequest">A row that belongs to a different mined request (same requester,
+        /// UniqueId and contract, another transaction hash) is never the one written to, at any height: the incoming
+        /// row is inserted on its own. For the chain recovery, which must only add what is missing.</param>
+        public static bool Save(VBTCWithdrawalRequest request, bool update = false, bool neverOverAnotherRequest = false)
         {
             var vwrDb = GetVBTCWithdrawalRequestDb();
             if (vwrDb == null)
@@ -461,7 +464,7 @@ namespace VerifiedXCore.Bitcoin.Models
                 // request reusing the UniqueId. From the height such a request is refused by validation; here the
                 // later row is inserted on its own either way.
                 if (existingRequest != null
-                    && request.RequestBlockHeight >= Globals.WithdrawalUniqueIdRulesHeight
+                    && (request.RequestBlockHeight >= Globals.WithdrawalUniqueIdRulesHeight || neverOverAnotherRequest)
                     && !string.IsNullOrEmpty(existingRequest.TransactionHash)
                     && !string.Equals(existingRequest.TransactionHash, request.TransactionHash, StringComparison.Ordinal))
                     existingRequest = null;
