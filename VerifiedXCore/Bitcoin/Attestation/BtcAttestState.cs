@@ -437,6 +437,54 @@ namespace VerifiedXCore.Bitcoin.Attestation
         }
 
         /// <summary>Empties every table of this layer (state wipe before a replay; chain-reference migration).</summary>
+        /// <summary>
+        /// At node start, before any block is applied. Everything in this database is written by blocks at or after the
+        /// height the validator bonds start and the height Bitcoin recording starts. While the chain's tip is below
+        /// both, nothing can rightly be here: rows found are left from a release whose heights were lower and have
+        /// passed (the heights were moved on 13 October 2026). With them a node would not start the bonds or the
+        /// Bitcoin view at the new heights, and would hold other signer sets and other watched vaults than the nodes
+        /// that never ran that release. They are removed. Returns how many rows were.
+        /// </summary>
+        public static int ClearIfBeforeItsStart(long tipHeight, LiteDatabase? db = null)
+        {
+            var d = db ?? Db;
+            if (d == null) return 0;
+            var starts = Math.Min(Globals.ValidatorBondHeight, Globals.BitcoinAttestationRecordHeight);
+            if (tipHeight + 1 >= starts) return 0;
+            var rows = AllCollections.Sum(name => d.GetCollection(name).Count());
+            if (rows == 0) return 0;
+            WipeAll(d);
+            VerifiedXCore.Utilities.ErrorLogUtility.LogError($"The Bitcoin attestation and validator bond tables held {rows} row(s) although the chain's tip ({tipHeight}) is below the height they start at ({starts}). They were left by a release with earlier heights and have been removed.", "BtcAttestStore.ClearIfBeforeItsStart()");
+            return rows;
+        }
+
+        /// <summary>
+        /// At node start: why this database cannot be the one the present settings build, or null. Past the start
+        /// heights it must have been started at them: the bonds seeded at the bond height, the Bitcoin view at the
+        /// configured checkpoint. Anything else was built under other settings and can only be rebuilt from the chain.
+        /// </summary>
+        public static string? BuiltUnderOtherSettings(long tipHeight, LiteDatabase? db = null)
+        {
+            var d = db ?? Db;
+            if (d == null) return null;
+            if (tipHeight >= Globals.ValidatorBondHeight)
+            {
+                var marker = d.GetCollection<VerifiedXCore.Services.ValidatorBondRow>(VerifiedXCore.Services.ValidatorBond.Collection).FindById("#seeded");
+                if (marker == null)
+                    return $"the validator bonds start at block {Globals.ValidatorBondHeight} and this node's state (tip {tipHeight}) has none";
+                if (marker.BondedAtHeight != Globals.ValidatorBondHeight)
+                    return $"this node's validator bonds were started at block {marker.BondedAtHeight}; this release starts them at {Globals.ValidatorBondHeight}";
+            }
+            if (tipHeight >= Globals.BitcoinAttestationRecordHeight)
+            {
+                var meta = GetMeta(d);
+                var checkpoint = BtcCheckpoint.Configured(out _);
+                if (meta != null && checkpoint != null && meta.CheckpointHeight != checkpoint.Height)
+                    return $"this node's Bitcoin view was started at Bitcoin block {meta.CheckpointHeight}; this release starts it at {checkpoint.Height}";
+            }
+            return null;
+        }
+
         public static void WipeAll(LiteDatabase? db = null)
         {
             var d = db ?? Db;

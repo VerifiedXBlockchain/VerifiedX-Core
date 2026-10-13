@@ -412,6 +412,22 @@ namespace VerifiedXCore.Services
         {
             Globals.LastBlock = BlockchainData.GetLastBlock() ?? new Block { Height = -1 };
 
+            // The attestation and bond tables belong to the heights this release starts them at (see the two methods).
+            try
+            {
+                VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.ClearIfBeforeItsStart(Globals.LastBlock.Height);
+                var otherSettings = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.BuiltUnderOtherSettings(Globals.LastBlock.Height);
+                if (otherSettings != null)
+                {
+                    ErrorLogUtility.LogError($"State must be rebuilt from the chain: {otherSettings}.", "StartupService.SetAdjudicatorAddresses()");
+                    StateTreiStatusService.SetFailed($"Attestation state built under other settings: {otherSettings}.");
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Checking the attestation tables at start failed: {ex.Message}", "StartupService.SetAdjudicatorAddresses()");
+            }
+
             var signerDB = Signer.GetSigners();
             var Signers = signerDB.FindAll().ToArray();
 

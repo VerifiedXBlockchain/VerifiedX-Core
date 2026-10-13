@@ -673,6 +673,44 @@ namespace VerifiedXCore.Tests
             finally { Globals.ValidatorAddress = priorAddress; }
         }
 
+        /// <summary>
+        /// A node that ran a release with earlier heights past them holds bonds, signer sets and vault scripts written
+        /// under those heights. While its chain is below the heights of this release it holds nothing that belongs
+        /// there: at start the tables are emptied, so that it starts them where every other node does.
+        /// </summary>
+        [Fact]
+        public async Task TablesLeftByAReleaseWithEarlierHeights_AreEmptiedAtStart_WhileTheChainIsBelowThisReleasesHeights()
+        {
+            // As that release left them: seeded at its (earlier) height, with a signer set.
+            Globals.ValidatorBondHeight = 170;
+            Globals.BitcoinAttestationRecordHeight = 171;
+            Globals.ValidatorBondGrandfatherHeight = 165;
+            await Apply(170);
+            await Apply(171);
+            Globals.ValidatorBondGrandfatherHeight = Grandfather;
+            Assert.NotNull(ValidatorBond.Row(_old[0].Address));
+            Assert.NotNull(BtcAttestStore.SignerSet(0));
+
+            // This release: the heights are ahead of the tip again.
+            Globals.ValidatorBondHeight = Rule;
+            Globals.BitcoinAttestationRecordHeight = Rule + 1;
+            Assert.True(BtcAttestStore.ClearIfBeforeItsStart(Tip) > 0);
+            Assert.Null(ValidatorBond.Row(_old[0].Address));
+            Assert.Null(BtcAttestStore.SignerSet(0));
+            Assert.Null(BtcAttestStore.BuiltUnderOtherSettings(Tip));
+            Assert.Equal(0, BtcAttestStore.ClearIfBeforeItsStart(Tip));
+
+            // And it then starts them at this release's height like everybody else.
+            await StartTheRule();
+            Assert.Equal(Rule, ValidatorBond.Row(_old[0].Address)!.BondedAtHeight);
+            Assert.Equal(0, BtcAttestStore.ClearIfBeforeItsStart(Tip));           // past the start: nothing is touched
+            Assert.Null(BtcAttestStore.BuiltUnderOtherSettings(Tip));
+            // A state past the start that was started somewhere else is named, not repaired.
+            Globals.ValidatorBondHeight = Rule - 20;
+            Assert.Contains("were started at block 200", BtcAttestStore.BuiltUnderOtherSettings(Tip));
+            Globals.ValidatorBondHeight = Rule;
+        }
+
         // ── The graceful exit from the node itself ──────────────────────────────────────────────────────────
 
         /// <summary>
