@@ -687,7 +687,7 @@ namespace VerifiedXCore.Data
                                             // (consensus state) and must not race the rest of
                                             // block application or the world-trei update.
                                             await CallBackReserveAccountTx(callBackHash,
-                                                HistoricalTransactionExceptions.KeepsReversedTransferPending(tx, block.Height)); // historical, see there
+                                                HistoricalTransactionExceptions.KeepsReversedTransferPending(tx, block.Height), block.Height); // historical, see there
                                             break;
                                         case "Recover()":
                                             string recoveryAddress = jobj["RecoveryAddress"].ToObject<string>();
@@ -706,7 +706,7 @@ namespace VerifiedXCore.Data
                                                 recoveryAddress = recordedRecovery;
                                             }
                                             await RecoverReserveAccountTx(recoveryAddress, tx.FromAddress, block.StateRoot,
-                                                HistoricalTransactionExceptions.KeepsReversedTransferPending(tx, block.Height)); // historical, see there
+                                                HistoricalTransactionExceptions.KeepsReversedTransferPending(tx, block.Height), block.Height); // historical, see there
                                             break;
                                         default:
                                             break;
@@ -850,6 +850,18 @@ namespace VerifiedXCore.Data
 
                             if (function == "Transfer()")
                             {
+                                // A delayed transfer takes effect only as the transfer state is waiting for: the
+                                // contract is still its sender's and still marked for its recipient. Otherwise the
+                                // row is a leftover (its lock was undone, or the contract has moved on since) and
+                                // must not hand the contract to anyone.
+                                if (scStateTreiRec != null && PathAuditRulesAtTime(rtx.ConfirmTimestamp) && !DeferredTransferStillStands(scStateTreiRec, rtx))
+                                {
+                                    ErrorLogUtility.LogError($"UpdateTreiFromReserve: transfer {rtx.Hash} of {scUID} from {rtx.FromAddress} to {rtx.ToAddress} no longer stands (owner {scStateTreiRec.OwnerAddress}, next owner {scStateTreiRec.NextOwner ?? "none"}); not applied.", "StateData.UpdateTreiFromReserve()");
+                                    rtx.ReserveTransactionStatus = ReserveTransactionStatus.CalledBack;
+                                    await rtxDb.UpdateSafeAsync(rtx);
+                                    await TransactionData.UpdateTxStatusForAllByHash(rtx.Hash, TransactionStatus.Failed);
+                                    continue;
+                                }
                                 if (scStateTreiRec != null)
                                 {
                                     
@@ -908,6 +920,17 @@ namespace VerifiedXCore.Data
                             vbtcAmount = vbtcData["Amount"]?.ToObject<decimal?>();
                         }
                         catch { }
+
+                        if (!string.IsNullOrEmpty(vbtcScUID) && vbtcAmount.HasValue && vbtcAmount.Value > 0
+                            && PathAuditRulesAtTime(rtx.ConfirmTimestamp) && !DeferredVbtcTransferStillCovered(vbtcScUID, rtx.FromAddress, vbtcAmount.Value))
+                        {
+                            // Judged again now that it falls due: nothing was taken from the sender when it was sent.
+                            ErrorLogUtility.LogError($"UpdateTreiFromReserve: vBTC transfer {rtx.Hash} of {vbtcAmount.Value} on {vbtcScUID} from {rtx.FromAddress} is no longer covered by its sender's balance; not applied.", "StateData.UpdateTreiFromReserve()");
+                            rtx.ReserveTransactionStatus = ReserveTransactionStatus.CalledBack;
+                            await rtxDb.UpdateSafeAsync(rtx);
+                            await TransactionData.UpdateTxStatusForAllByHash(rtx.Hash, TransactionStatus.Failed);
+                            continue;
+                        }
 
                         if (!string.IsNullOrEmpty(vbtcScUID) && vbtcAmount.HasValue && vbtcAmount.Value > 0)
                         {
@@ -1001,7 +1024,7 @@ namespace VerifiedXCore.Data
 
         /// <param name="keepTransferPending">Only for the historical mainnet callbacks in
         /// HistoricalTransactionExceptions: refund as usual but leave the reserve row Pending, as the network applied them.</param>
-        private static async Task CallBackReserveAccountTx(string? callBackHash, bool keepTransferPending = false)
+        private static async Task CallBackReserveAccountTx(string? callBackHash, bool keepTransferPending = false, long height = 0)
         {
             try
             {
@@ -1137,7 +1160,12 @@ namespace VerifiedXCore.Data
                             if(scUID != null)
                             {
                                 var scStateTrei = SmartContractStateTrei.GetSmartContractState(scUID);
-                                if(scStateTrei != null)
+                                // A callback undoes the lock its own transfer set, and no other: any called-back row
+                                // naming a contract used to clear that contract's lock, whoever owned it and whatever
+                                // the row's function was (second path audit, 14 October 2026).
+                                var ownLock = height < Globals.PathAuditRulesHeight
+                                    || (function == "Transfer()" || function == "TokenContractOwnerChange()") && scStateTrei != null && DeferredTransferStillStands(scStateTrei, rTX);
+                                if(scStateTrei != null && ownLock)
                                 {
                                     var scDb = SmartContractStateTrei.GetSCST();
                                     if(scDb != null)
@@ -1196,7 +1224,7 @@ namespace VerifiedXCore.Data
         }
         /// <param name="keepTransfersPending">Only for the historical mainnet recovery in HistoricalTransactionExceptions:
         /// redirect as usual but leave the reserve rows Pending, as the network applied it.</param>
-        private static async Task RecoverReserveAccountTx(string? _recoveryAddress, string _fromAddress, string stateRoot, bool keepTransfersPending = false)
+        private static async Task RecoverReserveAccountTx(string? _recoveryAddress, string _fromAddress, string stateRoot, bool keepTransfersPending = false, long height = 0)
         {
             try
             {
@@ -1316,7 +1344,9 @@ namespace VerifiedXCore.Data
                                 if (scStateTrei != null)
                                 {
                                     var scDb = SmartContractStateTrei.GetSCST();
-                                    if (scDb != null)
+                                    // Only a contract the recovered account still owns goes to its recovery address: a
+                                    // leftover row of a transfer long since made must not take the contract back.
+                                    if (scDb != null && (height < Globals.PathAuditRulesHeight || scStateTrei.OwnerAddress == rTX.FromAddress))
                                     {
                                         if (recoveryAddress != null)
                                         {
@@ -1343,7 +1373,8 @@ namespace VerifiedXCore.Data
                                     var vbtcData = JObject.Parse(rTX.Data);
                                     var vbtcScUID = vbtcData["ContractUID"]?.ToObject<string?>();
                                     var vbtcAmount = vbtcData["Amount"]?.ToObject<decimal?>();
-                                    if (!string.IsNullOrEmpty(vbtcScUID) && vbtcAmount.HasValue && vbtcAmount.Value > 0)
+                                    if (!string.IsNullOrEmpty(vbtcScUID) && vbtcAmount.HasValue && vbtcAmount.Value > 0
+                                        && (height < Globals.PathAuditRulesHeight || DeferredVbtcTransferStillCovered(vbtcScUID, rTX.FromAddress, vbtcAmount.Value)))
                                     {
                                         ApplyVBTCV2LedgerPair(vbtcScUID, rTX.FromAddress, recoveryAddress, vbtcAmount.Value, rTX.Hash);
                                     }
@@ -3052,6 +3083,48 @@ namespace VerifiedXCore.Data
         /// apply path (TransferVBTCV2), the reserve finalize path (UpdateTreiFromReserve), and
         /// reserve recovery (redirect/sweep).
         /// </summary>
+        // ── A reserve account's delayed moves are judged again when they fall due (second path audit, 14 October 2026) ──
+        //
+        // A reserve account's transfer is mined now and takes effect at its unlock time. Nothing is taken from the
+        // sender in between: a vBTC transfer is only netted against the sender's own later spends, and a contract
+        // transfer only sets the contract's lock. Both were then applied at the unlock time without looking again.
+
+        /// <summary>
+        /// Whether a reserve row that falls due at <paramref name="timestamp"/> is under these rules: it falls due in
+        /// a block after Globals.PathAuditRulesHeight. A row falls due in the first block whose time is past it, so
+        /// "at or after that block's time" is the same on a live node and on a replay.
+        /// </summary>
+        internal static bool PathAuditRulesAtTime(long timestamp)
+        {
+            if (Globals.PathAuditRulesHeight < 0 || Globals.PathAuditRulesHeight > (Globals.LastBlock?.Height ?? 0) + 1_000_000_000L) return false;
+            var gate = BlockchainData.GetBlockByHeight(Globals.PathAuditRulesHeight);
+            return gate != null && timestamp >= gate.Timestamp;
+        }
+
+        /// <summary>Whether state still waits for this delayed contract transfer: the contract is its sender's and marked for its recipient.</summary>
+        internal static bool DeferredTransferStillStands(SmartContractStateTrei contract, ReserveTransactions row) =>
+            contract.OwnerAddress == row.FromAddress && contract.NextOwner == row.ToAddress;
+
+        /// <summary>
+        /// Whether a reserve account's delayed vBTC transfer is still covered by what its sender holds on the contract.
+        /// The sender's balance is read as a transfer's own rule reads it. While the sender owned the vault its
+        /// balance was the vault's Bitcoin less everyone else's vBTC; once the vault has a new owner that balance is
+        /// the new owner's, and the old one has only its own ledger rows. A delayed transfer made as owner and applied
+        /// after the vault had changed hands gave the recipient vBTC the new owner could also spend: one Bitcoin,
+        /// claimed twice. (The owner of a vault of the earlier kind is judged as the owner only: its deposit is not
+        /// in state, as for its transfers in a block.)
+        /// </summary>
+        internal static bool DeferredVbtcTransferStillCovered(string scUID, string fromAddress, decimal amount)
+        {
+            var contract = SmartContractStateTrei.GetSmartContractState(scUID);
+            if (contract == null) return false;
+            if (contract.OwnerAddress == fromAddress)
+                return !VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(scUID)
+                    || Bitcoin.Services.VBTCService.AttestedOwnerSpendable(contract, fromAddress, long.MaxValue) >= amount;
+            var held = contract.SCStateTreiTokenizationTXes?.Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress).Sum(x => x.Amount) ?? 0M;
+            return held >= amount;
+        }
+
         private static void ApplyVBTCV2LedgerPair(string scUID, string fromAddress, string toAddress, decimal amount, string txHash)
         {
             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
