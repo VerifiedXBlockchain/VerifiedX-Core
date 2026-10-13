@@ -168,6 +168,40 @@ namespace VerifiedXCore.Tests
             return (ok, why);
         }
 
+        /// <summary>
+        /// Moves the chain to <paramref name="height"/> the way a node gets there over a long stretch: the validators
+        /// kept registering (they count as active for 1,000 blocks) and the first block of every epoch on the way
+        /// stored its signer set.
+        /// </summary>
+        protected async Task AdvanceTo(long height)
+        {
+            while (true)
+            {
+                var tip = Globals.LastBlock.Height;
+                var epochStart = H1 + ((tip - H1) / BtcAttestRules.EpochBlocks + 1) * BtcAttestRules.EpochBlocks;
+                if (epochStart > height) break;
+                var h = epochStart - 20;
+                foreach (var v in Signers)
+                {
+                    BlockchainData.GetBlocks().InsertSafe(new VfxBlock
+                    {
+                        Height = h, Hash = $"h{h}-{Guid.NewGuid():N}",
+                        Transactions = new List<VfxTx>
+                        {
+                            new VfxTx
+                            {
+                                TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = v.Address, ToAddress = v.Address, Hash = "r" + h,
+                                Data = JsonConvert.SerializeObject(new { ValidatorAddress = v.Address, IPAddress = "10.0.0.1", FrostPublicKey = v.Pub, IsS3C = false }),
+                            },
+                        },
+                    });
+                    h++;
+                }
+                await Apply(epochStart);
+            }
+            if (Globals.LastBlock.Height < height) await Apply(height);
+        }
+
         /// <summary>The block at the recording height: the Bitcoin view starts and the first signer set is stored.</summary>
         protected static Task Start() => Apply(H1);
 

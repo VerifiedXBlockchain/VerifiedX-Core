@@ -82,7 +82,7 @@ namespace VerifiedXCore.Tests
             _btc.MineEmpty(BtcAttestRules.Depth);
             var meta = BtcAttestStore.GetMeta()!;
             var headers = _btc.HeaderHexes(meta.TipHeight + 1, bitcoinHeight + BtcAttestRules.Depth);
-            var report = Assert.Single(BtcBlockScanner.BuildForward(_btc.Block(bitcoinHeight), bitcoinHeight, headers, 0));
+            var report = Assert.Single(BtcBlockScanner.BuildForward(_btc.Block(bitcoinHeight), bitcoinHeight, headers, BtcAttestRules.EpochOf(Tip + 1)));
             var tx = Signed(report);
             var (ok, why) = await Verify(tx, Tip + 1);
             Assert.True(ok, why);
@@ -579,6 +579,73 @@ namespace VerifiedXCore.Tests
             (ok, why) = FrostSigningAuthorization.Authorize(Announce(vault.Uid, vault.Script, reference, pinned, Signers[2].Address));
             Assert.False(ok);
             Assert.Contains("already completed", why);
+        }
+
+        /// <summary>
+        /// An exit has no requester on this chain who could raise its Bitcoin fee, and a pinned part cannot be given
+        /// up. A part fixed at 10 sat/vB while Bitcoin asks for more would hold its vault's coins and its locks for as
+        /// long as that lasted. So the chain raises the fee itself, by rule: after 2,160 blocks unconfirmed, a
+        /// replacement at twice the rate on the same coins, the fee out of the amount paid.
+        /// </summary>
+        [Fact]
+        public async Task AnExitPartThatDoesNotConfirm_HasItsFeeRaisedByRule_NobodySendsAnything()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.004M);
+            var burn = NewBurn();
+            await Mine(Exit(burn, BtcDest, (lockId, vault.Uid, 0.004M)));
+            var first = Assert.Single(Part(burn, vault.Uid).Pins);
+            Assert.Equal(10, first.FeeRate);
+            Assert.Equal(400_000 - 1_540, first.DestinationSats);
+
+            // Not before 2,160 blocks, and then at the next block the rule looks (every thirtieth).
+            long Looks(long from) => from % BtcAttestRules.TakeRetryBlocks == 0 ? from : from + BtcAttestRules.TakeRetryBlocks - from % BtcAttestRules.TakeRetryBlocks;
+            var due = Looks(first.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks);
+            await AdvanceTo(due - BtcAttestRules.TakeRetryBlocks);
+            Assert.Single(Part(burn, vault.Uid).Pins);
+            await AdvanceTo(due);
+            var part = Part(burn, vault.Uid);
+            Assert.Equal(VaultWithdrawalState.Pinned, part.State);
+            Assert.Equal(2, part.Pins.Count);
+            Assert.True(part.Pins[0].Superseded);
+            var second = part.Pins[1];
+            Assert.Equal(20, second.FeeRate);
+            Assert.Equal(154 * 20, second.FeeSats);
+            Assert.Equal(400_000 - 154 * 20, second.DestinationSats);   // the larger fee comes out of what the exit pays
+            Assert.Equal(first.ChangeSats, second.ChangeSats);           // the vault gets back exactly what it would have
+            Assert.Equal(first.Inputs, second.Inputs);
+            Assert.Equal(due, second.PinnedAtVfxHeight);
+
+            // The signers sign the replacement (and the first, should a miner take that one), and nothing else.
+            var replacement = BtcTx.Parse(second.TxHex, Network.Main);
+            var reference = BtcWithdrawals.ExitSigningReference(burn, vault.Uid);
+            var (signs, why) = FrostSigningAuthorization.Authorize(Announce(vault.Uid, vault.Script, reference, replacement, Signers[2].Address));
+            Assert.True(signs, why);
+            Assert.True(FrostSigningAuthorization.Authorize(Announce(vault.Uid, vault.Script, reference, BtcTx.Parse(first.TxHex, Network.Main), Signers[2].Address)).Item1);
+
+            // Still nothing: twice again, 2,160 blocks later.
+            var again = Looks(second.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks);
+            await AdvanceTo(again);
+            Assert.Equal(40, Part(burn, vault.Uid).Pins[2].FeeRate);
+
+            // Bitcoin takes the second one. The exit is complete, and the owner is added back the amount, whatever the fee was.
+            await SignAndConfirm(second);
+            Assert.Equal(VaultWithdrawalState.Settled, Part(burn, vault.Uid).State);
+            Assert.Equal(second.Txid, Part(burn, vault.Uid).SettledTxid);
+            Assert.True(Record(burn).IsComplete);
+            Assert.False(Record(burn).IsFailedRecord);
+            Assert.Equal(400_000, BtcAttestStore.Total(vault.Uid).SettledExitSats);
+            Assert.Equal(600_000, BtcAttestStore.Total(vault.Uid).HeldSats);
+
+            // A part too small to bear the next fee keeps the transaction it has.
+            var smallLock = await Lock(vault.Uid, 0.00003M);
+            var smallBurn = NewBurn();
+            await Mine(Exit(smallBurn, BtcDest, (smallLock, vault.Uid, 0.00003M)));        // 3,000 sats: 1,540 of fee, 1,460 paid
+            var small = Assert.Single(Part(smallBurn, vault.Uid).Pins);
+            await AdvanceTo(Looks(small.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks));
+            Assert.Single(Part(smallBurn, vault.Uid).Pins);                                  // 3,080 of fee would leave nothing to pay
         }
     }
 }

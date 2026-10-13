@@ -24,6 +24,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
     /// from other locks. The caster-sent failure and completion transactions are refused for these exits.</item>
     /// <item><b>Nothing was escrowed on the ledger.</b> The locker was debited when it locked; the exit reserved the
     /// locks. So an exit that fails restores its locks instead of refunding anybody.</item>
+    /// <item><b>Its fee is raised by rule.</b> An exit has no requester on this chain who could raise the Bitcoin fee
+    /// of a part that is not confirming, and a pinned part cannot be given up. So the chain raises it: a part whose
+    /// newest transaction has been unconfirmed for <see cref="BtcAttestRules.StuckPinBlocks"/> blocks gets a
+    /// replacement at twice the fee rate, on the same coins, the fee taken out of the part's amount like any
+    /// withdrawal's (<see cref="RaiseStuckExitFees"/>).</item>
     /// <item><b>The payout is added back to the vault's owner.</b> When a part is paid the vault's Bitcoin falls and no
     /// ledger row moves; the vBTC behind it was already debited once, at the lock. Without the add-back the owner's
     /// figure would fall a second time and that much of the vault's Bitcoin would belong to nobody.</item>
@@ -214,6 +219,43 @@ namespace VerifiedXCore.Bitcoin.Attestation
             foreach (var (row, tx, _) in built)
                 Pin(row, tx!, vfxHeight, db);
             return true;
+        }
+
+        /// <summary>
+        /// Every <see cref="BtcAttestRules.TakeRetryBlocks"/> blocks: each pinned exit part whose newest transaction
+        /// was fixed <see cref="BtcAttestRules.StuckPinBlocks"/> blocks ago or more gets a replacement at twice its fee
+        /// rate (10, 20, 40 ... sat/vB, at most <see cref="MaxPins"/> transactions), on the same coins and with the
+        /// larger fee taken out of the amount paid. A function of state and height: every node fixes the same
+        /// transaction at the same block, and nobody decides anything. A part too small to bear the next fee keeps the
+        /// transactions it has. Without this a part fixed at 10 sat/vB while Bitcoin asks for more would hold its
+        /// coins and its locks for as long as that lasted, with the vBTC behind it already burned on Base.
+        /// </summary>
+        private static void RaiseStuckExitFees(long vfxHeight, LiteDatabase? db)
+        {
+            if (vfxHeight % BtcAttestRules.TakeRetryBlocks != 0) return;
+            foreach (var row in BtcAttestStore.WithdrawalsInState(VaultWithdrawalState.Pinned, db)
+                         .Where(r => r.IsBridgeExit && r.Pins.Count < MaxPins)
+                         .OrderBy(r => r.Ref, StringComparer.Ordinal))
+            {
+                var newest = row.Pins.LastOrDefault(p => !p.Dead);
+                if (newest == null || vfxHeight < newest.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks) continue;
+                long rate;
+                try { rate = checked((newest.FeeRate > 0 ? newest.FeeRate : row.FeeRate) * 2); }
+                catch (OverflowException) { continue; }
+                var replacement = BtcCanonicalWithdrawal.BuildReplacement(row.SmartContractUID, row.DestinationScriptHex, row.AmountSats, rate, newest.Inputs, row.Ref, out _, db);
+                if (replacement == null) continue; // the fee would leave too little to pay, or a coin is not there (a rewind)
+
+                foreach (var earlier in row.Pins.Where(p => !p.Dead))
+                    earlier.Superseded = true;
+                row.Pins.Add(new VaultPin
+                {
+                    Txid = replacement.Txid, TxHex = replacement.TxHex, Inputs = replacement.Inputs, DestinationSats = replacement.DestinationSats,
+                    ChangeSats = replacement.ChangeSats, FeeSats = replacement.FeeSats, FeeRate = rate, PinnedAtVfxHeight = vfxHeight,
+                });
+                BtcAttestStore.SaveWithdrawal(row, db);
+                SCLogUtility.Log($"Bridge exit for burn {row.ExitBurnHash}: the part on vault {row.SmartContractUID} was unconfirmed for {BtcAttestRules.StuckPinBlocks} blocks; its Bitcoin fee is raised to {rate} sat/vB by rule, replacement {replacement.Txid} pinned ({replacement.FeeSats} sats, out of the amount paid).",
+                    "BtcWithdrawals.RaiseStuckExitFees()");
+            }
         }
 
         /// <summary>
