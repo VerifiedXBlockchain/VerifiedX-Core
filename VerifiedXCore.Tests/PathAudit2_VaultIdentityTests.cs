@@ -43,6 +43,7 @@ namespace VerifiedXCore.Tests
         private readonly long _priorDkgRule = Globals.VbtcV2DkgAttestationHeight;
         private readonly long _priorRule = Globals.PathAuditRulesHeight;
         private readonly long _priorRecord = Globals.BitcoinAttestationRecordHeight;
+        private readonly long _priorBurnRule = Globals.VaultBurnRuleHeight;
         private readonly (PrivateKey Key, string Pub, string Address) _owner = NewKey();
         private readonly List<(PrivateKey Key, string Pub, string Address)> _validators = Enumerable.Range(0, 10).Select(_ => NewKey()).ToList();
         private readonly string _groupKey;
@@ -89,6 +90,7 @@ namespace VerifiedXCore.Tests
             Globals.VbtcV2DkgAttestationHeight = _priorDkgRule;
             Globals.PathAuditRulesHeight = _priorRule;
             Globals.BitcoinAttestationRecordHeight = _priorRecord;
+            Globals.VaultBurnRuleHeight = _priorBurnRule;
             Globals.CustomPath = _priorCustomPath;
             try { Directory.Delete(_tempRoot, recursive: true); } catch { }
         }
@@ -232,6 +234,42 @@ namespace VerifiedXCore.Tests
             // The block that creates it, or any before: accepted.
             var atCreation = FrostDkgAttestation.NewContractUid();
             (ok, why) = await Verify(Create(atCreation, Body(atCreation, VaultFeature(atCreation, proofBlockHeight: Rule))), Rule);
+            Assert.True(ok, why);
+        }
+
+        /// <summary>
+        /// A vault the chain watches is created within twelve hours of its key ceremony, and never under a UID from
+        /// before these rules. Its deposit address exists from the ceremony, and its Bitcoin is watched from about a day
+        /// before its creation: a vault created days later could have Bitcoin at its address that no report can credit
+        /// and no withdrawal can spend. And a vault burned in the last hours in which burning was possible could be
+        /// created again from its old transaction.
+        /// </summary>
+        [Fact]
+        public async Task AWatchedVault_IsCreatedSoonAfterItsCeremony_AndNotUnderAUidFromBeforeTheRules()
+        {
+            Globals.BitcoinAttestationRecordHeight = Rule;
+            Globals.VaultBurnRuleHeight = Rule;   // as released: one fork height
+            string UidMade(long secondsAgo) => Guid.NewGuid().ToString("N") + ":" + (TimeUtil.GetTime() - secondsAgo);
+
+            var stale = UidMade(13 * 3600);
+            var (ok, why) = await Verify(Create(stale, Body(stale, VaultFeature(stale))), Rule - 1);
+            Assert.True(ok, "before the rule: " + why);
+            (ok, why) = await Verify(Create(stale, Body(stale, VaultFeature(stale))), Rule);
+            Assert.False(ok);
+            Assert.Contains("not made within the last 12 hours", why);
+            var recent = UidMade(11 * 3600);
+            (ok, why) = await Verify(Create(recent, Body(recent, VaultFeature(recent))), Rule);
+            Assert.True(ok, why);
+
+            // The block before the rules was mined two hours ago: a UID made before then (or within the hour a UID may be
+            // dated ahead) is from before the rules.
+            BlockchainData.GetBlocks().InsertSafe(new Block { Height = Rule - 1, Hash = "before-the-rules", Timestamp = TimeUtil.GetTime() - 2 * 3600, Transactions = new List<Transaction>() });
+            var fromBefore = UidMade(3 * 3600);
+            (ok, why) = await Verify(Create(fromBefore, Body(fromBefore, VaultFeature(fromBefore))), Rule);
+            Assert.False(ok);
+            Assert.Contains("made before the present rules started", why);
+            var fromAfter = UidMade(30 * 60);
+            (ok, why) = await Verify(Create(fromAfter, Body(fromAfter, VaultFeature(fromAfter))), Rule);
             Assert.True(ok, why);
         }
 

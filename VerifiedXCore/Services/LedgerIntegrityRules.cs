@@ -154,6 +154,46 @@ namespace VerifiedXCore.Services
                 : "This transaction's contract call cannot be read: its Function, ContractUID, Data and MD5List must each be text.";
         }
 
+        // ── A vault that is changing hands; a recipient that can hold vBTC ───────────────────────────────────────
+
+        /// <summary>
+        /// While a vault the chain watches is marked for a new owner (a sale in progress, a reserve account's delayed
+        /// transfer), its owner moves no vBTC out of it: no transfer, withdrawal or bridge lock. The owner's balance is
+        /// the vault's, and goes with it; a seller could put a transfer of all of it in the block that completes the
+        /// sale, and the buyer paid for an empty vault (second path audit, 14 October 2026). Holders are not touched.
+        /// Null when the rule passes.
+        /// </summary>
+        public static string? OwnerKeepsAVaultWholeWhileItChangesHands(Transaction tx)
+        {
+            if (tx == null || string.IsNullOrEmpty(tx.FromAddress)) return null;
+            foreach (var (key, _) in SameBlockDebitGuard.GetDebits(tx))
+            {
+                if (key.Kind != SameBlockDebitGuard.LedgerKind.VbtcV2 || key.Holder != tx.FromAddress) continue;
+                var contract = SmartContractStateTrei.GetSmartContractState(key.ContractUid);
+                if (contract == null || contract.OwnerAddress != tx.FromAddress || (contract.NextOwner == null && !contract.IsLocked)) continue;
+                if (!VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(contract.SmartContractUID)) continue;
+                return $"Vault {contract.SmartContractUID} is being transferred or sold. Its owner moves no vBTC out of it until that is completed or called back.";
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// From Globals.PathAuditRulesHeight vBTC is transferred to an address somebody can sign for: a VFX address (a
+        /// reserve account's included), not a shielded address, a name, or one of the chain's placeholder addresses.
+        /// The ledger credits the transaction's ToAddress as it stands, and a balance under a key nobody holds is lost:
+        /// its owner cannot take it back. Null when the rule passes.
+        /// </summary>
+        public static string? VbtcRecipientCanHoldIt(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.PathAuditRulesHeight) return null;
+            var function = tx.TransactionType == TransactionType.VBTC_V2_TRANSFER ? "TransferVBTCV2()" : DispatchedCall(tx.Data).Function;
+            if (tx.TransactionType != TransactionType.VBTC_V2_TRANSFER && function != "TransferVBTCV2()" && function != "TransferVBTCMultiV2()") return null;
+            var to = tx.ToAddress ?? "";
+            return !to.StartsWith(VerifiedXCore.Privacy.ShieldedAddressConstants.Prefix, StringComparison.Ordinal) && AddressValidateUtility.ValidateRBXAddress(to)
+                ? null
+                : "vBTC can only be transferred to a VFX address (not a shielded address, a name or a placeholder): nobody could spend it there.";
+        }
+
         // ── NEW-26 (follow-up): a vBTC V2 vault's code never changes after creation ─────────────────────────────
 
         /// <summary>The contract functions whose apply overwrites the stored ContractData with the carried body.</summary>
@@ -185,6 +225,8 @@ namespace VerifiedXCore.Services
 
         /// <summary>How long after its UID was made a vault may still be created (the UID ends in the time it was made).</summary>
         public const long VaultUidFreshSeconds = 7 * 24 * 60 * 60;
+        /// <summary>The same for a vault the chain watches, from Globals.PathAuditRulesHeight: inside the look-back its Bitcoin is watched from.</summary>
+        public const long WatchedVaultUidFreshSeconds = 12 * 60 * 60;
 
         /// <summary>
         /// Burn() deletes a contract's state record. A vault's ledger is on that record, so burning a vault destroys
@@ -241,6 +283,20 @@ namespace VerifiedXCore.Services
                 return "A vBTC V2 vault's UID ends in the time it was made (the UID the key ceremony ran under).";
             if (made > tx.Timestamp + 3600 || made < tx.Timestamp - VaultUidFreshSeconds)
                 return $"This vBTC V2 vault's UID was not made within the last {VaultUidFreshSeconds / 86400} days. Run the key ceremony again for a new vault.";
+            if (height >= Globals.PathAuditRulesHeight)
+            {
+                // A vault the chain watches is watched from about a day of Bitcoin blocks before its creation. Its
+                // deposit address exists from its key ceremony, so a vault created days after the ceremony could have
+                // Bitcoin at its address from before that window, which no report can then credit and no withdrawal
+                // can spend. Twelve hours keeps the ceremony inside the window.
+                if (made < tx.Timestamp - WatchedVaultUidFreshSeconds && VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(height))
+                    return $"This vBTC V2 vault's UID was not made within the last {WatchedVaultUidFreshSeconds / 3600} hours. Run the key ceremony again for a new vault.";
+                // And a vault burned just before burning stopped cannot come back: no vault is created under a UID
+                // from before these rules (a UID may be dated up to an hour ahead of its transaction).
+                var before = VerifiedXCore.Data.BlockchainData.GetBlockByHeight(Globals.PathAuditRulesHeight - 1);
+                if (before != null && made < before.Timestamp + 3600)
+                    return "This vBTC V2 vault's UID was made before the present rules started. Run the key ceremony again for a new vault.";
+            }
             return null;
         }
 

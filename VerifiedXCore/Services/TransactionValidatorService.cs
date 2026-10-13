@@ -284,6 +284,12 @@ namespace VerifiedXCore.Services
             if (bondRefusal != null)
                 return (false, bondRefusal);
 
+            // A vault that is changing hands keeps its owner's balance; vBTC goes only to an address that can hold it.
+            var vaultInTransitError = LedgerIntegrityRules.OwnerKeepsAVaultWholeWhileItChangesHands(txRequest)
+                ?? LedgerIntegrityRules.VbtcRecipientCanHoldIt(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (vaultInTransitError != null)
+                return (false, vaultInTransitError);
+
             if (PrivateTransactionTypes.IsPrivateTransaction(txRequest.TransactionType))
                 return await PrivateTransactionValidatorService.VerifyPrivateTX(txRequest, blockDownloads, blockVerify, twSkipVerify, processedNonces, skipPrivatePlonkProofVerification, blockHeight);
 

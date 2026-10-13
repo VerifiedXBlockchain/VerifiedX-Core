@@ -877,6 +877,7 @@ namespace VerifiedXCore.Data
                                 if (scStateTreiRec != null)
                                 {
                                     
+                                    CarryOwnerPosition(scStateTreiRec, rtx.ToAddress);
                                     scStateTreiRec.OwnerAddress = rtx.ToAddress;
                                     scStateTreiRec.NextOwner = null;
                                     scStateTreiRec.IsLocked = false;
@@ -1362,6 +1363,7 @@ namespace VerifiedXCore.Data
                                     {
                                         if (recoveryAddress != null)
                                         {
+                                            CarryOwnerPosition(scStateTrei, recoveryAddress);
                                             scStateTrei.OwnerAddress = recoveryAddress;
                                             scStateTrei.NextOwner = null;
                                             scStateTrei.IsLocked = false;
@@ -1451,6 +1453,7 @@ namespace VerifiedXCore.Data
                     {
                         foreach(var sc in scList)
                         {
+                            CarryOwnerPosition(sc, _recoveryAddress);
                             sc.OwnerAddress = _recoveryAddress;
                             sc.NextOwner = null;
                             sc.IsLocked = false;
@@ -1841,6 +1844,7 @@ namespace VerifiedXCore.Data
                 }
                 else
                 {
+                    CarryOwnerPosition(scStateTreiRec, tx.ToAddress);
                     scStateTreiRec.OwnerAddress = tx.ToAddress;
                     scStateTreiRec.Nonce += 1;
                     scStateTreiRec.ContractData = data;
@@ -2595,6 +2599,7 @@ namespace VerifiedXCore.Data
                 scStateTreiRec.NextOwner = null;
                 scStateTreiRec.IsLocked = false;
                 scStateTreiRec.PurchaseAmount = null;
+                CarryOwnerPosition(scStateTreiRec, tx.FromAddress);
                 scStateTreiRec.OwnerAddress = tx.FromAddress;
                 if (scStateTreiRec.PurchaseKeys != null)
                 {
@@ -3135,6 +3140,29 @@ namespace VerifiedXCore.Data
                     || Bitcoin.Services.VBTCService.AttestedOwnerSpendable(contract, fromAddress, long.MaxValue) >= amount;
             var held = contract.SCStateTreiTokenizationTXes?.Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress).Sum(x => x.Amount) ?? 0M;
             return held >= amount;
+        }
+
+        /// <summary>
+        /// Called where a contract's owner changes, before the new owner is written. On a vault the chain watches, what
+        /// the outgoing owner sent out as owner (transfers, withdrawals in escrow, bridge locks) sits on its address as
+        /// a position below zero, and the incoming owner's balance is the vault's Bitcoin less that. Left on the old
+        /// address, anything that address received afterwards only made the debt smaller: the refund of its own
+        /// withdrawal that did not go through, a bridge unlock, a payment from a holder all went to the new owner's
+        /// balance, and the old owner could spend none of it (second path audit, 14 October 2026). The debt belongs
+        /// with the vault: it moves to the incoming owner here, as a pair of ledger rows, and the outgoing owner is an
+        /// ordinary holder from then on. Changes the list only; the caller saves the contract.
+        /// </summary>
+        internal static void CarryOwnerPosition(SmartContractStateTrei? contract, string? newOwner)
+        {
+            var oldOwner = contract?.OwnerAddress;
+            var rows = contract?.SCStateTreiTokenizationTXes;
+            if (rows == null || rows.Count == 0 || string.IsNullOrEmpty(oldOwner) || string.IsNullOrEmpty(newOwner) || oldOwner == newOwner) return;
+            if (!VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(contract!.SmartContractUID)) return;
+            var position = rows.Where(x => x.FromAddress == oldOwner || x.ToAddress == oldOwner).Sum(x => x.Amount);
+            if (position >= 0M) return;
+            rows.Add(new SmartContractStateTreiTokenizationTX { Amount = -position, FromAddress = "+", ToAddress = oldOwner });
+            rows.Add(new SmartContractStateTreiTokenizationTX { Amount = position, FromAddress = newOwner, ToAddress = "-" });
+            SCLogUtility.Log($"vBTC vault {contract.SmartContractUID}: owner changes from {oldOwner} to {newOwner}; the {-position} vBTC the outgoing owner had sent out as owner is carried to the incoming owner.", "StateData.CarryOwnerPosition()");
         }
 
         private static void ApplyVBTCV2LedgerPair(string scUID, string fromAddress, string toAddress, decimal amount, string txHash)

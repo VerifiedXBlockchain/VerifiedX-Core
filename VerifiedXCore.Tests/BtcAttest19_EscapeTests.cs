@@ -567,6 +567,90 @@ namespace VerifiedXCore.Tests
             await RefusedInBlock(Release(vault.Uid, request.Hash, 500, from: _holder), $"already has {BtcWithdrawals.MaxReleasePins} release transactions");
         }
 
+        // ── A vault that changes hands (second path audit, 14 October 2026) ─────────────────────────────────
+
+        private VfxTx TransferVault(string vault, V to) =>
+            SignedBy(Minter, to.Address, TransactionType.NFT_TX, new[]
+            {
+                new { Function = "Transfer()", ContractUID = vault, ToAddress = to.Address, Data = SmartContractStateTrei.GetSmartContractState(vault)!.ContractData, MD5List = "NA" },
+            });
+
+        /// <summary>
+        /// The owner's own withdrawal is open when the vault goes to a new owner, and then does not go through. Its
+        /// refund used to shrink a debt left on the old owner's address, so it went to the new owner's balance and the
+        /// old owner had nothing: a failed withdrawal, and the vBTC not back.
+        /// </summary>
+        [Fact]
+        public async Task AnOwnerWhoHandsTheVaultOn_StillGetsItsOwnWithdrawalBack()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 150_000);
+            var request = await Mine(Request(vault.Uid, 0.001M));
+            Assert.Equal(VaultWithdrawalState.Pinned, Row(request, vault.Uid).State);
+
+            await Mine(TransferVault(vault.Uid, _holder));
+            Assert.Equal(_holder.Address, SmartContractStateTrei.GetSmartContractState(vault.Uid)!.OwnerAddress);
+            // What the old owner had sent out as owner went with the vault: it holds nothing and owes nothing.
+            Assert.Equal(0M, await Spendable(vault.Uid, Minter));
+            Assert.Equal(0.0005M, await Spendable(vault.Uid, _holder));
+            await AssertBacked(vault.Uid, _holder);
+
+            // It gives its withdrawal up, and Bitcoin confirms the release.
+            await Mine(Release(vault.Uid, request.Hash, 20));
+            await Confirm(Row(request, vault.Uid).Pins[1]);
+            Assert.Equal(VaultWithdrawalState.Released, Row(request, vault.Uid).State);
+            // The refund (less the Bitcoin fee) is the requester's, to spend as any holder; the new owner has what it had.
+            Assert.Equal(0.001M - 154 * 20 / 100_000_000M, await Spendable(vault.Uid, Minter));
+            Assert.Equal(0.0005M, await Spendable(vault.Uid, _holder));
+            await AssertBacked(vault.Uid, _holder);
+            var (ok, why) = await Verify(Transfer(vault.Uid, 0.0009M, to: _other), Tip + 1);
+            Assert.True(ok, why);
+        }
+
+        /// <summary>While a vault is marked for a new owner, its owner moves no vBTC out of it; holders are not touched.</summary>
+        [Fact]
+        public async Task AVaultBeingSoldOrTransferred_KeepsItsOwnersBalance()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 150_000);
+            await Mine(Transfer(vault.Uid, 0.0002M));
+            // A sale has started (or a reserve account's delayed transfer): state marks the vault for its next owner.
+            var contract = SmartContractStateTrei.GetSmartContractState(vault.Uid)!;
+            contract.NextOwner = _other.Address;
+            contract.IsLocked = true;
+            SmartContractStateTrei.UpdateSmartContract(contract);
+
+            await RefusedInBlock(Transfer(vault.Uid, 0.0005M, to: _other), "is being transferred or sold");
+            await RefusedInBlock(Request(vault.Uid, 0.0005M), "is being transferred or sold");
+            // A holder's vBTC is its own.
+            await Mine(Request(vault.Uid, 0.0002M, from: _holder));
+
+            contract = SmartContractStateTrei.GetSmartContractState(vault.Uid)!;
+            contract.NextOwner = null;
+            contract.IsLocked = false;
+            SmartContractStateTrei.UpdateSmartContract(contract);
+            await Mine(Transfer(vault.Uid, 0.0005M, to: _other));
+        }
+
+        /// <summary>vBTC goes only to an address somebody can sign for: sent anywhere else it is lost.</summary>
+        [Fact]
+        public async Task Vbtc_IsTransferredOnlyToAnAddressThatCanHoldIt()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 150_000);
+            foreach (var nowhere in new[] { "Reserve_Base", "Token_Base", "TW_Base", "zfx_" + new string('q', 60), "some.adnr.name.that.is.long.enough.vfx" })
+            {
+                var tx = SignedBy(Minter, nowhere, TransactionType.VBTC_V2_TRANSFER,
+                    new { Function = "TransferVBTCV2()", ContractUID = vault.Uid, FromAddress = Minter.Address, ToAddress = nowhere, Amount = 0.0001M });
+                var (ok, why) = await Verify(tx, Tip + 1);
+                Assert.False(ok, $"a transfer to {nowhere} was accepted");
+            }
+            await Mine(Transfer(vault.Uid, 0.0001M, to: _other));
+        }
+
         [Fact]
         public async Task TwoWithdrawalsThatAreTheSameBitcoinTransaction_ArePaidOnce()
         {
