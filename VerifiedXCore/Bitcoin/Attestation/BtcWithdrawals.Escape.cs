@@ -139,23 +139,24 @@ namespace VerifiedXCore.Bitcoin.Attestation
             ReleasePinnedCoins(row, db);
 
             var request = VBTCWithdrawalRequest.GetByTransactionHash(row.RequestHash, row.SmartContractUID);
+            if (request != null && request.IsCompleted) return;
             if (request == null)
+                ErrorLogUtility.LogError($"Withdrawal {row.Ref} released by {release.Txid} but its request row is missing; refunding from the attested record.", "BtcWithdrawals.CloseReleased()");
+            else
             {
-                ErrorLogUtility.LogError($"Withdrawal {row.Ref} released by {release.Txid} but its request row is missing; no refund written.", "BtcWithdrawals.CloseReleased()");
-                return;
+                request.Status = VBTCWithdrawalStatus.Cancelled;
+                request.IsCompleted = true;
+                VBTCWithdrawalRequest.Save(request, true);
             }
-            if (request.IsCompleted) return;
-            request.Status = VBTCWithdrawalStatus.Cancelled;
-            request.IsCompleted = true;
-            VBTCWithdrawalRequest.Save(request, true);
 
+            // The row here holds the requester and the amount: the refund does not depend on the other table.
             var feeSats = Math.Min(Math.Max(release.FeeSats, 0), row.AmountSats); // validation holds the fee within the amount
-            var refund = request.Amount - feeSats / BtcAttestBalance.SatsPerBtc;
+            var refund = (row.AmountSats - feeSats) / BtcAttestBalance.SatsPerBtc;
             BtcAttestStore.AddReleaseFee(row.SmartContractUID, feeSats, db);
-            if (refund > 0M && !StateData.RefundVbtcWithdrawalEscrow(row.SmartContractUID, request.RequestorAddress, refund))
-                ErrorLogUtility.LogError($"Refund of {refund} to {request.RequestorAddress} on {row.SmartContractUID} could not be written.", "BtcWithdrawals.CloseReleased()");
-            NoteOnLocalRecord(request, completed: false);
-            SCLogUtility.Log($"vBTC withdrawal {row.RequestHash} on {row.SmartContractUID} released by Bitcoin transaction {release.Txid} (reported in {report?.Hash}): {refund} refunded to {request.RequestorAddress}, {feeSats} sats of Bitcoin fee kept from it.",
+            if (refund > 0M && !StateData.RefundVbtcWithdrawalEscrow(row.SmartContractUID, row.Requester, refund))
+                ErrorLogUtility.LogError($"Refund of {refund} to {row.Requester} on {row.SmartContractUID} could not be written.", "BtcWithdrawals.CloseReleased()");
+            if (request != null) NoteOnLocalRecord(request, completed: false);
+            SCLogUtility.Log($"vBTC withdrawal {row.RequestHash} on {row.SmartContractUID} released by Bitcoin transaction {release.Txid} (reported in {report?.Hash}): {refund} refunded to {row.Requester}, {feeSats} sats of Bitcoin fee kept from it.",
                 "BtcWithdrawals.CloseReleased()");
         }
     }

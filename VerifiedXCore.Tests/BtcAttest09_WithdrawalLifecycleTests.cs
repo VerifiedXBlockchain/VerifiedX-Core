@@ -274,7 +274,7 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public async Task ChangeTooSmallToExist_GoesToTheFee()
+        public async Task ChangeTooSmallToExist_IsMadeUpFromThePayout_AndStaysInTheVault()
         {
             await Start();
             var vault = await CreateVault(H1 + 1);
@@ -282,14 +282,15 @@ namespace VerifiedXCore.Tests
 
             var request = await Mine(Request(vault.Uid, 0.001M));
             var pin = Row(request, vault.Uid).Pins[0];
-            Assert.Equal(0, pin.ChangeSats);
-            Assert.Equal(1_540 + 300, pin.FeeSats);
-            Assert.Single(BtcTx.Parse(pin.TxHex, Network.Main).Outputs);
+            Assert.Equal(546, pin.ChangeSats);
+            Assert.Equal(1_540, pin.FeeSats);
+            Assert.Equal(100_000 - 1_540 - 246, pin.DestinationSats);
+            Assert.Equal(2, BtcTx.Parse(pin.TxHex, Network.Main).Outputs.Count);
 
             await SignAndConfirm(pin);
-            Assert.Equal(0, BtcAttestStore.Total(vault.Uid).HeldSats);
-            // 0.001003 came in, 0.001 was withdrawn: the 300 sats went to Bitcoin miners, and the owner's figure says so.
-            Assert.Equal(0M, await Spendable(vault.Uid, Minter));
+            Assert.Equal(546, BtcAttestStore.Total(vault.Uid).HeldSats);
+            // 0.001003 came in, 0.001 was withdrawn: nothing but the fee went to Bitcoin miners, and what is left is the owner's.
+            Assert.Equal(0.00000546M, await Spendable(vault.Uid, Minter));
         }
 
         // ── Requests that are never paid ────────────────────────────────────────────────────────────────────
@@ -395,14 +396,71 @@ namespace VerifiedXCore.Tests
             await RefusedInBlock(Request(vault.Uid, 0.001M, destination: "not-an-address"), "not an address on this network");
             await RefusedInBlock(Request(vault.Uid, 0.001M, destination: "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"), "not an address on this network");
 
-            // An amount that leaves 400 sats after the fee: the request's own rule allows it (330 sats is enough for a
-            // Taproot payout), but the pinned transaction pays any kind of address and needs 546. It is accepted, never
-            // pinned, and refunded at expiry. It holds no coin while it waits.
-            var hopeless = await Mine(Request(vault.Uid, 0.0000194M, feeRate: 10));
-            var row = Row(hopeless, vault.Uid);
-            Assert.Equal(VaultWithdrawalState.Waiting, row.State);
-            Assert.Contains("leaves less than 546 sats", row.WaitingReason);
-            Assert.Equal(150_000, BtcAttestStore.Total(vault.Uid).UnspentSats);
+            await RefusedInBlock(Request(vault.Uid, 0.001M, destination: " " + BtcDest), "spaces around it");
+            await RefusedInBlock(Request(vault.Uid, 0.001M, destination: BtcDest + "\n"), "spaces around it");
+
+            // An amount that leaves 400 sats after the fee. The older rule allows it (330 sats is enough for a Taproot
+            // payout), but the transaction the chain fixes pays any kind of address and needs 546: it could never be
+            // pinned and would only hold its requester's vBTC until its window ran out. It is refused when it is made.
+            await RefusedInBlock(Request(vault.Uid, 0.0000194M, feeRate: 10), "leaves less than 546 sats to pay");
+            // The smallest that can be paid is accepted, and pinned at once.
+            var smallest = await Mine(Request(vault.Uid, 0.00002086M, feeRate: 10));
+            var row = Row(smallest, vault.Uid);
+            Assert.Equal(VaultWithdrawalState.Pinned, row.State);
+            Assert.Equal(546, row.Pins[0].DestinationSats);
+        }
+
+        /// <summary>
+        /// A withdrawal of nearly all of a coin leaves a remainder too small to be a Bitcoin output. It is the vault's
+        /// (the owner's, or another holder's), and nobody was debited for it, so it does not go to the miners: the
+        /// change is made up to the smallest output out of the payout. Otherwise any holder could burn what is left
+        /// to the owner a few hundred sats at a time.
+        /// </summary>
+        [Fact]
+        public async Task AnAmountThatLeavesTooLittleForAChangeOutput_CostsItsRequester_NotTheVault()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 100_000);
+            await Mine(Transfer(vault.Uid, 0.000997M));               // the holder has 99,700 sats; 300 are the owner's
+            var request = await Mine(Request(vault.Uid, 0.000997M, from: _holder));
+            var pin = Assert.Single(Row(request, vault.Uid).Pins);
+            Assert.Equal(1_540, pin.FeeSats);                         // the fee is the fee: nothing extra goes to the miners
+            Assert.Equal(546, pin.ChangeSats);
+            Assert.Equal(99_700 - 1_540 - 246, pin.DestinationSats);  // 246 sats of the payout make the change spendable
+            var btc = BtcTx.Parse(pin.TxHex, Network.Main);
+            Assert.Equal(vault.Script, btc.Outputs[1].ScriptPubKey);
+            Assert.Equal(546, btc.Outputs[1].Value.Satoshi);
+            await SignAndConfirm(pin);
+            Assert.Equal(VaultWithdrawalState.Settled, Row(request, vault.Uid).State);
+            Assert.Equal(546, BtcAttestStore.Total(vault.Uid).HeldSats);
+            Assert.Equal(0M, await Spendable(vault.Uid, _holder));
+            Assert.Equal(0.00000546M, await Spendable(vault.Uid, Minter)); // the owner's remainder is still there, and spendable
+
+            // No remainder, or one large enough to be an output, is as before.
+            await Deposit(vault.Script, 100_000);
+            var exact = await Mine(Request(vault.Uid, 0.001M));
+            Assert.Equal(0, Row(exact, vault.Uid).Pins[0].ChangeSats);
+            Assert.Equal(100_000 - 1_540, Row(exact, vault.Uid).Pins[0].DestinationSats);
+        }
+
+        /// <summary>The refund of a closed withdrawal is written from the chain's own record of it, whatever became of the request table's row.</summary>
+        [Fact]
+        public async Task AWithdrawalClosedByRule_IsRefunded_EvenIfItsRequestRowIsGone()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 150_000);
+            await Mine(Transfer(vault.Uid, 0.001M));
+            await Mine(Request(vault.Uid, 0.0004M));                                     // holds the only coin
+            var waiting = await Mine(Request(vault.Uid, 0.001M, from: _holder));
+            Assert.Equal(VaultWithdrawalState.Waiting, Row(waiting, vault.Uid).State);
+            Assert.Equal(0M, await Spendable(vault.Uid, _holder));
+
+            VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()!.DeleteMany(x => x.TransactionHash == waiting.Hash);
+            await Apply(waiting.Height + VBTCWithdrawalRequest.EXPIRY_BLOCKS + 1);
+            Assert.Equal(VaultWithdrawalState.Expired, Row(waiting, vault.Uid).State);
+            Assert.Equal(0.001M, await Spendable(vault.Uid, _holder));
         }
 
         // ── Several vaults in one request ───────────────────────────────────────────────────────────────────

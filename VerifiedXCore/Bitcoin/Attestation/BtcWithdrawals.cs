@@ -53,11 +53,29 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 {
                     case TransactionType.VBTC_V2_WITHDRAWAL_REQUEST:
                     {
-                        var watched = VBTCService.GetVbtcV2WithdrawalOutflows(tx).Select(o => o.Item1).Where(u => BtcAttestBalance.IsAttestedVault(Stored(u))).ToList();
+                        var outflows = VBTCService.GetVbtcV2WithdrawalOutflows(tx).Where(o => BtcAttestBalance.IsAttestedVault(Stored(o.ScUid))).ToList();
+                        var watched = outflows.Select(o => o.ScUid).ToList();
                         if (watched.Count == 0) return null;
-                        var address = JObject.Parse(tx.Data)["BTCAddress"]?.ToObject<string?>();
+                        var data = JObject.Parse(tx.Data);
+                        var address = data["BTCAddress"]?.ToObject<string?>();
                         if (!BtcCanonicalWithdrawal.TryDestinationScript(address, out var script))
                             return $"The withdrawal's Bitcoin address is not an address on this network: {address}";
+                        // Exactly the address, nothing around it: what is stored is what every reader parses.
+                        if (address != address!.Trim())
+                            return "The withdrawal's Bitcoin address has spaces around it.";
+                        // The chain fixes a transaction that pays any kind of address, so what is left after the fee of
+                        // the smallest one must be an output Bitcoin relays. A request below that could never be
+                        // pinned: it would only hold its requester's vBTC until its window ran out.
+                        var feeRate = data["FeeRate"]?.ToObject<long?>() ?? 0;
+                        foreach (var (vault, amount) in outflows)
+                        {
+                            var sats = (long)(amount * BtcAttestBalance.SatsPerBtc);
+                            long fee;
+                            try { fee = checked(BtcCanonicalWithdrawal.VSize(1) * feeRate); }
+                            catch (OverflowException) { return "The withdrawal's fee rate is out of range."; }
+                            if (feeRate > 0 && sats - fee < BtcCanonicalWithdrawal.DustSats)
+                                return $"A withdrawal of {sats} sats from vault {vault} at {feeRate} sat/vB leaves less than {BtcCanonicalWithdrawal.DustSats} sats to pay: its Bitcoin transaction costs at least {fee} sats, taken out of the amount. Raise the amount or lower the fee rate.";
+                        }
                         // A payment to the vault's own address cannot be told from its change: the vault's signers
                         // would refuse the transaction and the withdrawal would hold its coins without ever being paid.
                         foreach (var vault in watched)
@@ -132,6 +150,20 @@ namespace VerifiedXCore.Bitcoin.Attestation
             return row != null && row.State == VaultWithdrawalState.Pinned
                 && row.Pins.Any(p => !p.Dead && p.IsRelease && string.Equals(p.Txid, txid, StringComparison.OrdinalIgnoreCase));
         }
+
+        /// <summary>
+        /// The script a pinned withdrawal pays, as state holds it (lowercase hex); null when there is no such
+        /// withdrawal. The vault's signers check a transaction's outputs against this, not against an address parsed
+        /// a second time.
+        /// </summary>
+        public static string? DestinationScriptOf(string requestHash, string scUID) =>
+            NullIfEmpty(BtcAttestStore.Withdrawal(RefOf(requestHash, Stored(scUID) ?? scUID))?.DestinationScriptHex);
+
+        /// <summary>As <see cref="DestinationScriptOf"/>, for one vault's part of a bridge exit.</summary>
+        public static string? ExitDestinationScriptOf(VBTCBridgeBtcExitState exit, string scUID) =>
+            NullIfEmpty(BtcAttestStore.Withdrawal(ExitRefOf(exit, Stored(scUID) ?? scUID))?.DestinationScriptHex);
+
+        private static string? NullIfEmpty(string? s) => string.IsNullOrEmpty(s) ? null : s;
 
         /// <summary>Whether a complete, cancel or vote transaction names a vault the chain watches.</summary>
         public static bool IsWatched(Transaction tx)
@@ -399,7 +431,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var request = VBTCWithdrawalRequest.GetByTransactionHash(row.RequestHash, row.SmartContractUID);
             if (request == null)
             {
-                ErrorLogUtility.LogError($"Withdrawal {row.Ref} closed ({state}) but its request row is missing; no refund written.", "BtcWithdrawals.Close()");
+                // The row here holds the requester and the amount: the refund does not depend on the other table.
+                var owed = row.AmountSats / BtcAttestBalance.SatsPerBtc;
+                var written = StateData.RefundVbtcWithdrawalEscrow(row.SmartContractUID, row.Requester, owed);
+                ErrorLogUtility.LogError($"Withdrawal {row.Ref} closed ({state}) but its request row is missing; {owed} refunded to {row.Requester} from the attested record ({(written ? "written" : "NOT written")}).", "BtcWithdrawals.Close()");
                 return;
             }
             if (request.IsCompleted) return;

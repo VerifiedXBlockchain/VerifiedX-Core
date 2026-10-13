@@ -1,4 +1,5 @@
 using LiteDB;
+using VerifiedXCore.Data;
 
 namespace VerifiedXCore.Bitcoin.Attestation
 {
@@ -21,8 +22,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public static bool IsAttestedVault(string? scUID, LiteDatabase? db = null)
         {
             if (string.IsNullOrEmpty(scUID)) return false;
-            try { return BtcAttestStore.ScriptRowForVault(scUID, db) != null; }
-            catch { return false; }
+            // No store at all (a tool or a test that never opened the databases): nothing is watched. A store that
+            // fails to answer is another matter and is not swallowed: answering "not watched" would hand a watched
+            // vault to the earlier rules for that one call, which take the block producer's word for its balance.
+            if (db == null && DbContext.DB_BtcAttest == null) return false;
+            return BtcAttestStore.ScriptRowForVault(scUID, db) != null;
         }
 
         /// <summary>

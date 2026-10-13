@@ -386,6 +386,25 @@ namespace VerifiedXCore.Tests
             Assert.False(BtcAttestBlockRules.TryRegister(Release(vault.Uid, small.Hash, 31), state).Ok);
         }
 
+        // ── What the signers check a pinned transaction against ─────────────────────────────────────────────
+
+        [Fact]
+        public async Task TheSigners_CheckOutputsAgainstTheScriptInState_AndSignAChangeMadeUpToTheSmallestOutput()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 100_000);
+            await Mine(Transfer(vault.Uid, 0.000997M));
+            // 300 sats more than the amount in the coin: the change is made up to 546 out of the payout.
+            var request = await Mine(Request(vault.Uid, 0.000997M, from: _holder));
+            var pin = Assert.Single(Row(request, vault.Uid).Pins);
+            Assert.Equal(546, pin.ChangeSats);
+            var (signs, why) = FrostSigningAuthorization.Authorize(Announce(vault.Uid, vault.Script, request.Hash, BtcTx.Parse(pin.TxHex, Network.Main), Signers[1].Address));
+            Assert.True(signs, why);
+            Assert.Equal(BitcoinAddress.Create(BtcDest, Network.Main).ScriptPubKey.ToHex(), BtcWithdrawals.DestinationScriptOf(request.Hash, vault.Uid));
+            Assert.Null(BtcWithdrawals.DestinationScriptOf("nosuchrequest", vault.Uid));
+        }
+
         // ── Takeover ────────────────────────────────────────────────────────────────────────────────────────
 
         /// <summary>A vault with one coin of 150,000 sats, held by the holder's withdrawal of 10,000 sats at 1 sat/vB.</summary>

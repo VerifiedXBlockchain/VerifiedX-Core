@@ -121,6 +121,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 bool isBridgeExit = false;
                 bool leaderIsVaultSignerOfPinned = false;
                 bool pinnedRelease = false;
+                string? pinnedDestinationScriptHex = null; // a watched vault: the script state holds for the pinned payment
 
                 var wrh = request.WithdrawalRequestHash.Trim();
                 if (wrh.StartsWith(BtcExitPrefix, StringComparison.OrdinalIgnoreCase))
@@ -139,6 +140,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     {
                         var (pinned, pinReason) = Attestation.BtcWithdrawals.IsPinnedExitTransaction(exit, request.SmartContractUID, txId);
                         if (!pinned) return (false, pinReason);
+                        pinnedDestinationScriptHex = Attestation.BtcWithdrawals.ExitDestinationScriptOf(exit, request.SmartContractUID);
                         leaderIsVaultSignerOfPinned = Attestation.BtcWithdrawalSigner.SignersOf(request.SmartContractUID)
                             .Contains(request.LeaderAddress, StringComparer.Ordinal);
                     }
@@ -170,13 +172,21 @@ namespace VerifiedXCore.Bitcoin.FROST
                         // The requester gave the withdrawal up: consensus fixed a transaction that returns its coins to
                         // the vault and pays nobody.
                         pinnedRelease = Attestation.BtcWithdrawals.IsPinnedRelease(wrh, wr.SmartContractUID, txId);
+                        pinnedDestinationScriptHex = Attestation.BtcWithdrawals.DestinationScriptOf(wrh, wr.SmartContractUID);
                         leaderIsVaultSignerOfPinned = Attestation.BtcWithdrawalSigner.SignersOf(wr.SmartContractUID)
                             .Contains(request.LeaderAddress, StringComparer.Ordinal);
                     }
                 }
 
+                // On a watched vault the destination is the script consensus built the pinned transaction with, so
+                // this check and the transaction cannot disagree over how an address is read.
                 Script destinationScript;
-                try { destinationScript = BitcoinAddress.Create(destination, Globals.BTCNetwork).ScriptPubKey; }
+                try
+                {
+                    destinationScript = pinnedDestinationScriptHex != null
+                        ? Script.FromHex(pinnedDestinationScriptHex)
+                        : BitcoinAddress.Create(destination, Globals.BTCNetwork).ScriptPubKey;
+                }
                 catch (Exception ex) { return (false, $"Authorized destination invalid: {ApiErrorText.For(ex)}"); }
 
                 // ── 4. Outputs: destination (bounded) or change to the vault, nothing else ─────

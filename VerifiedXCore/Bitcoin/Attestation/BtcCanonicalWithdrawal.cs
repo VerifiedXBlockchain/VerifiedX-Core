@@ -35,7 +35,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
     /// <item>Fee: the request's fee rate times the size estimate the wallet has always used (57.5 vB per input, 43 per
     /// output for two outputs, 10.5 overhead, rounded down), taken out of the amount.</item>
     /// <item>Outputs: the destination gets the amount less the fee; the rest of the coins (inputs less the amount)
-    /// returns to the vault's deposit script. Change under 546 sats is not created and goes to the fee.</item>
+    /// returns to the vault's deposit script. A remainder under 546 sats is too small to be an output: the change is
+    /// made up to 546 out of the payout, so nothing of the vault's goes to the miners.</item>
     /// <item>Version 2, lock time 0, empty input scripts, and every input with sequence fffffffd: the transaction says
     /// it may be replaced, so that Bitcoin nodes relay a replacement that pays a higher fee
     /// (<see cref="BuildReplacement"/>).</item>
@@ -236,10 +237,20 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
             var destinationSats = amountSats - feeSats;
             var changeSats = inputSats - amountSats;
-            if (changeSats < DustSats)
+            if (changeSats > 0 && changeSats < DustSats)
             {
-                feeSats += changeSats;
-                changeSats = 0;
+                // What the coins hold beyond the amount is the vault's, and too little to be an output. It is not
+                // given to the miners (nobody was debited for it; any holder could have burned the owner's remainder
+                // a few hundred sats at a time): the change is made up to the smallest output out of the payout, so
+                // the cost of an amount that leaves an awkward remainder is the requester's.
+                var topUp = DustSats - changeSats;
+                if (destinationSats - topUp < DustSats)
+                {
+                    reason = $"the coins hold {changeSats} sats more than the amount, too little for a change output; making it up from the payout leaves less than {DustSats} sats to pay";
+                    return null;
+                }
+                destinationSats -= topUp;
+                changeSats = DustSats;
             }
 
             var outputs = new List<(string ScriptHex, long Sats)> { (destinationScriptHex, destinationSats) };
