@@ -3562,6 +3562,21 @@ namespace VerifiedXCore.Services
                         // Contract-scoped: a multi-contract request mints one row per contract
                         // under this hash, and this COMPLETE finalizes its own contract's row.
                         var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
+
+                        // From Globals.PathAuditRulesHeight a completion names a request that exists on its own contract.
+                        // The request table is written by every node from mined requests, so a missing row is either
+                        // this node's store being incomplete (in a block: rebuilt from the mined request, missing rows
+                        // only) or a completion that names a request under a contract it was never made on. That second
+                        // case used to pass here "lightweight", and its apply then reset the request's real row.
+                        var completeHeight = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
+                        if (withdrawalRequest == null && completeHeight >= Globals.PathAuditRulesHeight)
+                        {
+                            if (blockVerify || blockDownloads)
+                                withdrawalRequest = Bitcoin.Services.VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain(withdrawalRequestHash, completeHeight, scUID);
+                            if (withdrawalRequest == null)
+                                return (txResult, $"No withdrawal request {withdrawalRequestHash} exists on contract {scUID}.");
+                        }
+
                         if (withdrawalRequest != null)
                         {
                             // Full validation path (local node has the request record)

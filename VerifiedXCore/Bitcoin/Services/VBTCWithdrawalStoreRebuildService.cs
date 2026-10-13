@@ -213,6 +213,12 @@ namespace VerifiedXCore.Bitcoin.Services
         /// skip the consensus burn row. The REQUEST tx is on chain — back-scan a bounded window of
         /// blocks below the COMPLETE's height, reconstruct the row, and return it so completion
         /// (including the burn) can proceed exactly as on healthy nodes.
+        ///
+        /// From Globals.PathAuditRulesHeight it adds only the rows that are missing. It used to save every row of the
+        /// request over whatever the store held, so a completion that named the request's hash under ANOTHER contract
+        /// (no row there, hence "missing") rewrote the request's real row as freshly requested: a paid or cancelled
+        /// withdrawal became open again, to be cancelled and refunded a second time, and an owner lost the credit of a
+        /// settled one (second path audit, 14 October 2026).
         /// </summary>
         public static VBTCWithdrawalRequest? TryRecoverRequestRowFromChain(string requestTxHash, long anchorHeight, string? scUID = null)
         {
@@ -240,14 +246,20 @@ namespace VerifiedXCore.Bitcoin.Services
                         if (!TryBuildRequestRows(tx, out var rows) || rows == null || rows.Count == 0)
                             return null;
 
-                        var savedAny = false;
+                        var missingOnly = toHeight >= Globals.PathAuditRulesHeight;
+                        var saved = 0;
                         foreach (var row in rows)
-                            savedAny |= VBTCWithdrawalRequest.Save(row, update: true);
+                        {
+                            if (missingOnly && VBTCWithdrawalRequest.GetByTransactionHash(row.TransactionHash, row.SmartContractUID) != null)
+                                continue; // this row is here: what it has become since its request is never written over
+                            if (VBTCWithdrawalRequest.Save(row, update: true)) saved++;
+                        }
 
-                        if (!savedAny)
+                        if (saved == 0 && !missingOnly)
                             return null;
 
-                        LogUtility.Log($"Recovered {rows.Count} missing withdrawal request row(s) for {requestTxHash} from chain (height {block.Height}).", "VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain()");
+                        if (saved > 0)
+                            LogUtility.Log($"Recovered {saved} missing withdrawal request row(s) for {requestTxHash} from chain (height {block.Height}).", "VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain()");
                         return VBTCWithdrawalRequest.GetByTransactionHash(requestTxHash, scUID);
                     }
                 }
