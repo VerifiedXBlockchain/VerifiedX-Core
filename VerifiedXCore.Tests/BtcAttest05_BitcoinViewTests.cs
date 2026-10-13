@@ -147,6 +147,32 @@ namespace VerifiedXCore.Tests
             Assert.Equal(BtcHeaderAdd.Unconnected, chain.Add(Headers(_btc, Checkpoint - 5, Checkpoint), out _));
         }
 
+        /// <summary>
+        /// A validator does not follow headers timed more than two hours ahead of its own clock (Bitcoin's rule; consensus
+        /// cannot apply it, a node following Bitcoin can). What it does not follow it does not report or sign.
+        /// </summary>
+        [Fact]
+        public void TheHeaderChain_DoesNotFollowHeadersTimedMoreThanTwoHoursAhead()
+        {
+            var prior = BtcHeaderChain.Now;
+            try
+            {
+                var chain = NewChain();
+                _btc.MineEmpty(3);
+                var newest = _btc.Header(First + 2).Time;
+                // The node's clock is three hours behind the third header: the first two are within two hours, the third is not.
+                BtcHeaderChain.Now = () => newest - 3 * 3600;
+                Assert.Equal(BtcHeaderAdd.Invalid, chain.Add(Headers(_btc, First, First + 2), out var why));
+                Assert.Contains("two hours ahead", why);
+                Assert.Equal(Checkpoint, chain.TipHeight);
+                // Once the clock has caught up it follows them.
+                BtcHeaderChain.Now = () => newest - BtcHeaderChain.MaxFutureSeconds;
+                Assert.Equal(BtcHeaderAdd.Extended, chain.Add(Headers(_btc, First, First + 2), out _));
+                Assert.Equal(First + 2, chain.TipHeight);
+            }
+            finally { BtcHeaderChain.Now = prior; }
+        }
+
         // ── A fetched block ─────────────────────────────────────────────────────────────────────────────────
 
         [Fact]

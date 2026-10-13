@@ -104,6 +104,11 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
         /// header held, every one passes the rules, and (when they do not simply extend the tip) their branch carries
         /// more work than the part of the best chain it would replace.
         /// </summary>
+        /// <summary>How far ahead of this node's clock a header may be timed and still be followed: Bitcoin's own two hours.</summary>
+        public const int MaxFutureSeconds = 2 * 60 * 60;
+        /// <summary>This node's clock, in seconds. Replaceable for tests.</summary>
+        internal static Func<long> Now = () => DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
         public BtcHeaderAdd Add(IReadOnlyList<BtcHeader> run, out string? reason)
         {
             reason = null;
@@ -140,6 +145,12 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
                 {
                     height++;
                     var refusal = _rules.Validate(run[i], height, Lookup);
+                    // Bitcoin's "not more than two hours in the future" rule. Consensus cannot apply it (it reads a
+                    // clock); a validator following Bitcoin can, and does here, for what it follows and so for what it
+                    // signs. Without it a peer could feed headers timed hours ahead, which on testnet4 (where a block
+                    // twenty minutes after its parent may use the easiest target) is any number of cheap blocks.
+                    if (refusal == null && run[i].Time > Now() + MaxFutureSeconds)
+                        refusal = $"header {run[i].Hash} is timed more than two hours ahead of this node's clock";
                     if (refusal != null)
                     {
                         reason = refusal;
