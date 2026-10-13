@@ -619,7 +619,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                             }
 
                             // FIND-0013 Fix: Enforce maximum concurrent session cap
-                            if (FrostSessionStorage.DKGSessions.Count >= FrostSessionStorage.MAX_DKG_SESSIONS)
+                            // Ceremonies under way count; finished ones kept an hour for their result, and ones abandoned
+                            // more than fifteen minutes ago, do not take a place.
+                            if (FrostSessionStorage.DKGSessions.Values.Count(s => !s.IsCompleted && s.StartTimestamp >= TimeUtil.GetTime() - FrostSessionStorage.DKG_LEADER_CAP_WINDOW_SECONDS) >= FrostSessionStorage.MAX_DKG_SESSIONS)
                             {
                                 context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new

@@ -4247,6 +4247,14 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Timestamp = deployTx.Timestamp,
                     Fee = deployTx.Fee,
                     Nonce = deployTx.Nonce,
+                    // The signed content, as the other raw builders give it, so a wallet can recompute Hash and refuse
+                    // to sign on a mismatch instead of signing blind.
+                    FromAddress = deployTx.FromAddress,
+                    ToAddress = deployTx.ToAddress,
+                    Amount = deployTx.Amount,
+                    TransactionType = deployTx.TransactionType.ToString(),
+                    Data = deployTx.Data,
+                    HashPreimage = deployTx.GetHashPreimage(),
                     Message = "Sign the Hash field and submit via SendRawCreateContractTx."
                 });
             }
