@@ -235,5 +235,19 @@ namespace VerifiedXCore.Tests
             var (was, _) = await Verify(Create(old), BurnRule - 1);
             Assert.True(was);
         }
+
+        [Fact]
+        public async Task ADepositAddressBelongsToOneVault()
+        {
+            // Another vault is watched at this address already.
+            var script = NBitcoin.BitcoinAddress.Create(_address, NBitcoin.Network.Main).ScriptPubKey.ToHex().ToLowerInvariant();
+            VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.SaveScript(new VerifiedXCore.Bitcoin.Attestation.VaultDepositScriptRow
+            {
+                ScriptHex = script, SmartContractUID = "0123456789abcdef0123456789abcdef:1700000000", DepositAddress = _address, CreatedAtVfxHeight = 90, WatchFromBitcoinHeight = 1,
+            });
+            var (ok, why) = await Verify(Create(FrostDkgAttestation.NewContractUid()), Tip + 1);
+            Assert.False(ok);
+            Assert.Contains("already belongs to vault", why);
+        }
     }
 }

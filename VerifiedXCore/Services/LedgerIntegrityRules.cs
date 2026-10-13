@@ -359,6 +359,10 @@ namespace VerifiedXCore.Services
             if (v2.Count > 1) return "A contract may carry only one TokenizationV2 feature.";
             var reuseError = VaultUidIsNew(tx, uid, height);
             if (reuseError != null) return reuseError;
+            // From the recording height a vault is a contract made with Mint(), whose deposit script the chain then
+            // watches. One made as a token would be a vault the chain does not watch, left to the earlier rules.
+            if (payload.Function == "TokenDeploy()" && VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(height))
+                return "A vBTC V2 vault is created with Mint(), not deployed as a token.";
             VerifiedXCore.Models.SmartContracts.TokenizationV2Feature? feature;
             try
             {
@@ -366,6 +370,13 @@ namespace VerifiedXCore.Services
                     ?? Newtonsoft.Json.JsonConvert.DeserializeObject<VerifiedXCore.Models.SmartContracts.TokenizationV2Feature>(v2[0].FeatureFeatures?.ToString() ?? "");
             }
             catch { feature = null; }
+            // A deposit script belongs to one vault. A second vault carrying a watched vault's address would get no
+            // coins of its own and would not be watched, so it would fall to the earlier rules, which read its
+            // deposit from that address: the other vault's Bitcoin. (The key ceremony makes such an address
+            // unreachable for an honest set of validators; this does not depend on that.)
+            if (VerifiedXCore.Bitcoin.Attestation.BtcCanonicalWithdrawal.TryDestinationScript(feature?.DepositAddress, out var depositScript)
+                && VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.ScriptRow(depositScript) is { } taken && taken.SmartContractUID != uid)
+                return $"This deposit address already belongs to vault {taken.SmartContractUID}.";
             return VerifiedXCore.Bitcoin.FROST.FrostDkgAttestation.Validate(feature, uid, tx.FromAddress,
                 () => VBTCValidatorRegistry.FundedOnly(VBTCValidatorRegistry.GetActiveValidatorsAt(height - 1))); // NEW-26 (follow-up): funded now
         }

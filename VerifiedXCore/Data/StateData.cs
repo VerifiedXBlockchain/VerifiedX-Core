@@ -360,6 +360,9 @@ namespace VerifiedXCore.Data
                                         // VX-02: awaited. It was fire-and-forget, so a later TX in the same
                                         // block could run before this deploy's state writes landed.
                                         await DeployTokenContract(tx, block);
+                                        // (Validation refuses a vault deployed as a token from the recording height; if one is
+                                        // ever applied all the same, it is watched like any other.)
+                                        VerifiedXCore.Bitcoin.Attestation.BtcAttestApply.RegisterVaultIfAny(scUID, block.Height);
                                         break;
                                     case "TokenTransfer()":
                                         await TokenTransfer(tx, block); // NEW-12: awaited (ran concurrently with the rest of the block)
