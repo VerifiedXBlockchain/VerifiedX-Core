@@ -459,5 +459,129 @@ namespace VerifiedXCore.Tests
             Assert.Contains("/wallet/api/vbtc/withdraw/bumpfee", page);
             Assert.Contains("function vbtcOpenWithdrawals(c)", page);
         }
+
+        // ── What the routes must not get wrong ──────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// A caller that polls the multi-vault completion route records a payout when a share reads as a success. A
+        /// share that was closed and refunded was not paid, and must not read as one.
+        /// </summary>
+        [Fact]
+        public async Task TheMultiCompletionRoute_NeverReportsARefundedShare_AsPaid()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 150_000);
+            var paid = await Request(vault.Uid, 0.001M);
+            var waiting = await Request(vault.Uid, 0.0002M);                   // waits for the change; never pinned
+
+            // Being paid: not a success yet, and said to be in the chain's hands.
+            var multi = JObject.Parse(await _api.CompleteWithdrawalMulti(new VBTCWithdrawalCompleteMultiPayload { WithdrawalRequestHash = paid.Hash }));
+            Assert.False((bool)multi["Success"]!);
+            Assert.Equal(1, (int)multi["BeingPaid"]!);
+            Assert.True((bool)Assert.Single((JArray)multi["Results"]!)["BeingPaid"]!);
+
+            // Paid.
+            await Confirm(Row(paid, vault.Uid).Pins[0].TxHex);
+            multi = JObject.Parse(await _api.CompleteWithdrawalMulti(new VBTCWithdrawalCompleteMultiPayload { WithdrawalRequestHash = paid.Hash }));
+            Assert.True((bool)multi["Success"]!);
+            Assert.Equal(1, (int)multi["Paid"]!);
+
+            // Expired and refunded: it was never paid and never will be.
+            var late = await Request(vault.Uid, 0.0003M);                      // the change is held by the request before it; waits
+            Assert.Equal(VaultWithdrawalState.Waiting, Row(late, vault.Uid).State);
+            await Apply(late.Height + VBTCWithdrawalRequest.EXPIRY_BLOCKS + 1);
+            Assert.Equal(VaultWithdrawalState.Expired, Row(late, vault.Uid).State);
+            multi = JObject.Parse(await _api.CompleteWithdrawalMulti(new VBTCWithdrawalCompleteMultiPayload { WithdrawalRequestHash = late.Hash }));
+            Assert.False((bool)multi["Success"]!, multi.ToString());
+            Assert.Equal(0, (int)multi["Paid"]!);
+            Assert.Equal(1, (int)multi["Refunded"]!);
+            var share = Assert.Single((JArray)multi["Results"]!);
+            Assert.False((bool)share["Success"]!);
+            Assert.False((bool)share["AlreadyComplete"]!);
+            Assert.True((bool)share["Refunded"]!);
+            Assert.Contains("closed without being paid", (string)share["ErrorMessage"]!);
+            Assert.Contains("closed and refunded", (string)multi["Message"]!);
+            _ = waiting;
+        }
+
+        [Fact]
+        public async Task ARequestNotMinedYet_IsSaidToBeSo_AndIsNotAFailure()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 150_000);
+            var unknown = new string('a', 64);
+            var direct = await VBTCService.CompleteWithdrawal(vault.Uid, unknown);
+            Assert.False(direct.Success);
+            Assert.True(BtcVaultView.IsNotMinedYet(direct.ErrorMessage));
+            Assert.False(BtcVaultView.IsInTheChainsHands(direct.ErrorMessage));
+            var answer = JObject.Parse(await _api.CompleteWithdrawal(new VBTCWithdrawalCompletePayload { SmartContractUID = vault.Uid, WithdrawalRequestHash = unknown }));
+            Assert.False((bool)answer["Success"]!);
+            Assert.True((bool)answer["NotMinedYet"]!);
+            Assert.False((bool)answer["NothingToDo"]!);
+        }
+
+        /// <summary>A web wallet signs a hash. Every builder also answers with the Data it built, so the wallet can show what is being signed.</summary>
+        [Fact]
+        public async Task TheRawBuilders_AnswerWithWhatIsBeingSigned()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 150_000);
+            var waiting0 = await Request(vault.Uid, 0.0014M);                  // holds the coin
+            var waiting = await Request(vault.Uid, 0.00005M);
+            var cancel = JObject.Parse(await _api.GetRawCancelWithdrawalTxData(new VBTCWithdrawalCancelTxPayload { SmartContractUID = vault.Uid, RequestorAddress = Minter.Address, WithdrawalRequestHash = waiting.Hash }));
+            Assert.True((bool)cancel["Success"]!, cancel.ToString());
+            Assert.Contains(waiting.Hash, (string)cancel["Data"]!);
+            var bump = JObject.Parse(await _api.GetRawBumpWithdrawalFeeTxData(new VBTCWithdrawalFeeBumpPayload { SmartContractUID = vault.Uid, RequestorAddress = Minter.Address, WithdrawalRequestHash = waiting0.Hash, FeeRate = 30 }));
+            Assert.Contains("VBTCWithdrawalFeeBump()", (string)bump["Data"]!);
+            var release = JObject.Parse(await _api.GetRawReleaseWithdrawalTxData(new VBTCWithdrawalFeeBumpPayload { SmartContractUID = vault.Uid, RequestorAddress = Minter.Address, WithdrawalRequestHash = waiting0.Hash, FeeRate = 30 }));
+            Assert.True((bool)release["Success"]!, release.ToString());
+            Assert.Contains("VBTCWithdrawalRelease()", (string)release["Data"]!);
+
+            // A release is submitted by the release route and a fee bump by its own: a wallet cannot send one for the other.
+            var wrongRoute = JObject.Parse(await _api.SendRawBumpWithdrawalFeeTx(new RawVBTCTxSubmission
+            {
+                Hash = (string)release["Hash"]!, Signature = SignatureService.CreateSignature((string)release["Hash"]!, Minter.Key, Minter.Pub), PublicKey = Minter.Pub,
+            }));
+            Assert.False((bool)wrongRoute["Success"]!);
+            Assert.Contains("SendRawReleaseWithdrawalTx", (string)wrongRoute["Message"]!);
+            var (sent, pooled) = await SignAndSubmit(release, Minter, _api.SendRawReleaseWithdrawalTx);
+            Assert.True((bool)sent["Success"]!, sent.ToString());
+            await Mine(pooled!);
+            Assert.True(Row(waiting0, vault.Uid).Pins[^1].IsRelease);
+            var view = JObject.Parse(await _api.GetWithdrawalPin(vault.Uid, waiting0.Hash));
+            Assert.True((bool)view["Withdrawal"]!["Releasing"]!);
+            Assert.False((bool)view["Withdrawal"]!["CanRaiseFee"]!);
+            Assert.Equal("Release", (string)((JArray)view["Withdrawal"]!["Transactions"]!).Last!["Kind"]!);
+        }
+
+        /// <summary>The builds kept for signing are bounded, and what a submit route works on is its own copy.</summary>
+        [Fact]
+        public void TheBuildsKeptForSigning_AreBounded_AndHandedOutAsCopies()
+        {
+            var store = new VBTCController.PendingRawTxs();
+            VfxTx Build(int i, int dataLength = 10) => new VfxTx { Hash = "h" + i, FromAddress = "a", ToAddress = "b", Data = new string('x', dataLength), Timestamp = TimeUtil.GetTime() };
+
+            store["h1"] = Build(1);
+            Assert.True(store.TryGetValue("h1", out var first));
+            first.Signature = "one caller's signature";
+            Assert.True(store.TryGetValue("h1", out var second));
+            Assert.Null(second.Signature);                                   // another caller's copy is untouched
+            Assert.True(store.TryRemove("h1", out _));
+            Assert.False(store.TryRemove("h1", out _));                      // claimed once
+
+            for (var i = 0; i < VBTCController.PendingRawTxs.MaxEntries + 50; i++)
+                store["h" + i] = Build(i);
+            Assert.True(store.Count <= VBTCController.PendingRawTxs.MaxEntries);
+            Assert.True(store.TryGetValue("h" + (VBTCController.PendingRawTxs.MaxEntries + 49), out _));   // the newest are kept
+
+            // A few very large builds cannot hold more than the store's byte budget.
+            var big = new VBTCController.PendingRawTxs();
+            for (var i = 0; i < 200; i++)
+                big["h" + i] = Build(i, 256 * 1024);
+            Assert.True(big.Count * 256L * 1024 <= VBTCController.PendingRawTxs.MaxBytes);
+        }
     }
 }

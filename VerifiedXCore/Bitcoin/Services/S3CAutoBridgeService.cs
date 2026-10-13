@@ -147,6 +147,13 @@ namespace VerifiedXCore.Bitcoin.Services
                 // Give the request a moment to be mined so the contract's Active* fields are populated.
                 await Task.Delay(TimeSpan.FromSeconds(CeremonyPollSeconds));
                 var comp = await VBTCService.CompleteWithdrawal(s.S3CContractUID, reqTxHash);
+                // A vault the chain watches answers "not mined yet" until the request is in a block. That is a matter
+                // of blocks, not a failure: the request is in the pool and will be pinned and paid when it is mined.
+                for (var waited = 0; waited < 20 && !comp.Success && Attestation.BtcVaultView.IsNotMinedYet(comp.ErrorMessage); waited++)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(CeremonyPollSeconds));
+                    comp = await VBTCService.CompleteWithdrawal(s.S3CContractUID, reqTxHash);
+                }
                 // On a vault the chain watches nothing is completed from here: the vault's signers pay the request and
                 // the answer says it is in the chain's hands. That is not a failure; the next step waits for the BTC.
                 if (!comp.Success && !Attestation.BtcVaultView.IsInTheChainsHands(comp.ErrorMessage))

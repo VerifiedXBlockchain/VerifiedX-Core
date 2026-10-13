@@ -18,6 +18,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// </summary>
         public const string WaitingForPinMarker = "[AWAITING-BTC-PIN]";
 
+        /// <summary>The first words of the answer for a request this node has not seen mined yet.</summary>
+        public const string NotMinedYetMarker = "[NOT-MINED-YET]";
+
+        /// <summary>Whether a completion message says the request is not in a block this node has applied yet: ask again shortly.</summary>
+        public static bool IsNotMinedYet(string? message) => message != null && message.StartsWith(NotMinedYetMarker, StringComparison.Ordinal);
+
         /// <summary>Whether a completion message says "the chain is paying this; nothing to do" (rather than a failure).</summary>
         public static bool IsInTheChainsHands(string? message) =>
             message != null && (message.StartsWith(WaitingForPinMarker, StringComparison.Ordinal)
@@ -231,7 +237,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         {
             var row = Row(scUID, requestHash);
             if (row == null)
-                return (false, "", "", $"Withdrawal request {requestHash} is not recorded on vault {scUID}. If it was just sent, it has not been mined yet.");
+                return (false, "", "", $"{NotMinedYetMarker} Withdrawal request {requestHash} is not recorded on vault {scUID}. If it was just sent, it has not been mined yet: ask again in a moment.");
             var newest = row.Pins.LastOrDefault(p => !p.Dead);
             switch (row.State)
             {
@@ -273,7 +279,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     VaultWithdrawalState.Waiting => "Awaiting_BTC_Transaction",
                     _ => "Closed",
                 },
-                NothingToDo = true,
+                // Nothing for the caller to do once the request is in the chain's hands; before that (it is not mined
+                // yet, or the hash is wrong) there is: ask again, or check the hash.
+                NothingToDo = row != null,
+                NotMinedYet = row == null,
                 VFXTransactionHash = string.IsNullOrEmpty(vfxTxHash) ? null : vfxTxHash,
                 BTCTransactionHash = string.IsNullOrEmpty(btcTxHash) ? null : btcTxHash,
                 SmartContractUID = Stored(scUID),

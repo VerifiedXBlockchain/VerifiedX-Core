@@ -1170,11 +1170,19 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     });
                 }
 
+                // Bitcoin sent to a frozen vault is never credited; a caller about to deposit must be told.
+                var depositKind = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.KindOf(scUID);
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
-                    Message = "Deposit address retrieved",
+                    Message = depositKind.Frozen
+                        ? "Deposit address retrieved. DO NOT DEPOSIT: this vault is frozen and Bitcoin sent to it is not credited."
+                        : depositKind.Legacy ? "Deposit address retrieved. This vault was created before Bitcoin attestation; see Note." : "Deposit address retrieved",
                     SmartContractUID = scUID,
+                    Attested = depositKind.Attested,
+                    Legacy = depositKind.Legacy,
+                    Frozen = depositKind.Frozen,
+                    Note = depositKind.Note,
                     DepositAddress = vault.Feature.DepositAddress,
                     FrostGroupPublicKey = vault.Feature.FrostGroupPublicKey ?? string.Empty,
                     RequiredThreshold = vault.Feature.RequiredThreshold,
@@ -1727,13 +1735,23 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                 var (allSucceeded, results) = await Services.VBTCService.CompleteWithdrawalMulti(payload.WithdrawalRequestHash);
 
+                var paidCount = results.Count(r => r.Success);
+                var beingPaid = results.Count(r => r.BeingPaid);
+                var refunded = results.Count(r => r.Refunded);
+                var failed = results.Count - paidCount - beingPaid - refunded;
+                var parts = new List<string> { $"{paidCount}/{results.Count} withdrawal share(s) paid" };
+                if (beingPaid > 0) parts.Add($"{beingPaid} being paid by the chain (nothing to do; ask again later)");
+                if (refunded > 0) parts.Add($"{refunded} closed and refunded (no Bitcoin was or will be sent for them)");
+                if (failed > 0) parts.Add($"{failed} failed; retry to finish them");
                 return JsonConvert.SerializeObject(new
                 {
                     Success = allSucceeded,
-                    Message = allSucceeded
-                        ? "All withdrawal shares completed"
-                        : $"{results.Count(r => r.Success)}/{results.Count} withdrawal share(s) completed; retry to finish the rest",
+                    Message = allSucceeded ? "All withdrawal shares completed" : string.Join("; ", parts),
                     WithdrawalRequestHash = payload.WithdrawalRequestHash,
+                    Paid = paidCount,
+                    BeingPaid = beingPaid,
+                    Refunded = refunded,
+                    Failed = failed,
                     Results = results
                 });
             }
@@ -2571,7 +2589,71 @@ namespace VerifiedXCore.Bitcoin.Controllers
         /// In-memory store for unsigned vBTC transactions waiting to be signed externally.
         /// Keyed by tx Hash. Web wallet signs the Hash offline and submits via SendRaw* endpoints.
         /// </summary>
-        private static readonly ConcurrentDictionary<string, Transaction> _pendingRawVbtcTxs = new();
+        private static readonly PendingRawTxs _pendingRawVbtcTxs = new();
+
+        /// <summary>
+        /// The transactions built for a caller to sign, kept until they are submitted. Bounded: an entry lasts as long
+        /// as its transaction could still be mined (a little over an hour), and the oldest go first when there are too
+        /// many or they hold too much (any caller can build without limit, and a vault creation is up to 256 KB). What
+        /// a submit route is handed is a copy: setting the signature on it changes nothing for another caller
+        /// submitting the same hash at the same moment.
+        /// </summary>
+        internal sealed class PendingRawTxs
+        {
+            public const int MaxEntries = 2_000;
+            public const long MaxBytes = 32L * 1024 * 1024;
+            public const int LifetimeSeconds = 3_900;
+            private readonly ConcurrentDictionary<string, (Transaction Tx, long At, long Bytes)> _items = new();
+            private readonly object _sweep = new();
+
+            public int Count => _items.Count;
+
+            public Transaction this[string hash]
+            {
+                set
+                {
+                    _items[hash] = (value, TimeUtil.GetTime(), (value.Data?.Length ?? 0) + 512);
+                    Sweep();
+                }
+            }
+
+            public bool TryGetValue(string hash, out Transaction tx)
+            {
+                tx = null!;
+                if (string.IsNullOrEmpty(hash) || !_items.TryGetValue(hash, out var entry)) return false;
+                if (TimeUtil.GetTime() - entry.At > LifetimeSeconds)
+                {
+                    _items.TryRemove(hash, out _);
+                    return false;
+                }
+                tx = JsonConvert.DeserializeObject<Transaction>(JsonConvert.SerializeObject(entry.Tx))!;
+                return tx != null;
+            }
+
+            public bool TryRemove(string hash, out Transaction? tx)
+            {
+                var removed = _items.TryRemove(hash, out var entry);
+                tx = removed ? entry.Tx : null;
+                return removed;
+            }
+
+            private void Sweep()
+            {
+                lock (_sweep)
+                {
+                    var now = TimeUtil.GetTime();
+                    foreach (var old in _items.Where(i => now - i.Value.At > LifetimeSeconds).Select(i => i.Key).ToList())
+                        _items.TryRemove(old, out _);
+                    var bytes = _items.Values.Sum(v => v.Bytes);
+                    if (_items.Count <= MaxEntries && bytes <= MaxBytes) return;
+                    foreach (var oldest in _items.OrderBy(i => i.Value.At).ThenBy(i => i.Key, StringComparer.Ordinal).ToList())
+                    {
+                        if (_items.Count <= MaxEntries && bytes <= MaxBytes) break;
+                        if (_items.TryRemove(oldest.Key, out var gone)) bytes -= gone.Bytes;
+                    }
+                }
+            }
+        }
 
         #region Transfer Raw
 
@@ -2663,6 +2745,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Fee = tx.Fee,
                     Nonce = tx.Nonce,
                     TransactionType = tx.TransactionType.ToString(),
+                    // What is being signed: a wallet rebuilds the hash from these fields and shows the user the Data.
+                    Data = tx.Data,
                     // Reserve sends: UnlockTime is part of the hash preimage — clients
                     // reconstructing the TX need it, and UIs should show the 24h hold.
                     UnlockTime = tx.UnlockTime,
@@ -2985,6 +3069,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Fee = tx.Fee,
                     Nonce = tx.Nonce,
                     TransactionType = tx.TransactionType.ToString(),
+                    // What is being signed: a wallet rebuilds the hash from these fields and shows the user the Data.
+                    Data = tx.Data,
                     Message = "Sign the Hash field and submit via SendRawRequestWithdrawalTx."
                 });
             }
@@ -3341,6 +3427,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Fee = tx.Fee,
                     Nonce = tx.Nonce,
                     TransactionType = tx.TransactionType.ToString(),
+                    // What is being signed: a wallet rebuilds the hash from these fields and shows the user the Data.
+                    Data = tx.Data,
                     Message = "Sign the Hash field with your private key (ECDSA secp256k1) and submit via SendRawCompleteWithdrawalTx."
                 });
             }
@@ -3471,6 +3559,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Fee = tx.Fee,
                     Nonce = tx.Nonce,
                     TransactionType = tx.TransactionType.ToString(),
+                    // What is being signed: a wallet rebuilds the hash from these fields and shows the user the Data.
+                    Data = tx.Data,
                     Attested = attestedCancel,
                     Message = attestedCancel
                         ? "Sign the Hash field and submit via SendRawCancelWithdrawalTx. When it is mined the withdrawal is closed and its vBTC returned at once; no vote is held."
@@ -4194,7 +4284,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 // Check if this address is the contract owner. State trei is authoritative (available
                 // on ALL nodes); the local VBTCContractV2 record only supplies the deposit address.
                 var contract = VBTCContractV2.GetContract(scUID);
-                if (scState.OwnerAddress == address || contract?.OwnerAddress == address)
+                // (The wallet's own record keeps the minter as owner after the vault has changed hands; state does not.)
+                if (scState.OwnerAddress == address)
                 {
                     isOwner = true;
 

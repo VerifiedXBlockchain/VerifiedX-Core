@@ -1057,7 +1057,18 @@ namespace VerifiedXCore.Services
                 // rules here judges the transaction against its own effect (the vote that decided a cancellation would
                 // read "already decided" and be stamped Invalid). Post-gate the wallet record follows what was applied.
                 var cancelVoteByRules = Bitcoin.Services.VBTCCancellationVoting.RulesActive(blockHeight);
-                if (cancelVoteByRules && tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
+                // A vault the chain watches holds no cancellation vote: its cancel took effect when it was applied and
+                // opens no cancellation record, so the test below would stamp an applied cancel Invalid.
+                var cancelOnWatchedVault = tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL && Bitcoin.Attestation.BtcWithdrawals.IsWatched(tx);
+                if (cancelOnWatchedVault)
+                {
+                    var txdataWatched = TransactionData.GetAll();
+                    tx.TransactionStatus = TransactionStatus.Success;
+                    txdataWatched.InsertSafe(tx);
+                    SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_CANCEL in block: {tx.Hash}, from {tx.FromAddress} (a vault the chain watches: applied at once, no vote).",
+                        "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                }
+                if (cancelVoteByRules && !cancelOnWatchedVault && tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
                 {
                     var created = VBTCWithdrawalCancellation.GetCancellation($"{VBTCWithdrawalCancellation.OnChainUidPrefix}{tx.Hash}");
                     if (created == null)

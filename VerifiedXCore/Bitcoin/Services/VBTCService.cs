@@ -1015,6 +1015,10 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (string.IsNullOrEmpty(scUid) || candidates.Any(c => c.ScUid == scUid))
                         continue;
 
+                    // A vault frozen at the enforcement height can send nothing: with it in the plan the whole transfer would be refused.
+                    if (Attestation.BtcLegacyFreeze.Active(NextBlockHeight) && Attestation.BtcLegacyFreeze.IsLegacyVault(scUid))
+                        continue;
+
                     var balResult = await TryGetAvailableTransparentVbtcBalance(scUid, fromAddress);
                     if (!balResult.success)
                         continue;
@@ -1633,6 +1637,10 @@ namespace VerifiedXCore.Bitcoin.Services
                             continue;
                     }
 
+                    // A vault frozen at the enforcement height can pay nothing: with it in the plan the whole request would be refused.
+                    if (Attestation.BtcLegacyFreeze.Active(NextBlockHeight) && Attestation.BtcLegacyFreeze.IsLegacyVault(scUid))
+                        continue;
+
                     var balResult = await TryGetAvailableTransparentVbtcBalance(scUid, requestorAddress);
                     if (!balResult.success)
                         continue;
@@ -1776,6 +1784,16 @@ namespace VerifiedXCore.Bitcoin.Services
             public string? ErrorMessage { get; set; }
             /// <summary>True when the contract's share was already completed before this call.</summary>
             public bool AlreadyComplete { get; set; }
+            /// <summary>
+            /// A vault the chain watches: the share is not paid yet and nothing is wrong. Its Bitcoin transaction is
+            /// being fixed, signed or confirmed by the chain; ask again later. Success is false until Bitcoin has paid.
+            /// </summary>
+            public bool BeingPaid { get; set; }
+            /// <summary>
+            /// The share was closed without being paid (cancelled, expired, void, released) and its vBTC returned to
+            /// the requester. It will never be paid: not a success, and not something to retry.
+            /// </summary>
+            public bool Refunded { get; set; }
         }
 
         /// <summary>
@@ -1809,13 +1827,18 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 if (row.IsCompleted)
                 {
+                    // IsCompleted also marks a share that was closed and refunded. Only Completed was paid: reporting
+                    // the other as a success told a caller polling this route that Bitcoin had been sent when none was.
+                    var paid = row.Status == VBTCWithdrawalStatus.Completed;
                     results.Add(new MultiWithdrawalCompletionResult
                     {
                         SmartContractUID = row.SmartContractUID,
                         Amount = row.Amount,
-                        Success = true,
-                        AlreadyComplete = true,
-                        BTCTxHash = row.BTCTxHash
+                        Success = paid,
+                        AlreadyComplete = paid,
+                        Refunded = !paid,
+                        BTCTxHash = paid ? row.BTCTxHash : null,
+                        ErrorMessage = paid ? null : $"This share was closed without being paid ({row.Status}); its vBTC was returned to the requester. No Bitcoin was or will be sent for it.",
                     });
                     continue;
                 }
@@ -1831,10 +1854,11 @@ namespace VerifiedXCore.Bitcoin.Services
                         Success = success,
                         VFXTxHash = success ? vfxTxHash : null,
                         BTCTxHash = success ? btcTxHash : null,
-                        ErrorMessage = success ? null : error
+                        ErrorMessage = success ? null : error,
+                        BeingPaid = !success && Attestation.BtcVaultView.IsInTheChainsHands(error),
                     });
 
-                    if (!success)
+                    if (!success && !Attestation.BtcVaultView.IsInTheChainsHands(error))
                     {
                         SCLogUtility.Log($"Multi withdrawal share failed for contract {row.SmartContractUID} of request {withdrawalRequestHash}: {error}. Other shares continue; retry this one by calling CompleteWithdrawalMulti again.",
                             "VBTCService.CompleteWithdrawalMulti()");
