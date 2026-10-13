@@ -65,17 +65,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
             tx.WithOptions(TransactionOptions.None).GetSerializedSize() > BtcTxInclusion.MaxTxBytes;
 
         /// <summary>
-        /// A transaction the verifier would refuse as an event whatever its proof: one too large to carry, or one of
-        /// exactly 64 bytes that is not the block's coinbase (<see cref="BtcTxInclusion.InnerNodeBytes"/>). It is left
-        /// out here exactly as the verifier leaves it out. Reporting such a transaction as an event produced a report
-        /// every verifier refused, offered again on every pass: the chain's view of Bitcoin never passed that block,
-        /// for every vault (second path audit, 14 October 2026).
+        /// A transaction the verifier would refuse as an event whatever its proof: one too large to carry. It is left
+        /// out here exactly as the verifier leaves it out.
         /// </summary>
-        private static bool CannotBeProven(Transaction tx, int position)
-        {
-            var size = tx.WithOptions(TransactionOptions.None).GetSerializedSize();
-            return size > BtcTxInclusion.MaxTxBytes || (size == BtcTxInclusion.InnerNodeBytes && !(position == 0 && tx.IsCoinBase));
-        }
+        private static bool CannotBeProven(Transaction tx, int position) => TooLargeToProve(tx);
 
         private static List<BtcReport> Build(Block block, long blockHeight, string scope, IReadOnlyList<string> headers, long signerEpoch, LiteDatabase? db,
             long afterPosition, int firstPart)

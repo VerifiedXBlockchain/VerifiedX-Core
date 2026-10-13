@@ -160,11 +160,15 @@ namespace VerifiedXCore.Tests
                 var chain = NewChain();
                 _btc.MineEmpty(3);
                 var newest = _btc.Header(First + 2).Time;
-                // The node's clock is three hours behind the third header: the first two are within two hours, the third is not.
+                // The node's clock is far behind all three: nothing is followed, and the peer is not at fault for it.
                 BtcHeaderChain.Now = () => newest - 3 * 3600;
-                Assert.Equal(BtcHeaderAdd.Invalid, chain.Add(Headers(_btc, First, First + 2), out var why));
+                Assert.Equal(BtcHeaderAdd.Nothing, chain.Add(Headers(_btc, First, First + 2), out var why));
                 Assert.Contains("two hours ahead", why);
                 Assert.Equal(Checkpoint, chain.TipHeight);
+                // Behind only the third (blocks are ten minutes apart): the two before it are taken.
+                BtcHeaderChain.Now = () => newest - BtcHeaderChain.MaxFutureSeconds - 60;
+                Assert.Equal(BtcHeaderAdd.Extended, chain.Add(Headers(_btc, First, First + 2), out _));
+                Assert.Equal(First + 1, chain.TipHeight);
                 // Once the clock has caught up it follows them.
                 BtcHeaderChain.Now = () => newest - BtcHeaderChain.MaxFutureSeconds;
                 Assert.Equal(BtcHeaderAdd.Extended, chain.Add(Headers(_btc, First, First + 2), out _));

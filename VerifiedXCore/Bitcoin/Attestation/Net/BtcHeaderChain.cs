@@ -138,19 +138,30 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
                     return BtcHeaderAdd.Unconnected;
                 }
 
+                // Bitcoin's "not more than two hours in the future" rule. Consensus cannot apply it (it reads a clock); a
+                // validator following Bitcoin can, and does here, for what it follows and so for what it signs. Without
+                // it a peer could feed headers timed hours ahead, which on testnet4 (where a block twenty minutes after
+                // its parent may use the easiest target) is any number of cheap blocks. A header ahead of the clock is
+                // not a fault of the peer that serves it (a block stamped just under two hours ahead is valid Bitcoin,
+                // and this node's clock may be a little behind): the headers before it are taken, and it is simply not
+                // followed yet.
+                var notYet = run.Count;
+                var limit = Now() + MaxFutureSeconds;
+                for (var i = start; i < run.Count; i++)
+                    if (run[i].Time > limit) { notYet = i; break; }
+                if (notYet == start)
+                {
+                    reason = $"header {run[start].Hash} is timed more than two hours ahead of this node's clock; not followed yet";
+                    return BtcHeaderAdd.Nothing;
+                }
+
                 var branch = new Dictionary<long, BtcHeader>();
                 BtcHeader? Lookup(long h) => h > forkHeight ? (branch.TryGetValue(h, out var b) ? b : null) : At(h);
                 var branchWork = BigInteger.Zero;
-                for (var i = start; i < run.Count; i++)
+                for (var i = start; i < notYet; i++)
                 {
                     height++;
                     var refusal = _rules.Validate(run[i], height, Lookup);
-                    // Bitcoin's "not more than two hours in the future" rule. Consensus cannot apply it (it reads a
-                    // clock); a validator following Bitcoin can, and does here, for what it follows and so for what it
-                    // signs. Without it a peer could feed headers timed hours ahead, which on testnet4 (where a block
-                    // twenty minutes after its parent may use the easiest target) is any number of cheap blocks.
-                    if (refusal == null && run[i].Time > Now() + MaxFutureSeconds)
-                        refusal = $"header {run[i].Hash} is timed more than two hours ahead of this node's clock";
                     if (refusal != null)
                     {
                         reason = refusal;

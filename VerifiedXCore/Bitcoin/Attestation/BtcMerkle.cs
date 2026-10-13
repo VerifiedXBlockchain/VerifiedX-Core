@@ -227,12 +227,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
             byte[] bytes;
             try { bytes = Convert.FromHexString(strippedHex); }
             catch { return "the transaction is not valid hex"; }
-            // A transaction of exactly 64 bytes has the shape of an inner node and is not taken as an event (the depth
-            // fixed by the coinbase already rules the confusion out; this is the second lock). A shorter one cannot be
-            // an inner node. The coinbase that fixes the depth is taken at any size: bytes that are an inner node do
-            // not parse as a coinbase, and refusing a small coinbase left every event of its block without a proof, so
-            // one such block (a miner's choice; on testnet4 anyone's) stopped all reporting for good.
-            if (bytes.Length == InnerNodeBytes && !asCoinbase) return "a transaction of exactly 64 bytes is not accepted";
+            // No transaction is refused for its size being that of an inner node (64 bytes) or less. What stops an
+            // inner node being passed off as a transaction, or a made-up transaction being hung below a real 64-byte
+            // one, is the depth: every proof of a block has exactly as many levels as its coinbase's, and bytes that
+            // are an inner node do not parse as a coinbase. Refusing small transactions on top of that left a block
+            // with a small coinbase without any provable event, and a small spend of a vault coin either stopped all
+            // reporting (when the scanner reported it) or went unrecorded (when it did not), the coin then counted as
+            // held for good (second path audit, 14 October 2026).
 
             Transaction parsed;
             try { parsed = Transaction.Load(bytes, Net); }
