@@ -932,6 +932,8 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>NEW-06: registers a block transaction's contract creation; the reason when its UID was already created in this block.</summary>
+        public const string SameDepositAddressInBlock = "Another vault created in this block has the same deposit address.";
+
         public static string? RegisterCreationInBlock(Transaction tx, HashSet<string> createdInBlock, long height = 0)
         {
             var uid = CreatedContractUid(tx);
@@ -940,7 +942,7 @@ namespace VerifiedXCore.Services
             // creations naming one address could share a block; the second would then be a vault the chain does not
             // watch, reading the first one's Bitcoin.
             if (uid != null && height >= Globals.PathAuditRulesHeight && CreatedVaultDepositScript(tx) is { } script && !createdInBlock.Add("script:" + script))
-                return "Another vault created in this block has the same deposit address.";
+                return SameDepositAddressInBlock;
             return null;
         }
     }

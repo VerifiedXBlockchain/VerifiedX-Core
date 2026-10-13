@@ -1208,11 +1208,15 @@ namespace VerifiedXCore.Data
             {
                 if (tx.FromAddress != null && blockedSenders.Contains(tx.FromAddress))
                     continue;
-                var uid = LedgerIntegrityRules.CreatedContractUid(tx);
-                if (uid != null && !created.Add(uid))
+                // The same registration block validation makes (one creation per UID, and from
+                // Globals.PathAuditRulesHeight one per vault deposit address), so a proposal never carries what its own
+                // validation refuses: two such creations in the mempool would otherwise have every producer build a
+                // block it then rejects, for as long as both sat there.
+                var duplicate = LedgerIntegrityRules.RegisterCreationInBlock(tx, created, (Globals.LastBlock?.Height ?? 0) + 1);
+                if (duplicate != null)
                 {
                     if (tx.FromAddress != null) blockedSenders.Add(tx.FromAddress);
-                    LogUtility.Log($"[ProcessTxPool] Skipping duplicate creation of contract {uid} (tx {tx.Hash}) for this block", "TransactionData.ProcessTxPool()");
+                    LogUtility.Log($"[ProcessTxPool] Skipping tx {tx.Hash} for this block: {duplicate}", "TransactionData.ProcessTxPool()");
                     continue;
                 }
                 result.Add(tx);

@@ -334,6 +334,18 @@ namespace VerifiedXCore.Tests
             var before = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             Assert.Null(LedgerIntegrityRules.RegisterCreationInBlock(Create(first, Body(first, VaultFeature(first))), before, Rule - 1));
             Assert.Null(LedgerIntegrityRules.RegisterCreationInBlock(Create(second, Body(second, VaultFeature(second))), before, Rule - 1));
+
+            // A block's builder leaves the second one out, as its own validation would refuse the block: with the rule
+            // in validation only, two such creations in the mempool had every producer build a block it then rejected,
+            // for as long as both sat there.
+            var (a, b, plain) = (Create(first, Body(first, VaultFeature(first))), Create(second, Body(second, VaultFeature(second))), Create(elsewhere, VbtcTestContracts.BuildContractData(elsewhere, _owner.Address, null)));
+            b.FromAddress = "xAnotherSender";
+            Globals.LastBlock = new Block { Height = Rule };
+            Assert.Equal(new[] { a.Hash, plain.Hash }, TransactionData.DropDuplicateContractCreations(new List<Transaction> { a, b, plain }).Select(t => t.Hash));
+            Globals.LastBlock = new Block { Height = Rule - 10 };
+            Assert.Equal(3, TransactionData.DropDuplicateContractCreations(new List<Transaction> { a, b, plain }).Count);
+            // And a block that carried the pair is a producer's fault, not a sign that this node's state is wrong.
+            Assert.False(BlockValidatorService.IsStateCorruptionSignal(LedgerIntegrityRules.SameDepositAddressInBlock));
         }
 
         [Fact]

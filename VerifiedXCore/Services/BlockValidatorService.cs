@@ -84,6 +84,8 @@ namespace VerifiedXCore.Services
             // NEW-06 / NEW-07: producer-selection faults within one block, not local state corruption.
             if (reason.StartsWith("Duplicate creation", StringComparison.Ordinal))
                 return false;
+            if (reason.StartsWith(LedgerIntegrityRules.SameDepositAddressInBlock, StringComparison.Ordinal))
+                return false;
             if (reason.StartsWith(SameBlockDebitGuard.ReasonPrefix, StringComparison.Ordinal))
                 return false;
             return true;
