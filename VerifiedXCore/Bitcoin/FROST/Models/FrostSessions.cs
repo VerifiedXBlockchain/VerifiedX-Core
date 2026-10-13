@@ -182,8 +182,38 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// <summary>An in-progress DKG session older than this no longer counts against its leader.</summary>
         public const int DKG_LEADER_CAP_WINDOW_SECONDS = 900;
         
-        /// <summary>Maximum concurrent signing sessions allowed</summary>
-        public const int MAX_SIGNING_SESSIONS = 50;
+        /// <summary>
+        /// Maximum concurrent signing sessions allowed. One session signs one input of one Bitcoin transaction, and a
+        /// vault the chain watches can have many withdrawals being signed at once, each led in turn by several of its
+        /// signers: 50 sessions kept for an hour were used up by a handful of ordinary withdrawals, and could be
+        /// filled on purpose by the requester of one small pinned withdrawal (second path audit, 14 October 2026).
+        /// </summary>
+        public const int MAX_SIGNING_SESSIONS = 500;
+
+        /// <summary>A signing session is dropped this long after it was started; a ceremony takes seconds.</summary>
+        public const int SIGNING_SESSION_SECONDS = 600;
+
+        /// <summary>Signing sessions one leader may have open on this validator.</summary>
+        public const int MAX_SIGNING_SESSIONS_PER_LEADER = 60;
+
+        /// <summary>Signing sessions open for the same input of the same Bitcoin transaction (the vault's signers lead it in turn).</summary>
+        public const int MAX_SIGNING_SESSIONS_PER_INPUT = 3;
+
+        /// <summary>
+        /// Why a new signing session is refused for want of room; null when there is room. Counted over the sessions
+        /// given (the open ones), so the rule can be tested without the store.
+        /// </summary>
+        public static string? SigningStartRefusal(IEnumerable<SigningSession> open, string? leaderAddress, string? btcTxId, int inputIndex)
+        {
+            var sessions = open as ICollection<SigningSession> ?? open.ToList();
+            if (sessions.Count >= MAX_SIGNING_SESSIONS)
+                return "Maximum concurrent signing sessions reached. Try again later.";
+            if (!string.IsNullOrEmpty(leaderAddress) && sessions.Count(x => x.LeaderAddress == leaderAddress) >= MAX_SIGNING_SESSIONS_PER_LEADER)
+                return $"This leader already has {MAX_SIGNING_SESSIONS_PER_LEADER} signing sessions open here. Try again later.";
+            if (!string.IsNullOrEmpty(btcTxId) && sessions.Count(x => x.BtcTxId == btcTxId && x.InputIndex == inputIndex) >= MAX_SIGNING_SESSIONS_PER_INPUT)
+                return $"Input {inputIndex} of transaction {btcTxId} already has {MAX_SIGNING_SESSIONS_PER_INPUT} signing sessions open here. Try again later.";
+            return null;
+        }
         
         /// <summary>Maximum number of participant addresses per session (supports mainnet scale)</summary>
         public const int MAX_PARTICIPANTS = 200;
@@ -283,8 +313,9 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
                 DKGSessions.TryRemove(key, out _);
             }
             
-            // Cleanup signing sessions
-            var oldSigning = SigningSessions.Where(kvp => kvp.Value.StartTimestamp < oneHourAgo).Select(kvp => kvp.Key).ToList();
+            // Cleanup signing sessions (a shorter life than a key ceremony's: see SIGNING_SESSION_SECONDS)
+            var signingCutoff = currentTime - SIGNING_SESSION_SECONDS;
+            var oldSigning = SigningSessions.Where(kvp => kvp.Value.StartTimestamp < signingCutoff).Select(kvp => kvp.Key).ToList();
             foreach (var key in oldSigning)
             {
                 SigningSessions.TryRemove(key, out _);

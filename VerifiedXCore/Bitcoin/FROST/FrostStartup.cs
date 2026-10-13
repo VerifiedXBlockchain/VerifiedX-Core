@@ -1904,14 +1904,15 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // FIND-0013 Fix: Enforce maximum concurrent session cap
-                            if (FrostSessionStorage.SigningSessions.Count >= FrostSessionStorage.MAX_SIGNING_SESSIONS)
+                            // FIND-0013 Fix: Enforce maximum concurrent session cap (in all, per leader, per input)
+                            var noRoom = FrostSessionStorage.SigningStartRefusal(FrostSessionStorage.SigningSessions.Values.ToList(), request.LeaderAddress, request.BtcTxId, request.InputIndex);
+                            if (noRoom != null)
                             {
                                 context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                                 {
                                     Success = false,
-                                    Message = "Maximum concurrent signing sessions reached. Try again later."
+                                    Message = noRoom
                                 }));
                                 return;
                             }
