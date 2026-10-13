@@ -128,16 +128,17 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <summary>Tests only: replaces the wait before submitting.</summary>
         internal static TimeSpan? SubmitWaitOverride;
 
-        /// <summary>Started once at node start. Does nothing on a node that is not a validator.</summary>
+        /// <summary>Started once at node start. Does nothing while the node is not a validator.</summary>
         public static async Task RunLoop(CancellationToken ct)
         {
-            if (string.IsNullOrEmpty(Globals.ValidatorAddress))
-                return;
             try { await Task.Delay(TimeSpan.FromMinutes(2), ct); } catch { return; } // let startup complete
 
             while (!ct.IsCancellationRequested)
             {
-                try { await TickAsync(ct); }
+                // Asked every pass, not once at start: a node may start validating later, and a wallet that is unlocked
+                // after start has no validator address until then. (The loop used to end here for good, so such a
+                // validator never signed a report until it was restarted.)
+                try { if (!string.IsNullOrEmpty(Globals.ValidatorAddress)) await TickAsync(ct); }
                 catch (Exception ex) { ErrorLogUtility.LogError($"Bitcoin report loop: {ex}", "BtcReportService.RunLoop()"); }
                 try { await Task.Delay(TimeSpan.FromSeconds(LoopSeconds), ct); } catch { return; }
             }

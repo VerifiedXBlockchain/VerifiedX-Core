@@ -51,15 +51,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
         public static async Task RunLoop(CancellationToken ct)
         {
-            if (string.IsNullOrEmpty(Globals.ValidatorAddress))
-                return;
             try { await Task.Delay(TimeSpan.FromMinutes(3), ct); } catch { return; }
 
             while (!ct.IsCancellationRequested)
             {
                 try
                 {
-                    if ((Globals.LastBlock?.Height ?? 0) + 1 >= Globals.BitcoinAttestationRecordHeight
+                    // Asked every pass, not once at start: a node may start validating later, and a wallet that is
+                    // unlocked after start has no validator address until then. (The loop used to end here for good.)
+                    if (!string.IsNullOrEmpty(Globals.ValidatorAddress)
+                        && (Globals.LastBlock?.Height ?? 0) + 1 >= Globals.BitcoinAttestationRecordHeight
                         && VBTCCancellationVoteService.NodeIsAtNetworkHeight().Ready)
                         await TickAsync(Globals.ValidatorAddress, Globals.LastBlock!.Height);
                 }
@@ -74,6 +75,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var led = new List<string>();
             foreach (var row in BtcAttestStore.WithdrawalsInState(VaultWithdrawalState.Pinned).OrderBy(r => r.RequestVfxHeight).ThenBy(r => r.Ref, StringComparer.Ordinal))
             {
+              // One withdrawal that cannot be led (a fault in its vault's data, a signer that throws) must not stop
+              // the ones after it: the rows are taken oldest first, so it would stop them on every pass.
+              try
+              {
                 var pin = row.Pins.LastOrDefault(p => !p.Dead);
                 if (pin == null) continue;
                 // After a deep Bitcoin reorganisation a pinned transaction can spend a coin that is not there (yet):
@@ -99,6 +104,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     LogUtility.Log($"Withdrawal {row.RequestHash} on {row.SmartContractUID}: pinned Bitcoin transaction {pin.Txid} signed and broadcast by this validator.", "BtcWithdrawalSigner.TickAsync()");
                 else
                     ErrorLogUtility.LogError($"Withdrawal {row.RequestHash} on {row.SmartContractUID}: signing the pinned transaction {pin.Txid} did not complete: {detail}", "BtcWithdrawalSigner.TickAsync()");
+              }
+              catch (Exception ex)
+              {
+                ErrorLogUtility.LogError($"Withdrawal {row.RequestHash} on {row.SmartContractUID} could not be led by this validator: {ex.Message}", "BtcWithdrawalSigner.TickAsync()");
+              }
             }
             foreach (var old in Attempts.Where(a => DateTime.UtcNow - a.Value.At > TimeSpan.FromHours(6)).ToList())
                 Attempts.TryRemove(old.Key, out _);
@@ -170,7 +180,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var registered = VBTCValidatorRegistry.GetActiveValidators().Where(v => snapshot.Contains(v.ValidatorAddress, StringComparer.Ordinal)).ToList();
             var reachable = await FrostMPCService.ProbeValidatorReachability(registered);
             if (reachable.Count == 0) return (false, $"none of the vault's {snapshot.Count} signers is reachable");
-            var threshold = VBTCThresholdCalculator.CalculateAdjustedThreshold(snapshot.Count, reachable.Count, vault.Feature.ProofBlockHeight, Globals.LastBlock?.Height ?? 0);
+            var threshold = VBTCThresholdCalculator.CalculateAdjustedThreshold(snapshot.Count, reachable.Count,
+                Math.Max(0, Math.Min(vault.Feature.ProofBlockHeight, Globals.LastBlock?.Height ?? 0)), Globals.LastBlock?.Height ?? 0); // the height a vault names is its creator's word: never after the tip
 
             var result = await BitcoinTransactionService.ExecuteFROSTWithdrawal(
                 script.DepositAddress, destination, amount, feeRate, row.SmartContractUID, reachable, threshold,

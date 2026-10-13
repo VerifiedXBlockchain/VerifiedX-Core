@@ -213,6 +213,32 @@ namespace VerifiedXCore.Tests
             Assert.Contains("led by the withdrawal owner", why);
         }
 
+        /// <summary>
+        /// The pinned withdrawals are taken oldest first. One that throws when it is led (its vault names a proof height
+        /// in the future, a signer library fault) used to end the pass there, on every pass, so no later withdrawal of
+        /// any vault was ever led by this validator (second path audit, 14 October 2026).
+        /// </summary>
+        [Fact]
+        public async Task AWithdrawalThatCannotBeLed_DoesNotStopTheOnesAfterIt()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Report(_btc.Mine(Pay(vault.Script, 150_000)));
+            await Report(_btc.Mine(Pay(vault.Script, 160_000)));
+            var first = await Request(vault.Uid, 0.001M);
+            var second = await Request(vault.Uid, 0.0012M);
+            var firstPin = BtcAttestStore.Withdrawal(BtcWithdrawals.RefOf(first.Hash, vault.Uid))!.Pins[0];
+            var secondPin = BtcAttestStore.Withdrawal(BtcWithdrawals.RefOf(second.Hash, vault.Uid))!.Pins[0];
+
+            BtcWithdrawalSigner.KnownOnBitcoin = _ => Task.FromResult<bool?>(null);
+            BtcWithdrawalSigner.SignAndBroadcast = (row, p) =>
+                row.RequestHash == first.Hash ? throw new ArgumentException("Current block cannot be before last activity block") : Task.FromResult((true, p.Txid));
+
+            var late = Math.Max(firstPin.PinnedAtVfxHeight, secondPin.PinnedAtVfxHeight) + 10 * BtcWithdrawalSigner.TurnBlocks; // everybody's turn has come
+            var led = await BtcWithdrawalSigner.TickAsync(Signers[0].Address, late);
+            Assert.Equal(new[] { secondPin.Txid }, led);
+        }
+
         [Fact]
         public async Task TheVaultsSigners_StartTheCeremonyThemselves_OneAtATime_UntilBitcoinHasTheTransaction()
         {
