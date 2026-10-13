@@ -54,9 +54,14 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         var watched = VBTCService.GetVbtcV2WithdrawalOutflows(tx).Select(o => o.Item1).Where(u => BtcAttestBalance.IsAttestedVault(Stored(u))).ToList();
                         if (watched.Count == 0) return null;
                         var address = JObject.Parse(tx.Data)["BTCAddress"]?.ToObject<string?>();
-                        return BtcCanonicalWithdrawal.TryDestinationScript(address, out _)
-                            ? null
-                            : $"The withdrawal's Bitcoin address is not an address on this network: {address}";
+                        if (!BtcCanonicalWithdrawal.TryDestinationScript(address, out var script))
+                            return $"The withdrawal's Bitcoin address is not an address on this network: {address}";
+                        // A payment to the vault's own address cannot be told from its change: the vault's signers
+                        // would refuse the transaction and the withdrawal would hold its coins without ever being paid.
+                        foreach (var vault in watched)
+                            if (BtcAttestStore.ScriptRowForVault(Stored(vault))?.ScriptHex == script)
+                                return $"The withdrawal's Bitcoin address is the deposit address of vault {vault}, which it withdraws from. Bitcoin that is to stay in the vault is not withdrawn.";
+                        return null;
                     }
                     case TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE:
                         return IsWatched(tx)

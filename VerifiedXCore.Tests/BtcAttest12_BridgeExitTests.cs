@@ -465,6 +465,8 @@ namespace VerifiedXCore.Tests
             await RefusedInBlock(Exit(NewBurn(), BtcDest, (olderLock, watched.Uid, 0.001M), (watchedLock, watched.Uid, 0.001M)), "not on both");
             await RefusedInBlock(Exit(NewBurn(), BtcDest, (watchedLock, watched.Uid, 0.00002085M)), "at least 2086 sats");
             await RefusedInBlock(Exit(NewBurn(), "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", (watchedLock, watched.Uid, 0.001M)), "not an address on this network");
+            // To the address of the vault that would pay it: the payment could not be told from the change, and no signer would sign it.
+            await RefusedInBlock(Exit(NewBurn(), watched.Address, (watchedLock, watched.Uid, 0.001M)), "is the deposit address of vault");
 
             // The smallest part a vault can pay is accepted and pinned: its fee, and an output of exactly the dust limit.
             var smallBurn = NewBurn();

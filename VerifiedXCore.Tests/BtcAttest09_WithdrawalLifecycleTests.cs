@@ -457,5 +457,29 @@ namespace VerifiedXCore.Tests
             Assert.Null(BtcWithdrawals.Refusal(SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE,
                 new { Function = "VBTCWithdrawalComplete()", ContractUID = legacy.Uid, WithdrawalRequestHash = request.Hash, BTCTransactionHash = new string('a', 64) })));
         }
+
+        /// <summary>
+        /// A payment to the vault's own address cannot be told from the transaction's change. The vault's signers
+        /// count both as the payment, find it larger than the withdrawal, and refuse to sign: the withdrawal would hold
+        /// its coin and never be paid. It is refused when it is made instead.
+        /// </summary>
+        [Fact]
+        public async Task AWithdrawalToTheVaultsOwnAddress_IsRefusedWhenItIsMade()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var second = await CreateVault(H1 + 2);
+            await Deposit(vault.Script, 150_000);
+            await Mine(Transfer(vault.Uid, 0.001M));
+
+            await RefusedInBlock(Request(vault.Uid, 0.0005M, from: _holder, destination: vault.Address), "is the deposit address of vault");
+            var admitted = await VerifiedXCore.Services.TransactionValidatorService.VerifyTX(Request(vault.Uid, 0.0005M, from: _holder, destination: vault.Address));
+            Assert.False(admitted.Item1);
+            Assert.Contains("is the deposit address of vault", admitted.Item2);
+
+            // Another vault's address is a destination like any other: the Bitcoin moves from one vault to the next.
+            var moved = await Mine(Request(vault.Uid, 0.0005M, from: _holder, destination: second.Address));
+            Assert.Equal(VaultWithdrawalState.Pinned, Row(moved, vault.Uid).State);
+        }
     }
 }

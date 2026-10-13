@@ -120,11 +120,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         if (watched == null) return mixed;
                         if (watched == false) return null;
                         var destination = data["BtcDestination"]?.ToObject<string?>();
-                        if (!BtcCanonicalWithdrawal.TryDestinationScript(destination, out _))
+                        if (!BtcCanonicalWithdrawal.TryDestinationScript(destination, out var script))
                             return $"The exit's Bitcoin destination is not an address on this network: {destination}";
                         foreach (var (vault, sats) in PartsOf(allocations))
+                        {
                             if (sats < MinExitPartSats)
                                 return $"The exit asks vault {vault} for {sats} sats; a vault's part of an exit is at least {MinExitPartSats} sats (its Bitcoin fee and an output above dust).";
+                            // As for a withdrawal: a payment to the vault's own address cannot be told from its change.
+                            if (BtcAttestStore.ScriptRowForVault(vault)?.ScriptHex == script)
+                                return $"The exit's Bitcoin destination is the deposit address of vault {vault}, which it would be paid from.";
+                        }
                         return null;
                     }
                     case TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE:
