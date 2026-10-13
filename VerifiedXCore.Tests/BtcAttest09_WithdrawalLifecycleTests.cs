@@ -512,5 +512,52 @@ namespace VerifiedXCore.Tests
             }
             finally { Globals.VaultBurnRuleHeight = priorRule; }
         }
+
+        /// <summary>
+        /// A node that serves raw callers notes a withdrawal the caller announces, before any transaction exists. The
+        /// request that is then mined under the same UniqueId need not say the same: the mined transaction is what
+        /// every other node has. The node's row must become exactly that, or it alone pins another Bitcoin
+        /// transaction and refunds another amount.
+        /// </summary>
+        [Fact]
+        public async Task ANodesOwnNoteOfAnAnnouncedRequest_GivesWayToTheRequestThatIsMined()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 150_000);
+            await Mine(Transfer(vault.Uid, 0.001M));
+
+            // What RequestWithdrawalRaw stores on the node that served the call: 0.0009 to one address at 50 sat/vB.
+            const string uniqueId = "announced-0001";
+            const string announcedTo = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
+            Assert.True(VBTCWithdrawalRequest.Save(new VBTCWithdrawalRequest
+            {
+                RequestorAddress = _holder.Address, OriginalRequestTime = TimeUtil.GetTime(), OriginalSignature = "announced", OriginalUniqueId = uniqueId,
+                Timestamp = TimeUtil.GetTime(), SmartContractUID = vault.Uid, Amount = 0.0009M, BTCDestination = announcedTo, FeeRate = 50,
+                TransactionHash = "", IsCompleted = false, Status = VBTCWithdrawalStatus.Requested, RequestBlockHeight = Tip,
+            }));
+
+            // What is mined: 0.0003 to another address at 10 sat/vB, under the same UniqueId.
+            var mined = await Mine(SignedBy(_holder, _holder.Address, TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                new { Function = "VBTCWithdrawalRequest()", ContractUID = vault.Uid, BTCAddress = BtcDest, Amount = 0.0003M, FeeRate = 10, UniqueId = uniqueId }));
+
+            var row = RequestRow(mined, vault.Uid);
+            Assert.Equal(0.0003M, row.Amount);
+            Assert.Equal(BtcDest, row.BTCDestination);
+            Assert.Equal(10, row.FeeRate);
+            Assert.Equal(mined.Timestamp, row.Timestamp);
+            Assert.Equal(mined.Height, row.RequestBlockHeight);
+            // One row: the note became the record.
+            Assert.Single(VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()!.Find(x => x.SmartContractUID == vault.Uid && x.RequestorAddress == _holder.Address));
+
+            // And the Bitcoin transaction fixed on this node is the one every node fixes: for the mined request.
+            var pinned = Row(mined, vault.Uid);
+            Assert.Equal(30_000, pinned.AmountSats);
+            Assert.Equal(10, pinned.FeeRate);
+            var btc = BtcTx.Parse(Assert.Single(pinned.Pins).TxHex, Network.Main);
+            Assert.Equal(BitcoinAddress.Create(BtcDest, Network.Main).ScriptPubKey, btc.Outputs[0].ScriptPubKey);
+            Assert.Equal(30_000 - 1_540, btc.Outputs[0].Value.Satoshi);
+            Assert.Equal(0.0007M, (await VBTCService.TryGetAvailableTransparentVbtcBalance(vault.Uid, _holder.Address)).availableBalance);
+        }
     }
 }

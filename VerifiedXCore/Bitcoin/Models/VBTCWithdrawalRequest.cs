@@ -472,6 +472,22 @@ namespace VerifiedXCore.Bitcoin.Models
                 if (!update)
                     return false;
 
+                // A row with no transaction hash is this node's own note of a request a raw caller announced
+                // (RequestWithdrawalRaw). When the request is mined, the row becomes the chain's record of it, and
+                // everything the chain decided comes from the mined transaction: the caller may have signed and sent
+                // a request with another amount, destination or fee rate under the same UniqueId. Keeping the noted
+                // values made this one node refund, add back and (on a watched vault) pin a different Bitcoin
+                // transaction from every other node (path audit, 12 October 2026).
+                if (string.IsNullOrEmpty(existingRequest.TransactionHash) && !string.IsNullOrEmpty(request.TransactionHash))
+                {
+                    existingRequest.Amount = request.Amount;
+                    existingRequest.BTCDestination = request.BTCDestination;
+                    existingRequest.FeeRate = request.FeeRate;
+                    existingRequest.Timestamp = request.Timestamp;
+                    existingRequest.OriginalRequestTime = request.OriginalRequestTime;
+                    existingRequest.OriginalSignature = request.OriginalSignature;
+                }
+
                 existingRequest.Status = request.Status;
                 existingRequest.TransactionHash = request.TransactionHash;
                 existingRequest.IsCompleted = request.IsCompleted;
