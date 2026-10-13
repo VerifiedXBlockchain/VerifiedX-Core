@@ -266,5 +266,48 @@ namespace VerifiedXCore.Tests
             foreach (var signer in order)
                 Assert.Empty(await BtcWithdrawalSigner.TickAsync(signer, Tip + 500));
         }
+
+        /// <summary>
+        /// "Nothing is pinned, so nothing is signed" holds only while the block that made the pin stays in the chain.
+        /// The signers therefore leave a pin's block to settle before anyone leads or joins a ceremony for it: a
+        /// signature given at once would outlive the block if it were replaced.
+        /// </summary>
+        [Fact]
+        public async Task NoSignerSignsAPin_UntilItsBlockHasSettled()
+        {
+            BtcWithdrawalSigner.SettleBlocksOverride = null; // the real wait
+            Assert.Equal(10, BtcWithdrawalSigner.SettleBlocks);
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Report(_btc.Mine(Pay(vault.Script, 150_000)));
+            var request = await Request(vault.Uid, 0.001M);
+            var pin = Assert.Single(BtcAttestStore.Withdrawal(BtcWithdrawals.RefOf(request.Hash, vault.Uid))!.Pins);
+            var pinned = BtcTx.Parse(pin.TxHex, Network.Main);
+            var pinnedAt = pin.PinnedAtVfxHeight;
+            Assert.Equal(Tip, pinnedAt);
+
+            var led = new List<string>();
+            BtcWithdrawalSigner.KnownOnBitcoin = _ => Task.FromResult<bool?>(null);
+            BtcWithdrawalSigner.SignAndBroadcast = (_, p) => { led.Add(p.Txid); return Task.FromResult((true, p.Txid)); };
+            var addresses = Signers.Select(s => s.Address).ToList();
+            var first = addresses.OrderBy(a => BtcWithdrawalSigner.Turn(pin.Txid, a, addresses)).First();
+
+            // In the pin's own block, and for the nine after it: nobody leads, and nobody gives a share to one who does.
+            Assert.Empty(await BtcWithdrawalSigner.TickAsync(first, pinnedAt));
+            Assert.Empty(await BtcWithdrawalSigner.TickAsync(first, pinnedAt + BtcWithdrawalSigner.SettleBlocks - 1));
+            var (ok, why) = FrostSigningAuthorization.Authorize(Announce(vault.Uid, vault.Script, request.Hash, pinned, Signers[2].Address));
+            Assert.False(ok);
+            Assert.Contains("once the block that fixed it has settled", why);
+            Assert.True(BtcWithdrawals.IsPinnedTransaction(request.Hash, vault.Uid, pin.Txid).Ok); // it is fixed; it is only not signed yet
+            await Apply(pinnedAt + BtcWithdrawalSigner.SettleBlocks - 1);
+            Assert.False(FrostSigningAuthorization.Authorize(Announce(vault.Uid, vault.Script, request.Hash, pinned, Signers[2].Address)).Item1);
+
+            // From the tenth block on it is signed as before.
+            await Apply(pinnedAt + BtcWithdrawalSigner.SettleBlocks);
+            (ok, why) = FrostSigningAuthorization.Authorize(Announce(vault.Uid, vault.Script, request.Hash, pinned, Signers[2].Address));
+            Assert.True(ok, why);
+            Assert.Equal(new[] { pin.Txid }, await BtcWithdrawalSigner.TickAsync(first, pinnedAt + BtcWithdrawalSigner.SettleBlocks));
+            Assert.Single(led);
+        }
     }
 }

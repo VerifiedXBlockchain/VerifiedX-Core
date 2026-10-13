@@ -129,15 +129,28 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public static (bool Ok, string Reason) IsPinnedExitTransaction(VBTCBridgeBtcExitState exit, string scUID, string txid) =>
             IsPinnedTransactionOf(ExitRefOf(exit, Stored(scUID) ?? scUID), txid);
 
-        private static (bool Ok, string Reason) IsPinnedTransactionOf(string reference, string txid)
+        /// <summary>
+        /// Whether a signer of the vault gives its share for <paramref name="txid"/> now: it is fixed in state for this
+        /// withdrawal, and the block that fixed it has <see cref="BtcWithdrawalSigner.SettleBlocks"/> blocks on it.
+        /// </summary>
+        public static (bool Ok, string Reason) MaySign(string requestHash, string scUID, string txid) =>
+            IsPinnedTransactionOf(RefOf(requestHash, Stored(scUID) ?? scUID), txid, Globals.LastBlock?.Height ?? 0);
+
+        /// <summary>As <see cref="MaySign"/>, for one vault's part of a bridge exit.</summary>
+        public static (bool Ok, string Reason) MaySignExit(VBTCBridgeBtcExitState exit, string scUID, string txid) =>
+            IsPinnedTransactionOf(ExitRefOf(exit, Stored(scUID) ?? scUID), txid, Globals.LastBlock?.Height ?? 0);
+
+        private static (bool Ok, string Reason) IsPinnedTransactionOf(string reference, string txid, long? signingAtHeight = null)
         {
             var row = BtcAttestStore.Withdrawal(reference);
             if (row == null) return (false, "This withdrawal is not recorded for the vault in state");
             if (row.State != VaultWithdrawalState.Pinned)
                 return (false, $"No Bitcoin transaction is fixed in state for this withdrawal ({row.State}); nothing may be signed for it");
-            return row.Pins.Any(p => !p.Dead && string.Equals(p.Txid, txid, StringComparison.OrdinalIgnoreCase))
-                ? (true, "")
-                : (false, "Only the Bitcoin transaction fixed in state for this withdrawal may be signed");
+            var pin = row.Pins.FirstOrDefault(p => !p.Dead && string.Equals(p.Txid, txid, StringComparison.OrdinalIgnoreCase));
+            if (pin == null) return (false, "Only the Bitcoin transaction fixed in state for this withdrawal may be signed");
+            if (signingAtHeight != null && signingAtHeight.Value < pin.PinnedAtVfxHeight + BtcWithdrawalSigner.SettleBlocks)
+                return (false, $"This transaction was fixed at block {pin.PinnedAtVfxHeight}; it is signed from block {pin.PinnedAtVfxHeight + BtcWithdrawalSigner.SettleBlocks}, once the block that fixed it has settled");
+            return (true, "");
         }
 
         /// <summary>

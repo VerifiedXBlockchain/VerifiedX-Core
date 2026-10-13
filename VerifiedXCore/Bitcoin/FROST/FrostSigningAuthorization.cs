@@ -138,7 +138,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     // is signed, and any signer of the vault may lead (as for a withdrawal, below).
                     if (Attestation.BtcAttestBalance.IsAttestedVault(request.SmartContractUID))
                     {
-                        var (pinned, pinReason) = Attestation.BtcWithdrawals.IsPinnedExitTransaction(exit, request.SmartContractUID, txId);
+                        var (pinned, pinReason) = Attestation.BtcWithdrawals.MaySignExit(exit, request.SmartContractUID, txId);
                         if (!pinned) return (false, pinReason);
                         pinnedDestinationScriptHex = Attestation.BtcWithdrawals.ExitDestinationScriptOf(exit, request.SmartContractUID);
                         leaderIsVaultSignerOfPinned = Attestation.BtcWithdrawalSigner.SignersOf(request.SmartContractUID)
@@ -167,7 +167,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     // no other transaction can be signed, any signer of the vault may lead the ceremony.
                     if (Attestation.BtcAttestBalance.IsAttestedVault(wr.SmartContractUID))
                     {
-                        var (pinned, pinReason) = Attestation.BtcWithdrawals.IsPinnedTransaction(wrh, wr.SmartContractUID, txId);
+                        var (pinned, pinReason) = Attestation.BtcWithdrawals.MaySign(wrh, wr.SmartContractUID, txId);
                         if (!pinned) return (false, pinReason);
                         // The requester gave the withdrawal up: consensus fixed a transaction that returns its coins to
                         // the vault and pays nobody.

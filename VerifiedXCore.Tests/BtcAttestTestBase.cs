@@ -65,6 +65,9 @@ namespace VerifiedXCore.Tests
             Globals.BitcoinAttestationRecordHeight = H1;
             BtcChainRules.OverrideForTests = realMainnetRules ? null : BtcChainRules.Regtest;
             BtcAttestRules.DepthOverride = realMainnetRules ? null : 3;
+            // The signers' wait for a pin's block to settle is a matter of blocks passing, tested on its own
+            // (BtcAttest10); the other tests have the signers act in the block after the pin.
+            BtcWithdrawalSigner.SettleBlocksOverride = 0;
             Globals.WithdrawalEscrowHeight = 1;
             Globals.V2WithdrawalExpiryFixHeight = 1;
             Globals.V2WithdrawalOwnerAddBackFixHeight = 1;
@@ -115,6 +118,7 @@ namespace VerifiedXCore.Tests
             BtcChainRules.OverrideForTests = null;
             BtcAttestRules.DepthOverride = null;
             BtcAttestRules.StuckPinBlocksOverride = null;
+            BtcWithdrawalSigner.SettleBlocksOverride = null;
             Globals.BitcoinAttestationObserveHeight = _priorObserve;
             Globals.BitcoinAttestationRecordHeight = _priorRecord;
             Globals.BitcoinAttestationHeight = _priorEnforce;

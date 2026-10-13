@@ -24,6 +24,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
     {
         /// <summary>VFX blocks one signer is given before the next in line also starts (about a minute).</summary>
         public const int TurnBlocks = 5;
+        /// <summary>
+        /// VFX blocks a pin is left to settle before any signer leads or joins a ceremony for it (about two minutes).
+        /// "Nothing is pinned, so nothing is signed" holds only while the block that made the pin stays in the chain. A
+        /// signature given in that very block would outlive the block if it were replaced: the Bitcoin would be paid
+        /// for a request the surviving chain never mined, or mined on other coins. Bitcoin itself takes ten minutes a
+        /// block, so the wait costs a withdrawal nothing. A validator's own rule, not a consensus rule.
+        /// </summary>
+        public static int SettleBlocks => SettleBlocksOverride ?? 10;
+        /// <summary>Tests only.</summary>
+        internal static int? SettleBlocksOverride;
         private const int LoopSeconds = 20;
 
         /// <summary>When this node last led a ceremony for a pinned transaction, and whether it got it out.</summary>
@@ -71,7 +81,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 if (pin.Inputs.Any(o => BtcAttestStore.Coin(o)?.Status != VaultCoinStatus.Pinned)) continue;
                 var signers = SignersOf(row.SmartContractUID);
                 if (!signers.Contains(me, StringComparer.Ordinal)) continue;
-                if (tipHeight < pin.PinnedAtVfxHeight + (long)Turn(pin.Txid, me, signers) * TurnBlocks) continue;
+                if (tipHeight < pin.PinnedAtVfxHeight + SettleBlocks + (long)Turn(pin.Txid, me, signers) * TurnBlocks) continue;
 
                 // Led by this node a moment ago: give Bitcoin's relay and the other signers time before trying again.
                 if (Attempts.TryGetValue(pin.Txid, out var last) && DateTime.UtcNow - last.At < TimeSpan.FromMinutes(last.Broadcast ? 30 : 3))
