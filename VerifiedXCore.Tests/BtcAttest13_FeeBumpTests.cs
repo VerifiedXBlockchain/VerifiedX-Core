@@ -407,5 +407,62 @@ namespace VerifiedXCore.Tests
             await Confirm(pin);
             Assert.Null(BtcCanonicalWithdrawal.BuildReplacement(vault.Uid, row.DestinationScriptHex, row.AmountSats, 20, pin.Inputs, row.Ref, out _));
         }
+
+        /// <summary>
+        /// On a watched vault any signer of the vault may lead the ceremony for a pinned transaction. One who starts
+        /// ceremonies and never finishes them must not be able to keep the others out: every ceremony for a pinned
+        /// transaction signs that same transaction, so they run side by side, one per leader.
+        /// </summary>
+        [Fact]
+        public async Task ASignerThatStartsACeremonyAndNeverFinishes_DoesNotKeepTheOthersOut()
+        {
+            var older = await CreateVault(H1 - 50);
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 150_000);
+            var request = await Mine(Request(vault.Uid, 0.001M));
+            var pin = Assert.Single(Row(request, vault.Uid).Pins);
+            var scope = FrostSigningAuthorization.SigningScope(vault.Uid, pin.Txid);
+            var sighashes = new List<string> { "aa11" };
+            (bool Blocked, string Reason) Begin(string session, V leader, string sighash = "aa11") =>
+                FrostWithdrawalSigningTracker.TryBeginSigning(vault.Uid, request.Hash, session, 0, sighash, new List<string> { sighash }, pin.Inputs, null, scope, leader.Address);
+            bool Holds(string session) => FrostWithdrawalSigningTracker.ConfirmSessionHoldsInput(vault.Uid, request.Hash, 0, session, "aa11", scope).Ok;
+
+            // One signer starts and goes quiet.
+            Assert.False(Begin("stalled", Signers[3]).Blocked);
+            // Another leads the same transaction at once, and both ceremonies are this validator's.
+            var (blocked, reason) = Begin("honest", Signers[1]);
+            Assert.False(blocked, reason);
+            Assert.True(Holds("honest"));
+            Assert.True(Holds("stalled"));
+            Assert.False(Holds("never-started"));
+
+            // Starting again does not push anybody else's ceremony out, only the leader's own earlier one.
+            Assert.False(Begin("stalled-again", Signers[3]).Blocked);
+            Assert.True(Holds("honest"));
+            Assert.False(Holds("stalled"));
+            Assert.True(Holds("stalled-again"));
+
+            // A ceremony that failed lays no wait on the input: the next one starts straight away.
+            FrostWithdrawalSigningTracker.RecordSigningFailed(vault.Uid, request.Hash, "stalled-again", 0, scope);
+            Assert.False(Holds("stalled-again"));
+            Assert.True(Holds("honest"));
+            Assert.False(Begin("third", Signers[2]).Blocked);
+
+            // What is signed is still one transaction only: another sighash for this input is refused.
+            (blocked, reason) = Begin("forged", Signers[3], "cc33");
+            Assert.True(blocked);
+            Assert.Contains("exactly one Bitcoin transaction", reason);
+
+            // The share is given, and a later ceremony for the same transaction still gets one (a retry after a lost broadcast).
+            FrostWithdrawalSigningTracker.RecordSigningCompleted(vault.Uid, request.Hash, "honest", 0, "aa11", pin.Inputs, pin.Txid, scope);
+            Assert.False(Begin("retry", Signers[0]).Blocked);
+
+            // On a vault the chain does not watch nothing changed: one ceremony holds an input.
+            Assert.False(FrostWithdrawalSigningTracker.TryBeginSigning(older.Uid, request.Hash, "o-1", 0, "aa11", sighashes, pin.Inputs).Blocked);
+            (blocked, reason) = FrostWithdrawalSigningTracker.TryBeginSigning(older.Uid, request.Hash, "o-2", 0, "aa11", sighashes, pin.Inputs);
+            Assert.True(blocked);
+            Assert.Contains("already in progress", reason);
+        }
     }
 }

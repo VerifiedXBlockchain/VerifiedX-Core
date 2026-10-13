@@ -125,7 +125,13 @@ namespace VerifiedXCore.Bitcoin.Services
                         }
                     }
 
-                    if (record.Inputs.TryGetValue(inputIndex, out var input))
+                    // A vault the chain watches: this record is for one transaction that consensus fixed, and its
+                    // sighash was held to that above. Any number of ceremonies for it can only produce signatures of
+                    // that same transaction, so one ceremony in progress, or one that failed, does not shut out the
+                    // next. If it did, a single signer of the vault could keep every withdrawal from it unsigned for
+                    // good by starting ceremonies and never finishing them (each start held the input for five
+                    // minutes), and any signer of a vault may lead on a watched vault.
+                    if (record.Inputs.TryGetValue(inputIndex, out var input) && string.IsNullOrEmpty(transactionScope))
                     {
                         switch (input.State)
                         {
@@ -246,7 +252,8 @@ namespace VerifiedXCore.Bitcoin.Services
             List<string>? allInputSighashes = null,
             List<string>? txInputOutpoints = null,
             ISet<string>? reclaimablePins = null,
-            string? transactionScope = null)
+            string? transactionScope = null,
+            string? leaderAddress = null)
         {
             if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
                 return (false, string.Empty); // Non-withdrawal signing, allow (nothing to record)
@@ -262,7 +269,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 var (blocked, reason) = CheckWithdrawalSigning(scUID, withdrawalRequestHash, inputIndex, messageHash, allInputSighashes, txInputOutpoints, reclaimablePins, transactionScope);
                 if (blocked)
                     return (true, reason);
-                RecordSigningStarted(scUID, withdrawalRequestHash, sessionId, inputIndex, messageHash, allInputSighashes, transactionScope);
+                RecordSigningStarted(scUID, withdrawalRequestHash, sessionId, inputIndex, messageHash, allInputSighashes, transactionScope, leaderAddress);
                 return (false, string.Empty);
             }
         }
@@ -290,7 +297,9 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (record.PinnedSighashes != null && !string.IsNullOrEmpty(messageHash)
                     && (inputIndex >= record.PinnedSighashes.Count || !string.Equals(record.PinnedSighashes[inputIndex], messageHash, StringComparison.OrdinalIgnoreCase)))
                     return (false, $"Session {sessionId} signs a sighash that is not the one announced for withdrawal {withdrawalRequestHash} input {inputIndex}.");
-                if (input.State == SigningState.InProgress && !string.Equals(input.SessionId, sessionId, StringComparison.Ordinal))
+                // On a watched vault several ceremonies for the one fixed transaction may be open, one per leader.
+                if (input.State == SigningState.InProgress && !string.Equals(input.SessionId, sessionId, StringComparison.Ordinal)
+                    && !(input.SessionByLeader?.Values.Contains(sessionId ?? "", StringComparer.Ordinal) == true))
                     return (false, $"Session {sessionId} is not the ceremony this validator accepted for withdrawal {withdrawalRequestHash} input {inputIndex} (session {input.SessionId}).");
                 if (input.State == SigningState.Failed)
                     return (false, $"The ceremony this validator accepted for withdrawal {withdrawalRequestHash} input {inputIndex} failed; start again.");
@@ -304,7 +313,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// sighash set on first sight.
         /// </summary>
         public static void RecordSigningStarted(string scUID, string withdrawalRequestHash, string sessionId,
-            int inputIndex = 0, string? messageHash = null, List<string>? allInputSighashes = null, string? transactionScope = null)
+            int inputIndex = 0, string? messageHash = null, List<string>? allInputSighashes = null, string? transactionScope = null, string? leaderAddress = null)
         {
             if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
                 return;
@@ -325,6 +334,11 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 if (record.Inputs.TryGetValue(inputIndex, out var existing))
                 {
+                    // A watched vault: each leader has one open ceremony for this fixed transaction; a new start by the
+                    // same leader takes the place of its last, and nobody's start takes the place of another's.
+                    if (!string.IsNullOrEmpty(transactionScope))
+                        (existing.SessionByLeader ??= new Dictionary<string, string>(StringComparer.Ordinal))[leaderAddress ?? sessionId] = sessionId;
+
                     // Never downgrade a Signed input; refresh Failed/stale InProgress to InProgress.
                     if (existing.State == SigningState.Signed)
                         return;
@@ -341,7 +355,8 @@ namespace VerifiedXCore.Bitcoin.Services
                         SessionId = sessionId,
                         MessageHash = messageHash ?? string.Empty,
                         State = SigningState.InProgress,
-                        Timestamp = TimeUtil.GetTime()
+                        Timestamp = TimeUtil.GetTime(),
+                        SessionByLeader = string.IsNullOrEmpty(transactionScope) ? null : new Dictionary<string, string>(StringComparer.Ordinal) { [leaderAddress ?? sessionId] = sessionId },
                     };
                 }
             }
@@ -468,12 +483,28 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 if (record.Inputs.TryGetValue(inputIndex, out var existing))
                 {
+                    // A watched vault: the failed ceremony is forgotten and the others for the same fixed transaction
+                    // carry on; no cooldown is laid on the input (see CheckWithdrawalSigning).
+                    if (!string.IsNullOrEmpty(transactionScope))
+                    {
+                        if (existing.SessionByLeader != null)
+                            foreach (var leader in existing.SessionByLeader.Where(kv => kv.Value == sessionId).Select(kv => kv.Key).ToList())
+                                existing.SessionByLeader.Remove(leader);
+                        if (existing.State == SigningState.InProgress && existing.SessionId == sessionId)
+                            existing.SessionId = existing.SessionByLeader?.Values.FirstOrDefault() ?? string.Empty;
+                        return;
+                    }
+
                     if (existing.State == SigningState.Signed)
                         return; // Don't downgrade
 
                     existing.State = SigningState.Failed;
                     existing.SessionId = sessionId;
                     existing.Timestamp = TimeUtil.GetTime();
+                }
+                else if (!string.IsNullOrEmpty(transactionScope))
+                {
+                    return; // nothing was recorded for it
                 }
                 else
                 {
@@ -693,6 +724,11 @@ namespace VerifiedXCore.Bitcoin.Services
             public string MessageHash { get; set; } = string.Empty;
             public SigningState State { get; set; }
             public long Timestamp { get; set; }
+            /// <summary>
+            /// A vault the chain watches only: the open ceremony of each leader for this input of the one fixed
+            /// transaction (leader address to session). Null on any other vault, where one ceremony holds an input.
+            /// </summary>
+            public Dictionary<string, string>? SessionByLeader { get; set; }
         }
 
         /// <summary>
