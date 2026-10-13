@@ -105,6 +105,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
         /// <summary>The id of a transaction given in its serialization WITHOUT witness data: the double SHA-256 of those bytes.</summary>
         public static string TxidOfStripped(byte[] strippedBytes) => Display(SHA256.HashData(SHA256.HashData(strippedBytes)));
+
+        /// <summary>The id of a transaction given the first of its two SHA-256 hashes.</summary>
+        public static string TxidOfFirstHash(byte[] firstHash) => Display(SHA256.HashData(firstHash));
     }
 
     /// <summary>
@@ -116,17 +119,24 @@ namespace VerifiedXCore.Bitcoin.Attestation
     /// those bytes. What is parsed and what is hashed cannot differ, and a re-serialization must give the same bytes.</item>
     /// <item>Every proof in a block has the same length as the proof of that block's coinbase transaction. All leaves of
     /// Bitcoin's tree sit at one depth; without this, an inner node of the tree can be passed off as a transaction one
-    /// level up (the 64-byte transaction weakness).</item>
+    /// level up (the 64-byte transaction weakness). The coinbase is carried whole, or, when a miner made it too large
+    /// for that, shown to be a transaction by its length (<see cref="VerifyCoinbaseTail"/>).</item>
     /// <item>A transaction of 64 bytes or fewer is never accepted, for the same reason.</item>
     /// </list>
     /// </summary>
     public static class BtcTxInclusion
     {
         /// <summary>
-        /// Largest transaction a report carries with its bytes (plan 3.2: larger ones use the signed-only form). A vault
-        /// deposit or withdrawal is a few hundred bytes; this leaves room for a large payout that includes a vault.
+        /// Largest transaction a report carries, in bytes without witness data: the largest a Bitcoin node relays
+        /// (400,000 weight units is 100,000 such bytes), so every transaction anyone can send in the ordinary way can
+        /// be proven. A larger one has to be handed to a miner directly; it is never an event, and what it pays to a
+        /// vault is not credited (plan 3.2). A vault's own withdrawals are a few hundred bytes.
         /// </summary>
-        public const int MaxTxBytes = 40_000;
+        public const int MaxTxBytes = 100_000;
+        /// <summary>A coinbase proof in its constant-size form carries at most one hash block of the coinbase.</summary>
+        public const int MaxCoinbaseTailBytes = 64;
+        /// <summary>No Bitcoin transaction is larger than a block.</summary>
+        public const long MaxAnyTxBytes = 4_000_000;
 
         /// <summary>The network the chain follows, from the chain's own setting: never from local configuration.</summary>
         private static Network Net => FrostDkgAttestation.ConsensusNetwork;
@@ -142,10 +152,52 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public static string? VerifyCoinbase(BtcHeader header, string? coinbaseStrippedHex, IReadOnlyList<string>? branch, out int treeDepth, out Transaction? coinbase, out string? txid)
         {
             treeDepth = 0;
+            coinbase = null;
+            txid = null;
+            if (coinbaseStrippedHex != null && coinbaseStrippedHex.Length / 2 > BtcAttestRules.MaxCoinbaseProofBytes)
+                return $"a coinbase larger than {BtcAttestRules.MaxCoinbaseProofBytes} bytes is proven by its last block and its length, not carried";
             var reason = Check(header, coinbaseStrippedHex, 0, branch, branch?.Count ?? -1, out coinbase, out txid);
             if (reason != null) return reason;
             if (!coinbase!.IsCoinBase) return "the transaction given as the block's coinbase is not a coinbase transaction";
             treeDepth = branch!.Count;
+            return null;
+        }
+
+        /// <summary>
+        /// The depth of the block's tree from a coinbase too large to carry. The first leaf of the tree is shown to be
+        /// the hash of <paramref name="totalBytes"/> bytes, more than 64, by finishing its SHA-256 from the state before
+        /// its last block (<see cref="BtcSha256"/>): an inner node of the tree is the hash of exactly 64 bytes, so this
+        /// node is a transaction, and its branch is as long as the tree is deep. Nothing else is learnt about the
+        /// coinbase and nothing else is needed: what it pays is never read from this form. Null reason on success.
+        /// </summary>
+        public static string? VerifyCoinbaseTail(BtcHeader header, string? stateHex, string? tailHex, long? totalBytes, IReadOnlyList<string>? branch, out int treeDepth)
+        {
+            treeDepth = 0;
+            if (header == null) return "no header";
+            if (branch == null) return "no Merkle branch";
+            if (branch.Count > BtcMerkle.MaxDepth) return "the tree depth is out of range";
+            if (stateHex == null || tailHex == null || totalBytes == null) return "no coinbase proof";
+            if (stateHex.Length != BtcSha256.StateBytes * 2 || tailHex.Length % 2 != 0 || tailHex.Length == 0 || tailHex.Length / 2 > MaxCoinbaseTailBytes)
+                return "the coinbase proof is malformed";
+            if (stateHex != stateHex.ToLowerInvariant() || tailHex != tailHex.ToLowerInvariant()) return "the coinbase proof is not lowercase hex";
+            var total = totalBytes.Value;
+            if (total <= BtcAttestRules.MaxCoinbaseProofBytes) return $"a coinbase of up to {BtcAttestRules.MaxCoinbaseProofBytes} bytes is carried whole";
+            if (total > MaxAnyTxBytes) return "the coinbase length is out of range";
+
+            byte[] state, tail;
+            try { state = Convert.FromHexString(stateHex); tail = Convert.FromHexString(tailHex); }
+            catch { return "the coinbase proof is not valid hex"; }
+            // One form per coinbase: the tail is what is left after the whole blocks, or the last whole block.
+            if (tail.Length != (total % 64 == 0 ? 64 : total % 64)) return "the coinbase proof carries exactly the coinbase's last block";
+            var first = BtcSha256.Finish(state, tail, total);
+            if (first == null) return "the coinbase proof is malformed";
+
+            var id = BtcMerkle.TxidOfFirstHash(first);
+            var root = BtcMerkle.RootFromBranch(id, 0, branch);
+            if (root == null) return "the Merkle branch is malformed";
+            if (!string.Equals(root, header.MerkleRoot, StringComparison.Ordinal))
+                return $"the coinbase proof does not lead to block {header.Hash}";
+            treeDepth = branch.Count;
             return null;
         }
 

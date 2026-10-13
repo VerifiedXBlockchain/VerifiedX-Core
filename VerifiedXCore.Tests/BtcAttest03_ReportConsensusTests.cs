@@ -683,7 +683,7 @@ namespace VerifiedXCore.Tests
             Assert.All(parts.Skip(1), p => Assert.Empty(p.Headers));
             Assert.Equal(450, parts.Sum(p => p.Events.Count));
             var txs = parts.Select(p => Signed(p)).ToList();
-            Assert.All(txs, t => Assert.True(TransactionValidatorService.VerifyTXSize(t, Globals.MaxVbtcVaultTxSizeBytes)));
+            Assert.All(txs, t => Assert.True(TransactionValidatorService.VerifyTXSize(t, BtcAttestRules.MaxReportTxBytes)));
 
             var height = H1 + 2;
             await Refused(txs[1], height, "the first part of this block's report has not been applied");
@@ -797,47 +797,69 @@ namespace VerifiedXCore.Tests
             await Refused(Signed(first), height, "carries at least one event");
         }
 
+        /// <summary>
+        /// Every event is a Bitcoin transaction with its bytes and its Merkle proof; the report's signatures add
+        /// nothing to it. Any transaction a Bitcoin node relays fits (100,000 bytes without witness data). A larger one
+        /// is not an event, and nothing can be said about it: two thirds of the signers stating what a transaction
+        /// pays, with no proof, is the one thing that could have created vBTC out of nothing.
+        /// </summary>
         [Fact]
-        public async Task ATransactionTooLargeToCarry_IsListedOnTheSignaturesAlone()
+        public async Task EveryEventIsProven_ALargeTransactionToo_AndOneTooLargeToProveIsNotAnEvent()
         {
             await Start();
             var vault = await CreateVault(H1 + 1);
             var other = Elsewhere();
             var outputs = new List<(NBitcoin.Script, long)> { (vault.Script, 70_000) };
-            outputs.AddRange(Enumerable.Range(0, 1_300).Select(_ => (other, 1_000L)));
+            outputs.AddRange(Enumerable.Range(0, 2_800).Select(_ => (other, 1_000L)));
             var big = Pay(null, outputs.ToArray());
-            Assert.True(big.ToBytes().Length > BtcTxInclusion.MaxTxBytes);
+            var size = big.WithOptions(TransactionOptions.None).ToBytes().Length;
+            Assert.InRange(size, 90_000, BtcTxInclusion.MaxTxBytes);     // a payout to 2,800 addresses, one of them a vault
             var at = _btc.Mine(big);
             _btc.MineEmpty(3);
 
             var report = Forward(at);
             var ev = Assert.Single(report.Events);
-            Assert.Null(ev.TxHex);
-            Assert.Null(ev.Branch);
-            Assert.Equal(big.GetHash().ToString(), ev.Txid);
-            var created = Assert.Single(ev.Creates!);
-            Assert.Equal(0, created.Vout);
-            Assert.Equal(70_000, created.Sats);
-
+            Assert.Equal(BtcTxInclusion.ToStrippedHex(big), ev.TxHex);
+            Assert.NotNull(ev.Branch);
             var tx = Signed(report);
+            Assert.True(Newtonsoft.Json.JsonConvert.SerializeObject(tx).Length < BtcAttestRules.MaxReportTxBytes);
             await Accepted(tx, H1 + 2);
 
-            // The listing is what the signers signed: nothing in it can be changed afterwards.
-            var changed = Forward(at);
-            changed.Signatures = report.Signatures;
-            changed.Events[0].Creates![0].Sats = 7_000_000;
-            await Refused(Tx(changed), H1 + 2, "is not valid");
-            // A listing may not also carry bytes, and must name outputs of a watched vault.
-            var mixed = Forward(at);
-            mixed.Events[0].Branch = new List<string>();
-            await Refused(Signed(mixed), H1 + 2, "an oversize event carries no branch");
-            var nothing = Forward(at);
-            nothing.Events[0].Creates![0].ScriptHex = other.ToHex();
-            await Refused(Signed(nothing), H1 + 2, "touches no vault coin");
+            // An event with no bytes is nothing, whoever signed it.
+            var bare = Forward(at);
+            bare.Events[0].TxHex = null;
+            bare.Events[0].Branch = null;
+            await Refused(Signed(bare), H1 + 2, "an event carries its transaction and its proof");
+            // And the earlier form that only named a transaction and what it paid is not a report at all.
+            var listed = Signed(bare);
+            listed.Data = listed.Data.Replace("{\"Position\":1}", "{\"Position\":1,\"Txid\":\"" + big.GetHash() + "\",\"Creates\":[{\"Vout\":0,\"ScriptHex\":\"" + vault.Script.ToHex() + "\",\"Sats\":7000000}]}");
+            Assert.Contains("\"Creates\"", listed.Data);
+            listed.Build();
+            await Refused(listed, H1 + 2, "does not parse");
 
             await Apply(H1 + 2, tx);
             Assert.Equal(70_000, BtcAttestStore.Coin(Outpoint(big, 0))!.ValueSats);
             Assert.Equal(70_000, BtcAttestStore.Total(vault.Uid).HeldSats);
+
+            // Larger than any node relays (a miner would have to be handed it): not an event. Nothing is built for
+            // it, nothing can be reported for it, and what it pays the vault is not credited.
+            outputs.AddRange(Enumerable.Range(0, 500).Select(_ => (other, 1_000L)));
+            var huge = Pay(null, outputs.ToArray());
+            Assert.True(huge.WithOptions(TransactionOptions.None).ToBytes().Length > BtcTxInclusion.MaxTxBytes);
+            var ordinary = Pay(vault.Script, 5_000);
+            var next = _btc.Mine(huge, ordinary);
+            _btc.MineEmpty(3);
+            var after = Forward(next);
+            Assert.Equal(BtcTxInclusion.ToStrippedHex(ordinary), Assert.Single(after.Events).TxHex);
+            var forced = Forward(next);
+            forced.Events.Insert(0, new BtcReportEvent { Position = 1, TxHex = BtcTxInclusion.ToStrippedHex(huge), Branch = BtcMerkle.BranchFor(_btc.Block(next).Transactions.Select(t => t.GetHash().ToString()).ToList(), 1) });
+            await Refused(Signed(forced), H1 + 3, $"larger than {BtcTxInclusion.MaxTxBytes} bytes");
+            var afterTx = Signed(after);
+            await Accepted(afterTx, H1 + 3);
+            await Apply(H1 + 3, afterTx);
+            Assert.Null(BtcAttestStore.Coin(Outpoint(huge, 0)));
+            Assert.Equal(75_000, BtcAttestStore.Total(vault.Uid).HeldSats);
+            Assert.Empty(BtcBlockScanner.VaultsWithUnrecordedEvents(_btc.Block(next), next));   // and no backfill is looked for
         }
 
         [Fact]
@@ -860,8 +882,14 @@ namespace VerifiedXCore.Tests
             Assert.Equal(BtcAttestStore.OutpointKey(_btc.Block(at).Transactions[0].GetHash().ToString(), 1), coin.Outpoint);
         }
 
+        /// <summary>
+        /// Every proof in a block rests on the depth of the block's tree, taken from its coinbase transaction. A miner
+        /// can make a coinbase as large as it likes. The block is reported all the same, with every event proven: the
+        /// coinbase's last hash block and its length show that the first leaf of the tree is a transaction, which is
+        /// all the depth needs.
+        /// </summary>
         [Fact]
-        public async Task ABlockWhoseCoinbaseIsTooLargeToCarry_IsStillReported_OnTheSignaturesAlone()
+        public async Task ABlockWhoseCoinbaseIsTooLargeToCarry_IsReportedWithProofs_ItsDepthShownByTheCoinbasesLength()
         {
             await Start();
             var vault = await CreateVault(H1 + 1);
@@ -871,30 +899,85 @@ namespace VerifiedXCore.Tests
             var at = _btc.MineWithCoinbase(payouts, Pay(Elsewhere(), 5), deposit);
             _btc.MineEmpty(3);
             var coinbase = _btc.Block(at).Transactions[0];
-            Assert.True(coinbase.ToBytes().Length > BtcAttestRules.MaxCoinbaseProofBytes);
+            var coinbaseBytes = coinbase.WithOptions(TransactionOptions.None).ToBytes();
+            Assert.True(coinbaseBytes.Length > BtcAttestRules.MaxCoinbaseProofBytes);
 
             var report = Forward(at);
             Assert.Null(report.CoinbaseTxHex);
-            Assert.Null(report.CoinbaseBranch);
+            Assert.Equal(coinbaseBytes.Length, report.CoinbaseBytes);
+            Assert.Equal(64, report.CoinbaseState!.Length);
+            Assert.InRange(report.CoinbaseTailHex!.Length, 2, 128);
+            Assert.NotNull(report.CoinbaseBranch);
+            // The coinbase pays the vault and is itself an event, carried like any transaction; so is the deposit.
             Assert.Equal(new long[] { 0, 2 }, report.Events.Select(e => e.Position));
-            Assert.All(report.Events, e => Assert.Null(e.TxHex));
+            Assert.All(report.Events, e => Assert.NotNull(e.TxHex));
             var tx = Signed(report);
             await Accepted(tx, H1 + 2);
 
-            // Listings and a coinbase proof do not mix; a coinbase listing spends nothing.
-            var withCoinbase = Forward(at);
-            withCoinbase.CoinbaseTxHex = BtcTxInclusion.ToStrippedHex(_btc.Block(at - 1).Transactions[0]);
-            withCoinbase.CoinbaseBranch = new List<string>();
-            await Refused(Signed(withCoinbase), H1 + 2, "carries no coinbase proof");
-            var spending = Forward(at);
-            spending.Events[0].Spends = new List<string> { Outpoint(deposit, 0) };
-            await Refused(Signed(spending), H1 + 2, "a coinbase transaction spends nothing");
+            // The proof is of this coinbase and no other: nothing in it can be changed.
+            var longer = Forward(at);
+            longer.CoinbaseBytes += 64;
+            await Refused(Signed(longer), H1 + 2, "coinbase proof: the coinbase proof does not lead to block");
+            var otherState = Forward(at);
+            otherState.CoinbaseState = new string('0', 64);
+            await Refused(Signed(otherState), H1 + 2, "coinbase proof: the coinbase proof does not lead to block");
+            var wrongTail = Forward(at);
+            wrongTail.CoinbaseTailHex = wrongTail.CoinbaseTailHex + "00";
+            await Refused(Signed(wrongTail), H1 + 2, "coinbase proof");
+            var both = Forward(at);
+            both.CoinbaseTxHex = BtcTxInclusion.ToStrippedHex(_btc.Block(at - 1).Transactions[0]);
+            await Refused(Signed(both), H1 + 2, "a report carries one coinbase proof");
+            var none = Forward(at);
+            none.CoinbaseState = null; none.CoinbaseTailHex = null; none.CoinbaseBytes = null;
+            await Refused(Signed(none), H1 + 2, "coinbase proof: no coinbase proof");
+            // A branch one level short (a level of the tree passed off as its leaves) fails against the depth it fixes.
+            var shallow = Forward(at);
+            shallow.Events[1].Branch = shallow.Events[1].Branch!.Skip(1).ToList();
+            await Refused(Signed(shallow), H1 + 2, "every transaction of a block sits at the same depth");
 
             await Apply(H1 + 2, tx);
             Assert.Equal(89_000, BtcAttestStore.Total(vault.Uid).HeldSats);
             Assert.True(BtcAttestStore.Coin(Outpoint(coinbase, 401))!.IsCoinbase);
             Assert.False(BtcAttestStore.Coin(Outpoint(deposit, 0))!.IsCoinbase);
             Assert.Equal(at, Meta.EventsThroughHeight);
+
+            // A coinbase small enough to carry is carried: one form per coinbase.
+            var small = _btc.Mine(Pay(vault.Script, 4_000));
+            _btc.MineEmpty(3);
+            var carried = Forward(small);
+            Assert.NotNull(carried.CoinbaseTxHex);
+            Assert.Null(carried.CoinbaseState);
+            var smallBytes = _btc.Block(small).Transactions[0].WithOptions(TransactionOptions.None).ToBytes();
+            var asTail = Forward(small);
+            asTail.CoinbaseTxHex = null;
+            var tail = smallBytes.Length % 64 == 0 ? 64 : smallBytes.Length % 64;
+            asTail.CoinbaseState = BtcSha256.StateAfter(smallBytes, (smallBytes.Length - tail) / 64);
+            asTail.CoinbaseTailHex = Convert.ToHexString(smallBytes.AsSpan(smallBytes.Length - tail)).ToLowerInvariant();
+            asTail.CoinbaseBytes = smallBytes.Length;
+            await Refused(Signed(asTail), H1 + 3, "is carried whole");
+        }
+
+        /// <summary>The hash a coinbase proof is finished with is SHA-256: the same result as the platform's, from any block boundary.</summary>
+        [Fact]
+        public void AHashFinishedFromItsStatePartWay_IsTheHash()
+        {
+            var random = new Random(11);
+            foreach (var length in new[] { 0, 1, 55, 56, 63, 64, 65, 119, 120, 127, 128, 129, 1_000, 10_001, 65_536 })
+            {
+                var message = new byte[length];
+                random.NextBytes(message);
+                var expected = System.Security.Cryptography.SHA256.HashData(message);
+                Assert.Equal(expected, BtcSha256.Hash(message));
+                for (var blocks = 0; blocks <= length / 64; blocks += Math.Max(1, length / 64 / 5))
+                {
+                    var state = Convert.FromHexString(BtcSha256.StateAfter(message, blocks));
+                    Assert.Equal(expected, BtcSha256.Finish(state, message.AsSpan(blocks * 64), length));
+                }
+            }
+            // A state taken at anything but a block boundary, or a length that does not match, is not a proof.
+            Assert.Null(BtcSha256.Finish(new byte[32], new byte[10], 100));
+            Assert.Null(BtcSha256.Finish(new byte[31], new byte[10], 74));
+            Assert.Null(BtcSha256.Finish(new byte[32], new byte[10], 5));
         }
 
         // ── A vault created after its deposit was mined ─────────────────────────────────────────────────────

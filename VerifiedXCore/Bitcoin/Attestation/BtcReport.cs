@@ -24,14 +24,23 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public const int QuietBlocks = 144;
         public const int MaxEventsPerReport = 2000;
         /// <summary>
-        /// The size, in characters of canonical text without signatures, that a builder keeps one part of a report
-        /// under. The transaction cap is Globals.MaxVbtcVaultTxSizeBytes (256 KB); the rest is room for signatures.
+        /// The size cap of a report or rewind transaction. One part must hold the most a single event can need: 500
+        /// headers (80,000 characters), the coinbase proof (20,000), one transaction of
+        /// <see cref="BtcTxInclusion.MaxTxBytes"/> with its branch (201,000), and the signatures of two thirds of the
+        /// signer set. At about 265 characters a signature that leaves room for some 800 of them: a set of 1,200.
         /// </summary>
-        public const int PartTextBudget = 170_000;
+        public const int MaxReportTxBytes = 512 * 1024;
         /// <summary>
-        /// The largest coinbase transaction a report builder carries as the anchor of a block's proofs. Coinbase
-        /// transactions are a few hundred bytes; above this the builder lists the block's events instead. With the
-        /// header and transaction limits it keeps the largest possible part inside the transaction size cap.
+        /// The size, in characters of canonical text without signatures, that a builder keeps one part of a report
+        /// under when it has more than one event to place (a single event is never split, whatever its size). The
+        /// rest of <see cref="MaxReportTxBytes"/> is room for signatures.
+        /// </summary>
+        public const int PartTextBudget = 300_000;
+        /// <summary>
+        /// The largest coinbase transaction a report carries whole as the anchor of a block's proofs. Coinbase
+        /// transactions are a few hundred bytes. Above this the anchor is the constant-size form
+        /// (<see cref="BtcTxInclusion.VerifyCoinbaseTail"/>), so a miner cannot make a block unreportable by paying
+        /// out to thousands of addresses.
         /// </summary>
         public const int MaxCoinbaseProofBytes = 10_000;
         /// <summary>A coinbase output cannot be spent on Bitcoin for this many blocks.</summary>
@@ -89,26 +98,17 @@ namespace VerifiedXCore.Bitcoin.Attestation
         [JsonProperty(Order = 2)] public string Signature { get; set; } = "";
     }
 
-    public sealed class BtcReportOutput
-    {
-        [JsonProperty(Order = 1)] public long Vout { get; set; }
-        [JsonProperty(Order = 2)] public string ScriptHex { get; set; } = "";
-        [JsonProperty(Order = 3)] public long Sats { get; set; }
-    }
-
-    /// <summary>One Bitcoin transaction of the reported block, with proof that it is there.</summary>
+    /// <summary>
+    /// One Bitcoin transaction of the reported block, with proof that it is there. There is no other form: nothing a
+    /// report says about a transaction is taken on the signers' word.
+    /// </summary>
     public sealed class BtcReportEvent
     {
         /// <summary>The transaction's position in the block.</summary>
         [JsonProperty(Order = 1)] public long Position { get; set; }
-        /// <summary>The transaction without witness data, hex. Null only for an oversize event.</summary>
+        /// <summary>The transaction without witness data, hex.</summary>
         [JsonProperty(Order = 2)] public string? TxHex { get; set; }
         [JsonProperty(Order = 3)] public List<string>? Branch { get; set; }
-
-        // Oversize form (a transaction too large to carry): what it spends and creates, on the signatures alone.
-        [JsonProperty(Order = 4)] public string? Txid { get; set; }
-        [JsonProperty(Order = 5)] public List<string>? Spends { get; set; }
-        [JsonProperty(Order = 6)] public List<BtcReportOutput>? Creates { get; set; }
     }
 
     /// <summary>
@@ -132,25 +132,40 @@ namespace VerifiedXCore.Bitcoin.Attestation
         [JsonProperty(Order = 4)] public long ReplaceAbove { get; set; }
         /// <summary>Headers, 80 bytes each in hex, oldest first.</summary>
         [JsonProperty(Order = 5)] public List<string> Headers { get; set; } = new();
+        /// <summary>The block's coinbase transaction without witness data, when it is small enough to carry (<see cref="BtcAttestRules.MaxCoinbaseProofBytes"/>).</summary>
         [JsonProperty(Order = 6)] public string? CoinbaseTxHex { get; set; }
+        /// <summary>The coinbase's Merkle branch: its length is the depth of the block's tree, which every event's branch must match.</summary>
         [JsonProperty(Order = 7)] public List<string>? CoinbaseBranch { get; set; }
-        [JsonProperty(Order = 8)] public List<BtcReportEvent> Events { get; set; } = new();
+        /// <summary>
+        /// For a coinbase too large to carry, in place of <see cref="CoinbaseTxHex"/>: the SHA-256 state after all of
+        /// the coinbase but its last block (hex), those last bytes (<see cref="CoinbaseTailHex"/>) and its length
+        /// (<see cref="CoinbaseBytes"/>). They show that the first leaf of the block's tree is the hash of something
+        /// longer than 64 bytes, so a transaction and not an inner node, which is all the depth needs.
+        /// </summary>
+        [JsonProperty(Order = 8)] public string? CoinbaseState { get; set; }
+        [JsonProperty(Order = 9)] public string? CoinbaseTailHex { get; set; }
+        [JsonProperty(Order = 10)] public long? CoinbaseBytes { get; set; }
+        [JsonProperty(Order = 11)] public List<BtcReportEvent> Events { get; set; } = new();
         /// <summary>A block with more events than one transaction holds is reported in parts, applied in order from 1.</summary>
-        [JsonProperty(Order = 9)] public int Part { get; set; } = 1;
+        [JsonProperty(Order = 12)] public int Part { get; set; } = 1;
         /// <summary>
         /// True on the last part of a block's report (and on every report that has only one). The parts that follow a
         /// mined part are built from the state it left, so the number of parts is not fixed in advance.
         /// </summary>
-        [JsonProperty(Order = 10)] public bool Final { get; set; } = true;
+        [JsonProperty(Order = 13)] public bool Final { get; set; } = true;
         /// <summary>The stored signer set the signatures are checked against.</summary>
-        [JsonProperty(Order = 11)] public long SignerEpoch { get; set; }
-        [JsonProperty(Order = 12)] public List<BtcReportSignature>? Signatures { get; set; }
+        [JsonProperty(Order = 14)] public long SignerEpoch { get; set; }
+        [JsonProperty(Order = 15)] public List<BtcReportSignature>? Signatures { get; set; }
         /// <summary>
         /// Absent on a report. True on a rewind (transaction type VBTC_V2_BTC_REORG): the headers replace everything
         /// above <see cref="ReplaceAbove"/> although events of those blocks were already applied, and those events are
         /// taken back. Part of what is signed, so a signature for one can never serve as a signature for the other.
         /// </summary>
-        [JsonProperty(Order = 13)] public bool? Rewind { get; set; }
+        [JsonProperty(Order = 16)] public bool? Rewind { get; set; }
+
+        /// <summary>Whether any field of a coinbase proof is present, in either form.</summary>
+        [JsonIgnore] public bool CarriesCoinbaseProof =>
+            CoinbaseTxHex != null || CoinbaseBranch != null || CoinbaseState != null || CoinbaseTailHex != null || CoinbaseBytes != null;
 
         private static readonly JsonSerializerSettings Canonical = new()
         {

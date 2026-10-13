@@ -50,8 +50,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 return (false, "A Bitcoin attestation transaction has no unlock time.");
             if (string.IsNullOrEmpty(tx.Data))
                 return (false, "A Bitcoin attestation transaction carries data.");
-            if (!TransactionValidatorService.VerifyTXSize(tx, Globals.MaxVbtcVaultTxSizeBytes))
-                return (false, $"This transaction is too large. Max size allowed is {Globals.MaxVbtcVaultTxSizeBytes / 1024} kb.");
+            if (!TransactionValidatorService.VerifyTXSize(tx, BtcAttestRules.MaxReportTxBytes))
+                return (false, $"This transaction is too large. Max size allowed is {BtcAttestRules.MaxReportTxBytes / 1024} kb.");
             if (!string.Equals(tx.Hash, tx.GetHash(), StringComparison.Ordinal))
                 return (false, "This transaction's hash is not the hash of its content.");
 

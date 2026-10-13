@@ -94,7 +94,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             {
                 // A reorganisation of headers whose blocks have had no events reported: nothing but headers changes.
                 if (report.BlockHeight != 0 || !forward || report.Events.Count != 0 || report.Part != 1 || !report.Final
-                    || report.CoinbaseTxHex != null || report.CoinbaseBranch != null)
+                    || report.CarriesCoinbaseProof)
                     return BtcReportOutcome.Fail("a header replacement carries headers only");
                 if (meta.PendingNextPart != 0) return BtcReportOutcome.Fail("a header replacement cannot interrupt a multi-part report");
                 if (report.ReplaceAbove < meta.EventsThroughHeight || report.ReplaceAbove < meta.CheckpointHeight)
@@ -137,7 +137,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             // ── A quiet report: the next QuietBlocks blocks hold no vault event ─────────────────────────────
             if (report.BlockHeight == 0)
             {
-                if (!forward || report.Events.Count != 0 || report.Part != 1 || !report.Final || report.CoinbaseTxHex != null || report.CoinbaseBranch != null)
+                if (!forward || report.Events.Count != 0 || report.Part != 1 || !report.Final || report.CarriesCoinbaseProof)
                     return BtcReportOutcome.Fail("a report without a block carries headers only");
                 if (meta.PendingNextPart != 0) return BtcReportOutcome.Fail("a quiet report cannot interrupt a multi-part report");
                 // The range is fixed by state: exactly the next QuietBlocks blocks, buried like any reported block. It
@@ -189,17 +189,25 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var blockHeader = Lookup(block);
             if (blockHeader == null) return BtcReportOutcome.Fail($"the header of block {block} is not attested");
 
-            // The coinbase proof fixes the depth of the block's tree for every event that carries its bytes. A part
-            // whose events are all listings has nothing to bind and carries none (so a block whose coinbase is too
-            // large to carry can still be reported, on the signatures alone).
+            // The coinbase proof fixes the depth of the block's tree for every event: the coinbase itself, or, when a
+            // miner made it too large to carry, its last block and its length. A part with no events (one that only
+            // closes the block) has nothing to bind and carries none.
             var depth = 0;
-            if (report.Events.Any(e => e?.TxHex != null))
+            if (report.Events.Count > 0)
             {
-                var coinbaseError = BtcTxInclusion.VerifyCoinbase(blockHeader, report.CoinbaseTxHex, report.CoinbaseBranch, out depth, out _, out _);
+                string? coinbaseError;
+                if (report.CoinbaseTxHex != null)
+                {
+                    if (report.CoinbaseState != null || report.CoinbaseTailHex != null || report.CoinbaseBytes != null)
+                        return BtcReportOutcome.Fail("a report carries one coinbase proof");
+                    coinbaseError = BtcTxInclusion.VerifyCoinbase(blockHeader, report.CoinbaseTxHex, report.CoinbaseBranch, out depth, out _, out _);
+                }
+                else
+                    coinbaseError = BtcTxInclusion.VerifyCoinbaseTail(blockHeader, report.CoinbaseState, report.CoinbaseTailHex, report.CoinbaseBytes, report.CoinbaseBranch, out depth);
                 if (coinbaseError != null) return BtcReportOutcome.Fail($"coinbase proof: {coinbaseError}");
             }
-            else if (report.CoinbaseTxHex != null || report.CoinbaseBranch != null)
-                return BtcReportOutcome.Fail("a report whose events are all listings carries no coinbase proof");
+            else if (report.CarriesCoinbaseProof)
+                return BtcReportOutcome.Fail("a report with no events carries no coinbase proof");
 
             // ── Events ──────────────────────────────────────────────────────────────────────────────────────
             var effects = new List<BtcCoinEffect>();
@@ -211,42 +219,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 if (ev.Position <= lastPosition) return BtcReportOutcome.Fail("events are in block order, each transaction once");
                 lastPosition = ev.Position;
 
-                string txid;
-                bool isCoinbase;
-                List<string> spends;
-                List<(long Vout, string ScriptHex, long Sats)> outputs;
-
-                if (ev.TxHex != null)
-                {
-                    if (ev.Txid != null || ev.Spends != null || ev.Creates != null) return BtcReportOutcome.Fail("an event is either a transaction with its proof or an oversize listing");
-                    var inclusion = BtcTxInclusion.Verify(blockHeader, ev.TxHex, ev.Position, ev.Branch, depth, out var tx, out var id);
-                    if (inclusion != null) return BtcReportOutcome.Fail($"event at position {ev.Position}: {inclusion}");
-                    txid = id!;
-                    isCoinbase = tx!.IsCoinBase;
-                    if (isCoinbase != (ev.Position == 0)) return BtcReportOutcome.Fail("only the transaction at position 0 is a coinbase");
-                    spends = isCoinbase ? new List<string>() : tx.Inputs.Select(i => BtcAttestStore.OutpointKey(i.PrevOut.Hash.ToString(), i.PrevOut.N)).ToList();
-                    outputs = tx.Outputs.Select((o, i) => ((long)i, o.ScriptPubKey.ToHex().ToLowerInvariant(), o.Value.Satoshi)).ToList();
-                }
-                else
-                {
-                    // A listing: carried without bytes or branch, on the report's signatures alone (plan 3.2).
-                    if (ev.Branch != null) return BtcReportOutcome.Fail("an oversize event carries no branch");
-                    if (!IsTxid(ev.Txid)) return BtcReportOutcome.Fail("an oversize event names its transaction id");
-                    txid = ev.Txid!;
-                    isCoinbase = ev.Position == 0;
-                    spends = (ev.Spends ?? new List<string>()).ToList();
-                    if (isCoinbase && spends.Count > 0) return BtcReportOutcome.Fail("a coinbase transaction spends nothing");
-                    if (spends.Any(s => !IsOutpoint(s)) || spends.Distinct(StringComparer.Ordinal).Count() != spends.Count)
-                        return BtcReportOutcome.Fail("an oversize event lists distinct outpoints in lowercase");
-                    outputs = new List<(long, string, long)>();
-                    foreach (var c in ev.Creates ?? new List<BtcReportOutput>())
-                    {
-                        if (c == null || c.Vout < 0 || c.Sats <= 0 || string.IsNullOrEmpty(c.ScriptHex) || c.ScriptHex != c.ScriptHex.ToLowerInvariant())
-                            return BtcReportOutcome.Fail("an oversize event lists outputs with a position, a script in lowercase hex and a positive value");
-                        outputs.Add((c.Vout, c.ScriptHex, c.Sats));
-                    }
-                    if (outputs.Select(o => o.Item1).Distinct().Count() != outputs.Count) return BtcReportOutcome.Fail("an oversize event lists each output once");
-                }
+                // Every event is a transaction with its bytes and its proof. What it does is read from those bytes;
+                // nothing about it is taken on the signers' word.
+                if (ev.TxHex == null) return BtcReportOutcome.Fail("an event carries its transaction and its proof");
+                var inclusion = BtcTxInclusion.Verify(blockHeader, ev.TxHex, ev.Position, ev.Branch, depth, out var tx, out var id);
+                if (inclusion != null) return BtcReportOutcome.Fail($"event at position {ev.Position}: {inclusion}");
+                var txid = id!;
+                var isCoinbase = tx!.IsCoinBase;
+                if (isCoinbase != (ev.Position == 0)) return BtcReportOutcome.Fail("only the transaction at position 0 is a coinbase");
+                var spends = isCoinbase ? new List<string>() : tx.Inputs.Select(i => BtcAttestStore.OutpointKey(i.PrevOut.Hash.ToString(), i.PrevOut.N)).ToList();
+                var outputs = tx.Outputs.Select((o, i) => ((long)i, o.ScriptPubKey.ToHex().ToLowerInvariant(), o.Value.Satoshi)).ToList();
 
                 var added = DeriveEffects(txid, isCoinbase, spends, outputs, block, scopedVault?.SmartContractUID, overlay, effects, db);
                 if (added == 0)
@@ -279,7 +261,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (report.V != 1) return BtcReportOutcome.Fail("unknown rewind version");
             if (report.Rewind != true) return BtcReportOutcome.Fail("a rewind says that it is one");
             if (report.Scope != BtcReport.ScopeAll || report.BlockHeight != 0 || report.Events.Count != 0 || report.Part != 1 || !report.Final
-                || report.CoinbaseTxHex != null || report.CoinbaseBranch != null)
+                || report.CarriesCoinbaseProof)
                 return BtcReportOutcome.Fail("a rewind carries a height and headers only");
             if (report.Headers.Count == 0) return BtcReportOutcome.Fail("a rewind carries the replacing headers");
             if (report.Headers.Count > BtcAttestRules.MaxHeaders) return BtcReportOutcome.Fail($"a rewind carries at most {BtcAttestRules.MaxHeaders} headers");
@@ -393,15 +375,6 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
             var required = BtcAttestRules.RequiredSignatures(set.Addresses.Count);
             return seen.Count >= required ? null : $"{seen.Count} signature(s); {required} of {set.Addresses.Count} are required";
-        }
-
-        private static bool IsTxid(string? s) => s != null && s.Length == 64 && s.All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
-
-        private static bool IsOutpoint(string? s)
-        {
-            if (string.IsNullOrEmpty(s)) return false;
-            var colon = s.IndexOf(':');
-            return colon == 64 && IsTxid(s.Substring(0, 64)) && long.TryParse(s.Substring(65), out var n) && n >= 0 && s == BtcAttestStore.OutpointKey(s.Substring(0, 64), n);
         }
     }
 }
