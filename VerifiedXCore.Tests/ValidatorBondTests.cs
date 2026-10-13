@@ -26,7 +26,8 @@ namespace VerifiedXCore.Tests
     /// <summary>
     /// The validator stake is bonded (owner decision, 13 October 2026). A registered validator's 5,000 VFX cannot be
     /// sent while it is registered and for 1,200 blocks after its exit is mined; and a validator counts for a vault's
-    /// key ceremony only once that stake has been locked for two days, and only while it is still active.
+    /// key ceremony, and among an epoch's Bitcoin report signers, only once that stake has been locked for two days,
+    /// and only while it is still active.
     ///
     /// Before this the stake was looked at when a vault's key ceremony was judged and when an epoch's Bitcoin report
     /// signers were listed, and nothing kept it there: it was needed for one block and could leave in the next, while
@@ -446,6 +447,79 @@ namespace VerifiedXCore.Tests
             Assert.True(ValidatorBond.IsAged(late.Address, 14_700 + ValidatorBond.CeremonyAgeBlocks));
             // And having arrived, it stays.
             Assert.False((await Verify(Send(late, _friend, 1M), 14_701)).Ok);
+        }
+
+        // ── Minimum age for the Bitcoin report signers ──────────────────────────────────────────────────────
+
+        private static List<string> SignerSet(long vfxHeight) => BtcAttestStore.SignerSet(BtcAttestRules.EpochOf(vfxHeight))!.Addresses;
+        private static List<string> Sorted(IEnumerable<V> validators) => validators.Select(v => v.Address).OrderBy(a => a, StringComparer.Ordinal).ToList();
+
+        /// <summary>
+        /// As released: recording starts at the bond height, so the first signer set is taken in the block where the
+        /// bonds start. That set is the funded validators, as before the bond. Every later set takes only validators
+        /// whose stake has been locked for two days: one that registers today signs no report for two days.
+        /// </summary>
+        [Fact]
+        public async Task TheReportSigners_AreTheFundedValidatorsAtTheStart_AndFromThenOnlyThoseWithAStakeLockedForTwoDays()
+        {
+            Globals.BitcoinAttestationRecordHeight = Rule;     // epochs start at 200, 800, 1400, ...
+            await StartTheRule();
+            Assert.Equal(Sorted(_old), SignerSet(Rule));       // not empty in the bond's own block; the unfunded one is not in it
+
+            var fresh = NewKey();
+            Fund(fresh, Stake);
+            await Apply(250, LifecycleTx(fresh, TransactionType.VBTC_V2_VALIDATOR_REGISTER));
+            await Apply(300);
+            const long lockedSince = 300;
+            Assert.Equal(lockedSince, ValidatorBond.Row(fresh.Address)!.FundedSinceHeight);
+
+            // The next epoch: it is active and holds the stake (what used to be enough), and it is not a signer.
+            var everyone = _old.Append(fresh).ToList();
+            KeepActive(800, everyone);
+            await Apply(800);
+            Assert.Contains(VBTCValidatorRegistry.FundedOnly(VBTCValidatorRegistry.GetActiveValidatorsAt(799)), a => a.ValidatorAddress == fresh.Address);
+            Assert.Equal(Sorted(_old), SignerSet(800));
+
+            // The last epoch that starts before its two days are up (14,700): still not.
+            var aged = lockedSince + ValidatorBond.CeremonyAgeBlocks;
+            Assert.Equal(14_700, aged);
+            KeepActive(14_600, everyone);
+            await Apply(14_600);
+            Assert.True(BtcAttestRules.IsEpochStart(14_600));
+            Assert.Equal(Sorted(_old), SignerSet(14_600));
+
+            // The first epoch that starts after them: it signs.
+            KeepActive(15_200, everyone);
+            await Apply(15_200);
+            Assert.Equal(Sorted(everyone), SignerSet(15_200));
+
+            // Age is not enough by itself: three epochs later only the new one is still heard from, and the set is
+            // of validators that are still active.
+            KeepActive(17_000, new[] { fresh });
+            await Apply(17_000);
+            Assert.True(BtcAttestRules.IsEpochStart(17_000));
+            Assert.Equal(new List<string> { fresh.Address }, SignerSet(17_000));
+
+            // One that exits is out of the next set, while its stake waits out the sets it was in.
+            KeepActive(17_600, everyone);
+            await Apply(17_590, LifecycleTx(_old[0], TransactionType.VBTC_V2_VALIDATOR_EXIT));
+            await Apply(17_600);
+            Assert.Equal(Sorted(everyone.Where(v => v != _old[0])), SignerSet(17_600));
+            Assert.False((await Verify(Send(_old[0], _friend, 5_000M), 17_601)).Ok);
+        }
+
+        /// <summary>
+        /// If recording starts one block after the bonds do, the first set is taken in the block where the stakes are
+        /// first looked at, before that look. It is the funded validators there too, not an empty set.
+        /// </summary>
+        [Fact]
+        public async Task TheFirstSignerSet_TakenBeforeAnyStakeWasLookedAt_IsTheFundedValidators()
+        {
+            Globals.BitcoinAttestationRecordHeight = Rule + 1;
+            await StartTheRule();
+            Assert.Equal(Sorted(_old), SignerSet(Rule + 1));
+            // And before the bond there is no age to ask for: the funded validators, as always.
+            Assert.Equal(Sorted(_old), ValidatorBond.SignerEligible(VBTCValidatorRegistry.GetActiveValidatorsAt(Rule - 1), Rule - 1).Select(v => v.ValidatorAddress).OrderBy(a => a, StringComparer.Ordinal).ToList());
         }
 
         // ── The graceful exit from the node itself ──────────────────────────────────────────────────────────

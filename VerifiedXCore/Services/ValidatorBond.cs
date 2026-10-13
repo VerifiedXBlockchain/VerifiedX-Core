@@ -41,9 +41,9 @@ namespace VerifiedXCore.Services
     /// <item><b>Exit.</b> A mined exit starts the wait. The stake unlocks <see cref="ExitWaitBlocks"/> blocks later:
     /// two signer epochs, the longest a report signed under a set the validator was in is still accepted. Going quiet
     /// unlocks nothing; only the exit does. A registration or heartbeat during the wait resumes the bond.</item>
-    /// <item><b>Age.</b> A validator counts for a key ceremony once its stake has been locked for
-    /// <see cref="CeremonyAgeBlocks"/> blocks (two days), and only while it is still active
-    /// (<see cref="CeremonyEligible"/>).</item>
+    /// <item><b>Age.</b> A validator counts for a key ceremony, and for an epoch's Bitcoin report signers, once its
+    /// stake has been locked for <see cref="CeremonyAgeBlocks"/> blocks (two days), and only while it is still active
+    /// (<see cref="CeremonyEligible"/>, <see cref="SignerEligible"/>).</item>
     /// <item><b>Validators already active when the rule starts</b> are bonded at that block. Those holding the
     /// balance in the block after count as aged: they were validators before there was a bond to age.</item>
     /// </list>
@@ -55,7 +55,7 @@ namespace VerifiedXCore.Services
     {
         /// <summary>VFX blocks the stake stays locked after the exit is mined: two report-signer epochs (about four and a half hours).</summary>
         public const int ExitWaitBlocks = 1_200;
-        /// <summary>VFX blocks a stake must have been locked before its validator counts for a key ceremony: two days at twelve seconds a block.</summary>
+        /// <summary>VFX blocks a stake must have been locked before its validator counts for a key ceremony or among the Bitcoin report signers: two days at twelve seconds a block.</summary>
         public const int CeremonyAgeBlocks = 14_400;
         /// <summary>How often bonds not yet seen funded are looked at again, in blocks.</summary>
         public const int FundedCheckBlocks = 100;
@@ -241,6 +241,25 @@ namespace VerifiedXCore.Services
             return Active(height) ? funded.Where(v => IsAged(v.ValidatorAddress, height)).ToList() : funded;
         }
 
+        /// <summary>
+        /// The validators whose signatures count for the Bitcoin reports of the epoch that starts at
+        /// <paramref name="height"/>, out of those given (the active set): holding the validator balance now and, from
+        /// the bond height, with a stake locked for the minimum age (owner decision, 13 October 2026). A validator
+        /// that has just registered waits two days before it signs, like it waits before it holds a key share.
+        ///
+        /// The set is taken before the block's own bond step. In the block where the bonds start and in the one after
+        /// it no stake has been looked at yet, so there the set is the funded validators, as it was before the bond:
+        /// the same validators the first look then counts as aged.
+        /// </summary>
+        public static List<VBTCValidator> SignerEligible(IEnumerable<VBTCValidator> active, long height, LiteDatabase? db = null)
+        {
+            var funded = VBTCValidatorRegistry.FundedOnly(active);
+            if (!Active(height)) return funded;
+            var marker = Rows(db).FindById(SeededMarker);
+            if (marker == null || marker.FundedSinceHeight == 0) return funded;
+            return funded.Where(v => IsAged(v.ValidatorAddress, height, db)).ToList();
+        }
+
         /// <summary>What the API shows for an address.</summary>
         public static object Describe(string address)
         {
@@ -264,6 +283,8 @@ namespace VerifiedXCore.Services
                 StakeLockedSinceHeight = row == null || row.FundedSinceHeight == 0 ? (long?)null : row.FundedSinceHeight,
                 CountsForKeyCeremoniesFromHeight = row == null || row.ExitHeight != 0 || row.FundedSinceHeight == 0 ? (long?)null : row.FundedSinceHeight + CeremonyAgeBlocks,
                 CountsForKeyCeremoniesNow = IsAged(address, next),
+                // The same age: it is in the signer set taken at the first epoch start at or after this height (while active).
+                CountsForReportSignersFromHeight = row == null || row.ExitHeight != 0 || row.FundedSinceHeight == 0 ? (long?)null : row.FundedSinceHeight + CeremonyAgeBlocks,
                 Note = !Active(next) ? "The validator bond is not in force yet."
                     : row == null ? "This address has no validator bond."
                     : row.ExitHeight != 0 && held ? $"Exited: the stake unlocks at block {UnlockHeight(row)}."

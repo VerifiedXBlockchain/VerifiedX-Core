@@ -75,14 +75,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
         /// <summary>
         /// The validators whose signatures count for this epoch: active at the previous block, and holding the validator
-        /// stake in state right now. Registration checks the stake only at the moment of its own transaction and does not
-        /// lock it, so the stake is checked again here, at one instant for everyone: one stake backs one signer.
+        /// stake in state right now. Registration checks the stake only at the moment of its own transaction, so the
+        /// stake is checked again here, at one instant for everyone: one stake backs one signer. From the bond height
+        /// that stake is locked (ValidatorBond) and must have been locked for two days before its validator is counted
+        /// (<see cref="VerifiedXCore.Services.ValidatorBond.SignerEligible"/>).
         /// </summary>
         private static void StoreSignerSet(long vfxHeight, LiteDatabase? db)
         {
             // The registry reads committed blocks only; the balance is the state after the previous block (this runs
             // before the block's own transactions). Both are the same on every node, live or replaying.
-            var addresses = VBTCValidatorRegistry.FundedOnly(VBTCValidatorRegistry.GetActiveValidatorsAt(vfxHeight - 1))
+            var addresses = VerifiedXCore.Services.ValidatorBond.SignerEligible(VBTCValidatorRegistry.GetActiveValidatorsAt(vfxHeight - 1), vfxHeight, db)
                 .Select(v => v.ValidatorAddress)
                 .Where(a => !string.IsNullOrEmpty(a))
                 .Distinct(StringComparer.Ordinal)
