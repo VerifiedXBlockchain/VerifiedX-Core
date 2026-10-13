@@ -193,12 +193,60 @@ namespace VerifiedXCore.Tests
             Assert.True(ok, "before the rule this is the hole: " + why);
             (ok, why) = await Verify(Create(uid, body), Rule);
             Assert.False(ok);
-            Assert.Contains("may not read the clock", why);
+            Assert.Contains("must read the same on every node at every time: it calls dateProc()", why);
 
             // And a contract already in state with such code (made before the rule, or as a plain NFT whose code only
             // later shows the feature) was a vault to every reader; from the rule it is not one.
             Assert.True(IsVaultAtTip(uid, body, Rule - 10));
             Assert.False(IsVaultAtTip(uid, body, Rule + 10));
+        }
+
+        /// <summary>
+        /// The clock is not the only thing outside the code. `send` writes to a table that lives as long as the process
+        /// and throws on a second call with the same key, so a body using it is read once per process and never again;
+        /// `createSig` draws a random number. A vault's code may call what it declares itself and the built-ins known to
+        /// be pure, nothing else; and a body is never run as one of the runner's console commands.
+        /// </summary>
+        [Fact]
+        public async Task AVaultsCode_CallsOnlyWhatItDeclares_AndTheBuiltInsKnownToBePure()
+        {
+            var uid = FrostDkgAttestation.NewContractUid();
+            var honest = Body(uid, VaultFeature(uid));
+            Assert.Null(LedgerIntegrityRules.NotTimelessBecause(honest));
+
+            string With(string line)
+            {
+                const string anchor = "function GetIsStC() : string";
+                var source = SourceOf(honest);
+                var brace = source.IndexOf('{', source.IndexOf(anchor, StringComparison.Ordinal));
+                return BodyOf(source.Insert(brace + 1, "\r\n   " + line));
+            }
+            foreach (var (line, named) in new[]
+            {
+                ("send(\"k|->v\")", "send"), ("var s = createSig(\"m\", \"k\")", "createSig"), ("var r = rand(5)", "rand"),
+                ("var later = dateProc(\"638000000000000000\")", "dateProc"), ("var u = somethingNobodyDeclared()", "somethingNobodyDeclared"),
+            })
+            {
+                var body = With(line);
+                Assert.Equal($"it calls {named}()", LedgerIntegrityRules.NotTimelessBecause(body));
+                var (ok, why) = await Verify(Create(uid, body), Rule);
+                Assert.False(ok, $"a vault calling {named}() was created");
+                // From the rule a stored contract with such code is not run to ask whether it is a vault: it is not one.
+                var stored = Guid.NewGuid().ToString("N") + ":1755000001";
+                Assert.False(IsVaultAtTip(stored, body, Rule + 10));
+                Assert.Null(VBTCChainView.GetVault(stored));
+            }
+
+            // A console command is not a body, whatever the runner would do with it.
+            var command = BodyOf("#load C:/somewhere/a-file");
+            Assert.Equal("it is a console command, not code", LedgerIntegrityRules.NotTimelessBecause(command));
+            Assert.Throws<InvalidOperationException>(() => SmartContractMain.GenerateSmartContractInMemory(command));
+
+            // As a plain NFT's creation (not the vault type) code that is not timeless is not asked whether it makes a
+            // vault: it never does, on any node, at any time.
+            var nft = Create(uid, With("var later = dateProc(\"638000000000000000\")"));
+            nft.TransactionType = TransactionType.NFT_MINT;
+            Assert.Null(LedgerIntegrityRules.VbtcV2DkgAttestation(nft, Rule));
         }
 
         [Fact]

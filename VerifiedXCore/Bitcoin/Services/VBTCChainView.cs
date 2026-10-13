@@ -37,6 +37,9 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             if (state == null || string.IsNullOrEmpty(state.SmartContractUID) || string.IsNullOrEmpty(state.ContractData))
                 return null;
+            // One definition of "a vault" for every reader (deposit address, signers, registration for watching).
+            if (!VBTCService.IsVbtcV2Contract(state))
+                return null;
 
             var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(state.ContractData)));
             if (!_cache.TryGetValue(state.SmartContractUID, out var entry) || entry.Digest != digest)

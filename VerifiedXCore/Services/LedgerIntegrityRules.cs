@@ -321,6 +321,9 @@ namespace VerifiedXCore.Services
                 return null; // missing: the function's own rule; a vault: VaultCodeUnchanged
             if (string.Equals(payload.Data, stored.ContractData, StringComparison.Ordinal))
                 return null;
+            // (From Globals.PathAuditRulesHeight a body whose code is not timeless is never a vault to any reader, so it
+            // is not run to ask: its answer could differ on a node that validates this block later.)
+            if (height >= Globals.PathAuditRulesHeight && !ContractCodeIsTimeless(payload.Data)) return null;
             return CarriesTokenizationV2(payload.Data)
                 ? "A contract that is not a vBTC V2 vault cannot be given a TokenizationV2 feature; vaults are created only with a validator-attested key ceremony."
                 : null;
@@ -456,6 +459,15 @@ namespace VerifiedXCore.Services
             var uid = CreatedContractUid(tx);
             if (uid == null) return null;
             var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+            // Whether this creation makes a vault is asked of the body's code. Code that is not timeless can answer no
+            // today and yes to a node that validates this block later (which would then refuse a block the network
+            // accepted and never sync past it), so from Globals.PathAuditRulesHeight it is not asked at all: such a
+            // body is never a vault to any reader (VBTCService.IsVbtcV2Contract), and the creation type that must
+            // make one is refused.
+            if (height >= Globals.PathAuditRulesHeight && NotTimelessBecause(payload.Data) is { } notTimeless)
+                return tx.TransactionType == TransactionType.VBTC_V2_CONTRACT_CREATE
+                    ? $"A vBTC V2 vault's contract code must read the same on every node at every time: {notTimeless}."
+                    : null;
             var bindingError = SmartContractDeployBinding.Validate(payload.Data, uid, tx.FromAddress, isTokenDeploy: payload.Function == "TokenDeploy()", out var decompiled);
             if (bindingError != null) return bindingError;
             // Every reader of a vault's TokenizationV2 data decompiles the body, so a body that does not decompile is never a
@@ -471,8 +483,6 @@ namespace VerifiedXCore.Services
             {
                 if (decompiled.Features!.Count(f => f != null) != 1)
                     return "A vBTC V2 vault's contract carries the TokenizationV2 feature and no other.";
-                if (!ContractCodeIsTimeless(payload.Data))
-                    return "A vBTC V2 vault's contract code may not read the clock, a random number or the console.";
             }
             var reuseError = VaultUidIsNew(tx, uid, height);
             if (reuseError != null) return reuseError;
@@ -508,32 +518,48 @@ namespace VerifiedXCore.Services
         public const string ClockBuiltin = "dateProc";
 
         /// <summary>
-        /// Whether a contract body's code gives the same result whenever and wherever it runs: it parses, and calls
-        /// none of rand(), input() and dateProc(), and has no do-while loop. Never throws.
+        /// The language built-ins whose result depends on nothing but their arguments. Every other built-in reads or
+        /// keeps something outside the code: the clock (dateProc), a random number (rand, and createSig's nonce), the
+        /// console (input), or a table that lives as long as the process does (send, whose second call with the same
+        /// key throws, so a body using it is read once per process and never again).
         /// </summary>
-        public static bool ContractCodeIsTimeless(string? body)
+        public static readonly string[] PureBuiltins = { "print", "getMethods", "getProperties", "getTokenDetails", "getVotingRules", "validateSig" };
+
+        /// <summary>
+        /// Whether a contract body's code gives the same result whenever and wherever it runs: it parses, it has no
+        /// do-while loop, and every function it calls is one it declares itself or one of
+        /// <see cref="PureBuiltins"/>. An allow-list: a built-in this node does not know to be pure is not allowed.
+        /// Decided from the text alone, so it is the same on every node at every time. Never throws.
+        /// </summary>
+        public static bool ContractCodeIsTimeless(string? body) => NotTimelessBecause(body) == null;
+
+        /// <summary>Why a body's code is not timeless; null when it is.</summary>
+        public static string? NotTimelessBecause(string? body)
         {
-            if (string.IsNullOrEmpty(body)) return false;
+            if (string.IsNullOrEmpty(body)) return "it is empty";
             try
             {
                 var text = System.Text.Encoding.Unicode.GetString(SmartContractUtility.Decompress(Convert.FromBase64String(body)));
+                if (text.TrimStart().StartsWith("#", StringComparison.Ordinal)) return "it is a console command, not code";
                 var tree = global::Trillium.Syntax.SyntaxTree.Parse(text, preventLoopsAndRecursion: true); // as the node parses it
-                if (tree.Diagnostics.Length > 0) return false;
+                if (tree.Diagnostics.Length > 0) return "it does not parse";
+                var declared = new HashSet<string>(StringComparer.Ordinal);
+                var calls = new List<string>();
                 var pending = new Stack<global::Trillium.Syntax.SyntaxNode>();
                 pending.Push(tree.Root);
                 while (pending.Count > 0)
                 {
                     var node = pending.Pop();
-                    if (node is global::Trillium.Syntax.DoWhileStatementSyntax) return false;
-                    if (node is global::Trillium.Syntax.CallExpressionSyntax call
-                        && (call.Identifier.Text == ClockBuiltin || NondeterministicBuiltins.Contains(call.Identifier.Text)))
-                        return false;
+                    if (node is global::Trillium.Syntax.DoWhileStatementSyntax) return "it has a do-while loop";
+                    if (node is global::Trillium.Syntax.FunctionDeclarationSyntax function) declared.Add(function.Identifier.Text);
+                    if (node is global::Trillium.Syntax.CallExpressionSyntax call) calls.Add(call.Identifier.Text);
                     foreach (var child in node.GetChildren())
                         pending.Push(child);
                 }
-                return true;
+                var outside = calls.FirstOrDefault(name => !declared.Contains(name) && !PureBuiltins.Contains(name));
+                return outside == null ? null : $"it calls {outside}()";
             }
-            catch { return false; }
+            catch { return "it cannot be read"; }
         }
 
         /// <summary>
@@ -561,6 +587,7 @@ namespace VerifiedXCore.Services
                 if (CreatedContractUid(tx) == null) return null;
                 var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
                 if (string.IsNullOrEmpty(payload.Data)) return null;
+                if (!ContractCodeIsTimeless(payload.Data)) return null;
                 var decompiled = SmartContractMain.GenerateSmartContractInMemory(payload.Data);
                 var v2 = decompiled?.Features?.FirstOrDefault(f => f != null && f.FeatureName == FeatureName.TokenizationV2);
                 if (v2 == null) return null;
@@ -660,6 +687,8 @@ namespace VerifiedXCore.Services
             if (tx == null || height < Globals.VbtcV1RetirementHeight) return null;
             var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
             if (payload.Function != "Mint()" || string.IsNullOrEmpty(payload.Data)) return null;
+            // As for a vault: code that is not timeless is never a V1 contract to any reader, and is not run to ask.
+            if (height >= Globals.PathAuditRulesHeight && !ContractCodeIsTimeless(payload.Data)) return null;
             try { return VBTCService.DeclaresVbtcV1(VerifiedXCore.Models.SmartContracts.SmartContractMain.GenerateSmartContractInMemory(payload.Data)) ? VbtcV1RetiredMessage : null; }
             catch { return null; }
         }

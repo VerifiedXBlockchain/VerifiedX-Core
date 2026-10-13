@@ -225,6 +225,9 @@ namespace VerifiedXCore.Models.SmartContracts
                         textFromByte = scText;
                     }
 
+                    if (textFromByte != null && textFromByte.TrimStart().StartsWith("#", StringComparison.Ordinal))
+                        throw new InvalidOperationException("A contract body cannot be a console command.");
+
                     var repl = new TrilliumRepl();
                     repl.Run("#reset");
                     repl.Run(textFromByte);
@@ -532,6 +535,10 @@ namespace VerifiedXCore.Models.SmartContracts
             var byteArrayFromBase64 = scText.FromBase64ToByteArray();
             var decompressedByteArray = SmartContractUtility.Decompress(byteArrayFromBase64);
             var textFromByte = Encoding.Unicode.GetString(decompressedByteArray);
+            // The runner treats a one-line text that starts with '#' as a console command, and one of those reads and
+            // runs a file from this node's own disk (#load). A contract body is code, never a command.
+            if (textFromByte.TrimStart().StartsWith("#", StringComparison.Ordinal))
+                throw new InvalidOperationException("A contract body cannot be a console command.");
 
             var repl = new TrilliumRepl();
             repl.Run("#reset");

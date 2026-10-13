@@ -164,6 +164,13 @@ namespace VerifiedXCore.Bitcoin.Services
             bool isV2;
             try
             {
+                // Under the rule the text is judged first, and code that is not timeless is not run at all: what it
+                // answers once it may not answer again (a per-process table, the clock), and the answer is cached.
+                if (plain && !VerifiedXCore.Services.LedgerIntegrityRules.ContractCodeIsTimeless(scState.ContractData))
+                {
+                    _vbtcV2ContractCache[scState.SmartContractUID] = (digest, plain, false);
+                    return false;
+                }
                 var scMain = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
                 isV2 = scMain?.Features?.Any(f => f != null && f.FeatureName == FeatureName.TokenizationV2) == true;
                 if (isV2 && plain)
@@ -193,6 +200,10 @@ namespace VerifiedXCore.Bitcoin.Services
                 return false;
 
             var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(scState.ContractData)));
+            // The same reading as a vault's from Globals.PathAuditRulesHeight: code that is not timeless is never a V1
+            // contract, and is not run to ask. (Not cached under the rule: the cache has no place for which rule answered.)
+            if (NextBlockHeight >= Globals.PathAuditRulesHeight && !VerifiedXCore.Services.LedgerIntegrityRules.ContractCodeIsTimeless(scState.ContractData))
+                return false;
             if (_vbtcV1ContractCache.TryGetValue(scState.SmartContractUID, out var cached) && cached.DataDigest == digest)
                 return cached.IsV1;
 
@@ -2944,7 +2955,11 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
                 if (scState != null) return false;
             }
-            catch { }
+            catch
+            {
+                // A contract that is on chain and cannot be read is not answered for from this node's own records.
+                if (SmartContractStateTrei.GetSmartContractState(scUID) != null) return false;
+            }
             var local = VBTCContractV2.GetContract(scUID);
             return local != null && local.IsS3C;
         }
