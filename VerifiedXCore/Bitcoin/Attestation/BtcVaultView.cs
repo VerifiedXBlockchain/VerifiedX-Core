@@ -177,12 +177,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 row.SettledTxid,
                 ClosedAtVfxHeight = open ? (long?)null : row.ClosedAtVfxHeight,
                 CanCancel = row.State == VaultWithdrawalState.Waiting && !row.IsBridgeExit,
-                CanRaiseFee = pinned && row.Pins.Count < BtcWithdrawals.MaxPins && !row.Pins.Any(p => !p.Dead && p.IsRelease),
+                CanRaiseFee = pinned && BtcWithdrawals.HasRoomForPayment(row) && !row.Pins.Any(p => !p.Dead && p.IsRelease),
                 // The requester may give a pinned withdrawal up: its coins are sent back to the vault, and it is refunded less that Bitcoin fee.
-                CanRelease = pinned && row.Pins.Count < BtcWithdrawals.MaxPins,
+                CanRelease = pinned && BtcWithdrawals.HasRoomForRelease(row),
                 Releasing = pinned && row.Pins.Any(p => !p.Dead && p.IsRelease),
                 // From this block on, another withdrawal of the vault that pays a higher fee rate may be fixed on this one's coins.
-                CoinsCanBeTakenFromVfxHeight = pinned && newest != null ? newest.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks : (long?)null,
+                CoinsCanBeTakenFromVfxHeight = pinned && newest != null ? BtcWithdrawals.MovingSince(row) + BtcAttestRules.StuckPinBlocks : (long?)null,
                 Transactions = row.Pins.Select(p => new
                 {
                     p.Txid,

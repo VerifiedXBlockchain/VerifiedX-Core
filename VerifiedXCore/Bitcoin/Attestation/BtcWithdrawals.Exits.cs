@@ -234,7 +234,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         {
             if (vfxHeight % BtcAttestRules.TakeRetryBlocks != 0) return;
             foreach (var row in BtcAttestStore.WithdrawalsInState(VaultWithdrawalState.Pinned, db)
-                         .Where(r => r.IsBridgeExit && r.Pins.Count < MaxPins)
+                         .Where(r => r.IsBridgeExit && HasRoomForPayment(r))
                          .OrderBy(r => r.Ref, StringComparer.Ordinal))
             {
                 var newest = row.Pins.LastOrDefault(p => !p.Dead);

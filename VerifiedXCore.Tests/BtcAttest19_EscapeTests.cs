@@ -504,6 +504,69 @@ namespace VerifiedXCore.Tests
             await AssertBacked(vault.Uid, _holder);
         }
 
+        /// <summary>
+        /// Small raises do not buy more time. Every fee bump used to start the 2,160 blocks again, so a requester adding
+        /// 1 sat/vB just before they ran out kept a vault's coin eight times as long (second path audit, 14 October
+        /// 2026). Only a raise that at least doubles the rate counts as moving again.
+        /// </summary>
+        [Fact]
+        public async Task ASmallFeeRaise_DoesNotStartTheCountAgain_ADoublingDoes()
+        {
+            var (vault, deposit, slow) = await VaultHeldByASlowWithdrawal();
+            var first = Row(slow, vault.Uid).Pins[0];
+            // The slow one pays 1 sat/vB. Raised to 10, then by one at a time: 10 counts (it more than doubled), 11 and 12 do not.
+            await AdvanceTo(first.PinnedAtVfxHeight + 100);
+            await Mine(Bump(vault.Uid, slow.Hash, 10, from: _holder));
+            var doubled = Row(slow, vault.Uid).Pins[1];
+            Assert.Equal(doubled.PinnedAtVfxHeight, BtcWithdrawals.MovingSince(Row(slow, vault.Uid)));
+            await AdvanceTo(doubled.PinnedAtVfxHeight + Stuck - 20);
+            await Mine(Bump(vault.Uid, slow.Hash, 11, from: _holder));
+            await Mine(Bump(vault.Uid, slow.Hash, 12, from: _holder));
+            Assert.Equal(doubled.PinnedAtVfxHeight, BtcWithdrawals.MovingSince(Row(slow, vault.Uid)));
+
+            // So a withdrawal that pays more takes the coin 2,160 blocks after the raise that counted.
+            await AdvanceTo(doubled.PinnedAtVfxHeight + Stuck);
+            var taker = await Mine(Request(vault.Uid, 0.001M, feeRate: 30));
+            Assert.Equal(VaultWithdrawalState.Pinned, Row(taker, vault.Uid).State);
+            Assert.Equal(new[] { Row(taker, vault.Uid).Ref }, Coin(deposit, 0).AlsoPinnedTo);
+
+            // A release does not start it again either.
+            Assert.Equal(doubled.PinnedAtVfxHeight, BtcWithdrawals.MovingSince(Row(slow, vault.Uid)));
+            await AssertBacked(vault.Uid, _holder);
+        }
+
+        /// <summary>
+        /// The give-up path stays open. Releases used to share the limit of eight transactions with fee raises: after
+        /// seven raises a withdrawal could be neither raised nor released, and a release at too low a fee could not be
+        /// followed by a better one (second path audit, 14 October 2026).
+        /// </summary>
+        [Fact]
+        public async Task AfterEveryFeeRaiseIsUsed_TheWithdrawalCanStillBeReleased_AndTheReleaseRaised()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 150_000);
+            await Mine(Transfer(vault.Uid, 0.001M));
+            var request = await Mine(Request(vault.Uid, 0.001M, from: _holder));
+            for (var rate = 11; rate <= 17; rate++)
+                await Mine(Bump(vault.Uid, request.Hash, rate, from: _holder));
+            Assert.Equal(BtcWithdrawals.MaxPins, Row(request, vault.Uid).Pins.Count);
+            await RefusedInBlock(Bump(vault.Uid, request.Hash, 18, from: _holder), "It can still be released");
+
+            await Mine(Release(vault.Uid, request.Hash, 20, from: _holder));
+            await Mine(Release(vault.Uid, request.Hash, 30, from: _holder));
+            var row = Row(request, vault.Uid);
+            Assert.Equal(BtcWithdrawals.MaxPins + 2, row.Pins.Count);
+            Assert.True(row.Pins[^1].IsRelease);
+            // Releases have a limit of their own.
+            for (var rate = 40; row.Pins.Count(p => p.IsRelease) < BtcWithdrawals.MaxReleasePins; rate += 10)
+            {
+                await Mine(Release(vault.Uid, request.Hash, rate, from: _holder));
+                row = Row(request, vault.Uid);
+            }
+            await RefusedInBlock(Release(vault.Uid, request.Hash, 500, from: _holder), $"already has {BtcWithdrawals.MaxReleasePins} release transactions");
+        }
+
         [Fact]
         public async Task TwoWithdrawalsThatAreTheSameBitcoinTransaction_ArePaidOnce()
         {

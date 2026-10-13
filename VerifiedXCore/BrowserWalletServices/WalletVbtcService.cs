@@ -163,8 +163,8 @@ namespace VerifiedXCore.BrowserWalletServices
                         bitcoinTxid = newest?.Txid,
                         waitingFor = pinned ? null : w.WaitingReason,
                         canCancel = !pinned,
-                        canRaiseFee = pinned && w.Pins.Count < Bitcoin.Attestation.BtcWithdrawals.MaxPins && !w.Pins.Any(p => !p.Dead && p.IsRelease),
-                        canRelease = pinned && w.Pins.Count < Bitcoin.Attestation.BtcWithdrawals.MaxPins,
+                        canRaiseFee = pinned && Bitcoin.Attestation.BtcWithdrawals.HasRoomForPayment(w) && !w.Pins.Any(p => !p.Dead && p.IsRelease),
+                        canRelease = pinned && Bitcoin.Attestation.BtcWithdrawals.HasRoomForRelease(w),
                         releasing = pinned && w.Pins.Any(p => !p.Dead && p.IsRelease),
                     };
                 }).ToList();

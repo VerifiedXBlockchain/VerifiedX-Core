@@ -83,7 +83,27 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var newest = row.Pins.LastOrDefault(p => !p.Dead);
             if (newest == null) return false;
             var pays = newest.FeeRate > 0 ? newest.FeeRate : row.FeeRate;
-            return vfxHeight >= newest.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks && pays < feeRate;
+            return vfxHeight >= MovingSince(row) + BtcAttestRules.StuckPinBlocks && pays < feeRate;
+        }
+
+        /// <summary>
+        /// The block from which a pinned withdrawal's "has it stopped moving" is counted: its first live transaction,
+        /// or a later payment that at least doubled the fee rate of the one the count stood at. Every fee bump used to
+        /// start the count again, so a requester raising a small withdrawal by 1 sat/vB every 2,159 blocks kept a
+        /// vault's coin for eight times as long, for eight VFX fees (second path audit, 14 October 2026). A raise that
+        /// is serious about being confirmed doubles; anything less leaves the count where it was. A release never
+        /// restarts it.
+        /// </summary>
+        internal static long MovingSince(VaultWithdrawalRow row)
+        {
+            VaultPin? counted = null;
+            foreach (var pin in row.Pins.Where(p => !p.Dead && !p.IsRelease))
+            {
+                var rate = pin.FeeRate > 0 ? pin.FeeRate : row.FeeRate;
+                var standing = counted == null ? 0 : (counted.FeeRate > 0 ? counted.FeeRate : row.FeeRate);
+                if (counted == null || rate >= 2 * standing) counted = pin;
+            }
+            return counted?.PinnedAtVfxHeight ?? row.Pins.Where(p => !p.Dead).Select(p => p.PinnedAtVfxHeight).DefaultIfEmpty(row.RequestVfxHeight).Min();
         }
 
         /// <summary>
@@ -127,7 +147,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 if (newest == null) continue;
                 var pays = newest.FeeRate > 0 ? newest.FeeRate : pinned.FeeRate;
                 if (pays >= waiting.FeeRate) continue; // never takeable by this one
-                until = Math.Max(until, newest.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks + BtcAttestRules.TakeRetryBlocks);
+                until = Math.Max(until, MovingSince(pinned) + BtcAttestRules.StuckPinBlocks + BtcAttestRules.TakeRetryBlocks);
             }
             return until;
         }

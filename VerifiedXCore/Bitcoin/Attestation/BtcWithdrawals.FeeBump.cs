@@ -29,8 +29,20 @@ namespace VerifiedXCore.Bitcoin.Attestation
     {
         public const string FeeBumpFunction = "VBTCWithdrawalFeeBump()";
 
-        /// <summary>Transactions one withdrawal may have pinned: the first and seven replacements.</summary>
+        /// <summary>Payment transactions one withdrawal may have pinned: the first and seven replacements.</summary>
         public const int MaxPins = 8;
+
+        /// <summary>
+        /// Release transactions one withdrawal may have pinned, counted apart from its payments. They used to share the
+        /// payments' limit, so a requester who had raised the fee seven times could no longer give the withdrawal up,
+        /// and one release at too low a fee could not be followed by another (second path audit, 14 October 2026).
+        /// </summary>
+        public const int MaxReleasePins = 4;
+
+        /// <summary>Whether the withdrawal may have one more payment transaction pinned.</summary>
+        public static bool HasRoomForPayment(VaultWithdrawalRow row) => row.Pins.Count(p => !p.IsRelease) < MaxPins;
+        /// <summary>Whether the withdrawal may have one more release transaction pinned.</summary>
+        public static bool HasRoomForRelease(VaultWithdrawalRow row) => row.Pins.Count(p => p.IsRelease) < MaxReleasePins;
 
         /// <summary>The withdrawal a fee bump names, as "requestHash|scUID" with the contract as state spells it; null when it does not say.</summary>
         public static string? FeeBumpRef(Transaction tx)
@@ -87,7 +99,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
             var live = row.Pins.Where(p => !p.Dead).ToList();
             if (live.Count == 0) return "This withdrawal has no live Bitcoin transaction.";
-            if (row.Pins.Count >= MaxPins) return $"This withdrawal already has {MaxPins} Bitcoin transactions; no more replacements are accepted.";
+            if (isRelease && !HasRoomForRelease(row)) return $"This withdrawal already has {MaxReleasePins} release transactions; no more are accepted.";
+            if (!isRelease && !HasRoomForPayment(row)) return $"This withdrawal already has {MaxPins} Bitcoin transactions; no more replacements are accepted. It can still be released.";
             var newest = live[^1];
             var paying = newest.FeeRate > 0 ? newest.FeeRate : row.FeeRate;
             if (feeRate <= paying)
