@@ -463,16 +463,17 @@ namespace VerifiedXCore.Tests
             await RefusedInBlock(Exit(NewBurn(), BtcDest, (olderLock, older.Uid, 0.001M), (watchedLock, watched.Uid, 0.001M)), "not on both");
             // The lock's own record says which vault it belongs to, whatever the transaction claims.
             await RefusedInBlock(Exit(NewBurn(), BtcDest, (olderLock, watched.Uid, 0.001M), (watchedLock, watched.Uid, 0.001M)), "not on both");
-            await RefusedInBlock(Exit(NewBurn(), BtcDest, (watchedLock, watched.Uid, 0.00002085M)), "at least 2086 sats");
+            await RefusedInBlock(Exit(NewBurn(), BtcDest, (watchedLock, watched.Uid, 0.00025185M)), "at least 25186 sats");
             await RefusedInBlock(Exit(NewBurn(), "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", (watchedLock, watched.Uid, 0.001M)), "not an address on this network");
             // To the address of the vault that would pay it: the payment could not be told from the change, and no signer would sign it.
             await RefusedInBlock(Exit(NewBurn(), watched.Address, (watchedLock, watched.Uid, 0.001M)), "is the deposit address of vault");
 
-            // The smallest part a vault can pay is accepted and pinned: its fee, and an output of exactly the dust limit.
+            // The smallest part a vault can pay is accepted and pinned: what is left after its first fee (10 sat/vB) can
+            // still pay four doublings of it and an output of the dust limit.
             var smallBurn = NewBurn();
-            await Mine(Exit(smallBurn, BtcDest, (watchedLock, watched.Uid, 0.00002086M)));
+            await Mine(Exit(smallBurn, BtcDest, (watchedLock, watched.Uid, 0.00025186M)));
             var pin = Assert.Single(Part(smallBurn, watched.Uid).Pins);
-            Assert.Equal(546, pin.DestinationSats);
+            Assert.Equal(25_186 - 1_540, pin.DestinationSats);
 
             // An exit on older vaults only is not touched by these rules: it is paid the earlier way, and nothing is pinned for it.
             var burn = NewBurn();
@@ -639,13 +640,23 @@ namespace VerifiedXCore.Tests
             Assert.Equal(400_000, BtcAttestStore.Total(vault.Uid).SettledExitSats);
             Assert.Equal(600_000, BtcAttestStore.Total(vault.Uid).HeldSats);
 
-            // A part too small to bear the next fee keeps the transaction it has.
-            var smallLock = await Lock(vault.Uid, 0.00003M);
+            // The smallest part an exit may have bears four doublings (10 to 160 sat/vB), and then keeps what it has:
+            // a fifth would leave nothing to pay.
+            Assert.Equal(25_186, BtcWithdrawals.MinExitPartSats);
+            var smallLock = await Lock(vault.Uid, 0.00025186M);
             var smallBurn = NewBurn();
-            await Mine(Exit(smallBurn, BtcDest, (smallLock, vault.Uid, 0.00003M)));        // 3,000 sats: 1,540 of fee, 1,460 paid
-            var small = Assert.Single(Part(smallBurn, vault.Uid).Pins);
-            await AdvanceTo(Looks(small.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks));
-            Assert.Single(Part(smallBurn, vault.Uid).Pins);                                  // 3,080 of fee would leave nothing to pay
+            await Mine(Exit(smallBurn, BtcDest, (smallLock, vault.Uid, 0.00025186M)));
+            for (var doubling = 1; doubling <= BtcWithdrawals.ExitPartBearsDoublings; doubling++)
+            {
+                var newest = Part(smallBurn, vault.Uid).Pins[^1];
+                await AdvanceTo(Looks(newest.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks));
+                Assert.Equal(doubling + 1, Part(smallBurn, vault.Uid).Pins.Count);
+            }
+            var last = Part(smallBurn, vault.Uid).Pins[^1];
+            Assert.Equal(160, last.FeeRate);
+            Assert.Equal(546, last.DestinationSats);                                         // the fee at 160 sat/vB and an output above dust
+            await AdvanceTo(Looks(last.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks));
+            Assert.Equal(BtcWithdrawals.ExitPartBearsDoublings + 1, Part(smallBurn, vault.Uid).Pins.Count);
         }
     }
 }

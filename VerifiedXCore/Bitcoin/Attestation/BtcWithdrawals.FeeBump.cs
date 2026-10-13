@@ -84,6 +84,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var asked = data["FeeRate"]?.ToObject<long?>();
             if (asked is not > 0) return "A fee bump names a fee rate above zero.";
             feeRate = asked.Value;
+            if (feeRate > BtcCanonicalWithdrawal.MaxFeeRate) return $"A withdrawal's fee rate is at most {BtcCanonicalWithdrawal.MaxFeeRate} sat/vB; this names {feeRate}.";
 
             row = BtcAttestStore.Withdrawal(reference, db);
             if (row == null || row.IsBridgeExit) return "No such withdrawal request is known on this contract.";

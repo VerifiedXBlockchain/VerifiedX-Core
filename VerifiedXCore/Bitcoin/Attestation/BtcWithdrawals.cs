@@ -67,6 +67,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         // the smallest one must be an output Bitcoin relays. A request below that could never be
                         // pinned: it would only hold its requester's vBTC until its window ran out.
                         var feeRate = data["FeeRate"]?.ToObject<long?>() ?? 0;
+                        if (feeRate > BtcCanonicalWithdrawal.MaxFeeRate)
+                            return $"A withdrawal's fee rate is at most {BtcCanonicalWithdrawal.MaxFeeRate} sat/vB; this one names {feeRate}.";
                         foreach (var (vault, amount) in outflows)
                         {
                             var sats = (long)(amount * BtcAttestBalance.SatsPerBtc);

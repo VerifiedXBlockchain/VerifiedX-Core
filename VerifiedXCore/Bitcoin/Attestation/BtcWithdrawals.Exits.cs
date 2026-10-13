@@ -39,11 +39,18 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <summary>The fee rate of a bridge exit's Bitcoin transaction, sat/vB: the one exits have always paid.</summary>
         public const long ExitFeeRate = 10;
 
+        /// <summary>How many times the rule can double a part's fee rate that every part must be able to bear (10 to 160 sat/vB).</summary>
+        public const int ExitPartBearsDoublings = 4;
+
         /// <summary>
-        /// The least one vault may be asked to pay for an exit: the fee of the smallest transaction, and an output
-        /// above dust. A smaller part could never be pinned.
+        /// The least one vault may be asked to pay for an exit: the fee of the smallest transaction after the rule has
+        /// doubled it <see cref="ExitPartBearsDoublings"/> times, and an output above dust (25,186 sats). It used to be
+        /// the fee at 10 sat/vB and dust (2,086 sats): such a part could never have its fee raised, nobody can release
+        /// or take over an exit's part, and so it held the coin it was fixed on (in a vault with one coin, the whole
+        /// vault) for as long as Bitcoin asked more than 10 sat/vB, at the price of a 2,100-sat burn (second path
+        /// audit, 14 October 2026).
         /// </summary>
-        public static readonly long MinExitPartSats = BtcCanonicalWithdrawal.VSize(1) * ExitFeeRate + BtcCanonicalWithdrawal.DustSats;
+        public static readonly long MinExitPartSats = BtcCanonicalWithdrawal.VSize(1) * ExitFeeRate * (1L << ExitPartBearsDoublings) + BtcCanonicalWithdrawal.DustSats;
 
         /// <summary>
         /// The id of one vault's part of an exit. Keyed by the exit transaction and its block, so an exit made again
@@ -242,6 +249,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 long rate;
                 try { rate = checked((newest.FeeRate > 0 ? newest.FeeRate : row.FeeRate) * 2); }
                 catch (OverflowException) { continue; }
+                if (rate > BtcCanonicalWithdrawal.MaxFeeRate) continue;
                 var replacement = BtcCanonicalWithdrawal.BuildReplacement(row.SmartContractUID, row.DestinationScriptHex, row.AmountSats, rate, newest.Inputs, row.Ref, out _, db);
                 if (replacement == null) continue; // the fee would leave too little to pay, or a coin is not there (a rewind)
 

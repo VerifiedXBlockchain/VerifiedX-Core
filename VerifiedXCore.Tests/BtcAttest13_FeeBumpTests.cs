@@ -343,6 +343,33 @@ namespace VerifiedXCore.Tests
             await RefusedInBlock(Bump(vault.Uid, request.Hash, 646), "leaves less than 546 sats");
         }
 
+        /// <summary>
+        /// A fee rate has a ceiling. Without one, a rate above the 10,000 sat/vB at which Bitcoin nodes refuse to pass a
+        /// transaction on fixed a transaction that could not be broadcast, and every way out (a raise, a release, a
+        /// takeover) needs a still higher rate: the coins and the vBTC were held with no way out (second path audit,
+        /// 14 October 2026).
+        /// </summary>
+        [Fact]
+        public async Task AFeeRate_IsAtMostFiveThousand_ForARequest_ARaise_AndARelease()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 5_000_000);
+            Assert.Equal(5_000, BtcCanonicalWithdrawal.MaxFeeRate);
+
+            await RefusedInBlock(Request(vault.Uid, 0.02M, feeRate: 5_001), "fee rate is at most 5000 sat/vB");
+            await RefusedInBlock(Request(vault.Uid, 0.02M, feeRate: 20_000), "fee rate is at most 5000 sat/vB");
+            var request = await Mine(Request(vault.Uid, 0.02M, feeRate: 4_000));
+            Assert.Equal(VaultWithdrawalState.Pinned, Row(request, vault.Uid).State);
+
+            await RefusedInBlock(Bump(vault.Uid, request.Hash, 5_001), "fee rate is at most 5000 sat/vB");
+            var release = SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_COIN_PIN,
+                new { Function = BtcWithdrawals.ReleaseFunction, ContractUID = vault.Uid, WithdrawalRequestHash = request.Hash, FeeRate = 5_001, Nonce = Guid.NewGuid().ToString("N") });
+            await RefusedInBlock(release, "fee rate is at most 5000 sat/vB");
+            await Mine(Bump(vault.Uid, request.Hash, 5_000));
+            Assert.Equal(5_000, Row(request, vault.Uid).Pins[^1].FeeRate);
+        }
+
         [Fact]
         public async Task AWithdrawal_HasAtMostEightTransactions_AndABlockCarriesOneBumpForIt()
         {

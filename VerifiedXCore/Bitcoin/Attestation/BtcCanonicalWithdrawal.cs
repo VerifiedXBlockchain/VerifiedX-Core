@@ -51,8 +51,21 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <summary>The sequence of every input: replaceable (BIP 125), with no effect on the lock time.</summary>
         public const uint InputSequence = 0xFFFFFFFD;
 
-        /// <summary>The size estimate, in virtual bytes: 57.5 per input + 2 x 43 + 10.5, rounded down (154 for one input).</summary>
-        public static long VSize(int inputs) => (115L * inputs + 193) / 2;
+        /// <summary>
+        /// The size estimate, in virtual bytes: 57.5 per input + 2 x 43 + 10.5, rounded up (154 for one input, 212 for
+        /// two). Rounded down, a transaction with an even number of inputs paid a fraction under its fee rate, and at
+        /// 1 sat/vB that is under what Bitcoin nodes relay.
+        /// </summary>
+        public static long VSize(int inputs) => (115L * inputs + 194) / 2;
+
+        /// <summary>
+        /// The highest fee rate a withdrawal's Bitcoin transaction may be fixed at, sat/vB. Above anything Bitcoin has
+        /// asked for, and under the 10,000 sat/vB at which Bitcoin nodes refuse to send a transaction on as a likely
+        /// mistake: a withdrawal fixed above that could not be broadcast, and every way out of it (a raise, a release,
+        /// a takeover) needs a still higher rate, so its coins and its requester's vBTC were held with no way out
+        /// (second path audit, 14 October 2026). It also bounds what a mistyped rate can cost.
+        /// </summary>
+        public const long MaxFeeRate = 5_000;
 
         /// <summary>The script a Bitcoin address pays to, on the network this chain follows; false when it is not an address there.</summary>
         public static bool TryDestinationScript(string? address, out string scriptHex)

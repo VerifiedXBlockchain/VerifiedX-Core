@@ -264,8 +264,8 @@ namespace VerifiedXCore.Tests
             var request = await Mine(Request(vault.Uid, 0.001M));
             var pin = Row(request, vault.Uid).Pins[0];
             Assert.Equal(new[] { Outpoint(c2, 0), Outpoint(c1, 0) }, pin.Inputs);  // 70,000 then 40,000: covered
-            Assert.Equal(211 * 10, pin.FeeSats);                                    // two inputs: 57.5 x 2 + 96.5, rounded down
-            Assert.Equal(100_000 - 2_110, pin.DestinationSats);
+            Assert.Equal(212 * 10, pin.FeeSats);                                    // two inputs: 57.5 x 2 + 96.5, rounded up
+            Assert.Equal(100_000 - 2_120, pin.DestinationSats);
             Assert.Equal(10_000, pin.ChangeSats);
             Assert.Equal(VaultCoinStatus.Unspent, BtcAttestStore.Coin(Outpoint(c3, 0))!.Status);
 
