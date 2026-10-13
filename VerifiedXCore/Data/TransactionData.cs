@@ -1220,6 +1220,24 @@ namespace VerifiedXCore.Data
             return result;
         }
 
+        /// <summary>
+        /// Why a transaction would be dropped by every peer for overspending together with its sender's transactions
+        /// already waiting in the mempool; null when it would not. The check peers make on receipt
+        /// (DoubleSpendReplayCheck), for a route that submits a transaction signed elsewhere: without it the route
+        /// answered "broadcast" for a transaction nobody kept.
+        /// </summary>
+        public static string? PendingOverspendReason(Transaction tx)
+        {
+            try
+            {
+                var waiting = GetPool().Find(x => x.FromAddress == tx.FromAddress && x.Hash != tx.Hash).ToList();
+                if (waiting.Count == 0) return null;
+                var (ok, reason) = SameBlockDebitGuard.CheckAgainstPending(tx, waiting);
+                return ok ? null : reason;
+            }
+            catch { return null; }
+        }
+
         public static async Task<bool> DoubleSpendReplayCheck(Transaction tx, bool skipDebitGuard = false)
         {
             bool result = false;

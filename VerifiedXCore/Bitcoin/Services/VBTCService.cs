@@ -95,7 +95,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     r.BTCDestination,
                     r.FeeRate,
                     r.RequestBlockHeight,
-                    ExpiresAtHeight = r.RequestBlockHeight + VBTCWithdrawalRequest.EXPIRY_BLOCKS,
+                    // On a watched vault only a request still waiting for coins runs out; once its Bitcoin transaction is fixed it does not.
+                    ExpiresAtHeight = watched != null && watched.State != Attestation.VaultWithdrawalState.Waiting ? (long?)null : r.RequestBlockHeight + VBTCWithdrawalRequest.EXPIRY_BLOCKS,
                     Expired = isExpired,
                     Unpayable = watched == null && GetUnpayableWithdrawalMessage(r) != null,
                     CancellationPending = watched == null && VBTCWithdrawalCancellation.HasPendingCancellation(r.TransactionHash, now, scUID),

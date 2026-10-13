@@ -115,6 +115,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
         // ── A withdrawal ────────────────────────────────────────────────────────────────────────────────────
 
         /// <summary>One withdrawal's row for a watched vault, or null when there is none (the vault is not watched, or the request is unknown there).</summary>
+        /// <summary>Whether a withdrawal on a watched vault can still be cancelled: only while no Bitcoin transaction is fixed for it.</summary>
+        public static bool CanCancel(string? scUID, string? requestHash) =>
+            Row(scUID, requestHash) is { } row && row.State == VaultWithdrawalState.Waiting && !row.IsBridgeExit;
+
         public static VaultWithdrawalRow? Row(string? scUID, string? requestHash) =>
             string.IsNullOrEmpty(requestHash) ? null : BtcAttestStore.Withdrawal(BtcWithdrawals.RefOf(requestHash, Stored(scUID)));
 
@@ -270,8 +274,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
             return new
             {
                 // "Success" as these routes have always meant it for a caller that polls them: the withdrawal is paid
-                // or is being paid. False only when there is nothing to wait for.
+                // or is being paid. False only when there is nothing to wait for. Whether it IS paid is "Paid": until
+                // then its Bitcoin transaction can still be replaced by a fee raise, lose its coins to another
+                // withdrawal, or be released, so the transaction is named apart from the one that paid.
                 Success = success || waiting,
+                Paid = row != null && row.State == VaultWithdrawalState.Settled,
                 Attested = true,
                 Message = message,
                 Status = row == null ? "Unknown" : row.State switch
@@ -286,7 +293,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 NothingToDo = row != null,
                 NotMinedYet = row == null,
                 VFXTransactionHash = string.IsNullOrEmpty(vfxTxHash) ? null : vfxTxHash,
-                BTCTransactionHash = string.IsNullOrEmpty(btcTxHash) ? null : btcTxHash,
+                BTCTransactionHash = row != null && row.State == VaultWithdrawalState.Settled && !string.IsNullOrEmpty(btcTxHash) ? btcTxHash : null,
+                PinnedBTCTransactionHash = row != null && row.State == VaultWithdrawalState.Pinned && !string.IsNullOrEmpty(btcTxHash) ? btcTxHash : null,
                 SmartContractUID = Stored(scUID),
                 WithdrawalRequestHash = requestHash,
                 Withdrawal = row == null ? null : Describe(row),

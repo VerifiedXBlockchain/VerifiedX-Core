@@ -1016,6 +1016,11 @@ namespace VerifiedXCore.Controllers
                             transaction.TransactionRating = rating;
                         }
 
+                        // What every peer checks on receipt: with this sender's transactions already waiting it must not overspend.
+                        var waitingOverspend = TransactionData.PendingOverspendReason(transaction);
+                        if (waitingOverspend != null)
+                            return JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Not broadcast: together with this address's transactions still waiting to be mined it would overspend ({waitingOverspend}). Submit it again once they are mined." });
+
                         await TransactionData.AddToPool(transaction);
                         await P2PClient.SendTXMempool(transaction);//send out to mempool
 

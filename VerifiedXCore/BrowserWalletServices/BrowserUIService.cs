@@ -1008,8 +1008,8 @@ function renderVBTC(contracts){
     var canComplete=!c.attested&&!c.frozen&&c.withdrawalStatus==='Requested';
     var btns='<div class=""nft-actions"" style=""margin-top:6px"">';
     if(c.balance>0&&!c.frozen)btns+='<button class=""act-btn prim"" onclick=""openVBTCTx('+jsa(c.scUID)+','+Number(c.balance)+')"">&rarr; Send vBTC</button>';
-    if(c.balance>0&&!c.frozen)btns+='<button class=""act-btn prim"" style=""background:rgba(88,166,255,.15);border-color:rgba(88,166,255,.4)"" onclick=""openBridge('+jsa(c.scUID)+','+jsa(c.ownerAddress)+','+Number(c.balance)+')"">&#127881; Bridge to Base</button>';
-    if(canRequest)btns+='<button class=""act-btn prim"" onclick=""openWD('+jsa(c.scUID)+','+jsa(c.ownerAddress)+','+Number(c.balance)+')"">&darr; Withdraw</button>';
+    if(c.balance>0&&!c.frozen)btns+='<button class=""act-btn prim"" style=""background:rgba(88,166,255,.15);border-color:rgba(88,166,255,.4)"" onclick=""openBridge('+jsa(c.scUID)+','+jsa(selAddr)+','+Number(c.balance)+')"">&#127881; Bridge to Base</button>';
+    if(canRequest)btns+='<button class=""act-btn prim"" onclick=""openWD('+jsa(c.scUID)+','+jsa(selAddr)+','+Number(c.balance)+')"">&darr; Withdraw</button>';
     if(canComplete)btns+='<button class=""act-btn sec"" onclick=""openWDC('+jsa(c.scUID)+','+Number(c.activeWithdrawalAmount)+','+jsa(c.activeWithdrawalDest||'')+')"">&check; Complete Withdrawal</button>';
     btns+='</div>';
     return '<div class=""vbtc-card"">'+

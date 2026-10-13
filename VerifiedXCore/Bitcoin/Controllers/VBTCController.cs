@@ -2064,7 +2064,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     VotingRulesHeight = Globals.VbtcCancellationVoteRulesHeight,
                     ActiveVoters = activeVoters,
                     RequiredApprovals = required == int.MaxValue ? (int?)null : required,
-                    CanCancelNow = request != null && !request.IsCompleted
+                    CanCancelNow = VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(scUID)
+                        ? VerifiedXCore.Bitcoin.Attestation.BtcVaultView.CanCancel(scUID, withdrawalRequestHash) // a watched vault: only while it waits for coins
+                        : request != null && !request.IsCompleted
                         && (rulesActive
                             ? VBTCWithdrawalCancellation.GetOpenCancellation(withdrawalRequestHash, scUID, tip + 1) == null
                             : cancellations.Count == 0),
@@ -2619,7 +2621,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var ownerState = SmartContractStateTrei.GetSmartContractState(payload.SmartContractUID);
                 if (ownerState == null || ownerState.OwnerAddress != payload.OwnerAddress)
                 {
-                    return JsonConvert.SerializeObject(new { Success = false, Message = "Only the contract owner can request cancellation" });
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "This route cancels a withdrawal for the contract's owner. Anyone who requested a withdrawal cancels it with GetRawCancelWithdrawalTxData and SendRawCancelWithdrawalTx." });
                 }
 
                 // 5. No record is saved here. A cancellation exists only once the requester's signed
@@ -2994,6 +2996,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 // (the old order) meant a bad signature or fee shortfall destroyed the build, and the
                 // corrected retry got a misleading "No pending transaction found". The atomic remove
                 // also stops a concurrent duplicate submit of the same hash from broadcasting twice.
+                // What every peer checks on receipt: with this sender's transactions already waiting it must not overspend.
+                var waitingOverspend = TransactionData.PendingOverspendReason(pendingTx);
+                if (waitingOverspend != null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Not broadcast: together with this address's transactions still waiting to be mined it would overspend ({waitingOverspend}). Submit it again once they are mined." });
                 if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out _))
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction {body.Hash} was already submitted." });
 
@@ -3371,6 +3377,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 // (the old order) meant a bad signature or fee shortfall destroyed the build, and the
                 // corrected retry got a misleading "No pending transaction found". The atomic remove
                 // also stops a concurrent duplicate submit of the same hash from broadcasting twice.
+                // What every peer checks on receipt: with this sender's transactions already waiting it must not overspend.
+                var waitingOverspend = TransactionData.PendingOverspendReason(pendingTx);
+                if (waitingOverspend != null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Not broadcast: together with this address's transactions still waiting to be mined it would overspend ({waitingOverspend}). Submit it again once they are mined." });
                 if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out _))
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction {body.Hash} was already submitted." });
 
@@ -3525,6 +3535,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 // (the old order) meant a bad signature or fee shortfall destroyed the build, and the
                 // corrected retry got a misleading "No pending transaction found". The atomic remove
                 // also stops a concurrent duplicate submit of the same hash from broadcasting twice.
+                // What every peer checks on receipt: with this sender's transactions already waiting it must not overspend.
+                var waitingOverspend = TransactionData.PendingOverspendReason(pendingTx);
+                if (waitingOverspend != null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Not broadcast: together with this address's transactions still waiting to be mined it would overspend ({waitingOverspend}). Submit it again once they are mined." });
                 if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out _))
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction {body.Hash} was already submitted." });
 
@@ -3659,6 +3673,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 // (the old order) meant a bad signature or fee shortfall destroyed the build, and the
                 // corrected retry got a misleading "No pending transaction found". The atomic remove
                 // also stops a concurrent duplicate submit of the same hash from broadcasting twice.
+                // What every peer checks on receipt: with this sender's transactions already waiting it must not overspend.
+                var waitingOverspend = TransactionData.PendingOverspendReason(pendingTx);
+                if (waitingOverspend != null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Not broadcast: together with this address's transactions still waiting to be mined it would overspend ({waitingOverspend}). Submit it again once they are mined." });
                 if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out _))
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction {body.Hash} was already submitted." });
 
@@ -3781,6 +3799,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction verification failed: {reason}" });
 
                 // Claimed only once it is known-good, so a bad signature does not destroy the build (as for the other raw routes).
+                // What every peer checks on receipt: with this sender's transactions already waiting it must not overspend.
+                var waitingOverspend = TransactionData.PendingOverspendReason(pendingTx);
+                if (waitingOverspend != null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Not broadcast: together with this address's transactions still waiting to be mined it would overspend ({waitingOverspend}). Submit it again once they are mined." });
                 if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out _))
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction {body.Hash} was already submitted." });
 
@@ -4259,6 +4281,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 // (the old order) meant a bad signature or fee shortfall destroyed the build, and the
                 // corrected retry got a misleading "No pending transaction found". The atomic remove
                 // also stops a concurrent duplicate submit of the same hash from broadcasting twice.
+                // What every peer checks on receipt: with this sender's transactions already waiting it must not overspend.
+                var waitingOverspend = TransactionData.PendingOverspendReason(pendingTx);
+                if (waitingOverspend != null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Not broadcast: together with this address's transactions still waiting to be mined it would overspend ({waitingOverspend}). Submit it again once they are mined." });
                 if (!_pendingRawVbtcTxs.TryRemove(body.Hash, out _))
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction {body.Hash} was already submitted." });
 
@@ -5091,6 +5117,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
         {
             try
             {
+                if (SmartContractStateTrei.GetSmartContractState(scUID) == null)
+                    return Task.FromResult(JsonConvert.SerializeObject(new { Success = false, Attested = false, Message = $"No contract {scUID} is on chain. Check the contract UID." }));
                 if (!VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(SmartContractStateTrei.GetSmartContractState(scUID)?.SmartContractUID ?? scUID))
                     return Task.FromResult(JsonConvert.SerializeObject(new
                     {

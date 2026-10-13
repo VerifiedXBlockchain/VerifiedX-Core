@@ -220,7 +220,11 @@ namespace VerifiedXCore.Tests
                 Assert.True((bool)r["Attested"]!);
                 Assert.True((bool)r["NothingToDo"]!);
                 Assert.Equal("Awaiting_BTC_Confirmation", (string)r["Status"]!);
-                Assert.Equal(pin.Txid, (string)r["BTCTransactionHash"]!);
+                // Not paid yet: the transaction fixed for it is named apart from "the transaction that paid" (it can still
+                // be replaced by a fee raise, lose its coins, or be released).
+                Assert.False((bool)r["Paid"]!);
+                Assert.Equal(JTokenType.Null, r["BTCTransactionHash"]!.Type);
+                Assert.Equal(pin.Txid, (string)r["PinnedBTCTransactionHash"]!);
                 Assert.StartsWith(VBTCService.AwaitingConfirmationMarker, (string)r["Message"]!);
                 Assert.Null(r["SignedBTCTxHex"]);
                 Assert.Null(r["Hash"]);
@@ -275,7 +279,9 @@ namespace VerifiedXCore.Tests
             {
                 Assert.True((bool)r["Success"]!);
                 Assert.Equal("Completed", (string)r["Status"]!);
+                Assert.True((bool)r["Paid"]!);
                 Assert.Equal(pin.Txid, (string)r["BTCTransactionHash"]!);
+                Assert.Equal(JTokenType.Null, r["PinnedBTCTransactionHash"]!.Type);
                 Assert.Equal(report.Hash, (string)r["VFXTransactionHash"]!);
             }
             direct = await VBTCService.CompleteWithdrawal(vault.Uid, request.Hash);
