@@ -53,6 +53,8 @@ namespace VerifiedXCore.Tests
         private long _lostToForeignSpends;
         /// <summary>Deposits a reorganisation dropped that have not confirmed again yet (they do, in the end).</summary>
         private readonly List<BtcTx> _notYetBack = new();
+        /// <summary>Dropped transactions that spend a vault coin which was not back yet: Bitcoin confirms them again once it is.</summary>
+        private readonly List<BtcTx> _waitingForACoin = new();
         private Random _rng = new(1);
 
         private V Caster => Signers[0];
@@ -357,7 +359,11 @@ namespace VerifiedXCore.Tests
             foreach (var tx in dropped)
             {
                 if (IsDepositFromOutside(tx) && _rng.Next(4) == 0) continue;   // this one does not confirm again for now
-                if (!Spendable(tx)) continue;                                   // it needs a coin that is not back
+                if (!Spendable(tx))                                             // it needs a coin that is not back
+                {
+                    if (!IsDepositFromOutside(tx)) _waitingForACoin.Add(tx);
+                    continue;
+                }
                 await MineAndReport(tx);
                 _notYetBack.Remove(tx);
                 await Check("deep reorg (a dropped transaction confirmed again)");
@@ -475,12 +481,28 @@ namespace VerifiedXCore.Tests
                 _notYetBack.Remove(deposit);
                 await Check("a dropped deposit confirmed after all");
             }
+            // With the deposits back, the dropped transactions that were waiting for their coins confirm again too
+            // (a withdrawal fixed on what one of them pays back to the vault is waiting for exactly that).
+            for (var again = true; again;)
+            {
+                again = false;
+                foreach (var tx in _waitingForACoin.ToList())
+                {
+                    var coins = tx.Inputs.Select(i => BtcAttestStore.Coin(BtcAttestStore.OutpointKey(i.PrevOut.Hash.ToString(), i.PrevOut.N))).ToList();
+                    if (coins.Any(c => c != null && c.Status != VaultCoinStatus.Unspent && c.Status != VaultCoinStatus.Pinned)) continue;
+                    _waitingForACoin.Remove(tx);
+                    await MineAndReport(tx);
+                    await Check("a dropped transaction confirmed after all");
+                    again = true;
+                }
+            }
             for (var i = 0; i < 60 && Rows(VaultWithdrawalState.Pinned).Count > 0; i++)
             {
                 await Confirm();
                 await Check("confirm (winding down)");
             }
-            Assert.Empty(Rows(VaultWithdrawalState.Pinned));
+            Assert.True(Rows(VaultWithdrawalState.Pinned).Count == 0, Fail("winding down", "still pinned: " + string.Join(" | ", Rows(VaultWithdrawalState.Pinned).Select(r =>
+                $"{r.Ref[..12]} exit={r.IsBridgeExit} amount={r.AmountSats} pins=[{string.Join("; ", r.Pins.Select(p => $"{p.Txid[..8]} dead={p.Dead} release={p.IsRelease} rate={p.FeeRate} at={p.PinnedAtVfxHeight} inputs={string.Join(",", p.Inputs.Select(i => i[..8] + i[64..] + "=" + (BtcAttestStore.Coin(i)?.Status.ToString() ?? "none")))}"))}]"))));
 
             _out.WriteLine($"seed {seed}: " + string.Join(", ", _done.OrderBy(d => d.Key).Select(d => $"{d.Key} x{d.Value}")));
             // The fixed seeds are chosen to be broad. A wider run draws some short sequences too; those still count
