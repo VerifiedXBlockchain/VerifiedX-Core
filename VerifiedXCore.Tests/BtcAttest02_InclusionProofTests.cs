@@ -154,9 +154,8 @@ namespace VerifiedXCore.Tests
             var oneLong = BtcTxInclusion.Verify(header, stripped, p.Position << 1, new[] { new string('b', 64) }.Concat(p.Branch).ToList(), depth, out _, out _);
             Assert.Contains("every transaction of a block sits at the same depth", oneLong);
 
-            // 64 bytes or fewer is never a transaction here.
-            Assert.Contains("64 bytes or fewer", BtcTxInclusion.Verify(header, new string('1', 128), p.Position, p.Branch, depth, out _, out _));
-            Assert.Contains("64 bytes or fewer", BtcTxInclusion.Verify(header, new string('1', 120), p.Position, p.Branch, depth, out _, out _));
+            // Exactly 64 bytes, the size of an inner node, is never an event here.
+            Assert.Contains("exactly 64 bytes", BtcTxInclusion.Verify(header, new string('1', 128), p.Position, p.Branch, depth, out _, out _));
 
             // The depth comes from a real coinbase: a non-coinbase transaction cannot stand in for it, nor a coinbase at
             // a made-up depth, nor another block's coinbase.
@@ -179,6 +178,53 @@ namespace VerifiedXCore.Tests
             Assert.NotNull(BtcTxInclusion.VerifyCoinbase(header, Stripped(p.CoinbaseHex), p.CoinbaseBranch.Skip(1).ToList(), out _, out _, out _));
             Assert.NotNull(BtcTxInclusion.VerifyCoinbase(header, Stripped(_proofs[4].CoinbaseHex), _proofs[4].CoinbaseBranch, out _, out _, out _));
             Assert.Contains("out of range", BtcTxInclusion.Verify(header, stripped, p.Position, p.Branch, BtcMerkle.MaxDepth + 1, out _, out _));
+        }
+
+        /// <summary>
+        /// Bitcoin has no smallest transaction: 60 bytes is one input and one output with an empty script. Refusing
+        /// everything of 64 bytes or fewer meant a block whose coinbase was that small had no provable event at all, and
+        /// a report carrying a small spend of a vault coin was refused by every verifier and offered again for ever
+        /// (second path audit, 14 October 2026). A coinbase is taken at any size, a transaction shorter than an inner
+        /// node is taken, and one of exactly 64 bytes is left out by the scanner as it is refused here.
+        /// </summary>
+        [Fact]
+        public void ASmallCoinbase_FixesTheDepth_AndASmallTransaction_IsProven_UnlessItIsExactly64Bytes()
+        {
+            var made = Network.Main.Consensus.ConsensusFactory.CreateBlock();
+            // A coinbase of exactly 64 bytes: a four-byte height push and one output with no script.
+            var coinbase = Network.Main.CreateTransaction();
+            coinbase.Inputs.Add(new TxIn(new OutPoint(uint256.Zero, uint.MaxValue), new Script(Op.GetPushOp(800_000))));
+            coinbase.Outputs.Add(Money.Coins(3.125m), Script.Empty);
+            made.Transactions.Add(coinbase);
+            // One input, one output: 60 bytes plus the output's script.
+            NBitcoin.Transaction Small(int scriptBytes)
+            {
+                var t = Network.Main.CreateTransaction();
+                t.Inputs.Add(new OutPoint(new uint256(RandomUtils.GetBytes(32)), 0));
+                t.Outputs.Add(Money.Satoshis(1000), new Script(Enumerable.Repeat((byte)0x51, scriptBytes).ToArray()));
+                return t;
+            }
+            made.Transactions.Add(Small(0));
+            made.Transactions.Add(Small(3));
+            made.Transactions.Add(Small(4));
+            made.UpdateMerkleRoot();
+            Assert.Equal(64, coinbase.WithOptions(TransactionOptions.None).GetSerializedSize());
+            Assert.Equal(new[] { 60, 63, 64 }, made.Transactions.Skip(1).Select(t => t.WithOptions(TransactionOptions.None).GetSerializedSize()));
+            Assert.True(BtcHeader.TryParse(Convert.ToHexString(made.Header.ToBytes()), out var madeHeader));
+            var ids = made.Transactions.Select(t => t.GetHash().ToString()).ToList();
+
+            Assert.Null(BtcTxInclusion.VerifyCoinbase(madeHeader!, BtcTxInclusion.ToStrippedHex(coinbase), BtcMerkle.BranchFor(ids, 0), out var depth, out _, out _));
+            Assert.Equal(2, depth);
+            Assert.Null(BtcTxInclusion.Verify(madeHeader!, BtcTxInclusion.ToStrippedHex(made.Transactions[1]), 1, BtcMerkle.BranchFor(ids, 1), depth, out _, out _));
+            Assert.Null(BtcTxInclusion.Verify(madeHeader!, BtcTxInclusion.ToStrippedHex(made.Transactions[2]), 2, BtcMerkle.BranchFor(ids, 2), depth, out _, out _));
+            Assert.Contains("exactly 64 bytes", BtcTxInclusion.Verify(madeHeader!, BtcTxInclusion.ToStrippedHex(made.Transactions[3]), 3, BtcMerkle.BranchFor(ids, 3), depth, out _, out _));
+            // As an event (not as the anchor) a 64-byte coinbase is a 64-byte transaction like any other.
+            Assert.Contains("exactly 64 bytes", BtcTxInclusion.Verify(madeHeader!, BtcTxInclusion.ToStrippedHex(coinbase), 0, BtcMerkle.BranchFor(ids, 0), depth, out _, out _));
+            // An inner node offered as the coinbase one level up does not parse as one.
+            var inner = BtcMerkle.RootFromBranch(ids[0], 0, new[] { ids[1] })!;
+            Assert.NotNull(BtcTxInclusion.VerifyCoinbase(madeHeader!, string.Concat(Convert.FromHexString(ids[0]).Reverse().Concat(Convert.FromHexString(ids[1]).Reverse()).Select(b => b.ToString("x2"))),
+                BtcMerkle.BranchFor(ids, 0)!.Skip(1).ToList(), out _, out _, out _));
+            Assert.NotNull(inner);
         }
 
         /// <summary>Validators build branches from a block's transaction list; the builder and the checker agree, odd levels included.</summary>

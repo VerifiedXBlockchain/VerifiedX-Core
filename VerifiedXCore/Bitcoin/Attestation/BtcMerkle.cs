@@ -156,7 +156,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             txid = null;
             if (coinbaseStrippedHex != null && coinbaseStrippedHex.Length / 2 > BtcAttestRules.MaxCoinbaseProofBytes)
                 return $"a coinbase larger than {BtcAttestRules.MaxCoinbaseProofBytes} bytes is proven by its last block and its length, not carried";
-            var reason = Check(header, coinbaseStrippedHex, 0, branch, branch?.Count ?? -1, out coinbase, out txid);
+            var reason = Check(header, coinbaseStrippedHex, 0, branch, branch?.Count ?? -1, out coinbase, out txid, asCoinbase: true);
             if (reason != null) return reason;
             if (!coinbase!.IsCoinBase) return "the transaction given as the block's coinbase is not a coinbase transaction";
             treeDepth = branch!.Count;
@@ -208,7 +208,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public static string? Verify(BtcHeader header, string? strippedHex, long position, IReadOnlyList<string>? branch, int treeDepth, out Transaction? tx, out string? txid) =>
             Check(header, strippedHex, position, branch, treeDepth, out tx, out txid);
 
-        private static string? Check(BtcHeader header, string? strippedHex, long position, IReadOnlyList<string>? branch, int treeDepth, out Transaction? tx, out string? txid)
+        /// <summary>The size of an inner node of the tree: two hashes.</summary>
+        public const int InnerNodeBytes = 64;
+
+        private static string? Check(BtcHeader header, string? strippedHex, long position, IReadOnlyList<string>? branch, int treeDepth, out Transaction? tx, out string? txid, bool asCoinbase = false)
         {
             tx = null;
             txid = null;
@@ -224,7 +227,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
             byte[] bytes;
             try { bytes = Convert.FromHexString(strippedHex); }
             catch { return "the transaction is not valid hex"; }
-            if (bytes.Length <= 64) return "a transaction of 64 bytes or fewer is not accepted";
+            // A transaction of exactly 64 bytes has the shape of an inner node and is not taken as an event (the depth
+            // fixed by the coinbase already rules the confusion out; this is the second lock). A shorter one cannot be
+            // an inner node. The coinbase that fixes the depth is taken at any size: bytes that are an inner node do
+            // not parse as a coinbase, and refusing a small coinbase left every event of its block without a proof, so
+            // one such block (a miner's choice; on testnet4 anyone's) stopped all reporting for good.
+            if (bytes.Length == InnerNodeBytes && !asCoinbase) return "a transaction of exactly 64 bytes is not accepted";
 
             Transaction parsed;
             try { parsed = Transaction.Load(bytes, Net); }

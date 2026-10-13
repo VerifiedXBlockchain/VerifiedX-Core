@@ -47,7 +47,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             for (var position = 0; position < block.Transactions.Count; position++)
             {
                 var tx = block.Transactions[position];
-                if (TooLargeToProve(tx)) continue; // never an event (see Build)
+                if (CannotBeProven(tx, position)) continue; // never an event (see Build)
                 var isCoinbase = position == 0 && tx.IsCoinBase;
                 var spends = isCoinbase ? new List<string>() : tx.Inputs.Select(i => BtcAttestStore.OutpointKey(i.PrevOut.Hash.ToString(), i.PrevOut.N)).ToList();
                 var outputs = tx.Outputs.Select((o, i) => ((long)i, o.ScriptPubKey.ToHex().ToLowerInvariant(), o.Value.Satoshi)).ToList();
@@ -63,6 +63,19 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// </summary>
         private static bool TooLargeToProve(Transaction tx) =>
             tx.WithOptions(TransactionOptions.None).GetSerializedSize() > BtcTxInclusion.MaxTxBytes;
+
+        /// <summary>
+        /// A transaction the verifier would refuse as an event whatever its proof: one too large to carry, or one of
+        /// exactly 64 bytes that is not the block's coinbase (<see cref="BtcTxInclusion.InnerNodeBytes"/>). It is left
+        /// out here exactly as the verifier leaves it out. Reporting such a transaction as an event produced a report
+        /// every verifier refused, offered again on every pass: the chain's view of Bitcoin never passed that block,
+        /// for every vault (second path audit, 14 October 2026).
+        /// </summary>
+        private static bool CannotBeProven(Transaction tx, int position)
+        {
+            var size = tx.WithOptions(TransactionOptions.None).GetSerializedSize();
+            return size > BtcTxInclusion.MaxTxBytes || (size == BtcTxInclusion.InnerNodeBytes && !(position == 0 && tx.IsCoinBase));
+        }
 
         private static List<BtcReport> Build(Block block, long blockHeight, string scope, IReadOnlyList<string> headers, long signerEpoch, LiteDatabase? db,
             long afterPosition, int firstPart)
@@ -86,7 +99,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             for (var position = (int)Math.Max(0, afterPosition + 1); position < block.Transactions.Count; position++)
             {
                 var tx = block.Transactions[position];
-                if (TooLargeToProve(tx)) continue; // before anything of it is counted: the verifier never sees it
+                if (CannotBeProven(tx, position)) continue; // before anything of it is counted: the verifier never sees it
                 var isCoinbase = position == 0 && tx.IsCoinBase;
                 var spends = isCoinbase ? new List<string>() : tx.Inputs.Select(i => BtcAttestStore.OutpointKey(i.PrevOut.Hash.ToString(), i.PrevOut.N)).ToList();
                 var outputs = tx.Outputs.Select((o, i) => ((long)i, o.ScriptPubKey.ToHex().ToLowerInvariant(), o.Value.Satoshi)).ToList();

@@ -61,6 +61,32 @@ namespace VerifiedXCore.Tests
             await Apply(Tip + 1, Signed(report));
         }
 
+        /// <summary>
+        /// A vault coin spent by a transaction of exactly 64 bytes (its key holders can make one; a miner takes it
+        /// directly). The scanner used to report it as an event and every verifier refused the report, so nothing of
+        /// that Bitcoin block, or of any after it, was ever recorded for any vault. It is now left out as a transaction
+        /// too large to carry is, and the block's other events are reported (second path audit, 14 October 2026).
+        /// </summary>
+        [Fact]
+        public async Task ABlockHoldingA64ByteSpendOfAVaultCoin_IsStillReported()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var first = await Deposit(vault.Script, 100_000);
+            Assert.Equal(100_000, BtcAttestStore.Total(vault.Uid)!.HeldSats);
+
+            var small = Pay(new[] { new OutPoint(first.GetHash(), 0) }, (new NBitcoin.Script(new byte[] { 0x51, 0x51, 0x51, 0x51 }), 90_000));
+            Assert.Equal(64, small.WithOptions(NBitcoin.TransactionOptions.None).GetSerializedSize());
+            var second = Pay(vault.Script, 40_000);
+            await Report(_btc.Mine(small, second));
+
+            // The block was reported: the deposit in it is credited, and the chain's view of Bitcoin has moved past it.
+            Assert.Equal(VaultCoinStatus.Unspent, BtcAttestStore.Coin(Outpoint(second, 0))!.Status);
+            Assert.Equal(140_000, BtcAttestStore.Total(vault.Uid)!.HeldSats);
+            // The 64-byte spend itself is not recorded (as for a transaction too large to carry).
+            Assert.Equal(VaultCoinStatus.Unspent, BtcAttestStore.Coin(Outpoint(first, 0))!.Status);
+        }
+
         private static VfxTx SignedBy(V signer, string to, TransactionType type, object data)
         {
             var tx = new VfxTx
