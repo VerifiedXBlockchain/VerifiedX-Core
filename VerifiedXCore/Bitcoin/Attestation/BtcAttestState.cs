@@ -450,10 +450,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var d = db ?? Db;
             if (d == null) return 0;
             var starts = Math.Min(Globals.ValidatorBondHeight, Globals.BitcoinAttestationRecordHeight);
-            if (tipHeight + 1 >= starts) return 0;
+            if (tipHeight >= starts) return 0;
             var rows = AllCollections.Sum(name => d.GetCollection(name).Count());
             if (rows == 0) return 0;
             WipeAll(d);
+            // The snapshot slots copy these tables by row and never record a removal: a restore from one would bring
+            // the removed rows back. They are all marked unusable; new ones are taken as blocks arrive.
+            try { VerifiedXCore.Services.StateSnapshotService.InvalidateAbove(-1); } catch { }
             VerifiedXCore.Utilities.ErrorLogUtility.LogError($"The Bitcoin attestation and validator bond tables held {rows} row(s) although the chain's tip ({tipHeight}) is below the height they start at ({starts}). They were left by a release with earlier heights and have been removed.", "BtcAttestStore.ClearIfBeforeItsStart()");
             return rows;
         }

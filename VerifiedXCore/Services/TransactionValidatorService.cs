@@ -3248,8 +3248,13 @@ namespace VerifiedXCore.Services
                         }
                         else
                         {
-                            // Ensure validator actually has an active registration
-                            var existingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(validatorAddress);
+                            // Ensure validator actually has an active registration. Read from the committed blocks up
+                            // to the one before this transaction's block, which is what a node at the tip always read.
+                            // The lookup used here before answers "nobody" on a node that is still catching up, so
+                            // such a node refused a block carrying an exit that the rest of the network had accepted
+                            // and could not pass that height (second path audit, 14 October 2026).
+                            var existingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidatorsAt(exitHeight - 1)
+                                .FirstOrDefault(x => x.ValidatorAddress == validatorAddress);
                             if (existingValidator == null || !existingValidator.IsActive)
                                 return (txResult, "Validator does not have an active registration. Cannot exit.");
                         }

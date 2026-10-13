@@ -362,8 +362,9 @@ namespace VerifiedXCore
         /// <summary>
         /// A validator already active at this height counts as aged when the bonds start (if it holds its stake then).
         /// A height fixed in the release and below the tip when the release is cut, so nobody can register for it once
-        /// the bond is known. Mainnet value here; testnet in Program.cs. Set again with the other heights at the
-        /// mainnet release.
+        /// the bond is known. Mainnet value here; testnet in Program.cs. Unlike the other heights it is NOT moved
+        /// forward at the mainnet release: the bond has been public since this branch was first published (October
+        /// 2026), and a later height would count everyone who registered after that as aged.
         /// </summary>
         public static long ValidatorBondGrandfatherHeight = 7_496_000L;
         /// <summary>
@@ -488,7 +489,7 @@ namespace VerifiedXCore
         /// version is accepted; from H1 a node that has not upgraded cannot follow the chain and is refused.
         /// </summary>
         public static int MinimumPeerMajorVersion(long height) =>
-            height >= BitcoinAttestationRecordHeight ? MajorVer : Math.Min(MajorVer, PriorMajorVer);
+            height >= Math.Min(BitcoinAttestationRecordHeight, ValidatorBondHeight) ? MajorVer : Math.Min(MajorVer, PriorMajorVer); // the bonds start one block before H1: the two releases part there
 
         /// <summary>
         /// Where this chain's view of Bitcoin starts on mainnet (plan section 8.1). Height of the LAST of the twelve

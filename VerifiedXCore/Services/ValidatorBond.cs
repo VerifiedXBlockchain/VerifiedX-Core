@@ -27,6 +27,11 @@ namespace VerifiedXCore.Services
         /// there at the first look.
         /// </summary>
         public bool Grandfathered { get; set; }
+        /// <summary>
+        /// Set at the first look for a validator bonded by the start alone that did not hold its stake: the bond holds
+        /// nothing of it. (A later registration or heartbeat, which needs the balance, starts a bond of its own.)
+        /// </summary>
+        public bool Released { get; set; }
         public long LastModifiedHeight { get; set; }
     }
 
@@ -112,7 +117,7 @@ namespace VerifiedXCore.Services
 
         /// <summary>Whether the bond holds the stake for a transaction mined at <paramref name="height"/>.</summary>
         public static bool Holds(ValidatorBondRow? row, long height) =>
-            row != null && (row.ExitHeight == 0 || height < row.ExitHeight + ExitWaitBlocks);
+            row != null && !row.Released && (row.ExitHeight == 0 || height < row.ExitHeight + ExitWaitBlocks);
 
         /// <summary>The VFX of an address that a transaction mined at <paramref name="height"/> may not touch.</summary>
         public static decimal LockedAmount(string? address, long height, LiteDatabase? db = null) =>
@@ -168,9 +173,11 @@ namespace VerifiedXCore.Services
                 var funded = VBTCValidatorRegistry.HoldsValidatorBalance(row.Address);
                 if (firstLook && !funded && row.BondedAtHeight == marker.BondedAtHeight)
                 {
-                    // Bonded by the start alone, and its stake is not there: nothing of it is held beyond the wait
-                    // an exit has. (A later registration or heartbeat, which needs the balance, bonds it again.)
+                    // Bonded by the start alone, and its stake is not there: the bond holds nothing of it. (It was in
+                    // no signer set under the bond: the first is taken from funded validators. A later registration
+                    // or heartbeat, which needs the balance, bonds it again.)
                     row.ExitHeight = row.BondedAtHeight;
+                    row.Released = true;
                     Save(row, db);
                     continue;
                 }
@@ -230,7 +237,7 @@ namespace VerifiedXCore.Services
         public static bool StartsBond(Transaction tx, long height) =>
             tx != null && Active(height) && !string.IsNullOrEmpty(tx.FromAddress)
             && (tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER || tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT)
-            && !(Row(tx.FromAddress) is { } row && row.ExitHeight == 0);
+            && !Holds(Row(tx.FromAddress), height); // a stake the bond already holds (bonded, or in its exit wait) needs no second hold
 
         // ── Rules ───────────────────────────────────────────────────────────────────────────────────────────
 

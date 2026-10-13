@@ -566,9 +566,12 @@ namespace VerifiedXCore.Tests
             await StartTheRule();
             var row = ValidatorBond.Row(_poor.Address)!;
             Assert.Equal(Rule, row.ExitHeight);
+            Assert.True(row.Released);
             Assert.Equal(0, row.FundedSinceHeight);
-            Assert.False((await Verify(Send(_poor, _friend, 1M), Rule + ValidatorBond.ExitWaitBlocks - 1)).Ok);
-            Assert.True((await Verify(Send(_poor, _friend, 1M), Rule + ValidatorBond.ExitWaitBlocks)).Ok);
+            // Nothing of it is held: it was in no signer set under the bond, and what it has left is its own.
+            Assert.Equal(0M, ValidatorBond.LockedAmount(_poor.Address, Rule + 2));
+            var (free, freeWhy) = await Verify(Send(_poor, _friend, 1M), Rule + 2);
+            Assert.True(free, freeWhy);
             // A heartbeat (which needs the balance) bonds it again, with no age.
             Fund(_poor, Stake);
             await Apply(Rule + 50, LifecycleTx(_poor, TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT));
@@ -627,6 +630,55 @@ namespace VerifiedXCore.Tests
             state = new SameBlockDebitGuard.State { BlockHeight = Rule - 5 };
             Assert.True(SameBlockDebitGuard.TryRegister(heartbeat, state).Ok);
             Assert.True(SameBlockDebitGuard.TryRegister(Send(fresh, _friend, 5_000M), state).Ok);
+        }
+
+        /// <summary>
+        /// A validator that changes its mind during the exit wait sends a heartbeat. Its stake is already held, so the
+        /// heartbeat needs no second hold: the same-block rule used to take the stake off twice and refuse it unless the
+        /// address held 10,000 VFX, and the validator fell out for two days once the wait ended.
+        /// </summary>
+        [Fact]
+        public async Task AHeartbeatDuringTheExitWait_IsAccepted_WithTheStakeAlone()
+        {
+            await StartTheRule();
+            var v = _old[1];
+            Fund(v, Stake);                                                   // exactly the stake
+            await Apply(300, LifecycleTx(v, TransactionType.VBTC_V2_VALIDATOR_EXIT));
+            var heartbeat = LifecycleTx(v, TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT);
+            Assert.False(ValidatorBond.StartsBond(heartbeat, 400));           // the bond still holds its stake
+            var state = new SameBlockDebitGuard.State { BlockHeight = 400 };
+            var (ok, why) = SameBlockDebitGuard.TryRegister(heartbeat, state);
+            Assert.True(ok, why);
+            (ok, why) = await Verify(heartbeat, 400);
+            Assert.True(ok, why);
+            await Apply(400, heartbeat);
+            Assert.Equal(0, ValidatorBond.Row(v.Address)!.ExitHeight);
+        }
+
+        /// <summary>
+        /// Before the bonds an exit is judged from the validators on chain at the block before, also on a node that is
+        /// still catching up. Such a node used to know of no validators at all, refused the block carrying the exit and
+        /// could not pass that height.
+        /// </summary>
+        [Fact]
+        public async Task BeforeTheBonds_AnExitInABlock_IsJudgedTheSameByANodeThatIsStillCatchingUp()
+        {
+            var priorSynced = Globals.IsChainSynced;
+            try
+            {
+                var exit = LifecycleTx(_old[2], TransactionType.VBTC_V2_VALIDATOR_EXIT);
+                var stranger = LifecycleTx(_owner, TransactionType.VBTC_V2_VALIDATOR_EXIT);
+                foreach (var synced in new[] { true, false })
+                {
+                    Globals.IsChainSynced = synced;
+                    var (ok, why) = await Verify(exit, Rule - 10);
+                    Assert.True(ok, $"synced={synced}: {why}");
+                    (ok, why) = await Verify(stranger, Rule - 10);
+                    Assert.False(ok);
+                    Assert.Contains("does not have an active registration", why);
+                }
+            }
+            finally { Globals.IsChainSynced = priorSynced; }
         }
 
         /// <summary>

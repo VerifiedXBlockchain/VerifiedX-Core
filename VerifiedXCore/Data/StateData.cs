@@ -146,12 +146,21 @@ namespace VerifiedXCore.Data
             try
             {
                 VerifiedXCore.Bitcoin.Attestation.BtcAttestApply.OnBlockStart(block.Height); // Bitcoin attestation: the checkpoint at the recording height, the signer set at each epoch
+            }
+            catch (Exception ex)
+            {
+                blockStartFailed = true;
+                ErrorLogUtility.LogError($"Block {block.Height}: the Bitcoin attestation block-start step failed: {ex}", "StateData.UpdateTreis() - block start");
+            }
+            try
+            {
+                // Each step on its own: one that fails must not also skip the other for this block.
                 VerifiedXCore.Services.ValidatorBond.OnBlockStart(block.Height); // validator bonds: active validators bonded at the bond height; funded stakes confirmed
             }
             catch (Exception ex)
             {
                 blockStartFailed = true;
-                ErrorLogUtility.LogError($"Block {block.Height}: a block-start state step failed: {ex}", "StateData.UpdateTreis() - block start");
+                ErrorLogUtility.LogError($"Block {block.Height}: the validator bond block-start step failed: {ex}", "StateData.UpdateTreis() - block start");
             }
             var txList = block.Transactions.ToList();
             var txCount = txList.Count();

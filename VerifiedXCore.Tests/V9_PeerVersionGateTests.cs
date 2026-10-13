@@ -87,6 +87,13 @@ namespace VerifiedXCore.Tests
                 Assert.True(ProofUtility.IsMajorVersionCurrent("9.0.0.1745-beta"));
             }
 
+            // The bonds start one block before recording, and the two releases part there.
+            var priorBond = Globals.ValidatorBondHeight;
+            Globals.ValidatorBondHeight = 999;
+            Assert.Equal(8, Globals.MinimumPeerMajorVersion(998));
+            Assert.Equal(9, Globals.MinimumPeerMajorVersion(999));
+            Globals.ValidatorBondHeight = priorBond;
+
             // Malformed or missing versions are refused at any height.
             Globals.LastBlock = new Block { Height = 10 };
             Assert.False(WalletVersionUtility.Verify(""));
@@ -101,10 +108,13 @@ namespace VerifiedXCore.Tests
         public void WithTheForkHeightUnset_ThePreviousReleaseIsAlwaysAccepted()
         {
             Globals.BitcoinAttestationRecordHeight = long.MaxValue;
+            var priorBond = Globals.ValidatorBondHeight;
+            Globals.ValidatorBondHeight = long.MaxValue;   // the bonds start one block before it: unset with it
             Globals.LastBlock = new Block { Height = 50_000_000 };
             Assert.True(WalletVersionUtility.Verify("8.2.1.1742-beta"));
             Assert.True(ProofUtility.IsMajorVersionCurrent("8.2.1.1742-beta"));
             Assert.False(WalletVersionUtility.Verify("7.5.0.1"));
+            Globals.ValidatorBondHeight = priorBond;
         }
     }
 }
