@@ -2202,6 +2202,26 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                 // 6. Validate balance from State Trei
                 var scState = SmartContractStateTrei.GetSmartContractState(payload.SmartContractUID);
+                // A vault the chain watches keeps nothing on this node for a withdrawal that has not been mined: its
+                // requests, balances and statuses are chain state. This route is answered from that (an owner's balance
+                // is its attested Bitcoin, not its ledger rows), and nothing is recorded here: the request is the
+                // transaction built with GetRawRequestWithdrawalTxData.
+                if (scState != null && VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(scState.SmartContractUID))
+                {
+                    var spendable = await Services.VBTCService.TryGetAvailableTransparentVbtcBalance(scState.SmartContractUID, payload.VFXAddress);
+                    if (payload.Amount > spendable.availableBalance)
+                        return JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient vBTC balance. Available: {spendable.availableBalance}, Requested: {payload.Amount}" });
+                    return JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        Attested = true,
+                        Message = "Nothing is recorded for this request on this node: build its transaction with GetRawRequestWithdrawalTxData, sign it and submit it with SendRawRequestWithdrawalTx. Follow it with GetWithdrawalPin.",
+                        SmartContractUID = scState.SmartContractUID,
+                        Amount = payload.Amount,
+                        Destination = payload.BTCAddress,
+                        UniqueId = payload.UniqueId,
+                    });
+                }
                 if (scState != null && scState.SCStateTreiTokenizationTXes != null)
                 {
                     var tokenTxs = scState.SCStateTreiTokenizationTXes
