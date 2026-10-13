@@ -346,7 +346,7 @@ namespace VerifiedXCore.Services
                 }
                 else
                 {
-                    output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Transaction was not verified." });
+                    output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Transaction was not verified. Error: {result.Item2}" });
                 }
             }
             catch(Exception ex)

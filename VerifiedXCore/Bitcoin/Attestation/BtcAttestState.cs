@@ -233,7 +233,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public const string Withdrawals = "btc_vault_withdrawals";
 
         /// <summary>Every collection of this layer (state wipe, chain-reference migration, snapshot list).</summary>
-        public static readonly string[] AllCollections = { Headers, Scripts, Coins, Totals, Meta, SignerSets, Withdrawals };
+        public static readonly string[] AllCollections = { Headers, Scripts, Coins, Totals, Meta, SignerSets, Withdrawals, VerifiedXCore.Services.ValidatorBond.Collection };
 
         public static LiteDatabase Db => DbContext.DB_BtcAttest;
 
@@ -256,6 +256,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             withdrawals.EnsureIndex(x => x.State);
             withdrawals.EnsureIndex(x => x.RequestHash);
             withdrawals.EnsureIndex(x => x.LastModifiedHeight);
+            VerifiedXCore.Services.ValidatorBond.EnsureIndexes(db); // validator bonds are kept with the other height-stamped tables
         }
 
         // ── Meta ────────────────────────────────────────────────────────────────────────────────────────────
@@ -431,7 +432,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 || d.GetCollection<VaultDepositTotalRow>(Totals).Exists(x => x.LastModifiedHeight > vfxHeight)
                 || d.GetCollection<VaultDepositScriptRow>(Scripts).Exists(x => x.LastModifiedHeight > vfxHeight)
                 || d.GetCollection<AttestationSignerSetRow>(SignerSets).Exists(x => x.LastModifiedHeight > vfxHeight)
-                || d.GetCollection<AttestedHeaderRow>(Headers).Exists(x => x.LastModifiedHeight > vfxHeight);
+                || d.GetCollection<AttestedHeaderRow>(Headers).Exists(x => x.LastModifiedHeight > vfxHeight)
+                || VerifiedXCore.Services.ValidatorBond.ChangedAbove(vfxHeight, d);
         }
 
         /// <summary>Empties every table of this layer (state wipe before a replay; chain-reference migration).</summary>

@@ -439,10 +439,19 @@ namespace VerifiedXCore.Tests
 
             var root = Path.GetDirectoryName(Path.GetDirectoryName(ThisFile()))!;
             var controller = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "Controllers", "VBTCController.cs"));
-            Assert.Equal(4, CountOf(controller, "FundedOnly(Services.VBTCValidatorRegistry.GetPublicValidators())"));
+            // The coordinator takes its list from the bond's eligible list: funded only, and from the bond height aged too.
+            Assert.Equal(4, CountOf(controller, "ValidatorBond.CeremonyEligible(Services.VBTCValidatorRegistry.GetPublicValidators(), "));
+            Assert.Equal(4, CountOf(controller, "Services.VBTCValidatorRegistry.GetPublicValidators()"));
             Assert.Equal(0, CountOf(controller, "= Services.VBTCValidatorRegistry.GetPublicValidators()"));
             var s3c = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "Services", "S3CService.cs"));
             Assert.Contains("VBTCValidatorRegistry.HoldsValidatorBalance(v.ValidatorAddress)", s3c);
+            Assert.Contains("ValidatorBond.IsAged(v.ValidatorAddress", s3c);
+
+            // Before the bond height that list is the funded list, unchanged.
+            Assert.True(Globals.ValidatorBondHeight > 99);
+            var eligible = VerifiedXCore.Services.ValidatorBond.CeremonyEligible(all, 100);
+            Assert.Equal(funded.Select(v => v.ValidatorAddress).OrderBy(a => a, StringComparer.Ordinal),
+                         eligible.Select(v => v.ValidatorAddress).OrderBy(a => a, StringComparer.Ordinal));
         }
 
         // ── Wallet: never run or finish a ceremony whose contract would be refused (follow-up) ──

@@ -51,6 +51,7 @@ namespace VerifiedXCore.Services
                 Globals.ReserveRecoverRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ReserveRecoverRulesHeight;
                 Globals.VaultRewriteRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.VaultRewriteRulesHeight;
                 Globals.VaultBurnRuleHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.VaultBurnRuleHeight;
+                Globals.ValidatorBondHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ValidatorBondHeight;
                 Globals.SaleStartBidRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.SaleStartBidRulesHeight;
                 Globals.WithdrawalUniqueIdRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.WithdrawalUniqueIdRulesHeight;
                 Globals.RoyaltyRewriteRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.RoyaltyRewriteRulesHeight;
@@ -87,6 +88,7 @@ namespace VerifiedXCore.Services
                 Globals.ReserveRecoverRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ReserveRecoverRulesHeight;
                 Globals.VaultRewriteRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.VaultRewriteRulesHeight;
                 Globals.VaultBurnRuleHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.VaultBurnRuleHeight;
+                Globals.ValidatorBondHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ValidatorBondHeight;
                 Globals.SaleStartBidRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.SaleStartBidRulesHeight;
                 Globals.WithdrawalUniqueIdRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.WithdrawalUniqueIdRulesHeight;
                 Globals.RoyaltyRewriteRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.RoyaltyRewriteRulesHeight;

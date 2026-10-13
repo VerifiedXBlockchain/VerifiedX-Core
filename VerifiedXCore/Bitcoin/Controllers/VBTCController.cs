@@ -236,7 +236,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                 // Get candidate validators — these are all known active validators.
                 // Some may be offline. We probe reachability to filter to only online ones.
-                var allValidators = Services.VBTCValidatorRegistry.FundedOnly(Services.VBTCValidatorRegistry.GetPublicValidators());   // S3C §7.1: exclusion-only (public mints never use S3C validators); NEW-26 (follow-up): funded only
+                var allValidators = VerifiedXCore.Services.ValidatorBond.CeremonyEligible(Services.VBTCValidatorRegistry.GetPublicValidators(), (Globals.LastBlock?.Height ?? 0) + 1);   // S3C §7.1: exclusion-only (public mints never use S3C validators); NEW-26 (follow-up): funded only
 
                 if (allValidators == null || !allValidators.Any())
                 {
@@ -448,7 +448,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 {
                     Success = true,
                     Message = "Validator found",
-                    Validator = validator
+                    Validator = validator,
+                    Bond = VerifiedXCore.Services.ValidatorBond.Describe(validatorAddress)
                 });
             }
             catch (Exception ex)
@@ -458,6 +459,55 @@ namespace VerifiedXCore.Bitcoin.Controllers
         }
 
         #endregion
+
+        /// <summary>
+        /// The validator bond of an address: whether its stake is locked, how much it can send, when it unlocks after
+        /// an exit, and from which block it counts for a vault's key ceremony. Answers for any address, registered or not.
+        /// </summary>
+        [HttpGet("GetValidatorBond/{address}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> GetValidatorBond(string address)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(address))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Address is required" });
+                return JsonConvert.SerializeObject(new { Success = true, Bond = VerifiedXCore.Services.ValidatorBond.Describe(address.Trim()) });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
+            }
+        }
+
+        /// <summary>
+        /// Send the validator exit transaction for an address this wallet holds: the graceful way out. The validator
+        /// stops counting on chain at once, and its bonded 5,000 VFX unlocks 1,200 blocks after the exit is mined.
+        /// Works for a validator that is no longer running too (it is still bonded until it exits). If this node is
+        /// validating with that address it stops announcing it; use V1/TurnOffValidator to stop validating as well.
+        /// </summary>
+        [HttpPost("ExitValidator/{address}")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public async Task<string> ExitValidator(string address)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(address))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "Address is required" });
+                var (ok, message) = await VerifiedXCore.Services.ValidatorService.SendValidatorExit(address.Trim());
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = ok,
+                    Message = ok ? $"Exit transaction sent. The stake unlocks {VerifiedXCore.Services.ValidatorBond.ExitWaitBlocks} blocks after it is mined; follow it with GetValidatorBond." : message,
+                    ExitTxHash = ok ? message : null,
+                    Bond = VerifiedXCore.Services.ValidatorBond.Describe(address.Trim()),
+                });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {ApiErrorText.For(ex)}" });
+            }
+        }
 
         #region MPC Ceremony Management
 
@@ -805,7 +855,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
             {
                 allValidators = ceremony.IsS3C
                     ? Services.S3CService.GetValidatorsForCeremony()
-                    : Services.VBTCValidatorRegistry.FundedOnly(Services.VBTCValidatorRegistry.GetPublicValidators()); // NEW-26 (follow-up): funded only
+                    : VerifiedXCore.Services.ValidatorBond.CeremonyEligible(Services.VBTCValidatorRegistry.GetPublicValidators(), (Globals.LastBlock?.Height ?? 0) + 1); // NEW-26 (follow-up): funded only
             }
             catch (Exception s3cEx)
             {
@@ -3770,7 +3820,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Active ceremony already in progress.", ExistingCeremonyId = existingActive.CeremonyId });
 
                 // Probe validators
-                var allValidators = Services.VBTCValidatorRegistry.FundedOnly(Services.VBTCValidatorRegistry.GetPublicValidators());   // S3C §7.1: exclusion-only (public mints never use S3C validators); NEW-26 (follow-up): funded only
+                var allValidators = VerifiedXCore.Services.ValidatorBond.CeremonyEligible(Services.VBTCValidatorRegistry.GetPublicValidators(), (Globals.LastBlock?.Height ?? 0) + 1);   // S3C §7.1: exclusion-only (public mints never use S3C validators); NEW-26 (follow-up): funded only
                 if (allValidators == null || !allValidators.Any())
                     return JsonConvert.SerializeObject(new { Success = false, Message = "No active validators available" });
 
@@ -3924,7 +3974,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                         ceremony.Status = CeremonyStatus.ValidatingValidators;
                         ceremony.ProgressPercentage = 5;
 
-                        var allValidators = Services.VBTCValidatorRegistry.FundedOnly(Services.VBTCValidatorRegistry.GetPublicValidators());   // S3C §7.1: exclusion-only (public mints never use S3C validators); NEW-26 (follow-up): funded only
+                        var allValidators = VerifiedXCore.Services.ValidatorBond.CeremonyEligible(Services.VBTCValidatorRegistry.GetPublicValidators(), (Globals.LastBlock?.Height ?? 0) + 1);   // S3C §7.1: exclusion-only (public mints never use S3C validators); NEW-26 (follow-up): funded only
                         if (allValidators == null || !allValidators.Any())
                         {
                             ceremony.Status = CeremonyStatus.Failed;

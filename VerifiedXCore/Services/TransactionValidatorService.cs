@@ -278,6 +278,12 @@ namespace VerifiedXCore.Services
                 && vbtcPrivacyGateHeight >= Globals.VbtcPrivacyDisableHeight)
                 return (false, "vBTC privacy transactions are temporarily disabled.");
 
+            // A bonded validator's stake cannot be sent (ValidatorBond; from Globals.ValidatorBondHeight). Before the
+            // branches below, so that a shield, which also takes VFX from its sender, is held to it as well.
+            var bondRefusal = ValidatorBond.SpendRefusal(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (bondRefusal != null)
+                return (false, bondRefusal);
+
             if (PrivateTransactionTypes.IsPrivateTransaction(txRequest.TransactionType))
                 return await PrivateTransactionValidatorService.VerifyPrivateTX(txRequest, blockDownloads, blockVerify, twSkipVerify, processedNonces, skipPrivatePlonkProofVerification, blockHeight);
 
@@ -3219,10 +3225,23 @@ namespace VerifiedXCore.Services
                         if (txRequest.Amount != 0M)
                             return (txResult, "Validator exit cannot have an amount.");
                         
-                        // Ensure validator actually has an active registration
-                        var existingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(validatorAddress);
-                        if (existingValidator == null || !existingValidator.IsActive)
-                            return (txResult, "Validator does not have an active registration. Cannot exit.");
+                        var exitHeight = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
+                        if (ValidatorBond.Active(exitHeight))
+                        {
+                            // Under the bond an exit is what unlocks a stake, so it must be open to every bonded
+                            // validator, also one that went quiet long ago and is no longer listed as active; and it
+                            // is judged from chain state, not from this node's scan of recent blocks.
+                            var bond = ValidatorBond.Row(validatorAddress);
+                            if (bond == null) return (txResult, "This address has no validator bond. Nothing to exit.");
+                            if (bond.ExitHeight != 0) return (txResult, $"This validator exited at block {bond.ExitHeight}; its stake unlocks at block {ValidatorBond.UnlockHeight(bond)}.");
+                        }
+                        else
+                        {
+                            // Ensure validator actually has an active registration
+                            var existingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(validatorAddress);
+                            if (existingValidator == null || !existingValidator.IsActive)
+                                return (txResult, "Validator does not have an active registration. Cannot exit.");
+                        }
                     }
                     catch (Exception ex)
                     {

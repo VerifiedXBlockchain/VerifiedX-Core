@@ -340,6 +340,21 @@ namespace VerifiedXCore
         public static long VaultBurnRuleHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// The validator stake is bonded from this height (Services.ValidatorBond; owner decision 2026-10-13): a
+        /// registered validator cannot send its 5,000 VFX until 1,200 blocks after its exit is mined, and counts for a
+        /// vault's key ceremony only once that stake has been locked for two days. Validators active at this height
+        /// are bonded at it. A new refusal and a change to who may take part in a key ceremony, so it must be above
+        /// the tip when every validator runs this build: the same fork point as the rest.
+        /// </summary>
+        public static long ValidatorBondHeight = FundLossAuditHeight;
+        /// <summary>
+        /// This node has sent its validator's exit and must not announce itself again: the heartbeat loop re-announces a
+        /// validator the registry shows as inactive, which would undo the exit and, under the bond, resume the lock.
+        /// Cleared when validating is started again.
+        /// </summary>
+        public static bool ValidatorExitSent = false;
+
+        /// <summary>
         /// Item 5: the "manual" bid-signature bypass is honoured only for M_Sale_Start() (the validator set it for that
         /// function but tested the string, so a plain Sale_Start() carrying "manual" skipped the bid signature and named
         /// any address as the buyer; that address's own wallet then auto-signed the completion from its balance). The

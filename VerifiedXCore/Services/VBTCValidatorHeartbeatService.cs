@@ -95,6 +95,14 @@ namespace VerifiedXCore.Services
                             continue;
                         }
 
+                        // This node sent its validator's exit. The registry now shows it inactive, which the checks below
+                        // would "heal" with a heartbeat: that would undo the exit and resume the bond on its stake.
+                        if (Globals.ValidatorExitSent)
+                        {
+                            await Task.Delay(TimeSpan.FromMinutes(1));
+                            continue;
+                        }
+
                         // STALL-RESOLVE: no on-chain heartbeats while stranded. They cannot be mined
                         // on a dead branch and, if the node peers with the live network, a heartbeat
                         // built against forked state must not be broadcast as if we were healthy.

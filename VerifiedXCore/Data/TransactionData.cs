@@ -1249,7 +1249,9 @@ namespace VerifiedXCore.Data
                 if(stateTreiAcct != null)
                 {
                     var amountTotal = amount + tx.Amount + tx.Fee;
-                    if (amountTotal > stateTreiAcct.Balance)
+                    // A bonded validator's stake is not spendable (ValidatorBond).
+                    var bonded = VerifiedXCore.Services.ValidatorBond.LockedAmount(tx.FromAddress, (Globals.LastBlock?.Height ?? 0) + 1);
+                    if (amountTotal > stateTreiAcct.Balance - bonded)
                     {
                         result = true; //douple spend or overspend has occured
                     }

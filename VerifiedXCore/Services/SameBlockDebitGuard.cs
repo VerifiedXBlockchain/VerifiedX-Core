@@ -315,6 +315,10 @@ namespace VerifiedXCore.Services
                     b = key.Kind == LedgerKind.ShieldedPool
                         ? Privacy.PrivateTxSupplyRules.CommittedSupply(key.ContractUid, BlockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                         : AttestedOwnerBalance(key) ?? _balanceOf(key);
+                    // A bonded validator's stake is not there to be spent: its sends in one block are added up
+                    // against what is above the stake.
+                    if (key.Kind == LedgerKind.Native && b.HasValue)
+                        b -= ValidatorBond.LockedAmount(key.Holder, BlockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
                     _balances[key] = b;
                 }
                 return b;

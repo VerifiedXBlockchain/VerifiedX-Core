@@ -140,6 +140,7 @@ namespace VerifiedXCore.Data
             await ApplyForgedVfxBurnsAsync(block); // fund-loss audit item 1 (burn): at ForgedVfxBurnHeight, before the block's transactions
             PrivacyEpochService.ApplyIfResetBlock(block); // fund-loss audit item 1 (stage 2): shielded pools restart at PrivateTxProofRulesHeight
             VerifiedXCore.Bitcoin.Attestation.BtcAttestApply.OnBlockStart(block.Height); // Bitcoin attestation: the checkpoint at the recording height, the signer set at each epoch
+            VerifiedXCore.Services.ValidatorBond.OnBlockStart(block.Height); // validator bonds: active validators bonded at the bond height; funded stakes confirmed
             var txList = block.Transactions.ToList();
             var txCount = txList.Count();
             int txTreiUpdateSuccessCount = 0;
@@ -590,6 +591,13 @@ namespace VerifiedXCore.Data
                                 else
                                     TransferVBTCV2(tx);
                             }
+                        }
+
+                        // A registration or heartbeat bonds the validator's stake; an exit starts its wait.
+                        if (tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER || tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT
+                            || tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_EXIT)
+                        {
+                            VerifiedXCore.Services.ValidatorBond.OnTransactionApplied(tx, block.Height);
                         }
 
                         if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST)

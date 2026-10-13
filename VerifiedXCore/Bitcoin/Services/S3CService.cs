@@ -94,6 +94,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     bad.Add($"{entry.ValidatorAddress} (not flagged S3C on-chain)");
                 else if (!VBTCValidatorRegistry.HoldsValidatorBalance(v.ValidatorAddress)) // NEW-26 (follow-up)
                     bad.Add($"{entry.ValidatorAddress} (does not hold the {VerifiedXCore.Services.ValidatorService.ValidatorRequiredAmount()} VFX validator balance)");
+                else if (VerifiedXCore.Services.ValidatorBond.Active((Globals.LastBlock?.Height ?? 0) + 1) && !VerifiedXCore.Services.ValidatorBond.IsAged(v.ValidatorAddress, (Globals.LastBlock?.Height ?? 0) + 1))
+                    bad.Add($"{entry.ValidatorAddress} (its stake has not been bonded for {VerifiedXCore.Services.ValidatorBond.CeremonyAgeBlocks} blocks yet)");
                 else
                     result.Add(new VBTCValidator
                     {

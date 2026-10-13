@@ -496,7 +496,8 @@ namespace VerifiedXCore.Commands
                     }
                     break;
                 case "11": //Stop Masternode
-                    await ValidatorService.DoMasterNodeStop();
+                    var exitNote = await ValidatorService.DoMasterNodeStop(sendExit: true); // the graceful exit: frees a bonded stake after the wait
+                    if (exitNote != null) Console.WriteLine(exitNote);
                     break;
                 case "12": //SC import
                     ConsoleWriterService.Output("Feature coming soon");

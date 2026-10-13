@@ -799,9 +799,10 @@ namespace VerifiedXCore.Controllers
             if (presentValidator != null)
             {
                 
-                await ValidatorService.DoMasterNodeStop();
-                
-                output = "The validator has been turned off: " + presentValidator.Address;
+                // The operator's stop is the graceful exit: the on-chain exit goes out first (it frees a bonded stake after the wait).
+                var exitNote = await ValidatorService.DoMasterNodeStop(sendExit: true);
+
+                output = "The validator has been turned off: " + presentValidator.Address + (exitNote == null ? "" : ". " + exitNote);
             }
             else
             {

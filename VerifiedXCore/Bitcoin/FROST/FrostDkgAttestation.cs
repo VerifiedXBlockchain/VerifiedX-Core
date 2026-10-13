@@ -164,9 +164,12 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// <summary>Whether a contract created now (at the next block) must carry validator attestations.</summary>
         public static bool RequiredForNextBlock => (Globals.LastBlock?.Height ?? -1) + 1 >= Globals.VbtcV2DkgAttestationHeight;
 
-        /// <summary>The validators consensus counts for the next block: active at the tip and holding the validator balance.</summary>
+        /// <summary>
+        /// The validators consensus counts for a key ceremony judged in the next block: active at the tip, holding the
+        /// validator balance and, from the bond height, with a stake locked for two days (ValidatorBond.CeremonyEligible).
+        /// </summary>
         public static List<VBTCValidator> EligibleAtTip() =>
-            Services.VBTCValidatorRegistry.FundedOnly(Services.VBTCValidatorRegistry.GetActiveValidatorsAt(Globals.LastBlock?.Height ?? -1));
+            VerifiedXCore.Services.ValidatorBond.CeremonyEligible(Services.VBTCValidatorRegistry.GetActiveValidatorsAt(Globals.LastBlock?.Height ?? -1), (Globals.LastBlock?.Height ?? -1) + 1);
 
         /// <summary>
         /// Before a ceremony: null when enough validators are reachable for the contract to be accepted, else the reason. A

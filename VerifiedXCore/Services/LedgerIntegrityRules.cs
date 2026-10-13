@@ -378,7 +378,7 @@ namespace VerifiedXCore.Services
                 && VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.ScriptRow(depositScript) is { } taken && taken.SmartContractUID != uid)
                 return $"This deposit address already belongs to vault {taken.SmartContractUID}.";
             return VerifiedXCore.Bitcoin.FROST.FrostDkgAttestation.Validate(feature, uid, tx.FromAddress,
-                () => VBTCValidatorRegistry.FundedOnly(VBTCValidatorRegistry.GetActiveValidatorsAt(height - 1))); // NEW-26 (follow-up): funded now
+                () => ValidatorBond.CeremonyEligible(VBTCValidatorRegistry.GetActiveValidatorsAt(height - 1), height)); // active, funded now, and (from the bond height) a stake locked for two days
         }
 
         // ── NEW-29: contract code must be deterministic and must terminate ──────────────────────────────────────
