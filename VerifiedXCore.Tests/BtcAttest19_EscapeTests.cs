@@ -487,11 +487,9 @@ namespace VerifiedXCore.Tests
             Assert.Equal(VaultWithdrawalState.Waiting, Row(tooSoon, vault.Uid).State);
             Assert.Null(Coin(deposit, 0).AlsoPinnedTo);
 
-            // A withdrawal made shortly before the bumped one stops moving waits, and is fixed by itself when it does:
-            // nobody has to send anything at the right moment.
-            await AdvanceTo(bumped.PinnedAtVfxHeight + Stuck - 100);
-            var waiting = await Mine(Request(vault.Uid, 0.001M, feeRate: 10));
-            Assert.Equal(VaultWithdrawalState.Waiting, Row(waiting, vault.Uid).State);
+            // It waits, past its own 360 blocks, and is fixed by itself when the bumped one stops moving: nobody has
+            // to send anything at the right moment.
+            var waiting = tooSoon;
             var due = bumped.PinnedAtVfxHeight + Stuck;
             var retried = due % BtcAttestRules.TakeRetryBlocks == 0 ? due : due + BtcAttestRules.TakeRetryBlocks - due % BtcAttestRules.TakeRetryBlocks;
             await AdvanceTo(retried - 1);
@@ -559,6 +557,61 @@ namespace VerifiedXCore.Tests
             Assert.Equal(VaultWithdrawalState.Settled, Row(request, vault.Uid).State);
             Assert.Equal(50_000, BtcAttestStore.Total(vault.Uid).HeldSats);
             await AssertBacked(vault.Uid, _holder);
+        }
+
+        /// <summary>
+        /// A waiting request lives 360 blocks; a withdrawal stops moving after 2,160. A request made while the vault's
+        /// coin is held by a withdrawal that pays less is kept until it can take that coin, so its requester does not
+        /// have to come back and ask again at the right moment. One that could never take it runs out as before.
+        /// </summary>
+        [Fact]
+        public async Task ARequestMadeEarly_IsKeptUntilItCanTakeTheStoppedOnesCoins()
+        {
+            var (vault, deposit, slow) = await VaultHeldByASlowWithdrawal();
+            var slowPin = Row(slow, vault.Uid).Pins[0];
+            await Mine(Transfer(vault.Uid, 0.0002M, to: _other));
+
+            var early = await Mine(Request(vault.Uid, 0.001M, feeRate: 10));               // pays more: can take, in time
+            var never = await Mine(Request(vault.Uid, 0.0002M, from: _other, feeRate: 1));  // pays no more: never can
+            Assert.Equal(VaultWithdrawalState.Waiting, Row(early, vault.Uid).State);
+            var takesAt = slowPin.PinnedAtVfxHeight + Stuck;
+            var retried = takesAt % BtcAttestRules.TakeRetryBlocks == 0 ? takesAt : takesAt + BtcAttestRules.TakeRetryBlocks - takesAt % BtcAttestRules.TakeRetryBlocks;
+            Assert.Equal(slowPin.PinnedAtVfxHeight + Stuck + BtcAttestRules.TakeRetryBlocks + 1, BtcWithdrawals.ExpiresAtVfxHeight(Row(early, vault.Uid)));
+            Assert.Equal(never.Height + VBTCWithdrawalRequest.EXPIRY_BLOCKS + 1, BtcWithdrawals.ExpiresAtVfxHeight(Row(never, vault.Uid)));
+
+            // Past the ordinary window: the one that can never take the coin is closed and refunded, the other waits on.
+            await AdvanceTo(never.Height + VBTCWithdrawalRequest.EXPIRY_BLOCKS + 1);
+            Assert.Equal(VaultWithdrawalState.Expired, Row(never, vault.Uid).State);
+            Assert.Equal(0.0002M, await Spendable(vault.Uid, _other));
+            Assert.Equal(VaultWithdrawalState.Waiting, Row(early, vault.Uid).State);
+            Assert.Equal(0.0002M, await Spendable(vault.Uid, Minter));                      // still in escrow
+
+            // Its requester can cancel it at any time while it waits; here it does not.
+            await AdvanceTo(retried - 1);
+            Assert.Equal(VaultWithdrawalState.Waiting, Row(early, vault.Uid).State);
+            await AdvanceTo(retried);
+            var row = Row(early, vault.Uid);
+            Assert.Equal(VaultWithdrawalState.Pinned, row.State);
+            Assert.Equal(new[] { Outpoint(deposit, 0) }, row.Pins[0].Inputs);
+            await AssertBacked(vault.Uid, _holder, _other);
+        }
+
+        [Fact]
+        public async Task ARequestKeptForATakeover_ThatStillCannotBePaid_IsRefundedOnceItHasHadItsTurn()
+        {
+            var (vault, _, slow) = await VaultHeldByASlowWithdrawal();
+            var slowPin = Row(slow, vault.Uid).Pins[0];
+            // The slow one raises its fee above the waiting one's before it stops: it can no longer be taken from.
+            var waiting = await Mine(Request(vault.Uid, 0.001M, feeRate: 5));
+            Assert.Equal(VaultWithdrawalState.Waiting, Row(waiting, vault.Uid).State);
+            await AdvanceTo(waiting.Height + VBTCWithdrawalRequest.EXPIRY_BLOCKS + 1);
+            Assert.Equal(VaultWithdrawalState.Waiting, Row(waiting, vault.Uid).State);      // kept: 5 sat/vB against 1
+            await Mine(Bump(vault.Uid, slow.Hash, 8, from: _holder));
+            Assert.Equal(VaultWithdrawalState.Waiting, Row(waiting, vault.Uid).State);
+            await Apply(Tip + 1);
+            Assert.Equal(VaultWithdrawalState.Expired, Row(waiting, vault.Uid).State);      // nothing left to wait for
+            Assert.Equal(0.0014M, await Spendable(vault.Uid, Minter));
+            _ = slowPin;
         }
     }
 }

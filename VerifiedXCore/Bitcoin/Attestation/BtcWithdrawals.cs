@@ -306,11 +306,19 @@ namespace VerifiedXCore.Bitcoin.Attestation
             try
             {
                 var exits = new HashSet<string>(StringComparer.Ordinal);
+                var pinnedByVault = new Dictionary<string, List<VaultWithdrawalRow>>(StringComparer.Ordinal);
                 foreach (var row in BtcAttestStore.WaitingWithdrawalsRequestedBefore(vfxHeight - VBTCWithdrawalRequest.EXPIRY_BLOCKS, db)
                              .OrderBy(w => w.RequestVfxHeight).ThenBy(w => w.Ref, StringComparer.Ordinal))
                 {
                     if (!row.IsBridgeExit)
+                    {
+                        // Kept past its window while it is waiting for a withdrawal that pays less to stop moving,
+                        // so that it can take that one's coins without having to be requested again.
+                        if (!pinnedByVault.TryGetValue(row.SmartContractUID, out var pinned))
+                            pinnedByVault[row.SmartContractUID] = pinned = BtcAttestStore.WithdrawalsOf(row.SmartContractUID, VaultWithdrawalState.Pinned, db);
+                        if (vfxHeight <= KeptForTakeoverUntil(row, pinned)) continue;
                         Close(row, VaultWithdrawalState.Expired, vfxHeight, db, $"it could not be pinned within {VBTCWithdrawalRequest.EXPIRY_BLOCKS} blocks ({row.WaitingReason})");
+                    }
                     else if (exits.Add($"{row.RequestHash}@{row.RequestVfxHeight}"))
                         ExpireExit(row, vfxHeight, db); // an exit is failed as a whole, once
                 }

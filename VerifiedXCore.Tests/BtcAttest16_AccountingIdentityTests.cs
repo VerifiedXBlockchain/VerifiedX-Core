@@ -264,7 +264,11 @@ namespace VerifiedXCore.Tests
         {
             var waiting = Rows(VaultWithdrawalState.Waiting);
             if (waiting.Count == 0 || Tip + VBTCWithdrawalRequest.EXPIRY_BLOCKS + 5 >= H1 + BtcAttestRules.EpochBlocks) return;
-            await Apply(waiting.Max(r => r.RequestVfxHeight) + VBTCWithdrawalRequest.EXPIRY_BLOCKS + 1);
+            // (A waiting withdrawal that could still take a slower one's coins is kept past its window until it can.)
+            var pinned = Rows(VaultWithdrawalState.Pinned);
+            var last = waiting.Max(r => Math.Max(r.RequestVfxHeight + VBTCWithdrawalRequest.EXPIRY_BLOCKS, BtcWithdrawals.KeptForTakeoverUntil(r, pinned))) + 1;
+            if (last >= H1 + BtcAttestRules.EpochBlocks - 20) return;
+            await Apply(last);
             Assert.Empty(Rows(VaultWithdrawalState.Waiting));
             Did("expiry", $"{waiting.Count} unpinned request(s) or exit part(s)");
         }

@@ -109,6 +109,35 @@ namespace VerifiedXCore.Bitcoin.Attestation
         }
 
         /// <summary>
+        /// The last block a waiting withdrawal is kept at, past its ordinary window, because the coins it waits for are
+        /// held by a withdrawal that pays a lower fee rate and has not stopped moving yet: the block after which that
+        /// one can be taken from, plus the blocks until the next retry. 0 when it waits for nothing of the kind.
+        /// A waiting request lives 360 blocks and a withdrawal stops moving after
+        /// <see cref="BtcAttestRules.StuckPinBlocks"/>: without this a request made early ran out of its window first
+        /// and had to be made again at the right moment. Its requester can still cancel it at any time.
+        /// </summary>
+        internal static long KeptForTakeoverUntil(VaultWithdrawalRow waiting, IEnumerable<VaultWithdrawalRow> pinnedOnItsVault)
+        {
+            if (waiting.IsBridgeExit || waiting.State != VaultWithdrawalState.Waiting || string.IsNullOrEmpty(waiting.DestinationScriptHex)) return 0;
+            long until = 0;
+            foreach (var pinned in pinnedOnItsVault)
+            {
+                if (pinned.IsBridgeExit || pinned.State != VaultWithdrawalState.Pinned) continue;
+                var newest = pinned.Pins.LastOrDefault(p => !p.Dead);
+                if (newest == null) continue;
+                var pays = newest.FeeRate > 0 ? newest.FeeRate : pinned.FeeRate;
+                if (pays >= waiting.FeeRate) continue; // never takeable by this one
+                until = Math.Max(until, newest.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks + BtcAttestRules.TakeRetryBlocks);
+            }
+            return until;
+        }
+
+        /// <summary>The first block at which a waiting withdrawal is closed and refunded if it is still not pinned.</summary>
+        public static long ExpiresAtVfxHeight(VaultWithdrawalRow waiting, LiteDatabase? db = null) =>
+            Math.Max(waiting.RequestVfxHeight + VBTCWithdrawalRequest.EXPIRY_BLOCKS,
+                KeptForTakeoverUntil(waiting, BtcAttestStore.WithdrawalsOf(waiting.SmartContractUID, VaultWithdrawalState.Pinned, db))) + 1;
+
+        /// <summary>
         /// Every <see cref="BtcAttestRules.TakeRetryBlocks"/> blocks the withdrawals still waiting for coins are tried
         /// again: nothing else tells them that a withdrawal holding the vault's coins has just stopped moving (time
         /// passing changes no coin). In the order of every retry.

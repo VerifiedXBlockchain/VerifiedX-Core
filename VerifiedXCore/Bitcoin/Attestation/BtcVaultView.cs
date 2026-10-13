@@ -168,7 +168,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 row.AmountSats,
                 FeeRate = newest?.FeeRate > 0 ? newest.FeeRate : row.FeeRate,
                 row.RequestVfxHeight,
-                ExpiresAtVfxHeight = row.State == VaultWithdrawalState.Waiting ? row.RequestVfxHeight + VBTCWithdrawalRequest.EXPIRY_BLOCKS + 1 : (long?)null,
+                // For a withdrawal: later than its 360 blocks while it waits for a withdrawal that pays less to stop moving.
+                ExpiresAtVfxHeight = row.State != VaultWithdrawalState.Waiting ? (long?)null
+                    : row.IsBridgeExit ? row.RequestVfxHeight + VBTCWithdrawalRequest.EXPIRY_BLOCKS + 1 : BtcWithdrawals.ExpiresAtVfxHeight(row),
                 WaitingFor = row.State == VaultWithdrawalState.Waiting ? row.WaitingReason : null,
                 ClosedBecause = open || row.State == VaultWithdrawalState.Settled ? null : row.WaitingReason,
                 BitcoinTxid = row.SettledTxid ?? newest?.Txid,
@@ -209,7 +211,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     return $"{what} is waiting for its Bitcoin transaction to be fixed ({row.WaitingReason ?? "the vault's coins"}). That happens by itself as soon as the vault's coins allow. "
                         + (row.IsBridgeExit
                             ? $"If the exit cannot be fixed by block {row.RequestVfxHeight + VBTCWithdrawalRequest.EXPIRY_BLOCKS + 1} it is failed, its locks are restored and it is made again."
-                            : $"If it cannot be fixed by block {row.RequestVfxHeight + VBTCWithdrawalRequest.EXPIRY_BLOCKS + 1} it is closed and the vBTC returned. Until then its requester can cancel it.");
+                            : $"If it cannot be fixed by block {BtcWithdrawals.ExpiresAtVfxHeight(row)} it is closed and the vBTC returned. Until then its requester can cancel it.");
                 case VaultWithdrawalState.Pinned when newest?.IsRelease == true:
                     return $"{what} is being given up by its requester: Bitcoin transaction {newest.Txid} returns its coins to the vault. The vault's signers sign and broadcast it on their own. When Bitcoin has confirmed it {BtcAttestRules.Depth} times the withdrawal is closed and the vBTC returned, less that transaction's fee of {newest.FeeSats} sats. If one of its payments confirms first, it is paid instead.";
                 case VaultWithdrawalState.Pinned:
