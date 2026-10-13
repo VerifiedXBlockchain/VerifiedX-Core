@@ -137,7 +137,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
         // Keyed by SmartContractUID; the stored digest guards against a (never expected) change of
         // ContractData under the same UID. Decompiling runs a Trillium REPL, so this is cached.
-        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string DataDigest, bool IsV2)> _vbtcV2ContractCache = new();
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string DataDigest, bool Plain, bool IsV2)> _vbtcV2ContractCache = new();
 
         /// <summary>
         /// VX-01: consensus definition of "a vBTC V2 contract" — the contract code stored in the
@@ -146,6 +146,9 @@ namespace VerifiedXCore.Bitcoin.Services
         /// contract; before this check any minted smart contract (e.g. an NFT) was accepted as a
         /// target. S3C contracts carry the same feature (IsS3C flag) and pass. Missing or
         /// undecompilable contract data is NOT a vBTC V2 contract.
+        ///
+        /// From Globals.PathAuditRulesHeight the code must also be plain (LedgerIntegrityRules.VaultCodeIsPlain): the
+        /// feature alone, and nothing that reads the clock, so the answer cannot differ between nodes or change later.
         /// </summary>
         public static bool IsVbtcV2Contract(SmartContractStateTrei? scState)
         {
@@ -153,7 +156,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 return false;
 
             var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(scState.ContractData)));
-            if (_vbtcV2ContractCache.TryGetValue(scState.SmartContractUID, out var cached) && cached.DataDigest == digest)
+            var plain = NextBlockHeight >= Globals.PathAuditRulesHeight;
+            if (_vbtcV2ContractCache.TryGetValue(scState.SmartContractUID, out var cached) && cached.DataDigest == digest && cached.Plain == plain)
                 return cached.IsV2;
 
             bool isV2;
@@ -161,6 +165,8 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 var scMain = SmartContractMain.GenerateSmartContractInMemory(scState.ContractData);
                 isV2 = scMain?.Features?.Any(f => f != null && f.FeatureName == FeatureName.TokenizationV2) == true;
+                if (isV2 && plain)
+                    isV2 = VerifiedXCore.Services.LedgerIntegrityRules.VaultCodeIsPlain(scMain, scState.ContractData);
             }
             catch (Exception ex)
             {
@@ -169,7 +175,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 isV2 = false;
             }
 
-            _vbtcV2ContractCache[scState.SmartContractUID] = (digest, isV2);
+            _vbtcV2ContractCache[scState.SmartContractUID] = (digest, plain, isV2);
             return isV2;
         }
 
@@ -2920,8 +2926,9 @@ namespace VerifiedXCore.Bitcoin.Services
         /// </summary>
         public static bool ResolveContractIsS3C(string scUID)
         {
-            var local = VBTCContractV2.GetContract(scUID);
-            if (local != null) return local.IsS3C;
+            // Chain state first: block validation asks this (the bridge-lock refusal), and a record in this node's
+            // own wallet tables (which anyone could have a public node write, before the contract existed) must not
+            // decide what a block is. The local record answers only for a contract that is not on chain yet.
             try
             {
                 var scState = SmartContractStateTrei.GetSmartContractState(scUID);
@@ -2934,9 +2941,11 @@ namespace VerifiedXCore.Bitcoin.Services
                         .FirstOrDefault() as TokenizationV2Feature;
                     if (tknz != null) return tknz.IsS3C;
                 }
+                if (scState != null) return false;
             }
             catch { }
-            return false;
+            var local = VBTCContractV2.GetContract(scUID);
+            return local != null && local.IsS3C;
         }
 
         /// <summary>

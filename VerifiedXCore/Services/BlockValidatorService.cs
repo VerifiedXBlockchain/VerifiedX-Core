@@ -1013,7 +1013,7 @@ namespace VerifiedXCore.Services
 
                                 if (effectiveTxResult.Item1)
                                 {
-                                    var duplicateCreation = LedgerIntegrityRules.RegisterCreationInBlock(blkTransaction, blockCreatedContracts);
+                                    var duplicateCreation = LedgerIntegrityRules.RegisterCreationInBlock(blkTransaction, blockCreatedContracts, block.Height);
                                     if (duplicateCreation != null)
                                         effectiveTxResult = (false, duplicateCreation);
                                 }

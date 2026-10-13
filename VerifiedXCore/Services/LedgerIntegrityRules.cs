@@ -409,6 +409,15 @@ namespace VerifiedXCore.Services
             var v2 = decompiled.Features?.Where(f => f != null && f.FeatureName == FeatureName.TokenizationV2).ToList();
             if (v2 == null || v2.Count == 0) return null;
             if (v2.Count > 1) return "A contract may carry only one TokenizationV2 feature.";
+            // A vault's contract is its TokenizationV2 data and nothing that could make it read differently later
+            // or on another node (see VaultCodeIsPlain).
+            if (height >= Globals.PathAuditRulesHeight)
+            {
+                if (decompiled.Features!.Count(f => f != null) != 1)
+                    return "A vBTC V2 vault's contract carries the TokenizationV2 feature and no other.";
+                if (!ContractCodeIsTimeless(payload.Data))
+                    return "A vBTC V2 vault's contract code may not read the clock, a random number or the console.";
+            }
             var reuseError = VaultUidIsNew(tx, uid, height);
             if (reuseError != null) return reuseError;
             // From the recording height a vault is a contract made with Mint(), whose deposit script the chain then
@@ -422,6 +431,10 @@ namespace VerifiedXCore.Services
                     ?? Newtonsoft.Json.JsonConvert.DeserializeObject<VerifiedXCore.Models.SmartContracts.TokenizationV2Feature>(v2[0].FeatureFeatures?.ToString() ?? "");
             }
             catch { feature = null; }
+            // The height the key ceremony's proof names is read by the vault's signers; nothing checked it, and one in
+            // the future made every signer of the vault fail on its withdrawals (second path audit, 14 October 2026).
+            if (height >= Globals.PathAuditRulesHeight && feature != null && (feature.ProofBlockHeight < 0 || feature.ProofBlockHeight > height))
+                return "A vBTC V2 vault's ProofBlockHeight is a block that exists: not after the block that creates the vault.";
             // A deposit script belongs to one vault. A second vault carrying a watched vault's address would get no
             // coins of its own and would not be watched, so it would fall to the earlier rules, which read its
             // deposit from that address: the other vault's Bitcoin. (The key ceremony makes such an address
@@ -431,6 +444,76 @@ namespace VerifiedXCore.Services
                 return $"This deposit address already belongs to vault {taken.SmartContractUID}.";
             return VerifiedXCore.Bitcoin.FROST.FrostDkgAttestation.Validate(feature, uid, tx.FromAddress,
                 () => ValidatorBond.CeremonyEligible(VBTCValidatorRegistry.GetActiveValidatorsAt(height - 1), height)); // active, funded now, and (from the bond height) a stake locked for two days
+        }
+
+        // ── A vault's contract reads the same on every node, at every time ───────────────────────────────────────
+
+        /// <summary>The language built-in that reads the node's clock. Evolving NFTs use it; a vault may not.</summary>
+        public const string ClockBuiltin = "dateProc";
+
+        /// <summary>
+        /// Whether a contract body's code gives the same result whenever and wherever it runs: it parses, and calls
+        /// none of rand(), input() and dateProc(), and has no do-while loop. Never throws.
+        /// </summary>
+        public static bool ContractCodeIsTimeless(string? body)
+        {
+            if (string.IsNullOrEmpty(body)) return false;
+            try
+            {
+                var text = System.Text.Encoding.Unicode.GetString(SmartContractUtility.Decompress(Convert.FromBase64String(body)));
+                var tree = global::Trillium.Syntax.SyntaxTree.Parse(text, preventLoopsAndRecursion: true); // as the node parses it
+                if (tree.Diagnostics.Length > 0) return false;
+                var pending = new Stack<global::Trillium.Syntax.SyntaxNode>();
+                pending.Push(tree.Root);
+                while (pending.Count > 0)
+                {
+                    var node = pending.Pop();
+                    if (node is global::Trillium.Syntax.DoWhileStatementSyntax) return false;
+                    if (node is global::Trillium.Syntax.CallExpressionSyntax call
+                        && (call.Identifier.Text == ClockBuiltin || NondeterministicBuiltins.Contains(call.Identifier.Text)))
+                        return false;
+                    foreach (var child in node.GetChildren())
+                        pending.Push(child);
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// Whether a decompiled contract is a vault as every node will read it at every time: it carries the
+        /// TokenizationV2 feature and no other, and its code is timeless.
+        ///
+        /// "Is this contract a vault" was answered by running the contract's code and looking for the feature. Contract
+        /// code can read the clock (dateProc), and the decompiler hands an evolving contract the node's tip height, so
+        /// the same stored code could be a vault on one node and not on another, or become one later: an NFT that
+        /// turns into a "vault" naming any funded Bitcoin address after it was minted (no key ceremony was ever
+        /// checked), or an S3C vault that stops saying it is one and so may use the bridge (second path audit,
+        /// 14 October 2026). With one feature and no outside input the code has nothing to depend on.
+        /// </summary>
+        public static bool VaultCodeIsPlain(SmartContractMain? decompiled, string? body) =>
+            decompiled?.Features != null
+            && decompiled.Features.Count(f => f != null) == 1
+            && decompiled.Features.Any(f => f != null && f.FeatureName == FeatureName.TokenizationV2)
+            && ContractCodeIsTimeless(body);
+
+        /// <summary>The deposit script a vault creation would register, as hex; null when the transaction creates no vault.</summary>
+        public static string? CreatedVaultDepositScript(Transaction tx)
+        {
+            try
+            {
+                if (CreatedContractUid(tx) == null) return null;
+                var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+                if (string.IsNullOrEmpty(payload.Data)) return null;
+                var decompiled = SmartContractMain.GenerateSmartContractInMemory(payload.Data);
+                var v2 = decompiled?.Features?.FirstOrDefault(f => f != null && f.FeatureName == FeatureName.TokenizationV2);
+                if (v2 == null) return null;
+                var feature = v2.FeatureFeatures as TokenizationV2Feature
+                    ?? Newtonsoft.Json.JsonConvert.DeserializeObject<TokenizationV2Feature>(v2.FeatureFeatures?.ToString() ?? "");
+                return VerifiedXCore.Bitcoin.Attestation.BtcCanonicalWithdrawal.TryDestinationScript(feature?.DepositAddress, out var script)
+                    ? script : null;
+            }
+            catch { return null; }
         }
 
         // ── NEW-29: contract code must be deterministic and must terminate ──────────────────────────────────────
@@ -764,10 +847,16 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>NEW-06: registers a block transaction's contract creation; the reason when its UID was already created in this block.</summary>
-        public static string? RegisterCreationInBlock(Transaction tx, HashSet<string> createdInBlock)
+        public static string? RegisterCreationInBlock(Transaction tx, HashSet<string> createdInBlock, long height = 0)
         {
             var uid = CreatedContractUid(tx);
-            return uid != null && !createdInBlock.Add(uid) ? $"Duplicate creation of contract {uid} within block." : null;
+            if (uid != null && !createdInBlock.Add(uid)) return $"Duplicate creation of contract {uid} within block.";
+            // One deposit address, one vault: the creation rule looks at the vaults already in state, so two
+            // creations naming one address could share a block; the second would then be a vault the chain does not
+            // watch, reading the first one's Bitcoin.
+            if (uid != null && height >= Globals.PathAuditRulesHeight && CreatedVaultDepositScript(tx) is { } script && !createdInBlock.Add("script:" + script))
+                return "Another vault created in this block has the same deposit address.";
+            return null;
         }
     }
 }
