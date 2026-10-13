@@ -39,5 +39,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// </summary>
         public static decimal SettledExitBtc(string scUID, LiteDatabase? db = null) =>
             BtcAttestStore.Total(scUID, db).SettledExitSats / SatsPerBtc;
+
+        /// <summary>
+        /// Everything added back to the owner's ledger figure for Bitcoin that left the vault and was already charged
+        /// to somebody on the ledger: what bridge exits paid out (<see cref="SettledExitBtc"/>), and the Bitcoin fees of
+        /// releases, each taken out of its requester's refund.
+        /// </summary>
+        public static decimal OwnerAddBackBtc(string scUID, LiteDatabase? db = null)
+        {
+            var total = BtcAttestStore.Total(scUID, db);
+            return (total.SettledExitSats + total.ReleaseFeeSats) / SatsPerBtc;
+        }
     }
 }

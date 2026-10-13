@@ -36,6 +36,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public const int MaxCoinbaseProofBytes = 10_000;
         /// <summary>A coinbase output cannot be spent on Bitcoin for this many blocks.</summary>
         public const int CoinbaseMaturity = 100;
+        /// <summary>
+        /// VFX blocks (about 7.2 hours) after which a pinned withdrawal whose newest Bitcoin transaction has not
+        /// confirmed no longer keeps its coins to itself: another withdrawal of the vault that pays a higher fee rate
+        /// may be fixed on them (plan 5.5).
+        /// </summary>
+        public static int StuckPinBlocks => StuckPinBlocksOverride ?? 2160;
+        /// <summary>Tests only: a shorter wait, so that a run of a few hundred blocks reaches it.</summary>
+        internal static int? StuckPinBlocksOverride;
+        /// <summary>How often the withdrawals still waiting for coins are tried against coins that have become takeable, in VFX blocks.</summary>
+        public const int TakeRetryBlocks = 30;
         /// <summary>VFX blocks per signer-set epoch (about two hours).</summary>
         public const int EpochBlocks = 600;
         public const int MinSigners = 3;

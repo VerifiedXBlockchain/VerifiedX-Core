@@ -46,15 +46,22 @@ namespace VerifiedXCore.Bitcoin.Attestation
             catch { return null; }
         }
 
-        /// <summary>Why a fee bump is refused; null when it is accepted. <paramref name="replacement"/> is the transaction it would pin.</summary>
-        private static string? FeeBumpRefusal(Transaction tx, out VaultWithdrawalRow? row, out BtcCanonicalTx? replacement, out long feeRate, LiteDatabase? db = null)
+        /// <summary>
+        /// Why a fee bump or a release is refused; null when it is accepted. <paramref name="replacement"/> is the
+        /// transaction it would pin, and <paramref name="isRelease"/> which of the two it is (one transaction type, two
+        /// functions: both fix one more Bitcoin transaction on the withdrawal's own coins, at its requester's wish).
+        /// </summary>
+        private static string? FeeBumpRefusal(Transaction tx, out VaultWithdrawalRow? row, out BtcCanonicalTx? replacement, out long feeRate, out bool isRelease, LiteDatabase? db = null)
         {
             row = null;
             replacement = null;
             feeRate = 0;
+            isRelease = false;
             if (string.IsNullOrWhiteSpace(tx.Data)) return "A fee bump carries data.";
             var data = JObject.Parse(tx.Data);
-            if (data["Function"]?.ToObject<string?>() != FeeBumpFunction) return $"A fee bump's function is {FeeBumpFunction}.";
+            var function = data["Function"]?.ToObject<string?>();
+            isRelease = function == ReleaseFunction;
+            if (function != FeeBumpFunction && !isRelease) return $"This transaction's function is {FeeBumpFunction} or {ReleaseFunction}.";
             if (tx.FromAddress != tx.ToAddress) return "A fee bump is sent by the requester to itself.";
             if (tx.Amount != 0M) return "A fee bump carries no amount.";
 
@@ -86,6 +93,22 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (feeRate <= paying)
                 return $"The new fee rate must be above the {paying} sat/vB the withdrawal's newest Bitcoin transaction pays.";
 
+            if (isRelease)
+            {
+                replacement = BtcCanonicalWithdrawal.BuildRelease(row.SmartContractUID, feeRate, newest.Inputs, row.Ref, out var why, db);
+                if (replacement == null) return $"The release cannot be built: {why}.";
+                // Bitcoin nodes replace a transaction only by one that pays more in all, by at least its own relay cost.
+                var atLeast = newest.FeeSats + BtcCanonicalWithdrawal.VSize(replacement.Inputs.Count);
+                if (replacement.FeeSats < atLeast)
+                    return $"At {feeRate} sat/vB the release pays {replacement.FeeSats} sats; it must pay at least {atLeast} sats to replace the withdrawal's newest Bitcoin transaction. Name a higher fee rate.";
+                // Its fee comes out of the refund.
+                if (replacement.FeeSats > row.AmountSats)
+                    return $"At {feeRate} sat/vB the release costs {replacement.FeeSats} sats of Bitcoin fee, more than the {row.AmountSats} sats the withdrawal is for; the fee is taken out of the refund.";
+                return null;
+            }
+
+            if (live.Any(p => p.IsRelease))
+                return "This withdrawal is being released back to the vault; its payment is not raised any more. A release at a higher fee rate is accepted.";
             replacement = BtcCanonicalWithdrawal.BuildReplacement(row.SmartContractUID, row.DestinationScriptHex, row.AmountSats, feeRate, newest.Inputs, row.Ref, out var reason, db);
             if (replacement == null) return $"The replacement cannot be built: {reason}.";
             return null;
@@ -99,7 +122,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         {
             try
             {
-                var refusal = FeeBumpRefusal(tx, out var row, out var replacement, out var feeRate, db);
+                var refusal = FeeBumpRefusal(tx, out var row, out var replacement, out var feeRate, out var isRelease, db);
                 if (refusal != null || row == null || replacement == null)
                 {
                     ErrorLogUtility.LogError($"Fee bump {tx.Hash} was mined but changed nothing: {refusal}", "BtcWithdrawals.ApplyFeeBump()");
@@ -110,10 +133,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 row.Pins.Add(new VaultPin
                 {
                     Txid = replacement.Txid, TxHex = replacement.TxHex, Inputs = replacement.Inputs, DestinationSats = replacement.DestinationSats,
-                    ChangeSats = replacement.ChangeSats, FeeSats = replacement.FeeSats, FeeRate = feeRate, PinnedAtVfxHeight = vfxHeight,
+                    ChangeSats = replacement.ChangeSats, FeeSats = replacement.FeeSats, FeeRate = feeRate, PinnedAtVfxHeight = vfxHeight, IsRelease = isRelease,
                 });
                 BtcAttestStore.SaveWithdrawal(row, db);
-                SCLogUtility.Log($"vBTC withdrawal {row.RequestHash} on {row.SmartContractUID}: Bitcoin fee raised to {feeRate} sat/vB by its requester; replacement {replacement.Txid} pinned ({replacement.FeeSats} sats, paid out of the withdrawal).",
+                SCLogUtility.Log(isRelease
+                        ? $"vBTC withdrawal {row.RequestHash} on {row.SmartContractUID}: released by its requester; Bitcoin transaction {replacement.Txid} pinned, returning its coins to the vault at {feeRate} sat/vB ({replacement.FeeSats} sats, taken out of the refund). It is refunded when Bitcoin shows that transaction, or paid if a payment confirms first."
+                        : $"vBTC withdrawal {row.RequestHash} on {row.SmartContractUID}: Bitcoin fee raised to {feeRate} sat/vB by its requester; replacement {replacement.Txid} pinned ({replacement.FeeSats} sats, paid out of the withdrawal).",
                     "BtcWithdrawals.ApplyFeeBump()");
             }
             catch (Exception ex)

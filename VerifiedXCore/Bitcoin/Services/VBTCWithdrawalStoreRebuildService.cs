@@ -454,7 +454,7 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
-                var closed = new[] { Attestation.VaultWithdrawalState.Settled, Attestation.VaultWithdrawalState.Void, Attestation.VaultWithdrawalState.Expired, Attestation.VaultWithdrawalState.Cancelled };
+                var closed = new[] { Attestation.VaultWithdrawalState.Settled, Attestation.VaultWithdrawalState.Void, Attestation.VaultWithdrawalState.Expired, Attestation.VaultWithdrawalState.Cancelled, Attestation.VaultWithdrawalState.Released };
                 foreach (var attested in closed.SelectMany(state => Attestation.BtcAttestStore.WithdrawalsInState(state)).Where(w => !w.IsBridgeExit))
                 {
                     var row = VBTCWithdrawalRequest.GetByTransactionHash(attested.RequestHash, attested.SmartContractUID);

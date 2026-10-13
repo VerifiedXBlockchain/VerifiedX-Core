@@ -114,6 +114,7 @@ namespace VerifiedXCore.Tests
             StateWriteContext.Clear();
             BtcChainRules.OverrideForTests = null;
             BtcAttestRules.DepthOverride = null;
+            BtcAttestRules.StuckPinBlocksOverride = null;
             Globals.BitcoinAttestationObserveHeight = _priorObserve;
             Globals.BitcoinAttestationRecordHeight = _priorRecord;
             Globals.BitcoinAttestationHeight = _priorEnforce;

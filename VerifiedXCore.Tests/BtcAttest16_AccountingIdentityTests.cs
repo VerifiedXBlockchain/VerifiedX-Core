@@ -67,6 +67,7 @@ namespace VerifiedXCore.Tests
             Globals.BitcoinCheckpointHeadersMainnet = string.Concat(_btc.HeaderHexes(Checkpoint - 11, Checkpoint));
             Globals.BridgeIntraBlockGuardHeight = 1;
             Globals.BootstrapCasterAddresses.Add(Caster.Address);
+            BtcAttestRules.StuckPinBlocksOverride = 40; // a run stays inside one epoch of 600 blocks
         }
 
         protected override void SeedAccounts()
@@ -180,9 +181,10 @@ namespace VerifiedXCore.Tests
             if (have < 12_000) return;
             var amount = Btc8(_rng.Next(10_000, (int)Math.Min(have, 200_000) + 1));
             var feeRate = _rng.Next(2, 30);
+            var shared = SharedCoins();
             if (await TryMine(SignedBy(from, from.Address, TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
                     new { Function = "VBTCWithdrawalRequest()", ContractUID = _vault.Uid, BTCAddress = BtcDest, Amount = amount, FeeRate = feeRate, UniqueId = Guid.NewGuid().ToString("N") })))
-                Did("request", $"{amount} at {feeRate} sat/vB");
+                Did(SharedCoins() > shared ? "takeover" : "request", $"{amount} at {feeRate} sat/vB");
         }
 
         private async Task FeeBump()
@@ -196,6 +198,35 @@ namespace VerifiedXCore.Tests
                 Did("fee bump", $"to {rate} sat/vB ({row.Pins.Count + 1} transactions)");
         }
 
+        /// <summary>A requester gives a pinned withdrawal up: its coins are to go back to the vault.</summary>
+        private async Task Release()
+        {
+            var pinned = Rows(VaultWithdrawalState.Pinned).Where(r => !r.IsBridgeExit && r.Pins.Count < BtcWithdrawals.MaxPins).ToList();
+            if (pinned.Count == 0) return;
+            var row = Pick(pinned);
+            var rate = row.Pins.Last(p => !p.Dead).FeeRate + _rng.Next(1, 12);
+            if (await TryMine(SignedBy(KeyOf(row.Requester), row.Requester, TransactionType.VBTC_V2_COIN_PIN,
+                    new { Function = BtcWithdrawals.ReleaseFunction, ContractUID = _vault.Uid, WithdrawalRequestHash = row.RequestHash, FeeRate = rate })))
+                Did("release", $"at {rate} sat/vB ({row.Pins.Count + 1} transactions)");
+        }
+
+        /// <summary>
+        /// Blocks pass with nothing in them. Pinned withdrawals grow old, and one that has stopped moving no longer
+        /// keeps its coins from a waiting withdrawal that pays more.
+        /// </summary>
+        private async Task TimePasses()
+        {
+            // (The waiting withdrawals are tried against stopped ones on every thirtieth block; this run does not apply every block.)
+            var to = (Tip + _rng.Next(10, 70)) / BtcAttestRules.TakeRetryBlocks * BtcAttestRules.TakeRetryBlocks + BtcAttestRules.TakeRetryBlocks;
+            if (to >= H1 + BtcAttestRules.EpochBlocks - 20) return;
+            var shared = SharedCoins();
+            await Apply(to);
+            if (SharedCoins() > shared) Did("takeover", "a waiting withdrawal was fixed on coins of one that stopped moving");
+            else Did("time passes", $"to block {to}");
+        }
+
+        private int SharedCoins() => BtcAttestStore.CoinsOf(_vault.Uid).Count(c => c.Status == VaultCoinStatus.Pinned && c.AlsoPinnedTo is { Count: > 0 });
+
         /// <summary>Bitcoin confirms one of the transactions fixed for a withdrawal or an exit part: not always the newest.</summary>
         private async Task Confirm()
         {
@@ -204,11 +235,18 @@ namespace VerifiedXCore.Tests
             if (pinned.Count == 0) return;
             var row = Pick(pinned);
             var pin = Pick(row.Pins.Where(p => !p.Dead).ToList());
+            var others = BtcWithdrawals.HoldersOf(BtcAttestStore.Coin(pin.Inputs[0])!, null).Where(h => h.Ref != row.Ref).ToList();
             await MineAndReport(BtcTx.Parse(pin.TxHex, Network.Main));
+            // A withdrawal that held one of the same coins (a takeover) lost to it, and is refunded.
+            foreach (var other in others)
+            {
+                Assert.Equal(VaultWithdrawalState.Void, BtcAttestStore.Withdrawal(other.Ref)!.State);
+                Did("takeover decided", $"{other.Ref[..12]} refunded");
+            }
             var after = BtcAttestStore.Withdrawal(row.Ref)!;
-            Assert.Equal(VaultWithdrawalState.Settled, after.State);
+            Assert.Equal(pin.IsRelease ? VaultWithdrawalState.Released : VaultWithdrawalState.Settled, after.State);
             Assert.Equal(pin.Txid, after.SettledTxid);
-            Did(row.IsBridgeExit ? "exit paid" : row.Pins.Count > 1 ? "withdrawal paid (after a fee bump)" : "withdrawal paid", $"{row.AmountSats} sats by {pin.Txid[..12]}");
+            Did(pin.IsRelease ? "withdrawal released" : row.IsBridgeExit ? "exit paid" : row.Pins.Count > 1 ? "withdrawal paid (after a fee bump)" : "withdrawal paid", $"{row.AmountSats} sats by {pin.Txid[..12]}");
         }
 
         private async Task Cancel()
@@ -341,11 +379,13 @@ namespace VerifiedXCore.Tests
             Assert.Equal(coins.Where(c => c.Status == VaultCoinStatus.Pinned).Sum(c => c.ValueSats), total.PinnedSats);
 
             // Every held coin is held for a withdrawal that is still to be paid, and every such withdrawal holds its coins.
+            // (After a takeover a coin is held for more than one; every one of them is still to be paid.)
             foreach (var coin in coins.Where(c => c.Status == VaultCoinStatus.Pinned))
-                Assert.True(BtcAttestStore.Withdrawal(coin.PinnedToRef)?.State == VaultWithdrawalState.Pinned, Fail(after, $"coin {coin.Outpoint} is held for {coin.PinnedToRef}, which is not pinned"));
+                foreach (var holder in BtcWithdrawals.RefsOn(coin))
+                    Assert.True(BtcAttestStore.Withdrawal(holder)?.State == VaultWithdrawalState.Pinned, Fail(after, $"coin {coin.Outpoint} is held for {holder}, which is not pinned"));
             foreach (var row in Rows(VaultWithdrawalState.Pinned))
                 foreach (var outpoint in row.Pins.Where(p => !p.Dead).SelectMany(p => p.Inputs).Distinct())
-                    Assert.True(BtcAttestStore.Coin(outpoint) is { Status: VaultCoinStatus.Pinned or VaultCoinStatus.Orphaned } c && c.PinnedToRef == row.Ref, Fail(after, $"{row.Ref} does not hold its coin {outpoint}"));
+                    Assert.True(BtcAttestStore.Coin(outpoint) is { Status: VaultCoinStatus.Pinned or VaultCoinStatus.Orphaned } c && BtcWithdrawals.RefsOn(c).Contains(row.Ref), Fail(after, $"{row.Ref} does not hold its coin {outpoint}"));
 
             // Claims.
             var owner = await Spendable(Minter);
@@ -404,9 +444,9 @@ namespace VerifiedXCore.Tests
 
             var steps = new (int Weight, string Name, Func<Task> Run)[]
             {
-                (6, "deposit", Deposit), (14, "transfer", Transfer), (20, "request", Request), (8, "fee bump", FeeBump), (12, "confirm", Confirm),
+                (5, "deposit", Deposit), (14, "transfer", Transfer), (22, "request", Request), (8, "fee bump", FeeBump), (10, "confirm", Confirm),
                 (6, "cancel", Cancel), (4, "expiry", LetWindowsEnd), (9, "lock", Lock), (9, "exit", Exit), (3, "foreign spend", ForeignSpend),
-                (4, "deep reorg", DeepReorg),
+                (4, "deep reorg", DeepReorg), (5, "release", Release), (7, "time passes", TimePasses),
             };
             var weights = steps.Sum(s => s.Weight);
             for (var i = 0; i < 90 && Tip < H1 + BtcAttestRules.EpochBlocks - 20; i++)

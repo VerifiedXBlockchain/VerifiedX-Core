@@ -1226,7 +1226,7 @@ namespace VerifiedXCore.Services
                     var txdataBump = TransactionData.GetAll();
                     tx.TransactionStatus = TransactionStatus.Success;
                     txdataBump.InsertSafe(tx);
-                    SCLogUtility.Log($"VBTC_V2_COIN_PIN (withdrawal fee bump) in block: {tx.Hash}, from {tx.FromAddress}",
+                    SCLogUtility.Log($"VBTC_V2_COIN_PIN (withdrawal fee bump or release) in block: {tx.Hash}, from {tx.FromAddress}",
                         "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                 }
 

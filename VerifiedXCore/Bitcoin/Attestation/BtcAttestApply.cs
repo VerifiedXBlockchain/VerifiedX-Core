@@ -186,13 +186,14 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 {
                     // A coin a rewind orphaned, confirmed again: held again for the withdrawal whose pinned transaction
                     // spends it, if that withdrawal is still to be paid.
-                    var heldFor = existing == null ? null : BtcWithdrawals.HeldFor(existing, db);
-                    BtcAttestStore.SaveCoin(new VaultCoinRow
+                    var created = new VaultCoinRow
                     {
                         Outpoint = effect.Outpoint, SmartContractUID = effect.SmartContractUID, ValueSats = effect.Sats,
-                        Status = heldFor != null ? VaultCoinStatus.Pinned : VaultCoinStatus.Unspent, PinnedToRef = heldFor,
+                        PinnedToRef = existing?.PinnedToRef, AlsoPinnedTo = existing?.AlsoPinnedTo?.ToList(),
                         CreatedInHeight = effect.BitcoinHeight, IsCoinbase = effect.IsCoinbase,
-                    }, existing, db);
+                    };
+                    created.Status = BtcWithdrawals.SetHolders(created, db) ? VaultCoinStatus.Pinned : VaultCoinStatus.Unspent;
+                    BtcAttestStore.SaveCoin(created, existing, db);
                 }
             }
 
@@ -273,7 +274,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
         private static VaultCoinRow Clone(VaultCoinRow c) => new()
         {
             Outpoint = c.Outpoint, SmartContractUID = c.SmartContractUID, ValueSats = c.ValueSats, Status = c.Status, CreatedInHeight = c.CreatedInHeight,
-            IsCoinbase = c.IsCoinbase, SpentByTxid = c.SpentByTxid, SpentInHeight = c.SpentInHeight, PinnedToRef = c.PinnedToRef, LastModifiedHeight = c.LastModifiedHeight,
+            IsCoinbase = c.IsCoinbase, SpentByTxid = c.SpentByTxid, SpentInHeight = c.SpentInHeight, PinnedToRef = c.PinnedToRef,
+            AlsoPinnedTo = c.AlsoPinnedTo?.ToList(), LastModifiedHeight = c.LastModifiedHeight,
         };
     }
 }

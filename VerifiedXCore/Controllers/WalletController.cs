@@ -174,6 +174,23 @@ namespace VerifiedXCore.Controllers
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
+        /// <summary>Give up a pinned withdrawal on a vault the chain watches: its coins go back to the vault and the vBTC is refunded, less the Bitcoin fee.</summary>
+        [HttpPost("api/vbtc/withdraw/release")]
+        public async Task<IActionResult> VBTCWithdrawRelease([FromBody] VBTCWDBump req)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.ScUID) || string.IsNullOrWhiteSpace(req.OwnerAddress) || string.IsNullOrWhiteSpace(req.RequestHash))
+                    return BadRequest(new { success = false, message = "scUID, ownerAddress, and requestHash are required." });
+                if (!long.TryParse(req.FeeRate, out var feeRate) || feeRate <= 0)
+                    return BadRequest(new { success = false, message = "Invalid fee rate." });
+
+                var (success, message) = await WalletVbtcService.ReleaseWithdrawal(req.ScUID, req.OwnerAddress, req.RequestHash, feeRate);
+                return Ok(new { success, message });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
+        }
+
         /// <summary>Where a withdrawal from a vault the chain watches stands, with its Bitcoin transaction(s).</summary>
         [HttpGet("api/vbtc/withdraw/pin/{scUID}/{requestHash}")]
         public IActionResult VBTCWithdrawPin(string scUID, string requestHash)

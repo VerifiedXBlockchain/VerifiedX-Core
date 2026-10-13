@@ -93,9 +93,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 total.UnspentSats,
                 total.PinnedSats,
                 PaidOutForBridgeExitsSats = total.SettledExitSats,
+                // Bitcoin fees of releases (a requester had its withdrawal's coins sent back to the vault); each came out of that requester's refund.
+                ReleaseFeesSats = total.ReleaseFeeSats,
                 Coins = coins.Where(c => c.Status != VaultCoinStatus.Spent && c.Status != VaultCoinStatus.Orphaned)
                     .OrderBy(c => c.CreatedInHeight).ThenBy(c => c.Outpoint, StringComparer.Ordinal)
-                    .Select(c => new { c.Outpoint, c.ValueSats, Status = c.Status.ToString(), c.CreatedInHeight, c.IsCoinbase, HeldFor = c.PinnedToRef }).ToList(),
+                    .Select(c => new { c.Outpoint, c.ValueSats, Status = c.Status.ToString(), c.CreatedInHeight, c.IsCoinbase, HeldFor = c.PinnedToRef, AlsoHeldFor = c.AlsoPinnedTo }).ToList(),
                 SpentCoinCount = coins.Count(c => c.Status == VaultCoinStatus.Spent),
                 // Created by a Bitcoin block that a deep reorganisation removed: not counted, back if the transaction confirms again.
                 OrphanedCoins = coins.Where(c => c.Status == VaultCoinStatus.Orphaned)
@@ -146,6 +148,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         {
             var newest = row.Pins.LastOrDefault(p => !p.Dead);
             var open = row.State == VaultWithdrawalState.Waiting || row.State == VaultWithdrawalState.Pinned;
+            var pinned = row.State == VaultWithdrawalState.Pinned && !row.IsBridgeExit;
             return new
             {
                 row.SmartContractUID,
@@ -166,10 +169,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 row.SettledTxid,
                 ClosedAtVfxHeight = open ? (long?)null : row.ClosedAtVfxHeight,
                 CanCancel = row.State == VaultWithdrawalState.Waiting && !row.IsBridgeExit,
-                CanRaiseFee = row.State == VaultWithdrawalState.Pinned && !row.IsBridgeExit && row.Pins.Count < BtcWithdrawals.MaxPins,
+                CanRaiseFee = pinned && row.Pins.Count < BtcWithdrawals.MaxPins && !row.Pins.Any(p => !p.Dead && p.IsRelease),
+                // The requester may give a pinned withdrawal up: its coins are sent back to the vault, and it is refunded less that Bitcoin fee.
+                CanRelease = pinned && row.Pins.Count < BtcWithdrawals.MaxPins,
+                Releasing = pinned && row.Pins.Any(p => !p.Dead && p.IsRelease),
+                // From this block on, another withdrawal of the vault that pays a higher fee rate may be fixed on this one's coins.
+                CoinsCanBeTakenFromVfxHeight = pinned && newest != null ? newest.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks : (long?)null,
                 Transactions = row.Pins.Select(p => new
                 {
                     p.Txid,
+                    Kind = p.IsRelease ? "Release" : "Payment",
                     FeeRate = p.FeeRate > 0 ? p.FeeRate : row.FeeRate,
                     p.FeeSats,
                     p.DestinationSats,
@@ -195,11 +204,15 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         + (row.IsBridgeExit
                             ? $"If the exit cannot be fixed by block {row.RequestVfxHeight + VBTCWithdrawalRequest.EXPIRY_BLOCKS + 1} it is failed, its locks are restored and it is made again."
                             : $"If it cannot be fixed by block {row.RequestVfxHeight + VBTCWithdrawalRequest.EXPIRY_BLOCKS + 1} it is closed and the vBTC returned. Until then its requester can cancel it.");
+                case VaultWithdrawalState.Pinned when newest?.IsRelease == true:
+                    return $"{what} is being given up by its requester: Bitcoin transaction {newest.Txid} returns its coins to the vault. The vault's signers sign and broadcast it on their own. When Bitcoin has confirmed it {BtcAttestRules.Depth} times the withdrawal is closed and the vBTC returned, less that transaction's fee of {newest.FeeSats} sats. If one of its payments confirms first, it is paid instead.";
                 case VaultWithdrawalState.Pinned:
                     return $"{what} is paid by Bitcoin transaction {newest?.Txid}, fixed by the chain. The vault's signers sign and broadcast it on their own, and it completes when Bitcoin has confirmed it {BtcAttestRules.Depth} times. Nothing needs to be done."
-                        + (row.IsBridgeExit ? "" : " If it is not confirming, its requester can raise the fee.");
+                        + (row.IsBridgeExit ? "" : " If it is not confirming, its requester can raise the fee, or give the withdrawal up and have the vBTC back (a release).");
                 case VaultWithdrawalState.Settled:
                     return $"{what} was paid by Bitcoin transaction {row.SettledTxid}.";
+                case VaultWithdrawalState.Released:
+                    return $"{what} was given up by its requester: Bitcoin transaction {row.SettledTxid} returned its coins to the vault. The vBTC was returned to its requester, less that transaction's fee.";
                 default:
                     return $"{what} was closed ({row.State}): {row.WaitingReason}. "
                         + (row.IsBridgeExit ? "Its bridge locks were restored." : "The vBTC was returned to its requester.");

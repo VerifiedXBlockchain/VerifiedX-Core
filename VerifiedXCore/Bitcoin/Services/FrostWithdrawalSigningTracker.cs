@@ -161,6 +161,14 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
             }
 
+            // A vault the chain watches: which transactions may spend which coins is fixed in consensus state, and
+            // FrostSigningAuthorization has already held this one to it. Consensus may fix two withdrawals on the same
+            // coin (a withdrawal that stopped moving, and the one that takes its coins): Bitcoin confirms one and the
+            // chain refunds the other. This validator's own coin rule below would refuse the second and keep the vault
+            // stuck, so it is not applied.
+            if (!string.IsNullOrEmpty(transactionScope))
+                return (false, string.Empty);
+
             if (!_contractPins.TryGetValue(scUID, out var pins) || pins.IsEmpty)
                 return (false, string.Empty);
 
@@ -377,7 +385,8 @@ namespace VerifiedXCore.Bitcoin.Services
 
             // Contract-level pin: my key share is now out for this transaction; until it is observed
             // on-chain (confirmed or conflicted away) the rules in CheckWithdrawalSigning apply.
-            if (txInputOutpoints != null && txInputOutpoints.Count > 0)
+            // Not for a vault the chain watches (a transaction scope is given): its coins are held in consensus state.
+            if (txInputOutpoints != null && txInputOutpoints.Count > 0 && string.IsNullOrEmpty(transactionScope))
             {
                 var pin = new ContractOutpointPin
                 {

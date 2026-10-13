@@ -28,8 +28,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
     ///
     /// The rules:
     /// <list type="bullet">
-    /// <item>Coins: the vault's unspent coins (never one pinned to another withdrawal, never a coinbase output younger
-    /// than 100 blocks). If a single coin covers the amount, the smallest such coin, so a small withdrawal does not tie
+    /// <item>Coins: the vault's unspent coins (never a coinbase output younger than 100 blocks, and one pinned to
+    /// another withdrawal only under the rule of <see cref="BuildTaking"/>). If a single coin covers the amount, the smallest such coin, so a small withdrawal does not tie
     /// up the vault's largest coin. Otherwise the largest coins first until the amount is covered. Ties go to the older
     /// coin, then the lower outpoint.</item>
     /// <item>Fee: the request's fee rate times the size estimate the wallet has always used (57.5 vB per input, 43 per
@@ -79,40 +79,83 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var meta = BtcAttestStore.GetMeta(db);
             if (meta == null) { reason = "the Bitcoin view has not started"; return null; }
 
-            var free = BtcAttestStore.FreeCoinsOf(scUID, db)
+            var chosen = Choose(FreeCoins(scUID, meta, db), amountSats, out reason);
+            return chosen == null ? null : Assemble(vault, destinationScriptHex, amountSats, feeRate, chosen, out reason);
+        }
+
+        /// <summary>The vault's coins no withdrawal holds, less coinbase outputs too young to spend.</summary>
+        private static List<VaultCoinRow> FreeCoins(string scUID, AttestationMetaRow meta, LiteDatabase? db) =>
+            BtcAttestStore.FreeCoinsOf(scUID, db)
                 .Where(c => c.ValueSats > 0)
                 .Where(c => !c.IsCoinbase || meta.TipHeight >= c.CreatedInHeight + BtcAttestRules.CoinbaseMaturity)
                 .ToList();
 
-            List<VaultCoinRow> chosen;
-            var covering = free.Where(c => c.ValueSats >= amountSats)
+        /// <summary>The coin rule: the smallest single coin that covers the amount, otherwise the largest coins first.</summary>
+        private static List<VaultCoinRow>? Choose(List<VaultCoinRow> coins, long amountSats, out string? reason)
+        {
+            reason = null;
+            var covering = coins.Where(c => c.ValueSats >= amountSats)
                 .OrderBy(c => c.ValueSats).ThenBy(c => c.CreatedInHeight).ThenBy(c => c.Outpoint, StringComparer.Ordinal)
                 .FirstOrDefault();
-            if (covering != null)
-            {
-                chosen = new List<VaultCoinRow> { covering };
-            }
-            else
-            {
-                chosen = new List<VaultCoinRow>();
-                long sum = 0;
-                foreach (var coin in free.OrderByDescending(c => c.ValueSats).ThenBy(c => c.CreatedInHeight).ThenBy(c => c.Outpoint, StringComparer.Ordinal))
-                {
-                    chosen.Add(coin);
-                    sum += coin.ValueSats;
-                    if (sum >= amountSats) break;
-                    if (chosen.Count == MaxInputs) break;
-                }
-                if (sum < amountSats)
-                {
-                    reason = chosen.Count == MaxInputs
-                        ? $"the vault's {MaxInputs} largest free coins do not cover the amount"
-                        : "the vault's free coins do not cover the amount (others are held by withdrawals not yet confirmed)";
-                    return null;
-                }
-            }
+            if (covering != null) return new List<VaultCoinRow> { covering };
 
-            return Assemble(vault, destinationScriptHex, amountSats, feeRate, chosen, out reason);
+            var chosen = new List<VaultCoinRow>();
+            long sum = 0;
+            foreach (var coin in coins.OrderByDescending(c => c.ValueSats).ThenBy(c => c.CreatedInHeight).ThenBy(c => c.Outpoint, StringComparer.Ordinal))
+            {
+                chosen.Add(coin);
+                sum += coin.ValueSats;
+                if (sum >= amountSats) break;
+                if (chosen.Count == MaxInputs) break;
+            }
+            if (sum >= amountSats) return chosen;
+            reason = chosen.Count == MaxInputs
+                ? $"the vault's {MaxInputs} largest free coins do not cover the amount"
+                : "the vault's free coins do not cover the amount (others are held by withdrawals not yet confirmed)";
+            return null;
+        }
+
+        /// <summary>
+        /// The transaction for a withdrawal that the vault's free coins cannot pay, built on those and on coins held by
+        /// withdrawals that have stopped moving (<see cref="BtcWithdrawals.TakeableCoins"/>): the same coin rule over
+        /// both. It must be able to replace, on Bitcoin, every transaction it conflicts with: its fee rate is above
+        /// theirs (the caller offers only such coins) and its fee is at least the fees of the newest transaction of
+        /// each withdrawal it takes from plus one sat per virtual byte of its own size. Null with the reason when no
+        /// coin is takeable, the coins still do not cover the amount, or the fee is too small to replace them.
+        /// <paramref name="takenFrom"/> names the withdrawals whose coins it spends.
+        /// </summary>
+        public static BtcCanonicalTx? BuildTaking(string scUID, string destinationScriptHex, long amountSats, long feeRate, long vfxHeight,
+            out List<string> takenFrom, out string? reason, LiteDatabase? db = null)
+        {
+            reason = null;
+            takenFrom = new List<string>();
+            if (amountSats <= 0 || feeRate <= 0) { reason = "the amount and the fee rate must be positive"; return null; }
+            var vault = BtcAttestStore.ScriptRowForVault(scUID, db);
+            if (vault == null) { reason = "the vault is not watched"; return null; }
+            var meta = BtcAttestStore.GetMeta(db);
+            if (meta == null) { reason = "the Bitcoin view has not started"; return null; }
+
+            var takeable = BtcWithdrawals.TakeableCoins(scUID, feeRate, vfxHeight, db);
+            if (takeable.Count == 0) { reason = "no coin of the vault is held by a withdrawal that has stopped moving and pays a lower fee rate"; return null; }
+
+            var chosen = Choose(FreeCoins(scUID, meta, db).Concat(takeable.Select(t => t.Coin)).ToList(), amountSats, out reason);
+            if (chosen == null) return null;
+            var tx = Assemble(vault, destinationScriptHex, amountSats, feeRate, chosen, out reason);
+            if (tx == null) return null;
+
+            var replaced = new SortedDictionary<string, long>(StringComparer.Ordinal);
+            foreach (var (coin, holders) in takeable.Where(t => chosen.Any(c => c.Outpoint == t.Coin.Outpoint)))
+                foreach (var holder in holders)
+                    replaced[holder.Ref] = holder.Pins.Last(p => !p.Dead).FeeSats;
+            if (replaced.Count == 0) { reason = "the vault's free coins cover it"; return null; } // the caller builds from free coins first
+            var needed = replaced.Values.Sum() + VSize(chosen.Count);
+            if (tx.FeeSats < needed)
+            {
+                reason = $"its Bitcoin fee of {tx.FeeSats} sats could not replace the transaction(s) holding the coins ({needed} sats needed)";
+                return null;
+            }
+            takenFrom = replaced.Keys.ToList();
+            return tx;
         }
 
         /// <summary>
@@ -127,20 +170,55 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (amountSats <= 0 || feeRate <= 0) { reason = "the amount and the fee rate must be positive"; return null; }
             var vault = BtcAttestStore.ScriptRowForVault(scUID, db);
             if (vault == null) { reason = "the vault is not watched"; return null; }
+            var chosen = HeldCoins(vault, inputs, reference, out reason, db);
+            return chosen == null ? null : Assemble(vault, destinationScriptHex, amountSats, feeRate, chosen, out reason);
+        }
+
+        /// <summary>The coins of a withdrawal's newest transaction, as state holds them; null when one is no longer held for it.</summary>
+        private static List<VaultCoinRow>? HeldCoins(VaultDepositScriptRow vault, IReadOnlyList<string> inputs, string reference, out string? reason, LiteDatabase? db)
+        {
+            reason = null;
             if (inputs == null || inputs.Count == 0 || inputs.Count > MaxInputs) { reason = "the transaction it replaces has no coins"; return null; }
 
             var chosen = new List<VaultCoinRow>();
             foreach (var outpoint in inputs)
             {
                 var coin = BtcAttestStore.Coin(outpoint, db);
-                if (coin == null || coin.Status != VaultCoinStatus.Pinned || coin.PinnedToRef != reference || coin.SmartContractUID != vault.SmartContractUID)
+                if (coin == null || coin.Status != VaultCoinStatus.Pinned || !BtcWithdrawals.RefsOn(coin).Contains(reference, StringComparer.Ordinal) || coin.SmartContractUID != vault.SmartContractUID)
                 {
                     reason = $"coin {outpoint} is not held for this withdrawal";
                     return null;
                 }
                 chosen.Add(coin);
             }
-            return Assemble(vault, destinationScriptHex, amountSats, feeRate, chosen, out reason);
+            return chosen;
+        }
+
+        /// <summary>
+        /// The transaction that ends a withdrawal without paying it: the same coins in the same order, and one output,
+        /// everything less the fee, back to the vault's own deposit script. It conflicts with every payment fixed for
+        /// the withdrawal, so once Bitcoin shows it none of them can confirm. Null with the reason when the coins are
+        /// no longer held for this withdrawal or the fee leaves less than a dust output.
+        /// </summary>
+        public static BtcCanonicalTx? BuildRelease(string scUID, long feeRate, IReadOnlyList<string> inputs, string reference, out string? reason, LiteDatabase? db = null)
+        {
+            reason = null;
+            if (feeRate <= 0) { reason = "the fee rate must be positive"; return null; }
+            var vault = BtcAttestStore.ScriptRowForVault(scUID, db);
+            if (vault == null) { reason = "the vault is not watched"; return null; }
+            var chosen = HeldCoins(vault, inputs, reference, out reason, db);
+            if (chosen == null) return null;
+
+            var inputSats = chosen.Sum(c => c.ValueSats);
+            long feeSats;
+            try { feeSats = checked(VSize(chosen.Count) * feeRate); }
+            catch (OverflowException) { reason = "the fee rate is out of range"; return null; }
+            if (feeSats > inputSats - DustSats)
+            {
+                reason = $"a fee of {feeSats} sats ({chosen.Count} input(s) at {feeRate} sat/vB) leaves less than {DustSats} sats of the coins";
+                return null;
+            }
+            return Serialize(chosen, new[] { (vault.ScriptHex, inputSats - feeSats) }, inputSats, 0, inputSats - feeSats, feeSats, out reason);
         }
 
         private static BtcCanonicalTx? Assemble(VaultDepositScriptRow vault, string destinationScriptHex, long amountSats, long feeRate, List<VaultCoinRow> chosen, out string? reason)
@@ -164,6 +242,15 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 changeSats = 0;
             }
 
+            var outputs = new List<(string ScriptHex, long Sats)> { (destinationScriptHex, destinationSats) };
+            if (changeSats > 0) outputs.Add((vault.ScriptHex, changeSats));
+            return Serialize(chosen, outputs, inputSats, destinationSats, changeSats, feeSats, out reason);
+        }
+
+        private static BtcCanonicalTx? Serialize(List<VaultCoinRow> chosen, IReadOnlyList<(string ScriptHex, long Sats)> outputs, long inputSats,
+            long destinationSats, long changeSats, long feeSats, out string? reason)
+        {
+            reason = null;
             try
             {
                 var network = FrostDkgAttestation.ConsensusNetwork;
@@ -178,9 +265,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         Sequence = new Sequence(InputSequence),
                     });
                 }
-                tx.Outputs.Add(Money.Satoshis(destinationSats), Script.FromHex(destinationScriptHex));
-                if (changeSats > 0)
-                    tx.Outputs.Add(Money.Satoshis(changeSats), Script.FromHex(vault.ScriptHex));
+                foreach (var (scriptHex, sats) in outputs)
+                    tx.Outputs.Add(Money.Satoshis(sats), Script.FromHex(scriptHex));
 
                 var bytes = tx.WithOptions(TransactionOptions.None).ToBytes();
                 return new BtcCanonicalTx

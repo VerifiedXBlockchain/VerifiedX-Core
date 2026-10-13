@@ -20,8 +20,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
     /// confirms on the new branch it is completed again.</item>
     /// <item>A pinned transaction whose coin no longer exists stays pinned. Its signatures may be out; nothing else
     /// is ever signed for that withdrawal, and it confirms when the coin's own transaction is back.</item>
-    /// <item>A withdrawal that an orphaned block made void stays void. Its requester was refunded in a VFX block,
-    /// and VFX blocks are not undone. Its coins are free again.</item>
+    /// <item>A withdrawal that an orphaned block made void, or showed as released, stays closed. Its requester was
+    /// refunded in a VFX block, and VFX blocks are not undone. Its coins are free again.</item>
     /// </list>
     ///
     /// What cannot be taken back is what happened on this chain because of an orphaned deposit: vBTC already sent on
@@ -59,9 +59,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var completed = new SortedDictionary<string, VaultWithdrawalRow>(StringComparer.Ordinal);
             foreach (var coin in touched.Where(c => c.Status == VaultCoinStatus.Spent && c.SpentInHeight > bitcoinHeight && c.PinnedToRef != null))
             {
-                var row = BtcAttestStore.Withdrawal(coin.PinnedToRef, db);
-                if (row != null && row.State == VaultWithdrawalState.Settled && row.SettledTxid == coin.SpentByTxid)
-                    completed[row.Ref] = row;
+                foreach (var reference in RefsOn(coin)) // after a takeover the one that was paid need not be the first
+                {
+                    var row = BtcAttestStore.Withdrawal(reference, db);
+                    if (row != null && row.State == VaultWithdrawalState.Settled && row.SettledTxid == coin.SpentByTxid)
+                        completed[row.Ref] = row;
+                }
             }
             foreach (var row in completed.Values)
                 Unsettle(row, bitcoinHeight, rewind, db);
@@ -77,25 +80,24 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     next.SpentByTxid = null;
                     next.SpentInHeight = 0;
                 }
-                var holder = HeldFor(coin, db);
+                var held = SetHolders(next, db); // the withdrawals still to be paid by a transaction that spends it
                 if (coin.CreatedInHeight > bitcoinHeight)
                 {
                     next.Status = VaultCoinStatus.Orphaned;          // a transaction pinned on it stays pinned on it
-                    next.PinnedToRef = holder;
                 }
                 else if (wasSpentAbove)
                 {
-                    next.Status = holder != null ? VaultCoinStatus.Pinned : VaultCoinStatus.Unspent;
-                    if (holder == null && coin.PinnedToRef != null)
-                        ErrorLogUtility.LogError($"Bitcoin rewind to {bitcoinHeight}: coin {coin.Outpoint} of vault {coin.SmartContractUID} was spent by {coin.SpentByTxid} in a block Bitcoin no longer contains, which had closed {coin.PinnedToRef}. That stays closed; the coin is free again. A transaction once pinned for it can confirm now.",
+                    next.Status = held ? VaultCoinStatus.Pinned : VaultCoinStatus.Unspent;
+                    if (!held && coin.PinnedToRef != null)
+                        ErrorLogUtility.LogError($"Bitcoin rewind to {bitcoinHeight}: coin {coin.Outpoint} of vault {coin.SmartContractUID} was spent by {coin.SpentByTxid} in a block Bitcoin no longer contains, which had closed {string.Join(", ", RefsOn(coin))}. That stays closed; the coin is free again. A transaction once pinned for it can confirm now.",
                             "BtcWithdrawals.OnRewind()");
-                    next.PinnedToRef = holder;
                 }
                 else
                 {
                     continue; // created and spent at or below the height: untouched (not selected, in fact)
                 }
-                if (next.Status == coin.Status && next.PinnedToRef == coin.PinnedToRef && next.SpentByTxid == coin.SpentByTxid && next.SpentInHeight == coin.SpentInHeight)
+                if (next.Status == coin.Status && next.PinnedToRef == coin.PinnedToRef && next.SpentByTxid == coin.SpentByTxid && next.SpentInHeight == coin.SpentInHeight
+                    && RefsOn(next).SequenceEqual(RefsOn(coin), StringComparer.Ordinal))
                     continue;
                 BtcAttestStore.SaveCoin(next, coin, db);
                 vaults.Add(coin.SmartContractUID);
@@ -103,14 +105,6 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
             SCLogUtility.Log($"Bitcoin rewind to block {bitcoinHeight} ({rewind?.Hash}): {touched.Count} coin(s) of {vaults.Count} vault(s) taken back, {completed.Count} completion(s) reversed.", "BtcWithdrawals.OnRewind()");
             RetryWaiting(vaults, vfxHeight, db);
-        }
-
-        /// <summary>The withdrawal a coin is held for, if that withdrawal is still to be paid by a transaction that spends it; null otherwise.</summary>
-        internal static string? HeldFor(VaultCoinRow coin, LiteDatabase? db)
-        {
-            if (coin.PinnedToRef == null) return null;
-            var row = BtcAttestStore.Withdrawal(coin.PinnedToRef, db);
-            return row != null && row.State == VaultWithdrawalState.Pinned && row.Pins.Any(p => !p.Dead && p.Inputs.Contains(coin.Outpoint)) ? row.Ref : null;
         }
 
         /// <summary>A completion that rested on an orphaned block: the withdrawal (or exit part) is to be paid again, by the same transactions.</summary>

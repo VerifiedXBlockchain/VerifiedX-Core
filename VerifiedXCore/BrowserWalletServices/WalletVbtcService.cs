@@ -157,13 +157,15 @@ namespace VerifiedXCore.BrowserWalletServices
                     {
                         requestHash = w.RequestHash,
                         requester = w.Requester,
-                        state = pinned ? "awaiting Bitcoin" : "waiting for coins",
+                        state = !pinned ? "waiting for coins" : newest?.IsRelease == true ? "being given up, awaiting Bitcoin" : "awaiting Bitcoin",
                         amount = w.AmountSats / Bitcoin.Attestation.BtcAttestBalance.SatsPerBtc,
                         feeRate = newest?.FeeRate > 0 ? newest.FeeRate : w.FeeRate,
                         bitcoinTxid = newest?.Txid,
                         waitingFor = pinned ? null : w.WaitingReason,
                         canCancel = !pinned,
-                        canRaiseFee = pinned && w.Pins.Count < Bitcoin.Attestation.BtcWithdrawals.MaxPins,
+                        canRaiseFee = pinned && w.Pins.Count < Bitcoin.Attestation.BtcWithdrawals.MaxPins && !w.Pins.Any(p => !p.Dead && p.IsRelease),
+                        canRelease = pinned && w.Pins.Count < Bitcoin.Attestation.BtcWithdrawals.MaxPins,
+                        releasing = pinned && w.Pins.Any(p => !p.Dead && p.IsRelease),
                     };
                 }).ToList();
         }
@@ -174,6 +176,15 @@ namespace VerifiedXCore.BrowserWalletServices
             var (ok, result) = await Bitcoin.Services.VBTCService.BumpWithdrawalFee(scUID, requestorAddress, requestHash, feeRate);
             return ok
                 ? (true, $"Fee raised to {feeRate} sat/vB. The replacement Bitcoin transaction is fixed when this is mined ({result}); the extra fee comes out of the amount paid.")
+                : (false, result);
+        }
+
+        /// <summary>Give up a pinned withdrawal (watched vaults), signed by the requester's account on this node.</summary>
+        public static async Task<(bool success, string message)> ReleaseWithdrawal(string scUID, string requestorAddress, string requestHash, long feeRate)
+        {
+            var (ok, result) = await Bitcoin.Services.VBTCService.ReleaseWithdrawal(scUID, requestorAddress, requestHash, feeRate);
+            return ok
+                ? (true, $"Release sent ({result}). When it is mined a Bitcoin transaction returning the withdrawal's coins to the vault is fixed at {feeRate} sat/vB; the vBTC comes back, less that transaction's fee, once Bitcoin has confirmed it.")
                 : (false, result);
         }
 

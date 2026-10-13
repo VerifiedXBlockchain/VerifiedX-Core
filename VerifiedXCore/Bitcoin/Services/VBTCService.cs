@@ -242,9 +242,10 @@ namespace VerifiedXCore.Bitcoin.Services
                 ledgerBalance += NegativeNonOwnerPositions(scState, ownerAddress);
 
             // A vault the chain watches: Bitcoin it paid out for bridge exits is added back, as a completed withdrawal
-            // is. The vBTC behind an exit was debited when it was locked for the bridge.
+            // is. The vBTC behind an exit was debited when it was locked for the bridge. So is the Bitcoin fee of a
+            // release, which its requester paid out of its refund.
             if (Attestation.BtcAttestBalance.IsAttestedVault(scState.SmartContractUID))
-                ledgerBalance += Attestation.BtcAttestBalance.SettledExitBtc(scState.SmartContractUID);
+                ledgerBalance += Attestation.BtcAttestBalance.OwnerAddBackBtc(scState.SmartContractUID);
 
             return ledgerBalance;
         }
@@ -2798,7 +2799,10 @@ namespace VerifiedXCore.Bitcoin.Services
         /// (VBTC_V2_COIN_PIN; see Attestation.BtcWithdrawals.FeeBump). Shared by the wallet route, which signs it with a
         /// key this node holds, and by the raw route, whose caller signs the hash.
         /// </summary>
-        public static Transaction BuildWithdrawalFeeBumpTx(string scUID, string requestorAddress, string withdrawalRequestHash, long feeRate)
+        /// <param name="release">Give the withdrawal up instead (Attestation.BtcWithdrawals.Escape): the transaction
+        /// fixed returns the withdrawal's coins to the vault, and the requester is refunded, less its Bitcoin fee, when
+        /// Bitcoin shows it.</param>
+        public static Transaction BuildWithdrawalFeeBumpTx(string scUID, string requestorAddress, string withdrawalRequestHash, long feeRate, bool release = false)
         {
             var tx = new Transaction
             {
@@ -2811,7 +2815,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 TransactionType = TransactionType.VBTC_V2_COIN_PIN,
                 Data = JsonConvert.SerializeObject(new
                 {
-                    Function = Attestation.BtcWithdrawals.FeeBumpFunction,
+                    Function = release ? Attestation.BtcWithdrawals.ReleaseFunction : Attestation.BtcWithdrawals.FeeBumpFunction,
                     ContractUID = scUID,
                     WithdrawalRequestHash = withdrawalRequestHash,
                     FeeRate = feeRate,
@@ -2826,7 +2830,18 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Raise the Bitcoin fee of a pinned withdrawal that is not confirming, signed by the requester's account on
         /// this node. The replacement spends the same coins and the higher fee comes out of the withdrawal's amount.
         /// </summary>
-        public static async Task<(bool, string)> BumpWithdrawalFee(string scUID, string requestorAddress, string withdrawalRequestHash, long feeRate)
+        public static Task<(bool, string)> BumpWithdrawalFee(string scUID, string requestorAddress, string withdrawalRequestHash, long feeRate) =>
+            SendWithdrawalFeeBump(scUID, requestorAddress, withdrawalRequestHash, feeRate, release: false);
+
+        /// <summary>
+        /// Give up a pinned withdrawal that is not confirming, signed by the requester's account on this node. The chain
+        /// fixes a transaction that returns the withdrawal's coins to the vault; when Bitcoin shows it the vBTC is
+        /// refunded, less that transaction's fee. If a payment of the withdrawal confirms first it is paid as usual.
+        /// </summary>
+        public static Task<(bool, string)> ReleaseWithdrawal(string scUID, string requestorAddress, string withdrawalRequestHash, long feeRate) =>
+            SendWithdrawalFeeBump(scUID, requestorAddress, withdrawalRequestHash, feeRate, release: true);
+
+        private static async Task<(bool, string)> SendWithdrawalFeeBump(string scUID, string requestorAddress, string withdrawalRequestHash, long feeRate, bool release)
         {
             try
             {
@@ -2834,7 +2849,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (account == null)
                     return (false, $"Account not found: {requestorAddress}");
 
-                var bumpTx = BuildWithdrawalFeeBumpTx(scUID, requestorAddress, withdrawalRequestHash, feeRate);
+                var bumpTx = BuildWithdrawalFeeBumpTx(scUID, requestorAddress, withdrawalRequestHash, feeRate, release);
                 var privateKey = account.GetPrivKey;
                 if (privateKey == null)
                     return (false, $"Private key was null for account {requestorAddress}");
@@ -2846,14 +2861,14 @@ namespace VerifiedXCore.Bitcoin.Services
                 var result = await TransactionValidatorService.VerifyTX(bumpTx);
                 if (!result.Item1)
                 {
-                    SCLogUtility.Log($"vBTC V2 withdrawal fee bump refused: {scUID} / {withdrawalRequestHash}. Result: {result.Item2}", "VBTCService.BumpWithdrawalFee()");
+                    SCLogUtility.Log($"vBTC V2 withdrawal {(release ? "release" : "fee bump")} refused: {scUID} / {withdrawalRequestHash}. Result: {result.Item2}", "VBTCService.BumpWithdrawalFee()");
                     return (false, result.Item2);
                 }
                 await TransactionData.AddTxToWallet(bumpTx, true);
                 await AccountData.UpdateLocalBalance(requestorAddress, bumpTx.Fee + bumpTx.Amount);
                 await TransactionData.AddToPool(bumpTx);
                 await P2PClient.SendTXMempool(bumpTx);
-                SCLogUtility.Log($"vBTC V2 withdrawal fee bump sent. SCUID: {scUID}, withdrawal: {withdrawalRequestHash}, fee rate: {feeRate}, TxHash: {bumpTx.Hash}", "VBTCService.BumpWithdrawalFee()");
+                SCLogUtility.Log($"vBTC V2 withdrawal {(release ? "release" : "fee bump")} sent. SCUID: {scUID}, withdrawal: {withdrawalRequestHash}, fee rate: {feeRate}, TxHash: {bumpTx.Hash}", "VBTCService.BumpWithdrawalFee()");
                 return (true, bumpTx.Hash);
             }
             catch (Exception ex)

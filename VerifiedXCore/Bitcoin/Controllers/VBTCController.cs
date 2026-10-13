@@ -3539,7 +3539,21 @@ namespace VerifiedXCore.Bitcoin.Controllers
         /// </summary>
         [HttpPost("GetRawBumpWithdrawalFeeTxData")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
-        public async Task<string> GetRawBumpWithdrawalFeeTxData([FromBody] VBTCWithdrawalFeeBumpPayload payload)
+        public Task<string> GetRawBumpWithdrawalFeeTxData([FromBody] VBTCWithdrawalFeeBumpPayload payload) => RawFeeBumpTxData(payload, release: false);
+
+        /// <summary>
+        /// Build an unsigned VBTC_V2_COIN_PIN transaction for offline signing that gives a pinned withdrawal up (a
+        /// release): the chain fixes a Bitcoin transaction that returns the withdrawal's coins to the vault. When
+        /// Bitcoin shows it the withdrawal is closed and the vBTC refunded to its requester, less that transaction's
+        /// Bitcoin fee; the requester can then withdraw again. If a payment of the withdrawal confirms first, it is
+        /// paid as usual. FeeRate must be above the rate the withdrawal's newest transaction pays. Submit the signed
+        /// hash with SendRawReleaseWithdrawalTx. Only for vaults the chain watches.
+        /// </summary>
+        [HttpPost("GetRawReleaseWithdrawalTxData")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public Task<string> GetRawReleaseWithdrawalTxData([FromBody] VBTCWithdrawalFeeBumpPayload payload) => RawFeeBumpTxData(payload, release: true);
+
+        private async Task<string> RawFeeBumpTxData(VBTCWithdrawalFeeBumpPayload payload, bool release)
         {
             try
             {
@@ -3551,7 +3565,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (payload.FeeRate <= 0)
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Fee rate must be greater than zero" });
 
-                var tx = Services.VBTCService.BuildWithdrawalFeeBumpTx(payload.SmartContractUID, payload.RequestorAddress, payload.WithdrawalRequestHash, payload.FeeRate);
+                var tx = Services.VBTCService.BuildWithdrawalFeeBumpTx(payload.SmartContractUID, payload.RequestorAddress, payload.WithdrawalRequestHash, payload.FeeRate, release);
                 // Before the wallet signs: the same rule block validation applies.
                 var refusal = VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.Refusal(tx);
                 if (refusal != null)
@@ -3572,7 +3586,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     TransactionType = tx.TransactionType.ToString(),
                     TransactionTypeId = (int)tx.TransactionType,
                     Data = tx.Data,
-                    Message = "Sign the Hash field and submit via SendRawBumpWithdrawalFeeTx."
+                    Message = release ? "Sign the Hash field and submit via SendRawReleaseWithdrawalTx." : "Sign the Hash field and submit via SendRawBumpWithdrawalFeeTx."
                 });
             }
             catch (Exception ex)
@@ -3586,7 +3600,16 @@ namespace VerifiedXCore.Bitcoin.Controllers
         /// </summary>
         [HttpPost("SendRawBumpWithdrawalFeeTx")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
-        public async Task<string> SendRawBumpWithdrawalFeeTx([FromBody] RawVBTCTxSubmission body)
+        public Task<string> SendRawBumpWithdrawalFeeTx([FromBody] RawVBTCTxSubmission body) => SendRawFeeBumpTx(body, release: false);
+
+        /// <summary>
+        /// Submit a pre-signed VBTC_V2_COIN_PIN transaction that gives a withdrawal up (built by GetRawReleaseWithdrawalTxData).
+        /// </summary>
+        [HttpPost("SendRawReleaseWithdrawalTx")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public Task<string> SendRawReleaseWithdrawalTx([FromBody] RawVBTCTxSubmission body) => SendRawFeeBumpTx(body, release: true);
+
+        private async Task<string> SendRawFeeBumpTx(RawVBTCTxSubmission body, bool release)
         {
             try
             {
@@ -3594,10 +3617,14 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Hash, Signature, and PublicKey are required" });
 
                 if (!_pendingRawVbtcTxs.TryGetValue(body.Hash, out var pendingTx))
-                    return JsonConvert.SerializeObject(new { Success = false, Message = $"No pending transaction found for hash {body.Hash}. Call GetRawBumpWithdrawalFeeTxData first." });
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"No pending transaction found for hash {body.Hash}. Call {(release ? "GetRawReleaseWithdrawalTxData" : "GetRawBumpWithdrawalFeeTxData")} first." });
 
                 if (pendingTx.TransactionType != TransactionType.VBTC_V2_COIN_PIN)
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Invalid TX type: {pendingTx.TransactionType}" });
+                // Each route submits what its own build route made: a wallet that asked for a fee bump does not send a release by mistake, or the reverse.
+                var builtAsRelease = pendingTx.Data != null && pendingTx.Data.Contains(VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.ReleaseFunction);
+                if (builtAsRelease != release)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = builtAsRelease ? "This transaction is a release; submit it with SendRawReleaseWithdrawalTx." : "This transaction is a fee bump; submit it with SendRawBumpWithdrawalFeeTx." });
 
                 pendingTx.Signature = body.Signature;
 
@@ -3614,7 +3641,13 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 await TransactionData.AddToPool(pendingTx);
                 await P2P.P2PClient.SendTXMempool(pendingTx);
 
-                return JsonConvert.SerializeObject(new { Success = true, Hash = pendingTx.Hash, Message = "Fee bump transaction broadcast. When it is mined the replacement Bitcoin transaction is fixed and the vault's signers sign it." });
+                return JsonConvert.SerializeObject(new
+                {
+                    Success = true, Hash = pendingTx.Hash,
+                    Message = release
+                        ? "Release transaction broadcast. When it is mined the Bitcoin transaction that returns the withdrawal's coins to the vault is fixed and the vault's signers sign it; the vBTC is refunded, less its Bitcoin fee, when Bitcoin has confirmed it."
+                        : "Fee bump transaction broadcast. When it is mined the replacement Bitcoin transaction is fixed and the vault's signers sign it."
+                });
             }
             catch (Exception ex)
             {
@@ -4839,7 +4872,21 @@ namespace VerifiedXCore.Bitcoin.Controllers
         /// <param name="payload">SmartContractUID, RequestorAddress (the requester), WithdrawalRequestHash, FeeRate (sat/vB, above the current one)</param>
         [HttpPost("BumpWithdrawalFee")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
-        public async Task<string> BumpWithdrawalFee([FromBody] VBTCWithdrawalFeeBumpPayload payload)
+        public Task<string> BumpWithdrawalFee([FromBody] VBTCWithdrawalFeeBumpPayload payload) => SendFeeBump(payload, release: false);
+
+        /// <summary>
+        /// Give up a pinned withdrawal that is not confirming (a release), signed by the requester's account on this
+        /// node. The chain fixes a Bitcoin transaction that returns the withdrawal's coins to the vault. When Bitcoin
+        /// shows it the withdrawal is closed and the vBTC refunded, less that transaction's Bitcoin fee, and the
+        /// requester can withdraw again; if a payment of the withdrawal confirms first, it is paid as usual. A web
+        /// wallet uses GetRawReleaseWithdrawalTxData / SendRawReleaseWithdrawalTx.
+        /// </summary>
+        /// <param name="payload">SmartContractUID, RequestorAddress (the requester), WithdrawalRequestHash, FeeRate (sat/vB, above the current one)</param>
+        [HttpPost("ReleaseWithdrawal")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public Task<string> ReleaseWithdrawal([FromBody] VBTCWithdrawalFeeBumpPayload payload) => SendFeeBump(payload, release: true);
+
+        private async Task<string> SendFeeBump(VBTCWithdrawalFeeBumpPayload payload, bool release)
         {
             try
             {
@@ -4854,18 +4901,25 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new
                     {
                         Success = false,
-                        Message = $"This node does not hold the key for {payload.RequestorAddress}, so it cannot sign the fee bump. Build it with GetRawBumpWithdrawalFeeTxData, sign the hash, and submit it with SendRawBumpWithdrawalFeeTx."
+                        Message = release
+                            ? $"This node does not hold the key for {payload.RequestorAddress}, so it cannot sign the release. Build it with GetRawReleaseWithdrawalTxData, sign the hash, and submit it with SendRawReleaseWithdrawalTx."
+                            : $"This node does not hold the key for {payload.RequestorAddress}, so it cannot sign the fee bump. Build it with GetRawBumpWithdrawalFeeTxData, sign the hash, and submit it with SendRawBumpWithdrawalFeeTx."
                     });
 
-                var (ok, result) = await Services.VBTCService.BumpWithdrawalFee(payload.SmartContractUID, payload.RequestorAddress, payload.WithdrawalRequestHash, payload.FeeRate);
+                var (ok, result) = release
+                    ? await Services.VBTCService.ReleaseWithdrawal(payload.SmartContractUID, payload.RequestorAddress, payload.WithdrawalRequestHash, payload.FeeRate)
+                    : await Services.VBTCService.BumpWithdrawalFee(payload.SmartContractUID, payload.RequestorAddress, payload.WithdrawalRequestHash, payload.FeeRate);
                 if (!ok)
                     return JsonConvert.SerializeObject(new { Success = false, Message = result, Withdrawal = VerifiedXCore.Bitcoin.Attestation.BtcVaultView.Withdrawal(payload.SmartContractUID, payload.WithdrawalRequestHash) });
 
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
-                    Message = "Fee bump transaction broadcast. When it is mined the replacement Bitcoin transaction is fixed and the vault's signers sign it. Follow it with GetWithdrawalPin.",
+                    Message = release
+                        ? "Release transaction broadcast. When it is mined the Bitcoin transaction that returns the withdrawal's coins to the vault is fixed and the vault's signers sign it; the vBTC is refunded, less its Bitcoin fee, when Bitcoin has confirmed it. Follow it with GetWithdrawalPin."
+                        : "Fee bump transaction broadcast. When it is mined the replacement Bitcoin transaction is fixed and the vault's signers sign it. Follow it with GetWithdrawalPin.",
                     FeeBumpTxHash = result,
+                    Release = release,
                     SmartContractUID = payload.SmartContractUID,
                     WithdrawalRequestHash = payload.WithdrawalRequestHash,
                     FeeRate = payload.FeeRate

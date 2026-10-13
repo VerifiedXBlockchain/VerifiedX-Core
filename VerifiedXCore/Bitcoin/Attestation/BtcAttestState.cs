@@ -72,6 +72,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <summary>The withdrawal request or bridge-exit reference the coin is pinned to.</summary>
         public string? PinnedToRef { get; set; }
         /// <summary>
+        /// Other withdrawals whose fixed transaction spends this coin too: each took it from a withdrawal that had
+        /// stopped moving (plan 5.5). Bitcoin lets one of those transactions confirm; the others are then void. Null
+        /// when the coin is held for one withdrawal only, which is nearly always.
+        /// </summary>
+        public List<string>? AlsoPinnedTo { get; set; }
+        /// <summary>
         /// The vault's UID while the coin is Unspent, otherwise null. Indexed, so a vault's free coins are found
         /// without reading every coin it ever held. Set by <see cref="BtcAttestStore.SaveCoin"/> from the status.
         /// </summary>
@@ -90,6 +96,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// it was debited when it was locked for the bridge, so the Bitcoin leaving must not count against the owner again.
         /// </summary>
         public long SettledExitSats { get; set; }
+        /// <summary>
+        /// Bitcoin fees this vault has paid to send a withdrawal's coins back to itself at its requester's wish (a
+        /// release), in all. Each was taken out of that requester's refund, so it is added back to the owner's figure:
+        /// the Bitcoin left the vault once and must be counted against one party only.
+        /// </summary>
+        public long ReleaseFeeSats { get; set; }
         public long LastModifiedHeight { get; set; }
 
         /// <summary>What the vault holds on Bitcoin: unspent coins and coins pinned to a withdrawal not yet confirmed.</summary>
@@ -140,6 +152,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
         Expired = 4,
         /// <summary>Cancelled by its requester before it was pinned; refunded.</summary>
         Cancelled = 5,
+        /// <summary>
+        /// Its requester had its coins sent back to the vault, and Bitcoin shows that transaction: none of its payments
+        /// can confirm any more. Closed and refunded, less the Bitcoin fee of sending the coins back.
+        /// </summary>
+        Released = 6,
     }
 
     /// <summary>One Bitcoin transaction fixed for a withdrawal.</summary>
@@ -162,6 +179,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// valid: if Bitcoin confirms it instead, it settles the withdrawal all the same.
         /// </summary>
         public bool Superseded { get; set; }
+        /// <summary>
+        /// Pays nobody: it sends the withdrawal's coins back to the vault's own deposit script. Fixed at the requester's
+        /// wish to end a withdrawal that is not confirming. When Bitcoin shows it the withdrawal is closed and refunded.
+        /// </summary>
+        public bool IsRelease { get; set; }
     }
 
     /// <summary>
@@ -341,6 +363,15 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var d = db ?? Db;
             var total = Total(scUID, d);
             total.SettledExitSats += sats;
+            total.LastModifiedHeight = StateWriteContext.StampHeight;
+            d.GetCollection<VaultDepositTotalRow>(Totals).Upsert(total);
+        }
+
+        public static void AddReleaseFee(string scUID, long sats, LiteDatabase? db = null)
+        {
+            var d = db ?? Db;
+            var total = Total(scUID, d);
+            total.ReleaseFeeSats += sats;
             total.LastModifiedHeight = StateWriteContext.StampHeight;
             d.GetCollection<VaultDepositTotalRow>(Totals).Upsert(total);
         }

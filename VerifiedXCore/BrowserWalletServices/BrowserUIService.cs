@@ -1038,6 +1038,7 @@ function vbtcOpenWithdrawals(c){
   return c.openWithdrawals.map(function(w){
     var b='';
     if(w.canRaiseFee)b+=' <button class=""act-btn sec"" onclick=""doWDBump('+jsa(c.scUID)+','+jsa(w.requester)+','+jsa(w.requestHash)+','+Number(w.feeRate)+')"">Raise fee</button>';
+    if(w.canRelease)b+=' <button class=""act-btn sec"" onclick=""doWDRelease('+jsa(c.scUID)+','+jsa(w.requester)+','+jsa(w.requestHash)+','+Number(w.feeRate)+')"">'+(w.releasing?'Raise release fee':'Give up')+'</button>';
     if(w.canCancel)b+=' <button class=""act-btn sec"" onclick=""doWDCancel('+jsa(c.scUID)+','+jsa(w.requester)+','+jsa(w.requestHash)+')"">Cancel</button>';
     var what=Number(w.amount)+' BTC &middot; '+Number(w.feeRate)+' sat/vB'+(w.bitcoinTxid?' &middot; tx '+esc(shn(w.bitcoinTxid,16)):'')+(w.waitingFor?' &middot; '+esc(w.waitingFor):'');
     return '<div class=""vbtc-row""><span class=""k"">Withdrawal: '+esc(w.state)+'</span><span class=""v org"" title=""'+esc(w.bitcoinTxid||'')+'"">'+what+b+'</span></div>';
@@ -1054,6 +1055,20 @@ window.doWDBump=function(scUID,owner,hash,cur){
     body:JSON.stringify({ScUID:scUID,OwnerAddress:owner,RequestHash:hash,FeeRate:String(rate)})
   }).then(function(r){return r.json();}).then(function(d){
     alert(d.message||(d.success?'Fee bump sent.':'Fee bump failed.'));
+    if(d.success){tabLoaded.vbtc=false;loadVBTC();}
+  }).catch(function(e){alert('Request failed: '+e);});
+};
+window.doWDRelease=function(scUID,owner,hash,cur){
+  var v=prompt('Give this withdrawal up: its Bitcoin goes back to the vault and the vBTC comes back to you, less the Bitcoin fee of doing that. It takes effect once Bitcoin has confirmed it; if the payment confirms first you are paid instead. The withdrawal pays '+cur+' sat/vB now. Enter a higher fee rate in sat/vB:',String(cur+5));
+  if(v==null)return;
+  var rate=parseInt(v,10);
+  if(!(rate>cur)){alert('The fee rate must be above '+cur+' sat/vB.');return;}
+  fetch('/wallet/api/vbtc/withdraw/release',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ScUID:scUID,OwnerAddress:owner,RequestHash:hash,FeeRate:String(rate)})
+  }).then(function(r){return r.json();}).then(function(d){
+    alert(d.message||(d.success?'Release sent.':'Release failed.'));
     if(d.success){tabLoaded.vbtc=false;loadVBTC();}
   }).catch(function(e){alert('Request failed: '+e);});
 };

@@ -120,6 +120,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 bool leaderIsOwner = false;
                 bool isBridgeExit = false;
                 bool leaderIsVaultSignerOfPinned = false;
+                bool pinnedRelease = false;
 
                 var wrh = request.WithdrawalRequestHash.Trim();
                 if (wrh.StartsWith(BtcExitPrefix, StringComparison.OrdinalIgnoreCase))
@@ -166,6 +167,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                     {
                         var (pinned, pinReason) = Attestation.BtcWithdrawals.IsPinnedTransaction(wrh, wr.SmartContractUID, txId);
                         if (!pinned) return (false, pinReason);
+                        // The requester gave the withdrawal up: consensus fixed a transaction that returns its coins to
+                        // the vault and pays nobody.
+                        pinnedRelease = Attestation.BtcWithdrawals.IsPinnedRelease(wrh, wr.SmartContractUID, txId);
                         leaderIsVaultSignerOfPinned = Attestation.BtcWithdrawalSigner.SignersOf(wr.SmartContractUID)
                             .Contains(request.LeaderAddress, StringComparer.Ordinal);
                     }
@@ -187,7 +191,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 long inputSats = 0;
                 foreach (var so in spentOutputs) inputSats += so.Value.Satoshi;
 
-                var (boundsOk, boundsReason) = CheckSpendBounds(inputSats, destinationSats, changeSats, maxDestinationSats);
+                var (boundsOk, boundsReason) = CheckSpendBounds(inputSats, destinationSats, changeSats, maxDestinationSats, pinnedRelease);
                 if (!boundsOk) return (false, boundsReason);
 
                 // ── 5. Leader: the withdrawal owner for user withdrawals; a committee caster for exits ─
@@ -263,11 +267,14 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// </summary>
         public const long DUST_TOLERANCE_SATS = 546;
 
-        public static (bool Ok, string Reason) CheckSpendBounds(long inputSats, long destinationSats, long changeSats, long maxSats)
+        /// <param name="releaseToVault">The transaction is a release fixed by consensus for a watched vault: it pays
+        /// nobody and returns everything but its fee to the vault. The fee is still held within the authorized amount.</param>
+        public static (bool Ok, string Reason) CheckSpendBounds(long inputSats, long destinationSats, long changeSats, long maxSats, bool releaseToVault = false)
         {
             if (maxSats <= 0) return (false, "No authorized amount");
             if (inputSats <= 0) return (false, "Transaction has no input value");
-            if (destinationSats <= 0) return (false, "Transaction does not pay the authorized destination");
+            if (releaseToVault && destinationSats != 0) return (false, "A release pays nobody; this transaction pays the destination");
+            if (!releaseToVault && destinationSats <= 0) return (false, "Transaction does not pay the authorized destination");
             if (changeSats < 0) return (false, "Negative change");
 
             var fee = inputSats - destinationSats - changeSats;

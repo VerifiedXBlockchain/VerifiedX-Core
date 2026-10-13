@@ -31,6 +31,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
     /// at once, with no vote.</item>
     /// <item><b>Fee bump</b>: the requester of a pinned withdrawal that is not confirming may have it pinned again at a
     /// higher fee rate, on the same coins (BtcWithdrawals.FeeBump.cs).</item>
+    /// <item><b>Release</b> and <b>takeover</b>: the ways out of a pinned withdrawal that still does not confirm
+    /// (BtcWithdrawals.Escape.cs).</item>
     /// </list>
     /// </summary>
     public static partial class BtcWithdrawals
@@ -70,7 +72,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     case TransactionType.VBTC_V2_WITHDRAWAL_VOTE:
                         return IsWatched(tx) ? "Withdrawals from this vault are not cancelled by vote." : null;
                     case TransactionType.VBTC_V2_COIN_PIN:
-                        return FeeBumpRefusal(tx, out _, out _, out _);
+                        return FeeBumpRefusal(tx, out _, out _, out _, out _);
                     case TransactionType.VBTC_V2_WITHDRAWAL_CANCEL:
                     {
                         if (!IsWatched(tx)) return null;
@@ -118,6 +120,17 @@ namespace VerifiedXCore.Bitcoin.Attestation
             return row.Pins.Any(p => !p.Dead && string.Equals(p.Txid, txid, StringComparison.OrdinalIgnoreCase))
                 ? (true, "")
                 : (false, "Only the Bitcoin transaction fixed in state for this withdrawal may be signed");
+        }
+
+        /// <summary>
+        /// Whether <paramref name="txid"/> is a release fixed for this withdrawal: the one fixed transaction that pays
+        /// nobody, every sat of it (less the fee) returning to the vault.
+        /// </summary>
+        public static bool IsPinnedRelease(string requestHash, string scUID, string txid)
+        {
+            var row = BtcAttestStore.Withdrawal(RefOf(requestHash, Stored(scUID) ?? scUID));
+            return row != null && row.State == VaultWithdrawalState.Pinned
+                && row.Pins.Any(p => !p.Dead && p.IsRelease && string.Equals(p.Txid, txid, StringComparison.OrdinalIgnoreCase));
         }
 
         /// <summary>Whether a complete, cancel or vote transaction names a vault the chain watches.</summary>
@@ -190,21 +203,31 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 {
                     var coin = BtcAttestStore.Coin(spend.Outpoint, db);
                     if (coin?.PinnedToRef == null) continue; // not pinned: the Bitcoin left, nothing was owed for it (plan 5.7)
-                    var row = BtcAttestStore.Withdrawal(coin.PinnedToRef, db);
-                    if (row == null || row.State != VaultWithdrawalState.Pinned) continue;
 
-                    if (row.Pins.Any(p => !p.Dead && p.Txid == spend.Txid))
+                    // Nearly always one withdrawal holds the coin. After a takeover several do, and Bitcoin has now
+                    // confirmed the transaction of one of them (or of none).
+                    var answered = false;
+                    foreach (var row in HoldersOf(coin, db))
                     {
-                        Settle(row, spend.Txid, report, vfxHeight, db);
-                        continue;
+                        // Two withdrawals to the same address for the same amount, on the same coins at the same fee,
+                        // are the same Bitcoin transaction. It paid once: it answers the first, and is a foreign spend
+                        // to the other.
+                        var shown = answered ? null : row.Pins.FirstOrDefault(p => !p.Dead && p.Txid == spend.Txid);
+                        if (shown != null)
+                        {
+                            answered = true;
+                            if (shown.IsRelease) CloseReleased(row, shown, report, vfxHeight, db);
+                            else Settle(row, spend.Txid, report, vfxHeight, db);
+                            continue;
+                        }
+                        foreach (var pin in row.Pins.Where(p => !p.Dead && p.Inputs.Contains(spend.Outpoint)))
+                            pin.Dead = true;
+                        if (row.Pins.All(p => p.Dead))
+                            Close(row, VaultWithdrawalState.Void, vfxHeight, db,
+                                $"its coin {spend.Outpoint} was spent by another Bitcoin transaction ({spend.Txid})");
+                        else
+                            BtcAttestStore.SaveWithdrawal(row, db);
                     }
-                    foreach (var pin in row.Pins.Where(p => !p.Dead && p.Inputs.Contains(spend.Outpoint)))
-                        pin.Dead = true;
-                    if (row.Pins.All(p => p.Dead))
-                        Close(row, VaultWithdrawalState.Void, vfxHeight, db,
-                            $"its coin {spend.Outpoint} was spent by another Bitcoin transaction ({spend.Txid})");
-                    else
-                        BtcAttestStore.SaveWithdrawal(row, db);
                 }
 
                 RetryWaiting(vaults, vfxHeight, db);
@@ -238,6 +261,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     else if (exits.Add($"{row.RequestHash}@{row.RequestVfxHeight}"))
                         ExpireExit(row, vfxHeight, db); // an exit is failed as a whole, once
                 }
+                RetryWaitingForTakeover(vfxHeight, db);
             }
             catch (Exception ex)
             {
@@ -276,8 +300,15 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var tx = BtcCanonicalWithdrawal.Build(row.SmartContractUID, row.DestinationScriptHex, row.AmountSats, row.FeeRate, out var reason, db);
             if (tx == null)
             {
-                NoteWaiting(row, reason, db);
-                return false;
+                // The free coins cannot pay it. Coins held by withdrawals that have stopped moving may (plan 5.5).
+                tx = BtcCanonicalWithdrawal.BuildTaking(row.SmartContractUID, row.DestinationScriptHex, row.AmountSats, row.FeeRate, vfxHeight, out var takenFrom, out _, db);
+                if (tx == null)
+                {
+                    NoteWaiting(row, reason, db);
+                    return false;
+                }
+                SCLogUtility.Log($"vBTC withdrawal {row.RequestHash} on {row.SmartContractUID} is fixed on coins held by {string.Join(", ", takenFrom)}, unconfirmed for {BtcAttestRules.StuckPinBlocks} blocks or more: Bitcoin transaction {tx.Txid} at {row.FeeRate} sat/vB. Whichever confirms is paid; the other is refunded.",
+                    "BtcWithdrawals.TryPin()");
             }
             Pin(row, tx, vfxHeight, db);
             return true;
@@ -297,8 +328,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
             {
                 var coin = BtcAttestStore.Coin(outpoint, db)!;
                 var pinned = Copy(coin);
-                pinned.Status = VaultCoinStatus.Pinned;
-                pinned.PinnedToRef = row.Ref;
+                if (coin.Status == VaultCoinStatus.Pinned && coin.PinnedToRef != null && coin.PinnedToRef != row.Ref)
+                {
+                    // Taken from a withdrawal that stopped moving: both hold it until Bitcoin confirms one of them.
+                    pinned.AlsoPinnedTo = (coin.AlsoPinnedTo ?? new List<string>()).Where(r => r != row.Ref).Append(row.Ref).ToList();
+                }
+                else
+                {
+                    pinned.Status = VaultCoinStatus.Pinned;
+                    pinned.PinnedToRef = row.Ref;
+                }
                 BtcAttestStore.SaveCoin(pinned, coin, db);
             }
             row.Pins.Add(new VaultPin
@@ -417,18 +456,21 @@ namespace VerifiedXCore.Bitcoin.Attestation
             foreach (var outpoint in row.Pins.SelectMany(p => p.Inputs).Distinct(StringComparer.Ordinal))
             {
                 var coin = BtcAttestStore.Coin(outpoint, db);
-                if (coin == null || coin.Status != VaultCoinStatus.Pinned || coin.PinnedToRef != row.Ref) continue;
-                var free = Copy(coin);
-                free.Status = VaultCoinStatus.Unspent;
-                free.PinnedToRef = null;
-                BtcAttestStore.SaveCoin(free, coin, db);
+                if (coin == null || coin.Status != VaultCoinStatus.Pinned || !RefsOn(coin).Contains(row.Ref, StringComparer.Ordinal)) continue;
+                // The row is closed already, so it is no longer among the coin's holders. A coin another withdrawal
+                // holds too (a takeover) stays pinned, for that one.
+                var next = Copy(coin);
+                if (!SetHolders(next, db))
+                    next.Status = VaultCoinStatus.Unspent;
+                BtcAttestStore.SaveCoin(next, coin, db);
             }
         }
 
         private static VaultCoinRow Copy(VaultCoinRow c) => new()
         {
             Outpoint = c.Outpoint, SmartContractUID = c.SmartContractUID, ValueSats = c.ValueSats, Status = c.Status, CreatedInHeight = c.CreatedInHeight,
-            IsCoinbase = c.IsCoinbase, SpentByTxid = c.SpentByTxid, SpentInHeight = c.SpentInHeight, PinnedToRef = c.PinnedToRef, LastModifiedHeight = c.LastModifiedHeight,
+            IsCoinbase = c.IsCoinbase, SpentByTxid = c.SpentByTxid, SpentInHeight = c.SpentInHeight, PinnedToRef = c.PinnedToRef,
+            AlsoPinnedTo = c.AlsoPinnedTo?.ToList(), LastModifiedHeight = c.LastModifiedHeight,
         };
     }
 }
