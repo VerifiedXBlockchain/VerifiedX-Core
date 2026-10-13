@@ -428,13 +428,19 @@ namespace VerifiedXCore.Tests
 
         // ── The run ─────────────────────────────────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Seeds 1 to 6 on every run. A wider run is asked for with VFX_BTC_FUZZ_SEEDS="from-to" (for example
+        /// "7-300"), which replaces them.
+        /// </summary>
+        public static IEnumerable<object[]> Seeds()
+        {
+            var asked = Environment.GetEnvironmentVariable("VFX_BTC_FUZZ_SEEDS")?.Split('-');
+            var (from, to) = asked != null && asked.Length == 2 && int.TryParse(asked[0], out var a) && int.TryParse(asked[1], out var b) && b >= a ? (a, b) : (1, 6);
+            return Enumerable.Range(from, to - from + 1).Select(seed => new object[] { seed });
+        }
+
         [Theory]
-        [InlineData(1)]
-        [InlineData(2)]
-        [InlineData(3)]
-        [InlineData(4)]
-        [InlineData(5)]
-        [InlineData(6)]
+        [MemberData(nameof(Seeds))]
         public Task TheVaultsBitcoin_AlwaysEqualsEveryonesClaims(int seed) => Run(seed);
 
         private async Task Run(int seed)
@@ -477,7 +483,10 @@ namespace VerifiedXCore.Tests
             Assert.Empty(Rows(VaultWithdrawalState.Pinned));
 
             _out.WriteLine($"seed {seed}: " + string.Join(", ", _done.OrderBy(d => d.Key).Select(d => $"{d.Key} x{d.Value}")));
-            Assert.True(_done.GetValueOrDefault("deposit") >= 2 && _done.ContainsKey("transfer") && _done.ContainsKey("request"), "the run did too little to mean anything");
+            // The fixed seeds are chosen to be broad. A wider run draws some short sequences too; those still count
+            // for the identity, which was checked after every step.
+            if (Environment.GetEnvironmentVariable("VFX_BTC_FUZZ_SEEDS") == null)
+                Assert.True(_done.GetValueOrDefault("deposit") >= 2 && _done.ContainsKey("transfer") && _done.ContainsKey("request"), "the run did too little to mean anything");
         }
 
         // ── Replay ──────────────────────────────────────────────────────────────────────────────────────────
