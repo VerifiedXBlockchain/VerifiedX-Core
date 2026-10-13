@@ -403,6 +403,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             row.ClosedAtVfxHeight = vfxHeight;
             BtcAttestStore.SaveWithdrawal(row, db);
             ReleasePinnedCoins(row, db); // those of the request's other transactions; the ones this transaction spent are Spent already
+            CloseWhatRestedOnItsOtherTransactions(row, txid, vfxHeight, db);
             if (row.IsBridgeExit)
             {
                 SettleExitPart(row, txid, report, vfxHeight, db);
@@ -436,6 +437,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             row.WaitingReason = why;
             BtcAttestStore.SaveWithdrawal(row, db);
             ReleasePinnedCoins(row, db);
+            CloseWhatRestedOnItsOtherTransactions(row, null, vfxHeight, db);
             if (row.IsBridgeExit)
             {
                 VoidExitPart(row, vfxHeight, db, why);
@@ -459,6 +461,33 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 ErrorLogUtility.LogError($"Refund of {request.Amount} to {request.RequestorAddress} on {row.SmartContractUID} could not be written.", "BtcWithdrawals.Close()");
             NoteOnLocalRecord(request, completed: false);
             SCLogUtility.Log($"vBTC withdrawal {row.RequestHash} on {row.SmartContractUID} closed ({state}): {why}. {request.Amount} refunded to {request.RequestorAddress}.", "BtcWithdrawals.Close()");
+        }
+
+        /// <summary>
+        /// A withdrawal is decided: one of its transactions confirmed, or none can any more. Every other transaction
+        /// fixed for it spends the same coins and can now never confirm, so a coin one of them once created (it had
+        /// confirmed, in a block a Bitcoin reorganisation then dropped) will never exist again. A withdrawal pinned on
+        /// such a coin could never be paid and, being pinned, could never be cancelled or expire; it is closed and
+        /// refunded here, and its requester can ask again. Reached only after a deep reorganisation.
+        /// </summary>
+        private static void CloseWhatRestedOnItsOtherTransactions(VaultWithdrawalRow row, string? confirmedTxid, long vfxHeight, LiteDatabase? db)
+        {
+            foreach (var lost in row.Pins.Where(p => p.Txid != confirmedTxid))
+                for (var vout = 0; vout <= 1; vout++) // a payment's change is output 1; a release's only output is 0
+                {
+                    var coin = BtcAttestStore.Coin(BtcAttestStore.OutpointKey(lost.Txid, vout), db);
+                    if (coin == null || coin.Status != VaultCoinStatus.Orphaned) continue;
+                    foreach (var holder in HoldersOf(coin, db))
+                    {
+                        foreach (var pin in holder.Pins.Where(p => !p.Dead && p.Inputs.Contains(coin.Outpoint)))
+                            pin.Dead = true;
+                        if (holder.Pins.All(p => p.Dead))
+                            Close(holder, VaultWithdrawalState.Void, vfxHeight, db,
+                                $"its coin {coin.Outpoint} can never exist: Bitcoin transaction {lost.Txid}, which would create it, lost to {confirmedTxid ?? "another transaction"}");
+                        else
+                            BtcAttestStore.SaveWithdrawal(holder, db);
+                    }
+                }
         }
 
         /// <summary>

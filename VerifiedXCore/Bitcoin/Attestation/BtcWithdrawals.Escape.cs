@@ -137,6 +137,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             row.WaitingReason = $"its requester released it: Bitcoin transaction {release.Txid} returned its coins to the vault";
             BtcAttestStore.SaveWithdrawal(row, db);
             ReleasePinnedCoins(row, db);
+            CloseWhatRestedOnItsOtherTransactions(row, release.Txid, vfxHeight, db);
 
             var request = VBTCWithdrawalRequest.GetByTransactionHash(row.RequestHash, row.SmartContractUID);
             if (request != null && request.IsCompleted) return;

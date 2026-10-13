@@ -486,5 +486,54 @@ namespace VerifiedXCore.Tests
             Assert.True(Coin(c, 0).CreatedInHeight < Coin(a, 0).CreatedInHeight);
             Assert.Equal(branch.Tip, _btc.Tip);
         }
+
+        /// <summary>
+        /// A withdrawal has two transactions (its fee was raised). The first confirms, and another withdrawal is pinned
+        /// on its change. Bitcoin then drops that block and confirms the second transaction instead. The first can
+        /// never confirm now, so its change will never exist: the withdrawal pinned on it can never be paid. It is
+        /// closed and refunded, and its requester asks again; left as it was it would have stayed pinned for good.
+        /// </summary>
+        [Fact]
+        public async Task AWithdrawalPinnedOnChangeThatCanNeverExist_IsClosedAndRefunded()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var deposit = Pay(vault.Script, 150_000);
+            await MineAndReport(deposit);
+            await Mine(Transfer(vault.Uid, 0.0003M));
+            var first = await Request(vault.Uid, 0.001M);
+            await Mine(SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_COIN_PIN,
+                new { Function = BtcWithdrawals.FeeBumpFunction, ContractUID = vault.Uid, WithdrawalRequestHash = first.Hash, FeeRate = 25 }));
+            var pins = Row(first, vault.Uid).Pins;
+            var (lower, higher) = (BtcTx.Parse(pins[0].TxHex, Network.Main), BtcTx.Parse(pins[1].TxHex, Network.Main));
+
+            // The lower-fee transaction confirms; a holder's withdrawal is pinned on its change.
+            var at = await MineAndReport(lower);
+            Assert.Equal(VaultWithdrawalState.Settled, Row(first, vault.Uid).State);
+            var second = await Request(vault.Uid, 0.0003M, from: _holder);
+            Assert.Equal(new[] { Outpoint(lower, 1) }, Row(second, vault.Uid).Pins[0].Inputs);
+            Assert.Equal(0M, await Spendable(vault.Uid, _holder));
+
+            // Bitcoin drops that block. The first withdrawal is to be paid again; the second rests on a coin that is not there.
+            await Reorganise(at - 1);
+            Assert.Equal(VaultWithdrawalState.Pinned, Row(first, vault.Uid).State);
+            Assert.Equal(VaultWithdrawalState.Pinned, Row(second, vault.Uid).State);
+            Assert.Equal(VaultCoinStatus.Orphaned, Coin(lower, 1).Status);
+
+            // The higher-fee transaction confirms on the new branch. The lower one never can.
+            await MineAndReport(higher);
+            Assert.Equal(VaultWithdrawalState.Settled, Row(first, vault.Uid).State);
+            Assert.Equal(pins[1].Txid, Row(first, vault.Uid).SettledTxid);
+            var closed = Row(second, vault.Uid);
+            Assert.Equal(VaultWithdrawalState.Void, closed.State);
+            Assert.Contains("can never exist", closed.WaitingReason);
+            Assert.Equal(0.0003M, await Spendable(vault.Uid, _holder));
+            Assert.Equal(50_000, BtcAttestStore.Total(vault.Uid).HeldSats);
+            Assert.Equal(0.0002M, await Spendable(vault.Uid, Minter));
+
+            // The holder asks again, and is pinned on the change that does exist.
+            var again = await Request(vault.Uid, 0.0003M, from: _holder);
+            Assert.Equal(new[] { Outpoint(higher, 1) }, Row(again, vault.Uid).Pins[0].Inputs);
+        }
     }
 }
