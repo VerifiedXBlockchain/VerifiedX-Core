@@ -21,6 +21,12 @@ namespace VerifiedXCore.Services
         /// has really been locked: what the minimum age for a key ceremony counts from.
         /// </summary>
         public long FundedSinceHeight { get; set; }
+        /// <summary>
+        /// Set when the bonds start, for a validator that was already active at Globals.ValidatorBondGrandfatherHeight
+        /// (a height fixed in the release, before anybody could know of the bond): its stake counts as aged if it is
+        /// there at the first look.
+        /// </summary>
+        public bool Grandfathered { get; set; }
         public long LastModifiedHeight { get; set; }
     }
 
@@ -44,8 +50,14 @@ namespace VerifiedXCore.Services
     /// <item><b>Age.</b> A validator counts for a key ceremony, and for an epoch's Bitcoin report signers, once its
     /// stake has been locked for <see cref="CeremonyAgeBlocks"/> blocks (two days), and only while it is still active
     /// (<see cref="CeremonyEligible"/>, <see cref="SignerEligible"/>).</item>
-    /// <item><b>Validators already active when the rule starts</b> are bonded at that block. Those holding the
-    /// balance in the block after count as aged: they were validators before there was a bond to age.</item>
+    /// <item><b>Validators already active when the rule starts</b> are bonded at that block. Of those, the ones that
+    /// were validators already at Globals.ValidatorBondGrandfatherHeight (a height fixed in the release) and hold the
+    /// balance in the block after count as aged: they were validators before there was a bond to age. One that
+    /// registered between that height and the start waits its two days like any new validator (a registration made
+    /// once the bond was public would otherwise have bought the age for nothing). One that does not hold the balance
+    /// in the block after is treated as having exited at the start: nothing is locked that was not there.</item>
+    /// <item><b>The bonds start one block before Bitcoin recording does</b> (Globals.ValidatorBondHeight), so the first
+    /// report signer set is taken from stakes that are already locked.</item>
     /// </list>
     ///
     /// The rows live with the other chain-derived tables that are stamped by height, so a snapshot, a rollback and
@@ -116,48 +128,62 @@ namespace VerifiedXCore.Services
         public static void OnBlockStart(long height, LiteDatabase? db = null)
         {
             if (!Active(height)) return;
-            try
+            // No catch here: these rows are consensus state. A step that fails on this node must fail the block's
+            // application (StateData counts it), not leave this node with other bonds than everybody else.
+            var marker = Rows(db).FindById(SeededMarker);
+            if (marker == null)
             {
-                var marker = Rows(db).FindById(SeededMarker);
-                if (marker == null)
-                {
-                    // The first block under the rule. The validators active before it are bonded here; whether each
-                    // holds its stake is looked at in the next block, once this block's own transactions (which were
-                    // judged before any bond existed) have been applied.
-                    foreach (var validator in VBTCValidatorRegistry.GetActiveValidatorsAt(height - 1)
-                                 .Where(v => !string.IsNullOrEmpty(v.ValidatorAddress)).OrderBy(v => v.ValidatorAddress, StringComparer.Ordinal))
-                    {
-                        if (Row(validator.ValidatorAddress, db) == null)
-                            Save(new ValidatorBondRow { Address = validator.ValidatorAddress, BondedAtHeight = height }, db);
-                    }
-                    Save(new ValidatorBondRow { Address = SeededMarker, BondedAtHeight = height }, db);
-                    LogUtility.Log($"Validator bonds start at block {height}: every validator active at block {height - 1} is bonded.", "ValidatorBond.OnBlockStart()");
-                    return;
-                }
+                // The bonds start at one block, the same on every node. A state that reaches a later block without them
+                // was built by a release that did not have them: seeding here would bond other validators, at another
+                // height, than the rest of the network did.
+                if (height != Globals.ValidatorBondHeight)
+                    throw new InvalidOperationException($"the validator bonds start at block {Globals.ValidatorBondHeight} and this node's state has none at block {height}: it was built without them and must be rebuilt from the chain");
 
-                // A bond is seen funded at the start of a block, against the balances the block before left. The bond
-                // was already in state when that block was judged, so from here the balance cannot fall below the
-                // stake. Looked at in the first block after the rule starts, then every FundedCheckBlocks blocks.
-                var firstLook = marker.FundedSinceHeight == 0;
-                if (!firstLook && height % FundedCheckBlocks != 0) return;
-                foreach (var row in Rows(db).Find(x => x.FundedSinceHeight == 0).Where(r => r.Address != SeededMarker)
-                             .OrderBy(r => r.Address, StringComparer.Ordinal).ToList())
+                // The validators active before this block are bonded here; whether each holds its stake is looked at in
+                // the next block, once this block's own transactions (which were judged before any bond existed) have
+                // been applied.
+                var old = Globals.ValidatorBondGrandfatherHeight > 0 && Globals.ValidatorBondGrandfatherHeight < height
+                    ? new HashSet<string>(VBTCValidatorRegistry.GetActiveValidatorsAt(Globals.ValidatorBondGrandfatherHeight).Select(v => v.ValidatorAddress ?? ""), StringComparer.Ordinal)
+                    : new HashSet<string>(StringComparer.Ordinal);
+                foreach (var validator in VBTCValidatorRegistry.GetActiveValidatorsAt(height - 1)
+                             .Where(v => !string.IsNullOrEmpty(v.ValidatorAddress)).OrderBy(v => v.ValidatorAddress, StringComparer.Ordinal))
                 {
-                    if (!Holds(row, height) || row.BondedAtHeight >= height || !VBTCValidatorRegistry.HoldsValidatorBalance(row.Address)) continue;
-                    // A validator from before the rule that holds its stake at this first look counts as aged: it was
-                    // a validator before there was a bond to age. Everyone after that waits the full time.
-                    row.FundedSinceHeight = firstLook && row.BondedAtHeight == marker.BondedAtHeight ? height - CeremonyAgeBlocks : height;
-                    Save(row, db);
+                    if (Row(validator.ValidatorAddress, db) == null)
+                        Save(new ValidatorBondRow { Address = validator.ValidatorAddress, BondedAtHeight = height, Grandfathered = old.Contains(validator.ValidatorAddress) }, db);
                 }
-                if (firstLook)
-                {
-                    marker.FundedSinceHeight = height;
-                    Save(marker, db);
-                }
+                Save(new ValidatorBondRow { Address = SeededMarker, BondedAtHeight = height }, db);
+                LogUtility.Log($"Validator bonds start at block {height}: every validator active at block {height - 1} is bonded ({old.Count} were validators at block {Globals.ValidatorBondGrandfatherHeight}).", "ValidatorBond.OnBlockStart()");
+                return;
             }
-            catch (Exception ex)
+
+            // A bond is seen funded at the start of a block, against the balances the block before left. The bond
+            // was already in state when that block was judged, so from here the balance cannot fall below the
+            // stake. Looked at in the first block after the rule starts, then every FundedCheckBlocks blocks.
+            var firstLook = marker.FundedSinceHeight == 0;
+            if (!firstLook && height % FundedCheckBlocks != 0) return;
+            foreach (var row in Rows(db).Find(x => x.FundedSinceHeight == 0).Where(r => r.Address != SeededMarker)
+                         .OrderBy(r => r.Address, StringComparer.Ordinal).ToList())
             {
-                ErrorLogUtility.LogError($"Validator bond block-start step failed at {height}: {ex}", "ValidatorBond.OnBlockStart()");
+                if (!Holds(row, height) || row.BondedAtHeight >= height || row.ExitHeight != 0) continue;
+                var funded = VBTCValidatorRegistry.HoldsValidatorBalance(row.Address);
+                if (firstLook && !funded && row.BondedAtHeight == marker.BondedAtHeight)
+                {
+                    // Bonded by the start alone, and its stake is not there: nothing of it is held beyond the wait
+                    // an exit has. (A later registration or heartbeat, which needs the balance, bonds it again.)
+                    row.ExitHeight = row.BondedAtHeight;
+                    Save(row, db);
+                    continue;
+                }
+                if (!funded) continue;
+                // A validator from before the bond was known that holds its stake at this first look counts as aged.
+                // Everyone else waits the full time.
+                row.FundedSinceHeight = firstLook && row.Grandfathered && row.BondedAtHeight == marker.BondedAtHeight ? height - CeremonyAgeBlocks : height;
+                Save(row, db);
+            }
+            if (firstLook)
+            {
+                marker.FundedSinceHeight = height;
+                Save(marker, db);
             }
         }
 
@@ -165,39 +191,46 @@ namespace VerifiedXCore.Services
         public static void OnTransactionApplied(Transaction tx, long height, LiteDatabase? db = null)
         {
             if (tx == null || !Active(height) || string.IsNullOrEmpty(tx.FromAddress)) return;
-            try
+            // No catch here either (see OnBlockStart): a failure counts against the transaction's application.
+            switch (tx.TransactionType)
             {
-                switch (tx.TransactionType)
+                case TransactionType.VBTC_V2_VALIDATOR_REGISTER:
+                case TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT:
                 {
-                    case TransactionType.VBTC_V2_VALIDATOR_REGISTER:
-                    case TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT:
+                    var row = Row(tx.FromAddress, db);
+                    if (row != null && row.ExitHeight == 0) return;          // bonded already: nothing changes
+                    if (row != null && Holds(row, height))
                     {
-                        var row = Row(tx.FromAddress, db);
-                        if (row != null && row.ExitHeight == 0) return;          // bonded already: nothing changes
-                        if (row != null && Holds(row, height))
-                        {
-                            row.ExitHeight = 0;                                    // in its exit wait: the bond resumes, the stake never left
-                            Save(row, db);
-                            return;
-                        }
-                        Save(new ValidatorBondRow { Address = tx.FromAddress, BondedAtHeight = height }, db); // a new bond (or one after a full exit)
-                        return;
-                    }
-                    case TransactionType.VBTC_V2_VALIDATOR_EXIT:
-                    {
-                        var row = Row(tx.FromAddress, db);
-                        if (row == null || row.ExitHeight != 0) return;
-                        row.ExitHeight = height;
+                        row.ExitHeight = 0;                                    // in its exit wait: the bond resumes, the stake never left
                         Save(row, db);
                         return;
                     }
+                    Save(new ValidatorBondRow { Address = tx.FromAddress, BondedAtHeight = height }, db); // a new bond (or one after a full exit)
+                    return;
+                }
+                case TransactionType.VBTC_V2_VALIDATOR_EXIT:
+                {
+                    var row = Row(tx.FromAddress, db);
+                    if (row == null || row.ExitHeight != 0) return;
+                    row.ExitHeight = height;
+                    Save(row, db);
+                    return;
                 }
             }
-            catch (Exception ex)
-            {
-                ErrorLogUtility.LogError($"Validator bond could not follow {tx.TransactionType} {tx.Hash}: {ex}", "ValidatorBond.OnTransactionApplied()");
-            }
         }
+
+        /// <summary>
+        /// Whether a transaction mined at <paramref name="height"/> starts (or resumes) a bond on its sender: a
+        /// registration or heartbeat from an address the bond does not hold at that block. Its stake is then held from
+        /// that block's start: the address's other transactions of the same block are judged against what is above
+        /// it (SameBlockDebitGuard). Without that a heartbeat and a send of the whole balance could share a block: each
+        /// was valid alone, the bond started on an empty address, and the stake moved on to do the same from the next
+        /// address (second path audit, 14 October 2026).
+        /// </summary>
+        public static bool StartsBond(Transaction tx, long height) =>
+            tx != null && Active(height) && !string.IsNullOrEmpty(tx.FromAddress)
+            && (tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER || tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT)
+            && !(Row(tx.FromAddress) is { } row && row.ExitHeight == 0);
 
         // ── Rules ───────────────────────────────────────────────────────────────────────────────────────────
 

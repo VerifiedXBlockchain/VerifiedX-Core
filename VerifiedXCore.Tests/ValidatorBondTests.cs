@@ -39,12 +39,14 @@ namespace VerifiedXCore.Tests
     public class ValidatorBondTests : IDisposable
     {
         private const long Rule = 200;
+        private const long Grandfather = 180;
         private const long DkgRule = 50;
         private const decimal Stake = 5_000M;
         private readonly string _tempRoot;
         private readonly string? _priorCustomPath = Globals.CustomPath;
         private readonly Block _priorLastBlock = Globals.LastBlock;
         private readonly long _priorRule = Globals.ValidatorBondHeight;
+        private readonly long _priorGrandfather = Globals.ValidatorBondGrandfatherHeight;
         private readonly long _priorDkgRule = Globals.VbtcV2DkgAttestationHeight;
         private readonly long _priorBurnRule = Globals.VaultBurnRuleHeight;
         private readonly long _priorRecord = Globals.BitcoinAttestationRecordHeight;
@@ -64,6 +66,7 @@ namespace VerifiedXCore.Tests
             Globals.CustomPath = _tempRoot;
             DbContext.Initialize();
             Globals.ValidatorBondHeight = Rule;
+            Globals.ValidatorBondGrandfatherHeight = Grandfather;   // the validators registered at blocks 150-160 were validators then
             Globals.VbtcV2DkgAttestationHeight = DkgRule;
             Globals.VaultBurnRuleHeight = long.MaxValue;
             Globals.BitcoinAttestationRecordHeight = long.MaxValue;
@@ -86,6 +89,7 @@ namespace VerifiedXCore.Tests
             try { DbContext.CloseDB(); } catch { }
             Globals.LastBlock = _priorLastBlock;
             Globals.ValidatorBondHeight = _priorRule;
+            Globals.ValidatorBondGrandfatherHeight = _priorGrandfather;
             Globals.VbtcV2DkgAttestationHeight = _priorDkgRule;
             Globals.VaultBurnRuleHeight = _priorBurnRule;
             Globals.BitcoinAttestationRecordHeight = _priorRecord;
@@ -520,6 +524,153 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Sorted(_old), SignerSet(Rule + 1));
             // And before the bond there is no age to ask for: the funded validators, as always.
             Assert.Equal(Sorted(_old), ValidatorBond.SignerEligible(VBTCValidatorRegistry.GetActiveValidatorsAt(Rule - 1), Rule - 1).Select(v => v.ValidatorAddress).OrderBy(a => a, StringComparer.Ordinal).ToList());
+        }
+
+        // ── How the bonds start (second path audit, 14 October 2026) ────────────────────────────────────────
+
+        /// <summary>
+        /// A validator counts as aged at the start only if it was a validator already at a height fixed in the release,
+        /// below the tip when the release was cut. Every validator active one block before the start used to count,
+        /// so a registration made once the bond was public bought the two days for nothing.
+        /// </summary>
+        [Fact]
+        public async Task AValidatorThatRegisteredOnceTheBondWasKnown_IsBondedAtTheStart_AndWaitsItsTwoDays()
+        {
+            var late = NewKey();
+            Fund(late, Stake + 1M);
+            Lifecycle(late, TransactionType.VBTC_V2_VALIDATOR_REGISTER, Grandfather + 5);
+            await StartTheRule();
+
+            var row = ValidatorBond.Row(late.Address)!;
+            Assert.Equal(Rule, row.BondedAtHeight);
+            Assert.False(row.Grandfathered);
+            Assert.Equal(Rule + 1, row.FundedSinceHeight);                         // locked from the first look, like anybody new
+            Assert.False(ValidatorBond.IsAged(late.Address, Rule + 2));
+            Assert.True(ValidatorBond.Row(_old[0].Address)!.Grandfathered);
+            Assert.True(ValidatorBond.IsAged(_old[0].Address, Rule + 2));
+            Assert.False((await Verify(Send(late, _friend, 100M), Rule + 2)).Ok);   // its stake is held all the same
+
+            var eligible = ValidatorBond.CeremonyEligible(VBTCValidatorRegistry.GetActiveValidatorsAt(Rule + 1), Rule + 2).Select(v => v.ValidatorAddress).ToList();
+            Assert.DoesNotContain(late.Address, eligible);
+            Assert.Equal(_old.Count, eligible.Count);
+            Assert.True(ValidatorBond.IsAged(late.Address, Rule + 1 + ValidatorBond.CeremonyAgeBlocks));
+        }
+
+        /// <summary>
+        /// A validator bonded by the start alone that does not hold its stake is not held beyond the wait an exit has:
+        /// what it has left used to be locked until it sent an exit of its own.
+        /// </summary>
+        [Fact]
+        public async Task AValidatorSeededWithoutItsStake_IsTreatedAsExitedAtTheStart()
+        {
+            await StartTheRule();
+            var row = ValidatorBond.Row(_poor.Address)!;
+            Assert.Equal(Rule, row.ExitHeight);
+            Assert.Equal(0, row.FundedSinceHeight);
+            Assert.False((await Verify(Send(_poor, _friend, 1M), Rule + ValidatorBond.ExitWaitBlocks - 1)).Ok);
+            Assert.True((await Verify(Send(_poor, _friend, 1M), Rule + ValidatorBond.ExitWaitBlocks)).Ok);
+            // A heartbeat (which needs the balance) bonds it again, with no age.
+            Fund(_poor, Stake);
+            await Apply(Rule + 50, LifecycleTx(_poor, TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT));
+            Assert.Equal(0, ValidatorBond.Row(_poor.Address)!.ExitHeight);
+            Assert.Equal(0, ValidatorBond.Row(_poor.Address)!.FundedSinceHeight);
+            await Apply(Rule + 100);
+            Assert.Equal(Rule + 100, ValidatorBond.Row(_poor.Address)!.FundedSinceHeight);
+        }
+
+        /// <summary>
+        /// The bonds start at one block, the same on every node. A state that reaches a later block without them (built
+        /// by a release that did not have them) used to start them there, with other validators and another height
+        /// than the network's, and said nothing.
+        /// </summary>
+        [Fact]
+        public async Task AStateThatHasNoBondsPastTheStart_IsNotSeededThere_AndTheBlockCountsAsNotApplied()
+        {
+            var block = new Block { Height = Rule + 5, Hash = "late-seed", StateRoot = "root", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction>() };
+            BlockchainData.GetBlocks().InsertSafe(block);
+            Assert.False(await StateData.UpdateTreis(block));
+            Assert.Null(ValidatorBond.Row(_old[0].Address));
+            Assert.Throws<InvalidOperationException>(() => ValidatorBond.OnBlockStart(Rule + 6));
+        }
+
+        /// <summary>
+        /// A heartbeat and a send of the stake do not share a block. Each was valid alone against the balances before the
+        /// block, so the bond started on an address the stake had just left, and the stake went on to do the same from
+        /// the next address: one bond row a block, for ever, and never a locked coin.
+        /// </summary>
+        [Fact]
+        public async Task ABondThatStartsInABlock_HoldsTheStakeFromThatBlocksStart()
+        {
+            await StartTheRule();
+            var fresh = NewKey();
+            Fund(fresh, Stake + 2M);
+            var heartbeat = LifecycleTx(fresh, TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT);
+            Assert.True(ValidatorBond.StartsBond(heartbeat, Rule + 10));
+            Assert.False(ValidatorBond.StartsBond(LifecycleTx(_old[0], TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT), Rule + 10)); // bonded already
+
+            // The heartbeat first, then the stake: refused. What is above the stake still goes.
+            var state = new SameBlockDebitGuard.State { BlockHeight = Rule + 10 };
+            Assert.True(SameBlockDebitGuard.TryRegister(heartbeat, state).Ok);
+            var (ok, why) = SameBlockDebitGuard.TryRegister(Send(fresh, _friend, 5_000M), state);
+            Assert.False(ok);
+            Assert.StartsWith(SameBlockDebitGuard.ReasonPrefix, why);
+            Assert.True(SameBlockDebitGuard.TryRegister(Send(fresh, _friend, 1M), state).Ok);
+
+            // The stake first, then the heartbeat: the heartbeat is refused.
+            state = new SameBlockDebitGuard.State { BlockHeight = Rule + 10 };
+            Assert.True(SameBlockDebitGuard.TryRegister(Send(fresh, _friend, 5_000M), state).Ok);
+            (ok, why) = SameBlockDebitGuard.TryRegister(heartbeat, state);
+            Assert.False(ok);
+            Assert.Contains("starts a validator bond in this block", why);
+
+            // Before the bonds: as it always was.
+            state = new SameBlockDebitGuard.State { BlockHeight = Rule - 5 };
+            Assert.True(SameBlockDebitGuard.TryRegister(heartbeat, state).Ok);
+            Assert.True(SameBlockDebitGuard.TryRegister(Send(fresh, _friend, 5_000M), state).Ok);
+        }
+
+        /// <summary>
+        /// As released, the bonds start one block before Bitcoin recording does, so the first signer set (taken at the
+        /// recording block) counts stakes that are already locked. Started together, a stake could be counted for that
+        /// set and leave in the same block.
+        /// </summary>
+        [Fact]
+        public async Task TheFirstSignerSet_CountsStakesThatAreAlreadyLocked()
+        {
+            Globals.BitcoinAttestationRecordHeight = Rule + 1;
+            // In the bonds' own block a transaction is still judged without them: this validator's stake leaves.
+            var leaver = _old[7];
+            var leaving = Send(leaver, _friend, 5_000M);
+            var (ok, why) = await Verify(leaving, Rule);
+            Assert.True(ok, why);
+            await Apply(Rule, leaving);
+            // From the next block (where the first set is taken) nobody's stake can leave.
+            Assert.False((await Verify(Send(_old[0], _friend, 5_000M), Rule + 1)).Ok);
+            await Apply(Rule + 1);
+
+            var set = BtcAttestStore.SignerSet(BtcAttestRules.EpochOf(Rule + 1))!.Addresses;
+            Assert.DoesNotContain(leaver.Address, set);
+            Assert.Equal(Sorted(_old.Where(v => v != leaver)), set);
+            Assert.All(_old.Where(v => v != leaver), v => Assert.Equal(Stake, ValidatorBond.LockedAmount(v.Address, Rule + 2)));
+        }
+
+        [Fact]
+        public async Task BeforeTheBondsStart_NoExitTransactionIsSent()
+        {
+            var priorAddress = Globals.ValidatorAddress;
+            try
+            {
+                var v = _old[5];
+                AccountData.GetAccounts().InsertSafe(new Account { Address = v.Address, PublicKey = v.Pub, PrivateKey = "0" + v.Key.secret.ToString("x"), IsValidating = true });
+                Globals.ValidatorAddress = v.Address;
+                Globals.LastBlock = new Block { Height = Rule - 10 };
+                var (sent, why) = await ValidatorService.SendValidatorExit(v.Address);
+                Assert.False(sent);
+                Assert.Contains($"starts at block {Rule}", why);
+                Assert.Empty(TransactionData.GetPool().FindAll());
+                Assert.False(Globals.ValidatorExitSent);
+            }
+            finally { Globals.ValidatorAddress = priorAddress; }
         }
 
         // ── The graceful exit from the node itself ──────────────────────────────────────────────────────────

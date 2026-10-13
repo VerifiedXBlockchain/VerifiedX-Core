@@ -766,6 +766,7 @@ namespace VerifiedXCore.Controllers
                             accounts.UpdateSafe(account);
                             Globals.ValidatorAddress = account.Address;  
                             Globals.ValidatorPublicKey = account.PublicKey;
+                            Globals.ValidatorExitSent = false; // validating again: announce as usual (an exit sent earlier in this run had silenced it)
                             output = "Success! The requested account has been turned on: " + account.Address;
                         }
                     }

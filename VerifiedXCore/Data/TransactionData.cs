@@ -1251,7 +1251,12 @@ namespace VerifiedXCore.Data
                     var amountTotal = amount + tx.Amount + tx.Fee;
                     // A bonded validator's stake is not spendable (ValidatorBond).
                     var bonded = VerifiedXCore.Services.ValidatorBond.LockedAmount(tx.FromAddress, (Globals.LastBlock?.Height ?? 0) + 1);
-                    if (amountTotal > stateTreiAcct.Balance - bonded)
+                    // A bonded address may hold less than its stake (a validator seeded without it): what it can spend is
+                    // then nothing, not a negative amount that every transaction "exceeds". And a transaction that takes
+                    // nothing (its exit) takes nothing from the stake.
+                    var spendable = bonded > 0M ? Math.Max(0M, stateTreiAcct.Balance - bonded) : stateTreiAcct.Balance;
+                    var takesNothing = bonded > 0M && tx.Amount + tx.Fee == 0M;
+                    if (!takesNothing && amountTotal > spendable)
                     {
                         result = true; //douple spend or overspend has occured
                     }

@@ -353,9 +353,19 @@ namespace VerifiedXCore
         /// registered validator cannot send its 5,000 VFX until 1,200 blocks after its exit is mined, and counts for a
         /// vault's key ceremony only once that stake has been locked for two days. Validators active at this height
         /// are bonded at it. A new refusal and a change to who may take part in a key ceremony, so it must be above
-        /// the tip when every validator runs this build: the same fork point as the rest.
+        /// the tip when every validator runs this build. One block before the fork point of the rest
+        /// (BitcoinAttestationRecordHeight): the first Bitcoin report signer set is taken at that block, and the
+        /// stakes it counts are then already locked.
         /// </summary>
-        public static long ValidatorBondHeight = FundLossAuditHeight;
+        public static long ValidatorBondHeight = FundLossAuditHeight - 1;
+
+        /// <summary>
+        /// A validator already active at this height counts as aged when the bonds start (if it holds its stake then).
+        /// A height fixed in the release and below the tip when the release is cut, so nobody can register for it once
+        /// the bond is known. Mainnet value here; testnet in Program.cs. Set again with the other heights at the
+        /// mainnet release.
+        /// </summary>
+        public static long ValidatorBondGrandfatherHeight = 7_496_000L;
         /// <summary>
         /// This node has sent its validator's exit and must not announce itself again: the heartbeat loop re-announces a
         /// validator the registry shows as inactive, which would undo the exit and, under the bond, resume the lock.

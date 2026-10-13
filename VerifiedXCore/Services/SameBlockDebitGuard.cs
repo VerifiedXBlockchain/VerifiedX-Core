@@ -301,6 +301,9 @@ namespace VerifiedXCore.Services
             /// <summary>The height of the block being validated; null at admission and proposal (NEW-27).</summary>
             public long? BlockHeight { get; init; }
 
+            /// <summary>Senders whose registration or heartbeat in this block starts a validator bond: their stake is held from the block's start (ValidatorBond.StartsBond).</summary>
+            public HashSet<string> BondStarting { get; } = new(StringComparer.Ordinal);
+
             /// <summary>Consensus state (block validation).</summary>
             public State() : this(CommittedBalance) { }
             public State(Func<DebitKey, decimal?> balanceOf) { _balanceOf = balanceOf; }
@@ -321,6 +324,9 @@ namespace VerifiedXCore.Services
                         b -= ValidatorBond.LockedAmount(key.Holder, BlockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
                     _balances[key] = b;
                 }
+                // A bond that starts in this block holds the stake from the block's start.
+                if (key.Kind == LedgerKind.Native && b.HasValue && BondStarting.Contains(key.Holder))
+                    return b - ValidatorService.ValidatorRequiredAmount();
                 return b;
             }
 
@@ -373,6 +379,19 @@ namespace VerifiedXCore.Services
             if (isSweep && state.Senders.Contains(sender))
                 return (false, $"{ReasonPrefix}: Recover() must be the only transaction from {sender} in its block.");
 
+            // A registration or heartbeat that starts a bond: what its sender has already sent in this block must
+            // have left the stake, and what it sends after is judged against what is above the stake.
+            if (!state.BondStarting.Contains(sender) && ValidatorBond.StartsBond(tx, state.BlockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)))
+            {
+                var native = Canonical(new DebitKey(LedgerKind.Native, NativeUid, sender), state.CanonicalUids);
+                state.Spent.TryGetValue(native, out var sentAlready);
+                var whole = state.BalanceOf(native);
+                var stake = ValidatorService.ValidatorRequiredAmount();
+                if (whole.HasValue && sentAlready > whole.Value - stake)
+                    return (false, $"{ReasonPrefix}: {sender} starts a validator bond in this block and sends {sentAlready} VFX in it; {stake} VFX of its {whole.Value} must stay.");
+                state.BondStarting.Add(sender);
+            }
+
             var debits = GetDebits(tx);
             if (debits.Count == 0)
             {
@@ -388,7 +407,7 @@ namespace VerifiedXCore.Services
             {
                 state.Spent.TryGetValue(key, out var spent);
                 state.Count.TryGetValue(key, out var count);
-                if (count + n < 2)
+                if (count + n < 2 && !(key.Kind == LedgerKind.Native && state.BondStarting.Contains(key.Holder)))
                     continue;
                 var balance = state.BalanceOf(key);
                 if (balance.HasValue && spent + sum > balance.Value)

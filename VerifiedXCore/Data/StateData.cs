@@ -139,8 +139,20 @@ namespace VerifiedXCore.Data
             LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13: every apply path uses the block's height
             await ApplyForgedVfxBurnsAsync(block); // fund-loss audit item 1 (burn): at ForgedVfxBurnHeight, before the block's transactions
             PrivacyEpochService.ApplyIfResetBlock(block); // fund-loss audit item 1 (stage 2): shielded pools restart at PrivateTxProofRulesHeight
-            VerifiedXCore.Bitcoin.Attestation.BtcAttestApply.OnBlockStart(block.Height); // Bitcoin attestation: the checkpoint at the recording height, the signer set at each epoch
-            VerifiedXCore.Services.ValidatorBond.OnBlockStart(block.Height); // validator bonds: active validators bonded at the bond height; funded stakes confirmed
+            // The steps a block takes before its transactions write consensus state (signer sets, bonds). One that
+            // fails on this node is counted like a transaction that failed to apply: the block's state is reported as
+            // incomplete, so the node is flagged, not left quietly holding other state than its peers.
+            var blockStartFailed = false;
+            try
+            {
+                VerifiedXCore.Bitcoin.Attestation.BtcAttestApply.OnBlockStart(block.Height); // Bitcoin attestation: the checkpoint at the recording height, the signer set at each epoch
+                VerifiedXCore.Services.ValidatorBond.OnBlockStart(block.Height); // validator bonds: active validators bonded at the bond height; funded stakes confirmed
+            }
+            catch (Exception ex)
+            {
+                blockStartFailed = true;
+                ErrorLogUtility.LogError($"Block {block.Height}: a block-start state step failed: {ex}", "StateData.UpdateTreis() - block start");
+            }
             var txList = block.Transactions.ToList();
             var txCount = txList.Count();
             int txTreiUpdateSuccessCount = 0;
@@ -757,7 +769,7 @@ namespace VerifiedXCore.Data
             // A false here means the block was/will be committed to the chain while its state
             // effects are missing — the exact condition that produces a permanent
             // "new account with no balance" hole and gets a node stuck on a later block.
-            return txTreiUpdateSuccessCount == txCount;
+            return txTreiUpdateSuccessCount == txCount && !blockStartFailed;
         }
 
         public static async Task UpdateTreiFromReserve(List<ReserveTransactions> txList)

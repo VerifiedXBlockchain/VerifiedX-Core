@@ -484,7 +484,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
         /// Send the validator exit transaction for an address this wallet holds: the graceful way out. The validator
         /// stops counting on chain at once, and its bonded 5,000 VFX unlocks 1,200 blocks after the exit is mined.
         /// Works for a validator that is no longer running too (it is still bonded until it exits). If this node is
-        /// validating with that address it stops announcing it; use V1/TurnOffValidator to stop validating as well.
+        /// validating with that address it also stops validating: left validating, the node would announce the
+        /// validator again after a restart and so undo the exit. A validator that holds key shares of vaults is still
+        /// needed to sign their withdrawals after it exits: keep its node and its key shares.
         /// </summary>
         [HttpPost("ExitValidator/{address}")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
@@ -495,10 +497,16 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (string.IsNullOrWhiteSpace(address))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "Address is required" });
                 var (ok, message) = await VerifiedXCore.Services.ValidatorService.SendValidatorExit(address.Trim());
+                var stopped = false;
+                if (ok && AccountData.GetSingleAccount(address.Trim())?.IsValidating == true)
+                {
+                    await VerifiedXCore.Services.ValidatorService.DoMasterNodeStop();
+                    stopped = true;
+                }
                 return JsonConvert.SerializeObject(new
                 {
                     Success = ok,
-                    Message = ok ? $"Exit transaction sent. The stake unlocks {VerifiedXCore.Services.ValidatorBond.ExitWaitBlocks} blocks after it is mined; follow it with GetValidatorBond." : message,
+                    Message = ok ? $"Exit transaction sent{(stopped ? ", and this node has stopped validating" : "")}. The stake unlocks {VerifiedXCore.Services.ValidatorBond.ExitWaitBlocks} blocks after it is mined; follow it with GetValidatorBond. If this validator holds key shares of vaults, keep its node and key shares: their withdrawals still need its signature." : message,
                     ExitTxHash = ok ? message : null,
                     Bond = VerifiedXCore.Services.ValidatorBond.Describe(address.Trim()),
                 });

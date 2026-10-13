@@ -43,7 +43,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
             catch (Exception ex)
             {
+                // Logged here and passed on: the caller counts the block's state as incompletely applied on this node.
                 ErrorLogUtility.LogError($"Bitcoin attestation block-start step failed at {vfxHeight}: {ex}", "BtcAttestApply.OnBlockStart()");
+                throw;
             }
         }
 
@@ -134,7 +136,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
             catch (Exception ex)
             {
+                // Passed on: a vault this node failed to register would be one it does not watch while every other
+                // node does. The creation then counts as not applied here and the node is flagged.
                 ErrorLogUtility.LogError($"Registering vault {scUID} for Bitcoin attestation failed: {ex}", "BtcAttestApply.RegisterVaultIfAny()");
+                throw;
             }
         }
 

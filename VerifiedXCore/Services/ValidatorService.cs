@@ -1080,8 +1080,18 @@ namespace VerifiedXCore.Services
         {
             try
             {
+                // Before the bonds start an exit frees nothing, and an exit mined then is judged by rules that read each
+                // node's own view of who is a validator (a node still syncing has none and refused the block). None is sent.
+                var next = (Globals.LastBlock?.Height ?? 0) + 1;
+                if (!ValidatorBond.Active(next))
+                    return (false, $"The validator bond starts at block {Globals.ValidatorBondHeight}. Before it no stake is locked and no exit transaction is needed; none was sent.");
                 var account = AccountData.GetSingleAccount(address);
                 if (account == null) return (false, $"This wallet does not hold the key for {address}.");
+                // A registration or heartbeat of this validator still waiting to be mined would, mined after the exit,
+                // put the validator back in and resume the bond.
+                if (TransactionData.GetPool().Find(x => x.FromAddress == address).Any(x =>
+                        x.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER || x.TransactionType == TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT))
+                    return (false, $"A registration or heartbeat of {address} is still waiting to be mined; mined after the exit it would undo it. Send the exit once it is mined.");
                 var from = StateData.GetSpecificAccountStateTrei(address);
                 if (from == null) return (false, $"{address} has no account in chain state.");
                 var privateKey = AccountData.GetPrivateKey(account);
@@ -1112,9 +1122,10 @@ namespace VerifiedXCore.Services
                 if (exitTx.TransactionRating == null)
                     exitTx.TransactionRating = await TransactionRatingService.GetTransactionRating(exitTx);
 
-                // From here this node does not announce the validator again (see Globals.ValidatorExitSent).
-                if (address == Globals.ValidatorAddress) Globals.ValidatorExitSent = true;
                 await TransactionData.AddToPool(exitTx);
+                // From here this node does not announce the validator again (see Globals.ValidatorExitSent). Set once
+                // the exit is in the pool: set before, a failure there left the node silent and not exited.
+                if (address == Globals.ValidatorAddress) Globals.ValidatorExitSent = true;
                 await P2PClient.SendTXMempool(exitTx);
                 LogUtility.Log($"Validator {address} exit transaction sent: {exitTx.Hash}", "ValidatorService.SendValidatorExit()");
                 return (true, exitTx.Hash);
@@ -1146,6 +1157,7 @@ namespace VerifiedXCore.Services
                         var (ok, message) = await SendValidatorExit(address);
                         exitNote = ok
                             ? $"Exit transaction sent for {address}: {message}. Its {ValidatorRequiredAmount()} VFX stake unlocks {ValidatorBond.ExitWaitBlocks} blocks after the exit is mined."
+                            : !ValidatorBond.Active((Globals.LastBlock?.Height ?? 0) + 1) ? message
                             : $"The exit transaction for {address} was NOT sent: {message}. The stake stays bonded until an exit is mined (ExitValidator).";
                     }
                 }
@@ -1340,12 +1352,14 @@ namespace VerifiedXCore.Services
                     return;
                 }
 
-                var (sent, message) = await SendValidatorExit(validator.Address);
-                if (!sent)
-                {
-                    ErrorLogUtility.LogError($"Validator exit for {validator.Address} was not sent: {message}", "ValidatorService.StopValidating()");
+                // Called by the wallet when a send would leave a validating account's local balance under the validator
+                // amount. Under the bond such a send cannot take the stake (consensus refuses it) and the local balance
+                // only looks short because of sends still pending: nothing is stopped, and no exit is sent from here (an
+                // exit ends the bond's age and is the operator's decision: V1/TurnOffValidator, VBTC/ExitValidator).
+                // An account that is not bonded stops validating locally, as before.
+                var next = (Globals.LastBlock?.Height ?? 0) + 1;
+                if (ValidatorBond.Active(next) && ValidatorBond.Holds(ValidatorBond.Row(validator.Address), next))
                     return;
-                }
 
                 // Update local state
                 myAccount.IsValidating = false;

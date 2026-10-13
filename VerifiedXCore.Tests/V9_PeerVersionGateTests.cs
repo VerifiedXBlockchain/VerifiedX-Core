@@ -42,7 +42,9 @@ namespace VerifiedXCore.Tests
             Assert.True(Globals.BitcoinAttestationObserveHeight < _priorRecordHeight);
             Assert.True(_priorRecordHeight < Globals.BitcoinAttestationHeight);
             Assert.Equal(Globals.FundLossAuditHeight, Globals.VaultBurnRuleHeight);
-            Assert.Equal(Globals.FundLossAuditHeight, Globals.ValidatorBondHeight);
+            Assert.Equal(Globals.FundLossAuditHeight - 1, Globals.ValidatorBondHeight);   // one block before recording: the first signer set counts locked stakes
+            Assert.Equal(Globals.FundLossAuditHeight, Globals.PathAuditRulesHeight);
+            Assert.True(Globals.ValidatorBondGrandfatherHeight < Globals.ValidatorBondHeight);
             // Testnet (applied at startup).
             Assert.Equal(1_143_500, Globals.FundLossAuditTestnetHeight);
             Assert.Equal(Globals.FundLossAuditTestnetHeight, Globals.BitcoinAttestationRecordTestnetHeight);

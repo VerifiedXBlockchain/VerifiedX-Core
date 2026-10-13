@@ -38,8 +38,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// </summary>
         internal static void OnRewind(long bitcoinHeight, Transaction rewind, long vfxHeight, LiteDatabase? db = null)
         {
-            // Like every step of this layer inside block application: a fault here is logged and must not fail the
-            // block (every node would fail it the same way, and the chain would stop).
+            // A fault here is logged and passed on: the rewind then counts as not applied on this node and the node is
+            // flagged (a rewind taken back half-way is state no other node has). It does not stop the chain.
             try
             {
                 TakeBack(bitcoinHeight, rewind, vfxHeight, db);
@@ -47,6 +47,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Bitcoin rewind to {bitcoinHeight} ({rewind?.Hash}) failed part-way: {ex}", "BtcWithdrawals.OnRewind()");
+                throw;
             }
         }
 
