@@ -442,7 +442,12 @@ namespace VerifiedXCore.Tests
             otherSigners.Timestamp = second.Timestamp;
             otherSigners.Build();
             Assert.False((await TransactionValidatorService.VerifyTX(otherSigners)).Item1);
+            pool.InsertSafe(otherSigners);
             Assert.True((await TransactionValidatorService.VerifyTX(first)).Item1);
+            // Admitting the earliest takes the later copies of the same report out of the mempool (they used to pile up).
+            Assert.Null(pool.FindOne(x => x.Hash == second.Hash));
+            Assert.Null(pool.FindOne(x => x.Hash == otherSigners.Hash));
+            Assert.NotNull(pool.FindOne(x => x.Hash == first.Hash));
             await Accepted(second, H1 + 2);
 
             var chosen = await TransactionData.ProcessTxPool();

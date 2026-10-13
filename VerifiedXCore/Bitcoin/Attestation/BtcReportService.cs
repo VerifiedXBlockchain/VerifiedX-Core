@@ -25,6 +25,27 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
         private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, string>> ByReport = new(StringComparer.Ordinal);
         private static readonly ConcurrentDictionary<string, Queue<string>> BySigner = new(StringComparer.Ordinal);
+        /// <summary>
+        /// The reports this node has itself planned in the last two hours. A signature for one of them is never pushed
+        /// out by signatures for other reports: a signer's place in the store used to be a queue of 32 with the oldest
+        /// dropped, and anyone could fill it with that signer's own old signatures (they are public once mined, valid
+        /// for ever for their hash, and the epoch a signature is offered under is not part of what is signed), pushing
+        /// out the signature for the report in hand. Done for a third of the signers, nothing reached its quorum
+        /// (second path audit, 14 October 2026).
+        /// </summary>
+        private static readonly ConcurrentDictionary<string, DateTime> Planned = new(StringComparer.Ordinal);
+
+        /// <summary>This node has planned this report: its signatures are kept until the report is two hours old.</summary>
+        public static void NotePlanned(string reportHash)
+        {
+            if (string.IsNullOrEmpty(reportHash)) return;
+            Planned[reportHash] = DateTime.UtcNow;
+            if (Planned.Count > 256)
+                foreach (var old in Planned.Where(p => DateTime.UtcNow - p.Value > TimeSpan.FromHours(2)).ToList())
+                    Planned.TryRemove(old.Key, out _);
+        }
+
+        private static bool IsPlanned(string key) => Planned.ContainsKey(key.Substring(0, 64));
 
         private static string Key(string reportHash, long epoch) => $"{reportHash}|{epoch}";
 
@@ -46,8 +67,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
             var key = Key(reportHash, epoch);
             var held = ByReport.GetOrAdd(key, _ => new ConcurrentDictionary<string, string>(StringComparer.Ordinal));
-            if (held.TryAdd(address, signature))
+            if (held.TryAdd(address, signature) && !IsPlanned(key))
             {
+                // Only signatures for reports this node has not planned (yet) take a place in the signer's queue, and
+                // only those are dropped from it.
                 var mine = BySigner.GetOrAdd(address, _ => new Queue<string>());
                 lock (mine)
                 {
@@ -55,6 +78,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     while (mine.Count > MaxReportsPerSigner)
                     {
                         var oldest = mine.Dequeue();
+                        if (IsPlanned(oldest)) continue; // planned since it was queued: kept
                         if (ByReport.TryGetValue(oldest, out var old))
                         {
                             old.TryRemove(address, out _);
@@ -76,6 +100,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         {
             ByReport.Clear();
             BySigner.Clear();
+            Planned.Clear();
         }
     }
 
@@ -216,6 +241,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             {
                 var report = planned.Report;
                 var hash = report.Hash();
+                BtcReportSignatures.NotePlanned(hash);
                 var mine = SignAsThisValidator(report, hash, tip);
                 await gossip(report, hash, mine, ct);
 

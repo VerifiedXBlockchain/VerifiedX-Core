@@ -72,6 +72,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         return (false, $"Bitcoin report refused: {outcome.Error}");
                     if (admission && EarlierCopyInMempool(tx, outcome.ReportHash, height))
                         return (false, "This Bitcoin report is already in the mempool.");
+                    if (admission) DropLaterCopies(tx, outcome.ReportHash);
                     return (true, "Transaction has been verified.");
                 }
                 case TransactionType.VBTC_V2_BTC_REORG:
@@ -83,6 +84,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         return (false, $"Bitcoin rewind refused: {outcome.Error}");
                     if (admission && EarlierCopyInMempool(tx, outcome.ReportHash, height))
                         return (false, "This Bitcoin rewind is already in the mempool.");
+                    if (admission) DropLaterCopies(tx, outcome.ReportHash);
                     return (true, "Transaction has been verified.");
                 }
                 default:
@@ -98,6 +100,31 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// is all that can differ, and a copy that cannot be mined must not hold a good one out.
         /// A mempool rule only: block validation never reads the mempool.
         /// </summary>
+        /// <summary>
+        /// The other half of "one per report": when a copy is admitted, the copies of the same report that come after
+        /// it in that order are taken out of this node's mempool. They used to stay, so the same signed report wrapped
+        /// again and again (each time a second earlier, or with a lower hash) piled up: fee-free, rated highest, taking
+        /// the room of a block's proposal and, near the mempool's limit, of ordinary transactions.
+        /// </summary>
+        private static void DropLaterCopies(Transaction tx, string reportHash)
+        {
+            try
+            {
+                var type = tx.TransactionType;
+                var pool = TransactionData.GetPool();
+                foreach (var other in pool.Find(x => x.TransactionType == type).ToList())
+                {
+                    if (string.Equals(other.Hash, tx.Hash, StringComparison.Ordinal)) continue;
+                    var later = other.Timestamp > tx.Timestamp
+                        || (other.Timestamp == tx.Timestamp && string.CompareOrdinal(other.Hash, tx.Hash) > 0);
+                    if (!later) continue;
+                    if (BtcReport.TryParse(other.Data, out var held, out _) && held != null && held.Hash() == reportHash)
+                        pool.DeleteManySafe(x => x.Hash == other.Hash);
+                }
+            }
+            catch { }
+        }
+
         private static bool EarlierCopyInMempool(Transaction tx, string reportHash, long height)
         {
             try

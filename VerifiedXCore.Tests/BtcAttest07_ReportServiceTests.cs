@@ -119,6 +119,41 @@ namespace VerifiedXCore.Tests
             Assert.Empty(BtcReportService.Status.Offered);
         }
 
+        /// <summary>
+        /// A signer's old signatures cannot push its signature for the report in hand out of the store. They are public
+        /// once mined, valid for ever for their hash, and can be offered under any epoch: 32 of them used to fill the
+        /// signer's place, and the report this node was collecting for lost that signer (second path audit, 14 October
+        /// 2026). What this node has planned is kept; the rest queues as before.
+        /// </summary>
+        [Fact]
+        public async Task ReplayedOldSignatures_DoNotPushOutTheSignatureForAReportThisNodePlanned()
+        {
+            await Start();
+            string Sig(V v, string h) => SignatureService.CreateSignature(BtcReport.SigningMessage(h), v.Key, v.Pub);
+            string Hash(int i) => i.ToString("x").PadLeft(64, 'c');
+            var planned = new string('a', 64);
+            var notPlanned = new string('b', 64);
+            BtcReportSignatures.NotePlanned(planned);
+            Assert.True(BtcReportSignatures.Accept(planned, 0, Signers[0].Address, Sig(Signers[0], planned), Tip).Ok);
+            Assert.True(BtcReportSignatures.Accept(notPlanned, 0, Signers[0].Address, Sig(Signers[0], notPlanned), Tip).Ok);
+
+            for (var i = 0; i < BtcReportSignatures.MaxReportsPerSigner + 8; i++)
+                Assert.True(BtcReportSignatures.Accept(Hash(i), 0, Signers[0].Address, Sig(Signers[0], Hash(i)), Tip).Ok);
+
+            Assert.Single(BtcReportSignatures.For(planned, 0));       // kept
+            Assert.Empty(BtcReportSignatures.For(notPlanned, 0));     // the oldest of the rest: dropped, as before
+            Assert.Empty(BtcReportSignatures.For(Hash(0), 0));
+            Assert.Single(BtcReportSignatures.For(Hash(BtcReportSignatures.MaxReportsPerSigner + 7), 0));
+
+            // A report planned after its signature arrived is kept from then on.
+            var early = new string('d', 64);
+            Assert.True(BtcReportSignatures.Accept(early, 0, Signers[1].Address, Sig(Signers[1], early), Tip).Ok);
+            BtcReportSignatures.NotePlanned(early);
+            for (var i = 0; i < BtcReportSignatures.MaxReportsPerSigner + 8; i++)
+                Assert.True(BtcReportSignatures.Accept(Hash(100 + i), 0, Signers[1].Address, Sig(Signers[1], Hash(100 + i)), Tip).Ok);
+            Assert.Single(BtcReportSignatures.For(early, 0));
+        }
+
         [Fact]
         public async Task ASignature_IsKeptOnlyWhenValid_AndFromASignerOfItsEpoch()
         {
