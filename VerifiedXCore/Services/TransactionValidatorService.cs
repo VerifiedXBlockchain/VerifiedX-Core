@@ -535,6 +535,11 @@ namespace VerifiedXCore.Services
 
             }
 
+            // The rules below read the contract call the dispatcher runs, or the transaction is refused.
+            var contractCallError = LedgerIntegrityRules.ContractCallIsReadable(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (contractCallError != null)
+                return (txResult, contractCallError);
+
             // NEW-29: a carried contract body must be deterministic and terminate - checked on its syntax tree, before any
             // rule below runs the code.
             var contractBodyError = LedgerIntegrityRules.ContractBodyAllowed(txRequest);

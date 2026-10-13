@@ -102,6 +102,58 @@ namespace VerifiedXCore.Services
             return null;
         }
 
+        // ── The rules read the contract call the dispatcher runs ────────────────────────────────────────────────
+
+        /// <summary>The transaction types whose Data is a contract call that validation and state application dispatch on.</summary>
+        public static readonly TransactionType[] ContractCallTypes =
+        {
+            TransactionType.NFT_TX, TransactionType.NFT_MINT, TransactionType.NFT_BURN, TransactionType.NFT_SALE,
+            TransactionType.FTKN_MINT, TransactionType.FTKN_TX, TransactionType.FTKN_BURN,
+            TransactionType.TKNZ_MINT, TransactionType.TKNZ_TX, TransactionType.TKNZ_BURN,
+            TransactionType.SC_MINT, TransactionType.SC_TX, TransactionType.SC_BURN,
+            TransactionType.VBTC_V2_CONTRACT_CREATE, TransactionType.TKNZ_WD_ARB, TransactionType.TKNZ_WD_OWNER,
+        };
+
+        /// <summary>The function and contract a contract call names, read exactly as the dispatchers read them (VerifyTX and StateData.UpdateTreis).</summary>
+        public static (string? Function, string? ContractUID) DispatchedCall(string? txData)
+        {
+            if (string.IsNullOrEmpty(txData)) return (null, null);
+            try
+            {
+                var first = Newtonsoft.Json.JsonConvert.DeserializeObject<JArray>(txData)![0];
+                return ((string?)first["Function"], (string?)first["ContractUID"]);
+            }
+            catch { }
+            try
+            {
+                var obj = JObject.Parse(txData);
+                return (obj["Function"]?.ToObject<string?>(), obj["ContractUID"]?.ToObject<string?>());
+            }
+            catch { }
+            return (null, null);
+        }
+
+        /// <summary>
+        /// The rules below decide from <see cref="SmartContractDeployBinding.ReadPayload"/>; the dispatchers that run a
+        /// contract call read only its Function and ContractUID. The reader takes Function, ContractUID, Data and MD5List
+        /// in one step, so a call whose MD5List (or Data) is not text, for example <c>"MD5List":{}</c>, made it give up
+        /// and report no function at all, while the dispatcher still ran the function: every rule that asks "is this a
+        /// Burn(), a rewrite, a V1 function" passed, and the vault was burned, rewritten, or written to with the retired
+        /// V1 ledger function (second path audit, 14 October 2026). From Globals.PathAuditRulesHeight a contract call
+        /// that the dispatcher would run and the reader cannot read the same way is refused. Null when the rule passes.
+        /// </summary>
+        public static string? ContractCallIsReadable(Transaction tx, long height)
+        {
+            if (tx?.Data == null || height < Globals.PathAuditRulesHeight) return null;
+            if (!ContractCallTypes.Contains(tx.TransactionType)) return null;
+            var call = DispatchedCall(tx.Data);
+            if (string.IsNullOrWhiteSpace(call.Function)) return null; // nothing is dispatched
+            var read = SmartContractDeployBinding.ReadPayload(tx.Data);
+            return string.Equals(read.Function, call.Function, StringComparison.Ordinal) && string.Equals(read.ContractUID, call.ContractUID, StringComparison.Ordinal)
+                ? null
+                : "This transaction's contract call cannot be read: its Function, ContractUID, Data and MD5List must each be text.";
+        }
+
         // ── NEW-26 (follow-up): a vBTC V2 vault's code never changes after creation ─────────────────────────────
 
         /// <summary>The contract functions whose apply overwrites the stored ContractData with the carried body.</summary>

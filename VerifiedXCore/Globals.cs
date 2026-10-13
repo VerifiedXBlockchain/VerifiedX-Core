@@ -340,6 +340,15 @@ namespace VerifiedXCore
         public static long VaultBurnRuleHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// The rules found by the second path audit (14 October 2026) that refuse something older builds accepted
+        /// start here: a contract call must be readable by the rules exactly as the dispatcher reads it; a reserve
+        /// account's delayed moves are judged again when they fall due; a withdrawal's completion names a request
+        /// that exists on its own contract; and the others listed in docs/IMPL-vBTC-Bitcoin-Attestation.md, section I.
+        /// The same fork point as the rest.
+        /// </summary>
+        public static long PathAuditRulesHeight = FundLossAuditHeight;
+
+        /// <summary>
         /// The validator stake is bonded from this height (Services.ValidatorBond; owner decision 2026-10-13): a
         /// registered validator cannot send its 5,000 VFX until 1,200 blocks after its exit is mined, and counts for a
         /// vault's key ceremony only once that stake has been locked for two days. Validators active at this height
