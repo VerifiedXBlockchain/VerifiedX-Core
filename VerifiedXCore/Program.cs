@@ -139,7 +139,7 @@ namespace VerifiedXCore
             Globals.VbtcV2DkgAttestationHeight = Globals.IsTestNet ? 1_002_979 : Globals.VbtcV2DkgAttestationHeight;
             Globals.VbtcV1RetirementHeight = Globals.IsTestNet ? 1_002_979 : Globals.VbtcV1RetirementHeight;
             Globals.VbtcVaultTxSizeHeight = Globals.IsTestNet ? 1 : Globals.VbtcVaultTxSizeHeight;
-            // Fund-loss audit (Oct 2026): one activation for all its rules (Globals.FundLossAuditTestnetHeight, set 2026-10-08).
+            // Fund-loss audit (Oct 2026): one activation for all its rules (Globals.FundLossAuditTestnetHeight, reset 2026-10-13).
             Globals.PrivateTxSupplyRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PrivateTxSupplyRulesHeight;
             Globals.AddressFreezeHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.AddressFreezeHeight;
             Globals.SaleCompleteContractRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.SaleCompleteContractRulesHeight;
@@ -152,7 +152,12 @@ namespace VerifiedXCore
             Globals.ReserveTokenRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ReserveTokenRulesHeight;
             Globals.ForgedVfxBurnHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ForgedVfxBurnHeight;
             if (Globals.IsTestNet) Globals.ForgedVfxBurns.Clear(); // the forged VFX exists on mainnet only
-            Globals.PrivateTxProofRulesHeight = Globals.IsTestNet ? 1_099_400L : Globals.PrivateTxProofRulesHeight;
+            // Privacy stage 2 on testnet: with the fund-loss rules (reset 2026-10-13 from 1,099,400, which had passed).
+            Globals.PrivateTxProofRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PrivateTxProofRulesHeight;
+            // Bitcoin attestation (plan 8.4): observe from the tip of 2026-10-13, record with the fund-loss rules, enforce three days later.
+            Globals.BitcoinAttestationObserveHeight = Globals.IsTestNet ? Globals.BitcoinAttestationObserveTestnetHeight : Globals.BitcoinAttestationObserveHeight;
+            Globals.BitcoinAttestationRecordHeight = Globals.IsTestNet ? Globals.BitcoinAttestationRecordTestnetHeight : Globals.BitcoinAttestationRecordHeight;
+            Globals.BitcoinAttestationHeight = Globals.IsTestNet ? Globals.BitcoinAttestationTestnetHeight : Globals.BitcoinAttestationHeight;
             if (Globals.IsTestNet) Globals.ShieldedSupplyCorrections.Clear(); // the testnet pool was never forged against
 
             //Perform network time sync

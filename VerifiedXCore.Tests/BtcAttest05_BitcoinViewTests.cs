@@ -414,6 +414,45 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        /// <summary>
+        /// The checkpoints this build ships with (Globals), against the real networks (set VFX_BTC_LIVE=1): from each,
+        /// the light client must follow real peers' headers under the real rules to a tip well past the checkpoint,
+        /// and fetch and check a recent block. This is what a validator does from the observation height on.
+        /// </summary>
+        [Fact]
+        public async Task Live_TheConfiguredCheckpoints_LeadToTodaysBitcoin_OnBothNetworks()
+        {
+            if (Environment.GetEnvironmentVariable("VFX_BTC_LIVE") != "1") return;
+
+            foreach (var (network, rules, height, hex) in new[]
+            {
+                (Network.Main, BtcChainRules.Mainnet, Globals.BitcoinCheckpointHeightMainnet, Globals.BitcoinCheckpointHeadersMainnet),
+                (Network.TestNet4, BtcChainRules.Testnet4, Globals.BitcoinCheckpointHeightTestnet, Globals.BitcoinCheckpointHeadersTestnet),
+            })
+            {
+                Assert.True(BtcCheckpoint.TryParse(height, hex, out var checkpoint, out var why), why);
+                var dir = Path.Combine(_blockDir, "configured-" + network.Name);
+                using var client = new BtcLightClient(network, new BtcHeaderChain(checkpoint!, rules), dir);
+                var before = -1L;
+                for (var i = 0; i < 12 && client.TipHeight != before; i++)
+                {
+                    before = client.TipHeight;
+                    await client.RunOnceAsync(CancellationToken.None);
+                }
+                Assert.True(client.PeerCount >= 1, $"{network.Name}: no Bitcoin peer ({client.LastProblem})");
+                Assert.True(client.TipHeight > height + 500, $"{network.Name}: headers stopped at {client.TipHeight}, checkpoint {height} ({client.LastProblem})");
+                Assert.Equal(checkpoint!.Tip.Hash, client.HeaderAt(height)!.Hash);
+
+                var recent = client.TipHeight - 3;
+                for (var i = 0; i < 4 && client.BlockAt(recent) == null; i++)
+                    await client.RunOnceAsync(CancellationToken.None);
+                var block = client.BlockAt(recent);
+                Assert.True(block != null, $"{network.Name}: block {recent} did not arrive ({client.LastProblem})");
+                Assert.Null(BtcBlockCheck.Verify(block, client.HeaderAt(recent)!));
+                Assert.True(client.TipHeight > height, $"{network.Name}: checkpoint {height}, followed to {client.TipHeight} from {client.PeerCount} peer(s)");
+            }
+        }
+
         [Fact]
         public async Task OldBlocksAreRemoved_PastWhatReportBuildingCanAskFor()
         {

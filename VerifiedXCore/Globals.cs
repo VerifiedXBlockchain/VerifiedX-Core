@@ -264,10 +264,17 @@ namespace VerifiedXCore
         // One release, one fork point: every consensus rule from the Oct 8 2026 fund-loss audit activates at the same
         // mainnet height. Each rule keeps its own constant (so one can be moved alone if ever needed); all are set to
         // FundLossAuditHeight. Must be above the tip when every validator runs this build. Testnet values in Program.cs.
-        /// <summary>Shared mainnet activation height of the fund-loss audit rules: tip 7,465,190 on 2026-10-08 plus ~24 h (~6,730 blocks/day).</summary>
-        public const long FundLossAuditHeight = 7_472_000L;
-        /// <summary>Testnet activation of the same rules (Program.cs / WardenService): tip 1,092,619 on 2026-10-08 plus ~24 h (~6,500 blocks/day).</summary>
-        public const long FundLossAuditTestnetHeight = 1_099_400L;
+        /// <summary>
+        /// Shared mainnet activation height of the fund-loss audit rules. Reset 2026-10-13: the first value (7,472,000,
+        /// set 2026-10-08) passed before the build was on the network. Tip 7,496,705 on 2026-10-13 plus three days
+        /// (~6,300 blocks/day over the last five). The same height as <see cref="BitcoinAttestationRecordHeight"/>.
+        /// </summary>
+        public const long FundLossAuditHeight = 7_517_000L;
+        /// <summary>
+        /// Testnet activation of the same rules (Program.cs / WardenService). Reset 2026-10-13 from 1,099,400: tip
+        /// 1,124,010 on 2026-10-13 plus three days (~6,300 blocks/day).
+        /// </summary>
+        public const long FundLossAuditTestnetHeight = 1_143_500L;
 
         /// <summary>
         /// Item 1 (stage 1): a ZK-authorized private transaction (VFX/vBTC unshield, private transfer) may not take more
@@ -403,30 +410,38 @@ namespace VerifiedXCore
         /// </summary>
         public static long AddressFreezeHeight = FundLossAuditHeight;
 
-        // ── Bitcoin facts in consensus (docs/PLAN-vBTC-Bitcoin-Attestation.md). Nothing here is active until the heights
-        //    are set: every value below is a sentinel or empty in this build. ──────────────────────────────────────────
+        // ── Bitcoin facts in consensus (docs/PLAN-vBTC-Bitcoin-Attestation.md). Heights and checkpoints set 2026-10-13
+        //    (the mainnet values are set again when the release goes to mainnet). ──────────────────────────────────────
 
         /// <summary>
         /// H0, observation: validators watch Bitcoin blocks and build reports locally; nothing is sent. Needs no
-        /// coordination. Sentinel until set (testnet value in Program.cs).
+        /// coordination, so it is set at the tip of 2026-10-13: a validator starts watching as soon as it runs this
+        /// build, which leaves the days before H1 to compare Bitcoin tips between validators. Mainnet value; testnet in
+        /// Program.cs (<see cref="BitcoinAttestationObserveTestnetHeight"/>).
         /// </summary>
-        public static long BitcoinAttestationObserveHeight = long.MaxValue;
+        public static long BitcoinAttestationObserveHeight = 7_496_000L;
+        /// <summary>The three attestation heights on testnet (applied in Program.cs and WardenService): the tip of 2026-10-13, tip plus three days, and three days after that (plan 8.4).</summary>
+        public const long BitcoinAttestationObserveTestnetHeight = 1_124_000L;
+        public const long BitcoinAttestationRecordTestnetHeight = FundLossAuditTestnetHeight;
+        public const long BitcoinAttestationTestnetHeight = 1_163_000L;
         /// <summary>
         /// H1, recording: the Bitcoin report and rewind transactions are accepted and applied, and a vault created from
         /// this height on is watched: its deposit script is in state, its owner's balance is its attested coins, and its
         /// withdrawals and bridge exits follow pin / settle / void (with the requester's fee bump). Vaults created before
         /// this height keep the earlier rules until H2. The new types are a hard fork for a node that does not know
         /// them, so this must be above the height at which every validator and caster runs this release. It is also the
-        /// height from which a peer must be on this major version (<see cref="MinimumPeerMajorVersion"/>). Sentinel until set.
+        /// height from which a peer must be on this major version (<see cref="MinimumPeerMajorVersion"/>). Set 2026-10-13
+        /// to the fund-loss audit height (tip plus three days): one release, one fork point.
         /// </summary>
-        public static long BitcoinAttestationRecordHeight = long.MaxValue;
+        public static long BitcoinAttestationRecordHeight = FundLossAuditHeight;
         /// <summary>
         /// H2, enforcement: vaults created before H1 are frozen (nothing debits a balance on them, and no bridge exit or
         /// unlock draws on their locks), and the transactions only the earlier way of working needs (withdrawal
         /// completion, cancellation vote, bridge exit completion) are refused for every vault. The time between H1 and
-        /// H2 is for moving to a new vault. Sentinel until set.
+        /// H2 is for moving to a new vault: two weeks on mainnet, three days on testnet (plan 8.4). Set 2026-10-13:
+        /// H1 plus two weeks at ~6,400 blocks/day.
         /// </summary>
-        public static long BitcoinAttestationHeight = long.MaxValue;
+        public static long BitcoinAttestationHeight = 7_607_000L;
 
         /// <summary>The major version peers were required to run before this release.</summary>
         public const int PriorMajorVer = 8;
@@ -445,17 +460,45 @@ namespace VerifiedXCore
         /// Where this chain's view of Bitcoin starts on mainnet (plan section 8.1). Height of the LAST of the twelve
         /// checkpoint headers; it must be the first block of a difficulty interval (divisible by 2016). 0 = not set.
         /// </summary>
-        public static long BitcoinCheckpointHeightMainnet = 0;
+        public static long BitcoinCheckpointHeightMainnet = 969_696;
         /// <summary>
         /// The twelve consecutive Bitcoin mainnet headers ending at <see cref="BitcoinCheckpointHeightMainnet"/>, 80 bytes
         /// each in hex, oldest first, joined (whitespace and commas between them are ignored). Paste from any block
         /// explorer at release time; the node checks that they link and that each meets its own proof-of-work.
         /// </summary>
-        public static string BitcoinCheckpointHeadersMainnet = "";
+        /// Set 2026-10-13: blocks 969,685 to 969,696 (the last is 000000000000000000001e39df127cbab82a824ac43cfcdbf62e59f6a08b9f0b),
+        /// read from mempool.space and checked against blockstream.info.
+        public static string BitcoinCheckpointHeadersMainnet =
+            "0080072018ca59a6dd2b6c0e46eb8acc7c6611b57321e5e0a86e010000000000000000004bea33bb33d1fdad8654b03f4004197eb6719c9f2cf7b7bb77bd3b529c96932a5a9cc06ac51e0217a560ec5e" +
+            "004066219a8c00261cf0e47cb6e04c184202657330567bcdaed10100000000000000000020ff2db82f76d9fcea70a32806a47904803eb88ea51794caddc65feea6264383b8a0c06ac51e02178b4b1801" +
+            "00e03325e3fe2966c165fe7c388c6f34f513b98afacc166a82cb01000000000000000000fe87c792df2d94d9ef3e97f747ed44197deb702189f0501700619a69e06e2ccbf8a1c06ac51e021779fa4b53" +
+            "002000209999b8e41f68031ed9a3c5ed83b925676ee79b4c70c700000000000000000000c166b96edf8fee93cf1c642d4207df4dfd20b0cffac06d4cfd271e31e058009d20a5c06ac51e021701aa44ba" +
+            "00c04724221f4345dd6fd6789765c108bd5eb6c6e5529be030ea01000000000000000000fb92a2327e4b1ade75cd2710fad18b27282631c21d5960bba3c79db9322865ebaca5c06ac51e02170718cec4" +
+            "00200220e4677da8d41b97e25289487916a88d24f7047b1524ec0100000000000000000044a722d5cbd3bce2ec04e4c5c0c22a14d7e59a87b6fba21ff2a4836420f649518da6c06ac51e02176821e4df" +
+            "00409d25c4e4f05f88b995ad34e15448671843c6dfbcc579745d000000000000000000005fa8eefb29ee6c0c0d42b9122c2d676d94e955300c4fe7da20d57e47c451489992a7c06ac51e0217769c8c23" +
+            "00600a202fc787a2cd24f77224d9ece2e08f43156ff7e84201ac000000000000000000004fe5696d61bb207b0093a4f207a7be5af81fafcfdcf0769f67792ed132ff999cd9a8c06ac51e0217045b3479" +
+            "00200520a3bdb538cf1c2d9a9cabc1d929fc6eedc87cd71e4ea6000000000000000000003c26a0f61d2c4070c41f4fd5813748ee836bb7c265e76f605092c5b5b6d478ee14abc06ac51e02178c205ba2" +
+            "0020082039fa7abdc6f212da89c3a260148f33c60644b71b61710000000000000000000042359bc9481c2d090a7ec11d036b19df3eb0c852313bbc855c2305bd53cdff2a50abc06ac51e021700f0e9ae" +
+            "00000038c8423e19b206b534b9ddfb365c407b6b05cc85f6301b000000000000000000003234e2a63c1c7d747fb8076515d0f46a8f1403b6f292291fa30d9e66380ad07e88abc06ac51e0217183e320e" +
+            "00e00020ea7409145abed3693b6aa5e269dea055406e0962804301000000000000000000a8f40cc468f3aa4518fdc368e37fc7aff01eb12b293885f847517602a96e3a93d4abc06af01e021779d3a409";
         /// <summary>As <see cref="BitcoinCheckpointHeightMainnet"/>, for Bitcoin testnet4 (the VFX testnet).</summary>
-        public static long BitcoinCheckpointHeightTestnet = 0;
+        public static long BitcoinCheckpointHeightTestnet = 155_232;
         /// <summary>As <see cref="BitcoinCheckpointHeadersMainnet"/>, for Bitcoin testnet4.</summary>
-        public static string BitcoinCheckpointHeadersTestnet = "";
+        /// Set 2026-10-13: testnet4 blocks 155,221 to 155,232 (the last is 0000000000000002314dc5b90175408b22d2c80dfe99979629b40e572d40345b),
+        /// read from mempool.space and checked against two other explorers.
+        public static string BitcoinCheckpointHeadersTestnet =
+            "00e00422464783a8ec0371af02e41bb89392469b2f6a65200583b20254fbcc0000000000d832ee5d0c0dcbb6f499c5fcbcd499139d8843b5df506aaa0bea03a0b621abcd7687c36affff001d2801efd9" +
+            "0000002041ae6a0e6fe359b11225bae36bf2c210a02e56c5ea26e76ba0b88d0000000000d3669166e10d36c7e658abce1cc92b28f1560d5b2dafcdf34cf1160567e48454278cc36affff001d521685b1" +
+            "00000020e4a00ad2bb9c5b9f35f6c7b5e65b5ea1f762845b2abc0b42a9b389ae0000000030589a3a2c971f7a60ab872b1be254358d68e4df6d429be7930b156d4eec9c7bd890c36affff001d121abfab" +
+            "000000200f3846f43fc05f736ef711f077a84e0904e9efd1a5c747619d07dc0c00000000fa4993dca019ec9e1cfe6640d035886085b3bbe459643416b4dc806eafe530638995c36affff001d5e0ddf82" +
+            "0000002042f469d300162601f3b66b19c9915ad375fd061812c3799ebc9d5c0000000000e7a35434b8bf5a818f5c481005ac912d772d0dcfa97dd0a7fe66a8372d8cd0133a9ac36affff001dabb8bc2f" +
+            "000000209a801d1145f0d940659d1b9508a2bf5efb77a5f61876c697fde2d7520000000023f24e1b201f144cb51a1d4f2f71df7e82849440501d7ca42667ea46190a135feb9ec36affff001d119a4cab" +
+            "00c0fd29be213abfa1ac7bdcdb675bb814f6851fccd4e500fe9adbdf3e771e80000000008649813182029ed592553819b46a475d769640f537239a90aed932daca8c29247787c36a6e3f031938fb3930" +
+            "000056209e1c2b12ed97d68554b079472eecc622ed2418fa257d5b35000000000000000043b4ff5885eefeabaaaa4f6bad4749cd2db4b9ab6e0c1ec220f542fe6f1d4391288cc36affff001db8004c4c" +
+            "0040bf21aa63f10433621af301e2040935c393ad6429ca1fafea8076b854d800000000007646430c9d1d20eb71e253b454ecdca1bfb8ff3f20e5ac0412c9e21d23ca4ae6d990c36affff001d4b18987f" +
+            "00205622c641616194c97c09763dec871693c7e668f8f5889bfbb0907fbdaa0000000000e6aff20aa01019f5f19c1f39cb548eb5ef270885017e0e427ea995e9bcdaf74b8a95c36affff001d6c391966" +
+            "0040dd21c2f8139c10fec685a51b67b3c5b85a798c5a161234776e042ac28b00000000005514adc04431860a2c882aaf0decd5ea573999052e193077c495028162439fe03b9ac36affff001d6e00c924" +
+            "00c01133a4b225a064922585bd9db58ad1cb7127031c8ba15252c0db7a31cc00000000007f6bf7535d4eb0882eb99466ccacdc6f6848c61d4936aec2e67c75e233f7c363e397c36a437e0319e11e4279";
         public static readonly HashSet<string> FrozenAddresses = new(StringComparer.Ordinal)
         {
             "RB3eeBH258arkuePCJf5NMVMSaUyhyy9g6",

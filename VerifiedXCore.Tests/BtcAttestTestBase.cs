@@ -63,6 +63,7 @@ namespace VerifiedXCore.Tests
             Globals.IsTestNet = false; // Bitcoin mainnet addresses and transactions
             Globals.BitcoinAttestationObserveHeight = H1;
             Globals.BitcoinAttestationRecordHeight = H1;
+            Globals.BitcoinAttestationHeight = long.MaxValue; // no enforcement height unless a test sets one
             BtcChainRules.OverrideForTests = realMainnetRules ? null : BtcChainRules.Regtest;
             BtcAttestRules.DepthOverride = realMainnetRules ? null : 3;
             // The signers' wait for a pin's block to settle is a matter of blocks passing, tested on its own

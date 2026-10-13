@@ -24,14 +24,36 @@ namespace VerifiedXCore.Tests
             Globals.BitcoinAttestationRecordHeight = _priorRecordHeight;
         }
 
+        /// <summary>
+        /// The heights as set on 13 October 2026 (tips: mainnet 7,496,705, testnet 1,124,010). Observation needs no
+        /// coordination and starts at once; recording is the one fork point, with the fund-loss rules; enforcement
+        /// follows after the migration window. Both networks' checkpoints are twelve real headers that link, meet
+        /// their own proof-of-work and end at the first block of a difficulty interval.
+        /// </summary>
         [Fact]
-        public void ThisReleaseIsMajorNine_AndShipsWithItsForkHeightsUnset()
+        public void ThisReleaseIsMajorNine_AndItsHeightsAndCheckpointsAreSet()
         {
             Assert.Equal(9, Globals.MajorVer);
             Assert.Equal(8, Globals.PriorMajorVer);
-            Assert.Equal(long.MaxValue, _priorRecordHeight);
-            Assert.Equal(long.MaxValue, Globals.BitcoinAttestationObserveHeight);
-            Assert.Equal(long.MaxValue, Globals.BitcoinAttestationHeight);
+
+            // Mainnet (the defaults a node starts with).
+            Assert.Equal(7_517_000, Globals.FundLossAuditHeight);
+            Assert.Equal(Globals.FundLossAuditHeight, _priorRecordHeight);
+            Assert.True(Globals.BitcoinAttestationObserveHeight < _priorRecordHeight);
+            Assert.True(_priorRecordHeight < Globals.BitcoinAttestationHeight);
+            Assert.Equal(Globals.FundLossAuditHeight, Globals.VaultBurnRuleHeight);
+            // Testnet (applied at startup).
+            Assert.Equal(1_143_500, Globals.FundLossAuditTestnetHeight);
+            Assert.Equal(Globals.FundLossAuditTestnetHeight, Globals.BitcoinAttestationRecordTestnetHeight);
+            Assert.True(Globals.BitcoinAttestationObserveTestnetHeight < Globals.BitcoinAttestationRecordTestnetHeight);
+            Assert.True(Globals.BitcoinAttestationRecordTestnetHeight < Globals.BitcoinAttestationTestnetHeight);
+
+            Assert.True(VerifiedXCore.Bitcoin.Attestation.BtcCheckpoint.TryParse(Globals.BitcoinCheckpointHeightMainnet, Globals.BitcoinCheckpointHeadersMainnet, out var mainnet, out var why), why);
+            Assert.Equal(969_696, mainnet!.Height);
+            Assert.Equal("000000000000000000001e39df127cbab82a824ac43cfcdbf62e59f6a08b9f0b", mainnet.Tip.Hash);
+            Assert.True(VerifiedXCore.Bitcoin.Attestation.BtcCheckpoint.TryParse(Globals.BitcoinCheckpointHeightTestnet, Globals.BitcoinCheckpointHeadersTestnet, out var testnet, out why), why);
+            Assert.Equal(155_232, testnet!.Height);
+            Assert.Equal("0000000000000002314dc5b90175408b22d2c80dfe99979629b40e572d40345b", testnet.Tip.Hash);
         }
 
         [Fact]
@@ -71,7 +93,7 @@ namespace VerifiedXCore.Tests
             Assert.False(ProofUtility.IsMajorVersionCurrent("x.y"));
         }
 
-        /// <summary>With the fork height unset (this build as shipped), the previous release is always accepted.</summary>
+        /// <summary>With the fork height unset, the previous release is always accepted.</summary>
         [Fact]
         public void WithTheForkHeightUnset_ThePreviousReleaseIsAlwaysAccepted()
         {
