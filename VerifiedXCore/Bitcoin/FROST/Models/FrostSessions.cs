@@ -196,22 +196,32 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// <summary>Signing sessions one leader may have open on this validator.</summary>
         public const int MAX_SIGNING_SESSIONS_PER_LEADER = 60;
 
-        /// <summary>Signing sessions open for the same input of the same Bitcoin transaction (the vault's signers lead it in turn).</summary>
-        public const int MAX_SIGNING_SESSIONS_PER_INPUT = 3;
+        /// <summary>
+        /// Signing sessions one leader may have open here for the same thing to sign (one input of one transaction): a
+        /// retry. Counted per leader: a limit across leaders let one leader's three sessions refuse every other leader
+        /// of that input for as long as it renewed them.
+        /// </summary>
+        public const int MAX_SIGNING_SESSIONS_PER_LEADER_AND_HASH = 2;
+
+        /// <summary>How far a signing start's timestamp may be from this validator's clock, in seconds: an old start cannot be sent again to use up its leader's room.</summary>
+        public const int SIGNING_START_MAX_AGE_SECONDS = 1800; // wide enough for a wallet that signs its start, then asks for the ceremony a while later
 
         /// <summary>
         /// Why a new signing session is refused for want of room; null when there is room. Counted over the sessions
-        /// given (the open ones), so the rule can be tested without the store.
+        /// given (the open ones), so the rule can be tested without the store. With no leader given only the
+        /// validator's total is judged (before the leader's signature has been checked).
         /// </summary>
-        public static string? SigningStartRefusal(IEnumerable<SigningSession> open, string? leaderAddress, string? btcTxId, int inputIndex)
+        public static string? SigningStartRefusal(IEnumerable<SigningSession> open, string? leaderAddress, string? messageHash)
         {
             var sessions = open as ICollection<SigningSession> ?? open.ToList();
             if (sessions.Count >= MAX_SIGNING_SESSIONS)
                 return "Maximum concurrent signing sessions reached. Try again later.";
-            if (!string.IsNullOrEmpty(leaderAddress) && sessions.Count(x => x.LeaderAddress == leaderAddress) >= MAX_SIGNING_SESSIONS_PER_LEADER)
+            if (string.IsNullOrEmpty(leaderAddress)) return null;
+            if (sessions.Count(x => x.LeaderAddress == leaderAddress) >= MAX_SIGNING_SESSIONS_PER_LEADER)
                 return $"This leader already has {MAX_SIGNING_SESSIONS_PER_LEADER} signing sessions open here. Try again later.";
-            if (!string.IsNullOrEmpty(btcTxId) && sessions.Count(x => x.BtcTxId == btcTxId && x.InputIndex == inputIndex) >= MAX_SIGNING_SESSIONS_PER_INPUT)
-                return $"Input {inputIndex} of transaction {btcTxId} already has {MAX_SIGNING_SESSIONS_PER_INPUT} signing sessions open here. Try again later.";
+            if (!string.IsNullOrEmpty(messageHash)
+                && sessions.Count(x => x.LeaderAddress == leaderAddress && string.Equals(x.MessageHash, messageHash, StringComparison.OrdinalIgnoreCase)) >= MAX_SIGNING_SESSIONS_PER_LEADER_AND_HASH)
+                return $"This leader already has {MAX_SIGNING_SESSIONS_PER_LEADER_AND_HASH} signing sessions open here for the same input. Try again later.";
             return null;
         }
         

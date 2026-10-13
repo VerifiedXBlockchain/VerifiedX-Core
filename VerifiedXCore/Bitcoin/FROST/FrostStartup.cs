@@ -1907,7 +1907,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                             }
 
                             // FIND-0013 Fix: Enforce maximum concurrent session cap (in all, per leader, per input)
-                            var noRoom = FrostSessionStorage.SigningStartRefusal(FrostSessionStorage.SigningSessions.Values.ToList(), request.LeaderAddress, request.BtcTxId, request.InputIndex);
+                            var noRoom = FrostSessionStorage.SigningStartRefusal(FrostSessionStorage.SigningSessions.Values.ToList(), null, null); // the total; the leader's own room once it is known to be the leader
                             if (noRoom != null)
                             {
                                 context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
@@ -2057,6 +2057,21 @@ namespace VerifiedXCore.Bitcoin.FROST
                                     Success = false,
                                     Message = "Invalid leader signature"
                                 }));
+                                return;
+                            }
+
+                            // The leader is who it says: its room here, and a start that is not an old one sent again.
+                            if (Math.Abs(TimeUtil.GetTime() - request.Timestamp) > FrostSessionStorage.SIGNING_START_MAX_AGE_SECONDS)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "The signing start's timestamp is too far from this validator's clock." }));
+                                return;
+                            }
+                            var noRoomForLeader = FrostSessionStorage.SigningStartRefusal(FrostSessionStorage.SigningSessions.Values.ToList(), request.LeaderAddress, request.MessageHash);
+                            if (noRoomForLeader != null)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = noRoomForLeader }));
                                 return;
                             }
 
