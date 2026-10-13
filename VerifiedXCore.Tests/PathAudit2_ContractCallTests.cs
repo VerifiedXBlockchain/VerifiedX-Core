@@ -201,6 +201,18 @@ namespace VerifiedXCore.Tests
             (ok, why) = await Verify(Signed(TransactionType.NFT_BURN, $"[{{\"Function\":\"Burn()\",\"ContractUID\":\"{uid}\",\"Data\":{{}}}}]"), Rule);
             Assert.False(ok);
             Assert.Contains(Unreadable, why);
+            // A UID that is not text: the dispatcher keeps the function and runs it with no UID; the call is refused.
+            var noUid = Signed(TransactionType.NFT_BURN, "[{\"Function\":\"Burn()\",\"ContractUID\":{}}]");
+            Assert.Equal("Burn()", LedgerIntegrityRules.DispatchedCall(noUid.Data).Function);
+            (ok, why) = await Verify(noUid, Rule);
+            Assert.False(ok);
+            Assert.Contains(Unreadable, why);
+            // Locators that are not a plain value passed validation and made the apply throw on every node.
+            var stored = SmartContractStateTrei.GetSmartContractState(uid)!.ContractData;
+            var badLocators = Signed(TransactionType.NFT_TX, "[" + JsonConvert.SerializeObject(new { Function = "Transfer()", ContractUID = uid, ToAddress = _other.Address, Data = stored }).TrimEnd('}') + ",\"Locators\":{}}]", _other.Address);
+            (ok, why) = await Verify(badLocators, Rule);
+            Assert.False(ok);
+            Assert.Contains("Locators and Amount must each be a plain value", why);
             // And the ordinary burn is still refused by its own rule.
             (ok, why) = await Verify(plain, Rule);
             Assert.False(ok);

@@ -118,19 +118,41 @@ namespace VerifiedXCore.Services
         public static (string? Function, string? ContractUID) DispatchedCall(string? txData)
         {
             if (string.IsNullOrEmpty(txData)) return (null, null);
+            // Step for step as the dispatchers do it: the function is kept even when reading the contract's UID then
+            // fails (the dispatcher runs it with no UID), and the single-object shape is tried only when the array
+            // shape gave nothing at all.
+            string? function = null, uid = null;
+            var read = false;
             try
             {
                 var first = Newtonsoft.Json.JsonConvert.DeserializeObject<JArray>(txData)![0];
-                return ((string?)first["Function"], (string?)first["ContractUID"]);
+                function = (string?)first["Function"];
+                uid = (string?)first["ContractUID"];
+                read = true;
             }
             catch { }
             try
             {
-                var obj = JObject.Parse(txData);
-                return (obj["Function"]?.ToObject<string?>(), obj["ContractUID"]?.ToObject<string?>());
+                if (!read)
+                {
+                    var obj = JObject.Parse(txData);
+                    uid = obj["ContractUID"]?.ToObject<string?>();
+                    function = obj["Function"]?.ToObject<string?>();
+                }
             }
             catch { }
-            return (null, null);
+            return (function, uid);
+        }
+
+        /// <summary>The first element of a contract call (array shape) or the call itself (object shape); null when it is neither.</summary>
+        private static JObject? CallObject(string txData)
+        {
+            try
+            {
+                var root = JToken.Parse(txData);
+                return root is JArray arr ? (arr.Count > 0 ? arr[0] as JObject : null) : root as JObject;
+            }
+            catch { return null; }
         }
 
         /// <summary>
@@ -149,9 +171,14 @@ namespace VerifiedXCore.Services
             var call = DispatchedCall(tx.Data);
             if (string.IsNullOrWhiteSpace(call.Function)) return null; // nothing is dispatched
             var read = SmartContractDeployBinding.ReadPayload(tx.Data);
-            return string.Equals(read.Function, call.Function, StringComparison.Ordinal) && string.Equals(read.ContractUID, call.ContractUID, StringComparison.Ordinal)
-                ? null
-                : "This transaction's contract call cannot be read: its Function, ContractUID, Data and MD5List must each be text.";
+            if (!string.Equals(read.Function, call.Function, StringComparison.Ordinal) || !string.Equals(read.ContractUID, call.ContractUID, StringComparison.Ordinal))
+                return "This transaction's contract call cannot be read: its Function, ContractUID, Data and MD5List must each be text.";
+            // The two other fields the apply reads from the call. One that is not a plain value passed validation
+            // (nothing here reads it) and made the apply throw on every node: a transaction mined and never applied.
+            var fields = CallObject(tx.Data);
+            if (fields != null && ((fields["Locators"] is { } locators && locators is not JValue) || (fields["Amount"] is { } amount && amount is not JValue)))
+                return "This transaction's contract call cannot be read: its Locators and Amount must each be a plain value.";
+            return null;
         }
 
         // ── A vault that is changing hands; a recipient that can hold vBTC ───────────────────────────────────────
@@ -294,7 +321,7 @@ namespace VerifiedXCore.Services
                 // And a vault burned just before burning stopped cannot come back: no vault is created under a UID
                 // from before these rules (a UID may be dated up to an hour ahead of its transaction).
                 var before = VerifiedXCore.Data.BlockchainData.GetBlockByHeight(Globals.PathAuditRulesHeight - 1);
-                if (before != null && made < before.Timestamp + 3600)
+                if (before != null && made < before.Timestamp + 3600 + Globals.MaxFutureSkewSeconds)
                     return "This vBTC V2 vault's UID was made before the present rules started. Run the key ceremony again for a new vault.";
             }
             return null;
