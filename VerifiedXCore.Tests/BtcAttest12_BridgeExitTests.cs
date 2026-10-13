@@ -484,6 +484,31 @@ namespace VerifiedXCore.Tests
             Assert.True((await Verify(ExitComplete(burn, new string('b', 64)), Tip + 1)).Ok);
         }
 
+        /// <summary>
+        /// The plan takes the oldest locks first and gave up when a vault's share came out under the smallest part an
+        /// exit may have. One small lock at the front of the queue (a remnant of an earlier exit, or one made on purpose)
+        /// then ended the plan for every exit that reached it. The vault is left out and the plan made without it.
+        /// </summary>
+        [Fact]
+        public async Task ASmallLockAtTheFrontOfTheQueue_IsLeftOutOfThePlan_NotTheEndOfIt()
+        {
+            await Start();
+            var small = await CreateVault(H1 + 1);
+            var large = await CreateVault(H1 + 2);
+            await Deposit(small.Script, 500_000);
+            await Deposit(large.Script, 1_000_000);
+            var smallLock = await Lock(small.Uid, 0.0001M);      // 10,000 sats: under the smallest part
+            var largeLock = await Lock(large.Uid, 0.005M);
+
+            var plan = BridgePoolUnlockService.ComputeExitAllocationPlan(0.002M, null, Tip + 1);
+            Assert.NotNull(plan);
+            Assert.Equal(largeLock, Assert.Single(plan!).LockId);
+            Assert.Equal(0.002M, plan[0].UnlockAmount);
+            Assert.DoesNotContain(plan, a => a.LockId == smallLock);
+            // More than the rest can pay is still not planned.
+            Assert.Null(BridgePoolUnlockService.ComputeExitAllocationPlan(0.00505M, null, Tip + 1));
+        }
+
         [Fact]
         public async Task TheCastersPlan_UsesOlderVaultsFirst_ThenWatchedOnes_AndOnlyWatchedOnesOnceOldVaultsAreFrozen()
         {

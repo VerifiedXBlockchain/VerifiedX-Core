@@ -105,12 +105,20 @@ namespace VerifiedXCore.Bitcoin.Services
                 var fromOlder = ComputeAllocationPlan(exitAmountBtc, Without(watched));
                 if (fromOlder != null) return fromOlder;
             }
-            var fromWatched = ComputeAllocationPlan(exitAmountBtc, Without(older));
-            if (fromWatched == null) return null;
-            // A vault is never asked for less than a Bitcoin transaction can pay (the exit would be refused).
-            var tooSmall = fromWatched.GroupBy(a => a.SmartContractUID, StringComparer.Ordinal)
-                .Any(g => (long)(g.Sum(a => a.UnlockAmount) * Attestation.BtcAttestBalance.SatsPerBtc) < Attestation.BtcWithdrawals.MinExitPartSats);
-            return tooSmall ? null : fromWatched;
+            // A vault is never asked for less than a Bitcoin transaction can pay (the exit would be refused). A vault
+            // whose share would be that small is left out and the plan made again without it: one small lock at the
+            // front of the queue (a remnant, or one made on purpose) used to end the plan for every exit that reached it.
+            var leftOut = Without(older);
+            while (true)
+            {
+                var fromWatched = ComputeAllocationPlan(exitAmountBtc, leftOut);
+                if (fromWatched == null) return null;
+                var tooSmall = fromWatched.GroupBy(a => a.SmartContractUID, StringComparer.Ordinal)
+                    .Where(g => (long)(g.Sum(a => a.UnlockAmount) * Attestation.BtcAttestBalance.SatsPerBtc) < Attestation.BtcWithdrawals.MinExitPartSats)
+                    .Select(g => g.Key).ToList();
+                if (tooSmall.Count == 0) return fromWatched;
+                foreach (var vault in tooSmall) leftOut.Add(vault);
+            }
         }
 
         /// <summary>
