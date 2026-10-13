@@ -283,14 +283,22 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
         }
 
-        /// <summary>The requests still waiting on these vaults are tried again, oldest first: their coins have changed.</summary>
+        /// <summary>
+        /// The requests still waiting on these vaults are tried again: their coins have changed. The one that pays the
+        /// higher Bitcoin fee rate first, then the older. A coin that has just come back goes to the withdrawal most
+        /// likely to confirm and give it back as change, and somebody who queues requests at a fee that never
+        /// confirms does not get every coin a vault receives ahead of everybody else.
+        /// </summary>
         private static void RetryWaiting(IEnumerable<string> vaults, long vfxHeight, LiteDatabase? db)
         {
             foreach (var vault in vaults)
-                foreach (var waiting in BtcAttestStore.WithdrawalsOf(vault, VaultWithdrawalState.Waiting, db)
-                             .OrderBy(w => w.RequestVfxHeight).ThenBy(w => w.Ref, StringComparer.Ordinal))
+                foreach (var waiting in InTurn(BtcAttestStore.WithdrawalsOf(vault, VaultWithdrawalState.Waiting, db)))
                     TryPin(waiting, vfxHeight, db);
         }
+
+        /// <summary>The order waiting withdrawals are tried in: higher fee rate, then older, then by reference.</summary>
+        private static IEnumerable<VaultWithdrawalRow> InTurn(IEnumerable<VaultWithdrawalRow> waiting) =>
+            waiting.OrderByDescending(w => w.FeeRate).ThenBy(w => w.RequestVfxHeight).ThenBy(w => w.Ref, StringComparer.Ordinal);
 
         /// <summary>Before a block's transactions: requests that were never pinned and are past their window are closed and refunded.</summary>
         public static void OnBlockStart(long vfxHeight, LiteDatabase? db = null)

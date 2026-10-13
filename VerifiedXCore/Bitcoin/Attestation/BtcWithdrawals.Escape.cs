@@ -111,14 +111,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <summary>
         /// Every <see cref="BtcAttestRules.TakeRetryBlocks"/> blocks the withdrawals still waiting for coins are tried
         /// again: nothing else tells them that a withdrawal holding the vault's coins has just stopped moving (time
-        /// passing changes no coin). Oldest first, like every retry.
+        /// passing changes no coin). In the order of every retry.
         /// </summary>
         private static void RetryWaitingForTakeover(long vfxHeight, LiteDatabase? db)
         {
             if (vfxHeight % BtcAttestRules.TakeRetryBlocks != 0) return;
-            foreach (var waiting in BtcAttestStore.WithdrawalsInState(VaultWithdrawalState.Waiting, db)
-                         .Where(w => !w.IsBridgeExit)
-                         .OrderBy(w => w.RequestVfxHeight).ThenBy(w => w.Ref, StringComparer.Ordinal))
+            foreach (var waiting in InTurn(BtcAttestStore.WithdrawalsInState(VaultWithdrawalState.Waiting, db).Where(w => !w.IsBridgeExit)))
                 TryPin(waiting, vfxHeight, db);
         }
 

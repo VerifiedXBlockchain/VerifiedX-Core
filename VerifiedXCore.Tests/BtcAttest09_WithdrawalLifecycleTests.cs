@@ -617,5 +617,29 @@ namespace VerifiedXCore.Tests
             Assert.Equal(30_000 - 1_540, btc.Outputs[0].Value.Satoshi);
             Assert.Equal(0.0007M, (await VBTCService.TryGetAvailableTransparentVbtcBalance(vault.Uid, _holder.Address)).availableBalance);
         }
+
+        /// <summary>
+        /// When a coin comes back, the waiting withdrawal that pays the higher Bitcoin fee rate is fixed on it first.
+        /// Somebody who queues requests at a fee that will not confirm does not take every coin the vault receives.
+        /// </summary>
+        [Fact]
+        public async Task AReturningCoin_GoesToTheWaitingWithdrawalThatPaysMore_ThenToTheOlder()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 150_000);
+            await Mine(Transfer(vault.Uid, 0.0005M));
+            var holding = await Mine(Request(vault.Uid, 0.0005M));                             // holds the only coin
+            var cheap = await Mine(Request(vault.Uid, 0.0003M, from: _holder, feeRate: 1));    // first in line by age
+            var paying = await Mine(Request(vault.Uid, 0.0004M, feeRate: 20));
+            Assert.Equal(VaultWithdrawalState.Waiting, Row(cheap, vault.Uid).State);
+            Assert.Equal(VaultWithdrawalState.Waiting, Row(paying, vault.Uid).State);
+
+            // The change comes back: 100,000 sats, enough for either but not both.
+            var paid = await SignAndConfirm(Row(holding, vault.Uid).Pins[0]);
+            Assert.Equal(VaultWithdrawalState.Pinned, Row(paying, vault.Uid).State);
+            Assert.Equal(new[] { Outpoint(paid, 1) }, Row(paying, vault.Uid).Pins[0].Inputs);
+            Assert.Equal(VaultWithdrawalState.Waiting, Row(cheap, vault.Uid).State);
+        }
     }
 }
