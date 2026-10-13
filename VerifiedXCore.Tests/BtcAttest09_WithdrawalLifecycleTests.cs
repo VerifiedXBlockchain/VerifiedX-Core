@@ -481,5 +481,36 @@ namespace VerifiedXCore.Tests
             var moved = await Mine(Request(vault.Uid, 0.0005M, from: _holder, destination: second.Address));
             Assert.Equal(VaultWithdrawalState.Pinned, Row(moved, vault.Uid).State);
         }
+
+        /// <summary>
+        /// Burning a contract deletes its state record, and a vault keeps its whole ledger there. Its coins, withdrawals
+        /// and deposit script are kept under its UID and are never deleted, so a vault burned and created again would
+        /// have every coin and no debit. A watched vault is not burned, at any height, and nothing is created under
+        /// its UID.
+        /// </summary>
+        [Fact]
+        public async Task AWatchedVault_IsNeverBurned_AndNothingIsCreatedUnderItsUid()
+        {
+            var priorRule = Globals.VaultBurnRuleHeight;
+            Globals.VaultBurnRuleHeight = long.MaxValue; // the rule for vaults the chain does not watch is not in force here
+            try
+            {
+                await Start();
+                var vault = await CreateVault(H1 + 1);
+                await Deposit(vault.Script, 150_000);
+                await Mine(Transfer(vault.Uid, 0.001M));
+
+                await RefusedInBlock(SignedBy(Minter, Minter.Address, TransactionType.NFT_BURN, new[] { new { Function = "Burn()", ContractUID = vault.Uid } }), "vBTC V2 vault cannot be burned");
+                await RefusedInBlock(SignedBy(Minter, Minter.Address, TransactionType.TKNZ_BURN, new[] { new { Function = "Burn()", ContractUID = vault.Uid } }), "vBTC V2 vault cannot be burned");
+
+                var again = SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_CONTRACT_CREATE,
+                    new[] { new { Function = "Mint()", ContractUID = vault.Uid, Data = VbtcTestContracts.VaultContractData(vault.Uid, Minter.Address, vault.Address), MD5List = "NA" } });
+                await RefusedInBlock(again, "a vault's UID is never created twice");
+                // Even if its record were gone, what the chain keeps under the UID is still there.
+                SmartContractStateTrei.DeleteSmartContract(SmartContractStateTrei.GetSmartContractState(vault.Uid)!);
+                await RefusedInBlock(again, "a vault's UID is never created twice");
+            }
+            finally { Globals.VaultBurnRuleHeight = priorRule; }
+        }
     }
 }

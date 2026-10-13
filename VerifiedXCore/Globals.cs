@@ -321,6 +321,18 @@ namespace VerifiedXCore
         public static long VaultRewriteRulesHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// A vBTC V2 vault is never burned, and a vault's UID is never created twice (LedgerIntegrityRules.VaultNotBurned,
+        /// VaultUidIsNew). Burn() deletes the contract's state record, and for a vault that record is the ledger: every
+        /// holder's balance and every debit the owner ever made. The tables beside it survive (completed withdrawals,
+        /// bridge locks, attested coins), and the creation proof could be sent again, so an owner could burn its vault
+        /// and create it again with an empty ledger: the holders' vBTC gone, and its own balance restored to the whole
+        /// deposit plus everything it had already withdrawn. Found by the Oct 12 2026 path audit. For a vault the chain
+        /// watches the rule needs no height (such a vault exists only under these rules); for every other vault it
+        /// starts here.
+        /// </summary>
+        public static long VaultBurnRuleHeight = FundLossAuditHeight;
+
+        /// <summary>
         /// Item 5: the "manual" bid-signature bypass is honoured only for M_Sale_Start() (the validator set it for that
         /// function but tested the string, so a plain Sale_Start() carrying "manual" skipped the bid signature and named
         /// any address as the buyer; that address's own wallet then auto-signed the completion from its balance). The

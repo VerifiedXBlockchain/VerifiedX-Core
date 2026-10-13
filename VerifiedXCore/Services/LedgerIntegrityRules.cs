@@ -129,6 +129,69 @@ namespace VerifiedXCore.Services
                 : "A vBTC V2 vault's contract code cannot be changed after creation.";
         }
 
+        // ── A vBTC V2 vault is never burned, and its UID is never created twice ─────────────────────────────────
+
+        /// <summary>How long after its UID was made a vault may still be created (the UID ends in the time it was made).</summary>
+        public const long VaultUidFreshSeconds = 7 * 24 * 60 * 60;
+
+        /// <summary>
+        /// Burn() deletes a contract's state record. A vault's ledger is on that record, so burning a vault destroys
+        /// every holder's vBTC, strands the Bitcoin, and (with <see cref="VaultUidIsNew"/> missing) let the owner start
+        /// the same vault again with an empty ledger. Refused for a vault the chain watches at any height, and for
+        /// every vBTC V2 vault from Globals.VaultBurnRuleHeight. Reads the payload exactly as the StateData dispatcher
+        /// does. Null when the rule passes.
+        /// </summary>
+        public static string? VaultNotBurned(Transaction tx, long height)
+        {
+            if (tx?.Data == null) return null;
+            var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+            if (payload.Function != "Burn()" || string.IsNullOrEmpty(payload.ContractUID)) return null;
+            var stored = SmartContractStateTrei.GetSmartContractState(payload.ContractUID);
+            if (stored == null || !VBTCService.IsVbtcV2Contract(stored)) return null;
+            if (height < Globals.VaultBurnRuleHeight && !VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(stored.SmartContractUID))
+                return null;
+            return "A vBTC V2 vault cannot be burned: its ledger, every holder's vBTC and the record of its Bitcoin live on the contract.";
+        }
+
+        private const string VaultCreatedBefore = "This vBTC V2 vault was created before; a vault's UID is never created twice.";
+
+        /// <summary>
+        /// No contract is created under the UID of a vault the chain watches or ever watched: its deposit script, its
+        /// coins and its withdrawals are kept under that UID and are never deleted. Any creation, at any height (only
+        /// these rules write a watched script). Null when the rule passes.
+        /// </summary>
+        public static string? CreatedUidWasNeverWatched(Transaction tx)
+        {
+            var uid = CreatedContractUid(tx);
+            return uid != null && VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.ScriptRowForVault(uid) != null ? VaultCreatedBefore : null;
+        }
+
+        /// <summary>
+        /// A vault is created once. What is kept outside a vault's state record (its withdrawals, its bridge locks) is
+        /// kept under its UID and outlives the record, so a second creation under the same UID would inherit all of it
+        /// with an empty ledger. From Globals.VaultBurnRuleHeight a vault's creation is refused when its UID has mined
+        /// withdrawals or bridge locks, or when the UID was not made recently: a UID ends in the time it was made, and a
+        /// vault's creation follows its key ceremony within minutes, so an old creation cannot be sent again later.
+        /// Called for a creation that carries a TokenizationV2 feature. Null when the rule passes.
+        /// </summary>
+        public static string? VaultUidIsNew(Transaction tx, string uid, long height)
+        {
+            const string again = VaultCreatedBefore;
+            if (height < Globals.VaultBurnRuleHeight) return null;
+
+            if (VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()?.Exists(x => x.SmartContractUID == uid && x.TransactionHash != null && x.TransactionHash != "") == true)
+                return again;
+            if (VBTCBridgeLockState.GetCollection().Exists(x => x.SmartContractUID == uid))
+                return again;
+
+            var colon = uid.LastIndexOf(':');
+            if (colon < 0 || !long.TryParse(uid.AsSpan(colon + 1), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var made))
+                return "A vBTC V2 vault's UID ends in the time it was made (the UID the key ceremony ran under).";
+            if (made > tx.Timestamp + 3600 || made < tx.Timestamp - VaultUidFreshSeconds)
+                return $"This vBTC V2 vault's UID was not made within the last {VaultUidFreshSeconds / 86400} days. Run the key ceremony again for a new vault.";
+            return null;
+        }
+
         // ── Fund-loss audit item 4: a contract that is not a vault cannot become one by rewrite ──────────────────
 
         /// <summary>
@@ -294,6 +357,8 @@ namespace VerifiedXCore.Services
             var v2 = decompiled.Features?.Where(f => f != null && f.FeatureName == FeatureName.TokenizationV2).ToList();
             if (v2 == null || v2.Count == 0) return null;
             if (v2.Count > 1) return "A contract may carry only one TokenizationV2 feature.";
+            var reuseError = VaultUidIsNew(tx, uid, height);
+            if (reuseError != null) return reuseError;
             VerifiedXCore.Models.SmartContracts.TokenizationV2Feature? feature;
             try
             {

@@ -540,6 +540,11 @@ namespace VerifiedXCore.Services
             if (vaultCodeError != null)
                 return (txResult, vaultCodeError);
 
+            // A vBTC V2 vault is never burned: its ledger lives on the record Burn() deletes.
+            var vaultBurnError = LedgerIntegrityRules.VaultNotBurned(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (vaultBurnError != null)
+                return (txResult, vaultBurnError);
+
             // Fund-loss audit item 4: the inverse - a contract that is not a vault cannot be rewritten into one.
             var vaultRewriteError = LedgerIntegrityRules.VaultNotCreatedByRewrite(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
             if (vaultRewriteError != null)
@@ -564,6 +569,11 @@ namespace VerifiedXCore.Services
                 var creationSignatureError = SignatureError(txRequest);
                 if (creationSignatureError != null)
                     return (txResult, creationSignatureError);
+
+                // Nothing is created under the UID of a vault the chain watches or ever watched.
+                var watchedUidError = LedgerIntegrityRules.CreatedUidWasNeverWatched(txRequest);
+                if (watchedUidError != null)
+                    return (txResult, watchedUidError);
 
                 // NEW-26: a vBTC V2 deposit address must be the validators' FROST key (height-gated; block height at
                 // verify, tip + 1 at admission). Runs after the signature check (it decompiles the body too).
