@@ -447,15 +447,28 @@ namespace VerifiedXCore.Tests
             Assert.True((await TransactionValidatorService.VerifyTX(first)).Item1);
             // A copy at the held one's timestamp that sorts before it by hash is refused before its signatures are checked:
             // anyone could make such variants from the gossiped signatures, each a full check (fourth review, round 6).
-            var ties = Signers.SelectMany((_, i) => new[] { Signers.Where((_, j) => j != i), Signers.Where((_, j) => j != (i + 1) % Signers.Count || j == i) })
+            // The copy held is the one that sorts last, so that every other copy at its timestamp sorts before it.
+            var variants = Signers.Select((_, i) => Signers.Where((_, j) => j != i))
                 .Select(subset => { var t = Signed(Forward(at), subset); t.Timestamp = first.Timestamp; t.Build(); return t; })
-                .Where(t => string.CompareOrdinal(t.Hash, first.Hash) < 0).ToList();
-            Assert.NotEmpty(ties);
-            foreach (var tie in ties)
+                .Append(first).GroupBy(t => t.Hash).Select(g => g.First()).ToList();
+            Assert.True(variants.Count > 1);
+            var held = variants.OrderByDescending(t => t.Hash, StringComparer.Ordinal).First();
+            if (held.Hash != first.Hash)
+            {
+                pool.DeleteMany(x => x.Hash == first.Hash);
+                held.TransactionRating = await TransactionRatingService.GetTransactionRating(held);
+                pool.InsertSafe(held);
+            }
+            foreach (var tie in variants.Where(t => t.Hash != held.Hash))
             {
                 var (tieOk, tieWhy) = await TransactionValidatorService.VerifyTX(tie);
                 Assert.False(tieOk);
                 Assert.Contains("already in the mempool", tieWhy);
+            }
+            if (held.Hash != first.Hash)
+            {
+                pool.DeleteMany(x => x.Hash == held.Hash);
+                pool.InsertSafe(first);
             }
             // Admitting the earliest takes the later copies of the same report out of the mempool (they used to pile up).
             Assert.Null(pool.FindOne(x => x.Hash == second.Hash));

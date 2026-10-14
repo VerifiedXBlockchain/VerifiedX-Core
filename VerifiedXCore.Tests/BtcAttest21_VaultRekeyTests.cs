@@ -926,7 +926,7 @@ namespace VerifiedXCore.Tests
             Assert.True(uids.Select(u => u[^6..]).Distinct().Count() > 1); // the random tail
             // The time is read without the random digits (read whole, the check that the ceremony ran after the key fell
             // due never refused anything; fourth review, round 6).
-            Assert.All(uids, u => Assert.InRange(long.Parse(BtcVaultKeys.KeyUidTime(u)), TimeUtil.GetTime() - 5, TimeUtil.GetTime() + 30));
+            Assert.All(uids, u => Assert.InRange(long.Parse(BtcVaultKeys.KeyUidTime(u)), TimeUtil.GetTime() - 5, TimeUtil.GetTime() + 3_600)); // one process clock, a second a UID
             Assert.Equal("1700000000", BtcVaultKeys.KeyUidTime(new string('a', 32) + ":1700000000"));
         }
 
