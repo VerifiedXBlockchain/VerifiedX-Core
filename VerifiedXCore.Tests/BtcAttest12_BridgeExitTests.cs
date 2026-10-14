@@ -659,6 +659,29 @@ namespace VerifiedXCore.Tests
             Assert.Null(BridgePoolUnlockService.ComputeExitAllocationPlan(0.00505M, null, Tip + 1));
         }
 
+        /// <summary>
+        /// Locks made before amounts were held to 8 places (VX-01) can hold a fraction of a satoshi; the plan drew it, and
+        /// consensus, which takes whole satoshis from the path-audit rules (round 15), refused every plan that reached it
+        /// (fifth review, round 16). A lock is drawn down to its last whole satoshi.
+        /// </summary>
+        [Fact]
+        public async Task ALockWithAFractionOfASatoshi_IsPlannedInWholeSatoshis()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            var odd = await Lock(vault.Uid, 0.002M);
+            var next = await Lock(vault.Uid, 0.005M);
+            var record = VBTCBridgeLockState.GetByLockId(odd)!;
+            record.Amount = 0.002000005M; // as an older lock could be
+            VBTCBridgeLockState.GetCollection().Update(record);
+
+            var plan = BridgePoolUnlockService.ComputeExitAllocationPlan(0.003M, null, Tip + 1)!;
+            Assert.Equal(new[] { 0.002M, 0.001M }, plan.Select(a => a.UnlockAmount).ToArray());
+            var (ok, why) = await Verify(Exit(NewBurn(), BtcDest, plan.Select(a => (a.LockId, a.SmartContractUID, a.UnlockAmount)).ToArray()), Tip + 1);
+            Assert.True(ok, why);
+        }
+
         [Fact]
         public async Task TheCastersPlan_UsesOlderVaultsFirst_ThenWatchedOnes_AndOnlyWatchedOnesOnceOldVaultsAreFrozen()
         {

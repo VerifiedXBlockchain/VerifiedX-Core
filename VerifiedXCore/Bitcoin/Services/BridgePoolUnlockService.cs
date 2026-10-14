@@ -48,7 +48,9 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (excludeContractUIDs != null && excludeContractUIDs.Contains(lockRec.SmartContractUID))
                     continue;
 
-                decimal useAmount = Math.Min(remaining, lockRec.RemainingAmount);
+                // Whole satoshis, as consensus takes them from the path-audit rules: a lock made before amounts were held
+                // to 8 places (VX-01) is drawn down to its last whole satoshi (round 16).
+                decimal useAmount = Math.Min(remaining, Math.Round(lockRec.RemainingAmount, 8, MidpointRounding.ToZero));
                 if (useAmount <= 0) continue;
 
                 allocations.Add(new PoolUnlockAllocation
@@ -61,8 +63,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 remaining -= useAmount;
             }
 
-            // Not enough pool liquidity
-            if (remaining > 0.00000001M)
+            // Not enough pool liquidity (a plan short by any amount is refused by consensus; round 16)
+            if (remaining > 0M)
                 return null;
 
             return allocations;
