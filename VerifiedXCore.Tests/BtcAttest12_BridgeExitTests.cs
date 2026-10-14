@@ -250,6 +250,8 @@ namespace VerifiedXCore.Tests
             over["TotalAmount"] = 0.00199999M;
             over["TotalAmountSats"] = 199_999L;
             await RefusedInBlock(SignedBy(Caster, Caster.Address, TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC, over, free: true), "add up to");
+            // ... or a fraction of a satoshi more, in the total and the allocation alike (round 15).
+            await RefusedInBlock(Exit(NewBurn(), BtcDest, (lockId, vault.Uid, 0.002000009M)), "decimal places");
         }
 
         /// <summary>

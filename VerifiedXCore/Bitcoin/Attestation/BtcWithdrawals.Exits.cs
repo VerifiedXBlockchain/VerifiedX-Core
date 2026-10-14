@@ -153,6 +153,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         var drawn = allocations.Where(a => a != null).Sum(a => a.UnlockAmount);
                         if (total == null || drawn != total.Value)
                             return $"The exit's allocations add up to {drawn}, not its total {total}.";
+                        // In whole satoshis (round 15).
+                        foreach (var amount in allocations.Where(a => a != null).Select(a => a.UnlockAmount).Append(total.Value))
+                            if (VerifiedXCore.Bitcoin.Services.VBTCService.GetVbtcAmountError(amount, "a bridge exit") is { } fraction)
+                                return fraction;
                         var destination = data["BtcDestination"]?.ToObject<string?>();
                         if (!BtcCanonicalWithdrawal.TryDestinationScript(destination, out var script))
                             return $"The exit's Bitcoin destination is not an address on this network: {destination}";

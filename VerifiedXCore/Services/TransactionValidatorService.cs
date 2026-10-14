@@ -4407,6 +4407,10 @@ namespace VerifiedXCore.Services
                 if (a == null || string.IsNullOrWhiteSpace(a.LockId)) return (false, "allocation missing LockId");
                 if (!seen.Add(a.LockId)) return (false, $"duplicate lock {a.LockId}");
                 if (a.UnlockAmount <= 0M) return (false, $"non-positive amount for lock {a.LockId}");
+                // Whole satoshis from the path-audit rules: a fraction let an exit draw just under a satoshi more than
+                // the votes' amount, and parts truncated apart paid less than the locks gave up (fifth review, round 15).
+                if (exact && Bitcoin.Services.VBTCService.GetVbtcAmountError(a.UnlockAmount, "a bridge allocation") is { } fraction)
+                    return (false, fraction);
                 var rec = VBTCBridgeLockState.GetByLockId(a.LockId);
                 if (rec == null) return (false, $"unknown lock {a.LockId}");
                 if (rec.IsUnlocked) return (false, $"lock {a.LockId} already fully unlocked");
@@ -4420,6 +4424,7 @@ namespace VerifiedXCore.Services
                 sum += a.UnlockAmount;
             }
             if (Math.Abs(sum - totalAmount) > (exact ? 0M : 0.00000001M)) return (false, $"allocation sum {sum} != total {totalAmount}"); // exact from the path-audit rules (round 14)
+            if (exact && Bitcoin.Services.VBTCService.GetVbtcAmountError(totalAmount, "a bridge total") is { } totalFraction) return (false, totalFraction);
             return (true, "");
         }
 
