@@ -1240,6 +1240,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                             }
                             if (!string.IsNullOrEmpty(session.Round2Secret) && !string.IsNullOrEmpty(session.GeneratedSharesJson))
                             {
+                                round2Hold.Dispose(); // not held while a requester reads slowly (round 14)
                                 context.Response.StatusCode = StatusCodes.Status200OK;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                                 {
@@ -1372,6 +1373,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                             session.GeneratedSharesJson = sealedShares;
                             foreach (var (identifier, ephemeral) in sealEphemerals) session.SealEphemerals[identifier] = ephemeral;
                             FrostSessionStorage.MarkDkgStage(session, FrostSessionStorage.DkgStage.Round2);
+                            round2Hold.Dispose(); // stored: the answer is written without the lock (round 14)
 
                             LogUtility.Log($"[FROST] DKG Round 2 shares generated via native library for session {sessionId}", "FrostStartup.DKGRound2");
 
