@@ -116,15 +116,12 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
             catch { return new List<IBtcSource>(); }
         }
 
-        /// <summary>The network an address is in, as far as peer choice goes: its first two bytes.</summary>
+        /// <summary>The network an address is in, as far as peer choice goes: the first 16 bits of an IPv4 address, the first 32 of an IPv6 one.</summary>
         internal static string NetworkGroup(string endpoint)
         {
             var host = endpoint.Split(' ')[0];
-            var colon = host.LastIndexOf(':');
-            if (colon > 0) host = host.Substring(0, colon);
-            return IPAddress.TryParse(host, out var ip) && ip.AddressFamily == AddressFamily.InterNetwork
-                ? string.Join(".", ip.GetAddressBytes().Take(2))
-                : host;
+            if (IPEndPoint.TryParse(host, out var ep)) return VerifiedXCore.Utilities.RemoteIp.Group(ep.Address, 16, 32)!;
+            return IPAddress.TryParse(host.Trim('[', ']'), out var ip) ? VerifiedXCore.Utilities.RemoteIp.Group(ip, 16, 32)! : host;
         }
 
         private async Task<List<IPEndPoint>> DiscoverFromSeedsAsync(CancellationToken ct)
