@@ -14,7 +14,10 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public List<string> ParticipantAddresses { get; set; }
         public int RequiredThreshold { get; set; }
         public long StartTimestamp { get; set; }
-        /// <summary>The network address the start came from (a leader's node). Counted, so one host cannot take every place.</summary>
+        /// <summary>
+        /// The network the start came from (a leader's node): its /24 or /64, <see cref="VerifiedXCore.Utilities.RemoteIp.Group"/>.
+        /// Counted, so one host cannot take every place by using more of its addresses.
+        /// </summary>
         public string? SourceIp { get; set; }
         /// <summary>A re-key's ceremony: the vault the new key is for (signed into this validator's attestation).</summary>
         public string? RekeyOf { get; set; }
@@ -44,7 +47,16 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public string? FinalKeyPackage { get; set; }           // This validator's key package (for signing)
         public string? FinalPubkeyPackage { get; set; }        // Group pubkey package (for signature aggregation)
         public bool IsCompleted { get; set; }
-        
+
+        /// <summary>How far the ceremony has gone here: 0 started, then <see cref="FrostSessionStorage.DkgStage"/>. Each step is taken once.</summary>
+        public int Stage { get; set; }
+
+        /// <summary>When the ceremony last went a step further here (its start, until then).</summary>
+        public long LastProgressTimestamp { get; set; }
+
+        /// <summary>Its coordinator gave it up (<c>POST /frost/dkg/abort/{sessionId}</c>): it holds no place and its secrets are gone.</summary>
+        public bool IsAborted { get; set; }
+
         public DKGSession()
         {
             ParticipantAddresses = new List<string>();
@@ -173,19 +185,47 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
     public static class FrostSessionStorage
     {
         /// <summary>
-        /// Key ceremonies that may be under way on this validator at once. Anyone may lead one (the leader holds no
-        /// key material), so the places are guarded by what follows rather than by who asks: a start must be recent
-        /// and not seen before, a start that never continues gives its place back after two minutes, and one leader
-        /// and one network source each hold only a few. 50 places with none of that were filled, for fifteen minutes
-        /// at a time, by thirteen made-up leader keys from one machine (third pass, 14 October 2026).
+        /// Key ceremonies for vault creations that may be under way on this validator at once. Anyone may lead one (the
+        /// leader holds no key material), so the places are guarded by what follows rather than by who asks: a start
+        /// must be recent and not seen before, a ceremony holds its place only while it goes a step further every two
+        /// minutes (its few steps are each taken once), and one leader and one network (a /24 or /64) each hold only a
+        /// few. 50 places with none of that were filled, for fifteen minutes at a time, by thirteen made-up leader keys
+        /// from one machine (third pass, 14 October 2026). Re-keys do not use these places (<see cref="MAX_REKEY_DKG_SESSIONS"/>).
         /// </summary>
         public const int MAX_DKG_SESSIONS = 200;
 
-        /// <summary>A ceremony whose leader has sent nothing after its start for this long no longer holds a place.</summary>
+        /// <summary>A ceremony that has gone no step further here for this long no longer holds a place (it goes on if its leader comes back).</summary>
         public const int DKG_UNPROGRESSED_SECONDS = 120;
 
-        /// <summary>Ceremonies under way that one network address may have started here.</summary>
+        /// <summary>Ceremonies under way that one network (a /24 or /64) may have started here.</summary>
         public const int MAX_DKG_SESSIONS_PER_SOURCE = 8;
+
+        /// <summary>
+        /// Places kept for re-keys (plan 8.8), apart from creations': a vault whose key is losing its holders must get a
+        /// new one whoever is filling the creations' places. A re-key's ceremony is joined only for a vault the chain
+        /// says is due, led by an active vBTC validator, at most <see cref="MAX_REKEY_DKG_SESSIONS_PER_VAULT"/> per vault:
+        /// nobody can fill these places without a bonded validator and vaults that are due.
+        /// </summary>
+        public const int MAX_REKEY_DKG_SESSIONS = 100;
+
+        /// <summary>Re-key ceremonies under way for one vault (two leaders whose turns overlap).</summary>
+        public const int MAX_REKEY_DKG_SESSIONS_PER_VAULT = 2;
+
+        /// <summary>The steps a ceremony takes here, each once: its Round 2 shares made, every share for this validator received, its key made.</summary>
+        public static class DkgStage
+        {
+            public const int Round2 = 1;
+            public const int SharesIn = 2;
+            public const int Done = 3;
+        }
+
+        /// <summary>Records that a ceremony went a step further here. A step already taken changes nothing, so no message keeps a place by being sent again.</summary>
+        public static void MarkDkgStage(DKGSession s, int stage, long? nowSeconds = null)
+        {
+            if (stage <= s.Stage) return;
+            s.Stage = stage;
+            s.LastProgressTimestamp = nowSeconds ?? TimeUtil.GetTime();
+        }
 
         /// <summary>
         /// How far a ceremony start's timestamp may be from this validator's clock, in seconds (a web wallet signs its
@@ -213,39 +253,71 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// <summary>Tests only.</summary>
         internal static void ForgetDkgStarts() => SeenDkgStarts.Clear();
 
-        /// <summary>Whether a ceremony's leader has come back after its start: commitments, shares or verifications are held.</summary>
-        public static bool DkgHasProgressed(DKGSession s) =>
-            s.Round1Commitments.Count > 1 || s.Round2Secret != null || s.GeneratedSharesJson != null
-            || !s.ReceivedSharesJson.IsEmpty || !s.ReceivedShares.IsEmpty || !s.Round3Verifications.IsEmpty;
+        /// <summary>
+        /// Whether a ceremony has gone a step further here than its start. Commitments posted with a Round 2 request are
+        /// not a step: anybody who knows the session id could post them (the session's own leader among them).
+        /// </summary>
+        public static bool DkgHasProgressed(DKGSession s) => s.Stage > 0;
 
         /// <summary>
-        /// Whether a ceremony holds a place: not finished, started within the window, and either its leader has
-        /// continued it or it is still within the time a leader takes to come back.
+        /// Whether a ceremony holds a place: not finished or given up, started within the window, and gone a step further
+        /// (or started) within the last <see cref="DKG_UNPROGRESSED_SECONDS"/>.
         /// </summary>
         public static bool DkgIsUnderWay(DKGSession s, long nowSeconds) =>
-            !s.IsCompleted && s.StartTimestamp >= nowSeconds - DKG_LEADER_CAP_WINDOW_SECONDS
-            && (DkgHasProgressed(s) || s.StartTimestamp >= nowSeconds - DKG_UNPROGRESSED_SECONDS);
+            !s.IsCompleted && !s.IsAborted && s.StartTimestamp >= nowSeconds - DKG_LEADER_CAP_WINDOW_SECONDS
+            && Math.Max(s.StartTimestamp, s.LastProgressTimestamp) >= nowSeconds - DKG_UNPROGRESSED_SECONDS;
 
         /// <summary>
         /// Why a ceremony start is refused for want of room, age or novelty; null when it may go on. Counted over the
         /// sessions given, so the rule can be tested without the store. With no leader given only what can be judged
         /// before the leader's signature is checked (the validator's total, the start's age) is judged.
         /// </summary>
-        public static string? DkgStartRefusal(IEnumerable<DKGSession> sessions, long nowSeconds, string? sessionId, long startTimestamp, string? leaderAddress, string? sourceIp)
+        /// <remarks>
+        /// A re-key's start (<paramref name="rekeyOf"/> set) is counted among re-keys only, and not per network: its leader
+        /// is a validator, checked by the caller (<see cref="RekeyLeaderRefusal"/>), and validators may share a host.
+        /// </remarks>
+        public static string? DkgStartRefusal(IEnumerable<DKGSession> sessions, long nowSeconds, string? sessionId, long startTimestamp, string? leaderAddress, string? sourceIp, string? rekeyOf = null)
         {
             if (Math.Abs(nowSeconds - startTimestamp) > DKG_START_MAX_AGE_SECONDS)
                 return "This ceremony start is not recent. Sign a new one.";
-            var underWay = sessions.Where(s => DkgIsUnderWay(s, nowSeconds)).ToList();
-            if (underWay.Count >= MAX_DKG_SESSIONS)
-                return "Maximum concurrent DKG sessions reached. Try again later.";
+            var rekey = !string.IsNullOrEmpty(rekeyOf);
+            var underWay = sessions.Where(s => DkgIsUnderWay(s, nowSeconds) && string.IsNullOrEmpty(s.RekeyOf) != rekey).ToList();
+            if (underWay.Count >= (rekey ? MAX_REKEY_DKG_SESSIONS : MAX_DKG_SESSIONS))
+                return rekey ? "Maximum concurrent re-key ceremonies reached. Try again later." : "Maximum concurrent DKG sessions reached. Try again later.";
+            if (rekey && underWay.Count(s => string.Equals(s.RekeyOf, rekeyOf, StringComparison.Ordinal)) >= MAX_REKEY_DKG_SESSIONS_PER_VAULT)
+                return $"Two re-key ceremonies for vault {rekeyOf} are already under way here. Try again shortly.";
             if (string.IsNullOrEmpty(leaderAddress)) return null;
             if (DkgStartWasSeen(sessionId))
                 return "This ceremony start was used before. Start again under a new session id.";
             if (underWay.Count(s => string.Equals(s.LeaderAddress, leaderAddress, StringComparison.Ordinal)) >= MAX_DKG_SESSIONS_PER_LEADER)
                 return $"Too many open DKG sessions for this leader (cap {MAX_DKG_SESSIONS_PER_LEADER}). Finish or abandon them first.";
-            if (!string.IsNullOrEmpty(sourceIp) && underWay.Count(s => string.Equals(s.SourceIp, sourceIp, StringComparison.Ordinal)) >= MAX_DKG_SESSIONS_PER_SOURCE)
-                return $"Too many key ceremonies under way from this network address (cap {MAX_DKG_SESSIONS_PER_SOURCE}). Try again shortly.";
+            if (!rekey && !string.IsNullOrEmpty(sourceIp) && underWay.Count(s => string.Equals(s.SourceIp, sourceIp, StringComparison.Ordinal)) >= MAX_DKG_SESSIONS_PER_SOURCE)
+                return $"Too many key ceremonies under way from this network (cap {MAX_DKG_SESSIONS_PER_SOURCE}). Try again shortly.";
             return null;
+        }
+
+        /// <summary>Why a re-key's start is not taken from this leader: only an active vBTC validator leads one. Null when it may.</summary>
+        public static string? RekeyLeaderRefusal(string? leaderAddress, Func<string, bool>? isActiveValidator = null)
+        {
+            if (string.IsNullOrEmpty(leaderAddress)) return "A re-key's ceremony needs a leader.";
+            var active = isActiveValidator ?? (a => VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.GetValidator(a)?.IsActive == true);
+            return active(leaderAddress) ? null : "A re-key's ceremony is led by an active vBTC validator.";
+        }
+
+        /// <summary>
+        /// Gives a ceremony up (its coordinator's attempt failed): it holds no place from now on and its secrets are
+        /// dropped. A finished ceremony is left alone: its key package may be the vault's. False when there is nothing to give up.
+        /// </summary>
+        public static bool AbortDkg(DKGSession s)
+        {
+            if (s.IsCompleted || s.IsAborted) return false;
+            s.IsAborted = true;
+            s.Round1SecretPackage = null;
+            s.Round2Secret = null;
+            s.GeneratedSharesJson = null;
+            s.ReceivedSharesJson.Clear();
+            s.ReceivedShares.Clear();
+            return true;
         }
 
         /// <summary>

@@ -655,8 +655,8 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                             // Room and age, before anything else is looked at (who leads is judged once its signature is checked).
                             var dkgNow = TimeUtil.GetTime();
-                            var dkgSource = VerifiedXCore.Utilities.RemoteIp.Text(context.Connection.RemoteIpAddress);
-                            var dkgRoomRefusal = FrostSessionStorage.DkgStartRefusal(FrostSessionStorage.DKGSessions.Values, dkgNow, request.SessionId, request.Timestamp, null, null);
+                            var dkgSource = VerifiedXCore.Utilities.RemoteIp.Group(context.Connection.RemoteIpAddress);
+                            var dkgRoomRefusal = FrostSessionStorage.DkgStartRefusal(FrostSessionStorage.DKGSessions.Values, dkgNow, request.SessionId, request.Timestamp, null, null, request.RekeyOf);
                             if (dkgRoomRefusal != null)
                             {
                                 context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
@@ -742,8 +742,10 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // The leader is known now: a start it already used, its own places, and its network source's.
-                            var dkgLeaderRefusal = FrostSessionStorage.DkgStartRefusal(FrostSessionStorage.DKGSessions.Values, dkgNow, request.SessionId, request.Timestamp, request.LeaderAddress, dkgSource);
+                            // The leader is known now: a start it already used, its own places, and its network's. A re-key's
+                            // leader is an active vBTC validator (re-keys have places of their own, which nobody else may take).
+                            var dkgLeaderRefusal = (string.IsNullOrEmpty(request.RekeyOf) ? null : FrostSessionStorage.RekeyLeaderRefusal(request.LeaderAddress))
+                                ?? FrostSessionStorage.DkgStartRefusal(FrostSessionStorage.DKGSessions.Values, dkgNow, request.SessionId, request.Timestamp, request.LeaderAddress, dkgSource, request.RekeyOf);
                             if (dkgLeaderRefusal != null)
                             {
                                 LogUtility.Log($"[FROST] DKG start refused for leader {request.LeaderAddress} from {dkgSource}: {dkgLeaderRefusal}", "FrostStartup.DKGStart");
@@ -752,20 +754,6 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 {
                                     Success = false,
                                     Message = dkgLeaderRefusal
-                                }));
-                                return;
-                            }
-
-                            // Per-leader session cap: one address cannot exhaust the DKG session pool.
-                            var leaderOpenSessions = FrostSessionStorage.CountDkgSessionsForLeader(request.LeaderAddress);
-                            if (!FrostSessionStorage.LeaderMayOpenDkgSession(leaderOpenSessions))
-                            {
-                                LogUtility.Log($"[FROST] DKG start refused for leader {request.LeaderAddress}: {leaderOpenSessions} sessions already open (cap {FrostSessionStorage.MAX_DKG_SESSIONS_PER_LEADER}).", "FrostStartup.DKGStart");
-                                context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
-                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
-                                {
-                                    Success = false,
-                                    Message = $"Too many open DKG sessions for this leader (cap {FrostSessionStorage.MAX_DKG_SESSIONS_PER_LEADER}). Finish or abandon them first."
                                 }));
                                 return;
                             }
@@ -828,6 +816,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 ParticipantAddresses = request.ParticipantAddresses,
                                 RequiredThreshold = request.RequiredThreshold,
                                 StartTimestamp = TimeUtil.GetTime(),
+                                LastProgressTimestamp = TimeUtil.GetTime(),
                                 SourceIp = dkgSource,
                                 RekeyOf = string.IsNullOrEmpty(request.RekeyOf) ? null : request.RekeyOf,
                                 MyParticipantIndex = myParticipantId,
@@ -1099,17 +1088,33 @@ namespace VerifiedXCore.Bitcoin.FROST
                             return;
                         }
 
-                        if (!FrostSessionStorage.DKGSessions.TryGetValue(sessionId, out var session))
+                        if (!FrostSessionStorage.DKGSessions.TryGetValue(sessionId, out var session) || session.IsAborted)
                         {
                             context.Response.StatusCode = StatusCodes.Status404NotFound;
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Session not found" }));
                             return;
                         }
 
+                        // Round 2 is made once. Its shares are answered again to a coordinator that asks again; nothing
+                        // posted a second time is stored or counts as the ceremony going on.
+                        if (!string.IsNullOrEmpty(session.Round2Secret) && !string.IsNullOrEmpty(session.GeneratedSharesJson))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status200OK;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                Success = true,
+                                Message = "Round 2 shares were generated before",
+                                SessionId = sessionId,
+                                SharesGenerated = true,
+                                GeneratedShares = session.GeneratedSharesJson
+                            }, Formatting.Indented));
+                            return;
+                        }
+
                         using (var reader = new StreamReader(context.Request.Body))
                         {
                             var body = await reader.ReadToEndAsync();
-                            
+
                             // FIND-024 Fix: Parse all Round 1 commitments and call FROST native Round 2
                             if (string.IsNullOrEmpty(session.Round1SecretPackage))
                             {
@@ -1134,15 +1139,6 @@ namespace VerifiedXCore.Bitcoin.FROST
                             else
                             {
                                 LogUtility.Log($"[FROST DEBUG] Round2 addressCommitments is null or empty. Body length={body?.Length ?? 0}, body(first 300)='{body?.Substring(0, Math.Min(300, body?.Length ?? 0))}'", "FrostStartup.DKGRound2");
-                            }
-
-                            // Store all commitments in the session for later use by TryFinalizeDKG (Round 3)
-                            if (addressCommitments != null)
-                            {
-                                foreach (var kvp in addressCommitments)
-                                {
-                                    session.Round1Commitments.TryAdd(kvp.Key, kvp.Value);
-                                }
                             }
 
                             // Build BTreeMap using computed FROST Identifiers from participant list ordering
@@ -1215,9 +1211,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // Store Round 2 state
+                            // Store Round 2 state, and the participants' commitments it was made from (TryFinalizeDKG, Round 3).
+                            // Only participants' commitments, and only now that they made a Round 2.
+                            foreach (var kvp in addressCommitments!)
+                                if (session.ParticipantAddresses.Contains(kvp.Key))
+                                    session.Round1Commitments.TryAdd(kvp.Key, kvp.Value);
                             session.Round2Secret = round2Secret;
                             session.GeneratedSharesJson = sealedShares;
+                            FrostSessionStorage.MarkDkgStage(session, FrostSessionStorage.DkgStage.Round2);
 
                             LogUtility.Log($"[FROST] DKG Round 2 shares generated via native library for session {sessionId}", "FrostStartup.DKGRound2");
 
@@ -1342,6 +1343,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // FIND-024 Fix: Auto-trigger DKG finalization if all required shares received
                             var receivedCount = session.ReceivedSharesJson.Count;
                             var totalOtherParticipants = session.ParticipantAddresses.Count - 1;
+                            if (receivedCount >= totalOtherParticipants) FrostSessionStorage.MarkDkgStage(session, FrostSessionStorage.DkgStage.SharesIn);
                             var dkgAutoFinalized = false;
 
                             if (receivedCount >= totalOtherParticipants && !session.IsCompleted 
@@ -1532,6 +1534,7 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                             var receivedCount = session.ReceivedSharesJson.Count;
                             var totalOtherParticipants = session.ParticipantAddresses.Count - 1;
+                            if (accusations.Count == 0 && receivedCount >= totalOtherParticipants) FrostSessionStorage.MarkDkgStage(session, FrostSessionStorage.DkgStage.SharesIn);
 
                             LogUtility.Log($"[FROST] Batch share distribution: extracted {sharesExtracted} new shares, total received: {receivedCount}/{totalOtherParticipants}", 
                                 "FrostStartup.DKGSharesBatch");
@@ -1822,6 +1825,51 @@ namespace VerifiedXCore.Bitcoin.FROST
                             Success = false,
                             Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}"
                         }));
+                    }
+                });
+
+                /// <summary>
+                /// POST /frost/dkg/abort - the ceremony's leader gives up a failed attempt: the session holds no place here
+                /// from now on and its secrets are dropped (a later attempt runs under a new session and contract UID).
+                /// Signed by the leader over "ABORT.{sessionId}.{leader}.{timestamp}", so no participant can end another's
+                /// ceremony; a finished ceremony is not touched.
+                /// </summary>
+                endpoints.MapPost("/frost/dkg/abort", async context =>
+                {
+                    try
+                    {
+                        using var reader = new StreamReader(context.Request.Body);
+                        var request = JsonConvert.DeserializeObject<FrostDKGAbortRequest>(await reader.ReadToEndAsync());
+                        if (request == null || string.IsNullOrEmpty(request.SessionId) || string.IsNullOrEmpty(request.LeaderAddress) || string.IsNullOrEmpty(request.LeaderSignature))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "SessionId, LeaderAddress and LeaderSignature are required" }));
+                            return;
+                        }
+                        if (!FrostSessionStorage.DKGSessions.TryGetValue(request.SessionId, out var session)
+                            || !string.Equals(session.LeaderAddress, request.LeaderAddress, StringComparison.Ordinal))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status404NotFound;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "No session of this leader" }));
+                            return;
+                        }
+                        if (Math.Abs(TimeUtil.GetTime() - request.Timestamp) > FrostSessionStorage.DKG_START_MAX_AGE_SECONDS
+                            || !SignatureService.VerifySignature(request.LeaderAddress, FrostDKGAbortRequest.Message(request.SessionId, request.LeaderAddress, request.Timestamp), request.LeaderSignature))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid or old leader signature" }));
+                            return;
+                        }
+                        var aborted = FrostSessionStorage.AbortDkg(session);
+                        if (aborted) LogUtility.Log($"[FROST] DKG session {request.SessionId} given up by its leader {request.LeaderAddress}.", "FrostStartup.DKGAbort");
+                        context.Response.StatusCode = StatusCodes.Status200OK;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = true, Aborted = aborted }));
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"DKG abort error: {ex.Message}", "FrostStartup.DKGAbort");
+                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }));
                     }
                 });
 

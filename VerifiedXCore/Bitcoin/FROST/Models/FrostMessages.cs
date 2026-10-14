@@ -18,6 +18,18 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public string? RekeyOf { get; set; }
     }
 
+    /// <summary>A key ceremony's leader gives up a failed attempt (<c>POST /frost/dkg/abort</c>).</summary>
+    public class FrostDKGAbortRequest
+    {
+        public string SessionId { get; set; } = "";
+        public string LeaderAddress { get; set; } = "";
+        public long Timestamp { get; set; }
+        public string LeaderSignature { get; set; } = "";
+
+        /// <summary>What the leader signs: distinct from a start's "{sessionId}.{leader}.{timestamp}", so a start's signature does not abort.</summary>
+        public static string Message(string sessionId, string leaderAddress, long timestamp) => $"ABORT.{sessionId}.{leaderAddress}.{timestamp}";
+    }
+
     /// <summary>
     /// DKG Round 1 - Commitment Phase
     /// Each validator sends their polynomial commitments

@@ -201,6 +201,8 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             public FrostDKGResult? Result;
             public readonly Dictionary<string, string> Failed = new(StringComparer.Ordinal);
+            /// <summary>Of <see cref="Failed"/>: the validators that said they had no room (HTTP 429). Left out of this ceremony, not remembered as failing.</summary>
+            public readonly HashSet<string> Busy = new(StringComparer.Ordinal);
             public string? Error;
         }
 
@@ -319,7 +321,10 @@ namespace VerifiedXCore.Bitcoin.Services
                 foreach (var (address, reason) in outcome.Failed)
                 {
                     run.Excluded.TryAdd(address, reason);
-                    RecentDkgFailures[address] = (TimeUtil.GetTime() + DkgFailureMemorySeconds, reason);
+                    // A validator with no room for another ceremony did nothing wrong (and anybody can fill its room for a
+                    // while): it sits out this ceremony and is asked again by the next.
+                    if (!outcome.Busy.Contains(address))
+                        RecentDkgFailures[address] = (TimeUtil.GetTime() + DkgFailureMemorySeconds, reason);
                     LogUtility.Log($"[FROST MPC] DKG attempt {attempt}: dropping {address} — {reason}", "FrostMPCService.CoordinateDKGCeremony");
                 }
                 if (outcome.Failed.Count == 0)
@@ -345,10 +350,11 @@ namespace VerifiedXCore.Bitcoin.Services
             try
             {
                 // Start: FROST DKG needs every participant from here on.
-                await BroadcastDKGStart(sessionId, contractUid, leaderAddress, validators, threshold, preSignedAuth, attempt.Failed, rekeyOf);
+                await BroadcastDKGStart(sessionId, contractUid, leaderAddress, validators, threshold, preSignedAuth, attempt.Failed, rekeyOf, attempt.Busy);
                 if (attempt.Failed.Count > 0)
                 {
                     attempt.Error = $"{attempt.Failed.Count} of {validators.Count} validators did not join the key ceremony.";
+                    await AbortDkgAttempt(sessionId, leaderAddress, validators.Where(v => !attempt.Failed.ContainsKey(v.ValidatorAddress)), preSignedAuth);
                     return attempt;
                 }
                 progressCallback?.Invoke(0, 10);
@@ -372,6 +378,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (attempt.Failed.Count > 0)
                 {
                     attempt.Error = $"Round 1 failed for {attempt.Failed.Count} of {validators.Count} validators.";
+                    await AbortDkgAttempt(sessionId, leaderAddress, validators, preSignedAuth);
                     return attempt;
                 }
                 progressCallback?.Invoke(1, 40);
@@ -382,6 +389,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (attempt.Failed.Count > 0)
                 {
                     attempt.Error = $"Round 2 failed for {attempt.Failed.Count} of {validators.Count} validators.";
+                    await AbortDkgAttempt(sessionId, leaderAddress, validators, preSignedAuth);
                     return attempt;
                 }
                 progressCallback?.Invoke(2, 65);
@@ -389,6 +397,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 // Results: every participant must have finished with the same key and attested it.
                 progressCallback?.Invoke(3, 85);
                 attempt.Result = await AggregateDKGResult(sessionId, contractUid, validators, threshold, leaderAddress, attempt.Failed, rekeyOf);
+                if (attempt.Result == null)
+                    await AbortDkgAttempt(sessionId, leaderAddress, validators, preSignedAuth);
                 if (attempt.Result == null)
                     attempt.Error = attempt.Failed.Count > 0
                         ? $"{attempt.Failed.Count} of {validators.Count} validators did not finish the key ceremony with a valid attestation."
@@ -406,6 +416,33 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// Gives up a failed attempt's sessions on its participants, so they hold no place there while later attempts
+        /// run (each under a new session). Only a leader whose key is on this node signs one; a web wallet's attempt
+        /// (pre-signed) is left to give its places back on its own, two minutes after it last went on. Best effort.
+        /// </summary>
+        private static async Task AbortDkgAttempt(string sessionId, string leaderAddress, IEnumerable<VBTCValidator> validators, PreSignedLeaderAuth? preSignedAuth)
+        {
+            if (preSignedAuth != null) return;
+            try
+            {
+                var timestamp = TimeUtil.GetTime();
+                var signature = VerifiedXCore.Services.SignatureService.AddressSignature(leaderAddress, FrostDKGAbortRequest.Message(sessionId, leaderAddress, timestamp));
+                if (string.IsNullOrEmpty(signature) || signature == "F") return;
+                var request = new FrostDKGAbortRequest { SessionId = sessionId, LeaderAddress = leaderAddress, Timestamp = timestamp, LeaderSignature = signature };
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                await Task.WhenAll(validators.Where(v => InputValidationHelper.ValidateValidatorIPAddress(v.IPAddress, out _)).Select(async v =>
+                {
+                    try { await _httpClient.PostAsJsonAsync($"http://{v.IPAddress}:{Globals.FrostValidatorPort}/frost/dkg/abort", request, cts.Token); }
+                    catch { }
+                }));
+            }
+            catch (Exception ex)
+            {
+                LogUtility.Log($"[FROST MPC] Could not give up DKG session {sessionId}: {ex.Message}", "FrostMPCService.AbortDkgAttempt");
+            }
+        }
+
+        /// <summary>
         /// Broadcast the DKG start to every participant; each one that does not accept it is added to
         /// <paramref name="failed"/> (FROST DKG needs all of them).
         /// </summary>
@@ -417,7 +454,8 @@ namespace VerifiedXCore.Bitcoin.Services
             int threshold,
             PreSignedLeaderAuth? preSignedAuth,
             Dictionary<string, string> failed,
-            string? rekeyOf = null)
+            string? rekeyOf = null,
+            HashSet<string>? busy = null)
         {
             // Sign with leader's key using deterministic message format
             // Any VFX wallet owner can be the leader — not just validators
@@ -453,6 +491,7 @@ namespace VerifiedXCore.Bitcoin.Services
             };
 
             var failures = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
+            var noRoom = new System.Collections.Concurrent.ConcurrentDictionary<string, bool>();
             var tasks = validators.Select(async validator =>
             {
                 try
@@ -474,6 +513,7 @@ namespace VerifiedXCore.Bitcoin.Services
                         LogUtility.Log($"[FROST MPC] DKG Start REJECTED by {validator.ValidatorAddress}: HTTP {(int)response.StatusCode} — {errorBody}",
                             "FrostMPCService.BroadcastDKGStart");
                         failures[validator.ValidatorAddress] = $"refused the DKG start (HTTP {(int)response.StatusCode})";
+                        if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests) noRoom[validator.ValidatorAddress] = true;
                     }
                 }
                 catch (Exception ex)
@@ -486,6 +526,7 @@ namespace VerifiedXCore.Bitcoin.Services
             await Task.WhenAll(tasks);
 
             foreach (var (address, reason) in failures) failed[address] = reason;
+            if (busy != null) foreach (var address in noRoom.Keys) busy.Add(address);
             LogUtility.Log($"[FROST MPC] DKG Start broadcast: {validators.Count - failures.Count}/{validators.Count} joined",
                 "FrostMPCService.BroadcastDKGStart");
         }

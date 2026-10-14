@@ -205,6 +205,38 @@ namespace VerifiedXCore.Tests
             Assert.DoesNotContain(run.Result!.ParticipantAddresses, saboteurs.Contains);
         }
 
+        /// <summary>
+        /// A validator that answers a start with "no room" (HTTP 429) did nothing wrong: its room can be filled by anybody
+        /// for a while. It sits out this ceremony and is not remembered as failing, so the next ceremony asks it again
+        /// (third pass, 14 October 2026: the coordinator remembered it for six hours).
+        /// </summary>
+        [Fact]
+        public async Task AValidatorWithNoRoom_SitsOutThisCeremony_ButIsNotRememberedAsFailing()
+        {
+            var validators = Validators(20);
+            var busy = validators[0].ValidatorAddress;
+            var broken = validators[1].ValidatorAddress;
+            FrostMPCService.AttemptRunnerForTests = (uid, session, participants, auth) =>
+            {
+                var attempt = new FrostMPCService.DkgAttempt();
+                if (participants.Any(p => p.ValidatorAddress == busy))
+                {
+                    attempt.Failed[busy] = "refused the DKG start (HTTP 429)";
+                    attempt.Busy.Add(busy);
+                    attempt.Failed[broken] = "refused the DKG start (HTTP 500)";
+                    attempt.Error = "2 of 20 validators did not join the key ceremony.";
+                }
+                else attempt.Result = ResultFor(uid, participants);
+                return Task.FromResult(attempt);
+            };
+
+            var run = await FrostMPCService.CoordinateDKGCeremony("c", "ROwner", validators, 51);
+            Assert.NotNull(run.Result);
+            Assert.DoesNotContain(busy, run.Result!.ParticipantAddresses);
+            Assert.False(FrostMPCService.RecentDkgFailures.ContainsKey(busy));
+            Assert.True(FrostMPCService.RecentDkgFailures.ContainsKey(broken));
+        }
+
         [Fact]
         public async Task Reruns_StopAtTheParticipationFloor()
         {
