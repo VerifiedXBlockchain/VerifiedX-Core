@@ -250,6 +250,13 @@ namespace VerifiedXCore.Tests
             over["TotalAmount"] = 0.00199999M;
             over["TotalAmountSats"] = 199_999L;
             await RefusedInBlock(SignedBy(Caster, Caster.Address, TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC, over, free: true), "add up to");
+            // An allocation's fields named in another case, or twice in two cases: refused (apply reads either; round 16).
+            foreach (var spelled in new[] { "\"lockId\":\"" + lockId + "\"", "\"LockId\":\"other\",\"lockId\":\"" + lockId + "\"" })
+            {
+                var data = JObject.Parse(Exit(NewBurn(), BtcDest, (lockId, vault.Uid, 0.002M)).Data);
+                data["Allocations"] = JArray.Parse("[{" + spelled + ",\"UnlockAmount\":0.002,\"SmartContractUID\":\"" + vault.Uid + "\"}]");
+                await RefusedInBlock(SignedBy(Caster, Caster.Address, TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC, data, free: true), "named exactly");
+            }
             // ... or a fraction of a satoshi more, in the total and the allocation alike (round 15).
             await RefusedInBlock(Exit(NewBurn(), BtcDest, (lockId, vault.Uid, 0.002000009M)), "decimal places");
         }

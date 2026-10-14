@@ -109,6 +109,26 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
         // ── Rules checked by VerifyTX ───────────────────────────────────────────────────────────────────────
 
+        private static readonly string[] AllocationFields = { nameof(PoolUnlockAllocation.LockId), nameof(PoolUnlockAllocation.UnlockAmount), nameof(PoolUnlockAllocation.SmartContractUID) };
+
+        /// <summary>
+        /// Each allocation an object with the model's own field names, exactly. Apply's typed reader matches a key in any
+        /// case and takes the last of two spellings, while the per-block guard and other rules read exact keys: one
+        /// allocation could name a lock to the guard and draw another (fifth review, round 16).
+        /// </summary>
+        public static string? AllocationFieldsRefusal(JToken? allocations)
+        {
+            if (allocations is not JArray array) return null;
+            foreach (var item in array)
+            {
+                if (item is not JObject obj) return "Each bridge allocation is an object.";
+                foreach (var property in obj.Properties())
+                    if (!AllocationFields.Contains(property.Name, StringComparer.Ordinal))
+                        return $"A bridge allocation's fields are LockId, UnlockAmount and SmartContractUID, named exactly (not {property.Name}).";
+            }
+            return null;
+        }
+
         /// <summary>Why a bridge exit transaction is refused under these rules; null when it is not refused here.</summary>
         public static string? ExitRefusal(Transaction tx)
         {
@@ -120,6 +140,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     case TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC:
                     {
                         var data = JObject.Parse(tx.Data);
+                        if (data["Allocations"] is JArray && AllocationFieldsRefusal(data["Allocations"]) is { } fields) return fields;
                         var allocations = data["Allocations"]?.ToObject<List<PoolUnlockAllocation>>();
                         if (allocations == null || allocations.Count == 0)
                         {

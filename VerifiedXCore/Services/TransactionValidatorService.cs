@@ -4395,6 +4395,7 @@ namespace VerifiedXCore.Services
             // exactly: "L1" and "l1 " drew on one lock twice, the second draw failed at apply and the part was paid in full
             // anyway, and an expired exit restored both (fourth review, round 11).
             var exact = height >= Globals.PathAuditRulesHeight;
+            if (exact && Bitcoin.Attestation.BtcWithdrawals.AllocationFieldsRefusal(allocationsToken) is { } fields) return (false, fields);
             List<PoolUnlockAllocation>? allocations;
             try { allocations = allocationsToken?.ToObject<List<PoolUnlockAllocation>>(); }
             catch (Exception ex) { return (false, $"unparseable allocations: {ApiErrorText.For(ex)}"); }
