@@ -209,6 +209,18 @@ namespace VerifiedXCore.Utilities
                 BlockRollbackUtility.RefreshInMemoryTip(targetHeight);
                 await DbContext.CheckPoint();
 
+                // A slot holds the attestation and bond tables as they were when it was taken. One taken from a state
+                // that was started at other heights than this release starts them at brings that state back, and
+                // marking it good here would erase the flag the start of the node set on it. It is not good: only a
+                // rebuild from the chain is.
+                var otherSettings = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.BuiltUnderOtherSettings(targetHeight);
+                if (otherSettings != null)
+                {
+                    ErrorLogUtility.LogError($"[SnapshotRestore] The restored state must be rebuilt from the chain: {otherSettings}.", "SnapshotRestoreUtility");
+                    StateTreiStatusService.SetFailed($"Attestation state built under other settings: {otherSettings}.");
+                    return false;
+                }
+
                 // 8) State is verified consistent up to the target. Slots newer than the target
                 //    contain rolled-back blocks — invalidate them.
                 StateTreiStatusService.SetSynced(targetHeight);

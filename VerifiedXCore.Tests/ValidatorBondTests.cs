@@ -594,6 +594,84 @@ namespace VerifiedXCore.Tests
             Assert.False(await StateData.UpdateTreis(block));
             Assert.Null(ValidatorBond.Row(_old[0].Address));
             Assert.Throws<InvalidOperationException>(() => ValidatorBond.OnBlockStart(Rule + 6));
+            Assert.Equal(Rule + 5, StateData.BlockStartFailedAtHeight);
+        }
+
+        /// <summary>
+        /// A full rebuild of the state from the chain counted only the blocks that threw. A block whose block-start
+        /// step failed returns false without throwing, so a rebuild that could not start the bonds ended "0 failures"
+        /// and marked the state good (third pass, 14 October 2026).
+        /// </summary>
+        [Fact]
+        public async Task AFullRebuild_ThatCannotStartTheBonds_IsNotASuccess()
+        {
+            var statusBefore = StateTreiStatusService.GetStatus();
+            try
+            {
+                // The chain as this node holds it has no block at the height the bonds start at (a database that lost
+                // it, or one built by a release that started them elsewhere): the block after cannot seed them.
+                BlockchainData.GetBlocks().InsertSafe(new Block { Height = Rule + 5, Hash = "after-the-start", StateRoot = "root", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction>() });
+                Assert.False(await BlockRollbackUtility.ResetTreis());
+                Assert.False(StateTreiStatusService.IsSynced());
+
+                // With the blocks there, the same rebuild succeeds.
+                BlockchainData.GetBlocks().DeleteManySafe(x => x.Height == Rule + 5);
+                foreach (var h in new[] { Rule, Rule + 1 })
+                    BlockchainData.GetBlocks().InsertSafe(new Block { Height = h, Hash = $"b{h}", StateRoot = "root" + h, Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction>() });
+                Assert.True(await BlockRollbackUtility.ResetTreis());
+                Assert.NotNull(ValidatorBond.Row(_old[0].Address));
+            }
+            finally
+            {
+                Globals.IsResyncing = false;
+                Globals.StopAllTimers = false;
+            }
+        }
+
+        /// <summary>
+        /// A state whose bonds were started at another height than this release starts them at is flagged when the node
+        /// starts, and can only be rebuilt from the chain. A snapshot slot taken from that state holds the same bonds;
+        /// restoring it marked the state good again.
+        /// </summary>
+        [Fact]
+        public async Task ASnapshotOfAStateStartedAtOtherHeights_IsNotRestoredAsGood()
+        {
+            try
+            {
+                await StartTheRule();
+                await Apply(Rule + 2);
+                await StateSnapshotService.UpdateCycleAsync(Tip, Globals.LastBlock.Hash);
+                Assert.NotNull(StateSnapshotService.PickSlotForRestore(Tip));
+
+                // The same slot, under a release that starts the bonds elsewhere.
+                Globals.ValidatorBondHeight = Rule - 20;
+                Assert.NotNull(BtcAttestStore.BuiltUnderOtherSettings(Tip));
+                Assert.False(await SnapshotRestoreUtility.TryRestoreAsync(Tip));
+                Assert.False(StateTreiStatusService.IsSynced());
+
+                // Under the release it was built by, it restores.
+                Globals.ValidatorBondHeight = Rule;
+                Assert.True(await SnapshotRestoreUtility.TryRestoreAsync(Tip));
+                Assert.True(StateTreiStatusService.IsSynced());
+            }
+            finally
+            {
+                Globals.IsResyncing = false;
+                Globals.StopAllTimers = false;
+            }
+        }
+
+        /// <summary>
+        /// A database error is not "this validator does not hold the stake". Read that way it gave this node another
+        /// signer set than the network's and nothing said so.
+        /// </summary>
+        [Fact]
+        public void TheStakeRead_Throws_WhenTheDatabaseCannotBeRead()
+        {
+            Assert.True(VBTCValidatorRegistry.HoldsValidatorBalance(_old[0].Address));
+            Assert.False(VBTCValidatorRegistry.HoldsValidatorBalance(_poor.Address));
+            DbContext.CloseDB();
+            Assert.ThrowsAny<Exception>(() => VBTCValidatorRegistry.HoldsValidatorBalance(_old[0].Address));
         }
 
         /// <summary>

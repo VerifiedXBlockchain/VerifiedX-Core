@@ -72,11 +72,11 @@ namespace VerifiedXCore.Bitcoin.Services
             // One cached scan per (height, block hash at that height): admission checks many transactions against the same
             // tip, and a rollback that replaces the block changes the key.
             var tipHash = BlockchainData.GetBlockByHeight(height)?.Hash;
-            if (string.IsNullOrEmpty(tipHash)) return ScanBlocks(height); // no committed block to key on: never cached
+            if (string.IsNullOrEmpty(tipHash)) return ScanBlocks(height, consensus: true); // no committed block to key on: never cached
             var cached = _atHeightCache; // a reference: read and replaced atomically
             if (cached != null && cached.Height == height && cached.Hash == tipHash)
                 return cached.Validators.Select(Copy).ToList();
-            var scanned = ScanBlocks(height);
+            var scanned = ScanBlocks(height, consensus: true);
             _atHeightCache = new AtHeight(height, tipHash, scanned.Select(Copy).ToList());
             return scanned;
         }
@@ -116,14 +116,13 @@ namespace VerifiedXCore.Bitcoin.Services
         public static bool HoldsValidatorBalance(string? address)
         {
             if (string.IsNullOrEmpty(address)) return false;
-            try
-            {
-                var account = StateData.GetSpecificAccountStateTrei(address);
-                // Exact key: LiteDB lookups ignore case, so a case variant would read another address's balance.
-                return account != null && string.Equals(account.Key, address, StringComparison.Ordinal)
-                    && account.Balance >= VerifiedXCore.Services.ValidatorService.ValidatorRequiredAmount();
-            }
-            catch { return false; }
+            // No catch: this answer decides who is in a signer set and whose bond is funded. A database error read as
+            // "does not hold it" gave this node other sets than the network's without a word; thrown, it fails the
+            // block step or the transaction that asked, and the node is flagged.
+            var account = StateData.GetSpecificAccountStateTrei(address);
+            // Exact key: LiteDB lookups ignore case, so a case variant would read another address's balance.
+            return account != null && string.Equals(account.Key, address, StringComparison.Ordinal)
+                && account.Balance >= VerifiedXCore.Services.ValidatorService.ValidatorRequiredAmount();
         }
 
         /// <summary>NEW-26 (follow-up): the validators that hold the validator balance now (see HoldsValidatorBalance).</summary>
@@ -155,7 +154,12 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Scans the last SCAN_WINDOW blocks for validator lifecycle transactions
         /// and builds a map of active validators.
         /// </summary>
-        private static List<VBTCValidator> ScanBlocks(long currentHeight)
+        /// <param name="consensus">
+        /// The scan decides consensus state (a signer set, the bonds, a ceremony's participants): a block that cannot
+        /// be read is then an error to its caller, not an empty answer. A node that read "no validators" where its
+        /// peers read forty held other state than they did and nothing said so.
+        /// </param>
+        private static List<VBTCValidator> ScanBlocks(long currentHeight, bool consensus = false)
         {
             var scanFrom = Math.Max(0, currentHeight - SCAN_WINDOW);
             var validatorMap = new Dictionary<string, VBTCValidator>();
@@ -183,6 +187,7 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 ErrorLogUtility.LogError($"Error scanning blocks for validator state: {ex}",
                     "VBTCValidatorRegistry.ScanBlocks()");
+                if (consensus) throw;
             }
 
             // Return only validators that are active (registered/heartbeated and not exited)

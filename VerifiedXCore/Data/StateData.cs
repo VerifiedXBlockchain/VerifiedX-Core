@@ -132,6 +132,15 @@ namespace VerifiedXCore.Data
             wTrei.UpdateSafe(record);
         }
 
+        /// <summary>
+        /// The height of the last block whose block-start step (the Bitcoin view, the validator bonds) failed on this
+        /// node, or -1. A full replay reads it: it cannot count every block that returns false here (blocks of the
+        /// chain's history hold transactions whose apply has always failed, the same on every node), but a block-start
+        /// step that fails leaves this node with other signer sets or bonds than the network, and a replay that ends
+        /// so has not rebuilt the state.
+        /// </summary>
+        public static long BlockStartFailedAtHeight = -1;
+
         public static async Task<bool> UpdateTreis(Block block)
         {
             Globals.TreisUpdating = true;
@@ -150,6 +159,7 @@ namespace VerifiedXCore.Data
             catch (Exception ex)
             {
                 blockStartFailed = true;
+                BlockStartFailedAtHeight = block.Height;
                 ErrorLogUtility.LogError($"Block {block.Height}: the Bitcoin attestation block-start step failed: {ex}", "StateData.UpdateTreis() - block start");
             }
             try
@@ -160,6 +170,7 @@ namespace VerifiedXCore.Data
             catch (Exception ex)
             {
                 blockStartFailed = true;
+                BlockStartFailedAtHeight = block.Height;
                 ErrorLogUtility.LogError($"Block {block.Height}: the validator bond block-start step failed: {ex}", "StateData.UpdateTreis() - block start");
             }
             var txList = block.Transactions.ToList();

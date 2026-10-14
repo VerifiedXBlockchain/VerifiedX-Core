@@ -663,6 +663,7 @@ namespace VerifiedXCore.Utilities
                 // at a time from disk, keeping memory usage flat regardless of chain length.
                 int processedCount = 0;
                 int failCount = 0;
+                StateData.BlockStartFailedAtHeight = -1;
                 var rebuildStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
                 // Reserve rows were wiped in Step 2 and are recreated Pending during replay.
@@ -682,6 +683,13 @@ namespace VerifiedXCore.Utilities
                         // privacy/shielded TXs, bridge locks/unlocks, etc.
                         await StateData.UpdateTreis(block);
                         processedCount++;
+                        // A block-start step that failed (see StateData.BlockStartFailedAtHeight): the rebuilt state is
+                        // not the network's, and the replay is not a success.
+                        if (StateData.BlockStartFailedAtHeight == block.Height)
+                        {
+                            failCount++;
+                            ErrorLogUtility.LogError($"[ResetTreis] The block-start step of block {block.Height} failed during the replay.", "BlockRollbackUtility.ResetTreis");
+                        }
 
                         if (!reservePendingPossible && block.Transactions != null &&
                             block.Transactions.Any(t => t.FromAddress != null && t.FromAddress.StartsWith("xRBX") && t.TransactionType != TransactionType.RESERVE))
