@@ -401,11 +401,19 @@ namespace VerifiedXCore.Bitcoin.Attestation
         {
             if (row.IsBridgeExit) return TryPinExit(row, vfxHeight, db); // with the exit's other vaults, or not at all
             if (row.State != VaultWithdrawalState.Waiting || string.IsNullOrEmpty(row.DestinationScriptHex)) return false;
-            var tx = BtcCanonicalWithdrawal.Build(row.SmartContractUID, row.DestinationScriptHex, row.AmountSats, row.FeeRate, out var reason, db);
+            // Not fixed on a key that cannot sign any more (plan 8.8): pinned, it could be neither paid nor given up; waiting,
+            // it expires and its requester is refunded.
+            if (BtcVaultKeys.CannotSignRefusal(row.SmartContractUID, db) is { } cannotSign)
+            {
+                NoteWaiting(row, cannotSign, db);
+                return false;
+            }
+            row.ShortfallShareSats = ShortfallShare(row.SmartContractUID, row.AmountSats, db);
+            var tx = BtcCanonicalWithdrawal.Build(row.SmartContractUID, row.DestinationScriptHex, PayableSats(row), row.FeeRate, out var reason, db);
             if (tx == null)
             {
                 // The free coins cannot pay it. Coins held by withdrawals that have stopped moving may (plan 5.5).
-                tx = BtcCanonicalWithdrawal.BuildTaking(row.SmartContractUID, row.DestinationScriptHex, row.AmountSats, row.FeeRate, vfxHeight, out var takenFrom, out _, db);
+                tx = BtcCanonicalWithdrawal.BuildTaking(row.SmartContractUID, row.DestinationScriptHex, PayableSats(row), row.FeeRate, vfxHeight, out var takenFrom, out _, db);
                 if (tx == null)
                 {
                     NoteWaiting(row, reason, db);
@@ -417,6 +425,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
             Pin(row, tx, vfxHeight, db);
             return true;
         }
+
+        /// <summary>What a withdrawal's or exit part's Bitcoin transaction pays out of the vault: its amount less its share of a sweep shortfall.</summary>
+        internal static long PayableSats(VaultWithdrawalRow row) => row.AmountSats - Math.Max(0, row.ShortfallShareSats);
 
         private static void NoteWaiting(VaultWithdrawalRow row, string? reason, LiteDatabase? db)
         {

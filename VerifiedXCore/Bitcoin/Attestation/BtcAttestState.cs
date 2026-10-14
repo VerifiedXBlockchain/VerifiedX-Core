@@ -249,6 +249,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public bool IsSweep { get; set; }
         /// <summary>For a sweep: the script of the key it moves coins from.</summary>
         public string? SweepFromScriptHex { get; set; }
+        /// <summary>
+        /// Sats of this withdrawal (or exit part) that stay in the vault to make good Bitcoin fees of moving the vault to a
+        /// new key that its owner's figure could not carry (plan 8.8): its share of that shortfall, fixed when it was
+        /// pinned. Its Bitcoin transaction pays <see cref="AmountSats"/> less this.
+        /// </summary>
+        public long ShortfallShareSats { get; set; }
         public List<VaultPin> Pins { get; set; } = new();
         public string? SettledTxid { get; set; }
         public long ClosedAtVfxHeight { get; set; }

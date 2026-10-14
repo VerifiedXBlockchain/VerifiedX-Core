@@ -211,9 +211,14 @@ namespace VerifiedXCore.Bitcoin.Attestation
             foreach (var part in parts)
             {
                 string? reason = "the destination is not a Bitcoin address on this network";
-                var tx = string.IsNullOrEmpty(part.DestinationScriptHex)
+                // As for a withdrawal: not on a key that cannot sign (the exit then fails by rule and its locks are
+                // restored), and leaving its share of a sweep shortfall in the vault.
+                var cannotSign = BtcVaultKeys.CannotSignRefusal(part.SmartContractUID, db);
+                if (cannotSign != null) reason = cannotSign;
+                part.ShortfallShareSats = ShortfallShare(part.SmartContractUID, part.AmountSats, db);
+                var tx = string.IsNullOrEmpty(part.DestinationScriptHex) || cannotSign != null
                     ? null
-                    : BtcCanonicalWithdrawal.Build(part.SmartContractUID, part.DestinationScriptHex, part.AmountSats, part.FeeRate, out reason, db);
+                    : BtcCanonicalWithdrawal.Build(part.SmartContractUID, part.DestinationScriptHex, PayableSats(part), part.FeeRate, out reason, db);
                 built.Add((part, tx, reason));
             }
 
@@ -245,12 +250,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
                          .OrderBy(r => r.Ref, StringComparer.Ordinal))
             {
                 var newest = row.Pins.LastOrDefault(p => !p.Dead);
-                if (newest == null || vfxHeight < newest.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks) continue;
+                // A sweep is raised sooner: the key it empties is one whose holders are leaving (plan 8.8).
+                if (newest == null || vfxHeight < newest.PinnedAtVfxHeight + (row.IsSweep ? SweepStuckBlocks : BtcAttestRules.StuckPinBlocks)) continue;
                 long rate;
                 try { rate = checked((newest.FeeRate > 0 ? newest.FeeRate : row.FeeRate) * 2); }
                 catch (OverflowException) { continue; }
-                if (rate > BtcCanonicalWithdrawal.MaxFeeRate) continue;
-                var replacement = BtcCanonicalWithdrawal.BuildReplacement(row.SmartContractUID, row.DestinationScriptHex, row.AmountSats, rate, newest.Inputs, row.Ref, out _, db);
+                if (rate > (row.IsSweep ? SweepMaxFeeRate : BtcCanonicalWithdrawal.MaxFeeRate)) continue;
+                var replacement = BtcCanonicalWithdrawal.BuildReplacement(row.SmartContractUID, row.DestinationScriptHex, PayableSats(row), rate, newest.Inputs, row.Ref, out _, db);
                 if (replacement == null) continue; // the fee would leave too little to pay, or a coin is not there (a rewind)
 
                 foreach (var earlier in row.Pins.Where(p => !p.Dead))

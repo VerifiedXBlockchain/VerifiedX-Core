@@ -145,14 +145,14 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>A key ceremony as validators run it: a new key UID, a real key, and each participant's attestation.</summary>
-        private static (string KeyUid, string Address, NBitcoin.Script Script, string Proof) Ceremony(IEnumerable<V> participants, int threshold, string leader)
+        private static (string KeyUid, string Address, NBitcoin.Script Script, string Proof) Ceremony(string rekeyOf, IEnumerable<V> participants, int threshold, string leader)
         {
             var keyUid = FrostDkgAttestation.NewContractUid();
             var groupKey = Convert.ToHexString(new Key().PubKey.ToBytes()[1..]).ToLowerInvariant();
             var address = FrostDkgAttestation.DeriveTaprootAddress(groupKey, FrostDkgAttestation.ConsensusNetwork)!;
             var list = participants.ToList();
             var canonical = FrostDkgAttestation.Canonical(list.Select(p => p.Address));
-            var message = FrostDkgAttestation.Message(keyUid, groupKey, address, leader, threshold, canonical);
+            var message = FrostDkgAttestation.Message(keyUid, groupKey, address, leader, threshold, canonical, rekeyOf);
             var proof = FrostDkgAttestation.BuildProof(keyUid, groupKey, address, leader, threshold, canonical,
                 list.Select(p => new FrostDkgAttestation.Attestation { ValidatorAddress = p.Address, Signature = VerifiedXCore.Services.SignatureService.CreateSignature(message, p.Key, p.Pub) }));
             return (keyUid, address, ScriptOf(address), proof);
@@ -258,7 +258,7 @@ namespace VerifiedXCore.Tests
             var vault = await CreateVault(H1 + 1, keyHolders: Signers);
             await Deposit(vault.Script, 200_000);
             var stillHere = Signers.Take(3).ToList();
-            var ceremony = Ceremony(stillHere, 2, Signers[0].Address);
+            var ceremony = Ceremony(vault.Uid, stillHere, 3, Signers[0].Address);
 
             // Not due yet: refused.
             await Refused(RekeyTx(vault.Uid, ceremony.Proof), "is not due for replacement");
@@ -267,14 +267,14 @@ namespace VerifiedXCore.Tests
             Assert.True(BtcAttestStore.ScriptRowForVault(vault.Uid)!.RekeyDueSinceVfxHeight > 0);
 
             // What a creation's ceremony must be, a re-key's must be: nearly every eligible validator, each attesting.
-            await Refused(RekeyTx(vault.Uid, Ceremony(stillHere.Take(2), 2, Signers[0].Address).Proof), "must list 3 to 512 distinct participants");
-            await Refused(RekeyTx(vault.Uid, Ceremony(Signers, 3, Signers[0].Address).Proof), "is not an eligible validator"); // the one that left
-            var forged = Ceremony(stillHere, 2, Signers[0].Address);
+            await Refused(RekeyTx(vault.Uid, Ceremony(vault.Uid, stillHere.Take(2), 3, Signers[0].Address).Proof), "must list 3 to 512 distinct participants");
+            await Refused(RekeyTx(vault.Uid, Ceremony(vault.Uid, Signers, 3, Signers[0].Address).Proof), "is not an eligible validator"); // the one that left
+            var forged = Ceremony(vault.Uid, stillHere, 3, Signers[0].Address);
             var proof = FrostDkgAttestation.ParseProof(forged.Proof)!;
             proof.Attestations[0].Signature = proof.Attestations[1].Signature;
             await Refused(RekeyTx(vault.Uid, FrostDkgAttestation.BuildProof(proof.ContractUID, proof.GroupPublicKey, proof.TaprootAddress, proof.Owner, proof.Threshold, proof.Participants, proof.Attestations)), "has no valid attestation");
             // The new key's UID is its own: not the vault's, not a contract's.
-            var asVault = FrostDkgAttestation.ParseProof(Ceremony(stillHere, 2, Signers[0].Address).Proof)!;
+            var asVault = FrostDkgAttestation.ParseProof(Ceremony(vault.Uid, stillHere, 3, Signers[0].Address).Proof)!;
             await Refused(RekeyTx(vault.Uid, BuildWithUid(asVault, vault.Uid, stillHere)), "the new key's UID is the vault's own");
             // And the vault is named exactly; an S3C vault's key is not the chain's to move.
             var s3c = await CreateS3CVault(Tip + 1);
@@ -287,7 +287,7 @@ namespace VerifiedXCore.Tests
             // One re-key of a vault a block.
             var state = new BtcAttestBlockRules.State();
             Assert.True(BtcAttestBlockRules.TryRegister(rekey, state).Ok);
-            Assert.Equal(BtcAttestBlockRules.OneRekeyReason, BtcAttestBlockRules.TryRegister(RekeyTx(vault.Uid, Ceremony(stillHere, 2, Signers[1].Address).Proof), state).Reason);
+            Assert.Equal(BtcAttestBlockRules.OneRekeyReason, BtcAttestBlockRules.TryRegister(RekeyTx(vault.Uid, Ceremony(vault.Uid, stillHere, 3, Signers[1].Address).Proof), state).Reason);
             await Apply(Tip + 1, rekey);
 
             var keys = BtcAttestStore.ScriptRowsForVault(vault.Uid);
@@ -299,13 +299,13 @@ namespace VerifiedXCore.Tests
             Assert.Equal(ceremony.KeyUid, current.KeyUID);
             Assert.Equal(ceremony.Address, current.DepositAddress);
             Assert.Equal(stillHere.Select(s => s.Address).OrderBy(a => a, StringComparer.Ordinal), current.Holders);
-            Assert.Equal(2, current.MinSigners);
+            Assert.Equal(3, current.MinSigners);           // 67% of three, as every re-key
             Assert.Equal(vault.Uid, BtcVaultKeys.VaultOf(ceremony.KeyUid));
             Assert.Equal(current.Holders, BtcWithdrawalSigner.SignersOf(ceremony.KeyUid));
             Assert.Equal(Signers.Count, BtcWithdrawalSigner.SignersOf(vault.Uid).Count); // the vault's UID still names its first key
 
             // Once: the vault is not due any more, and the key UID is taken.
-            await Refused(RekeyTx(vault.Uid, Ceremony(stillHere, 2, Signers[0].Address).Proof), "is not due for replacement");
+            await Refused(RekeyTx(vault.Uid, Ceremony(vault.Uid, stillHere, 3, Signers[0].Address).Proof), "is not due for replacement");
             Assert.Equal(current.GroupKeyHex, FrostDkgGuard.ResolveOnChainGroupPublicKey(ceremony.KeyUid));
 
             // The API shows the vault at its new address, with both keys.
@@ -350,7 +350,7 @@ namespace VerifiedXCore.Tests
             var stillHere = Signers.Take(3).ToList();
             await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
             var ownerBefore = await Spendable(vault.Uid, Minter);
-            var ceremony = Ceremony(stillHere, 2, Signers[0].Address);
+            var ceremony = Ceremony(vault.Uid, stillHere, 3, Signers[0].Address);
             await Mine(RekeyTx(vault.Uid, ceremony.Proof));
 
             // The sweep is fixed in the re-key's own block: the old key's coin, one output to the new key.
@@ -415,7 +415,7 @@ namespace VerifiedXCore.Tests
 
             var stillHere = Signers.Take(3).ToList();
             await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
-            var ceremony = Ceremony(stillHere, 2, Signers[0].Address);
+            var ceremony = Ceremony(vault.Uid, stillHere, 3, Signers[0].Address);
             await Mine(RekeyTx(vault.Uid, ceremony.Proof));
             // Every coin of the old key is held by the withdrawal: nothing to sweep yet.
             Assert.Empty(BtcAttestStore.WithdrawalsOf(vault.Uid, VaultWithdrawalState.Pinned).Where(w => w.IsSweep));
@@ -435,6 +435,129 @@ namespace VerifiedXCore.Tests
             var fixedNow = Row(waiting, vault.Uid);
             Assert.Equal(VaultWithdrawalState.Pinned, fixedNow.State);
             Assert.Equal(ceremony.Script.ToHex(), BtcVaultKeys.KeyOfCoins(fixedNow.Pins[0].Inputs)!.ScriptHex);
+        }
+
+        // ── What the review of the re-key found (third pass, 14 October 2026) ──────────────────────
+
+        /// <summary>
+        /// The new key's threshold was the leader's choice (up to every holder signing together, which any one holder
+        /// could then withhold, and which fell due again at once), and the proof named no vault: a creation's proof, or
+        /// one made for another vault, served as any due vault's re-key. A re-key's ceremony now signs the vault's UID
+        /// into every attestation and uses 67% of its holders, and validators join it only for a vault that is due.
+        /// </summary>
+        [Fact]
+        public async Task AReKeysVaultAndThreshold_AreFixed_NotTheLeaders()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            var other = await CreateVault(H1 + 2, keyHolders: Signers);
+            await Deposit(vault.Script, 100_000);
+            var stillHere = Signers.Take(3).ToList();
+            Assert.Contains("is not due", BtcVaultKeys.RekeyCeremonyRefusal(vault.Uid, 67));
+            await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
+
+            // Validators join only a due vault's ceremony, and only at 67%.
+            Assert.Null(BtcVaultKeys.RekeyCeremonyRefusal(vault.Uid, 67));
+            Assert.Contains("threshold of 67%", BtcVaultKeys.RekeyCeremonyRefusal(vault.Uid, 100));
+            Assert.Contains("no vault", BtcVaultKeys.RekeyCeremonyRefusal(new string('a', 32) + ":1", 67));
+
+            // Every holder signing together: refused.
+            var allOfThem = Ceremony(vault.Uid, Signers.Take(3), 2, Signers[0].Address);
+            await Refused(RekeyTx(vault.Uid, allOfThem.Proof), "signs with 3 of its 3 holders");
+            // A proof made for another vault, or for a creation (no vault named): no valid attestation for this re-key.
+            await Refused(RekeyTx(vault.Uid, Ceremony(other.Uid, stillHere, 3, Signers[0].Address).Proof), "has no valid attestation");
+            var keyUid = FrostDkgAttestation.NewContractUid();
+            var groupKey = Convert.ToHexString(new Key().PubKey.ToBytes()[1..]).ToLowerInvariant();
+            var address = FrostDkgAttestation.DeriveTaprootAddress(groupKey, FrostDkgAttestation.ConsensusNetwork)!;
+            var canonical = FrostDkgAttestation.Canonical(stillHere.Select(p => p.Address));
+            var creationMessage = FrostDkgAttestation.Message(keyUid, groupKey, address, Signers[0].Address, 3, canonical);
+            var creationProof = FrostDkgAttestation.BuildProof(keyUid, groupKey, address, Signers[0].Address, 3, canonical,
+                stillHere.Select(p => new FrostDkgAttestation.Attestation { ValidatorAddress = p.Address, Signature = VerifiedXCore.Services.SignatureService.CreateSignature(creationMessage, p.Key, p.Pub) }));
+            await Refused(RekeyTx(vault.Uid, creationProof), "has no valid attestation");
+        }
+
+        /// <summary>
+        /// Anybody who saw a re-key's ceremony start (every participant) could mint an NFT under the new key's UID before
+        /// the re-key was mined, and the re-key was refused for good. Only a vault's or a key's UID blocks it now, and no
+        /// contract can be created under a key's UID.
+        /// </summary>
+        [Fact]
+        public async Task AContractMintedUnderTheNewKeysUid_DoesNotBlockTheReKey()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 100_000);
+            var stillHere = Signers.Take(3).ToList();
+            await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
+            var ceremony = Ceremony(vault.Uid, stillHere, 3, Signers[0].Address);
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
+            {
+                SmartContractUID = ceremony.KeyUid, ContractData = VbtcTestContracts.BuildContractData(ceremony.KeyUid, Minter.Address, null, name: "Squatter"),
+                MinterAddress = Minter.Address, OwnerAddress = Minter.Address,
+            });
+            await Mine(RekeyTx(vault.Uid, ceremony.Proof));
+            Assert.Equal(ceremony.KeyUid, BtcAttestStore.ScriptRowForVault(vault.Uid)!.KeyUID);
+            // And from now on nothing is created under that UID.
+            var create = new VfxTx
+            {
+                TransactionType = TransactionType.NFT_MINT, FromAddress = Minter.Address, ToAddress = Minter.Address,
+                Data = JsonConvert.SerializeObject(new[] { new { Function = "Mint()", ContractUID = ceremony.KeyUid, Data = "x" } }),
+            };
+            Assert.Contains("is a vault key's", LedgerIntegrityRules.CreatedUidWasNeverWatched(create));
+        }
+
+        /// <summary>
+        /// A sweep's Bitcoin fee falls on the owner's figure (what is left of the vault's Bitcoin after every other
+        /// claim). An owner who had given away all its vBTC had nothing to carry it with, and the vault then held less
+        /// than its holders' claims: the last of them could never be paid in full. Each payment from such a vault now
+        /// leaves its share of the shortfall in the vault, so the claims and the Bitcoin come out even.
+        /// </summary>
+        [Fact]
+        public async Task SweepFeesTheOwnerCannotCarry_AreSharedByThePaymentsThatFollow_AndEveryoneIsPaid()
+        {
+            await Start();
+            var holder = NewKey();
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = holder.Address, Balance = 100M, Nonce = 0 });
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 200_000);
+            await Mine(SignedBy(Minter, holder.Address, TransactionType.VBTC_V2_TRANSFER,
+                new { Function = "TransferVBTCV2()", ContractUID = vault.Uid, FromAddress = Minter.Address, ToAddress = holder.Address, Amount = 0.002M }));
+            Assert.Equal(0M, await Spendable(vault.Uid, Minter));
+
+            var stillHere = Signers.Take(3).ToList();
+            await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
+            await Mine(RekeyTx(vault.Uid, Ceremony(vault.Uid, stillHere, 3, Signers[0].Address).Proof));
+            var sweep = Assert.Single(BtcAttestStore.WithdrawalsOf(vault.Uid, VaultWithdrawalState.Pinned).Where(w => w.IsSweep));
+            var fee = sweep.Pins[0].FeeSats;
+            await SignAndConfirm(sweep.Pins[0]);
+            Assert.Equal(200_000 - fee, BtcAttestStore.Total(vault.Uid).HeldSats);
+            Assert.True(await Spendable(vault.Uid, Minter) < 0M); // the owner's figure carries the fee it cannot pay
+
+            // The holder withdraws everything it holds: the payment leaves the shortfall in the vault, and is fixed.
+            var request = await Mine(SignedBy(holder, holder.Address, TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                new { Function = "VBTCWithdrawalRequest()", ContractUID = vault.Uid, BTCAddress = BtcDest, Amount = 0.002M, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") }));
+            var row = Row(request, vault.Uid);
+            Assert.Equal(VaultWithdrawalState.Pinned, row.State);
+            Assert.Equal(fee, row.ShortfallShareSats);
+            Assert.Equal(200_000 - fee - row.Pins[0].FeeSats, row.Pins[0].DestinationSats);
+            await SignAndConfirm(row.Pins[0]);
+            Assert.Equal(VaultWithdrawalState.Settled, Row(request, vault.Uid).State);
+            Assert.Equal(0, BtcAttestStore.Total(vault.Uid).HeldSats);
+            Assert.Equal(0M, await Spendable(vault.Uid, Minter)); // even again
+        }
+
+        /// <summary>A sweep is fixed at what withdrawals of the last thousand blocks paid, not at a rate Bitcoin may ignore.</summary>
+        [Fact]
+        public async Task ASweepIsFixedAtTheRateWithdrawalsPay()
+        {
+            await Start();
+            Assert.Equal(BtcWithdrawals.SweepFeeRate, BtcWithdrawals.SweepRateAt(Tip + 1));
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 900_000);
+            foreach (var rate in new[] { 30, 60, 90 })
+                await Mine(Request(vault.Uid, 0.001M, rate));
+            Assert.Equal(60, BtcWithdrawals.SweepRateAt(Tip + 1));
+            Assert.Equal(BtcWithdrawals.SweepFeeRate, BtcWithdrawals.SweepRateAt(Tip + 2_000));
         }
 
         // ── Who leads ────────────────────────────────────────────────────────────────

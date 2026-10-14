@@ -87,7 +87,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (feeRate > BtcCanonicalWithdrawal.MaxFeeRate) return $"A withdrawal's fee rate is at most {BtcCanonicalWithdrawal.MaxFeeRate} sat/vB; this names {feeRate}.";
 
             row = BtcAttestStore.Withdrawal(reference, db);
-            if (row == null || row.IsBridgeExit) return "No such withdrawal request is known on this contract.";
+            if (row == null || row.IsBridgeExit || row.IsSweep) return "No such withdrawal request is known on this contract.";
             if (row.Requester != tx.FromAddress) return "Only the requester can raise a withdrawal's Bitcoin fee.";
             switch (row.State)
             {
@@ -123,7 +123,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
             if (live.Any(p => p.IsRelease))
                 return "This withdrawal is being released back to the vault; its payment is not raised any more. A release at a higher fee rate is accepted.";
-            replacement = BtcCanonicalWithdrawal.BuildReplacement(row.SmartContractUID, row.DestinationScriptHex, row.AmountSats, feeRate, newest.Inputs, row.Ref, out var reason, db);
+            replacement = BtcCanonicalWithdrawal.BuildReplacement(row.SmartContractUID, row.DestinationScriptHex, PayableSats(row), feeRate, newest.Inputs, row.Ref, out var reason, db);
             if (replacement == null) return $"The replacement cannot be built: {reason}.";
             return null;
         }

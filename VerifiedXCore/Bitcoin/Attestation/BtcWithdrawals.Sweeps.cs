@@ -1,4 +1,7 @@
 using LiteDB;
+using VerifiedXCore.Bitcoin.Services;
+using VerifiedXCore.Data;
+using VerifiedXCore.Models;
 using VerifiedXCore.Utilities;
 
 namespace VerifiedXCore.Bitcoin.Attestation
@@ -26,8 +29,56 @@ namespace VerifiedXCore.Bitcoin.Attestation
     /// </summary>
     public static partial class BtcWithdrawals
     {
-        /// <summary>The fee rate a sweep is first fixed at, sat/vB: a bridge exit's.</summary>
+        /// <summary>The lowest fee rate a sweep is fixed at, sat/vB: a bridge exit's.</summary>
         public const long SweepFeeRate = ExitFeeRate;
+
+        /// <summary>The highest fee rate a sweep is first fixed at, and the highest it is raised to, sat/vB.</summary>
+        public const long SweepMaxFeeRate = 1_000;
+
+        /// <summary>VFX blocks a sweep's newest transaction may wait unconfirmed before its fee is doubled (about 72 minutes, some seven Bitcoin blocks).</summary>
+        public const int SweepStuckBlocks = 360;
+
+        /// <summary>
+        /// The fee rate a new sweep is fixed at: what withdrawals requested in the last thousand blocks pay (the middle
+        /// one), between <see cref="SweepFeeRate"/> and <see cref="SweepMaxFeeRate"/>. Requesters choose rates that get
+        /// their Bitcoin out, so this follows Bitcoin's fee market from chain state alone; a sweep fixed at a rate
+        /// Bitcoin ignores would leave the old key's coins there while its holders keep leaving.
+        /// </summary>
+        public static long SweepRateAt(long vfxHeight, LiteDatabase? db = null)
+        {
+            var rates = BtcAttestStore.WithdrawalsInState(VaultWithdrawalState.Pinned, db)
+                .Concat(BtcAttestStore.WithdrawalsInState(VaultWithdrawalState.Settled, db))
+                .Concat(BtcAttestStore.WithdrawalsInState(VaultWithdrawalState.Waiting, db))
+                .Where(w => !w.IsSweep && !w.IsBridgeExit && w.RequestVfxHeight > vfxHeight - 1_000)
+                .Select(w => w.Pins.LastOrDefault(p => !p.Dead)?.FeeRate is > 0 and var r ? r : w.FeeRate)
+                .OrderBy(r => r).ToList();
+            var middle = rates.Count == 0 ? SweepFeeRate : rates[rates.Count / 2];
+            return Math.Clamp(middle, SweepFeeRate, SweepMaxFeeRate);
+        }
+
+        /// <summary>
+        /// The sats of a withdrawal or exit part of <paramref name="amountSats"/> that stay in the vault to make good what
+        /// sweeps cost beyond the owner's figure. The owner's figure is what is left of the vault's Bitcoin after every
+        /// other claim; a sweep's fee falls on it, and when the owner holds less than the fees, the vault holds less than
+        /// its holders' claims by the difference (the shortfall). Each payment then leaves its share of the shortfall in
+        /// the vault (its amount over all claims), and its requester's completed withdrawal is added back to the owner's
+        /// figure in full as before, so the shortfall closes as the vault pays out and nobody is left unpaid at the end.
+        /// 0 while the owner's figure covers it (always, unless the owner has given away everything).
+        /// </summary>
+        internal static long ShortfallShare(string scUID, long amountSats, LiteDatabase? db = null)
+        {
+            if (amountSats <= 0 || BtcAttestStore.Total(scUID, db).SweepFeeSats <= 0) return 0;
+            var state = SmartContractStateTrei.GetSmartContractState(scUID);
+            if (state == null || string.IsNullOrEmpty(state.OwnerAddress)) return 0;
+            var owner = VBTCService.AttestedOwnerSpendable(state, state.OwnerAddress, StateWriteContext.StampHeight > 0 ? StateWriteContext.StampHeight : (Globals.LastBlock?.Height ?? 0));
+            if (owner >= 0M) return 0;
+            var shortfall = (long)Math.Ceiling(-owner * BtcAttestBalance.SatsPerBtc);
+            var held = BtcAttestStore.Total(scUID, db).HeldSats;
+            var claims = held + shortfall;
+            if (claims <= 0) return 0;
+            var share = (long)Math.Ceiling((decimal)shortfall * amountSats / claims);
+            return Math.Min(share, shortfall);
+        }
 
         /// <summary>Every sweep's reference starts with this, and the signing ceremony is told it as the withdrawal it signs for.</summary>
         public const string SweepPrefix = "sweep:";
@@ -47,9 +98,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var keys = BtcAttestStore.ScriptRowsForVault(scUID, db);
             if (keys.Count < 2) return;
             var current = keys[^1];
+            var rate = SweepRateAt(vfxHeight, db);
             foreach (var old in keys.Take(keys.Count - 1))
             {
-                var tx = BtcCanonicalWithdrawal.BuildSweep(old, current, SweepFeeRate, vfxHeight, out var takenFrom, out var reason, db);
+                var tx = BtcCanonicalWithdrawal.BuildSweep(old, current, rate, vfxHeight, out var takenFrom, out var reason, db);
                 if (tx == null) continue;
                 var n = 0;
                 string reference;
@@ -57,7 +109,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 var row = new VaultWithdrawalRow
                 {
                     Ref = reference, SmartContractUID = scUID, RequestHash = "", Requester = "", AmountSats = tx.InputSats,
-                    DestinationScriptHex = current.ScriptHex, FeeRate = SweepFeeRate, RequestVfxHeight = vfxHeight,
+                    DestinationScriptHex = current.ScriptHex, FeeRate = rate, RequestVfxHeight = vfxHeight,
                     State = VaultWithdrawalState.Waiting, IsSweep = true, SweepFromScriptHex = old.ScriptHex,
                 };
                 Pin(row, tx, vfxHeight, db);

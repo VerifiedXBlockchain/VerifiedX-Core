@@ -453,7 +453,7 @@ namespace VerifiedXCore.Tests
         {
             _rng = new Random(seed);
             await Start();
-            _vault = await CreateVault(H1 + 1);
+            _vault = await CreateVault(H1 + 1, keyHolders: Signers); // its key held by the validators, as every vault's is
             await Deposit();
             await Deposit();
             await Check("the first deposits");
@@ -603,7 +603,7 @@ namespace VerifiedXCore.Tests
             var holder = _holders[0];
 
             await Start();
-            _vault = await CreateVault(H1 + 1);
+            _vault = await CreateVault(H1 + 1, keyHolders: Signers); // its key held by the validators, as every vault's is
             await MineAndReport(Pay(_vault.Script, 300_000));
             await Check("deposit");
 
