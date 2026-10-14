@@ -355,10 +355,14 @@ namespace VerifiedXCore.Tests
                 // xV1's batch, replayed here: named for xV1, or (from an older coordinator) unnamed with only xV1's shares.
                 var named = await Post(Batch("xV1", ids["xV1"]));
                 Assert.Equal(HttpStatusCode.Conflict, named.StatusCode);
-                Assert.Contains("another validator", await named.Content.ReadAsStringAsync());
+                Assert.Contains("not addressed to this validator", await named.Content.ReadAsStringAsync());
                 var unnamed = await Post(Batch(null, ids["xV1"]));
                 Assert.Equal(HttpStatusCode.Conflict, unnamed.StatusCode);
-                Assert.Contains("No share in this batch", await unnamed.Content.ReadAsStringAsync());
+                Assert.Contains("not addressed to this validator", await unnamed.Content.ReadAsStringAsync());
+                // Refused without taking the session's lock: they are answered while the lock is held (round 16).
+                await session.Gate.WaitAsync();
+                try { Assert.Equal(HttpStatusCode.Conflict, (await Post(Batch("xV1", ids["xV1"]))).StatusCode); }
+                finally { session.Gate.Release(); }
                 Assert.False(session.Reported);
 
                 // A batch for this validator is taken (its made-up shares are then reported, as before).

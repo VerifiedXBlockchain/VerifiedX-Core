@@ -371,6 +371,23 @@ namespace VerifiedXCore.Bitcoin.Services
             return null;
         }
 
+        /// <summary>
+        /// A request answered "busy" (503: the session's lock was held past the validator's wait) is asked again twice
+        /// before the answer counts against the validator: requests anyone can send can hold that lock a while (fifth
+        /// review, round 16).
+        /// </summary>
+        private static async Task<HttpResponseMessage> SendRetryingBusy(HttpClient client, Func<HttpRequestMessage> make, int tries = 3)
+        {
+            for (var i = 1; ; i++)
+            {
+                using var request = make();
+                var response = await client.SendAsync(request);
+                if (response.StatusCode != System.Net.HttpStatusCode.ServiceUnavailable || i >= tries) return response;
+                response.Dispose();
+                await Task.Delay(TimeSpan.FromSeconds(2));
+            }
+        }
+
         /// <summary>The participants no share can be sealed to: no registered key, or one that does not derive the address.</summary>
         internal static List<string> UnsealableParticipants(IEnumerable<VBTCValidator> validators, Func<string, string?> verifiedKeyOf) =>
             validators.Select(v => v.ValidatorAddress).Where(a => string.IsNullOrEmpty(verifiedKeyOf(a))).Distinct(StringComparer.Ordinal).ToList();
@@ -780,11 +797,14 @@ namespace VerifiedXCore.Bitcoin.Services
                         Recipient = validator.ValidatorAddress,
                         AllGeneratedShares = sharesByRecipient[validator.ValidatorAddress]
                     });
-                    using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(redistributePayload, Encoding.UTF8, "application/json") };
-                    if (leaderSigns)
-                        request.Headers.TryAddWithoutValidation(FrostDkgLeaderAuth.ContentSignatureHeader,
-                            VerifiedXCore.Services.SignatureService.AddressSignature(leaderAddress, FrostDkgLeaderAuth.ContentMessage("SHARES", sessionId, redistributePayload)));
-                    var response = await _ceremonyHttpClient.SendAsync(request);
+                    var sharesSignature = leaderSigns
+                        ? VerifiedXCore.Services.SignatureService.AddressSignature(leaderAddress, FrostDkgLeaderAuth.ContentMessage("SHARES", sessionId, redistributePayload)) : null;
+                    var response = await SendRetryingBusy(_ceremonyHttpClient, () =>
+                    {
+                        var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(redistributePayload, Encoding.UTF8, "application/json") };
+                        if (sharesSignature != null) request.Headers.TryAddWithoutValidation(FrostDkgLeaderAuth.ContentSignatureHeader, sharesSignature);
+                        return request;
+                    });
                     if (!response.IsSuccessStatusCode)
                     {
                         deliveryFailures[validator.ValidatorAddress] = $"did not accept its Round 2 shares (HTTP {(int)response.StatusCode})";
@@ -926,7 +946,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 try
                 {
                     var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/dkg/result/{sessionId}";
-                    var response = await _httpClient.GetAsync(url);
+                    var response = await SendRetryingBusy(_httpClient, () => new HttpRequestMessage(HttpMethod.Get, url));
                     if (!response.IsSuccessStatusCode)
                         return;
                     var json = JObject.Parse(await response.Content.ReadAsStringAsync());

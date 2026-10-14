@@ -1580,6 +1580,21 @@ namespace VerifiedXCore.Bitcoin.FROST
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This session's shares are sent by its leader, signed." }));
                             return;
                         }
+                        // A batch for another validator is refused before the lock: it reads only the body (round 16).
+                        try
+                        {
+                            var addressed = Newtonsoft.Json.Linq.JObject.Parse(body);
+                            var addressedTo = addressed["Recipient"]?.ToString();
+                            var myBatchId = !string.IsNullOrEmpty(Globals.ValidatorAddress) && BuildAddressToIdentifierMap(session.ParticipantAddresses).TryGetValue(Globals.ValidatorAddress, out var mine) ? mine : null;
+                            if ((!string.IsNullOrEmpty(addressedTo) && addressedTo != Globals.ValidatorAddress)
+                                || (myBatchId != null && addressed["AllGeneratedShares"] is Newtonsoft.Json.Linq.JObject batchShares && !BatchCarriesShareFor(batchShares, myBatchId)))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This share batch is not addressed to this validator." }));
+                                return;
+                            }
+                        }
+                        catch (Newtonsoft.Json.JsonException) { } // judged under the lock as before
                         // One batch at a time per session, and none while it gives its attestation (round 11).
                         if (!await session.Gate.WaitAsync(TimeSpan.FromSeconds(30)))
                         {
