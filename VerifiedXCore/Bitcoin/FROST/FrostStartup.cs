@@ -2204,6 +2204,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                             DKGProof = session.DKGProof,
                             Attestation = attestation,
                             PublicKeyPackageHash = keyPackageHash,
+                            // A creation's proof that this validator holds its part of the key, signed for this vault (round 12).
+                            Possession = string.IsNullOrEmpty(session.RekeyOf)
+                                ? FrostDkgAttestation.SignPossession(session.Round1SecretPackage, session.SmartContractUID, session.LeaderAddress, session.GroupPublicKey ?? "") : null,
                             IsCompleted = session.IsCompleted
                         }, Formatting.Indented));
                         }

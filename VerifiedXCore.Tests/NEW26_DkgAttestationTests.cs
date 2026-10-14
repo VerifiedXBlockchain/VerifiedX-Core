@@ -349,45 +349,34 @@ namespace VerifiedXCore.Tests
             Assert.False((await Verify(CreateFor(uid2, mixed, Proof(uid2, mixed), isS3C: true))).Ok);
         }
 
-        /// <summary>
-        /// Participants that hold a key, made as a FROST Round 1 makes it: each a secret, its constant term and a proof of
-        /// knowledge (R even, z = k + c·a), the group key the sum of the terms.
-        /// </summary>
-        private static (string GroupKey, string Address, Dictionary<string, FrostDkgAttestation.Round1Proof> Proofs) HeldKey(IEnumerable<string> participants)
+        /// <summary>Participants that hold a key: each a secret and its constant term, the group key their sum.</summary>
+        private static (string GroupKey, string Address, Dictionary<string, byte[]> Secrets, Dictionary<string, string> Terms) HeldKey(IEnumerable<string> participants)
         {
-            var order = System.Numerics.BigInteger.Parse("0FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", System.Globalization.NumberStyles.HexNumber);
-            System.Numerics.BigInteger Num(byte[] b) => new System.Numerics.BigInteger(b, isUnsigned: true, isBigEndian: true);
-            byte[] Be32(System.Numerics.BigInteger v) { var b = v.ToByteArray(isUnsigned: true, isBigEndian: true); var r = new byte[32]; Buffer.BlockCopy(b, 0, r, 32 - b.Length, b.Length); return r; }
-            var ids = FrostStartup.BuildAddressToIdentifierMap(participants.ToList());
-            var proofs = new Dictionary<string, FrostDkgAttestation.Round1Proof>();
-            var terms = new List<NBitcoin.Secp256k1.ECPubKey>();
+            var secrets = new Dictionary<string, byte[]>();
+            var terms = new Dictionary<string, string>();
+            var points = new List<NBitcoin.Secp256k1.ECPubKey>();
             foreach (var p in participants)
             {
                 var a = new NBitcoin.Key().ToBytes();
                 var phi = NBitcoin.Secp256k1.ECPrivKey.Create(a).CreatePubKey();
-                byte[] k; byte[] r;
-                do { k = new NBitcoin.Key().ToBytes(); r = NBitcoin.Secp256k1.ECPrivKey.Create(k).CreatePubKey().ToBytes(true); } while (r[0] != 0x02);
-                var c = FrostDkgAttestation.DkgChallenge(Convert.FromHexString(ids[p]), phi.ToBytes(true), r[1..]);
-                var z = (Num(k) + c * Num(a)) % order;
-                proofs[p] = new FrostDkgAttestation.Round1Proof
-                {
-                    ConstantTerm = Convert.ToHexString(phi.ToBytes(true)).ToLowerInvariant(),
-                    ProofOfKnowledge = Convert.ToHexString(r[1..].Concat(Be32(z)).ToArray()).ToLowerInvariant(),
-                };
-                terms.Add(phi);
+                secrets[p] = a;
+                terms[p] = Convert.ToHexString(phi.ToBytes(true)).ToLowerInvariant();
+                points.Add(phi);
             }
-            NBitcoin.Secp256k1.ECPubKey.TryCombine(NBitcoin.Secp256k1.Context.Instance, terms, out var sum);
+            NBitcoin.Secp256k1.ECPubKey.TryCombine(NBitcoin.Secp256k1.Context.Instance, points, out var sum);
             var groupKey = Convert.ToHexString(sum!.ToBytes(true)[1..]).ToLowerInvariant();
-            return (groupKey, FrostDkgAttestation.DeriveTaprootAddress(groupKey, NBitcoin.Network.Main)!, proofs);
+            return (groupKey, FrostDkgAttestation.DeriveTaprootAddress(groupKey, NBitcoin.Network.Main)!, secrets, terms);
         }
 
-        /// <summary>
-        /// An S3C vault's deposit address is its group key and only its own few validators attest it: three self-declared
-        /// S3C validators could name any Taproot address (a pending public vault's, a re-key's, anyone's) as their vault's
-        /// and have its Bitcoin credited to them. From the path-audit height an S3C vault's proof shows its participants
-        /// hold the key: each one's Round 1 constant term with its proof of knowledge, summing to the group key (fourth
-        /// review, round 11).
-        /// </summary>
+        private static Dictionary<string, FrostDkgAttestation.Round1Proof> Possession((string GroupKey, string Address, Dictionary<string, byte[]> Secrets, Dictionary<string, string> Terms) held,
+            string uid, string owner) =>
+            held.Secrets.ToDictionary(kv => kv.Key, kv => new FrostDkgAttestation.Round1Proof
+            {
+                ConstantTerm = held.Terms[kv.Key],
+                PossessionSignature = Convert.ToHexString(NBitcoin.Secp256k1.ECPrivKey.Create(kv.Value)
+                    .SignBIP340(FrostDkgAttestation.PossessionMessage(uid, owner, held.GroupKey)).ToBytes()).ToLowerInvariant(),
+            });
+
         [Fact]
         public async Task NEW26_S3c_MustShowItsParticipantsHoldTheKey()
         {
@@ -412,17 +401,24 @@ namespace VerifiedXCore.Tests
                 Assert.False(ok);
                 Assert.Contains("hold the key", message);
 
-                // ... and with proofs of knowledge for other terms: refused.
+                // ... and with good signatures for this vault by terms that sum to another key: refused.
                 var other = HeldKey(addresses);
                 uid = NewUid();
-                (ok, message) = await Verify(Create(uid, _address, _groupKey, ProofOf(uid, _groupKey, _address, other.Proofs), addresses, isS3C: true));
+                (ok, message) = await Verify(Create(uid, _address, _groupKey, ProofOf(uid, _groupKey, _address, Possession((_groupKey, other.Address, other.Secrets, other.Terms), uid, _minter.Address)), addresses, isS3C: true));
                 Assert.False(ok);
                 Assert.Contains("do not hold it", message);
 
-                // A key the pool holds: accepted.
+                // A key the pool holds, but its signatures copied from another vault's creation: refused (round 12).
                 var held = HeldKey(addresses);
+                var copiedFrom = NewUid();
                 uid = NewUid();
-                (ok, message) = await Verify(Create(uid, held.Address, held.GroupKey, ProofOf(uid, held.GroupKey, held.Address, held.Proofs), addresses, isS3C: true));
+                (ok, message) = await Verify(Create(uid, held.Address, held.GroupKey, ProofOf(uid, held.GroupKey, held.Address, Possession(held, copiedFrom, _minter.Address)), addresses, isS3C: true));
+                Assert.False(ok);
+                Assert.Contains("no valid possession signature", message);
+
+                // A key the pool holds, signed for this vault: accepted.
+                uid = NewUid();
+                (ok, message) = await Verify(Create(uid, held.Address, held.GroupKey, ProofOf(uid, held.GroupKey, held.Address, Possession(held, uid, _minter.Address)), addresses, isS3C: true));
                 Assert.True(ok, message);
             }
             finally { Globals.PathAuditRulesHeight = priorRules; }

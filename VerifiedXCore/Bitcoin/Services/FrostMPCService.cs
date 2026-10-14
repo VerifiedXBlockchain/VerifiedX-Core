@@ -399,7 +399,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 // Results: every participant must have finished with the same key and attested it.
                 progressCallback?.Invoke(3, 85);
-                attempt.Result = await AggregateDKGResult(sessionId, contractUid, validators, threshold, leaderAddress, attempt.Failed, rekeyOf, commitments);
+                attempt.Result = await AggregateDKGResult(sessionId, contractUid, validators, threshold, leaderAddress, attempt.Failed, rekeyOf);
                 if (attempt.Result == null)
                     await AbortDkgAttempt(sessionId, leaderAddress, validators, preSignedAuth);
                 if (attempt.Result == null)
@@ -842,12 +842,12 @@ namespace VerifiedXCore.Bitcoin.Services
             int threshold,
             string leaderAddress,
             Dictionary<string, string> failed,
-            string? rekeyOf = null,
-            IReadOnlyDictionary<string, string>? round1Packages = null)
+            string? rekeyOf = null)
         {
             LogUtility.Log($"[FROST MPC] Collecting DKG results from {validators.Count} validators...", "FrostMPCService.AggregateDKGResult");
 
             var results = new System.Collections.Concurrent.ConcurrentDictionary<string, (string Gpk, string Address, FrostDkgAttestation.Attestation? Attestation, string? KeyPackageHash)>(StringComparer.Ordinal);
+            var possession = new System.Collections.Concurrent.ConcurrentDictionary<string, FrostDkgAttestation.Round1Proof>(StringComparer.Ordinal);
             var resultTasks = validators.Select(async validator =>
             {
                 try
@@ -866,6 +866,12 @@ namespace VerifiedXCore.Bitcoin.Services
                     var keyPackageHash = json["PublicKeyPackageHash"]?.Type == JTokenType.String ? json["PublicKeyPackageHash"]!.Value<string>() : null;
                     if (!string.IsNullOrEmpty(gpk) && !string.IsNullOrEmpty(addr))
                         results[validator.ValidatorAddress] = (gpk, addr, attestation, keyPackageHash);
+                    try
+                    {
+                        if (json["Possession"]?.Type == JTokenType.Object && json["Possession"]!.ToObject<FrostDkgAttestation.Round1Proof>() is { } held)
+                            possession[validator.ValidatorAddress] = held;
+                    }
+                    catch { }
                 }
                 catch (Exception ex)
                 {
@@ -928,9 +934,10 @@ namespace VerifiedXCore.Bitcoin.Services
             if (failed.Count > 0)
                 return null;
 
-            // A creation's proof carries each participant's Round 1 constant term and proof of knowledge: that its
-            // participants hold the key (consensus asks it of an S3C vault; round 11). A re-key's proof needs none.
-            var round1Proofs = rekeyOf == null ? FrostDkgAttestation.Round1ProofsOf(round1Packages, participants) : null;
+            // A creation's proof carries each participant's Round 1 constant term signed for this vault: that its
+            // participants hold the key (consensus asks it of an S3C vault; rounds 11-12). A re-key's proof needs none.
+            var round1Proofs = rekeyOf == null && participants.All(p => possession.ContainsKey(p))
+                ? participants.ToDictionary(p => p, p => possession[p], StringComparer.Ordinal) : null;
             var dkgProof = FrostDkgAttestation.BuildProof(contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, attestations, keyPackageHashOfAll, round1Proofs);
             LogUtility.Log($"[FROST MPC] DKG aggregation complete. GroupPubKey: {groupPublicKey.Substring(0, 16)}..., Address: {taprootAddress}",
                 "FrostMPCService.AggregateDKGResult");
