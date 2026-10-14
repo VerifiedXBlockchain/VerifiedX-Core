@@ -237,6 +237,14 @@ namespace VerifiedXCore.Tests
                 Amount = 0.002M, AmountSats = 200_000L, BtcDestination = BtcDest, BaseBurnTxHash = NewBurn(),
             }, free: true);
             await RefusedInBlock(numeric, "carries its allocations");
+            // ... and naming an older vault and a lock that does not exist: it drew no lock and had that vault's signers
+            // pay the burn (round 14). The shape is refused from the recording height.
+            var older = SignedBy(Caster, Caster.Address, TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC, new
+            {
+                Function = "VBTCBridgeExitToBTC()", ContractUID = Guid.NewGuid().ToString("N") + ":1", LockId = "made-up",
+                Amount = 0.002M, AmountSats = 200_000L, BtcDestination = BtcDest, BaseBurnTxHash = NewBurn(),
+            }, free: true);
+            await RefusedInBlock(older, "carries its allocations");
         }
 
         /// <summary>

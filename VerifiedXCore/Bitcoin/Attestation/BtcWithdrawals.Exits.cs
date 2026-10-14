@@ -123,15 +123,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         var allocations = data["Allocations"]?.ToObject<List<PoolUnlockAllocation>>();
                         if (allocations == null || allocations.Count == 0)
                         {
-                            // The single-lock shape of the first bridge version names its one contract directly. Its lock
-                            // names a vault too: one of a watched vault's, under another contract's UID, recorded an exit
-                            // nobody could complete, fail or expire, and its burn was used for good (fourth review, round 12).
-                            // Read as validation and apply read it (a number becomes its digits; round 13).
-                            var singleLockId = data["LockId"]?.ToObject<string?>();
-                            var singleLock = string.IsNullOrWhiteSpace(singleLockId) ? null : VBTCBridgeLockState.GetByLockId(singleLockId);
-                            return BtcAttestBalance.IsAttestedVault(Stored(data["ContractUID"]?.ToObject<string?>())) || BtcAttestBalance.IsAttestedVault(singleLock?.SmartContractUID)
-                                ? "A bridge exit from this vault carries its allocations."
-                                : null;
+                            // The single-lock shape of the first bridge version draws no lock at apply, while its record
+                            // names whatever contract it gives: one caster could have any older vault's signers pay a burn
+                            // with no lock drawn (fifth review, round 14), and on a watched vault's lock it recorded an exit
+                            // nobody could settle (round 12). No code has sent it since allocations came in: refused.
+                            return "A bridge exit carries its allocations.";
                         }
                         var watched = ExitIsOnWatchedVaults(allocations, out var mixed);
                         if (watched == null) return mixed;
