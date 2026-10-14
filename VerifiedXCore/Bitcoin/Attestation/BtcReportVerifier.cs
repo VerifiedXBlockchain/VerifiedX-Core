@@ -82,6 +82,25 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 return BtcReportOutcome.Fail("only the first part of a report carries headers");
             var forward = report.Scope == BtcReport.ScopeAll;
 
+            // ── What state alone refuses, before the signatures: a copy of a report already mined (anyone can wrap one
+            // with a new timestamp) costs a node nothing but this. The same conditions are checked again below. ─────
+            if (report.ReplaceAbove == 0 && report.BlockHeight > 0)
+            {
+                if (report.BlockHeight <= meta.CheckpointHeight) return BtcReportOutcome.Fail("blocks at or below the checkpoint are not reported");
+                if (report.Scope == BtcReport.ScopeAll)
+                {
+                    if (meta.PendingNextPart == 0)
+                    {
+                        if (report.Part == 1 && report.BlockHeight <= meta.EventsThroughHeight)
+                            return BtcReportOutcome.Fail($"block {report.BlockHeight} is at or below the events-through height {meta.EventsThroughHeight}");
+                    }
+                    else if (report.BlockHeight != meta.PendingPartBlockHeight || report.Part != meta.PendingNextPart)
+                        return BtcReportOutcome.Fail($"part {meta.PendingNextPart} for block {meta.PendingPartBlockHeight} is expected next");
+                }
+                else if (report.BlockHeight > meta.EventsThroughHeight)
+                    return BtcReportOutcome.Fail("a backfill report is for a block whose events were already reported");
+            }
+
             // ── Signatures (checked before the heavier work; they bind every field through the hash) ─────────
             var hash = report.Hash();
             var signatureError = CheckSignatures(report, hash, vfxHeight, db);

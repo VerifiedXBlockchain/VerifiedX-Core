@@ -215,12 +215,13 @@ namespace VerifiedXCore.Tests
             var tx = Signed(report);
             await Apply(H1 + 2, tx);
 
-            await Refused(tx, H1 + 3, "does not extend"); // its headers are already attested
+            // Its block is already reported: refused by state before its signatures are checked (a copy costs nothing).
+            await Refused(tx, H1 + 3, "is at or below the events-through height");
             var again = Tx(report); // the same signed report in a new transaction
             again.Timestamp += 1;
             again.Build();
             Assert.NotEqual(tx.Hash, again.Hash);
-            await Refused(again, H1 + 3, "does not extend");
+            await Refused(again, H1 + 3, "is at or below the events-through height");
             // The same block reported again without its headers: its events are already in.
             Assert.Empty(ForwardParts(at)); // an honest validator has nothing left to report for it
             report.Headers.Clear();
@@ -322,19 +323,19 @@ namespace VerifiedXCore.Tests
             var at = _btc.Mine(Pay(vault.Script, 50_000), Pay(vault.Script, 60_000));
             _btc.MineEmpty(4);
 
-            async Task Changed(Action<BtcReport> change)
+            async Task Changed(Action<BtcReport> change, string because = "is not valid")
             {
                 var report = Forward(at, throughTip: _btc.Tip - 1);
                 report.Signatures = Signers.Take(3).Select(v => Sign(v, report)).ToList();
                 change(report);
-                await Refused(Tx(report), H1 + 2, "is not valid");
+                await Refused(Tx(report), H1 + 2, because);
             }
 
             await Changed(r => r.Events.RemoveAt(1));                     // an event left out after signing
             await Changed(r => r.Events.RemoveAt(0));
             await Changed(r => r.Headers.Add(_btc.Header(_btc.Tip).Hex)); // a header added
             await Changed(r => r.Headers.RemoveAt(r.Headers.Count - 1));
-            await Changed(r => r.Scope = vault.Uid);
+            await Changed(r => r.Scope = vault.Uid, "a backfill report is for a block whose events were already reported"); // refused by state first
             await Changed(r => r.Final = false);
             await Changed(r => r.CoinbaseBranch = new List<string>(r.CoinbaseBranch!) { new string('0', 64) });
         }
@@ -771,7 +772,7 @@ namespace VerifiedXCore.Tests
 
             // Nothing else may come between the parts.
             height++;
-            await Refused(txs[0], height, "does not extend");
+            await Refused(txs[0], height, "is expected next");
             await Refused(Signed(BtcBlockScanner.BuildForward(_btc.Block(later), later, new List<string>(), 0).Single()), height, "is expected next");
             var fork = _btc.ForkAfter(at);
             fork.MineEmpty(6);
