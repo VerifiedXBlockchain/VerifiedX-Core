@@ -304,6 +304,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             withdrawals.EnsureIndex(x => x.State);
             withdrawals.EnsureIndex(x => x.RequestHash);
             withdrawals.EnsureIndex(x => x.LastModifiedHeight);
+            withdrawals.EnsureIndex(x => x.RequestVfxHeight); // the sweep rate reads the last thousand blocks' requests only
             VerifiedXCore.Services.ValidatorBond.EnsureIndexes(db); // validator bonds are kept with the other height-stamped tables
         }
 

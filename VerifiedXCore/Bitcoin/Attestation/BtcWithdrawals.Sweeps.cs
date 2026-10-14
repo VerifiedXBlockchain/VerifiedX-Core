@@ -46,10 +46,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// </summary>
         public static long SweepRateAt(long vfxHeight, LiteDatabase? db = null)
         {
-            var rates = BtcAttestStore.WithdrawalsInState(VaultWithdrawalState.Pinned, db)
-                .Concat(BtcAttestStore.WithdrawalsInState(VaultWithdrawalState.Settled, db))
-                .Concat(BtcAttestStore.WithdrawalsInState(VaultWithdrawalState.Waiting, db))
-                .Where(w => !w.IsSweep && !w.IsBridgeExit && w.RequestVfxHeight > vfxHeight - 1_000)
+            // Only the last thousand blocks' rows are read (indexed): every settled row ever kept was read before, for
+            // every re-keyed vault every 30 blocks (fourth review).
+            var since = vfxHeight - 1_000;
+            var rates = (db ?? BtcAttestStore.Db).GetCollection<VaultWithdrawalRow>(BtcAttestStore.Withdrawals).Find(x => x.RequestVfxHeight > since)
+                .Where(w => w.State == VaultWithdrawalState.Pinned || w.State == VaultWithdrawalState.Settled || w.State == VaultWithdrawalState.Waiting)
+                .Where(w => !w.IsSweep && !w.IsBridgeExit)
                 .Select(w => w.Pins.LastOrDefault(p => !p.Dead)?.FeeRate is > 0 and var r ? r : w.FeeRate)
                 .OrderBy(r => r).ToList();
             var middle = rates.Count == 0 ? SweepFeeRate : rates[rates.Count / 2];
@@ -98,9 +100,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var keys = BtcAttestStore.ScriptRowsForVault(scUID, db);
             if (keys.Count < 2) return;
             var current = keys[^1];
-            var marketRate = SweepRateAt(vfxHeight, db);
+            long? market = null;
             foreach (var old in keys.Take(keys.Count - 1))
             {
+                // A replaced key with no free coin and no coin a withdrawal holds has nothing a sweep could take: the
+                // same answer as building one, without reading the market (most re-keyed vaults, most of the time).
+                if (!KeyHoldsUnspent(scUID, old, db)) continue;
+                var marketRate = market ??= SweepRateAt(vfxHeight, db);
                 // A withdrawal on the replaced key that has gone unconfirmed past the stopped window gives its coins up
                 // at double its own rate, even when that rate is above the market's: otherwise one that never confirms
                 // keeps its coins (with the vault's change) under a key whose holders are leaving. Only when it is
@@ -126,6 +132,15 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 SCLogUtility.Log($"Vault {scUID}: {tx.Inputs.Count} coin(s) of key generation {old.Generation} ({tx.InputSats} sats) fixed on Bitcoin transaction {tx.Txid} to the current key (generation {current.Generation}), {tx.FeeSats} sats of fee"
                     + (takenFrom.Count > 0 ? $"; taken from {string.Join(", ", takenFrom)}, which had stopped moving." : "."), "BtcWithdrawals.PlanSweeps()");
             }
+        }
+
+        /// <summary>Whether a key of the vault still holds a free coin, or a coin a withdrawal (not a sweep) has fixed.</summary>
+        internal static bool KeyHoldsUnspent(string scUID, VaultDepositScriptRow key, LiteDatabase? db)
+        {
+            if (BtcAttestStore.FreeCoinsOf(scUID, db).Any(c => BtcCanonicalWithdrawal.IsUnder(c, key, db))) return true;
+            return BtcAttestStore.WithdrawalsOf(scUID, VaultWithdrawalState.Pinned, db).Where(r => !r.IsSweep)
+                .SelectMany(r => r.Pins.Where(p => !p.Dead).SelectMany(p => p.Inputs))
+                .Any(i => BtcAttestStore.Coin(i, db) is { Status: VaultCoinStatus.Pinned } c && BtcCanonicalWithdrawal.IsUnder(c, key, db));
         }
 
         /// <summary>
