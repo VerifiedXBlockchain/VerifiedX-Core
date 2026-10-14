@@ -722,6 +722,16 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "A re-key's start is signed in full by its leader (and a signature given must be valid)." }));
                                 return;
                             }
+                            // A session id and a re-key's UID are the leader's own: another validator's signed start under them,
+                            // reaching this node first, had the leader's own start refused (fourth review, round 7).
+                            var boundRefusal = FrostDkgLeaderAuth.SessionIdRefusal(request.SessionId, request.LeaderAddress, rekey: !string.IsNullOrEmpty(request.RekeyOf))
+                                ?? (string.IsNullOrEmpty(request.RekeyOf) ? null : VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyUidLeaderRefusal(request.SmartContractUID, request.LeaderAddress));
+                            if (boundRefusal != null)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = boundRefusal }));
+                                return;
+                            }
                             // A UID the chain fixed for a due key's successor is used only by that vault's re-key, signed in full
                             // by its leader: a copy stripped of both was taken as an unsigned creation under the re-key's
                             // session id, and the leader's own start was then refused (fourth review, round 6).

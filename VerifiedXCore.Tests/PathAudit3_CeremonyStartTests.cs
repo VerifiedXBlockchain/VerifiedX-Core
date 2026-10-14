@@ -414,9 +414,9 @@ namespace VerifiedXCore.Tests
             try
             {
                 Assert.False(FrostSessionStorage.MakeWayForSignedStart(copy.SessionId, "other"));    // the same start: nothing to replace
-                copy.Stage = 1;
-                Assert.False(FrostSessionStorage.MakeWayForSignedStart(copy.SessionId, "signed"));   // under way
-                copy.Stage = 0; copy.LeaderSigned = true;
+                copy.IsCompleted = true;
+                Assert.False(FrostSessionStorage.MakeWayForSignedStart(copy.SessionId, "signed"));   // finished
+                copy.IsCompleted = false; copy.LeaderSigned = true;
                 Assert.False(FrostSessionStorage.MakeWayForSignedStart(copy.SessionId, "signed"));   // signed already
                 copy.LeaderSigned = false;
                 Assert.True(FrostSessionStorage.MakeWayForSignedStart(copy.SessionId, "signed"));
@@ -426,6 +426,40 @@ namespace VerifiedXCore.Tests
                 Assert.True(FrostSessionStorage.MakeWayForSignedStart(Guid.NewGuid().ToString(), "x")); // nothing there: nothing in the way
             }
             finally { FrostSessionStorage.DKGSessions.TryRemove(copy.SessionId, out _); }
+        }
+
+        /// <summary>
+        /// A copy of the leader's own start with its signature removed, then a Round 2 set of the copier's: the leader's
+        /// signed start used to be answered as a repeat and ran on that set. It replaces such a session (round 7).
+        /// </summary>
+        [Fact]
+        public void TheLeadersSignedStart_ReplacesItsOwnContent_OnceSomeoneElseMovedItOn()
+        {
+            var copy = new DKGSession { SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc", LeaderAddress = "xL", StartTimestamp = _now, LastProgressTimestamp = _now, StartBodyHash = "same", Stage = 1 };
+            Assert.True(FrostSessionStorage.DKGSessions.TryAdd(copy.SessionId, copy));
+            try { Assert.True(FrostSessionStorage.MakeWayForSignedStart(copy.SessionId, "same")); }
+            finally { FrostSessionStorage.DKGSessions.TryRemove(copy.SessionId, out _); }
+        }
+
+        /// <summary>
+        /// A session id was only a name: another validator opened one under the leader's id at a participant first, with its
+        /// own signed start, and the leader's start was refused there. Ids carry their leader's tag, a tagged id is taken only
+        /// from that leader, and a re-key's id is always tagged; a re-key's UID carries digits only its leader makes (round 7).
+        /// </summary>
+        [Fact]
+        public void ASessionIdAndAReKeysUid_AreTheirLeadersOwn()
+        {
+            var id = FrostDkgLeaderAuth.NewSessionId("xLeader");
+            Assert.Null(FrostDkgLeaderAuth.SessionIdRefusal(id, "xLeader", rekey: true));
+            Assert.Contains("another leader", FrostDkgLeaderAuth.SessionIdRefusal(id, "xOther", rekey: false));
+            Assert.Null(FrostDkgLeaderAuth.SessionIdRefusal(Guid.NewGuid().ToString(), "xOther", rekey: false)); // a web wallet's creation
+            Assert.Contains("tagged with its leader", FrostDkgLeaderAuth.SessionIdRefusal(Guid.NewGuid().ToString(), "xLeader", rekey: true));
+
+            var key = new VerifiedXCore.Bitcoin.Attestation.VaultDepositScriptRow { SmartContractUID = "v", Generation = 0, RekeyDueSinceVfxHeight = 5 };
+            var uid = VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.NewKeyUid(key, "xLeader");
+            Assert.Null(VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyUidLeaderRefusal(uid, "xLeader"));
+            Assert.Contains("another leader", VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyUidLeaderRefusal(uid, "xOther"));
+            Assert.InRange(long.Parse(VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyUidTime(uid)), TimeUtil.GetTime() - 5, TimeUtil.GetTime() + 30);
         }
 
         /// <summary>

@@ -317,15 +317,39 @@ namespace VerifiedXCore.Bitcoin.Attestation
         }
 
         /// <summary>
-        /// A UID for a re-key ceremony of this due key: its fixed first part, then the time and six random digits, a new
-        /// one for every attempt. Random so that nobody can open sessions in advance under the UID a leader will use.
+        /// A UID for a re-key ceremony of this due key: its fixed first part, then the time and six digits of its leader
+        /// (<see cref="LeaderDigits"/>; random when no leader is given), a new one for every attempt.
         /// </summary>
-        public static string NewKeyUid(VaultDepositScriptRow key)
+        public static string NewKeyUid(VaultDepositScriptRow key, string? leaderAddress = null)
         {
             long now = TimeUtil.GetTime(), last, next;
             do { last = Interlocked.Read(ref _lastKeyUidTime); next = Math.Max(now, last + 1); }
             while (Interlocked.CompareExchange(ref _lastKeyUidTime, next, last) != last);
-            return $"{NextKeyHex(key)}:{next}{System.Security.Cryptography.RandomNumberGenerator.GetInt32(0, 1_000_000):D6}";
+            return leaderAddress == null
+                ? $"{NextKeyHex(key)}:{next}{System.Security.Cryptography.RandomNumberGenerator.GetInt32(0, 1_000_000):D6}"
+                : $"{NextKeyHex(key)}:{next}{LeaderDigits(leaderAddress, next)}";
+        }
+
+        /// <summary>
+        /// The six digits after a re-key UID's time when its leader made it: from a hash of the leader and the time. Another
+        /// validator could start its own signed re-key under the UID it saw in a leader's start, reach a participant first,
+        /// and the leader's start was refused there as another leader's ceremony under that UID (fourth review, round 7).
+        /// A participant takes a re-key's UID only from the leader its digits name (<see cref="KeyUidLeaderRefusal"/>).
+        /// Consensus reads only the fixed first part.
+        /// </summary>
+        public static string LeaderDigits(string leaderAddress, long time)
+        {
+            var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes($"VFX-REKEY-UID|{leaderAddress}|{time}"));
+            return (BitConverter.ToUInt32(hash, 0) % 1_000_000).ToString("D6");
+        }
+
+        /// <summary>Why a participant refuses a re-key start under this UID from this leader: its digits are not the leader's.</summary>
+        public static string? KeyUidLeaderRefusal(string? keyUid, string? leaderAddress)
+        {
+            var uid = keyUid ?? "";
+            if (uid.IndexOf(':') != 32 || !long.TryParse(KeyUidTime(uid), out var time) || string.IsNullOrEmpty(leaderAddress)) return "the re-key's UID does not read as one";
+            return uid.EndsWith(LeaderDigits(leaderAddress, time), StringComparison.Ordinal) && uid.Length == 33 + time.ToString().Length + 6
+                ? null : "the re-key's UID was made by another leader";
         }
 
         /// <summary>The vault whose due key's successor a UID would be (its first part is that key's <see cref="NextKeyHex"/>); null when none.</summary>

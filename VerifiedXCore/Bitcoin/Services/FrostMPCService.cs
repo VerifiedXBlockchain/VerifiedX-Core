@@ -299,7 +299,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 run.Attempts = attempt;
                 var auth = preSignedAuths is { Count: > 0 } ? preSignedAuths[attempt - 1] : null;
                 var contractUid = attempt == 1 ? ceremonyId : (newContractUid?.Invoke() ?? FrostDkgAttestation.NewContractUid());
-                var sessionId = !string.IsNullOrEmpty(auth?.SessionId) ? auth!.SessionId : Guid.NewGuid().ToString();
+                var sessionId = !string.IsNullOrEmpty(auth?.SessionId) ? auth!.SessionId : FrostDkgLeaderAuth.NewSessionId(leaderAddress);
                 LogUtility.Log($"[FROST MPC] DKG attempt {attempt}/{attempts}. Ceremony: {ceremonyId}, Contract: {contractUid}, Session: {sessionId}, " +
                     $"Validators: {participants.Count}, Threshold: {threshold}%, PreSigned: {auth != null}", "FrostMPCService.CoordinateDKGCeremony");
 

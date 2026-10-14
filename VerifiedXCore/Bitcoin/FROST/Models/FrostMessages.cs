@@ -46,6 +46,32 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
 
         public static string StartMessage(string startBodyHash) => $"DKG-START|{startBodyHash}";
 
+        /// <summary>The tag a leader's session ids begin with: the first 16 hex digits of a hash of its address.</summary>
+        public static string LeaderTag(string? leaderAddress) => Sha256Hex("VFX-DKG-SESSION|" + (leaderAddress ?? "")).Substring(0, 16);
+
+        /// <summary>
+        /// A new session id for a ceremony this leader runs: its tag, a colon, a GUID. A session id was only a name: another
+        /// validator could open one under the leader's id at a participant first, with its own signed start, and the
+        /// leader's start was refused there, attempt after attempt (fourth review, round 7). A participant takes a tagged
+        /// id only from the leader it names (<see cref="SessionIdRefusal"/>).
+        /// </summary>
+        public static string NewSessionId(string leaderAddress) => $"{LeaderTag(leaderAddress)}:{Guid.NewGuid()}";
+
+        /// <summary>
+        /// Why a start's session id is refused: a tagged id names another leader, or a re-key's id is not tagged with its
+        /// leader. Untagged ids (a web wallet's pre-signed creations, older coordinators) are taken for creations.
+        /// </summary>
+        public static string? SessionIdRefusal(string? sessionId, string? leaderAddress, bool rekey)
+        {
+            var id = sessionId ?? "";
+            var tagged = id.Length > 17 && id[16] == ':' && id.Take(16).All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
+            if (tagged && !string.Equals(id.Substring(0, 16), LeaderTag(leaderAddress), StringComparison.Ordinal))
+                return "This session id belongs to another leader.";
+            if (rekey && !tagged)
+                return "A re-key's session id is tagged with its leader.";
+            return null;
+        }
+
         /// <summary>What the leader signs for a request body of one step ("ROUND2", "SHARES") of a session.</summary>
         public static string ContentMessage(string step, string sessionId, string body) => $"DKG-{step}|{sessionId}|{Sha256Hex(body ?? "")}";
     }
