@@ -228,6 +228,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
             // The new key's UID is one of its own: the ceremony ran under it and its holders file their shares under it.
             if (!LooksLikeContractUid(keyUid)) return "the new key's UID is not a UID";
             if (string.Equals(keyUid, rekey.ContractUID, StringComparison.Ordinal)) return "the new key's UID is the vault's own";
+            // The new key's UID is the one the chain fixed for it when the key fell due (its first 32 characters; the
+            // rest is when the ceremony ran, so a retry has its own). Nothing else can be created under it from that
+            // block on, so no contract (an NFT, an S3C vault made by a few validators in seconds) can take it first.
+            if (!keyUid.StartsWith(NextKeyHex(current) + ":", StringComparison.Ordinal))
+                return $"the new key's UID is not the one fixed for this vault's next key ({NextKeyHex(current)}:<time>)";
             // Another vault's UID or another key's is refused. Any other contract under the same UID is not: its holders
             // learn the UID when the ceremony starts, and minting an NFT under it first would otherwise block every
             // re-key (a key UID is looked up as a key before it is looked up as a contract, and no vault can ever be
@@ -286,6 +291,37 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (VBTCChainView.GetVault(vaultUid)?.Feature.IsS3C != false) return "an S3C vault's key is not replaced by the chain";
             if (requiredThresholdPercent != FrostDkgAttestation.RekeyThresholdPercent)
                 return $"a re-key's ceremony uses a threshold of {FrostDkgAttestation.RekeyThresholdPercent}%";
+            return null;
+        }
+
+        /// <summary>
+        /// The first part of the UID of a due key's successor, fixed by the chain when the key fell due: a hash of the
+        /// vault, the generation and the block it fell due. No contract can be created under it while the key is due
+        /// (<see cref="DueKeyClaiming"/>), and no proof can be made for it before it falls due.
+        /// </summary>
+        public static string NextKeyHex(VaultDepositScriptRow key) =>
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
+                $"VFX-VAULT-REKEY|{key.SmartContractUID}|{key.Generation + 1}|{key.RekeyDueSinceVfxHeight}")))[..32].ToLowerInvariant();
+
+        private static long _lastKeyUidTime;
+
+        /// <summary>A UID for a re-key ceremony of this due key: its fixed first part and a time, a new one for every attempt.</summary>
+        public static string NewKeyUid(VaultDepositScriptRow key)
+        {
+            long now = TimeUtil.GetTime(), last, next;
+            do { last = Interlocked.Read(ref _lastKeyUidTime); next = Math.Max(now, last + 1); }
+            while (Interlocked.CompareExchange(ref _lastKeyUidTime, next, last) != last);
+            return $"{NextKeyHex(key)}:{next}";
+        }
+
+        /// <summary>The vault whose due key's successor a UID would be (its first part is that key's <see cref="NextKeyHex"/>); null when none.</summary>
+        public static string? DueKeyClaiming(string? uid, LiteDatabase? db = null)
+        {
+            if (string.IsNullOrEmpty(uid) || uid.IndexOf(':') != 32) return null;
+            var hex = uid.Substring(0, 32).ToLowerInvariant();
+            foreach (var key in (db ?? BtcAttestStore.Db).GetCollection<VaultDepositScriptRow>(BtcAttestStore.Scripts)
+                         .Find(x => x.RetiredAtVfxHeight == 0 && x.RekeyDueSinceVfxHeight > 0))
+                if (NextKeyHex(key) == hex) return key.SmartContractUID;
             return null;
         }
 

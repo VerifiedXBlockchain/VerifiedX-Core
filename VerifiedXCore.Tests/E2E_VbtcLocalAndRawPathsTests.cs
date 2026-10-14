@@ -378,7 +378,7 @@ namespace VerifiedXCore.Tests
             Assert.True(BtcAttestStore.ScriptRowForVault(ceremony)!.RekeyDueSinceVfxHeight > 0);
 
             // The validators of the day make the new key; the re-key goes through the mempool like any report.
-            var keyUid = FrostDkgAttestation.NewContractUid();
+            var keyUid = BtcVaultKeys.NewKeyUid(BtcAttestStore.ScriptRowForVault(ceremony)!); // the UID the chain fixed for it
             var groupKey = Convert.ToHexString(new Key().PubKey.ToBytes()[1..]).ToLowerInvariant();
             var newAddress = FrostDkgAttestation.DeriveTaprootAddress(groupKey, FrostDkgAttestation.ConsensusNetwork)!;
             var participants = FrostDkgAttestation.Canonical(stillHere.Select(s => s.Address));

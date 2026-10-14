@@ -252,7 +252,8 @@ namespace VerifiedXCore.Bitcoin.Services
             Action<int, int>? progressCallback = null,
             IReadOnlyList<PreSignedLeaderAuth>? preSignedAuths = null,
             Func<int, string?>? participantShortfall = null,
-            string? rekeyOf = null)
+            string? rekeyOf = null,
+            Func<string>? newContractUid = null)
         {
             var run = new FrostDkgRun();
             var leaderAddress = ownerAddress;
@@ -297,7 +298,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 run.Attempts = attempt;
                 var auth = preSignedAuths is { Count: > 0 } ? preSignedAuths[attempt - 1] : null;
-                var contractUid = attempt == 1 ? ceremonyId : FrostDkgAttestation.NewContractUid();
+                var contractUid = attempt == 1 ? ceremonyId : (newContractUid?.Invoke() ?? FrostDkgAttestation.NewContractUid());
                 var sessionId = !string.IsNullOrEmpty(auth?.SessionId) ? auth!.SessionId : Guid.NewGuid().ToString();
                 LogUtility.Log($"[FROST MPC] DKG attempt {attempt}/{attempts}. Ceremony: {ceremonyId}, Contract: {contractUid}, Session: {sessionId}, " +
                     $"Validators: {participants.Count}, Threshold: {threshold}%, PreSigned: {auth != null}", "FrostMPCService.CoordinateDKGCeremony");

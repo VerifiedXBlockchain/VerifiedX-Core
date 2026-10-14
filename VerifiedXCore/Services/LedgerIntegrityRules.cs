@@ -286,6 +286,10 @@ namespace VerifiedXCore.Services
             var uid = CreatedContractUid(tx);
             if (uid == null) return null;
             if (VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.ScriptRowForVault(uid) != null) return VaultCreatedBefore;
+            // Nor under the UID the chain fixed for a due key's successor (plan 8.8): an S3C vault made in seconds by a
+            // few validators under it blocked the re-key, attempt after attempt (fourth review, round 3).
+            if (VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.Db != null && VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.DueKeyClaiming(uid) is { } dueVault)
+                return $"This UID is the one fixed for vault {dueVault}'s next key; no contract is created under it.";
             // Nor under the UID of a vault's later key (plan 8.8): its holders file that key's shares under it.
             return VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.Db?.GetCollection<VerifiedXCore.Bitcoin.Attestation.VaultDepositScriptRow>(VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.Scripts)
                        .Exists(x => x.KeyUID == uid) == true

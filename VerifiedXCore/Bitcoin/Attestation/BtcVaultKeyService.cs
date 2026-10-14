@@ -111,9 +111,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (shortfall != null) return (false, shortfall);
 
             // Every re-key's key signs with the same share of its holders; the ceremony names the vault it is for.
-            var run = await FrostMPCService.CoordinateDKGCeremony(FrostDkgAttestation.NewContractUid(), me, reachable, FrostDkgAttestation.RekeyThresholdPercent,
+            // The new key's UID begins with what the chain fixed for it (BtcVaultKeys.NextKeyHex); every attempt has its own.
+            var run = await FrostMPCService.CoordinateDKGCeremony(BtcVaultKeys.NewKeyUid(key), me, reachable, FrostDkgAttestation.RekeyThresholdPercent,
                 participantShortfall: n => FrostDkgAttestation.PreCeremonyShortfall(n, false, all.Count, FrostDkgAttestation.RekeyParticipationShare),
-                rekeyOf: vaultUid);
+                rekeyOf: vaultUid, newContractUid: () => BtcVaultKeys.NewKeyUid(key));
             var result = run.Result;
             if (result == null || string.IsNullOrEmpty(run.ContractUID)) return (false, run.Error ?? "the key ceremony did not complete");
             var resultError = FrostDkgAttestation.CeremonyResultError(run.ContractUID!, result.GroupPublicKey, result.TaprootAddress, result.DKGProof, result.ParticipantAddresses, false, me, rekeyOf: vaultUid);
