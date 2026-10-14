@@ -54,6 +54,62 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// Lists every mined transaction carrying a contract body that LedgerIntegrityRules.ContractBodyAllowed refuses from
+        /// Globals.PathAuditRulesHeight (a call to send or createSig): such a contract's later transfers and evolves carry
+        /// the same body and would be refused too. Block database opened READ-ONLY in place; inert unless
+        /// PROCESSBOUND_SCAN_DB names the database folder. Writes processbound-scan.txt to FUNDLOSS_SCAN_OUT.
+        /// </summary>
+        [Fact]
+        public void ProcessBoundBuiltinsScan()
+        {
+            var dbDir = Environment.GetEnvironmentVariable("PROCESSBOUND_SCAN_DB");
+            if (string.IsNullOrWhiteSpace(dbDir)) return;
+            var outDir = Environment.GetEnvironmentVariable("FUNDLOSS_SCAN_OUT");
+            if (string.IsNullOrWhiteSpace(outDir)) outDir = dbDir;
+            Directory.CreateDirectory(outDir);
+            var dbPath = Path.Combine(dbDir, DbContext.RSRV_DB_NAME);
+            Assert.True(File.Exists(dbPath), $"Block database not found: {dbPath}");
+
+            var mapper = new BsonMapper(null, LegacyTypeNameBinder.Instance);
+            mapper.RegisterType<DateTime>(
+                value => value.ToString("o", CultureInfo.InvariantCulture),
+                bson => DateTime.ParseExact(bson, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+            mapper.RegisterType<DateTimeOffset>(
+                value => value.ToString("o", CultureInfo.InvariantCulture),
+                bson => DateTimeOffset.ParseExact(bson, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+            // Not disposed: a read-only database with a write-ahead log would try to checkpoint it on dispose (and fail).
+            var db = new LiteDatabase(new ConnectionString { Filename = dbPath, Connection = ConnectionType.Direct, ReadOnly = true }, mapper);
+            var blocks = db.GetCollection<Block>(DbContext.RSRV_BLOCKS);
+
+            var network = dbDir.Contains("TestNet", StringComparison.OrdinalIgnoreCase) ? "testnet" : "mainnet";
+            var reportPath = Path.Combine(outDir, $"processbound-scan-{network}.txt");
+            var lines = new System.Collections.Generic.List<string>();
+            long scanned = 0, withBody = 0, lastHeight = -1;
+            string? stopped = null;
+            try
+            {
+            foreach (var block in blocks.Query().OrderBy(b => b.Height).ToEnumerable())
+            {
+                lastHeight = block.Height;
+                if (++scanned % 500_000 == 0)
+                    File.WriteAllText(reportPath + ".progress", $"{DateTime.UtcNow:O} height {block.Height}, {withBody} bodies, {lines.Count} hits{Environment.NewLine}");
+                foreach (var tx in block.Transactions ?? new System.Collections.Generic.List<Transaction>())
+                {
+                    if (tx?.Data == null || !tx.Data.Contains("\"Data\"")) continue;
+                    withBody++;
+                    if (LedgerIntegrityRules.ContractBodyAllowed(tx, 0) != null) continue; // refused before already (NEW-29)
+                    var reason = LedgerIntegrityRules.ContractBodyAllowed(tx, long.MaxValue);
+                    if (reason != null) lines.Add($"{block.Height} {tx.Hash} {tx.TransactionType} {reason}");
+                }
+            }
+            }
+            catch (Exception ex) { stopped = ex.ToString(); }
+            if (stopped != null) lines.Insert(0, $"STOPPED after height {lastHeight}: {stopped}");
+            lines.Insert(0, $"{network}: {scanned} blocks to height {lastHeight}, {withBody} transactions carrying a Data field, {lines.Count} refused only by the process-bound built-ins rule");
+            File.WriteAllLines(reportPath, lines);
+        }
+
+        /// <summary>
         /// Runs the production privacy-store rebuild (PrivacyDbRebuildService) over a real block database opened
         /// read-only into a scratch DB_Privacy, and writes the resulting pool rows next to the scan report, so the
         /// figure every node will hold after the one-time startup rebuild can be compared with the scan's

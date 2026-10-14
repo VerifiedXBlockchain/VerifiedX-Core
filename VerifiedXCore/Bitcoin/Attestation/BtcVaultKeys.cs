@@ -57,14 +57,15 @@ namespace VerifiedXCore.Bitcoin.Attestation
     /// fixed on its coins can be neither paid nor given up, and the Bitcoin is gone for good. So a vault is moved to a
     /// new key before that, while its old key still signs:
     /// <list type="number">
-    /// <item><b>Health.</b> At the start of every epoch each vault key is looked at: of its holders, how many are
-    /// active validators whose stake is bonded with no exit. When half of the holders it can spare above its
-    /// threshold are gone, the key is due for replacement (<see cref="CheckHealth"/>). The rule reads the chain
-    /// only.</item>
+    /// <item><b>Health.</b> Every <see cref="HealthCheckBlocks"/> blocks (and at each epoch start) each vault key is
+    /// looked at: of its holders, how many are active validators whose stake is bonded with no exit. When half of the
+    /// holders it can spare above its threshold are gone, the key is due for replacement, and stays due until it is
+    /// replaced (<see cref="CheckHealth"/>). The rule reads the chain only.</item>
     /// <item><b>Re-key.</b> While a key is due, a key ceremony among the validators of the day makes a new one, under
-    /// a new UID of its own, by exactly the rule a vault's creation follows (the same participants, nearly all
-    /// eligible validators, each attesting). Anyone may lead it and submit the result; validators do so on their own,
-    /// in turns (<see cref="BtcVaultKeyService"/>). The new key becomes the vault's current key.</item>
+    /// a new UID of its own: the participants are eligible validators as for a creation, at least 67% of them take
+    /// part, the key signs with 67% of its holders, and every attestation names the vault. Anyone may lead it and
+    /// submit the result; validators do so on their own, in turns (<see cref="BtcVaultKeyService"/>). The new key
+    /// becomes the vault's current key.</item>
     /// <item><b>Sweep.</b> The old key's coins are sent to the new key by transactions fixed by rule, signed by the
     /// old key's holders like any withdrawal (BtcWithdrawals.Sweeps.cs).</item>
     /// </list>
@@ -149,7 +150,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         }
 
         /// <summary>
-        /// At the start of every epoch: how many holders of each vault's current key still count, and whether the key is
+        /// Every <see cref="HealthCheckBlocks"/> blocks: how many holders of each vault's current key still count, and whether the key is
         /// due for replacement. The registry and the bonds read committed blocks and state only, so every node writes the
         /// same. A row is written only when what it says changes.
         /// </summary>
