@@ -1117,7 +1117,7 @@ namespace VerifiedXCore.Data
         public static SmartContractStateTrei GetSpecificSmartContractStateTrei(string scUID)
         {
             var scTrei = DbContext.DB_SmartContractStateTrei.GetCollection<SmartContractStateTrei>(DbContext.RSRV_SCSTATE_TREI);
-            var account = scTrei.FindOne(x => x.SmartContractUID == scUID);
+            var account = scTrei.Find(x => x.SmartContractUID == scUID).OrderBy(x => x.Id).FirstOrDefault(); // the oldest, as before the index (round 8)
             if (account == null)
             {
                 return null;

@@ -739,6 +739,23 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// Contract state is looked up through an index on its UID. Should a UID ever be stored twice, the lookup takes the
+        /// oldest document, as the scan before the index did; through a non-unique index the first match depends on the
+        /// index's random levels, which differ between nodes (fourth review, round 8).
+        /// </summary>
+        [Fact]
+        public async Task AUidStoredTwice_ReadsAsItsOldestDocument_OnEveryNode()
+        {
+            await Start();
+            var uid = FrostDkgAttestation.NewContractUid();
+            var scs = SmartContractStateTrei.GetSCST();
+            scs.Insert(new SmartContractStateTrei { SmartContractUID = uid, OwnerAddress = "xFirst" });
+            for (var i = 0; i < 40; i++) scs.Insert(new SmartContractStateTrei { SmartContractUID = uid, OwnerAddress = "xLater" + i });
+            Assert.Equal("xFirst", SmartContractStateTrei.GetSmartContractState(uid)!.OwnerAddress);
+            Assert.Equal("xFirst", StateData.GetSpecificSmartContractStateTrei(uid).OwnerAddress);
+        }
+
+        /// <summary>
         /// Refunds are credits nobody can refuse, and the count was of balances: a requester who escrowed everything left
         /// it, a new holder took the place, and the refund put the requester back above the limit; enough at once took the
         /// vault's document past LiteDB's limit and froze it (fourth review, round 6). An address stays on the ledger, at

@@ -232,7 +232,7 @@ namespace VerifiedXCore.Data
             scTrei.EnsureIndexSafe(x => x.LastModifiedHeight, false); //snapshot diff-copy queries
             // Every contract lookup is by its UID: without an index each one read every contract's document, a watched
             // vault's ledger (up to about 10 MB) among them (fourth review, round 7). Not unique: older states may hold a
-            // UID twice, and lookups have always taken the first.
+            // UID twice; lookups take the oldest (lowest Id), as the scan did.
             scTrei.EnsureIndexSafe(x => x.SmartContractUID, false);
 
             //var peers = DbContext.DB_Peers.GetCollection<Peers>(DbContext.RSRV_PEERS);

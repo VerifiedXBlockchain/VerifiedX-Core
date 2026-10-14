@@ -43,7 +43,9 @@ namespace VerifiedXCore.Models
             var scs = GetSCST();
             if (scs != null)
             {
-                var sc = scs.FindOne(x => x.SmartContractUID == smartContractUID);
+                // The oldest document of a UID, as the scan before the UID index read it: through a non-unique index the
+                // first match depends on the index's random levels, which differ between nodes (fourth review, round 8).
+                var sc = scs.Find(x => x.SmartContractUID == smartContractUID).OrderBy(x => x.Id).FirstOrDefault();
                 if (sc != null)
                 {
                     return sc;
