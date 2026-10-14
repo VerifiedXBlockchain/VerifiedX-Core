@@ -286,6 +286,33 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A signing start is authorized by the "{session}.{leader}.{timestamp}" signature a key ceremony's start and share
+        /// batch also carry: a ceremony's participant could start signing under its leader's name (fifth review, round 16).
+        /// A signing start under a key ceremony's (leader-tagged) id is refused; signing ids are untagged.
+        /// </summary>
+        [Fact]
+        public async Task ASigningStart_UnderAKeyCeremonysSessionId_IsRefused()
+        {
+            using var server = new TestServer(new WebHostBuilder().UseStartup<FrostStartup>());
+            var client = server.CreateClient();
+            var leader = new EllipticCurve.PrivateKey("secp256k1");
+            var pub = "04" + Convert.ToHexString(leader.publicKey().toString()).ToLowerInvariant();
+            var address = VerifiedXCore.Data.AccountData.GetHumanAddress(pub);
+            var ceremonyId = FrostDkgLeaderAuth.NewSessionId(address);
+            Assert.True(FrostDkgLeaderAuth.IsTagged(ceremonyId));
+            Assert.False(FrostDkgLeaderAuth.IsTagged(Guid.NewGuid().ToString()));
+            Assert.False(FrostDkgLeaderAuth.IsTagged(Guid.NewGuid() + ":i1"));
+            var body = JsonConvert.SerializeObject(new
+            {
+                SessionId = ceremonyId, LeaderAddress = address, Timestamp = _now, SignerAddresses = new[] { "xV1", "xV2" },
+                LeaderSignature = VerifiedXCore.Services.SignatureService.CreateSignature($"{ceremonyId}.{address}.{_now}", leader, pub),
+            });
+            var response = await client.PostAsync("/frost/sign/start", new StringContent(body, Encoding.UTF8, "application/json"));
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Contains("not a signing session", await response.Content.ReadAsStringAsync());
+        }
+
+        /// <summary>
         /// The leader's signature on a share batch did not say whom it was for: a participant replayed its own batch to
         /// another, which reported every dealer (to the replayer, so nothing was settled) and refused the leader's real
         /// batch, and was dropped (fifth review, round 15). A batch for another validator, or with no share for this one,

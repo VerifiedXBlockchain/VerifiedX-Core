@@ -2325,6 +2325,17 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // A signing start is authorized by the same "{session}.{leader}.{timestamp}" signature a key
+                            // ceremony's start and share batch carry: every participant of a leader's ceremony could start
+                            // signing under that leader's name (fifth review, round 16). Key ceremonies' ids carry the
+                            // leader's tag; signing ids never do.
+                            if (FrostDkgLeaderAuth.IsTagged(request.SessionId))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "A key ceremony's session id is not a signing session's." }));
+                                return;
+                            }
+
                             if (request.SignerAddresses == null || request.SignerAddresses.Count == 0 
                                 || request.SignerAddresses.Count > FrostSessionStorage.MAX_PARTICIPANTS)
                             {

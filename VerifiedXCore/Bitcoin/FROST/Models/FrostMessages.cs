@@ -57,6 +57,10 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// </summary>
         public static string NewSessionId(string leaderAddress) => $"{LeaderTag(leaderAddress)}:{Guid.NewGuid()}";
 
+        /// <summary>Whether a session id has a leader's tag (16 hex digits and a colon): only key ceremonies' ids do.</summary>
+        public static bool IsTagged(string? sessionId) =>
+            sessionId != null && sessionId.Length > 17 && sessionId[16] == ':' && sessionId.Take(16).All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
+
         /// <summary>
         /// Why a start's session id is refused: a tagged id names another leader, or comes without the leader's signature
         /// over the whole start (every tagged id is made on the leader's own node, which always signs: an unsigned copy
@@ -67,7 +71,7 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public static string? SessionIdRefusal(string? sessionId, string? leaderAddress, bool rekey, bool bodySigned)
         {
             var id = sessionId ?? "";
-            var tagged = id.Length > 17 && id[16] == ':' && id.Take(16).All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
+            var tagged = IsTagged(id);
             if (tagged && !string.Equals(id.Substring(0, 16), LeaderTag(leaderAddress), StringComparison.Ordinal))
                 return "This session id belongs to another leader.";
             if (tagged && !bodySigned)
