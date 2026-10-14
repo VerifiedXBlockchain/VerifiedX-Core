@@ -237,7 +237,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var plan = Planner.Plan(view, tip);
             if (Globals.TreisUpdating || (Globals.LastBlock?.Height ?? 0) != tip)
             {
-                Planner.Reset();
+                // Only this plan is dropped. The planner's memo (blocks found empty, and how far the backfill sweep has
+                // gone) is kept: each entry is keyed on the state stamps read when the plan began, so a block applied
+                // meanwhile makes the entries it affects stale and they are done again. Forgetting it on every new VFX
+                // block meant a plan longer than a block's time (a validator catching up on Bitcoin) never finished,
+                // on any validator (fourth review).
                 return;
             }
             status.Waiting = plan.Waiting;
