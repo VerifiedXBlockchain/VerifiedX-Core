@@ -205,7 +205,8 @@ namespace VerifiedXCore.Tests
             var network = dbDir.Contains("TestNet", StringComparison.OrdinalIgnoreCase) ? "testnet" : "mainnet";
             var changes = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<(long Height, string Hash, string Function, long Unlock)>>(StringComparer.Ordinal);
             var blockTimes = new System.Collections.Generic.List<(long Height, long Time)>();
-            long scanned = 0, lastHeight = -1, reserveTxs = 0;
+            long scanned = 0, lastHeight = -1, reserveTxs = 0, longestUidHeight = -1;
+            var longestUid = "";
             string? stopped = null;
             try
             {
@@ -216,6 +217,8 @@ namespace VerifiedXCore.Tests
                     blockTimes.Add((block.Height, block.Timestamp));
                     foreach (var tx in block.Transactions ?? new System.Collections.Generic.List<Transaction>())
                     {
+                        var created = tx?.Data == null ? null : LedgerIntegrityRules.CreatedContractUid(tx);
+                        if (created != null && created.Length > longestUid.Length) { longestUid = created; longestUidHeight = block.Height; }
                         if (tx?.FromAddress == null || !tx.FromAddress.StartsWith("xRBX", StringComparison.Ordinal) || tx.TransactionType == TransactionType.RESERVE) continue;
                         reserveTxs++;
                         var (function, uid) = LedgerIntegrityRules.DispatchedCall(tx.Data);
@@ -248,6 +251,9 @@ namespace VerifiedXCore.Tests
             }
             if (stopped != null) lines.Insert(0, $"STOPPED after height {lastHeight}: {stopped}");
             lines.Insert(0, $"{network}: {scanned} blocks to height {lastHeight}, {reserveTxs} reserve transactions, {changes.Count} contracts with a delayed owner change, {contractsWithMany} with more than one, {sameBatch} pairs falling due together");
+            // The longest contract UID created in history: LiteDB refuses an index key over 1,023 bytes, and contract state is
+            // now indexed by its UID (round 7); such a contract would be missing on a node with the index (round 9).
+            lines.Insert(1, $"longest created contract UID: {longestUid.Length} characters ({longestUid}) at block {longestUidHeight}");
             File.WriteAllLines(Path.Combine(outDir, $"reserve-order-scan-{network}.txt"), lines);
         }
 
