@@ -139,7 +139,7 @@ namespace VerifiedXCore.Tests
             // Stopping at range + depth, as on mainnet, is short here; one past the burying header is one too many.
             foreach (var through in new[] { quietThrough + BtcAttestRules.Depth, buriedAt - 1, buriedAt + 1 })
             {
-                var (ok, why) = await Verify(Signed(BtcBlockScanner.BuildQuiet(_btc.HeaderHexes(First, through), 0)), H1 + 1);
+                var (ok, why) = await Verify(Signed(BtcBlockScanner.BuildQuiet(_btc.HeaderHexes(First, through), 0, _btc.Header(quietThrough).Hash)), H1 + 1);
                 Assert.False(ok);
                 Assert.Contains("no more and no fewer", why);
             }

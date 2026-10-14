@@ -73,9 +73,11 @@ namespace VerifiedXCore.Tests
 
         private static string Stripped(string fullHex) => BtcTxInclusion.ToStrippedHex(Transaction.Parse(fullHex, Network.Main));
 
+        private string HashAt(long height) => BtcHeader.TryParse(_headers[height], out var header) ? header!.Hash : throw new InvalidOperationException($"no header {height}");
+
         private BtcReport ReportOf(Proven p, long headersFrom, long headersTo) => new()
         {
-            BlockHeight = p.BlockHeight, Headers = Headers(headersFrom, headersTo),
+            BlockHeight = p.BlockHeight, BlockHash = HashAt(p.BlockHeight), Headers = Headers(headersFrom, headersTo),
             CoinbaseTxHex = Stripped(p.CoinbaseHex), CoinbaseBranch = p.CoinbaseBranch,
             Events = { new BtcReportEvent { Position = p.Position, TxHex = Stripped(p.TxHex), Branch = p.Branch } },
         };
@@ -159,8 +161,10 @@ namespace VerifiedXCore.Tests
             await Bad(r => r.Headers[3] = r.Headers[3].Substring(0, 152) + "00000000", "does not meet its own proof-of-work target");
             // An easier target, claimed by the header itself.
             await Bad(r => r.Headers[0] = r.Headers[0].Substring(0, 144) + "ffff7f20" + r.Headers[0].Substring(152), "the rules require");
-            // The deposit's proof under another block's height.
-            await Bad(r => r.BlockHeight = depositAt - 1, "coinbase proof");
+            // The deposit's proof under another block's height: the report no longer names its block; and named as that
+            // other block, the proof is no proof.
+            await Bad(r => r.BlockHeight = depositAt - 1, "names that block's hash");
+            await Bad(r => { r.BlockHeight = depositAt - 1; r.BlockHash = HashAt(depositAt - 1); }, "coinbase proof");
             // The transaction with its witness data left in is not the form a proof is made of.
             await Bad(r => r.Events[0].TxHex = _flow.Deposit.TxHex, "event at position");
             // The withdrawal presented before the deposit it spends is known: it only shows its change.

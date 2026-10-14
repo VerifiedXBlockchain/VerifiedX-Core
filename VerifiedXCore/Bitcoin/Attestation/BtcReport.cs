@@ -164,6 +164,17 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// taken back. Part of what is signed, so a signature for one can never serve as a signature for the other.
         /// </summary>
         [JsonProperty(Order = 16)] public bool? Rewind { get; set; }
+        /// <summary>
+        /// The hash of the Bitcoin block the report is about; on a quiet report, of the last block of its range.
+        /// Absent on a header replacement and on a rewind, which are about headers they carry. Part of what is signed.
+        ///
+        /// Without it two kinds of report said nothing that tied them to one block: a last part that only closes a
+        /// block (no events, no headers), and a quiet report whose range the attested headers already bury (no
+        /// headers). Their signed text was the same for any block at that height, or for any range, so a signed one
+        /// could be sent again while its epoch lasted: to close another block of the same height before its events
+        /// were reported, or to pass over the next day of blocks unread (third pass, 14 October 2026).
+        /// </summary>
+        [JsonProperty(Order = 17)] public string? BlockHash { get; set; }
 
         /// <summary>Whether any field of a coinbase proof is present, in either form.</summary>
         [JsonIgnore] public bool CarriesCoinbaseProof =>

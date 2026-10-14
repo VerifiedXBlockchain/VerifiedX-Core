@@ -443,7 +443,7 @@ namespace VerifiedXCore.Tests
             // A block carries one report or one rewind, not both.
             var state = new BtcAttestBlockRules.State();
             Assert.True(BtcAttestBlockRules.TryRegister(good, state).Ok);
-            var also = Signed(BtcBlockScanner.BuildQuiet(new List<string>(), 0));
+            var also = Signed(BtcBlockScanner.BuildQuiet(new List<string>(), 0, _btc.Header(_btc.Tip).Hash));
             Assert.Equal(BtcAttestBlockRules.OneReportReason, BtcAttestBlockRules.TryRegister(also, state).Reason);
 
             // The good one is accepted, once: afterwards there is nothing left for it to take back.

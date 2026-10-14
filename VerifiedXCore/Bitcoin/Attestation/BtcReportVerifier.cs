@@ -94,7 +94,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             {
                 // A reorganisation of headers whose blocks have had no events reported: nothing but headers changes.
                 if (report.BlockHeight != 0 || !forward || report.Events.Count != 0 || report.Part != 1 || !report.Final
-                    || report.CarriesCoinbaseProof)
+                    || report.CarriesCoinbaseProof || report.BlockHash != null)
                     return BtcReportOutcome.Fail("a header replacement carries headers only");
                 if (meta.PendingNextPart != 0) return BtcReportOutcome.Fail("a header replacement cannot interrupt a multi-part report");
                 if (report.ReplaceAbove < meta.EventsThroughHeight || report.ReplaceAbove < meta.CheckpointHeight)
@@ -148,6 +148,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 var exact = rules.BuriedAt(quietThrough, meta.TipHeight, BtcAttestRules.Depth, Lookup) != null
                     ? report.Headers.Count == 0
                     : rules.BuriedAt(quietThrough, newTip, BtcAttestRules.Depth, Lookup) == newTip;
+                // It names the last block of its range, so that it is a statement about those blocks and no others.
+                if (report.BlockHash == null || !string.Equals(Lookup(quietThrough)?.Hash, report.BlockHash, StringComparison.Ordinal))
+                    return BtcReportOutcome.Fail($"a quiet report names the hash of the last block of its range (block {quietThrough})");
                 if (!exact)
                     return BtcReportOutcome.Fail($"a quiet report covers blocks {meta.EventsThroughHeight + 1} to {quietThrough} and carries the headers through the one that buries them ({BtcAttestRules.Depth} of full difficulty), no more and no fewer");
                 return new BtcReportOutcome { ReportHash = hash, NewHeaders = newHeaders, NewTipHeight = newTip, NewTipHash = newTipHash, QuietThroughHeight = quietThrough };
@@ -192,6 +195,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
             var blockHeader = Lookup(block);
             if (blockHeader == null) return BtcReportOutcome.Fail($"the header of block {block} is not attested");
+            if (!string.Equals(blockHeader.Hash, report.BlockHash, StringComparison.Ordinal))
+                return BtcReportOutcome.Fail($"a report about a block names that block's hash (block {block} is {blockHeader.Hash})");
 
             // The coinbase proof fixes the depth of the block's tree for every event: the coinbase itself, or, when a
             // miner made it too large to carry, its last block and its length. A part with no events (one that only
@@ -265,7 +270,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (report.V != 1) return BtcReportOutcome.Fail("unknown rewind version");
             if (report.Rewind != true) return BtcReportOutcome.Fail("a rewind says that it is one");
             if (report.Scope != BtcReport.ScopeAll || report.BlockHeight != 0 || report.Events.Count != 0 || report.Part != 1 || !report.Final
-                || report.CarriesCoinbaseProof)
+                || report.CarriesCoinbaseProof || report.BlockHash != null)
                 return BtcReportOutcome.Fail("a rewind carries a height and headers only");
             if (report.Headers.Count == 0) return BtcReportOutcome.Fail("a rewind carries the replacing headers");
             if (report.Headers.Count > BtcAttestRules.MaxHeaders) return BtcReportOutcome.Fail($"a rewind carries at most {BtcAttestRules.MaxHeaders} headers");

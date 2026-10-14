@@ -251,7 +251,7 @@ namespace VerifiedXCore.Tests
             // Reported anyway, by hand: refused, the transaction touches no watched vault.
             var forced = new BtcReport
             {
-                BlockHeight = at, Headers = _btc.HeaderHexes(First, _btc.Tip),
+                BlockHeight = at, BlockHash = _btc.Header(at).Hash, Headers = _btc.HeaderHexes(First, _btc.Tip),
                 CoinbaseTxHex = BtcTxInclusion.ToStrippedHex(_btc.Block(at).Transactions[0]), CoinbaseBranch = EventFor(_btc.Block(at), 0).Branch,
                 Events = { EventFor(_btc.Block(at), 1) },
             };
@@ -580,6 +580,60 @@ namespace VerifiedXCore.Tests
 
         // ── Headers only, and replacing headers ─────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// A quiet report whose range the attested headers already bury carries no headers. It used to carry nothing
+        /// else either, so its signed text was the same for every range of its epoch: sent again, it passed over the
+        /// next day of blocks unread, and a deposit in them was never credited (a spend never recorded).
+        /// </summary>
+        [Fact]
+        public async Task AQuietReport_IsAboutItsOwnRange_AndCannotBeSentAgainForTheNext()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var height = H1 + 2;
+            var q1 = Checkpoint + BtcAttestRules.QuietBlocks;
+            var q2 = q1 + BtcAttestRules.QuietBlocks;
+            var q3 = q2 + BtcAttestRules.QuietBlocks;
+
+            _btc.MineEmpty(BtcAttestRules.QuietBlocks + BtcAttestRules.Depth);
+            var first = Signed(BtcBlockScanner.BuildQuiet(_btc.HeaderHexes(First, q1 + BtcAttestRules.Depth), 0, _btc.Header(q1).Hash));
+            await Accepted(first, height);
+            await Apply(height++, first);
+
+            // The attested headers run far ahead of the reported blocks (here by a replacement of the last header
+            // with a long heavier branch; a deep reorganisation does the same).
+            var branch = _btc.ForkAfter(Meta.TipHeight - 1);
+            branch.MineEmpty(BtcAttestRules.QuietBlocks - BtcAttestRules.Depth + 2);
+            var deposit = Pay(vault.Script, 70_000);
+            var at = branch.Mine(deposit);                      // a deposit in the third day
+            Assert.True(at > q2 && at <= q3);
+            branch.MineEmpty(2 * BtcAttestRules.QuietBlocks);
+            var replaceAbove = Meta.TipHeight - 1;
+            var replacement = Signed(BtcBlockScanner.BuildHeaderReplacement(replaceAbove, branch.HeaderHexes(replaceAbove + 1, q3 + BtcAttestRules.Depth + 2), 0));
+            await Accepted(replacement, height);
+            await Apply(height++, replacement);
+            Assert.True(Meta.TipHeight >= q3 + BtcAttestRules.Depth);
+
+            // The second day is quiet and already buried: its report carries no headers.
+            var second = BtcBlockScanner.BuildQuiet(new List<string>(), 0, branch.Header(q2).Hash);
+            var secondTx = Signed(second);
+            await Accepted(secondTx, height);
+            await Apply(height++, secondTx);
+            Assert.Equal(q2, Meta.EventsThroughHeight);
+
+            // The same signed report in a new transaction, for the third day, which holds the deposit.
+            var again = BtcAttestTxValidator.Create(TransactionType.VBTC_V2_BTC_REPORT, secondTx.Data, VerifiedXCore.Utilities.TimeUtil.GetTime() + 1);
+            Assert.NotEqual(secondTx.Hash, again.Hash);
+            await Refused(again, height, "names the hash of the last block of its range");
+            Assert.Equal(q2, Meta.EventsThroughHeight);
+
+            // The deposit is reported as it should be.
+            var report = Signed(Assert.Single(BtcBlockScanner.BuildForward(branch.Block(at), at, new List<string>(), 0)));
+            await Accepted(report, height);
+            await Apply(height++, report);
+            Assert.Equal(70_000, BtcAttestStore.Total(vault.Uid).HeldSats);
+        }
+
         [Fact]
         public async Task ADayWithNoVaultEvent_IsOneQuietReport_OverAFixedRange()
         {
@@ -597,15 +651,19 @@ namespace VerifiedXCore.Tests
             Assert.Equal(buriedAt - 1, _btc.Tip); // the day is not buried yet
 
             // The range and the headers are fixed by state: not fewer, not more, and never with an event.
-            await Refused(Signed(BtcBlockScanner.BuildQuiet(_btc.HeaderHexes(First, _btc.Tip), 0)), h, "no more and no fewer");
+            var last = _btc.Header(quietThrough).Hash;
+            await Refused(Signed(BtcBlockScanner.BuildQuiet(_btc.HeaderHexes(First, _btc.Tip), 0, last)), h, "no more and no fewer");
             _btc.MineEmpty(2);
-            await Refused(Signed(BtcBlockScanner.BuildQuiet(_btc.HeaderHexes(First, buriedAt + 1), 0)), h, "no more and no fewer");
-            await Refused(Signed(BtcBlockScanner.BuildQuiet(_btc.HeaderHexes(First, buriedAt - 1), 0)), h, "no more and no fewer");
-            var withEvent = BtcBlockScanner.BuildQuiet(_btc.HeaderHexes(First, buriedAt), 0);
+            await Refused(Signed(BtcBlockScanner.BuildQuiet(_btc.HeaderHexes(First, buriedAt + 1), 0, last)), h, "no more and no fewer");
+            await Refused(Signed(BtcBlockScanner.BuildQuiet(_btc.HeaderHexes(First, buriedAt - 1), 0, last)), h, "no more and no fewer");
+            var withEvent = BtcBlockScanner.BuildQuiet(_btc.HeaderHexes(First, buriedAt), 0, last);
             withEvent.Events.Add(EventFor(_btc.Block(at), 1));
             await Refused(Signed(withEvent), h, "carries headers only");
+            // It names the last block of its range: not another block, and not nothing.
+            await Refused(Signed(BtcBlockScanner.BuildQuiet(_btc.HeaderHexes(First, buriedAt), 0, _btc.Header(quietThrough - 1).Hash)), h, "names the hash of the last block of its range");
+            await Refused(Signed(BtcBlockScanner.BuildQuiet(_btc.HeaderHexes(First, buriedAt), 0, null!)), h, "names the hash of the last block of its range");
 
-            var quiet = Signed(BtcBlockScanner.BuildQuiet(_btc.HeaderHexes(First, buriedAt), 0));
+            var quiet = Signed(BtcBlockScanner.BuildQuiet(_btc.HeaderHexes(First, buriedAt), 0, last));
             await Accepted(quiet, h);
             await Apply(h, quiet);
             Assert.Equal(buriedAt, Meta.TipHeight);
@@ -624,7 +682,7 @@ namespace VerifiedXCore.Tests
 
             // The next quiet day starts from there; headers already attested are not carried again.
             _btc.MineEmpty(BtcAttestRules.QuietBlocks);
-            var next = Signed(BtcBlockScanner.BuildQuiet(_btc.HeaderHexes(Meta.TipHeight + 1, at + BtcAttestRules.QuietBlocks + BtcAttestRules.Depth), 0));
+            var next = Signed(BtcBlockScanner.BuildQuiet(_btc.HeaderHexes(Meta.TipHeight + 1, at + BtcAttestRules.QuietBlocks + BtcAttestRules.Depth), 0, _btc.Header(at + BtcAttestRules.QuietBlocks).Hash));
             await Accepted(next, h + 2);
             await Apply(h + 2, next);
             Assert.Equal(at + BtcAttestRules.QuietBlocks, Meta.EventsThroughHeight);
@@ -800,9 +858,13 @@ namespace VerifiedXCore.Tests
             await Apply(height++, Signed(parts[0]));
 
             // An empty report is only ever the last part of a block already begun.
-            var empty = new BtcReport { BlockHeight = at, Part = Meta.PendingNextPart, Final = true };
+            var empty = new BtcReport { BlockHeight = at, BlockHash = _btc.Header(at).Hash, Part = Meta.PendingNextPart, Final = true };
             await Accepted(Signed(empty), height);
-            var notLast = new BtcReport { BlockHeight = at, Part = Meta.PendingNextPart, Final = false };
+            // It names the block it closes. One that names no block, or another block of that height, closes nothing:
+            // signed once, such a part could otherwise be sent again for whatever block stood at that height later.
+            await Refused(Signed(new BtcReport { BlockHeight = at, Part = Meta.PendingNextPart, Final = true }), height, "names that block's hash");
+            await Refused(Signed(new BtcReport { BlockHeight = at, BlockHash = _btc.Header(at - 1).Hash, Part = Meta.PendingNextPart, Final = true }), height, "names that block's hash");
+            var notLast = new BtcReport { BlockHeight = at, BlockHash = _btc.Header(at).Hash, Part = Meta.PendingNextPart, Final = false };
             await Refused(Signed(notLast), height, "carries at least one event");
 
             await Apply(height++, Signed(empty));
@@ -810,7 +872,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(at, Meta.EventsThroughHeight);
             // What the closed block still holds is unrecorded, and a backfill brings it in.
             Assert.Equal(new[] { vault.Uid }, BtcBlockScanner.VaultsWithUnrecordedEvents(_btc.Block(at), at));
-            var first = new BtcReport { BlockHeight = at + 1, Part = 1, Final = true };
+            var first = new BtcReport { BlockHeight = at + 1, BlockHash = _btc.Header(at + 1).Hash, Part = 1, Final = true };
             await Refused(Signed(first), height, "carries at least one event");
         }
 
@@ -1074,7 +1136,7 @@ namespace VerifiedXCore.Tests
             Assert.Empty(BtcBlockScanner.BuildBackfill(_btc.Block(oldAt), oldAt, c.Uid, 0)); // the scanner does not see it either
             var forced = new BtcReport
             {
-                Scope = c.Uid, BlockHeight = oldAt,
+                Scope = c.Uid, BlockHeight = oldAt, BlockHash = _btc.Header(oldAt).Hash,
                 CoinbaseTxHex = BtcTxInclusion.ToStrippedHex(_btc.Block(oldAt).Transactions[0]), CoinbaseBranch = EventFor(_btc.Block(oldAt), 0).Branch,
                 Events = { EventFor(_btc.Block(oldAt), 1) },
             };

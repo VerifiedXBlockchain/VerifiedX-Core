@@ -78,6 +78,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var scopedVault = scope == BtcReport.ScopeAll ? null : scope;
 
             var txids = block.Transactions.Select(t => t.GetHash().ToString()).ToList();
+            var blockHash = block.GetHash().ToString();
             // Every proof in a block rests on the block's coinbase transaction, which fixes the depth of its tree. Each
             // part carries it, or, when it is too large for that (a miner paying out to thousands of addresses), its
             // last hash block and its length, which show the same thing in a few hundred characters.
@@ -104,7 +105,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (events.Count == 0)
             {
                 if (firstPart > 1)
-                    result.Add(new BtcReport { Scope = scope, BlockHeight = blockHeight, SignerEpoch = signerEpoch, Part = firstPart, Final = true });
+                    result.Add(new BtcReport { Scope = scope, BlockHeight = blockHeight, BlockHash = blockHash, SignerEpoch = signerEpoch, Part = firstPart, Final = true });
                 return result;
             }
 
@@ -114,7 +115,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             {
                 var part = new BtcReport
                 {
-                    Scope = scope, BlockHeight = blockHeight, Headers = first ? headers.ToList() : new List<string>(),
+                    Scope = scope, BlockHeight = blockHeight, BlockHash = blockHash, Headers = first ? headers.ToList() : new List<string>(),
                     CoinbaseBranch = coinbaseBranch, SignerEpoch = signerEpoch,
                 };
                 if (coinbaseWhole)
@@ -155,10 +156,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <summary>
         /// A quiet report: the next <see cref="BtcAttestRules.QuietBlocks"/> blocks above the events-through height hold
         /// no vault event. <paramref name="headers"/> are the headers from the attested tip + 1 through the last of
-        /// those blocks + the depth (none when they are attested already).
+        /// those blocks through the header that buries them (none when they are attested already).
+        /// <paramref name="lastBlockHash"/> is the hash of the last block of the range.
         /// </summary>
-        public static BtcReport BuildQuiet(IReadOnlyList<string> headers, long signerEpoch) =>
-            new() { Scope = BtcReport.ScopeAll, BlockHeight = 0, Headers = headers.ToList(), SignerEpoch = signerEpoch };
+        public static BtcReport BuildQuiet(IReadOnlyList<string> headers, long signerEpoch, string lastBlockHash) =>
+            new() { Scope = BtcReport.ScopeAll, BlockHeight = 0, BlockHash = lastBlockHash, Headers = headers.ToList(), SignerEpoch = signerEpoch };
 
         /// <summary>
         /// A rewind to <paramref name="rewindTo"/>: the attested headers above it are replaced by a heavier branch, and

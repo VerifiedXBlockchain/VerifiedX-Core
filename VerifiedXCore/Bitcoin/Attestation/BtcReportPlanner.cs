@@ -171,7 +171,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     plan.Waiting = $"the headers through {quietBuriedAt} are not held";
                     return plan;
                 }
-                plan.With(BtcPlannedReport.Quiet, BtcBlockScanner.BuildQuiet(headers, epoch));
+                plan.With(BtcPlannedReport.Quiet, BtcBlockScanner.BuildQuiet(headers, epoch, view.HeaderAt(last)!.Hash));
             }
 
             foreach (var h in _empty.Keys.Where(k => k <= meta.EventsThroughHeight).ToList()) _empty.Remove(h);
