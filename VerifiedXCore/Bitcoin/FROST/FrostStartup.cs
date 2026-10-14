@@ -1533,13 +1533,17 @@ namespace VerifiedXCore.Bitcoin.FROST
                             return;
                         }
 
+                        // The body is read before the session's lock is taken: a sender trickling its body held the lock, and
+                        // the leader's batch to this validator timed out (fourth review, round 12).
+                        string body;
+                        using (var bodyReader = new StreamReader(context.Request.Body)) body = await bodyReader.ReadToEndAsync();
                         // One batch at a time per session, and none while it gives its attestation (round 11).
                         await session.Gate.WaitAsync();
                         try
                         {
                         using (var reader = new StreamReader(context.Request.Body))
                         {
-                            var body = await reader.ReadToEndAsync();
+                            // (read before the lock)
                             // Shares are taken only once this validator has made its Round 2 (it then holds every dealer's
                             // commitment, and each share is checked against its dealer's before it is kept): one sent earlier
                             // was kept unchecked and the real one dropped (fourth review, round 4).
@@ -2142,7 +2146,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                             return;
                         }
 
-                        await session.Gate.WaitAsync(); // not while a share batch is being taken (round 11)
+                        if (!await session.Gate.WaitAsync(TimeSpan.FromSeconds(30))) // not while a share batch is being taken (round 11); bounded (round 12)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Busy taking a share batch; ask again." }));
+                            return;
+                        }
                         try
                         {
                         // A session that reported a share attests nothing (round 10).
