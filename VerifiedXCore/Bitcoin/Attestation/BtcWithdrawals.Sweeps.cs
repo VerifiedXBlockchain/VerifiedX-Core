@@ -98,10 +98,20 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var keys = BtcAttestStore.ScriptRowsForVault(scUID, db);
             if (keys.Count < 2) return;
             var current = keys[^1];
-            var rate = SweepRateAt(vfxHeight, db);
+            var marketRate = SweepRateAt(vfxHeight, db);
             foreach (var old in keys.Take(keys.Count - 1))
             {
-                var tx = BtcCanonicalWithdrawal.BuildSweep(old, current, rate, vfxHeight, out var takenFrom, out var reason, db);
+                // A withdrawal on the replaced key that has gone unconfirmed past the stopped window gives its coins up
+                // at double its own rate, even when that rate is above the market's: otherwise one that never confirms
+                // keeps its coins (with the vault's change) under a key whose holders are leaving. Only when it is
+                // actually taken; free coins alone go at the market rate.
+                var rate = marketRate;
+                var stalled = StalledOnKeyRate(scUID, old, vfxHeight, db);
+                List<string> takenFrom = new();
+                string? reason = null;
+                var tx = stalled > marketRate ? BtcCanonicalWithdrawal.BuildSweep(old, current, stalled, vfxHeight, out takenFrom, out reason, db) : null;
+                if (tx != null && takenFrom.Count > 0) rate = stalled;
+                else tx = BtcCanonicalWithdrawal.BuildSweep(old, current, rate, vfxHeight, out takenFrom, out reason, db);
                 if (tx == null) continue;
                 var n = 0;
                 string reference;
@@ -116,6 +126,27 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 SCLogUtility.Log($"Vault {scUID}: {tx.Inputs.Count} coin(s) of key generation {old.Generation} ({tx.InputSats} sats) fixed on Bitcoin transaction {tx.Txid} to the current key (generation {current.Generation}), {tx.FeeSats} sats of fee"
                     + (takenFrom.Count > 0 ? $"; taken from {string.Join(", ", takenFrom)}, which had stopped moving." : "."), "BtcWithdrawals.PlanSweeps()");
             }
+        }
+
+        /// <summary>
+        /// The rate at which a sweep of <paramref name="old"/> takes the coins of a withdrawal fixed on that key that has
+        /// gone <see cref="BtcAttestRules.StuckPinBlocks"/> blocks without confirming (counted as for a takeover): double
+        /// the highest such withdrawal's rate, at most <see cref="SweepMaxFeeRate"/>. 0 when there is none, or when double
+        /// its rate would pass the ceiling (it pays enough to be confirmed).
+        /// </summary>
+        internal static long StalledOnKeyRate(string scUID, VaultDepositScriptRow old, long vfxHeight, LiteDatabase? db)
+        {
+            long best = 0;
+            foreach (var row in BtcAttestStore.WithdrawalsOf(scUID, VaultWithdrawalState.Pinned, db))
+            {
+                if (row.IsSweep || row.IsBridgeExit) continue;
+                var newest = row.Pins.LastOrDefault(p => !p.Dead);
+                if (newest == null || vfxHeight < MovingSince(row) + BtcAttestRules.StuckPinBlocks) continue;
+                if (!newest.Inputs.Any(i => BtcAttestStore.ScriptRowOfCoin(BtcAttestStore.Coin(i, db), db)?.ScriptHex == old.ScriptHex)) continue;
+                var doubled = 2 * (newest.FeeRate > 0 ? newest.FeeRate : row.FeeRate);
+                if (doubled <= SweepMaxFeeRate) best = Math.Max(best, doubled);
+            }
+            return best;
         }
 
         /// <summary>Every <see cref="BtcAttestRules.TakeRetryBlocks"/> blocks: the sweeps of every vault with a replaced key.</summary>

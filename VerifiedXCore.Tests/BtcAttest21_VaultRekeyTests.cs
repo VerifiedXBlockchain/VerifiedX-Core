@@ -437,6 +437,45 @@ namespace VerifiedXCore.Tests
             Assert.Equal(ceremony.Script.ToHex(), BtcVaultKeys.KeyOfCoins(fixedNow.Pins[0].Inputs)!.ScriptHex);
         }
 
+        /// <summary>
+        /// A withdrawal fixed on the old key before the re-key, paying no less than the market, that never confirms: a
+        /// sweep at the market rate could not take its coins, and they stayed (with the vault's change) under a key whose
+        /// holders were leaving. Once it has gone the stopped window unconfirmed, a sweep takes them at double its rate;
+        /// the withdrawal is void and refunded in full, and the coins are under the new key (third pass review, H2).
+        /// </summary>
+        [Fact]
+        public async Task AWithdrawalOnTheOldKeyThatNeverConfirms_GivesItsCoinsToASweep()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 200_000);
+            var request = await Mine(Request(vault.Uid, 0.0005M, feeRate: 40));
+            var oldPin = Assert.Single(Row(request, vault.Uid).Pins);
+
+            var stillHere = Signers.Take(3).ToList();
+            await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
+            var ceremony = Ceremony(vault.Uid, stillHere, 3, Signers[0].Address);
+            await Mine(RekeyTx(vault.Uid, ceremony.Proof));
+            Assert.Empty(BtcAttestStore.WithdrawalsOf(vault.Uid, VaultWithdrawalState.Pinned).Where(w => w.IsSweep));
+            // The market (the only request of the last 1,000 blocks) pays what this withdrawal pays: at its rate it is not
+            // taken, however long it waits.
+            Assert.Equal(40, BtcWithdrawals.SweepRateAt(Tip + 1));
+
+            var stopped = BtcWithdrawals.MovingSince(Row(request, vault.Uid)) + BtcAttestRules.StuckPinBlocks;
+            var looks = stopped % BtcAttestRules.TakeRetryBlocks == 0 ? stopped : stopped + BtcAttestRules.TakeRetryBlocks - stopped % BtcAttestRules.TakeRetryBlocks;
+            await AdvanceTo(looks - BtcAttestRules.TakeRetryBlocks);
+            Assert.Empty(BtcAttestStore.WithdrawalsOf(vault.Uid, VaultWithdrawalState.Pinned).Where(w => w.IsSweep));
+            await AdvanceTo(looks);
+
+            var sweep = Assert.Single(BtcAttestStore.WithdrawalsOf(vault.Uid, VaultWithdrawalState.Pinned).Where(w => w.IsSweep));
+            Assert.Equal(80, sweep.Pins[0].FeeRate);
+            Assert.Equal(oldPin.Inputs, sweep.Pins[0].Inputs);
+            await SignAndConfirm(sweep.Pins[0]);
+            Assert.NotEqual(VaultWithdrawalState.Pinned, Row(request, vault.Uid).State);
+            Assert.NotEqual(VaultWithdrawalState.Settled, Row(request, vault.Uid).State);
+            Assert.Equal(ceremony.Script.ToHex(), BtcAttestStore.ScriptRowOfCoin(BtcAttestStore.Coin(BtcAttestStore.OutpointKey(sweep.Pins[0].Txid, 0)))!.ScriptHex);
+        }
+
         // ── What the review of the re-key found (third pass, 14 October 2026) ──────────────────────
 
         /// <summary>
