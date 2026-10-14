@@ -3106,6 +3106,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
                 ErrorLogUtility.LogError($"TransferVBTCV2 error: {ex.Message}", "StateData.TransferVBTCV2()");
             }
         }
@@ -3144,6 +3145,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
                 ErrorLogUtility.LogError($"TransferVBTCV2Multi error: {ex.Message}", "StateData.TransferVBTCV2Multi()");
             }
         }
@@ -3934,6 +3936,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
                 ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal error: {ex.Message}", "StateData.RequestVBTCV2Withdrawal()");
             }
         }
@@ -4031,6 +4034,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
                 ErrorLogUtility.LogError($"RequestVBTCV2WithdrawalMulti error: {ex.Message}", "StateData.RequestVBTCV2WithdrawalMulti()");
             }
         }
