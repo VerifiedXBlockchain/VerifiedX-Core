@@ -1661,6 +1661,24 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 myFrostIdentifier = myId;
                             }
 
+                            // A batch made for another validator is refused, and so is one carrying no share for this one:
+                            // a participant replaying its own batch here had this validator report every dealer (to the
+                            // replayer) and refuse the leader's real batch, and it was dropped (fifth review, round 15).
+                            // Neither reports anybody.
+                            var batchRecipient = json["Recipient"]?.ToString();
+                            if (!string.IsNullOrEmpty(batchRecipient) && batchRecipient != myAddress)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This share batch is addressed to another validator." }));
+                                return;
+                            }
+                            if (!string.IsNullOrEmpty(myFrostIdentifier) && !BatchCarriesShareFor(allSharesToken, myFrostIdentifier))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "No share in this batch is addressed to this validator." }));
+                                return;
+                            }
+
                             if (string.IsNullOrEmpty(myFrostIdentifier))
                             {
                                 LogUtility.Log($"[FROST] WARNING: Could not determine own FROST Identifier for share extraction. MyAddress={myAddress}", "FrostStartup.DKGSharesBatch");
@@ -3946,6 +3964,20 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// This ensures DKG and signing ceremonies use consistent identifiers even when
         /// the validator list grows, shrinks, or the dictionary iteration order changes.
         /// </summary>
+        /// <summary>Whether any sender's entry in a share batch holds a share under <paramref name="identifier"/>.</summary>
+        internal static bool BatchCarriesShareFor(Newtonsoft.Json.Linq.JObject batch, string identifier)
+        {
+            foreach (var entry in batch.Properties())
+            {
+                try
+                {
+                    if (Newtonsoft.Json.Linq.JObject.Parse(entry.Value?.ToString() ?? "")[identifier] != null) return true;
+                }
+                catch { }
+            }
+            return false;
+        }
+
         /// <summary>The gate, taken within <paramref name="wait"/> and released when the result is disposed; null when not taken.</summary>
         internal static async Task<IDisposable?> HoldGate(SemaphoreSlim gate, TimeSpan wait) =>
             await gate.WaitAsync(wait) ? new GateRelease(gate) : null;

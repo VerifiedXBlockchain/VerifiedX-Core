@@ -775,6 +775,9 @@ namespace VerifiedXCore.Bitcoin.Services
                         LeaderAddress = leaderAddress,
                         Timestamp = timestamp,
                         LeaderSignature = leaderSignature,
+                        // Named in the signed body: a participant replayed its own batch to others, who reported every
+                        // dealer and refused the leader's real batch (fifth review, round 15).
+                        Recipient = validator.ValidatorAddress,
                         AllGeneratedShares = sharesByRecipient[validator.ValidatorAddress]
                     });
                     using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(redistributePayload, Encoding.UTF8, "application/json") };

@@ -286,6 +286,67 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// The leader's signature on a share batch did not say whom it was for: a participant replayed its own batch to
+        /// another, which reported every dealer (to the replayer, so nothing was settled) and refused the leader's real
+        /// batch, and was dropped (fifth review, round 15). A batch for another validator, or with no share for this one,
+        /// is refused and reports nobody.
+        /// </summary>
+        [Fact]
+        public async Task AShareBatchForAnotherValidator_IsRefused_AndReportsNobody()
+        {
+            using var server = new TestServer(new WebHostBuilder().UseStartup<FrostStartup>());
+            var client = server.CreateClient();
+            var leader = new EllipticCurve.PrivateKey("secp256k1");
+            var pub = "04" + Convert.ToHexString(leader.publicKey().toString()).ToLowerInvariant();
+            var address = VerifiedXCore.Data.AccountData.GetHumanAddress(pub);
+            var participants = new List<string> { "xV1", "xV2", "xV3" };
+            var ids = FrostStartup.BuildAddressToIdentifierMap(participants);
+            var priorValidator = Globals.ValidatorAddress;
+            Globals.ValidatorAddress = "xV2";
+            var session = new DKGSession
+            {
+                SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc", LeaderAddress = address, StartTimestamp = _now, LastProgressTimestamp = _now,
+                ParticipantAddresses = participants, RequiredThreshold = 67, MyParticipantIndex = 2, Round1SecretPackage = "secret", Round2Secret = "round2",
+            };
+            Assert.True(FrostSessionStorage.DKGSessions.TryAdd(session.SessionId, session));
+            try
+            {
+                string Batch(string? recipient, string forId) => JsonConvert.SerializeObject(new
+                {
+                    LeaderAddress = address, Timestamp = _now,
+                    LeaderSignature = VerifiedXCore.Services.SignatureService.CreateSignature($"{session.SessionId}.{address}.{_now}", leader, pub),
+                    Recipient = recipient,
+                    AllGeneratedShares = new Dictionary<string, string>
+                    {
+                        ["xV1"] = new JObject { [forId] = FrostShareCrypto.Prefix + "AAAA" }.ToString(Formatting.None),
+                        ["xV3"] = new JObject { [forId] = FrostShareCrypto.Prefix + "AAAA" }.ToString(Formatting.None),
+                    },
+                });
+                async Task<HttpResponseMessage> Post(string body) =>
+                    await client.PostAsync($"/frost/dkg/shares/{session.SessionId}", new StringContent(body, Encoding.UTF8, "application/json"));
+
+                // xV1's batch, replayed here: named for xV1, or (from an older coordinator) unnamed with only xV1's shares.
+                var named = await Post(Batch("xV1", ids["xV1"]));
+                Assert.Equal(HttpStatusCode.Conflict, named.StatusCode);
+                Assert.Contains("another validator", await named.Content.ReadAsStringAsync());
+                var unnamed = await Post(Batch(null, ids["xV1"]));
+                Assert.Equal(HttpStatusCode.Conflict, unnamed.StatusCode);
+                Assert.Contains("No share in this batch", await unnamed.Content.ReadAsStringAsync());
+                Assert.False(session.Reported);
+
+                // A batch for this validator is taken (its made-up shares are then reported, as before).
+                var own = await Post(Batch("xV2", ids["xV2"]));
+                Assert.NotEqual(HttpStatusCode.Conflict, own.StatusCode);
+                Assert.True(session.Reported);
+            }
+            finally
+            {
+                FrostSessionStorage.DKGSessions.TryRemove(session.SessionId, out _);
+                Globals.ValidatorAddress = priorValidator;
+            }
+        }
+
+        /// <summary>
         /// A dealer sealed each share to the participant's key read from its registry at Round 2: a participant that had
         /// left the registry since the start (an exit, a lapsed heartbeat) failed every honest dealer's Round 2, and the
         /// dealers were dropped (fifth review, round 14). Shares are sealed to the keys taken at the start.
