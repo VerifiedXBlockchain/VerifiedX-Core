@@ -67,6 +67,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var set = BtcAttestStore.SignerSet(epoch, db);
             if (set == null || !set.Addresses.Contains(address, StringComparer.Ordinal))
                 return (false, $"{address} is not a signer in epoch {epoch}");
+            // A signer's signature already held for this report is not checked again: copies of it (hundreds in one
+            // answer from another validator) cost nothing (fourth review, round 2).
+            if (ByReport.TryGetValue(Key(reportHash, epoch), out var already) && already.ContainsKey(address))
+                return (true, "held");
             if (!VerifiedXCore.Services.SignatureService.VerifySignature(address, BtcReport.SigningMessage(reportHash), signature))
                 return (false, "the signature is not valid");
 
@@ -405,6 +409,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
             public List<BtcReportSignature>? Signatures { get; set; }
         }
 
+        /// <summary>The most bytes of a signature answer read: every member's address and signature, with room for the JSON.</summary>
+        internal static int MaxAnswerBytes(int members) => 4096 + members * 1024;
+
         /// <summary>
         /// Sends this node's signature to the signers whose signature it lacks, and keeps what they answer with.
         /// A signer is asked again no more often than every few loops.
@@ -434,11 +441,21 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 {
                     var ip = validator.IPAddress.Replace("::ffff:", "");
                     using var content = new StringContent(body, Encoding.UTF8, "application/json");
-                    using var response = await Http.PostAsync($"http://{ip}:{Globals.FrostValidatorPort}/frost/btcreport/signature", content, ct);
+                    using var request = new HttpRequestMessage(HttpMethod.Post, $"http://{ip}:{Globals.FrostValidatorPort}/frost/btcreport/signature") { Content = content };
+                    // Read only as far as an answer holding every member's signature goes, and look at no more entries
+                    // than the set has members, each member once: a signer could answer with gigabytes, or with
+                    // thousands of entries that each cost a signature check (fourth review, round 2).
+                    using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
                     if (!response.IsSuccessStatusCode) return;
-                    var answer = JsonConvert.DeserializeObject<SignatureAnswer>(await response.Content.ReadAsStringAsync(ct));
-                    foreach (var s in answer?.Signatures ?? new List<BtcReportSignature>())
+                    var text = await Net.BtcValidatorSource.ReadBoundedAsync(response.Content, MaxAnswerBytes(members.Count), ct);
+                    if (text == null) return;
+                    var answer = JsonConvert.DeserializeObject<SignatureAnswer>(text);
+                    var seen = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var s in (answer?.Signatures ?? new List<BtcReportSignature>()).Take(members.Count))
+                    {
+                        if (s?.ValidatorAddress == null || !members.Contains(s.ValidatorAddress) || !seen.Add(s.ValidatorAddress)) continue;
                         BtcReportSignatures.Accept(reportHash, report.SignerEpoch, s.ValidatorAddress, s.Signature, tip);
+                    }
                 }
                 catch { }
             }));

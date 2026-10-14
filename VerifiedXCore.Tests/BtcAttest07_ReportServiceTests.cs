@@ -154,6 +154,28 @@ namespace VerifiedXCore.Tests
             Assert.Single(BtcReportSignatures.For(early, 0));
         }
 
+        /// <summary>
+        /// A signer could answer a signature request with thousands of entries naming signers this node already holds,
+        /// each checked again at the cost of a signature verification (and with gigabytes, read whole). A held signer's
+        /// copy is not checked again, and an answer is read only as far as one holding every member goes (fourth
+        /// review, round 2).
+        /// </summary>
+        [Fact]
+        public async Task ASignatureAlreadyHeld_IsNotCheckedAgain()
+        {
+            await Start();
+            var hash = new string('e', 64);
+            var good = SignatureService.CreateSignature(BtcReport.SigningMessage(hash), Signers[0].Key, Signers[0].Pub);
+            Assert.True(BtcReportSignatures.Accept(hash, 0, Signers[0].Address, good, Tip).Ok);
+            var (ok, why) = BtcReportSignatures.Accept(hash, 0, Signers[0].Address, "not a signature at all", Tip);
+            Assert.True(ok);
+            Assert.Equal("held", why);
+            Assert.Equal(good, Assert.Single(BtcReportSignatures.For(hash, 0)).Signature);
+            // Another signer's bad signature is still checked and refused.
+            Assert.False(BtcReportSignatures.Accept(hash, 0, Signers[1].Address, "not a signature at all", Tip).Ok);
+            Assert.Equal(4096 + 200 * 1024, BtcReportService.MaxAnswerBytes(200));
+        }
+
         [Fact]
         public async Task ASignature_IsKeptOnlyWhenValid_AndFromASignerOfItsEpoch()
         {
