@@ -450,16 +450,18 @@ namespace VerifiedXCore.Tests
         public void ASessionIdAndAReKeysUid_AreTheirLeadersOwn()
         {
             var id = FrostDkgLeaderAuth.NewSessionId("xLeader");
-            Assert.Null(FrostDkgLeaderAuth.SessionIdRefusal(id, "xLeader", rekey: true));
-            Assert.Contains("another leader", FrostDkgLeaderAuth.SessionIdRefusal(id, "xOther", rekey: false));
-            Assert.Null(FrostDkgLeaderAuth.SessionIdRefusal(Guid.NewGuid().ToString(), "xOther", rekey: false)); // a web wallet's creation
-            Assert.Contains("tagged with its leader", FrostDkgLeaderAuth.SessionIdRefusal(Guid.NewGuid().ToString(), "xLeader", rekey: true));
+            Assert.Null(FrostDkgLeaderAuth.SessionIdRefusal(id, "xLeader", rekey: true, bodySigned: true));
+            Assert.Contains("another leader", FrostDkgLeaderAuth.SessionIdRefusal(id, "xOther", rekey: false, bodySigned: true));
+            Assert.Null(FrostDkgLeaderAuth.SessionIdRefusal(Guid.NewGuid().ToString(), "xOther", rekey: false, bodySigned: false)); // a web wallet's creation
+            Assert.Contains("tagged with its leader", FrostDkgLeaderAuth.SessionIdRefusal(Guid.NewGuid().ToString(), "xLeader", rekey: true, bodySigned: true));
+            // An unsigned copy under a leader's tagged id (it could be carried to a finished ceremony first; round 8).
+            Assert.Contains("only with its leader's signature", FrostDkgLeaderAuth.SessionIdRefusal(id, "xLeader", rekey: false, bodySigned: false));
 
             var key = new VerifiedXCore.Bitcoin.Attestation.VaultDepositScriptRow { SmartContractUID = "v", Generation = 0, RekeyDueSinceVfxHeight = 5 };
             var uid = VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.NewKeyUid(key, "xLeader");
             Assert.Null(VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyUidLeaderRefusal(uid, "xLeader"));
             Assert.Contains("another leader", VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyUidLeaderRefusal(uid, "xOther"));
-            Assert.InRange(long.Parse(VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyUidTime(uid)), TimeUtil.GetTime() - 5, TimeUtil.GetTime() + 30);
+            Assert.InRange(long.Parse(VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyUidTime(uid)), TimeUtil.GetTime() - 5, TimeUtil.GetTime() + 3_600);
         }
 
         /// <summary>

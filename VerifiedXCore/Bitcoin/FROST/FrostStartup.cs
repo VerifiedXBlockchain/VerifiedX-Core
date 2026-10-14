@@ -724,7 +724,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                             }
                             // A session id and a re-key's UID are the leader's own: another validator's signed start under them,
                             // reaching this node first, had the leader's own start refused (fourth review, round 7).
-                            var boundRefusal = FrostDkgLeaderAuth.SessionIdRefusal(request.SessionId, request.LeaderAddress, rekey: !string.IsNullOrEmpty(request.RekeyOf))
+                            var boundRefusal = FrostDkgLeaderAuth.SessionIdRefusal(request.SessionId, request.LeaderAddress, rekey: !string.IsNullOrEmpty(request.RekeyOf), bodySigned: leaderSignedStart)
                                 ?? (string.IsNullOrEmpty(request.RekeyOf) ? null : VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyUidLeaderRefusal(request.SmartContractUID, request.LeaderAddress));
                             if (boundRefusal != null)
                             {

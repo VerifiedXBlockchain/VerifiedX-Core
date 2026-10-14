@@ -58,15 +58,20 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public static string NewSessionId(string leaderAddress) => $"{LeaderTag(leaderAddress)}:{Guid.NewGuid()}";
 
         /// <summary>
-        /// Why a start's session id is refused: a tagged id names another leader, or a re-key's id is not tagged with its
-        /// leader. Untagged ids (a web wallet's pre-signed creations, older coordinators) are taken for creations.
+        /// Why a start's session id is refused: a tagged id names another leader, or comes without the leader's signature
+        /// over the whole start (every tagged id is made on the leader's own node, which always signs: an unsigned copy
+        /// under it, carried to a finished ceremony before the leader's start arrived, held the id; fourth review,
+        /// round 8), or a re-key's id is not tagged with its leader. Untagged ids (a web wallet's pre-signed creations,
+        /// older coordinators) are taken for creations.
         /// </summary>
-        public static string? SessionIdRefusal(string? sessionId, string? leaderAddress, bool rekey)
+        public static string? SessionIdRefusal(string? sessionId, string? leaderAddress, bool rekey, bool bodySigned)
         {
             var id = sessionId ?? "";
             var tagged = id.Length > 17 && id[16] == ':' && id.Take(16).All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
             if (tagged && !string.Equals(id.Substring(0, 16), LeaderTag(leaderAddress), StringComparison.Ordinal))
                 return "This session id belongs to another leader.";
+            if (tagged && !bodySigned)
+                return "A leader-tagged session is started only with its leader's signature over the whole start.";
             if (rekey && !tagged)
                 return "A re-key's session id is tagged with its leader.";
             return null;
