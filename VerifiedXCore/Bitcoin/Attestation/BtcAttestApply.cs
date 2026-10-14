@@ -139,7 +139,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     ScriptHex = scriptHex, SmartContractUID = scUID, DepositAddress = address.Trim(),
                     CreatedAtVfxHeight = vfxHeight, WatchFromBitcoinHeight = watchFrom,
                     Generation = 0, KeyUID = scUID, Holders = holders, GroupKeyHex = vault.Feature.FrostGroupPublicKey,
-                    MinSigners = FrostDkgAttestation.ThresholdFor(holders.Count, vault.Feature.RequiredThreshold),
+                    // The threshold the ceremony made the key with, as its participants attested it. (The contract's own
+                    // RequiredThreshold is written as 51 by every creation route whatever the ceremony used.)
+                    MinSigners = FrostDkgAttestation.ParseProof(vault.Feature.DKGProof)?.Threshold is > 0 and var attested
+                        ? attested : FrostDkgAttestation.ThresholdFor(holders.Count, vault.Feature.RequiredThreshold),
                 }, db);
             }
             catch (Exception ex)

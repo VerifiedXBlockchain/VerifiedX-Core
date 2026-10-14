@@ -110,8 +110,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var shortfall = FrostDkgAttestation.PreCeremonyShortfall(reachable.Count, false, all.Count);
             if (shortfall != null) return (false, shortfall);
 
-            // The new key keeps the vault's own signing threshold, as a share of its holders.
-            var threshold = vault.Feature.RequiredThreshold > 0 ? vault.Feature.RequiredThreshold : 67;
+            // The new key keeps the share of its holders the old key needs to sign (never below a majority).
+            var holders = Math.Max(1, BtcVaultKeys.Holders(key).Count);
+            var threshold = Math.Max(51, (int)Math.Ceiling(100.0 * BtcVaultKeys.MinSigners(key) / holders));
             var run = await FrostMPCService.CoordinateDKGCeremony(FrostDkgAttestation.NewContractUid(), me, reachable, threshold,
                 participantShortfall: n => FrostDkgAttestation.PreCeremonyShortfall(n, false, all.Count));
             var result = run.Result;
