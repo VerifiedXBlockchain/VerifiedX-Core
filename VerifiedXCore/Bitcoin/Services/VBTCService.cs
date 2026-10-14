@@ -136,6 +136,14 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Height a transaction submitted now would be mined at (local gates and mempool admission).</summary>
         public static long NextBlockHeight => (Globals.LastBlock?.Height ?? 0) + 1;
 
+        /// <summary>
+        /// The height a height-gated reading of a contract is made at: the block being validated or applied
+        /// (<see cref="ContractClock.BlockHeight"/>), else the next block. The tip alone was wrong in a state rebuild at
+        /// startup (no tip loaded: every block read under the old rule) and in a rebuild while running (every block read
+        /// under the new one), and one block late while a block is applied (the tip has already moved to it).
+        /// </summary>
+        public static long RuleHeight => VerifiedXCore.Services.ContractClock.BlockHeight ?? NextBlockHeight;
+
         // Keyed by SmartContractUID; the stored digest guards against a (never expected) change of
         // ContractData under the same UID. Decompiling runs a Trillium REPL, so this is cached.
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string DataDigest, bool Plain, bool IsV2)> _vbtcV2ContractCache = new();
@@ -157,7 +165,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 return false;
 
             var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(scState.ContractData)));
-            var plain = NextBlockHeight >= Globals.PathAuditRulesHeight;
+            var plain = RuleHeight >= Globals.PathAuditRulesHeight;
             if (_vbtcV2ContractCache.TryGetValue(scState.SmartContractUID, out var cached) && cached.DataDigest == digest && cached.Plain == plain)
                 return cached.IsV2;
 
@@ -202,7 +210,7 @@ namespace VerifiedXCore.Bitcoin.Services
             var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(scState.ContractData)));
             // The same reading as a vault's from Globals.PathAuditRulesHeight: code that is not timeless is never a V1
             // contract, and is not run to ask. (Not cached under the rule: the cache has no place for which rule answered.)
-            if (NextBlockHeight >= Globals.PathAuditRulesHeight && !VerifiedXCore.Services.LedgerIntegrityRules.ContractCodeIsTimeless(scState.ContractData))
+            if (RuleHeight >= Globals.PathAuditRulesHeight && !VerifiedXCore.Services.LedgerIntegrityRules.ContractCodeIsTimeless(scState.ContractData))
                 return false;
             if (_vbtcV1ContractCache.TryGetValue(scState.SmartContractUID, out var cached) && cached.DataDigest == digest)
                 return cached.IsV1;

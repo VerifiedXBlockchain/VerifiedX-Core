@@ -245,7 +245,7 @@ namespace VerifiedXCore.Services
             // Globals.PathAuditRulesHeight, the node's clock (null) otherwise. See LedgerIntegrityRules.BlockTime.
             var blockTime = LedgerIntegrityRules.BlockTime(blockHeight, blockTimestamp);
             // And contract code read while this transaction is judged is read as of its block (ContractClock).
-            using var contractClock = blockTime != null ? ContractClock.ForBlock(blockTime.Value, blockHeight!.Value) : null;
+            using var contractClock = blockHeight != null ? ContractClock.ForBlock(blockTime, blockHeight.Value) : null;
 
             // NEW-27: a whitelisted transaction skips validation only in block validation and only with the content its
             // hash commits to (the carried Hash alone used to skip every check).

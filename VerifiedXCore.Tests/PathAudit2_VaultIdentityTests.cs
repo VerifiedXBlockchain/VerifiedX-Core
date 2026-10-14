@@ -202,6 +202,31 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// Which reading applies is the block's, not the node's tip. A state rebuild at startup replays blocks before the
+        /// tip is loaded (the tip read -1, so every block after the rule was read under the old one, and a clock-reading
+        /// contract became a "vault" on that node only); a rebuild while running read blocks before the rule under the
+        /// new one; and a block is applied after the tip has moved to it (fourth review).
+        /// </summary>
+        [Fact]
+        public void WhichReadingApplies_IsTheBlocksBeingJudged_NotTheNodesTip()
+        {
+            var uid = FrostDkgAttestation.NewContractUid();
+            var body = ReadingTheClock(Body(uid, VaultFeature(uid)));
+            bool AsOfBlock(long blockHeight, long tip)
+            {
+                using (ContractClock.ForBlock(TimeUtil.GetTime(), blockHeight))
+                    return IsVaultAtTip(uid, body, tip);
+            }
+            Assert.False(AsOfBlock(Rule + 10, tip: -1));        // a rebuild at startup, after the rule
+            Assert.True(AsOfBlock(Rule - 10, tip: Rule + 500)); // a rebuild while running, before the rule
+            Assert.False(AsOfBlock(Rule, tip: Rule));           // the rule's own block, applied after the tip moved to it
+            Assert.True(AsOfBlock(Rule - 1, tip: Rule - 1));
+            Assert.Null(ContractClock.BlockHeight);             // nothing is left behind outside the block
+            Assert.False(IsVaultAtTip(uid, body, Rule));        // outside a block: the next block's reading
+            Assert.True(IsVaultAtTip(uid, body, Rule - 2));
+        }
+
+        /// <summary>
         /// The clock is not the only thing outside the code. `send` writes to a table that lives as long as the process
         /// and throws on a second call with the same key, so a body using it is read once per process and never again;
         /// `createSig` draws a random number. A vault's code may call what it declares itself and the built-ins known to

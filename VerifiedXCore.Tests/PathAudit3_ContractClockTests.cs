@@ -121,8 +121,13 @@ namespace VerifiedXCore.Tests
             Assert.False(ContractClock.IsSet);
             Assert.Equal(Uid, UidRead(changesTomorrow));
 
-            // Before the rules' height nothing is set.
-            Assert.Null(ContractClock.ForBlock(_now - 2 * Day, Rule - 1));
+            // Before the rules' height the clock is not set (only the block's height is recorded).
+            using (ContractClock.ForBlock(_now - 2 * Day, Rule - 1))
+            {
+                Assert.False(ContractClock.IsSet);
+                Assert.Equal(Rule - 1, ContractClock.BlockHeight);
+            }
+            Assert.Null(ContractClock.BlockHeight);
             // A date the code computes instead of naming has not passed, on any node.
             var source = NEW29_ContractCodeTests.Source(changedYesterday).Replace("dateProc(\"" + Ticks(_now - Day) + "\")", "dateProc(\"" + Ticks(_now - Day).ToString()[..9] + "\" + \"" + Ticks(_now - Day).ToString()[9..] + "\")");
             var computed = NEW29_ContractCodeTests.Body(source);

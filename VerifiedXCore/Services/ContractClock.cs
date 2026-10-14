@@ -22,24 +22,38 @@ namespace VerifiedXCore.Services
     {
         private static readonly AsyncLocal<(long Time, long Tip)?> Current = new();
 
+        /// <summary>The height of the block being judged or applied, at any height (the clock above is set only from the rules' height).</summary>
+        private static readonly AsyncLocal<long?> Judged = new();
+
         private sealed class Restore : IDisposable
         {
             private readonly (long, long)? _prior;
-            public Restore((long, long)? prior) { _prior = prior; }
-            public void Dispose() { Current.Value = _prior; }
+            private readonly long? _priorJudged;
+            public Restore((long, long)? prior, long? priorJudged) { _prior = prior; _priorJudged = priorJudged; }
+            public void Dispose() { Current.Value = _prior; Judged.Value = _priorJudged; }
         }
 
         /// <summary>
         /// Contract code read until the result is disposed is read as of this block: its timestamp, and the block
-        /// before it as the chain's height. Null (and nothing changes) before the rules' height.
+        /// before it as the chain's height (from the rules' height, and only when a timestamp is given). At every
+        /// height the block's height is recorded (<see cref="BlockHeight"/>).
         /// </summary>
-        public static IDisposable? ForBlock(long blockTimestamp, long blockHeight)
+        public static IDisposable ForBlock(long? blockTimestamp, long blockHeight)
         {
-            if (blockHeight < Globals.PathAuditRulesHeight) return null;
             var prior = Current.Value;
-            Current.Value = (blockTimestamp, blockHeight - 1);
-            return new Restore(prior);
+            var priorJudged = Judged.Value;
+            Judged.Value = blockHeight;
+            if (blockTimestamp != null && blockHeight >= Globals.PathAuditRulesHeight)
+                Current.Value = (blockTimestamp.Value, blockHeight - 1);
+            return new Restore(prior, priorJudged);
         }
+
+        /// <summary>
+        /// The height of the block being validated or applied on this flow; null outside one (admission, API). Rules that
+        /// change at a height read it, never the node's tip: a state rebuild at startup runs before the tip is loaded,
+        /// and a block is applied after the tip has moved to it.
+        /// </summary>
+        public static long? BlockHeight => Judged.Value;
 
         /// <summary>Whether contract code is being read as of a block.</summary>
         public static bool IsSet => Current.Value != null;
