@@ -2999,12 +2999,19 @@ namespace VerifiedXCore.Bitcoin.Services
         /// denominator is this set's Count (FULL snapshot — dead members still count). Used
         /// identically by TransactionValidatorService (eligibility) and StateData (denominator).
         /// </summary>
-        public static HashSet<string> ResolveCancellationVoterSet(string scUID)
+        /// <remarks>
+        /// With <paramref name="asOfHeight"/> (consensus: the block before the transaction's) the legacy fallback is the
+        /// public set as of that height, read from committed blocks; without it, the node's current view (display).
+        /// </remarks>
+        public static HashSet<string> ResolveCancellationVoterSet(string scUID, long? asOfHeight = null)
         {
             var snapshot = ResolveContractSnapshot(scUID);
             if (snapshot.Count > 0)
                 return new HashSet<string>(snapshot);
-            return new HashSet<string>(VBTCValidatorRegistry.GetPublicValidators().Select(v => v.ValidatorAddress));
+            var publicSet = asOfHeight is long h
+                ? VBTCValidatorRegistry.GetActiveValidatorsAt(h).Where(v => !v.IsS3C)
+                : VBTCValidatorRegistry.GetPublicValidators();
+            return new HashSet<string>(publicSet.Select(v => v.ValidatorAddress));
         }
 
         public static async Task<(bool Success, string TxHashOrError, string LockId)> CreateBridgeLockTx(

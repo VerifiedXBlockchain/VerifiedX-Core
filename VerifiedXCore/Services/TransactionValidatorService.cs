@@ -3233,7 +3233,9 @@ namespace VerifiedXCore.Services
                         // Anti-spam check: Ensure validator doesn't already have an active record.
                         // Exception: if the existing record's RegisterTransactionHash matches this TX hash,
                         // it means this TX was already processed into a block but not yet cleaned from mempool.
-                        var existingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(validatorAddress);
+                        // The set as of the block before this one (second path audit's rule for consensus reads): the
+                        // tip-based lookup answered "nobody" on a node catching up.
+                        var existingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidatorAt(validatorAddress, Bitcoin.Services.VBTCValidatorRegistry.SetHeightFor(blockHeight));
                         if (existingValidator != null && existingValidator.IsActive
                             && existingValidator.RegisterTransactionHash != txRequest.Hash)
                             return (txResult, "Validator already has an active registration. Cannot register again.");
@@ -3641,7 +3643,7 @@ namespace VerifiedXCore.Services
                             // FIND-002 + FIND-028 FIX: Allow the original requester OR an active vBTC validator
                             if (withdrawalRequest.RequestorAddress != txRequest.FromAddress)
                             {
-                                var completingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(txRequest.FromAddress);
+                                var completingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidatorAt(txRequest.FromAddress, Bitcoin.Services.VBTCValidatorRegistry.SetHeightFor(blockHeight));
                                 if (completingValidator == null || !completingValidator.IsActive)
                                     return (txResult, $"Only the original requester ({withdrawalRequest.RequestorAddress}) or an active vBTC validator can complete this withdrawal. Received from: {txRequest.FromAddress}");
                             }
@@ -3774,8 +3776,9 @@ namespace VerifiedXCore.Services
 
                         // S3C §7.4: voter must be active AND in the contract's DKG snapshot (or the
                         // public set for legacy no-snapshot contracts) — same resolution as StateData.
-                        var voterSet = Bitcoin.Services.VBTCService.ResolveCancellationVoterSet(cancellation.SmartContractUID);
-                        var validator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(txRequest.FromAddress);
+                        var voterSetHeight = Bitcoin.Services.VBTCValidatorRegistry.SetHeightFor(blockHeight);
+                        var voterSet = Bitcoin.Services.VBTCService.ResolveCancellationVoterSet(cancellation.SmartContractUID, voterSetHeight);
+                        var validator = Bitcoin.Services.VBTCValidatorRegistry.GetValidatorAt(txRequest.FromAddress, voterSetHeight);
                         if (validator == null || !validator.IsActive || !voterSet.Contains(txRequest.FromAddress))
                             return (txResult, "Only validators in this contract's DKG snapshot can vote on its cancellation.");
 

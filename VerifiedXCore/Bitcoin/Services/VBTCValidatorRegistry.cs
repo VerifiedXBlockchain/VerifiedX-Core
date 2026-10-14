@@ -99,6 +99,20 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// One validator from the active set as of <paramref name="height"/> (committed blocks only, as
+        /// <see cref="GetActiveValidatorsAt"/>): the lookup for consensus. <see cref="GetValidator"/> answers "nobody" on a
+        /// node that is still catching up, swallows database errors, and reads the node's tip rather than the block judged.
+        /// </summary>
+        public static VBTCValidator? GetValidatorAt(string? address, long height)
+        {
+            if (string.IsNullOrEmpty(address)) return null;
+            return GetActiveValidatorsAt(height).FirstOrDefault(v => v.ValidatorAddress == address);
+        }
+
+        /// <summary>The height whose active set judges a transaction: the block before its block, or before the next block at admission.</summary>
+        public static long SetHeightFor(long? blockHeight) => (blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) - 1;
+
+        /// <summary>
         /// S3C (§3.2): the exclusion point for ALL public ceremony/selection sites — the active
         /// set minus S3C validators. GetActiveValidators() stays inclusive for auth/consensus.
         /// With no S3C validators on-chain this returns the identical set as today.

@@ -4333,8 +4333,9 @@ namespace VerifiedXCore.Data
 
                 // S3C §7.4: voter must be active AND in the contract's DKG snapshot (or the public
                 // set for legacy no-snapshot contracts). Public→public-only; S3C→S3C-only.
-                var voterSet = Bitcoin.Services.VBTCService.ResolveCancellationVoterSet(cancellation.SmartContractUID);
-                var validator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(tx.FromAddress);
+                // The set as of the block before this vote's, as block validation judged it.
+                var voterSet = Bitcoin.Services.VBTCService.ResolveCancellationVoterSet(cancellation.SmartContractUID, tx.Height - 1);
+                var validator = Bitcoin.Services.VBTCValidatorRegistry.GetValidatorAt(tx.FromAddress, tx.Height - 1);
                 if (validator == null || !validator.IsActive || !voterSet.Contains(tx.FromAddress))
                 {
                     ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation failed: {tx.FromAddress} is not an eligible voter for contract {cancellation.SmartContractUID}", "StateData.VoteOnVBTCV2Cancellation()");
@@ -4422,6 +4423,9 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                // A vote this node could not judge (the validator set is read from committed blocks and a read error is
+                // thrown, not answered "no") leaves its state unlike its peers': marked, so a restart rebuilds state.
+                BlockStartFailedAtHeight = tx.Height;
                 ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation error: {ex.Message}", "StateData.VoteOnVBTCV2Cancellation()");
             }
         }

@@ -428,6 +428,31 @@ namespace VerifiedXCore.Tests
             Assert.Equal(0.001M, LedgerBalance(Vault, Requester));
         }
 
+        /// <summary>
+        /// Before the vote rules height a vote was judged against the validator set as the node saw it at its tip, which
+        /// is empty on a node still catching up: such a node dropped every vote the network had counted. It is judged
+        /// against the set as of the block before the vote's, read from committed blocks (third pass review).
+        /// </summary>
+        [Fact]
+        public void StateData_LegacyVote_IsJudgedByTheSetBeforeItsBlock_OnANodeStillCatchingUp()
+        {
+            var c = OpenCancellation();
+            Globals.VbtcCancellationVoteRulesHeight = long.MaxValue; // the legacy path
+            Globals.IsChainSynced = false;                          // a node that is syncing
+            Assert.Null(VBTCValidatorRegistry.GetValidator("xVal1"));
+            Assert.NotNull(VBTCValidatorRegistry.GetValidatorAt("xVal1", CancelHeight));
+
+            StateDataApply("VoteOnVBTCV2Cancellation", VoteTx(c.CancellationUID, "xVal1", true, CancelHeight + 1));
+            Assert.True(VBTCWithdrawalCancellation.HasValidatorVoted(c.CancellationUID, "xVal1"));
+            // Registered, but in no snapshot of this vault: no vote.
+            StateDataApply("VoteOnVBTCV2Cancellation", VoteTx(c.CancellationUID, "xPublicOnly", true, CancelHeight + 1));
+            Assert.False(VBTCWithdrawalCancellation.HasValidatorVoted(c.CancellationUID, "xPublicOnly"));
+            // Not registered as of the block before the vote: no vote.
+            Register("xLate", isS3C: false, CancelHeight + 1);
+            StateDataApply("VoteOnVBTCV2Cancellation", VoteTx(c.CancellationUID, "xLate", true, CancelHeight + 1));
+            Assert.False(VBTCWithdrawalCancellation.HasValidatorVoted(c.CancellationUID, "xLate"));
+        }
+
         [Fact]
         public void StateData_VoteAlreadyCountedByTheStoreRebuild_StillCreditsTheRefund()
         {
