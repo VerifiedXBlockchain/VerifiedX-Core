@@ -123,8 +123,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         var allocations = data["Allocations"]?.ToObject<List<PoolUnlockAllocation>>();
                         if (allocations == null || allocations.Count == 0)
                         {
-                            // The single-lock shape of the first bridge version names its one contract directly.
-                            return BtcAttestBalance.IsAttestedVault(Stored(data["ContractUID"]?.ToObject<string?>()))
+                            // The single-lock shape of the first bridge version names its one contract directly. Its lock
+                            // names a vault too: one of a watched vault's, under another contract's UID, recorded an exit
+                            // nobody could complete, fail or expire, and its burn was used for good (fourth review, round 12).
+                            var singleLock = data["LockId"]?.Type == JTokenType.String ? VBTCBridgeLockState.GetByLockId((string)data["LockId"]!) : null;
+                            return BtcAttestBalance.IsAttestedVault(Stored(data["ContractUID"]?.ToObject<string?>())) || BtcAttestBalance.IsAttestedVault(singleLock?.SmartContractUID)
                                 ? "A bridge exit from this vault carries its allocations."
                                 : null;
                         }
