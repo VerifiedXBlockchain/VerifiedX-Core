@@ -189,7 +189,16 @@ namespace VerifiedXCore.Data
             LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13: every apply path uses the block's height
             using var contractClock = ContractClock.ForBlock(block.Timestamp, block.Height); // contract code is read as of this block
             await ApplyForgedVfxBurnsAsync(block); // fund-loss audit item 1 (burn): at ForgedVfxBurnHeight, before the block's transactions
-            PrivacyEpochService.ApplyIfResetBlock(block); // fund-loss audit item 1 (stage 2): shielded pools restart at PrivateTxProofRulesHeight
+            try
+            {
+                PrivacyEpochService.ApplyIfResetBlock(block); // fund-loss audit item 1 (stage 2): shielded pools restart at PrivateTxProofRulesHeight
+            }
+            catch (Exception ex)
+            {
+                // Uncaught it left TreisUpdating set for good, and the node waited on it forever (fourth review, round 6).
+                NoteApplyStepFailed(block.Height, ex);
+                ErrorLogUtility.LogError($"Shielded-pool restart at block {block.Height} failed: {ex}", "StateData.UpdateTreis()");
+            }
             // The steps a block takes before its transactions write consensus state (signer sets, bonds). One that
             // fails on this node is counted like a transaction that failed to apply: the block's state is reported as
             // incomplete, so the node is flagged, not left quietly holding other state than its peers.
