@@ -39,6 +39,33 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// commitment coefficients and x is the recipient's identifier (the same check FROST part3 makes, which the native
         /// library reports without naming the sender). False when the share or commitment cannot be read.
         /// </summary>
+        /// <summary>The longest dealer entry (its map for one recipient, as relayed) a recipient opens: the same on both sides of a dispute.</summary>
+        public static int MaxDealerEntryLength => VerifiedXCore.Bitcoin.FROST.Models.FrostSessionStorage.MAX_COMMITMENT_DATA_LENGTH * 10;
+
+        /// <summary>
+        /// A Round 2 package as the library makes it, rebuilt from its signing share alone (64 hex digits) with the fixed
+        /// header; null when it has none. A recipient keeps only this, so nothing a dealer adds reaches the native
+        /// finalize, and a dispute is judged on the same thing the recipient took (fourth review, round 12: a padded or
+        /// extended package was refused by the recipient and ruled good by the coordinator, and the honest recipient was
+        /// dropped).
+        /// </summary>
+        public static string? CanonicalShare(string? round2PackageJson)
+        {
+            try
+            {
+                var share = JObject.Parse(round2PackageJson ?? "")["signing_share"];
+                if (share?.Type != JTokenType.String) return null;
+                var hex = ((string)share!).ToLowerInvariant();
+                if (hex.Length != 64 || !hex.All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return null;
+                return new JObject
+                {
+                    ["header"] = new JObject { ["version"] = 0, ["ciphersuite"] = "FROST-secp256k1-SHA256-TR-v1" },
+                    ["signing_share"] = hex,
+                }.ToString(Newtonsoft.Json.Formatting.None);
+            }
+            catch { return null; }
+        }
+
         public static bool ShareMatchesCommitment(string round2PackageJson, string round1PackageJson, string recipientIdentifierHex)
         {
             try
@@ -188,7 +215,8 @@ namespace VerifiedXCore.Bitcoin.FROST
         {
             if (string.IsNullOrEmpty(recipientPublicKeyHex) || string.IsNullOrEmpty(dealerCommitment)) return false;
             return FrostShareCrypto.OpenWithEphemeral(sealedPackage, ephemeralPrivateHex, recipientPublicKeyHex, sessionId, recipientIdentifier, out var package)
-                && ShareMatchesCommitment(package, dealerCommitment, recipientIdentifier);
+                && CanonicalShare(package) is { } canonical
+                && ShareMatchesCommitment(canonical, dealerCommitment, recipientIdentifier);
         }
     }
 }

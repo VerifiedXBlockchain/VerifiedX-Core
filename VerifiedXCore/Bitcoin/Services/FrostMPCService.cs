@@ -767,7 +767,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 try
                 {
                     string? sealedShare = null;
-                    if (sharesByRecipient.TryGetValue(d.Accuser, out var batch) && batch.TryGetValue(d.Accused, out var dealerMap) && idByAddress.TryGetValue(d.Accuser, out var accuserId))
+                    if (sharesByRecipient.TryGetValue(d.Accuser, out var batch) && batch.TryGetValue(d.Accused, out var dealerMap) && idByAddress.TryGetValue(d.Accuser, out var accuserId)
+                        && dealerMap.Length <= FrostDkgBlame.MaxDealerEntryLength) // a recipient refuses a longer entry unopened: the dealer's doing (round 12)
                     {
                         try { sealedShare = JObject.Parse(dealerMap)[accuserId]?.ToString(); } catch { }
                         var url = $"http://{byAddress[d.Accused].IPAddress}:{Globals.FrostValidatorPort}/frost/dkg/reveal/{sessionId}";

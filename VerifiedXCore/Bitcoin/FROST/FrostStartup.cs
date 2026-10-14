@@ -1644,7 +1644,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 }
 
                                 // Bound data size
-                                if (senderSharesStr.Length > FrostSessionStorage.MAX_COMMITMENT_DATA_LENGTH * 10)
+                                if (senderSharesStr.Length > FrostDkgBlame.MaxDealerEntryLength)
                                 {
                                     if (session.ParticipantAddresses.Contains(senderAddr)) accusations[senderAddr] = FrostDkgBlame.AccusationUnopenable;
                                     LogUtility.Log($"[FROST] Share data from {senderAddr} exceeds size limit, skipping", "FrostStartup.DKGSharesBatch");
@@ -1669,6 +1669,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                                             shareForMe = opened;
                                     }
 
+                                    // Only the signing share, in the library's own form, is kept (round 12).
+                                    if (!string.IsNullOrEmpty(shareForMe)) shareForMe = FrostDkgBlame.CanonicalShare(shareForMe) ?? "";
                                     if (!string.IsNullOrEmpty(shareForMe))
                                     {
                                         if (!session.Round1Commitments.TryGetValue(senderAddr, out var senderCommitment)
