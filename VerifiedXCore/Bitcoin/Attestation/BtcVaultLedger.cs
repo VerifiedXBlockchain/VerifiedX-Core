@@ -210,20 +210,21 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     case TransactionType.VBTC_V2_BRIDGE_UNLOCK:
                     {
                         var data = JObject.Parse(tx.Data);
-                        var lockId = data["LockId"]?.Type == JTokenType.String ? (string?)data["LockId"] : null;
-                        var uid = (lockId == null ? null : VBTCBridgeLockState.GetByLockId(lockId)?.SmartContractUID)
-                            ?? (data["ContractUID"]?.Type == JTokenType.String ? (string?)data["ContractUID"] : null);
+                        // Fields read as validation and apply read them: a number becomes its digits (round 13).
+                        var lockId = data["LockId"]?.ToObject<string?>();
+                        var uid = (string.IsNullOrWhiteSpace(lockId) ? null : VBTCBridgeLockState.GetByLockId(lockId)?.SmartContractUID)
+                            ?? data["ContractUID"]?.ToObject<string?>();
                         credits.Add((uid, tx.FromAddress));
                         break;
                     }
                     case TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK:
                     {
                         var data = JObject.Parse(tx.Data);
-                        var destination = data["VfxDestinationAddress"]?.Type == JTokenType.String ? (string?)data["VfxDestinationAddress"] : null;
-                        if (data["Allocations"] is JArray allocations)
-                            foreach (var allocation in allocations.OfType<JObject>())
-                                if (allocation["LockId"]?.Type == JTokenType.String)
-                                    credits.Add((VBTCBridgeLockState.GetByLockId((string)allocation["LockId"]!)?.SmartContractUID, destination));
+                        var destination = data["VfxDestinationAddress"]?.ToObject<string?>();
+                        // The allocations as validation and apply read them (a numeric lock id becomes its digits; round 13).
+                        foreach (var allocation in data["Allocations"]?.ToObject<List<VerifiedXCore.Bitcoin.Models.PoolUnlockAllocation>>() ?? new())
+                            if (!string.IsNullOrWhiteSpace(allocation?.LockId))
+                                credits.Add((VBTCBridgeLockState.GetByLockId(allocation.LockId)?.SmartContractUID, destination));
                         break;
                     }
                     default:
@@ -273,7 +274,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 }
                 return null;
             }
-            catch (Newtonsoft.Json.JsonException) { return null; } // unreadable data is refused by the transaction's own rules
+            catch (Exception ex) when (ex is Newtonsoft.Json.JsonException or ArgumentException or FormatException or InvalidCastException)
+            { return null; } // unreadable data is refused by the transaction's own rules
         }
     }
 }

@@ -126,7 +126,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
                             // The single-lock shape of the first bridge version names its one contract directly. Its lock
                             // names a vault too: one of a watched vault's, under another contract's UID, recorded an exit
                             // nobody could complete, fail or expire, and its burn was used for good (fourth review, round 12).
-                            var singleLock = data["LockId"]?.Type == JTokenType.String ? VBTCBridgeLockState.GetByLockId((string)data["LockId"]!) : null;
+                            // Read as validation and apply read it (a number becomes its digits; round 13).
+                            var singleLockId = data["LockId"]?.ToObject<string?>();
+                            var singleLock = string.IsNullOrWhiteSpace(singleLockId) ? null : VBTCBridgeLockState.GetByLockId(singleLockId);
                             return BtcAttestBalance.IsAttestedVault(Stored(data["ContractUID"]?.ToObject<string?>())) || BtcAttestBalance.IsAttestedVault(singleLock?.SmartContractUID)
                                 ? "A bridge exit from this vault carries its allocations."
                                 : null;

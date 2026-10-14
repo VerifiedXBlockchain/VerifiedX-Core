@@ -122,9 +122,9 @@ namespace VerifiedXCore.Tests
                 new { Function = "VBTCWithdrawalRequest()", ContractUID = vault, BTCAddress = BtcDest, Amount = amount, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") });
 
         /// <summary>A holder locks vBTC of a vault for the bridge; returns the lock's id.</summary>
-        private async Task<string> Lock(string vault, decimal amount, V? from = null)
+        private async Task<string> Lock(string vault, decimal amount, V? from = null, string? id = null)
         {
-            var lockId = Guid.NewGuid().ToString("N");
+            var lockId = id ?? Guid.NewGuid().ToString("N");
             await Mine(SignedBy(from ?? Minter, (from ?? Minter).Address, TransactionType.VBTC_V2_BRIDGE_LOCK,
                 new { Function = "VBTCBridgeLock()", ContractUID = vault, LockId = lockId, Amount = amount, AmountSats = (long)(amount * 100_000_000M), EvmDestination = "0x" + new string('a', 40) }));
             Assert.NotNull(VBTCBridgeLockState.GetByLockId(lockId));
@@ -228,6 +228,14 @@ namespace VerifiedXCore.Tests
                 Amount = 0.004M, AmountSats = 400_000L, BtcDestination = BtcDest, BaseBurnTxHash = NewBurn(),
             }, free: true);
             await RefusedInBlock(single, "carries its allocations");
+            // ... also when the lock's id is given as a JSON number, which validation and apply read as its digits (round 13).
+            var numbered = await Lock(vault.Uid, 0.002M, id: "777" + Random.Shared.Next(100_000, 999_999));
+            var numeric = SignedBy(Caster, Caster.Address, TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC, new
+            {
+                Function = "VBTCBridgeExitToBTC()", ContractUID = Guid.NewGuid().ToString("N") + ":1", LockId = long.Parse(numbered),
+                Amount = 0.002M, AmountSats = 200_000L, BtcDestination = BtcDest, BaseBurnTxHash = NewBurn(),
+            }, free: true);
+            await RefusedInBlock(numeric, "carries its allocations");
         }
 
         /// <summary>

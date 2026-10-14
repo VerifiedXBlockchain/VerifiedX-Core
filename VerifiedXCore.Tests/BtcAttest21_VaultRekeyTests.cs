@@ -870,6 +870,20 @@ namespace VerifiedXCore.Tests
                 SmartContractStateTrei.GetSCST().Update(sold);
                 Assert.Contains("can change hands by Transfer()", BtcVaultLedger.SaleRefusal(Sell("abcdefghij")));
                 Assert.Null(BtcVaultLedger.HolderLimitRefusal(PoolUnlock(holder.Address)));
+                // A pool unlock naming a numerically named lock as a JSON number: read as apply reads it (round 13).
+                var numberedLock = "9" + Random.Shared.Next(100_000, 999_999);
+                VBTCBridgeLockState.GetCollection().Insert(new VBTCBridgeLockState
+                {
+                    LockId = numberedLock, SmartContractUID = vault.Uid, OwnerAddress = holder.Address, Amount = 0.0005M, AmountSats = 50_000,
+                    LockTxHash = "h2", LockTimestamp = 2, EvmDestination = "0x0",
+                });
+                var numericUnlock = SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK, new
+                {
+                    Function = "VBTCBridgePoolUnlock()", TotalAmount = 0.0001M, TotalAmountSats = 10_000, VfxDestinationAddress = "xNew",
+                    ExitBurnTxHash = new string('c', 64), Allocations = new[] { new { LockId = long.Parse(numberedLock), UnlockAmount = 0.0001M, SmartContractUID = vault.Uid } },
+                });
+                Assert.Contains("the most a vault holds", BtcVaultLedger.HolderLimitRefusal(numericUnlock));
+                VBTCBridgeLockState.GetCollection().Delete(numberedLock);
                 Assert.Null(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.0001M, Tip + 1, "xNew"));   // its one lock is on the full vault
                 Assert.Equal(lockId, Assert.Single(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.0001M, Tip + 1, holder.Address)!).LockId);
             }
