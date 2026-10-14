@@ -39,10 +39,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public const int SweepStuckBlocks = 360;
 
         /// <summary>
-        /// The fee rate a new sweep is fixed at: what withdrawals requested in the last thousand blocks pay (the middle
-        /// one), between <see cref="SweepFeeRate"/> and <see cref="SweepMaxFeeRate"/>. Requesters choose rates that get
-        /// their Bitcoin out, so this follows Bitcoin's fee market from chain state alone; a sweep fixed at a rate
-        /// Bitcoin ignores would leave the old key's coins there while its holders keep leaving.
+        /// The fee rate a new sweep is fixed at: what Bitcoin accepted from withdrawals requested in the last thousand
+        /// blocks (the middle rate of the transactions that paid them), between <see cref="SweepFeeRate"/> and
+        /// <see cref="SweepMaxFeeRate"/>. It follows Bitcoin's fee market from chain state alone; a sweep fixed at a rate
+        /// Bitcoin ignores would leave the old key's coins there while its holders keep leaving. Only paid withdrawals
+        /// count: requests that wait or are pinned can be cancelled or never paid, and anyone could steer every sweep's
+        /// rate with a few of them at no cost but VFX fees (fourth review, round 2). A paid one costs its Bitcoin fee.
         /// </summary>
         public static long SweepRateAt(long vfxHeight, LiteDatabase? db = null)
         {
@@ -50,9 +52,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
             // every re-keyed vault every 30 blocks (fourth review).
             var since = vfxHeight - 1_000;
             var rates = (db ?? BtcAttestStore.Db).GetCollection<VaultWithdrawalRow>(BtcAttestStore.Withdrawals).Find(x => x.RequestVfxHeight > since)
-                .Where(w => w.State == VaultWithdrawalState.Pinned || w.State == VaultWithdrawalState.Settled || w.State == VaultWithdrawalState.Waiting)
-                .Where(w => !w.IsSweep && !w.IsBridgeExit)
-                .Select(w => w.Pins.LastOrDefault(p => !p.Dead)?.FeeRate is > 0 and var r ? r : w.FeeRate)
+                .Where(w => w.State == VaultWithdrawalState.Settled && !w.IsSweep && !w.IsBridgeExit)
+                .Select(w => w.Pins.FirstOrDefault(p => p.Txid == w.SettledTxid)?.FeeRate is > 0 and var r ? r : w.FeeRate)
                 .OrderBy(r => r).ToList();
             var middle = rates.Count == 0 ? SweepFeeRate : rates[rates.Count / 2];
             return Math.Clamp(middle, SweepFeeRate, SweepMaxFeeRate);

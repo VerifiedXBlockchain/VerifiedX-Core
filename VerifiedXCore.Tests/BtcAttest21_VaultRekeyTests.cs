@@ -457,9 +457,9 @@ namespace VerifiedXCore.Tests
             var ceremony = Ceremony(vault.Uid, stillHere, 2, Signers[0].Address);
             await Mine(RekeyTx(vault.Uid, ceremony.Proof));
             Assert.Empty(BtcAttestStore.WithdrawalsOf(vault.Uid, VaultWithdrawalState.Pinned).Where(w => w.IsSweep));
-            // The market (the only request of the last 1,000 blocks) pays what this withdrawal pays: at its rate it is not
-            // taken, however long it waits.
-            Assert.Equal(40, BtcWithdrawals.SweepRateAt(Tip + 1));
+            // The market rate (nothing paid in the last 1,000 blocks: the floor) is below what this withdrawal pays: at it,
+            // it is not taken, however long it waits.
+            Assert.True(BtcWithdrawals.SweepRateAt(Tip + 1) <= 40);
 
             var stopped = BtcWithdrawals.MovingSince(Row(request, vault.Uid)) + BtcAttestRules.StuckPinBlocks;
             var looks = stopped % BtcAttestRules.TakeRetryBlocks == 0 ? stopped : stopped + BtcAttestRules.TakeRetryBlocks - stopped % BtcAttestRules.TakeRetryBlocks;
@@ -649,7 +649,14 @@ namespace VerifiedXCore.Tests
             var vault = await CreateVault(H1 + 1, keyHolders: Signers);
             await Deposit(vault.Script, 900_000);
             foreach (var rate in new[] { 30, 60, 90 })
-                await Mine(Request(vault.Uid, 0.001M, rate));
+            {
+                var request = await Mine(Request(vault.Uid, 0.001M, rate));
+                // Requested and pinned, not paid: it says nothing of what Bitcoin accepts (and could be given up).
+                var before = BtcWithdrawals.SweepRateAt(Tip + 1);
+                await SignAndConfirm(Row(request, vault.Uid).Pins.Last(p => !p.Dead));
+                Assert.Equal(VaultWithdrawalState.Settled, Row(request, vault.Uid).State);
+                if (rate == 30) Assert.Equal(BtcWithdrawals.SweepFeeRate, before);
+            }
             Assert.Equal(60, BtcWithdrawals.SweepRateAt(Tip + 1));
             Assert.Equal(BtcWithdrawals.SweepFeeRate, BtcWithdrawals.SweepRateAt(Tip + 2_000));
         }
