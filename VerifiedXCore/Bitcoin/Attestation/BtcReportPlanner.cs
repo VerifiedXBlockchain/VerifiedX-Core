@@ -69,6 +69,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// </summary>
         public const int SweepBack = BtcAttestRules.QuietBlocks + 96;
 
+        /// <summary>The blocks a pruned peer serves: on a first run, a vault watched from within them is swept from its first watched block.</summary>
+        public const int ServedBlocks = 288;
+
         private readonly Dictionary<long, (string Hash, long Scripts, long Coins)> _empty = new();
         private long _sweepFrom = -1;
         private long _sweepScripts = -1;
@@ -278,7 +281,14 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var floor = Math.Max(meta.CheckpointHeight + 1, meta.EventsThroughHeight - SweepBack);
             if (_sweepFrom < 0)
             {
-                _sweepFrom = floor; // first run of this process: what was swept before is not known
+                // First run of this process (or after a reset): what was swept before is not known. A vault created shortly
+                // before may still be owed a backfill below the floor (one quiet report moves the events-through height 144
+                // at once); started at the floor alone, a third of the signers restarting lost it for good (fifth review,
+                // round 14). Vaults watched from within the blocks still served are swept from their first watched block.
+                _sweepFrom = floor;
+                var reach = Math.Max(meta.CheckpointHeight + 1, meta.EventsThroughHeight - ServedBlocks + 1);
+                foreach (var row in db.GetCollection<VaultDepositScriptRow>(BtcAttestStore.Scripts).Find(x => x.WatchFromBitcoinHeight >= reach && x.WatchFromBitcoinHeight < floor))
+                    _sweepFrom = Math.Min(_sweepFrom, row.WatchFromBitcoinHeight);
             }
             else
             {

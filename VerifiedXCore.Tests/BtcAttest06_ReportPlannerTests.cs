@@ -328,6 +328,40 @@ namespace VerifiedXCore.Tests
             Assert.DoesNotContain(view.Asked, h => h < Meta.EventsThroughHeight - BtcReportPlanner.SweepBack);
         }
 
+        /// <summary>
+        /// A planner that starts (or resets) looked back only 240 blocks below the events-through height: a vault created
+        /// shortly before, still owed a backfill for a deposit more than 96 blocks below its creation, was never swept on
+        /// it once one quiet report had moved the height 144, and with a third of the signers restarted the deposit was
+        /// lost (fifth review, round 14). A first run also sweeps vaults watched from within the blocks still served.
+        /// </summary>
+        [Fact]
+        public async Task AVaultOwedABackfill_IsSweptAfterTheValidatorRestarts()
+        {
+            await Start();
+            var a = await CreateVault(H1 + 1);
+            var bAddress = NewTaprootAddress();
+            var depositsAt = _btc.Mine(Pay(a.Script, 1_000), Pay(ScriptOf(bAddress), 11_000), Pay(ScriptOf(bAddress), 22_000));
+            _btc.MineEmpty(110);
+            _btc.Mine(Pay(a.Script, 1_000));
+            _btc.MineEmpty(BtcAttestRules.Depth);
+            var view = new View(_btc);
+            await Drive(view);
+            var b = await CreateVault(Tip + 1, bAddress);
+            Assert.True(BtcAttestStore.ScriptRowForVault(b.Uid)!.WatchFromBitcoinHeight <= depositsAt);
+            Assert.True(depositsAt < Meta.EventsThroughHeight - 100);
+
+            // One quiet report is mined before the backfill: the events-through height moves 144.
+            _btc.MineEmpty(BtcAttestRules.QuietBlocks + BtcAttestRules.Depth);
+            var quiet = _planner.Plan(view, Tip).Reports.First(r => r.Kind != BtcPlannedReport.Backfill);
+            await Apply(Tip + 1, Signed(quiet.Report));
+            Assert.True(depositsAt < Meta.EventsThroughHeight - BtcReportPlanner.SweepBack);
+
+            // The validator restarts: the deposits are still found and credited.
+            _planner.Reset();
+            Assert.Equal(new[] { BtcPlannedReport.Backfill }, await Drive(view));
+            Assert.Equal(33_000, BtcAttestStore.Total(b.Uid).HeldSats);
+        }
+
         [Fact]
         public async Task ASpendOfABackfilledCoin_InALaterReportedBlock_IsBackfilledToo()
         {
