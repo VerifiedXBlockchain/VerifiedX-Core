@@ -188,7 +188,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 scopedVault = BtcAttestStore.ScriptRowForVault(report.Scope, db);
                 if (scopedVault == null) return BtcReportOutcome.Fail($"no vault {report.Scope} is known to the Bitcoin view");
                 if (block > meta.EventsThroughHeight) return BtcReportOutcome.Fail("a backfill report is for a block whose events were already reported");
-                if (block < scopedVault.WatchFromBitcoinHeight) return BtcReportOutcome.Fail($"block {block} is before vault {report.Scope} is watched from ({scopedVault.WatchFromBitcoinHeight})");
+                // From the earliest of its keys: a deposit to a replaced key that the forward reports missed is still the vault's.
+                var watchedFrom = BtcAttestStore.ScriptRowsForVault(report.Scope, db).Min(k => k.WatchFromBitcoinHeight);
+                if (block < watchedFrom) return BtcReportOutcome.Fail($"block {block} is before vault {report.Scope} is watched from ({watchedFrom})");
             }
 
             // Burial: enforced here, not left to the signers.

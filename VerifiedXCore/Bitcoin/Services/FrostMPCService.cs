@@ -249,7 +249,8 @@ namespace VerifiedXCore.Bitcoin.Services
             int threshold,
             Action<int, int>? progressCallback = null,
             IReadOnlyList<PreSignedLeaderAuth>? preSignedAuths = null,
-            Func<int, string?>? participantShortfall = null)
+            Func<int, string?>? participantShortfall = null,
+            string? rekeyOf = null)
         {
             var run = new FrostDkgRun();
             var leaderAddress = ownerAddress;
@@ -301,7 +302,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 var outcome = AttemptRunnerForTests != null
                     ? await AttemptRunnerForTests(contractUid, sessionId, participants, auth)
-                    : await RunDkgAttempt(contractUid, sessionId, leaderAddress, participants, threshold, progressCallback, auth);
+                    : await RunDkgAttempt(contractUid, sessionId, leaderAddress, participants, threshold, progressCallback, auth, rekeyOf);
                 if (outcome.Result != null)
                 {
                     run.Result = outcome.Result;
@@ -337,13 +338,14 @@ namespace VerifiedXCore.Bitcoin.Services
             List<VBTCValidator> validators,
             int threshold,
             Action<int, int>? progressCallback,
-            PreSignedLeaderAuth? preSignedAuth)
+            PreSignedLeaderAuth? preSignedAuth,
+            string? rekeyOf = null)
         {
             var attempt = new DkgAttempt();
             try
             {
                 // Start: FROST DKG needs every participant from here on.
-                await BroadcastDKGStart(sessionId, contractUid, leaderAddress, validators, threshold, preSignedAuth, attempt.Failed);
+                await BroadcastDKGStart(sessionId, contractUid, leaderAddress, validators, threshold, preSignedAuth, attempt.Failed, rekeyOf);
                 if (attempt.Failed.Count > 0)
                 {
                     attempt.Error = $"{attempt.Failed.Count} of {validators.Count} validators did not join the key ceremony.";
@@ -386,7 +388,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 // Results: every participant must have finished with the same key and attested it.
                 progressCallback?.Invoke(3, 85);
-                attempt.Result = await AggregateDKGResult(sessionId, contractUid, validators, threshold, leaderAddress, attempt.Failed);
+                attempt.Result = await AggregateDKGResult(sessionId, contractUid, validators, threshold, leaderAddress, attempt.Failed, rekeyOf);
                 if (attempt.Result == null)
                     attempt.Error = attempt.Failed.Count > 0
                         ? $"{attempt.Failed.Count} of {validators.Count} validators did not finish the key ceremony with a valid attestation."
@@ -414,7 +416,8 @@ namespace VerifiedXCore.Bitcoin.Services
             List<VBTCValidator> validators,
             int threshold,
             PreSignedLeaderAuth? preSignedAuth,
-            Dictionary<string, string> failed)
+            Dictionary<string, string> failed,
+            string? rekeyOf = null)
         {
             // Sign with leader's key using deterministic message format
             // Any VFX wallet owner can be the leader — not just validators
@@ -445,7 +448,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 Timestamp = timestamp,
                 LeaderSignature = leaderSignature,
                 ParticipantAddresses = validators.Select(v => v.ValidatorAddress).ToList(),
-                RequiredThreshold = threshold
+                RequiredThreshold = threshold,
+                RekeyOf = rekeyOf,
             };
 
             var failures = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
@@ -735,7 +739,8 @@ namespace VerifiedXCore.Bitcoin.Services
             List<VBTCValidator> validators,
             int threshold,
             string leaderAddress,
-            Dictionary<string, string> failed)
+            Dictionary<string, string> failed,
+            string? rekeyOf = null)
         {
             LogUtility.Log($"[FROST MPC] Collecting DKG results from {validators.Count} validators...", "FrostMPCService.AggregateDKGResult");
 
@@ -803,7 +808,7 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 var a = r.Value.Attestation;
                 if (a != null && a.ValidatorAddress == r.Key
-                    && FrostDkgAttestation.Verify(a, contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants))
+                    && FrostDkgAttestation.Verify(a, contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, rekeyOf))
                     attestations.Add(a);
                 else
                     failed[r.Key] = "did not return a valid attestation";

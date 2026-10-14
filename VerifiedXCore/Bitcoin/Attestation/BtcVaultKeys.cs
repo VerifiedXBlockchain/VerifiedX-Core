@@ -130,6 +130,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
         // ── Health ─────────────────────────────────────────────────────────────────
 
+        /// <summary>How often the keys' holders are counted, in VFX blocks (about twenty minutes).</summary>
+        public const int HealthCheckBlocks = 100;
+
         /// <summary>
         /// Holders a key may lose before it is replaced: half of those it can spare above its threshold, at least one.
         /// The other half is the time the replacement takes (a ceremony, then the old key signs the sweep).
@@ -162,6 +165,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 if (holders.Count == 0 || threshold <= 0) continue;
                 var healthy = holders.Count(a => IsHealthy(a, active, vfxHeight, db));
                 var due = healthy < threshold + SpareBeforeRekey(holders.Count, threshold);
+                if (!due && key.RekeyDueSinceVfxHeight > 0 && healthy < holders.Count) due = true; // once due, due until replaced
                 var dueSince = due ? (key.RekeyDueSinceVfxHeight > 0 ? key.RekeyDueSinceVfxHeight : vfxHeight) : 0;
                 if (key.HealthyHolders == healthy && key.RekeyDueSinceVfxHeight == dueSince) continue;
                 key.HealthyHolders = healthy;
@@ -213,9 +217,19 @@ namespace VerifiedXCore.Bitcoin.Attestation
             // The new key's UID is one of its own: the ceremony ran under it and its holders file their shares under it.
             if (!LooksLikeContractUid(keyUid)) return "the new key's UID is not a UID";
             if (string.Equals(keyUid, rekey.ContractUID, StringComparison.Ordinal)) return "the new key's UID is the vault's own";
-            if (SmartContractStateTrei.GetSmartContractState(keyUid) != null) return "the new key's UID is a contract's";
-            if ((db ?? BtcAttestStore.Db).GetCollection<VaultDepositScriptRow>(BtcAttestStore.Scripts).Exists(x => x.KeyUID == keyUid))
-                return "the new key's UID is already a key's";
+            // Another vault's UID or another key's is refused. Any other contract under the same UID is not: its holders
+            // learn the UID when the ceremony starts, and minting an NFT under it first would otherwise block every
+            // re-key (a key UID is looked up as a key before it is looked up as a contract, and no vault can ever be
+            // created under it, LedgerIntegrityRules.CreatedUidWasNeverWatched).
+            var scripts = (db ?? BtcAttestStore.Db).GetCollection<VaultDepositScriptRow>(BtcAttestStore.Scripts);
+            if (scripts.Exists(x => x.SmartContractUID == keyUid)) return "the new key's UID is a vault's";
+            if (scripts.Exists(x => x.KeyUID == keyUid)) return "the new key's UID is already a key's";
+            // The ceremony ran after the key fell due (a UID ends in the time it was made): no proof is kept in hand for
+            // a key before it is due.
+            var dueBlock = VerifiedXCore.Data.BlockchainData.GetBlockByHeight(current.RekeyDueSinceVfxHeight);
+            if (dueBlock != null && long.TryParse(keyUid.Substring(keyUid.IndexOf(':') + 1), out var made)
+                && made < dueBlock.Timestamp - Globals.MaxFutureSkewSeconds - 3600)
+                return "the new key's ceremony was run before the key fell due";
 
             // The rule a vault's creation follows, word for word: the address is the key's, every participant is an
             // eligible validator, a public ceremony includes nearly all of them, and each attested.
@@ -224,8 +238,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 DepositAddress = proof.TaprootAddress ?? "", FrostGroupPublicKey = proof.GroupPublicKey ?? "", DKGProof = rekey.DKGProof,
                 ValidatorAddressesSnapshot = proof.Participants ?? new List<string>(), IsS3C = false,
             };
+            // ... except that the attestations name this vault (a creation's proof, or another vault's, is not this re-key's),
+            // the threshold is the one every re-key uses, and two thirds of the eligible validators suffice.
             var ceremonyError = FrostDkgAttestation.Validate(feature, keyUid, proof.Owner ?? "",
-                () => VerifiedXCore.Services.ValidatorBond.CeremonyEligible(VBTCValidatorRegistry.GetActiveValidatorsAt(vfxHeight - 1), vfxHeight));
+                () => VerifiedXCore.Services.ValidatorBond.CeremonyEligible(VBTCValidatorRegistry.GetActiveValidatorsAt(vfxHeight - 1), vfxHeight),
+                rekeyOf: rekey.ContractUID);
             if (ceremonyError != null) return ceremonyError;
 
             string scriptHex;
@@ -243,6 +260,21 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 Generation = current.Generation + 1, KeyUID = keyUid, Holders = participants, MinSigners = proof.Threshold,
                 GroupKeyHex = proof.GroupPublicKey, HealthyHolders = participants.Count, HealthCheckedAtVfxHeight = vfxHeight,
             };
+            return null;
+        }
+
+        /// <summary>
+        /// Why a validator does not join a re-key's ceremony for this vault now; null when it may. The vault's current key
+        /// must be due at the tip and the vault not an S3C vault, and the threshold the one every re-key uses.
+        /// </summary>
+        public static string? RekeyCeremonyRefusal(string? vaultUid, int requiredThresholdPercent)
+        {
+            var key = BtcAttestStore.ScriptRowForVault(vaultUid);
+            if (key == null || !string.Equals(key.SmartContractUID, vaultUid, StringComparison.Ordinal)) return $"no vault {vaultUid} is watched";
+            if (key.RekeyDueSinceVfxHeight <= 0) return $"vault {vaultUid}'s key is not due for replacement";
+            if (VBTCChainView.GetVault(vaultUid)?.Feature.IsS3C != false) return "an S3C vault's key is not replaced by the chain";
+            if (requiredThresholdPercent != FrostDkgAttestation.RekeyThresholdPercent)
+                return $"a re-key's ceremony uses a threshold of {FrostDkgAttestation.RekeyThresholdPercent}%";
             return null;
         }
 

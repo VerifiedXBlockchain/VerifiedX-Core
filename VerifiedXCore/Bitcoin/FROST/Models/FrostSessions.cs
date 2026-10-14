@@ -16,6 +16,8 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public long StartTimestamp { get; set; }
         /// <summary>The network address the start came from (a leader's node). Counted, so one host cannot take every place.</summary>
         public string? SourceIp { get; set; }
+        /// <summary>A re-key's ceremony: the vault the new key is for (signed into this validator's attestation).</summary>
+        public string? RekeyOf { get; set; }
         
         // FROST native library state for this validator's participation
         public ushort MyParticipantIndex { get; set; }         // This validator's 1-based index

@@ -14,6 +14,8 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public string LeaderSignature { get; set; }
         public List<string> ParticipantAddresses { get; set; }
         public int RequiredThreshold { get; set; }
+        /// <summary>A re-key's ceremony (plan 8.8): the vault the new key is for. Null for a vault's creation.</summary>
+        public string? RekeyOf { get; set; }
     }
 
     /// <summary>

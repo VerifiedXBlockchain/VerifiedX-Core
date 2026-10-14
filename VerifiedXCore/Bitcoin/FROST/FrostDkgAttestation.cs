@@ -39,6 +39,20 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// <summary>FROST minimum: a threshold key needs at least three participants.</summary>
         public const int MinParticipants = 3;
 
+        /// <summary>
+        /// A vault's new key (a re-key, plan 8.8) is made at this share of its holders, whoever leads the ceremony and
+        /// whatever the old key used: chosen by the leader, a key every holder had to sign with could be withheld by
+        /// any one of them, and would fall due again at once.
+        /// </summary>
+        public const int RekeyThresholdPercent = 67;
+
+        /// <summary>
+        /// The share of eligible validators a re-key's ceremony must include. Lower than a creation's: a re-key is
+        /// needed exactly when validators are leaving, and one that cannot be made in time loses the vault's Bitcoin.
+        /// Still two thirds of every eligible stake, each attesting.
+        /// </summary>
+        public const double RekeyParticipationShare = 0.67;
+
         public class Attestation
         {
             public string ValidatorAddress { get; set; } = "";
@@ -62,8 +76,13 @@ namespace VerifiedXCore.Bitcoin.FROST
             (participants ?? Enumerable.Empty<string>()).Where(a => !string.IsNullOrEmpty(a)).Distinct(StringComparer.Ordinal).OrderBy(a => a, StringComparer.Ordinal).ToList();
 
         /// <summary>The message every participant signs.</summary>
-        public static string Message(string contractUid, string groupPublicKey, string taprootAddress, string owner, int threshold, IEnumerable<string> participants) =>
-            $"VFX_DKG_ATTEST_V2|{contractUid}|{groupPublicKey}|{taprootAddress}|{owner}|{threshold}|{string.Join(",", Canonical(participants))}";
+        /// <param name="rekeyOf">
+        /// For a re-key's ceremony, the vault it makes a new key for. Part of what each participant signs, so a
+        /// creation's proof is never a re-key's and a re-key's names its vault.
+        /// </param>
+        public static string Message(string contractUid, string groupPublicKey, string taprootAddress, string owner, int threshold, IEnumerable<string> participants, string? rekeyOf = null) =>
+            $"VFX_DKG_ATTEST_V2|{contractUid}|{groupPublicKey}|{taprootAddress}|{owner}|{threshold}|{string.Join(",", Canonical(participants))}"
+            + (string.IsNullOrEmpty(rekeyOf) ? "" : $"|REKEY|{rekeyOf}");
 
         /// <summary>The FROST signing threshold the validators use for n participants at a threshold percentage.</summary>
         public static int ThresholdFor(int participants, int thresholdPercent) => (int)Math.Ceiling(participants * (thresholdPercent / 100.0));
@@ -117,15 +136,15 @@ namespace VerifiedXCore.Bitcoin.FROST
             catch { return null; }
         }
 
-        public static bool Verify(Attestation? a, string contractUid, string groupPublicKey, string taprootAddress, string owner, int threshold, IEnumerable<string> participants) =>
+        public static bool Verify(Attestation? a, string contractUid, string groupPublicKey, string taprootAddress, string owner, int threshold, IEnumerable<string> participants, string? rekeyOf = null) =>
             a != null && !string.IsNullOrEmpty(a.ValidatorAddress) && !string.IsNullOrEmpty(a.Signature)
-            && SignatureService.VerifySignature(a.ValidatorAddress, Message(contractUid, groupPublicKey, taprootAddress, owner, threshold, participants), a.Signature);
+            && SignatureService.VerifySignature(a.ValidatorAddress, Message(contractUid, groupPublicKey, taprootAddress, owner, threshold, participants, rekeyOf), a.Signature);
 
         /// <summary>A majority (51%) of n, and never fewer than two.</summary>
         public static int Required(int n) => Math.Max(2, (int)Math.Ceiling(n * 0.51));
 
         /// <summary>Participants a public ceremony needs out of <paramref name="eligible"/> validators: at least 90%, and at least three.</summary>
-        public static int RequiredParticipants(int eligible) => Math.Max(MinParticipants, (int)Math.Ceiling(eligible * PublicParticipationShare));
+        public static int RequiredParticipants(int eligible, double share = PublicParticipationShare) => Math.Max(MinParticipants, (int)Math.Ceiling(eligible * share));
 
         /// <summary>
         /// This validator's attestation for a ceremony it completed, or null. It signs only when it is a participant, its key
@@ -133,7 +152,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// list), and the address is the group key's Taproot address. Owner, threshold and participants come from its own
         /// session: the leader is authenticated at the ceremony start.
         /// </summary>
-        public static Attestation? SignLocal(string? contractUid, string? groupPublicKey, string? taprootAddress, string? owner, int threshold, List<string>? participants)
+        public static Attestation? SignLocal(string? contractUid, string? groupPublicKey, string? taprootAddress, string? owner, int threshold, List<string>? participants, string? rekeyOf = null)
         {
             try
             {
@@ -152,7 +171,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     var recorded = Canonical(JsonConvert.DeserializeObject<List<string>>(stored.ParticipantOrderJson));
                     if (!recorded.SequenceEqual(list, StringComparer.Ordinal)) return null;
                 }
-                var signature = SignatureService.ValidatorSignature(Message(contractUid, groupPublicKey, taprootAddress, owner, threshold, list));
+                var signature = SignatureService.ValidatorSignature(Message(contractUid, groupPublicKey, taprootAddress, owner, threshold, list, rekeyOf));
                 return string.IsNullOrEmpty(signature) || signature == "ERROR" || signature == "F" ? null
                     : new Attestation { ValidatorAddress = me, Signature = signature };
             }
@@ -176,11 +195,11 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// public ceremony needs at least 90% of the funded active public validators; an S3C ceremony its whole pool. A
         /// ceremony with fewer could complete and produce a real key whose contract is refused.
         /// </summary>
-        public static string? PreCeremonyShortfall(int reachable, bool isS3C, int s3cPoolSize)
+        public static string? PreCeremonyShortfall(int reachable, bool isS3C, int s3cPoolSize, double share = PublicParticipationShare)
         {
             if (!RequiredForNextBlock) return null;
             var basis = isS3C ? s3cPoolSize : EligibleAtTip().Count(v => v.IsActive && !v.IsS3C);
-            var need = isS3C ? Math.Max(MinParticipants, s3cPoolSize) : RequiredParticipants(basis);
+            var need = isS3C ? Math.Max(MinParticipants, s3cPoolSize) : RequiredParticipants(basis, share);
             return reachable >= need ? null
                 : $"Only {reachable} validator(s) are reachable; a vBTC V2 contract needs a key ceremony with at least {need} of the {basis} eligible validators, so its creation would be refused. Try again when more validators are online.";
         }
@@ -189,15 +208,15 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// After a ceremony, before its deposit address is recorded or shown: null when the contract it produced would pass
         /// the consensus check at the tip (same rule, same validator set), else the reason.
         /// </summary>
-        public static string? CeremonyResultError(string contractUid, string? groupPublicKey, string? taprootAddress, string? dkgProof, List<string>? participants, bool isS3C, string owner)
+        public static string? CeremonyResultError(string contractUid, string? groupPublicKey, string? taprootAddress, string? dkgProof, List<string>? participants, bool isS3C, string owner, string? rekeyOf = null)
         {
-            if (!RequiredForNextBlock) return null;
+            if (!RequiredForNextBlock && rekeyOf == null) return null;
             var feature = new TokenizationV2Feature
             {
                 DepositAddress = taprootAddress ?? "", FrostGroupPublicKey = groupPublicKey ?? "", DKGProof = dkgProof ?? "",
                 ValidatorAddressesSnapshot = participants ?? new List<string>(), IsS3C = isS3C,
             };
-            return Validate(feature, contractUid, owner, EligibleAtTip);
+            return Validate(feature, contractUid, owner, EligibleAtTip, rekeyOf);
         }
 
         /// <summary>
@@ -206,7 +225,10 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// derived from committed state up to height - 1 (deterministic on every node); it is read only after the cheap
         /// checks pass.
         /// </summary>
-        public static string? Validate(TokenizationV2Feature? feature, string contractUid, string owner, Func<List<VBTCValidator>> activeAtPreviousBlock)
+        /// <param name="rekeyOf">For a re-key (plan 8.8): the vault the new key is for. The attestations must name it, the
+        /// threshold is <see cref="RekeyThresholdPercent"/> of the participants exactly, and the ceremony includes at
+        /// least <see cref="RekeyParticipationShare"/> of the eligible validators.</param>
+        public static string? Validate(TokenizationV2Feature? feature, string contractUid, string owner, Func<List<VBTCValidator>> activeAtPreviousBlock, string? rekeyOf = null)
         {
             if (feature == null) return "vBTC V2 contract has no TokenizationV2 data.";
             var groupKey = feature.FrostGroupPublicKey ?? "";
@@ -240,6 +262,8 @@ namespace VerifiedXCore.Bitcoin.FROST
             var n = canonical.Count;
             if (proof.Threshold < Required(n) || proof.Threshold > n)
                 return $"vBTC V2 contract signing threshold {proof.Threshold} is not a majority of its {n} participants.";
+            if (rekeyOf != null && proof.Threshold != ThresholdFor(n, RekeyThresholdPercent))
+                return $"A vault's new key signs with {ThresholdFor(n, RekeyThresholdPercent)} of its {n} holders ({RekeyThresholdPercent}%); this one names {proof.Threshold}.";
 
             // Every participant: an active validator of the contract's class that holds the validator balance.
             var eligible = new HashSet<string>(activeAtPreviousBlock().Where(v => v != null && v.IsActive && v.IsS3C == feature.IsS3C && !string.IsNullOrEmpty(v.ValidatorAddress))
@@ -249,8 +273,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                 return $"vBTC V2 contract key ceremony participant {notEligible} is not an eligible validator.";
 
             // Participation: a public ceremony includes nearly every eligible validator; an S3C ceremony is its own pool.
-            if (!feature.IsS3C && n < RequiredParticipants(eligible.Count))
-                return $"vBTC V2 contract key ceremony had {n} participants; at least {RequiredParticipants(eligible.Count)} of the {eligible.Count} eligible validators are required.";
+            var share = rekeyOf != null ? RekeyParticipationShare : PublicParticipationShare;
+            if (!feature.IsS3C && n < RequiredParticipants(eligible.Count, share))
+                return $"vBTC V2 contract key ceremony had {n} participants; at least {RequiredParticipants(eligible.Count, share)} of the {eligible.Count} eligible validators are required.";
 
             // Exactly one valid attestation from every participant.
             if (proof.Attestations == null || proof.Attestations.Count != n)
@@ -261,7 +286,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     return "vBTC V2 contract DKG proof carries a duplicate or unnamed attestation.";
             foreach (var p in canonical)
             {
-                if (!byAddress.TryGetValue(p, out var a) || !Verify(a, contractUid, groupKey, address, owner, proof.Threshold, canonical))
+                if (!byAddress.TryGetValue(p, out var a) || !Verify(a, contractUid, groupKey, address, owner, proof.Threshold, canonical, rekeyOf))
                     return $"vBTC V2 contract DKG proof has no valid attestation from participant {p}.";
             }
             return null;

@@ -770,6 +770,19 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // A re-key's ceremony (plan 8.8) is joined only for a vault whose key the chain says is due, and
+                            // only at the share every re-key uses: a leader chooses neither the vault nor the threshold.
+                            if (!string.IsNullOrEmpty(request.RekeyOf))
+                            {
+                                var rekeyRefusal = VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.RekeyCeremonyRefusal(request.RekeyOf, request.RequiredThreshold);
+                                if (rekeyRefusal != null)
+                                {
+                                    context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = rekeyRefusal }));
+                                    return;
+                                }
+                            }
+
                             // FIND-024 Fix: Determine this validator's participant index (1-based)
                             // CRITICAL: Use sorted order to match BuildAddressToIdentifierMap
                             var myAddress = Globals.ValidatorAddress;
@@ -816,6 +829,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 RequiredThreshold = request.RequiredThreshold,
                                 StartTimestamp = TimeUtil.GetTime(),
                                 SourceIp = dkgSource,
+                                RekeyOf = string.IsNullOrEmpty(request.RekeyOf) ? null : request.RekeyOf,
                                 MyParticipantIndex = myParticipantId,
                                 Round1SecretPackage = secretPackage
                             };
@@ -1862,7 +1876,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         // threshold and the participant list of this validator's own session.
                         var attestation = FrostDkgAttestation.SignLocal(session.SmartContractUID, session.GroupPublicKey, session.TaprootAddress,
                             session.LeaderAddress, FrostDkgAttestation.ThresholdFor(session.ParticipantAddresses?.Count ?? 0, session.RequiredThreshold),
-                            session.ParticipantAddresses);
+                            session.ParticipantAddresses, session.RekeyOf);
 
                         // Return final result
                         context.Response.StatusCode = StatusCodes.Status200OK;

@@ -284,7 +284,13 @@ namespace VerifiedXCore.Services
         public static string? CreatedUidWasNeverWatched(Transaction tx)
         {
             var uid = CreatedContractUid(tx);
-            return uid != null && VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.ScriptRowForVault(uid) != null ? VaultCreatedBefore : null;
+            if (uid == null) return null;
+            if (VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.ScriptRowForVault(uid) != null) return VaultCreatedBefore;
+            // Nor under the UID of a vault's later key (plan 8.8): its holders file that key's shares under it.
+            return VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.Db?.GetCollection<VerifiedXCore.Bitcoin.Attestation.VaultDepositScriptRow>(VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.Scripts)
+                       .Exists(x => x.KeyUID == uid) == true
+                ? "This UID is a vault key's; no contract is created under it."
+                : null;
         }
 
         /// <summary>

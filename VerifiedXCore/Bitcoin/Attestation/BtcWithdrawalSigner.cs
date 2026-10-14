@@ -196,6 +196,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
             var snapshot = BtcVaultKeys.Holders(script);
             var registered = VBTCValidatorRegistry.GetActiveValidators().Where(v => snapshot.Contains(v.ValidatorAddress, StringComparer.Ordinal)).ToList();
+            // A holder that has exited (the reason a key is replaced) may still run and still hold its share; it is asked
+            // at the address this node last knew for it. Sweeps of a replaced key depend on exactly these.
+            foreach (var holder in snapshot.Where(a => registered.All(r => r.ValidatorAddress != a)))
+                if (Globals.NetworkValidators.TryGetValue(holder, out var known) && !string.IsNullOrEmpty(known.IPAddress))
+                    registered.Add(new VBTCValidator { ValidatorAddress = holder, IPAddress = known.IPAddress, IsActive = true });
             var reachable = await FrostMPCService.ProbeValidatorReachability(registered);
             if (reachable.Count == 0) return (false, $"none of the key's {snapshot.Count} signers is reachable");
             var madeAt = script.Generation > 0 ? script.CreatedAtVfxHeight : vault.Feature.ProofBlockHeight; // the height a vault names is its creator's word: never after the tip

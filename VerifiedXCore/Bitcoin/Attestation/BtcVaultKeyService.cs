@@ -107,17 +107,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (vault == null) return (false, "the vault is not in state");
             var all = VerifiedXCore.Services.ValidatorBond.CeremonyEligible(VBTCValidatorRegistry.GetPublicValidators(), tip + 1);
             var reachable = await FrostMPCService.ProbeValidatorReachability(all);
-            var shortfall = FrostDkgAttestation.PreCeremonyShortfall(reachable.Count, false, all.Count);
+            var shortfall = FrostDkgAttestation.PreCeremonyShortfall(reachable.Count, false, all.Count, FrostDkgAttestation.RekeyParticipationShare);
             if (shortfall != null) return (false, shortfall);
 
-            // The new key keeps the share of its holders the old key needs to sign (never below a majority).
-            var holders = Math.Max(1, BtcVaultKeys.Holders(key).Count);
-            var threshold = Math.Max(51, (int)Math.Ceiling(100.0 * BtcVaultKeys.MinSigners(key) / holders));
-            var run = await FrostMPCService.CoordinateDKGCeremony(FrostDkgAttestation.NewContractUid(), me, reachable, threshold,
-                participantShortfall: n => FrostDkgAttestation.PreCeremonyShortfall(n, false, all.Count));
+            // Every re-key's key signs with the same share of its holders; the ceremony names the vault it is for.
+            var run = await FrostMPCService.CoordinateDKGCeremony(FrostDkgAttestation.NewContractUid(), me, reachable, FrostDkgAttestation.RekeyThresholdPercent,
+                participantShortfall: n => FrostDkgAttestation.PreCeremonyShortfall(n, false, all.Count, FrostDkgAttestation.RekeyParticipationShare),
+                rekeyOf: vaultUid);
             var result = run.Result;
             if (result == null || string.IsNullOrEmpty(run.ContractUID)) return (false, run.Error ?? "the key ceremony did not complete");
-            var resultError = FrostDkgAttestation.CeremonyResultError(run.ContractUID!, result.GroupPublicKey, result.TaprootAddress, result.DKGProof, result.ParticipantAddresses, false, me);
+            var resultError = FrostDkgAttestation.CeremonyResultError(run.ContractUID!, result.GroupPublicKey, result.TaprootAddress, result.DKGProof, result.ParticipantAddresses, false, me, rekeyOf: vaultUid);
             if (resultError != null) return (false, resultError);
 
             var rekey = new BtcRekey { ContractUID = vaultUid, DKGProof = result.DKGProof ?? "" };

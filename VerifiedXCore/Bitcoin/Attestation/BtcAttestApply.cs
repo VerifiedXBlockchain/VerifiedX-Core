@@ -38,10 +38,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 if (BtcAttestStore.GetMeta(db) == null)
                     Initialize(vfxHeight, db);
                 if (BtcAttestRules.IsEpochStart(vfxHeight))
-                {
                     StoreSignerSet(vfxHeight, db);
-                    BtcVaultKeys.CheckHealth(vfxHeight, db); // which vault keys have too few holders left (plan 8.8)
-                }
+                // Which vault keys have too few holders left (plan 8.8). Every 100 blocks: an exit takes effect in less than
+                // an epoch, and a key must be found due while its old holders can still sign.
+                if (vfxHeight % BtcVaultKeys.HealthCheckBlocks == 0 || BtcAttestRules.IsEpochStart(vfxHeight))
+                    BtcVaultKeys.CheckHealth(vfxHeight, db);
                 BtcWithdrawals.OnBlockStart(vfxHeight, db); // requests never pinned and past their window: closed, refunded
             }
             catch (Exception ex)
