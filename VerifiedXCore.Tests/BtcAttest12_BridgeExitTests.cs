@@ -608,6 +608,15 @@ namespace VerifiedXCore.Tests
             Assert.Empty(BtcAttestStore.ExitParts(old.Hash, Tip));
             Assert.Null(BtcWithdrawals.ExitRefusal(ExitComplete(burn, new string('b', 64))));
             Assert.True((await Verify(ExitComplete(burn, new string('b', 64)), Tip + 1)).Ok);
+
+            // A caster fails an older-vault exit (it may already have paid it in Bitcoin; nothing on chain says): the burn
+            // is exited again only from older vaults, never from a watched vault's locks (round 14).
+            var failedBurn = NewBurn();
+            var failedExit = await Mine(Exit(failedBurn, BtcDest, (olderLock, older.Uid, 0.0005M)));
+            await Mine(ExitFail(failedBurn, failedExit, (olderLock, older.Uid, 0.0005M)));
+            Assert.True(Record(failedBurn).IsFailedRecord);
+            await RefusedInBlock(Exit(failedBurn, BtcDest, (watchedLock, watched.Uid, 0.0005M)), "only from older vaults");
+            Assert.True((await Verify(Exit(failedBurn, BtcDest, (olderLock, older.Uid, 0.0005M)), Tip + 1)).Ok);
         }
 
         /// <summary>

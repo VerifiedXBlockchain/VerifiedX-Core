@@ -132,6 +132,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         var watched = ExitIsOnWatchedVaults(allocations, out var mixed);
                         if (watched == null) return mixed;
                         if (watched == false) return null;
+                        // A burn whose exit from older vaults a caster failed may already have been paid in Bitcoin (a
+                        // failure transaction proves nothing about the signing): it is exited again only from older vaults,
+                        // never charged to a watched vault's holders (fifth review, round 14).
+                        var earlier = VBTCBridgeBtcExitState.GetByBurnHash(data["BaseBurnTxHash"]?.ToObject<string?>() ?? "");
+                        if (earlier != null && earlier.IsFailedRecord && !IsWatchedExit(earlier))
+                            return "This burn's exit from older vaults was failed by a caster; it is exited again only from older vaults.";
                         // Each lock once, named by its own id, asked for no more than it holds: a lock's look-up trims and
                         // ignores case, and "L1" with "l1 " drew on one lock twice; the second draw failed at apply and
                         // the part was paid in full anyway (fourth review, round 11). Every watched exit is held to it,
