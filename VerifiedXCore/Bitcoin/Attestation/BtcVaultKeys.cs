@@ -243,7 +243,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             // The ceremony ran after the key fell due (a UID ends in the time it was made): no proof is kept in hand for
             // a key before it is due.
             var dueBlock = VerifiedXCore.Data.BlockchainData.GetBlockByHeight(current.RekeyDueSinceVfxHeight);
-            if (dueBlock != null && long.TryParse(keyUid.Substring(keyUid.IndexOf(':') + 1), out var made)
+            if (dueBlock != null && long.TryParse(KeyUidTime(keyUid), out var made)
                 && made < dueBlock.Timestamp - Globals.MaxFutureSkewSeconds - 3600)
                 return "the new key's ceremony was run before the key fell due";
 
@@ -304,6 +304,17 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 $"VFX-VAULT-REKEY|{key.SmartContractUID}|{key.Generation + 1}|{key.RekeyDueSinceVfxHeight}")))[..32].ToLowerInvariant();
 
         private static long _lastKeyUidTime;
+
+        /// <summary>
+        /// The time part of a re-key's UID: what follows the colon, less the six random digits <see cref="NewKeyUid"/>
+        /// puts after the time. Read whole, the number was a million times any block's time, and the check that the
+        /// ceremony ran after the key fell due never refused anything (fourth review, round 6).
+        /// </summary>
+        internal static string KeyUidTime(string keyUid)
+        {
+            var tail = keyUid.Substring(keyUid.IndexOf(':') + 1);
+            return tail.Length > 10 ? tail[..^6] : tail; // a time in seconds has 10 digits until the year 2286
+        }
 
         /// <summary>
         /// A UID for a re-key ceremony of this due key: its fixed first part, then the time and six random digits, a new
