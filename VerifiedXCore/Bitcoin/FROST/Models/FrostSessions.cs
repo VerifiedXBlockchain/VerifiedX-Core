@@ -51,6 +51,13 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         [Newtonsoft.Json.JsonIgnore]
         public ConcurrentDictionary<string, string> SealEphemerals { get; set; } = new();
         
+        /// <summary>
+        /// Each participant's verified key as this validator's registry gave it at the start: shares are sealed to these.
+        /// Read live at Round 2, a participant that left the registry in between (an exit, a lapsed heartbeat) failed every
+        /// honest dealer's Round 2 (fifth review, round 14).
+        /// </summary>
+        public ConcurrentDictionary<string, string> ParticipantKeys { get; set; } = new();
+
         // Round 1: Commitments (from all validators)
         public ConcurrentDictionary<string, string> Round1Commitments { get; set; } = new();
         

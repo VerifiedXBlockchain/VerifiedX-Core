@@ -696,6 +696,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                             }
 
                             // Verify all participants are registered active validators
+                            var participantKeys = new Dictionary<string, string>(StringComparer.Ordinal);
                             foreach (var participantAddr in request.ParticipantAddresses)
                             {
                                 var participantValidator = Services.VBTCValidatorRegistry.GetValidator(participantAddr);
@@ -709,6 +710,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                                     }));
                                     return;
                                 }
+                                // Its key, taken now and kept for the ceremony (round 14).
+                                if (FrostShareCrypto.IsOwnKey(participantValidator.FrostPublicKey, participantAddr))
+                                    participantKeys[participantAddr] = participantValidator.FrostPublicKey;
                             }
 
                             // The leader's signature over the whole start (fourth review, round 4): required for a re-key, whose
@@ -887,7 +891,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 LeaderSigned = leaderSignedStart,
                                 StartBodyHash = startBodyHash,
                                 MyParticipantIndex = myParticipantId,
-                                Round1SecretPackage = secretPackage
+                                Round1SecretPackage = secretPackage,
+                                ParticipantKeys = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(participantKeys, StringComparer.Ordinal),
                             };
 
                             // Auto-store this validator's commitment
@@ -1347,7 +1352,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // recipient's registered validator key; the coordinator only ever relays ciphertext.
                             var idToAddress = BuildAddressToIdentifierMap(session.ParticipantAddresses).ToDictionary(kv => kv.Value, kv => kv.Key);
                             var sealEphemerals = new Dictionary<string, string>(StringComparer.Ordinal);
-                            var sealedShares = FrostShareCrypto.SealAll(sharesJson, sessionId, idToAddress, FrostShareCrypto.VerifiedPublicKey, out var sealError, sealEphemerals);
+                            // To the keys taken at the start (round 14); a session from before them reads the registry.
+                            var sealedShares = FrostShareCrypto.SealAll(sharesJson, sessionId, idToAddress,
+                                a => session.ParticipantKeys.TryGetValue(a, out var k) ? k : FrostShareCrypto.VerifiedPublicKey(a), out var sealError, sealEphemerals);
                             if (sealedShares == null)
                             {
                                 ErrorLogUtility.LogError($"FROST DKG Round 2: shares not released for session {sessionId}: {sealError}", "FrostStartup.DKGRound2");

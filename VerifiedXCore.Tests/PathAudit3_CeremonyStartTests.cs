@@ -286,6 +286,54 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A dealer sealed each share to the participant's key read from its registry at Round 2: a participant that had
+        /// left the registry since the start (an exit, a lapsed heartbeat) failed every honest dealer's Round 2, and the
+        /// dealers were dropped (fifth review, round 14). Shares are sealed to the keys taken at the start.
+        /// </summary>
+        [Fact]
+        public async Task ARound2_SealsToTheKeysTakenAtTheStart_NotTheRegistryAtRound2()
+        {
+            using var server = new TestServer(new WebHostBuilder().UseStartup<FrostStartup>());
+            var client = server.CreateClient();
+            var keys = Enumerable.Range(0, 3).Select(_ =>
+            {
+                var k = new EllipticCurve.PrivateKey("secp256k1");
+                var p = "04" + Convert.ToHexString(k.publicKey().toString()).ToLowerInvariant();
+                return (Pub: p, Address: VerifiedXCore.Data.AccountData.GetHumanAddress(p));
+            }).OrderBy(k => k.Address, StringComparer.Ordinal).ToList();
+            var r1 = Enumerable.Range(1, 3).Select(i => FrostNative.DKGRound1Generate((ushort)i, 3, 3)).ToList();
+            Assert.All(r1, r => Assert.Equal(FrostNative.SUCCESS, r.Item3));
+            var priorValidator = Globals.ValidatorAddress;
+            var priorSynced = Globals.IsChainSynced;
+            Globals.ValidatorAddress = keys[0].Address;
+            Globals.IsChainSynced = false; // the registry answers nobody now
+            var session = new DKGSession
+            {
+                SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc", LeaderAddress = "xLeader", StartTimestamp = _now, LastProgressTimestamp = _now,
+                ParticipantAddresses = keys.Select(k => k.Address).ToList(), RequiredThreshold = 67, MyParticipantIndex = 1, Round1SecretPackage = r1[0].Item2,
+                ParticipantKeys = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(keys.ToDictionary(k => k.Address, k => k.Pub)),
+            };
+            session.Round1Commitments.TryAdd(keys[0].Address, r1[0].Item1);
+            Assert.True(FrostSessionStorage.DKGSessions.TryAdd(session.SessionId, session));
+            try
+            {
+                var body = JsonConvert.SerializeObject(Enumerable.Range(0, 3).ToDictionary(i => keys[i].Address, i => r1[i].Item1));
+                var response = await client.PostAsync($"/frost/dkg/round2/{session.SessionId}", new StringContent(body, Encoding.UTF8, "application/json"));
+                var text = await response.Content.ReadAsStringAsync();
+                Assert.True(response.StatusCode == HttpStatusCode.OK, text);
+                var shares = Newtonsoft.Json.Linq.JObject.Parse((string)Newtonsoft.Json.Linq.JObject.Parse(text)["GeneratedShares"]!);
+                Assert.Equal(2, shares.Count);
+                Assert.All(shares.Properties(), p => Assert.StartsWith(FrostShareCrypto.Prefix, (string)p.Value!));
+            }
+            finally
+            {
+                FrostSessionStorage.DKGSessions.TryRemove(session.SessionId, out _);
+                Globals.ValidatorAddress = priorValidator;
+                Globals.IsChainSynced = priorSynced;
+            }
+        }
+
+        /// <summary>
         /// Two Round 2 requests at once (the leader's signed request replayed by a participant) each sealed the shares with
         /// their own one-time keys; the last stored won while the leader relayed the other's ciphertext, so a reveal could
         /// not open it and the honest dealer was dropped (fifth review, round 13). A request that comes while another is
