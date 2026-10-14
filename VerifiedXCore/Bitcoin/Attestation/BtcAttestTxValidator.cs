@@ -224,8 +224,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 foreach (var other in pending)
                 {
                     if (string.Equals(other.Hash, tx.Hash, StringComparison.Ordinal)) continue;
+                    // Before verification a held copy also wins a tie of timestamps: variants of one report with other
+                    // signature subsets at one timestamp each cost a full check (fourth review, round 6).
                     var earlier = other.Timestamp < tx.Timestamp
-                        || (other.Timestamp == tx.Timestamp && string.CompareOrdinal(other.Hash, tx.Hash) < 0);
+                        || (other.Timestamp == tx.Timestamp && (!recheckSignatures || string.CompareOrdinal(other.Hash, tx.Hash) < 0));
                     if (!earlier) continue;
                     if (BtcReport.TryParse(other.Data, out var held, out _) && held != null && held.Hash() == reportHash
                         && (recheckSignatures ? BtcReportVerifier.CheckSignatures(held, reportHash, height) == null

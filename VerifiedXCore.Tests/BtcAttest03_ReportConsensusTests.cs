@@ -445,6 +445,18 @@ namespace VerifiedXCore.Tests
             Assert.False((await TransactionValidatorService.VerifyTX(otherSigners)).Item1);
             pool.InsertSafe(otherSigners);
             Assert.True((await TransactionValidatorService.VerifyTX(first)).Item1);
+            // A copy at the held one's timestamp that sorts before it by hash is refused before its signatures are checked:
+            // anyone could make such variants from the gossiped signatures, each a full check (fourth review, round 6).
+            var ties = Signers.SelectMany((_, i) => new[] { Signers.Where((_, j) => j != i), Signers.Where((_, j) => j != (i + 1) % Signers.Count || j == i) })
+                .Select(subset => { var t = Signed(Forward(at), subset); t.Timestamp = first.Timestamp; t.Build(); return t; })
+                .Where(t => string.CompareOrdinal(t.Hash, first.Hash) < 0).ToList();
+            Assert.NotEmpty(ties);
+            foreach (var tie in ties)
+            {
+                var (tieOk, tieWhy) = await TransactionValidatorService.VerifyTX(tie);
+                Assert.False(tieOk);
+                Assert.Contains("already in the mempool", tieWhy);
+            }
             // Admitting the earliest takes the later copies of the same report out of the mempool (they used to pile up).
             Assert.Null(pool.FindOne(x => x.Hash == second.Hash));
             Assert.Null(pool.FindOne(x => x.Hash == otherSigners.Hash));
