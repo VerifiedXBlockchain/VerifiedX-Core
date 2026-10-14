@@ -190,6 +190,8 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
         public const int MaxHeadersPerAnswer = 200;
         /// <summary>Hashes in one request.</summary>
         public const int MaxLocatorHashes = 64;
+        /// <summary>The most bytes of an answer read: a full answer of hex headers and its JSON. Nothing past this is read.</summary>
+        public const int MaxAnswerBytes = MaxHeadersPerAnswer * BtcHeader.Size * 2 + 4096;
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(8) };
         private readonly string _url;
 
@@ -214,10 +216,13 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
             {
                 var body = Newtonsoft.Json.JsonConvert.SerializeObject(new BtcHeadersRequest { Locator = locator.Take(MaxLocatorHashes).ToList() });
                 using var content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
-                using var response = await Http.PostAsync(_url, content, ct);
+                using var request = new HttpRequestMessage(HttpMethod.Post, _url) { Content = content };
+                // The answer is read only as far as a full answer goes: a validator that streams more is not read on
+                // (the client's own limit is 2 GB, and all of it was held before its size was looked at).
+                using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
                 if (!response.IsSuccessStatusCode) return null;
-                var text = await response.Content.ReadAsStringAsync(ct);
-                if (text.Length > MaxHeadersPerAnswer * BtcHeader.Size * 2 + 4096) return null;
+                var text = await ReadBoundedAsync(response.Content, MaxAnswerBytes, ct);
+                if (text == null) return null;
                 var answer = Newtonsoft.Json.JsonConvert.DeserializeObject<Answer>(text);
                 if (answer?.Success != true || answer.Headers == null || answer.Headers.Count > MaxHeadersPerAnswer) return null;
                 var headers = new List<BtcHeader>(answer.Headers.Count);
@@ -229,6 +234,22 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
                 return headers;
             }
             catch { return null; }
+        }
+
+        /// <summary>The body as text, or null when it is longer than <paramref name="maxBytes"/> (only that much plus one byte is read).</summary>
+        internal static async Task<string?> ReadBoundedAsync(HttpContent content, int maxBytes, CancellationToken ct)
+        {
+            if (content.Headers.ContentLength is long declared && declared > maxBytes) return null;
+            await using var stream = await content.ReadAsStreamAsync(ct);
+            var buffer = new byte[maxBytes + 1];
+            var read = 0;
+            while (read < buffer.Length)
+            {
+                var n = await stream.ReadAsync(buffer.AsMemory(read, buffer.Length - read), ct);
+                if (n == 0) break;
+                read += n;
+            }
+            return read > maxBytes ? null : System.Text.Encoding.UTF8.GetString(buffer, 0, read);
         }
 
         public Task<Block?> GetBlockAsync(string hash, CancellationToken ct) => Task.FromResult<Block?>(null);

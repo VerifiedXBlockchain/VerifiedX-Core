@@ -334,6 +334,40 @@ namespace VerifiedXCore.Tests
             Assert.Equal(_btc.Tip, client.TipHeight);
         }
 
+        /// <summary>A stream that never ends and says nothing of its length, as a validator streaming forever would send.</summary>
+        private sealed class EndlessStream : Stream
+        {
+            public long Served;
+            public override bool CanRead => true;
+            public override bool CanSeek => false;
+            public override bool CanWrite => false;
+            public override long Length => throw new NotSupportedException();
+            public override long Position { get => Served; set => throw new NotSupportedException(); }
+            public override void Flush() { }
+            public override int Read(byte[] buffer, int offset, int count) { Array.Fill(buffer, (byte)'0', offset, count); Served += count; return count; }
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        }
+
+        /// <summary>
+        /// A validator's answer was read whole before its size was looked at, and the client allowed 2 GB: one validator
+        /// streaming for the eight seconds it is given filled the asking validator's memory. Only a full answer's worth is
+        /// read now (third pass review, 14 October 2026).
+        /// </summary>
+        [Fact]
+        public async Task AValidatorsAnswer_IsReadOnlyAsFarAsAFullAnswerGoes()
+        {
+            var max = BtcValidatorSource.MaxAnswerBytes;
+            Assert.Equal("ok", await BtcValidatorSource.ReadBoundedAsync(new System.Net.Http.StringContent("ok"), max, CancellationToken.None));
+            Assert.NotNull(await BtcValidatorSource.ReadBoundedAsync(new System.Net.Http.StringContent(new string('0', max)), max, CancellationToken.None));
+            Assert.Null(await BtcValidatorSource.ReadBoundedAsync(new System.Net.Http.StringContent(new string('0', max + 1)), max, CancellationToken.None));
+
+            var endless = new EndlessStream();
+            Assert.Null(await BtcValidatorSource.ReadBoundedAsync(new System.Net.Http.StreamContent(endless), max, CancellationToken.None));
+            Assert.InRange(endless.Served, max + 1, max + 1 + 81920);
+        }
+
         [Fact]
         public void WhatAValidatorServes_IsItsBestChainAfterTheNewestHashItIsGiven()
         {
@@ -351,8 +385,8 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task Peers_AreTakenFromDifferentNetworks_WhileThereAreSuchToTake()
         {
-            Assert.Equal("10.9", BtcLightClient.NetworkGroup("10.9.0.7:8333 /Satoshi:27.0.0/"));
-            Assert.Equal("10.9", BtcLightClient.NetworkGroup("10.9.200.1:8333"));
+            Assert.Equal("10.9.0.0/16", BtcLightClient.NetworkGroup("10.9.0.7:8333 /Satoshi:27.0.0/"));
+            Assert.Equal("10.9.0.0/16", BtcLightClient.NetworkGroup("10.9.200.1:8333"));
             Assert.NotEqual(BtcLightClient.NetworkGroup("10.9.0.7:8333"), BtcLightClient.NetworkGroup("10.10.0.7:8333"));
 
             _btc.MineEmpty(1);

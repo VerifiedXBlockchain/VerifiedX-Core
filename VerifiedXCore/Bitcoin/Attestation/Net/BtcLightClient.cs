@@ -300,6 +300,9 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
                     if (headers == null)
                     {
                         if (IsPeer(source)) Drop(source, "no answer to a header request", TimeSpan.FromMinutes(10));
+                        // A validator that does not answer, or answers with more than an answer holds, is not asked
+                        // again for ten minutes (it may only be restarting).
+                        else if (fromValidators.Contains(source)) _avoidUntil[source.Name] = DateTime.UtcNow + TimeSpan.FromMinutes(10);
                         break;
                     }
                     if (headers.Count == 0) break;
