@@ -16,14 +16,21 @@ namespace VerifiedXCore.Privacy
             bool twSkipVerify,
             Dictionary<string, long>? processedNonces,
             bool skipPlonkProofVerification = false,
-            long? blockHeight = null)
+            long? blockHeight = null,
+            long? blockTimestamp = null)
         {
             _ = twSkipVerify;
 
             if (txRequest.Data != null && txRequest.Data.Length > Globals.MaxPrivateTxDataSize)
                 return (false, $"Private transaction Data exceeds MaxPrivateTxDataSize ({Globals.MaxPrivateTxDataSize}).");
 
-            if (!blockDownloads)
+            var blockTime = LedgerIntegrityRules.BlockTime(blockHeight, blockTimestamp);
+            if (blockTime != null)
+            {
+                if (LedgerIntegrityRules.TimestampOutsideItsBlock(txRequest, blockTime.Value))
+                    return (false, LedgerIntegrityRules.TimestampOutsideItsBlockMessage);
+            }
+            else if (!blockDownloads)
             {
                 var stale = await TransactionData.IsTxTimestampStale(txRequest, allowHistorical: false);
                 if (stale)

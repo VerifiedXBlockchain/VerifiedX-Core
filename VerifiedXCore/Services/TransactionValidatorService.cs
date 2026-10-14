@@ -237,10 +237,13 @@ namespace VerifiedXCore.Services
             return null;
         }
 
-        public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false, bool twSkipVerify = false, Dictionary<string, long> processedNonces = null, bool skipPrivatePlonkProofVerification = false, long? blockHeight = null)
+        public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false, bool twSkipVerify = false, Dictionary<string, long> processedNonces = null, bool skipPrivatePlonkProofVerification = false, long? blockHeight = null, long? blockTimestamp = null)
         {
             bool txResult = false;
             bool runReserveCheck = true;
+            // The time this transaction's rules are judged at: its block's timestamp in block validation from
+            // Globals.PathAuditRulesHeight, the node's clock (null) otherwise. See LedgerIntegrityRules.BlockTime.
+            var blockTime = LedgerIntegrityRules.BlockTime(blockHeight, blockTimestamp);
 
             // NEW-27: a whitelisted transaction skips validation only in block validation and only with the content its
             // hash commits to (the carried Hash alone used to skip every check).
@@ -291,12 +294,12 @@ namespace VerifiedXCore.Services
                 return (false, vaultInTransitError);
 
             if (PrivateTransactionTypes.IsPrivateTransaction(txRequest.TransactionType))
-                return await PrivateTransactionValidatorService.VerifyPrivateTX(txRequest, blockDownloads, blockVerify, twSkipVerify, processedNonces, skipPrivatePlonkProofVerification, blockHeight);
+                return await PrivateTransactionValidatorService.VerifyPrivateTX(txRequest, blockDownloads, blockVerify, twSkipVerify, processedNonces, skipPrivatePlonkProofVerification, blockHeight, blockTimestamp);
 
             // Bitcoin attestation: sender-less transactions with their own rules, judged from chain state alone. Block
             // validation passes the block's height; admission the height the transaction would be mined at.
             if (VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(txRequest.TransactionType))
-                return await VerifiedXCore.Bitcoin.Attestation.BtcAttestTxValidator.Verify(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1), blockDownloads, admission: blockHeight == null);
+                return await VerifiedXCore.Bitcoin.Attestation.BtcAttestTxValidator.Verify(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1), blockDownloads, admission: blockHeight == null, blockTimestamp: blockTimestamp);
 
             // From the enforcement height: vaults created before the recording height are frozen, and the transactions
             // only the earlier way of working needs are refused for every vault.
@@ -437,7 +440,12 @@ namespace VerifiedXCore.Services
 
             // HAL-068 Fix: Timestamp validation using explicit blockDownloads parameter instead of semaphore state
             // Skip validation during block sync, enforce for new transactions
-            if (!blockDownloads)
+            if (blockTime != null)
+            {
+                if (LedgerIntegrityRules.TimestampOutsideItsBlock(txRequest, blockTime.Value))
+                    return (txResult, LedgerIntegrityRules.TimestampOutsideItsBlockMessage);
+            }
+            else if (!blockDownloads)
             {
                 var isTxStale = await TransactionData.IsTxTimestampStale(txRequest, allowHistorical: false);
                 if (isTxStale)
@@ -2203,7 +2211,12 @@ namespace VerifiedXCore.Services
                                     if (!messageParse)
                                         return (txResult, "Improper Message Format. Message must be a timestamp.");
 
-                                    if (!blockDownloads)
+                                    if (blockTime != null)
+                                    {
+                                        if (messageTimestamp < LedgerIntegrityRules.NowForAgeRules(blockTime) - 30 * 60)
+                                            return (txResult, "Signature message is too old. Please resubmit a new tx.");
+                                    }
+                                    else if (!blockDownloads)
                                     {
                                         if (messageTimestamp < TimeUtil.GetTime(0, -30))
                                             return (txResult, "Signature message is too old. Please resubmit a new tx.");
@@ -2444,8 +2457,13 @@ namespace VerifiedXCore.Services
                                     if(topic == null)
                                         return (txResult, "Topic does not exist.");
 
-                                    var currentTime = DateTime.UtcNow;
-                                    if(currentTime > topic.VotingEndDate)
+                                    // From the height the end of voting is read as the moment it is (a stored date comes
+                                    // back in the node's local time; compared as it stood, the answer followed the
+                                    // node's time zone), against the block's timestamp in a block.
+                                    var votingEnded = (blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.PathAuditRulesHeight
+                                        ? DateTimeOffset.FromUnixTimeSeconds(LedgerIntegrityRules.NowForAgeRules(blockTime)).UtcDateTime > topic.VotingEndDate.ToUniversalTime()
+                                        : DateTime.UtcNow > topic.VotingEndDate;
+                                    if (votingEnded)
                                         return (txResult, "Voting for this topic has ended.");
 
                                     //from address must equal vote address
@@ -2583,6 +2601,15 @@ namespace VerifiedXCore.Services
                                             //86400 seconds in a day
                                             var currentTime = TimeUtil.GetTime();
                                             var lastUpdateTime = currentTime - treiRec.UpdateTimestamp;
+                                            // From the height: the last update's time is its block's (the stored one
+                                            // is the clock of the node at the moment it applied the update, a different
+                                            // number on every node), and in a block "now" is the block's timestamp.
+                                            if ((blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.PathAuditRulesHeight)
+                                            {
+                                                var lastUpdateBlock = BlockchainData.GetBlockByHeight(treiRec.LatestBlockHeight);
+                                                if (lastUpdateBlock != null)
+                                                    lastUpdateTime = LedgerIntegrityRules.NowForWaitRules(blockTime) - lastUpdateBlock.Timestamp;
+                                            }
 
                                             if (lastUpdateTime < 43200)
                                             {
@@ -2717,7 +2744,11 @@ namespace VerifiedXCore.Services
                                             if (rTx.FromAddress != txRequest.FromAddress)
                                                 return (txResult, "From address does not match the reserve tx from address. Cannot call back.");
 
-                                            if (Globals.BlocksDownloadSlim.CurrentCount != 0 && Globals.BlocksDownloadV2Slim.CurrentCount != 0)
+                                            // In a block (from the height) the status above is the whole rule: a row
+                                            // is finalized by the first block timed after its unlock time, on every
+                                            // node alike, and until that block it can be called back. The clock is
+                                            // read only at admission, so that a call-back past its time is not sent.
+                                            if (blockTime == null && Globals.BlocksDownloadSlim.CurrentCount != 0 && Globals.BlocksDownloadV2Slim.CurrentCount != 0)
                                             {
                                                 if (rTx.ConfirmTimestamp <= currentTime)
                                                     return (txResult, "This TX has already passed and can no longer be called back.");
@@ -2747,7 +2778,12 @@ namespace VerifiedXCore.Services
                                         {
                                             var currentTime = TimeUtil.GetTime(-600);
 
-                                            if (Globals.BlocksDownloadSlim.CurrentCount != 0 && Globals.BlocksDownloadV2Slim.CurrentCount != 0)
+                                            if (blockTime != null)
+                                            {
+                                                if (LedgerIntegrityRules.NowForAgeRules(blockTime) - 600 > sigTime)
+                                                    return (txResult, "Recover request has expired.");
+                                            }
+                                            else if (Globals.BlocksDownloadSlim.CurrentCount != 0 && Globals.BlocksDownloadV2Slim.CurrentCount != 0)
                                             {
                                                 if (currentTime > sigTime)
                                                 return (txResult, "Recover request has expired.");
@@ -4236,7 +4272,13 @@ namespace VerifiedXCore.Services
                 if(txRequest.UnlockTime == null)
                     return (txResult, "There must be an unlock time for this transaction");
 
-                if (Globals.BlocksDownloadSlim.CurrentCount != 0 && Globals.BlocksDownloadV2Slim.CurrentCount != 0)
+                if (blockTime != null)
+                {
+                    // 24 hours less the three the rule has always allowed, from the block's timestamp.
+                    if (txRequest.UnlockTime.Value < LedgerIntegrityRules.NowForAgeRules(blockTime) + 21 * 3600)
+                        return (txResult, "Unlock time does not meet 24 hour requirement.");
+                }
+                else if (Globals.BlocksDownloadSlim.CurrentCount != 0 && Globals.BlocksDownloadV2Slim.CurrentCount != 0)
                 {
                     var validUnlockTime = TimeUtil.GetReserveTime(-3);
 

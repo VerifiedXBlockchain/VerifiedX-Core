@@ -34,7 +34,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <param name="height">The block's height in block validation; the height it would be mined at (tip + 1) at admission.</param>
         /// <param name="admission">True when the transaction is being judged for the mempool or for a block proposal,
         /// false in block validation. Only admission reads the mempool.</param>
-        public static async Task<(bool, string)> Verify(Transaction tx, long height, bool blockDownloads, bool admission = false)
+        public static async Task<(bool, string)> Verify(Transaction tx, long height, bool blockDownloads, bool admission = false, long? blockTimestamp = null)
         {
             if (!BtcAttestRules.Recording(height))
                 return (false, "Bitcoin attestation transactions are not accepted before the recording height.");
@@ -55,7 +55,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (!string.Equals(tx.Hash, tx.GetHash(), StringComparison.Ordinal))
                 return (false, "This transaction's hash is not the hash of its content.");
 
-            if (!blockDownloads)
+            var blockTime = admission ? null : LedgerIntegrityRules.BlockTime(height, blockTimestamp);
+            if (blockTime != null)
+            {
+                if (LedgerIntegrityRules.TimestampOutsideItsBlock(tx, blockTime.Value))
+                    return (false, LedgerIntegrityRules.TimestampOutsideItsBlockMessage);
+            }
+            else if (!blockDownloads)
             {
                 if (await TransactionData.IsTxTimestampStale(tx, allowHistorical: false))
                     return (false, "The timestamp of this transaction is too old or too far in the future.");

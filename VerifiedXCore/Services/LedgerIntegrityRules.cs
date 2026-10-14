@@ -972,5 +972,44 @@ namespace VerifiedXCore.Services
                 return SameDepositAddressInBlock;
             return null;
         }
+
+        #region Time in block validation
+
+        /// <summary>
+        /// How far a block's timestamp may be from the moment its producer chose its transactions. A producer chooses
+        /// by its own clock (admission) and stamps the block a moment later, or one second after the block before it
+        /// when that one is ahead of its clock; every time rule is this much easier in a block than at admission, so
+        /// that what a producer chose by its clock always stands in its block.
+        /// </summary>
+        public const int BlockTimeMarginSeconds = 300;
+
+        /// <summary>
+        /// The time a block's transactions are judged at. Block validation read the clock of the node doing it: a
+        /// transaction at the edge of an hour old, a reserve send at the edge of its 24 hours or a recovery signature at
+        /// the edge of its ten minutes was valid on one node and not on the next, and none of it was checked at all by a
+        /// node reading the same block a day later. From Globals.PathAuditRulesHeight a block's transactions are judged
+        /// by the block's own timestamp, the same on every node whenever it reads the block. Null: the node's clock
+        /// (admission to the mempool, and blocks before the height).
+        /// </summary>
+        public static long? BlockTime(long? blockHeight, long? blockTimestamp)
+            => blockHeight != null && blockTimestamp != null && blockHeight.Value >= Globals.PathAuditRulesHeight ? blockTimestamp : null;
+
+        /// <summary>
+        /// "Now" for a rule that is easier the earlier now is (an age limit, a deadline, a minimum time ahead): the
+        /// block's timestamp less the margin in a block, the clock otherwise.
+        /// </summary>
+        public static long NowForAgeRules(long? blockTime) => blockTime != null ? blockTime.Value - BlockTimeMarginSeconds : TimeUtil.GetTime();
+
+        /// <summary>"Now" for a rule that is easier the later now is (a wait that must have passed).</summary>
+        public static long NowForWaitRules(long? blockTime) => blockTime != null ? blockTime.Value + BlockTimeMarginSeconds : TimeUtil.GetTime();
+
+        /// <summary>A transaction's timestamp against its block's: not older than the age limit, not further ahead than the skew, each with the margin.</summary>
+        public static bool TimestampOutsideItsBlock(Transaction tx, long blockTime)
+            => blockTime - tx.Timestamp > Globals.MaxTxAgeSeconds + BlockTimeMarginSeconds
+            || tx.Timestamp - blockTime > Globals.MaxFutureSkewSeconds + BlockTimeMarginSeconds;
+
+        public const string TimestampOutsideItsBlockMessage = "The timestamp of this transaction is too far from its block's.";
+
+        #endregion
     }
 }
