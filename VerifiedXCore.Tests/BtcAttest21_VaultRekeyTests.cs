@@ -598,6 +598,25 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// Anyone could send a vault coins worth less than the fee their inputs add, and every sweep spent more on them
+        /// than they held. A sweep leaves such a coin where it is (fourth review, round 3).
+        /// </summary>
+        [Fact]
+        public async Task ASweep_LeavesBehindCoinsWorthLessThanTheirFee()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            var big = await Deposit(vault.Script, 100_000);
+            var dust = await Deposit(vault.Script, 500);   // its input costs 575 sats at 10 sat/vB
+            var stillHere = Signers.Take(3).ToList();
+            await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
+            await Mine(RekeyTx(vault.Uid, Ceremony(vault.Uid, stillHere, 2, Signers[0].Address).Proof));
+            var sweep = Assert.Single(BtcAttestStore.WithdrawalsOf(vault.Uid, VaultWithdrawalState.Pinned).Where(w => w.IsSweep));
+            Assert.Equal(new[] { BtcAttestStore.OutpointKey(big.GetHash().ToString(), 0) }, sweep.Pins[0].Inputs);
+            Assert.Equal(VaultCoinStatus.Unspent, BtcAttestStore.Coin(BtcAttestStore.OutpointKey(dust.GetHash().ToString(), 0))!.Status);
+        }
+
+        /// <summary>
         /// A withdrawal request mined a second time (by a producer, once the recent-blocks check has forgotten its hash)
         /// debited its requester again with no row to pay, expire or cancel. A watched vault's request is mined once
         /// (fourth review, round 2).

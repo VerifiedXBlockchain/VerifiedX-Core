@@ -198,7 +198,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var meta = BtcAttestStore.GetMeta(db);
             if (meta == null) { reason = "the Bitcoin view has not started"; return null; }
 
-            var free = FreeCoins(from, meta, db);
+            // A coin worth no more than the fee its input adds is left where it is: anyone could send a vault dust and have
+            // every sweep spend more on it than it holds (fourth review, round 3). It goes with a later sweep when fees fall.
+            var free = FreeCoins(from, meta, db).Where(c => c.ValueSats * 2 > 115L * feeRate).ToList();
             var takeable = BtcWithdrawals.TakeableCoins(from.SmartContractUID, feeRate, vfxHeight, db)
                 .Where(t => IsUnder(t.Coin, from, db) && t.Holders.All(h => !h.IsSweep && !h.IsBridgeExit)).ToList();
             BtcCanonicalTx? Try(List<VaultCoinRow> coins, out string? why)

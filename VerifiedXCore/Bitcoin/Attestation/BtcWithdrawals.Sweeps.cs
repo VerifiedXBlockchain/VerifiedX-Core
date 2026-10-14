@@ -102,11 +102,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (keys.Count < 2) return;
             var current = keys[^1];
             long? market = null;
+            // What the vault holds, read once for all its replaced keys (fourth review, round 3: once per key).
+            var freeCoins = BtcAttestStore.FreeCoinsOf(scUID, db);
+            var heldCoins = BtcAttestStore.WithdrawalsOf(scUID, VaultWithdrawalState.Pinned, db).Where(r => !r.IsSweep)
+                .SelectMany(r => r.Pins.Where(p => !p.Dead).SelectMany(p => p.Inputs)).Distinct(StringComparer.Ordinal)
+                .Select(i => BtcAttestStore.Coin(i, db)).Where(c => c is { Status: VaultCoinStatus.Pinned }).Select(c => c!).ToList();
             foreach (var old in keys.Take(keys.Count - 1))
             {
                 // A replaced key with no free coin and no coin a withdrawal holds has nothing a sweep could take: the
                 // same answer as building one, without reading the market (most re-keyed vaults, most of the time).
-                if (!KeyHoldsUnspent(scUID, old, db)) continue;
+                if (!freeCoins.Concat(heldCoins).Any(c => BtcCanonicalWithdrawal.IsUnder(c, old, db))) continue;
                 var marketRate = market ??= SweepRateAt(vfxHeight, db);
                 // A withdrawal on the replaced key that has gone unconfirmed past the stopped window gives its coins up
                 // at double its own rate, even when that rate is above the market's: otherwise one that never confirms
@@ -133,15 +138,6 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 SCLogUtility.Log($"Vault {scUID}: {tx.Inputs.Count} coin(s) of key generation {old.Generation} ({tx.InputSats} sats) fixed on Bitcoin transaction {tx.Txid} to the current key (generation {current.Generation}), {tx.FeeSats} sats of fee"
                     + (takenFrom.Count > 0 ? $"; taken from {string.Join(", ", takenFrom)}, which had stopped moving." : "."), "BtcWithdrawals.PlanSweeps()");
             }
-        }
-
-        /// <summary>Whether a key of the vault still holds a free coin, or a coin a withdrawal (not a sweep) has fixed.</summary>
-        internal static bool KeyHoldsUnspent(string scUID, VaultDepositScriptRow key, LiteDatabase? db)
-        {
-            if (BtcAttestStore.FreeCoinsOf(scUID, db).Any(c => BtcCanonicalWithdrawal.IsUnder(c, key, db))) return true;
-            return BtcAttestStore.WithdrawalsOf(scUID, VaultWithdrawalState.Pinned, db).Where(r => !r.IsSweep)
-                .SelectMany(r => r.Pins.Where(p => !p.Dead).SelectMany(p => p.Inputs))
-                .Any(i => BtcAttestStore.Coin(i, db) is { Status: VaultCoinStatus.Pinned } c && BtcCanonicalWithdrawal.IsUnder(c, key, db));
         }
 
         /// <summary>
