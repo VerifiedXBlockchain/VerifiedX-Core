@@ -203,13 +203,15 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// <summary>
         /// Places kept for re-keys (plan 8.8), apart from creations': a vault whose key is losing its holders must get a
         /// new one whoever is filling the creations' places. A re-key's ceremony is joined only for a vault the chain
-        /// says is due, led by an active vBTC validator, at most <see cref="MAX_REKEY_DKG_SESSIONS_PER_VAULT"/> per vault:
-        /// nobody can fill these places without a bonded validator and vaults that are due.
+        /// says is due, led by a validator that may hold a key share (active, its stake bonded for two days), at most
+        /// <see cref="MAX_REKEY_DKG_SESSIONS_PER_LEADER"/> a leader. There is no limit per vault: a limit of two let one
+        /// validator restarting its own two starts keep every other leader off a vault (fourth review). Filling every
+        /// place takes fifty such validators.
         /// </summary>
         public const int MAX_REKEY_DKG_SESSIONS = 100;
 
-        /// <summary>Re-key ceremonies under way for one vault (two leaders whose turns overlap).</summary>
-        public const int MAX_REKEY_DKG_SESSIONS_PER_VAULT = 2;
+        /// <summary>Re-key ceremonies under way that one leader may have started here (an attempt and its retry).</summary>
+        public const int MAX_REKEY_DKG_SESSIONS_PER_LEADER = 2;
 
         /// <summary>The steps a ceremony takes here, each once: its Round 2 shares made, every share for this validator received, its key made.</summary>
         public static class DkgStage
@@ -284,24 +286,30 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
             var underWay = sessions.Where(s => DkgIsUnderWay(s, nowSeconds) && string.IsNullOrEmpty(s.RekeyOf) != rekey).ToList();
             if (underWay.Count >= (rekey ? MAX_REKEY_DKG_SESSIONS : MAX_DKG_SESSIONS))
                 return rekey ? "Maximum concurrent re-key ceremonies reached. Try again later." : "Maximum concurrent DKG sessions reached. Try again later.";
-            if (rekey && underWay.Count(s => string.Equals(s.RekeyOf, rekeyOf, StringComparison.Ordinal)) >= MAX_REKEY_DKG_SESSIONS_PER_VAULT)
-                return $"Two re-key ceremonies for vault {rekeyOf} are already under way here. Try again shortly.";
             if (string.IsNullOrEmpty(leaderAddress)) return null;
             if (DkgStartWasSeen(sessionId))
                 return "This ceremony start was used before. Start again under a new session id.";
-            if (underWay.Count(s => string.Equals(s.LeaderAddress, leaderAddress, StringComparison.Ordinal)) >= MAX_DKG_SESSIONS_PER_LEADER)
-                return $"Too many open DKG sessions for this leader (cap {MAX_DKG_SESSIONS_PER_LEADER}). Finish or abandon them first.";
+            var perLeader = rekey ? MAX_REKEY_DKG_SESSIONS_PER_LEADER : MAX_DKG_SESSIONS_PER_LEADER;
+            if (underWay.Count(s => string.Equals(s.LeaderAddress, leaderAddress, StringComparison.Ordinal)) >= perLeader)
+                return $"Too many open DKG sessions for this leader (cap {perLeader}). Finish or abandon them first.";
             if (!rekey && !string.IsNullOrEmpty(sourceIp) && underWay.Count(s => string.Equals(s.SourceIp, sourceIp, StringComparison.Ordinal)) >= MAX_DKG_SESSIONS_PER_SOURCE)
                 return $"Too many key ceremonies under way from this network (cap {MAX_DKG_SESSIONS_PER_SOURCE}). Try again shortly.";
             return null;
         }
 
-        /// <summary>Why a re-key's start is not taken from this leader: only an active vBTC validator leads one. Null when it may.</summary>
-        public static string? RekeyLeaderRefusal(string? leaderAddress, Func<string, bool>? isActiveValidator = null)
+        /// <summary>
+        /// Why a re-key's start is not taken from this leader: only a validator that may hold a key share leads one (active,
+        /// funded, its stake bonded for the minimum age, as for a ceremony's participants). Null when it may.
+        /// </summary>
+        public static string? RekeyLeaderRefusal(string? leaderAddress, Func<string, bool>? mayHoldAShare = null)
         {
             if (string.IsNullOrEmpty(leaderAddress)) return "A re-key's ceremony needs a leader.";
-            var active = isActiveValidator ?? (a => VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.GetValidator(a)?.IsActive == true);
-            return active(leaderAddress) ? null : "A re-key's ceremony is led by an active vBTC validator.";
+            var eligible = mayHoldAShare ?? (a =>
+            {
+                var v = VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.GetValidator(a);
+                return v?.IsActive == true && VerifiedXCore.Services.ValidatorBond.CeremonyEligible(new[] { v }, (Globals.LastBlock?.Height ?? 0) + 1).Count > 0;
+            });
+            return eligible(leaderAddress) ? null : "A re-key's ceremony is led by an active vBTC validator whose stake has been bonded for the minimum age.";
         }
 
         /// <summary>

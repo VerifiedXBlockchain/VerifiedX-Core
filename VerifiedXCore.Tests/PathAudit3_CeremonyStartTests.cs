@@ -164,11 +164,14 @@ namespace VerifiedXCore.Tests
             Assert.Null(Refusal("xValidator", rekeyOf: "vault1"));
             Assert.Null(FrostSessionStorage.DkgStartRefusal(_sessions, _now, "s", _now, null, null, "vault1"));
 
-            // Two leaders of one vault's re-key at once, not three; another vault still has room.
+            // One leader holds two re-key places (an attempt and its retry), whatever the vault; it cannot keep the others
+            // off a vault (fourth review: two places a vault, both held by one validator restarting its starts).
             Open("xValidatorA", rekeyOf: "vault1");
+            Open("xValidatorA", rekeyOf: "vault1");
+            Assert.Contains("for this leader (cap 2)", Refusal("xValidatorA", rekeyOf: "vault2"));
+            Assert.Null(Refusal("xValidatorB", rekeyOf: "vault1"));
             Open("xValidatorB", rekeyOf: "vault1");
-            Assert.Contains("already under way", Refusal("xValidatorC", rekeyOf: "vault1"));
-            Assert.Null(Refusal("xValidatorC", rekeyOf: "vault2"));
+            Assert.Null(Refusal("xValidatorC", rekeyOf: "vault1"));
 
             // Re-keys do not count against the creations' network limit (validators may share a host), nor creations against theirs.
             _sessions.Clear();
@@ -178,7 +181,7 @@ namespace VerifiedXCore.Tests
 
             // Only an active validator leads one.
             Assert.Null(FrostSessionStorage.RekeyLeaderRefusal("xValidator", a => a == "xValidator"));
-            Assert.Contains("active vBTC validator", FrostSessionStorage.RekeyLeaderRefusal("xAnybody", a => a == "xValidator"));
+            Assert.Contains("bonded for the minimum age", FrostSessionStorage.RekeyLeaderRefusal("xAnybody", a => a == "xValidator"));
             Assert.NotNull(FrostSessionStorage.RekeyLeaderRefusal(null, a => true));
         }
 
