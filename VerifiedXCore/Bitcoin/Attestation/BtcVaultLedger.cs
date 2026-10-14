@@ -157,6 +157,40 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 : null;
         }
 
+        /// <summary>The longest sale key a watched vault's sale carries (a wallet's is 10 letters).</summary>
+        public const int MaxSaleKeyLength = 64;
+
+        /// <summary>The most purchase keys a watched vault keeps (each sale adds one, never removed).</summary>
+        public const int MaxPurchaseKeys = 1_000;
+
+        /// <summary>
+        /// Why a sale of a watched vault is refused: its key is longer than <see cref="MaxSaleKeyLength"/>, or the vault
+        /// already keeps <see cref="MaxPurchaseKeys"/> purchase keys. Each completed sale adds its key to the vault's
+        /// state document for good, and a key could be about 29 KB: an owner selling the vault to itself about 575 times
+        /// took the document past LiteDB's limit and froze every holder (fourth review, round 9). After the last sale it
+        /// can still change hands by Transfer().
+        /// </summary>
+        public static string? SaleRefusal(Transaction tx)
+        {
+            try
+            {
+                if (tx?.Data == null || tx.TransactionType != TransactionType.NFT_SALE) return null;
+                var data = JObject.Parse(tx.Data);
+                var function = data["Function"]?.Type == JTokenType.String ? (string)data["Function"]! : null;
+                if (function != "Sale_Start()" && function != "M_Sale_Start()" && function != "Sale_Complete()" && function != "M_Sale_Complete()" && function != "Sale_Cancel()") return null;
+                var uid = data["ContractUID"]?.Type == JTokenType.String ? (string)data["ContractUID"]! : null;
+                if (string.IsNullOrEmpty(uid) || !BtcAttestBalance.IsAttestedVault(uid)) return null;
+                var key = data["KeySign"]?.Type == JTokenType.String ? (string)data["KeySign"]! : null;
+                if (key != null && key.Length > MaxSaleKeyLength)
+                    return $"A sale of vault {uid} carries a key of at most {MaxSaleKeyLength} characters.";
+                if ((function == "Sale_Start()" || function == "M_Sale_Start()")
+                    && (SmartContractStateTrei.GetSmartContractState(uid)?.PurchaseKeys?.Count ?? 0) >= MaxPurchaseKeys)
+                    return $"Vault {uid} has been sold {MaxPurchaseKeys} times, the most it keeps; it can change hands by Transfer().";
+                return null;
+            }
+            catch (Newtonsoft.Json.JsonException) { return null; } // unreadable data is refused by the sale's own rules
+        }
+
         /// <summary>
         /// Why a transaction is refused for the holder limit of a watched vault it credits: a vBTC transfer (single or
         /// multi), or an unlock from the bridge (to the lock's owner, or a pool unlock to its destination on each vault

@@ -293,7 +293,9 @@ namespace VerifiedXCore.Services
             var vaultInTransitError = LedgerIntegrityRules.OwnerKeepsAVaultWholeWhileItChangesHands(txRequest)
                 ?? LedgerIntegrityRules.VbtcRecipientCanHoldIt(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                 // A watched vault holds at most so many holders with a balance, so its ledger stays within one document.
-                ?? VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.HolderLimitRefusal(txRequest);
+                ?? VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.HolderLimitRefusal(txRequest)
+                // ... and its document does not grow by a sale's key without bound (round 9).
+                ?? VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.SaleRefusal(txRequest);
             if (vaultInTransitError != null)
                 return (false, vaultInTransitError);
 

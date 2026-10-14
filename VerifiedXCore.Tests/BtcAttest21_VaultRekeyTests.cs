@@ -858,6 +858,14 @@ namespace VerifiedXCore.Tests
                 VfxTx Buy(V who) => SignedBy(who, Minter.Address, TransactionType.NFT_SALE, new { Function = "M_Sale_Complete()", ContractUID = vault.Uid, KeySign = "k" });
                 Assert.Contains("the most a vault holds", BtcVaultLedger.HolderLimitRefusal(Buy(buyer)));
                 Assert.Null(BtcVaultLedger.HolderLimitRefusal(Buy(holder)));
+                // A sale adds its key to the vault's document for good: a short key, and a bounded number of sales (round 9).
+                VfxTx Sell(string key) => SignedBy(Minter, Minter.Address, TransactionType.NFT_SALE, new { Function = "M_Sale_Start()", ContractUID = vault.Uid, NextOwner = holder.Address, SoldFor = 1M, KeySign = key });
+                Assert.Null(BtcVaultLedger.SaleRefusal(Sell("abcdefghij")));
+                Assert.Contains("a key of at most", BtcVaultLedger.SaleRefusal(Sell(new string('k', BtcVaultLedger.MaxSaleKeyLength + 1))));
+                var sold = SmartContractStateTrei.GetSmartContractState(vault.Uid)!;
+                sold.PurchaseKeys = Enumerable.Range(0, BtcVaultLedger.MaxPurchaseKeys).Select(i => "k" + i).ToList();
+                SmartContractStateTrei.GetSCST().Update(sold);
+                Assert.Contains("can change hands by Transfer()", BtcVaultLedger.SaleRefusal(Sell("abcdefghij")));
                 Assert.Null(BtcVaultLedger.HolderLimitRefusal(PoolUnlock(holder.Address)));
                 Assert.Null(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.0001M, Tip + 1, "xNew"));   // its one lock is on the full vault
                 Assert.Equal(lockId, Assert.Single(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.0001M, Tip + 1, holder.Address)!).LockId);
