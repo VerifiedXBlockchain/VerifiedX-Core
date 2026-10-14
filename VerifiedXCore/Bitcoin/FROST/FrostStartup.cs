@@ -1545,6 +1545,15 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Shares are taken after this validator's Round 2." }));
                                 return;
                             }
+                            // A finished session takes no more shares, and one that reported takes none either: reports (which
+                            // a dealer answers with a share's sealing key) come only from a session that will never attest a
+                            // key (fourth review, round 10).
+                            if (session.IsCompleted || session.Reported)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This validator's shares for this session are settled." }));
+                                return;
+                            }
                             if (session.LeaderSigned && !SignatureService.VerifySignature(session.LeaderAddress,
                                     FrostDkgLeaderAuth.ContentMessage("SHARES", sessionId, body), context.Request.Headers[FrostDkgLeaderAuth.ContentSignatureHeader].ToString()))
                             {
@@ -1678,6 +1687,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 }
                             }
 
+                            // A report is made once and for good: this session will not finish, and gives no attestation (round 10).
+                            if (accusations.Count > 0) session.Reported = true;
+
                             var receivedCount = session.ReceivedSharesJson.Count;
                             var totalOtherParticipants = session.ParticipantAddresses.Count - 1;
                             if (accusations.Count == 0 && receivedCount >= totalOtherParticipants) FrostSessionStorage.MarkDkgStage(session, FrostSessionStorage.DkgStage.SharesIn);
@@ -1706,8 +1718,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 TaprootAddress = session.TaprootAddress ?? "",
                                 Accusations = accusations,
                                 // Each report signed, so the dealer reveals that share's key for it and for nothing else (round 9).
-                                AccusationSignatures = accusations.Keys.ToDictionary(accused => accused,
-                                    accused => SignatureService.AddressSignature(myAddress, FrostDkgBlame.AccusationMessage(sessionId, myAddress, accused)))
+                                AccusationSignatures = accusations.Keys.ToDictionary(accused => accused, accused => SignedReport(myAddress, sessionId, accused))
                             }, Formatting.Indented));
                         }
                     }
@@ -2119,6 +2130,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 Success = false,
                                 Message = "Session not found"
                             }));
+                            return;
+                        }
+
+                        // A session that reported a share attests nothing (round 10).
+                        if (session.Reported)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status409Conflict;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This validator reported a share in this session; it attests no key from it.", SessionId = sessionId, IsCompleted = false }));
                             return;
                         }
 
@@ -3712,10 +3731,23 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// persists the key package, and marks the session as completed.
         /// Returns true if finalization succeeded.
         /// </summary>
+        /// <summary>This validator's signature on its report about a dealer's share; null when it cannot sign (the report then drops nobody).</summary>
+        private static string? SignedReport(string? myAddress, string sessionId, string accused)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(myAddress)) return null;
+                var signature = SignatureService.AddressSignature(myAddress, FrostDkgBlame.AccusationMessage(sessionId, myAddress, accused));
+                return string.IsNullOrEmpty(signature) || signature == "ERROR" ? null : signature;
+            }
+            catch { return null; }
+        }
+
         private static bool TryFinalizeDKG(DKGSession session)
         {
             try
             {
+                if (session.Reported) return false; // a session that reported a share never finishes (round 10)
                 if (session.IsCompleted) return true;
                 if (string.IsNullOrEmpty(session.Round2Secret))
                 {

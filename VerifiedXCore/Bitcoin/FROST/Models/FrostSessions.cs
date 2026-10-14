@@ -31,6 +31,15 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public string? Round1SecretPackage { get; set; }       // Secret from DKGRound1Generate (kept private)
         public string? Round2Secret { get; set; }              // Secret from DKGRound2GenerateShares (kept private)
         public string? GeneratedSharesJson { get; set; }       // Shares this validator created for others
+        /// <summary>
+        /// This validator reported a dealer's share in this session (signed). It then never finishes the session and never
+        /// attests its key: a dealer reveals a share's sealing key against that report, so a key whose holders' reports
+        /// were revealed must be one that can never be used (consensus needs every participant's attestation). Without
+        /// this a leader could draw reports from participants after the ceremony had finished, have every dealer reveal,
+        /// and interpolate the key of a vault (fourth review, round 10).
+        /// </summary>
+        public bool Reported { get; set; }
+
         /// <summary>The one-time key each of this validator's shares was sealed with, by recipient identifier (revealed only to settle that recipient's signed report).</summary>
         [Newtonsoft.Json.JsonIgnore]
         public ConcurrentDictionary<string, string> SealEphemerals { get; set; } = new();

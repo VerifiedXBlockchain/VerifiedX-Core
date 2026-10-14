@@ -348,6 +348,69 @@ namespace VerifiedXCore.Tests
             finally { FrostSessionStorage.DKGSessions.TryRemove(session.SessionId, out _); }
         }
 
+        /// <summary>
+        /// A dealer reveals a share's sealing key against its recipient's signed report. A leader (or, for an unsigned
+        /// creation, anyone holding the share-distribution signature) could draw such reports from participants after the
+        /// ceremony had finished, have every dealer reveal, and interpolate the key of a vault that goes on chain (fourth
+        /// review, round 10). A report and an attestation now exclude each other: a session that reports never finishes
+        /// or attests and takes no more batches, and a finished session takes no batch, so it cannot be made to report.
+        /// </summary>
+        [Fact]
+        public async Task ASessionThatReported_NeverAttests_AndAFinishedOneCannotBeMadeToReport()
+        {
+            using var server = new TestServer(new WebHostBuilder().UseStartup<FrostStartup>());
+            var client = server.CreateClient();
+            var leader = new EllipticCurve.PrivateKey("secp256k1");
+            var pub = "04" + Convert.ToHexString(leader.publicKey().toString()).ToLowerInvariant();
+            var leaderAddress = VerifiedXCore.Data.AccountData.GetHumanAddress(pub);
+            var priorValidator = Globals.ValidatorAddress;
+            Globals.ValidatorAddress = "xV1";
+            DKGSession Open(bool completed) => new DKGSession
+            {
+                SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc", LeaderAddress = leaderAddress, StartTimestamp = _now, LastProgressTimestamp = _now,
+                ParticipantAddresses = new List<string> { "xV1", "xV2", "xV3" }, RequiredThreshold = 67, MyParticipantIndex = 1, Round2Secret = "secret", IsCompleted = completed,
+            };
+            var reporting = Open(completed: false);
+            var finished = Open(completed: true);
+            Assert.True(FrostSessionStorage.DKGSessions.TryAdd(reporting.SessionId, reporting));
+            Assert.True(FrostSessionStorage.DKGSessions.TryAdd(finished.SessionId, finished));
+            try
+            {
+                async Task<(HttpStatusCode Code, string Body)> Batch(DKGSession session)
+                {
+                    var body = JsonConvert.SerializeObject(new
+                    {
+                        LeaderAddress = leaderAddress, Timestamp = _now,
+                        LeaderSignature = VerifiedXCore.Services.SignatureService.CreateSignature($"{session.SessionId}.{leaderAddress}.{_now}", leader, pub),
+                        AllGeneratedShares = new { xV2 = "", xV3 = "" },
+                    });
+                    var response = await client.PostAsync($"/frost/dkg/shares/{session.SessionId}", new StringContent(body, Encoding.UTF8, "application/json"));
+                    return (response.StatusCode, await response.Content.ReadAsStringAsync());
+                }
+
+                // Empty entries: this validator reports both dealers, and that session is done for good.
+                var (code, text) = await Batch(reporting);
+                Assert.Equal(HttpStatusCode.OK, code);
+                Assert.NotNull(JObject.Parse(text)["Accusations"]?["xV2"]);
+                Assert.True(reporting.Reported);
+                Assert.Equal(HttpStatusCode.Conflict, (await Batch(reporting)).Code);           // no second batch
+                reporting.IsCompleted = true;                                                    // even were it marked finished
+                var result = await client.GetAsync($"/frost/dkg/result/{reporting.SessionId}");
+                Assert.Equal(HttpStatusCode.Conflict, result.StatusCode);                        // no attestation
+
+                // A finished session takes no batch, so no report can be drawn from it.
+                (code, text) = await Batch(finished);
+                Assert.Equal(HttpStatusCode.Conflict, code);
+                Assert.False(finished.Reported);
+            }
+            finally
+            {
+                Globals.ValidatorAddress = priorValidator;
+                FrostSessionStorage.DKGSessions.TryRemove(reporting.SessionId, out _);
+                FrostSessionStorage.DKGSessions.TryRemove(finished.SessionId, out _);
+            }
+        }
+
         /// <summary>The start's hash covers everything it says: another participant list, threshold, vault or contract is another start.</summary>
         [Fact]
         public void AStartsHash_CoversEverythingItSays()
