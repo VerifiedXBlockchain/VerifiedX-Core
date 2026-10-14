@@ -70,16 +70,19 @@ namespace VerifiedXCore.Bitcoin.Services
 
         /// <summary>
         /// The allocation plan for an unlock back to VFX. From the enforcement height it leaves out the locks of frozen
-        /// vaults: consensus refuses them, and vBTC handed out on a frozen vault could never be moved.
+        /// vaults: consensus refuses them, and vBTC handed out on a frozen vault could never be moved. It also leaves out
+        /// a watched vault whose ledger is full and does not name the destination: consensus refuses that credit
+        /// (BtcVaultLedger.CreditRefusal, fourth review round 6).
         /// </summary>
-        public static List<PoolUnlockAllocation>? ComputeUnlockAllocationPlan(decimal amountBtc, long height)
+        public static List<PoolUnlockAllocation>? ComputeUnlockAllocationPlan(decimal amountBtc, long height, string? destination = null)
         {
-            if (!Attestation.BtcLegacyFreeze.Active(height))
-                return ComputeAllocationPlan(amountBtc);
-            var frozen = (VBTCBridgeLockState.GetAvailableLocksFIFO() ?? new List<VBTCBridgeLockState>())
-                .Select(l => l.SmartContractUID).Distinct(StringComparer.Ordinal)
-                .Where(c => Attestation.BtcLegacyFreeze.IsLegacyVault(c)).ToHashSet(StringComparer.Ordinal);
-            return ComputeAllocationPlan(amountBtc, frozen);
+            var vaults = (VBTCBridgeLockState.GetAvailableLocksFIFO() ?? new List<VBTCBridgeLockState>())
+                .Select(l => l.SmartContractUID).Distinct(StringComparer.Ordinal).ToList();
+            var leftOut = vaults
+                .Where(c => Attestation.BtcLegacyFreeze.Active(height) && Attestation.BtcLegacyFreeze.IsLegacyVault(c)
+                    || destination != null && Attestation.BtcVaultLedger.CreditRefusal(SmartContractStateTrei.GetSmartContractState(c), destination) != null)
+                .ToHashSet(StringComparer.Ordinal);
+            return leftOut.Count == 0 ? ComputeAllocationPlan(amountBtc) : ComputeAllocationPlan(amountBtc, leftOut);
         }
 
         /// <summary>

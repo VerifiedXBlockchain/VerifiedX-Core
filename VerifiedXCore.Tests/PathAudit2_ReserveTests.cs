@@ -225,6 +225,52 @@ namespace VerifiedXCore.Tests
             Assert.Equal(0M, Held(_reserve.Address));
         }
 
+        /// <summary>
+        /// A reserve's vBTC transfer is judged against a vault's holder limit when it is sent, and others may fill the
+        /// vault before it falls due: judged again then, a transfer to an address the full vault does not name is called
+        /// back and the reserve keeps its vBTC (fourth review, round 6).
+        /// </summary>
+        [Fact]
+        public async Task ADelayedVbtcTransfer_ToANewAddress_IsCalledBack_IfTheWatchedVaultFilledUpMeanwhile()
+        {
+            var watched = Guid.NewGuid().ToString("N") + ":1755000002";
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
+            {
+                SmartContractUID = watched, ContractData = VbtcTestContracts.VbtcV2ContractData, MinterAddress = _firstBuyer.Address, OwnerAddress = _firstBuyer.Address, Nonce = 0,
+                SCStateTreiTokenizationTXes = new List<SmartContractStateTreiTokenizationTX>
+                {
+                    new() { Amount = 1.5M, FromAddress = "+", ToAddress = _reserve.Address },
+                    new() { Amount = -1.5M, FromAddress = _firstBuyer.Address, ToAddress = "-" },
+                },
+            });
+            VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.SaveScript(new VerifiedXCore.Bitcoin.Attestation.VaultDepositScriptRow
+            {
+                ScriptHex = "5120" + new string('b', 64), SmartContractUID = watched, DepositAddress = "bc1pwatched", CreatedAtVfxHeight = Rule, WatchFromBitcoinHeight = 1,
+            });
+            Assert.True(VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(watched));
+            decimal HeldOn(string address) => SmartContractStateTrei.GetSmartContractState(watched)!.SCStateTreiTokenizationTXes!
+                .Where(x => x.FromAddress == address || x.ToAddress == address).Sum(x => x.Amount);
+            Transaction Send(string to, decimal amount, long unlockInHours) => FromReserve(TransactionType.VBTC_V2_TRANSFER, to,
+                new { Function = "TransferVBTCV2()", ContractUID = watched, FromAddress = _reserve.Address, ToAddress = to, Amount = amount }, unlockInHours);
+
+            var first = Send(_recipient.Address, 0.5M, 30);
+            await Mine(0, first);
+            VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.MaxHoldersOverride = VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.LedgerAddresses(SmartContractStateTrei.GetSmartContractState(watched));
+            try { await Mine(31); }
+            finally { VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.MaxHoldersOverride = null; }
+            Assert.Equal(ReserveTransactionStatus.CalledBack, StatusOf(first));
+            Assert.Equal(0M, HeldOn(_recipient.Address));
+            Assert.Equal(1.5M, HeldOn(_reserve.Address));
+
+            // With room on the vault, the same transfer goes through.
+            var second = Send(_recipient.Address, 0.5M, 60);
+            await Mine(32, second);
+            await Mine(61);
+            Assert.Equal(ReserveTransactionStatus.Confirmed, StatusOf(second));
+            Assert.Equal(0.5M, HeldOn(_recipient.Address));
+            Assert.Equal(1.0M, HeldOn(_reserve.Address));
+        }
+
         // ── A called-back row and somebody else's lock ──────────────────────────────────────────────────────
 
         private Transaction UnknownCall(string to, long unlockInHours) =>

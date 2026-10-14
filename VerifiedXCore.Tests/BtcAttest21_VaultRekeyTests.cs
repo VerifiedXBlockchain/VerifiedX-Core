@@ -638,12 +638,29 @@ namespace VerifiedXCore.Tests
             var before = Enumerable.Range(0, 7).Select(A).Append("xOwner").ToDictionary(a => a, a => Balance(contract, a));
             var total = rows.Sum(x => x.Amount);
 
+            var tail = rows.Skip(rows.Count - BtcVaultLedger.RawTailRows).ToList();
             Assert.True(BtcVaultLedger.Compact(contract));
-            Assert.True(contract.SCStateTreiTokenizationTXes!.Count <= 8);
+            Assert.True(contract.SCStateTreiTokenizationTXes!.Count <= 8 + BtcVaultLedger.RawTailRows);
+            Assert.Equal(tail, contract.SCStateTreiTokenizationTXes.Skip(contract.SCStateTreiTokenizationTXes.Count - BtcVaultLedger.RawTailRows)); // the newest rows as they were
             foreach (var (a, b) in before) Assert.Equal(b, Balance(contract, a));
             Assert.Equal(total, contract.SCStateTreiTokenizationTXes.Sum(x => x.Amount));
-            Assert.Equal(before.Count(kv => kv.Value != 0M), BtcVaultLedger.HoldersWithABalance(contract));
+            Assert.Equal(before.Count, BtcVaultLedger.LedgerAddresses(contract));
             Assert.False(BtcVaultLedger.Compact(contract)); // nothing more to save
+
+            // An address whose rows sum to zero is dropped, unless it may yet be refunded: then it keeps a row of zero.
+            var zero = new List<SmartContractStateTreiTokenizationTX>();
+            for (var i = 0; i < 3_000; i++)
+            {
+                zero.Add(new SmartContractStateTreiTokenizationTX { FromAddress = "+", ToAddress = "xGone" + (i % 2), Amount = 0.00001M });
+                zero.Add(new SmartContractStateTreiTokenizationTX { FromAddress = "xGone" + (i % 2), ToAddress = "-", Amount = -0.00001M });
+            }
+            zero.AddRange(rows.Skip(rows.Count - BtcVaultLedger.RawTailRows)); // the newest rows name others
+            var kept = new SmartContractStateTrei { SmartContractUID = "z", SCStateTreiTokenizationTXes = zero.ToList() };
+            Assert.True(BtcVaultLedger.Compact(kept, keepAtZero: () => new HashSet<string> { "xGone1" }));
+            Assert.DoesNotContain(kept.SCStateTreiTokenizationTXes!, x => x.FromAddress == "xGone0" || x.ToAddress == "xGone0");
+            var marker = Assert.Single(kept.SCStateTreiTokenizationTXes!, x => x.FromAddress == "xGone1" || x.ToAddress == "xGone1");
+            Assert.Equal(0M, marker.Amount);
+            Assert.Equal("-", marker.ToAddress);
 
             // A row naming two addresses (or none) is not a shape compaction knows: left as it is.
             var odd = new SmartContractStateTrei { SmartContractUID = "w", SCStateTreiTokenizationTXes = rows.Append(new SmartContractStateTreiTokenizationTX { FromAddress = "xA", ToAddress = "xB", Amount = 1M }).ToList() };
@@ -702,12 +719,12 @@ namespace VerifiedXCore.Tests
             await Mine(SignedBy(holder, Minter.Address, TransactionType.VBTC_V2_TRANSFER,
                 new { Function = "TransferVBTCV2()", ContractUID = vault.Uid, FromAddress = holder.Address, ToAddress = Minter.Address, Amount = 0.0004M }));
             state = SmartContractStateTrei.GetSmartContractState(vault.Uid)!;
-            Assert.True(state.SCStateTreiTokenizationTXes!.Count < 10);
+            Assert.True(state.SCStateTreiTokenizationTXes!.Count < 10 + BtcVaultLedger.RawTailRows);
             Assert.Equal(0.0006M, state.SCStateTreiTokenizationTXes.Where(x => x.FromAddress == holder.Address || x.ToAddress == holder.Address).Sum(x => x.Amount));
             Assert.Equal(spendableBefore + 0.0004M, await Spendable(vault.Uid, Minter));
 
             // At the holder limit, a new holder is refused; an existing one is not.
-            BtcVaultLedger.MaxHoldersOverride = BtcVaultLedger.HoldersWithABalance(state);
+            BtcVaultLedger.MaxHoldersOverride = BtcVaultLedger.LedgerAddresses(state);
             try
             {
                 var newcomer = NewKey();
@@ -718,6 +735,106 @@ namespace VerifiedXCore.Tests
                 Assert.True(ok, why);
             }
             finally { BtcVaultLedger.MaxHoldersOverride = null; }
+        }
+
+        /// <summary>
+        /// Refunds are credits nobody can refuse, and the count was of balances: a requester who escrowed everything left
+        /// it, a new holder took the place, and the refund put the requester back above the limit; enough at once took the
+        /// vault's document past LiteDB's limit and froze it (fourth review, round 6). An address stays on the ledger, at
+        /// zero, while its withdrawal is open: compaction keeps it, the count includes it, and its refund needs no place.
+        /// </summary>
+        [Fact]
+        public async Task ARequesterWhoEscrowedEverything_KeepsItsPlace_UntilItsWithdrawalCloses()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 500_000);
+            var holder = NewKey();
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = holder.Address, Balance = 100M, Nonce = 0 });
+            await Mine(SignedBy(Minter, holder.Address, TransactionType.VBTC_V2_TRANSFER,
+                new { Function = "TransferVBTCV2()", ContractUID = vault.Uid, FromAddress = Minter.Address, ToAddress = holder.Address, Amount = 0.001M }));
+            var helper = NewKey();
+            await Mine(SignedBy(Minter, helper.Address, TransactionType.VBTC_V2_TRANSFER,
+                new { Function = "TransferVBTCV2()", ContractUID = vault.Uid, FromAddress = Minter.Address, ToAddress = helper.Address, Amount = 0.0001M }));
+
+            // The vault's one coin is held by the owner's withdrawal; the holder's, for all it has, waits.
+            await Mine(Request(vault.Uid, 0.002M));
+            var waiting = await Mine(SignedBy(holder, holder.Address, TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                new { Function = "VBTCWithdrawalRequest()", ContractUID = vault.Uid, BTCAddress = BtcDest, Amount = 0.001M, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") }));
+            Assert.Equal(VaultWithdrawalState.Waiting, Row(waiting, vault.Uid).State);
+
+            // A long history, then a write: the ledger is compacted, and the holder (at zero) is kept.
+            var state = SmartContractStateTrei.GetSmartContractState(vault.Uid)!;
+            for (var i = 0; i < 2_500; i++)
+            {
+                state.SCStateTreiTokenizationTXes!.Add(new SmartContractStateTreiTokenizationTX { FromAddress = "+", ToAddress = helper.Address, Amount = 0.00000001M });
+                state.SCStateTreiTokenizationTXes.Add(new SmartContractStateTreiTokenizationTX { FromAddress = helper.Address, ToAddress = "-", Amount = -0.00000001M });
+            }
+            SmartContractStateTrei.GetSCST().Update(state);
+            await Mine(SignedBy(Minter, helper.Address, TransactionType.VBTC_V2_TRANSFER,
+                new { Function = "TransferVBTCV2()", ContractUID = vault.Uid, FromAddress = Minter.Address, ToAddress = helper.Address, Amount = 0.0001M }));
+            state = SmartContractStateTrei.GetSmartContractState(vault.Uid)!;
+            Assert.True(state.SCStateTreiTokenizationTXes!.Count < 10 + BtcVaultLedger.RawTailRows);
+            var place = Assert.Single(state.SCStateTreiTokenizationTXes, x => x.FromAddress == holder.Address || x.ToAddress == holder.Address);
+            Assert.Equal(0M, place.Amount);
+
+            // The vault is full with it counted: a new address is refused, and the refund still lands.
+            BtcVaultLedger.MaxHoldersOverride = BtcVaultLedger.LedgerAddresses(state);
+            try
+            {
+                await Refused(SignedBy(helper, NewKey().Address, TransactionType.VBTC_V2_TRANSFER,
+                    new { Function = "TransferVBTCV2()", ContractUID = vault.Uid, FromAddress = helper.Address, ToAddress = "xNobodyYet", Amount = 0.00001M }), "the most a vault holds");
+                await Mine(SignedBy(holder, holder.Address, TransactionType.VBTC_V2_WITHDRAWAL_CANCEL,
+                    new { Function = "VBTCWithdrawalCancel()", ContractUID = vault.Uid, WithdrawalRequestHash = waiting.Hash, FailureProof = "" }));
+                state = SmartContractStateTrei.GetSmartContractState(vault.Uid)!;
+                Assert.Equal(0.001M, state.SCStateTreiTokenizationTXes!.Where(x => x.FromAddress == holder.Address || x.ToAddress == holder.Address).Sum(x => x.Amount));
+                Assert.True(BtcVaultLedger.LedgerAddresses(state) <= BtcVaultLedger.MaxHoldersOverride);
+            }
+            finally { BtcVaultLedger.MaxHoldersOverride = null; }
+        }
+
+        /// <summary>
+        /// Unlocks from the bridge credit an address too, a pool unlock any address its Base burn names: on a full vault
+        /// one that is not named yet is refused, and the casters' plan leaves such a vault out (fourth review, round 6).
+        /// The vault's owner, and an address already named, are never refused.
+        /// </summary>
+        [Fact]
+        public async Task AFullVault_RefusesACreditToANewAddressFromAnyPath_ButNeverItsOwnerOrAHolder()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 500_000);
+            var holder = NewKey();
+            await Mine(SignedBy(Minter, holder.Address, TransactionType.VBTC_V2_TRANSFER,
+                new { Function = "TransferVBTCV2()", ContractUID = vault.Uid, FromAddress = Minter.Address, ToAddress = holder.Address, Amount = 0.001M }));
+            var state = SmartContractStateTrei.GetSmartContractState(vault.Uid)!;
+            var lockId = "lock-" + Guid.NewGuid().ToString("N");
+            VBTCBridgeLockState.GetCollection().Insert(new VBTCBridgeLockState
+            {
+                LockId = lockId, SmartContractUID = vault.Uid, OwnerAddress = holder.Address, Amount = 0.0005M, AmountSats = 50_000,
+                LockTxHash = "h", LockTimestamp = 1, EvmDestination = "0x0",
+            });
+            VfxTx PoolUnlock(string destination) => SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK, new
+            {
+                Function = "VBTCBridgePoolUnlock()", TotalAmount = 0.0001M, TotalAmountSats = 10_000, VfxDestinationAddress = destination,
+                ExitBurnTxHash = new string('a', 64), Allocations = new[] { new { LockId = lockId, UnlockAmount = 0.0001M, SmartContractUID = vault.Uid } },
+            });
+            BtcVaultLedger.MaxHoldersOverride = BtcVaultLedger.LedgerAddresses(state);
+            try
+            {
+                Assert.Null(BtcVaultLedger.CreditRefusal(state, Minter.Address));       // the owner
+                Assert.Null(BtcVaultLedger.CreditRefusal(state, holder.Address));       // named already
+                Assert.Contains("the most a vault holds", BtcVaultLedger.CreditRefusal(state, "xNew"));
+                await Refused(PoolUnlock("xNew"), "the most a vault holds");
+                Assert.Null(BtcVaultLedger.HolderLimitRefusal(PoolUnlock(holder.Address)));
+                Assert.Null(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.0001M, Tip + 1, "xNew"));   // its one lock is on the full vault
+                Assert.Equal(lockId, Assert.Single(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.0001M, Tip + 1, holder.Address)!).LockId);
+            }
+            finally
+            {
+                BtcVaultLedger.MaxHoldersOverride = null;
+                VBTCBridgeLockState.GetCollection().Delete(lockId);
+            }
         }
 
         /// <summary>

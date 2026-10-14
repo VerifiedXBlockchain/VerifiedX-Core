@@ -1012,6 +1012,19 @@ namespace VerifiedXCore.Data
                         }
                         catch { }
 
+                        // A watched vault's ledger names at most so many addresses: judged now that it falls due, as other
+                        // transfers sent meanwhile may have filled it (fourth review, round 6). The sender keeps its vBTC.
+                        var holderLimitRefusal = string.IsNullOrEmpty(vbtcScUID) ? null
+                            : VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.CreditRefusal(SmartContractStateTrei.GetSmartContractState(vbtcScUID), rtx.ToAddress);
+                        if (holderLimitRefusal != null)
+                        {
+                            ErrorLogUtility.LogError($"UpdateTreiFromReserve: vBTC transfer {rtx.Hash} on {vbtcScUID} to {rtx.ToAddress} not applied: {holderLimitRefusal}", "StateData.UpdateTreiFromReserve()");
+                            rtx.ReserveTransactionStatus = ReserveTransactionStatus.CalledBack;
+                            await rtxDb.UpdateSafeAsync(rtx);
+                            await TransactionData.UpdateTxStatusForAllByHash(rtx.Hash, TransactionStatus.Failed);
+                            continue;
+                        }
+
                         if (!string.IsNullOrEmpty(vbtcScUID) && vbtcAmount.HasValue && vbtcAmount.Value > 0
                             && PathAuditRulesAtTime(rtx.ConfirmTimestamp) && !DeferredVbtcTransferStillCovered(vbtcScUID, rtx.FromAddress, vbtcAmount.Value))
                         {
@@ -1263,7 +1276,7 @@ namespace VerifiedXCore.Data
                                     {
                                         scStateTrei.NextOwner = null;
                                         scStateTrei.IsLocked = false;
-                                        await scDb.UpdateSafeAsync(scStateTrei);
+                                        await WriteContractStateAsync(scDb, scStateTrei);
                                     }
 
                                     // Re-sync any local vBTC V2 record to the (unchanged) state-trei
@@ -1445,7 +1458,7 @@ namespace VerifiedXCore.Data
                                             scStateTrei.OwnerAddress = recoveryAddress;
                                             scStateTrei.NextOwner = null;
                                             scStateTrei.IsLocked = false;
-                                            await scDb.UpdateSafeAsync(scStateTrei);
+                                            await WriteContractStateAsync(scDb, scStateTrei);
                                         }
 
                                     }
@@ -1535,7 +1548,7 @@ namespace VerifiedXCore.Data
                             sc.OwnerAddress = _recoveryAddress;
                             sc.NextOwner = null;
                             sc.IsLocked = false;
-                            await _scDb.UpdateSafeAsync(sc);
+                            await WriteContractStateAsync(_scDb, sc);
                         }
                     }
 
@@ -3220,6 +3233,19 @@ namespace VerifiedXCore.Data
                     || Bitcoin.Services.VBTCService.AttestedOwnerSpendable(contract, fromAddress, long.MaxValue) >= amount;
             var held = contract.SCStateTreiTokenizationTXes?.Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress).Sum(x => x.Amount) ?? 0M;
             return held >= amount;
+        }
+
+        /// <summary>
+        /// A reserve's call-back or recovery writing a contract's state: a watched vault through its own writer, which
+        /// compacts its ledger and throws a failed write instead of dropping it (fourth review, round 6); any other
+        /// contract as before.
+        /// </summary>
+        private static async Task WriteContractStateAsync(LiteDB.ILiteCollection<SmartContractStateTrei> scDb, SmartContractStateTrei contract)
+        {
+            if (VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(contract.SmartContractUID))
+                SmartContractStateTrei.UpdateSmartContract(contract);
+            else
+                await scDb.UpdateSafeAsync(contract);
         }
 
         /// <summary>

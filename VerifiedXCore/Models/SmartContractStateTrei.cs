@@ -115,7 +115,7 @@ namespace VerifiedXCore.Models
             // thrown, never dropped; a dropped ledger write left a withdrawal paid with no debit (fourth review, round 5).
             if (scMain != null && VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(scMain.SmartContractUID))
             {
-                VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.Compact(scMain);
+                VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.CompactWatched(scMain);
                 if (!scs.UpdateOrThrow(scMain))
                     throw new InvalidOperationException($"Vault {scMain.SmartContractUID}'s state is not in the state trie; it was not written.");
                 return;

@@ -543,7 +543,7 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             var vfxDestinationAddress = record.VfxDestinationAddress;
             LogUtility.Log($"[BurnExitConsensus] VfxPoolUnlock: vfxDest={vfxDestinationAddress}, amount={record.Amount}, burn={record.BaseBurnTxHash}", "BurnExitConsensusService.ExecuteVfxPoolUnlock()");
-            var allocations = BridgePoolUnlockService.ComputeUnlockAllocationPlan(record.Amount, VBTCService.NextBlockHeight);
+            var allocations = BridgePoolUnlockService.ComputeUnlockAllocationPlan(record.Amount, VBTCService.NextBlockHeight, vfxDestinationAddress);
 
             if (allocations == null || allocations.Count == 0)
             {
