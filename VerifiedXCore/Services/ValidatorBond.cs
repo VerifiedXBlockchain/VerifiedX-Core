@@ -218,6 +218,9 @@ namespace VerifiedXCore.Services
                     if (row != null && Holds(row, height))
                     {
                         row.ExitHeight = 0;                                    // in its exit wait: the bond resumes, the stake never left
+                        // ... but its age starts again (from the path-audit rules): a validator could leave in the middle of
+                        // each ceremony and come back aged at once, so every re-key including it failed (fifth review, round 14).
+                        if (height >= Globals.PathAuditRulesHeight) row.FundedSinceHeight = 0;
                         Save(row, db);
                         return;
                     }

@@ -262,6 +262,41 @@ namespace VerifiedXCore.Tests
             Assert.Equal(exitedAt, ValidatorBond.Row(v.Address)!.ExitHeight);
         }
 
+        /// <summary>
+        /// A validator could exit in the middle of a key ceremony (failing it) and send a heartbeat within the wait to come
+        /// back aged at once, run after run (fifth review, round 14). From the path-audit rules an exit costs the age: a
+        /// heartbeat during the wait resumes the bond, and the two days start again from the next look.
+        /// </summary>
+        [Fact]
+        public async Task AHeartbeatDuringTheWait_FromThePathAuditRules_StartsTheAgeAgain()
+        {
+            await StartTheRule();
+            var prior = Globals.PathAuditRulesHeight;
+            Globals.PathAuditRulesHeight = 250;
+            try
+            {
+                var back = _old[1];
+                Assert.True(ValidatorBond.IsAged(back.Address, 299));
+                await Apply(300, LifecycleTx(back, TransactionType.VBTC_V2_VALIDATOR_EXIT));
+                await Apply(350, LifecycleTx(back, TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT));
+                var resumed = ValidatorBond.Row(back.Address)!;
+                Assert.Equal(0, resumed.ExitHeight);
+                Assert.Equal(0, resumed.FundedSinceHeight);
+                Assert.False(ValidatorBond.IsAged(back.Address, 351));
+                Assert.False((await Verify(Send(back, _friend, 5_000M), 300 + 1_200)).Ok); // still bonded
+
+                // Seen funded at the next look, and aged two days after it.
+                await Apply(400);
+                Assert.Equal(400, ValidatorBond.Row(back.Address)!.FundedSinceHeight);
+                Assert.False(ValidatorBond.IsAged(back.Address, 400 + ValidatorBond.CeremonyAgeBlocks - 1));
+                Assert.True(ValidatorBond.IsAged(back.Address, 400 + ValidatorBond.CeremonyAgeBlocks));
+            }
+            finally
+            {
+                Globals.PathAuditRulesHeight = prior;
+            }
+        }
+
         [Fact]
         public async Task AHeartbeatDuringTheWait_ResumesTheBond_AndRegisteringAfterAFullExit_StartsANewOne()
         {
