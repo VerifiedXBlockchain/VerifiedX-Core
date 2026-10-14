@@ -214,6 +214,29 @@ namespace VerifiedXCore.Tests
 
         // ── Backfill ────────────────────────────────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// The planner's memo assumed state only grows. When it goes back (a snapshot restored, another branch of VFX
+        /// blocks, a Bitcoin rewind), a vault registered under a stamp already seen, or blocks below the sweep's position,
+        /// were never looked at again, and a deposit owed a backfill stayed uncredited. The memo is dropped then (fourth
+        /// review, round 3).
+        /// </summary>
+        [Fact]
+        public void ThePlannersMemo_IsDroppedWhenStateGoesBack()
+        {
+            string? Same(long h) => "hash-" + h;
+            // Growing on one chain: kept.
+            Assert.False(BtcReportPlanner.StateWentBack(120, 130, 100, 110, 50, 60, 110, "hash-110", Same));
+            Assert.False(BtcReportPlanner.StateWentBack(120, 130, -1, -1, -1, 60, -1, null, Same)); // nothing seen yet
+            // A stamp went down (a snapshot restored).
+            Assert.True(BtcReportPlanner.StateWentBack(90, 130, 100, 110, 50, 60, 110, "hash-110", Same));
+            Assert.True(BtcReportPlanner.StateWentBack(120, 100, 100, 110, 50, 60, 110, "hash-110", Same));
+            // The block the stamps came from is no longer on the chain (another branch).
+            Assert.True(BtcReportPlanner.StateWentBack(120, 130, 100, 110, 50, 60, 110, "hash-110", h => "other-" + h));
+            // The events-through height moved back below the sweep's position (a Bitcoin rewind).
+            Assert.True(BtcReportPlanner.StateWentBack(120, 130, 100, 110, 70, 60, 110, "hash-110", Same));
+            Assert.False(BtcReportPlanner.StateWentBack(120, 130, 100, 110, 61, 60, 110, "hash-110", Same)); // the sweep just past it
+        }
+
         [Fact]
         public async Task ADepositMinedBeforeItsVaultExisted_IsFoundAndBackfilled_AlongsideTheForwardReport()
         {

@@ -69,6 +69,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
         private long _sweepFrom = -1;
         private long _sweepScripts = -1;
         private long _sweepCoins = -1;
+        /// <summary>The VFX block the stamps last seen were written by (height and hash): if it is no longer on the chain, the state was rebuilt.</summary>
+        private long _anchorHeight = -1;
+        private string? _anchorHash;
 
         public void Reset()
         {
@@ -76,7 +79,22 @@ namespace VerifiedXCore.Bitcoin.Attestation
             _sweepFrom = -1;
             _sweepScripts = -1;
             _sweepCoins = -1;
+            _anchorHeight = -1;
+            _anchorHash = null;
         }
+
+        /// <summary>
+        /// Whether the memo no longer describes the state: the memo relies on stamps that only grow on one chain. They do
+        /// not when state goes back (a snapshot restored, a switch to another branch of VFX blocks, a Bitcoin rewind
+        /// that moved the events-through height back): a vault registered then under a stamp already seen, or blocks
+        /// below the sweep's position, would never be looked at again by this process, and a deposit owed a backfill
+        /// stayed uncredited (fourth review, round 3).
+        /// </summary>
+        internal static bool StateWentBack(long scripts, long coins, long sweepScripts, long sweepCoins, long sweepFrom, long eventsThrough,
+            long anchorHeight, string? anchorHash, Func<long, string?> hashAt) =>
+            scripts < sweepScripts || coins < sweepCoins
+            || (sweepFrom >= 0 && sweepFrom > eventsThrough + 1)
+            || (anchorHeight >= 0 && !string.Equals(hashAt(anchorHeight), anchorHash, StringComparison.Ordinal));
 
         /// <param name="tipHeight">
         /// The height of the VFX tip. Reports are signed under the epoch of the tip, whose signer set is in state; a
@@ -120,6 +138,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
             var scripts = MaxStamp(db, BtcAttestStore.Scripts);
             var coins = MaxStamp(db, BtcAttestStore.Coins);
+            static string? HashAt(long h) => VerifiedXCore.Data.BlockchainData.GetBlockByHeight(h)?.Hash;
+            if (StateWentBack(scripts, coins, _sweepScripts, _sweepCoins, _sweepFrom, meta.EventsThroughHeight, _anchorHeight, _anchorHash, HashAt))
+                Reset();
+            _anchorHeight = Math.Max(scripts, coins);
+            _anchorHash = HashAt(_anchorHeight);
 
             // ── 3a. Something unrecorded in a block already reported ────────────────────────────────────────
             PlanBackfill(plan, view, meta, epoch, scripts, coins, db);
