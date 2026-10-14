@@ -141,9 +141,25 @@ namespace VerifiedXCore.Data
         /// </summary>
         public static long BlockStartFailedAtHeight = -1;
 
+        /// <summary>A step of the block being applied failed on this node (set by <see cref="NoteApplyStepFailed"/>, cleared as each block starts).</summary>
+        private static bool _applyStepFailed;
+
+        /// <summary>
+        /// A consensus step inside a transaction's apply (recording a withdrawal, settling after a report, a cancel, a fee
+        /// raise, a bridge exit) failed on this node and was caught where it ran. The block's state is then reported as
+        /// incomplete and marked like a failed block-start step, so the node is flagged instead of quietly holding other
+        /// state than its peers (fourth review).
+        /// </summary>
+        public static void NoteApplyStepFailed(long height)
+        {
+            _applyStepFailed = true;
+            BlockStartFailedAtHeight = height;
+        }
+
         public static async Task<bool> UpdateTreis(Block block)
         {
             Globals.TreisUpdating = true;
+            _applyStepFailed = false;
             StateWriteContext.SetHeight(block.Height); //stamp LastModifiedHeight on state writes for snapshot diffing
             LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13: every apply path uses the block's height
             using var contractClock = ContractClock.ForBlock(block.Timestamp, block.Height); // contract code is read as of this block
@@ -804,7 +820,7 @@ namespace VerifiedXCore.Data
             // A false here means the block was/will be committed to the chain while its state
             // effects are missing — the exact condition that produces a permanent
             // "new account with no balance" hole and gets a node stuck on a later block.
-            return txTreiUpdateSuccessCount == txCount && !blockStartFailed;
+            return txTreiUpdateSuccessCount == txCount && !blockStartFailed && !_applyStepFailed;
         }
 
         /// <param name="asOf">The block whose timestamp made these transfers fall due: contract code is read as of it.</param>
@@ -4425,7 +4441,7 @@ namespace VerifiedXCore.Data
             {
                 // A vote this node could not judge (the validator set is read from committed blocks and a read error is
                 // thrown, not answered "no") leaves its state unlike its peers': marked, so a restart rebuilds state.
-                BlockStartFailedAtHeight = tx.Height;
+                NoteApplyStepFailed(tx.Height);
                 ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation error: {ex.Message}", "StateData.VoteOnVBTCV2Cancellation()");
             }
         }

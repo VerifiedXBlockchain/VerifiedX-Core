@@ -235,6 +235,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
             catch (Exception ex)
             {
+                VerifiedXCore.Data.StateData.NoteApplyStepFailed(vfxHeight);
                 ErrorLogUtility.LogError($"Recording withdrawal {requestHash} on {scUID} failed: {ex}", "BtcWithdrawals.OnRequestApplied()");
             }
         }
@@ -316,6 +317,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
             catch (Exception ex)
             {
+                VerifiedXCore.Data.StateData.NoteApplyStepFailed(vfxHeight);
                 ErrorLogUtility.LogError($"Settling withdrawals after Bitcoin report {report?.Hash} failed: {ex}", "BtcWithdrawals.OnCoinsChanged()");
             }
         }
@@ -390,6 +392,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
             catch (Exception ex)
             {
+                VerifiedXCore.Data.StateData.NoteApplyStepFailed(vfxHeight);
                 ErrorLogUtility.LogError($"Cancelling a withdrawal ({tx.Hash}) failed: {ex}", "BtcWithdrawals.ApplyCancel()");
             }
             return true;

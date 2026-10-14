@@ -476,6 +476,32 @@ namespace VerifiedXCore.Tests
             Assert.Equal(ceremony.Script.ToHex(), BtcAttestStore.ScriptRowOfCoin(BtcAttestStore.Coin(BtcAttestStore.OutpointKey(sweep.Pins[0].Txid, 0)))!.ScriptHex);
         }
 
+        /// <summary>
+        /// A step inside a transaction's apply (recording a withdrawal, settling after a report, a cancel, a fee raise, a
+        /// bridge exit) caught its own error and only logged it: a store fault on one node left it debited with no
+        /// withdrawal row, unlike its peers, and nothing flagged it. It now marks the block (fourth review).
+        /// </summary>
+        [Fact]
+        public async Task AnApplyStepThatFails_MarksItsBlock()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 100_000);
+            var broken = new LiteDB.LiteDatabase(new System.IO.MemoryStream());
+            broken.Dispose();
+            var prior = StateData.BlockStartFailedAtHeight;
+            try
+            {
+                StateData.BlockStartFailedAtHeight = -1;
+                BtcWithdrawals.OnRequestApplied(vault.Uid, "a-request", Tip + 1, broken);
+                Assert.Equal(Tip + 1, StateData.BlockStartFailedAtHeight);
+                // A block applied after it starts clean.
+                var request = await Mine(Request(vault.Uid, 0.0001M));
+                Assert.NotNull(request);
+            }
+            finally { StateData.BlockStartFailedAtHeight = prior; }
+        }
+
         // ── What the review of the re-key found (third pass, 14 October 2026) ──────────────────────
 
         /// <summary>
