@@ -56,7 +56,19 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// idempotent re-save of the SAME group key (metadata refresh, backup restore) updates.
         /// Returns false when the save was refused.
         /// </summary>
+        /// <summary>
+        /// Taken around the look-up and the write: two ceremonies finishing at once for one contract could otherwise both
+        /// find no package and both insert, and both be backed up under the one nonce the backup derives from the contract
+        /// (fourth review, round 11).
+        /// </summary>
+        private static readonly object SaveGate = new();
+
         public static bool SaveKeyPackage(FrostValidatorKeyStore keyStore)
+        {
+            lock (SaveGate) return SaveKeyPackageUnderGate(keyStore);
+        }
+
+        private static bool SaveKeyPackageUnderGate(FrostValidatorKeyStore keyStore)
         {
             try
             {
