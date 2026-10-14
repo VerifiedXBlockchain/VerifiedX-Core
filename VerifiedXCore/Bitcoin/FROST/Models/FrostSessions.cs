@@ -14,6 +14,8 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public List<string> ParticipantAddresses { get; set; }
         public int RequiredThreshold { get; set; }
         public long StartTimestamp { get; set; }
+        /// <summary>The network address the start came from (a leader's node). Counted, so one host cannot take every place.</summary>
+        public string? SourceIp { get; set; }
         
         // FROST native library state for this validator's participation
         public ushort MyParticipantIndex { get; set; }         // This validator's 1-based index
@@ -168,8 +170,81 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
     /// </summary>
     public static class FrostSessionStorage
     {
-        /// <summary>Maximum concurrent DKG sessions allowed</summary>
-        public const int MAX_DKG_SESSIONS = 50;
+        /// <summary>
+        /// Key ceremonies that may be under way on this validator at once. Anyone may lead one (the leader holds no
+        /// key material), so the places are guarded by what follows rather than by who asks: a start must be recent
+        /// and not seen before, a start that never continues gives its place back after two minutes, and one leader
+        /// and one network source each hold only a few. 50 places with none of that were filled, for fifteen minutes
+        /// at a time, by thirteen made-up leader keys from one machine (third pass, 14 October 2026).
+        /// </summary>
+        public const int MAX_DKG_SESSIONS = 200;
+
+        /// <summary>A ceremony whose leader has sent nothing after its start for this long no longer holds a place.</summary>
+        public const int DKG_UNPROGRESSED_SECONDS = 120;
+
+        /// <summary>Ceremonies under way that one network address may have started here.</summary>
+        public const int MAX_DKG_SESSIONS_PER_SOURCE = 8;
+
+        /// <summary>
+        /// How far a ceremony start's timestamp may be from this validator's clock, in seconds (a web wallet signs its
+        /// start, then asks for the ceremony a while later). A start carries its leader's signature over the session
+        /// id and this timestamp and nothing else, so an old one could be sent again by anybody who had seen it (every
+        /// participant has): it opened a session under that leader, and since a leader's new start for a vault
+        /// replaces its earlier ones, it removed the ceremony that leader was running.
+        /// </summary>
+        public const int DKG_START_MAX_AGE_SECONDS = 1800;
+
+        /// <summary>Session ids of the starts this validator has accepted, kept twice as long as a start stays fresh.</summary>
+        private static readonly ConcurrentDictionary<string, long> SeenDkgStarts = new(StringComparer.Ordinal);
+
+        /// <summary>Records an accepted start. False when this session id was accepted before.</summary>
+        public static bool NoteDkgStart(string sessionId, long nowSeconds)
+        {
+            if (SeenDkgStarts.Count > 4096)
+                foreach (var old in SeenDkgStarts.Where(kv => kv.Value < nowSeconds - 2 * DKG_START_MAX_AGE_SECONDS).Select(kv => kv.Key).ToList())
+                    SeenDkgStarts.TryRemove(old, out _);
+            return SeenDkgStarts.TryAdd(sessionId, nowSeconds);
+        }
+
+        public static bool DkgStartWasSeen(string? sessionId) => !string.IsNullOrEmpty(sessionId) && SeenDkgStarts.ContainsKey(sessionId);
+
+        /// <summary>Tests only.</summary>
+        internal static void ForgetDkgStarts() => SeenDkgStarts.Clear();
+
+        /// <summary>Whether a ceremony's leader has come back after its start: commitments, shares or verifications are held.</summary>
+        public static bool DkgHasProgressed(DKGSession s) =>
+            s.Round1Commitments.Count > 1 || s.Round2Secret != null || s.GeneratedSharesJson != null
+            || !s.ReceivedSharesJson.IsEmpty || !s.ReceivedShares.IsEmpty || !s.Round3Verifications.IsEmpty;
+
+        /// <summary>
+        /// Whether a ceremony holds a place: not finished, started within the window, and either its leader has
+        /// continued it or it is still within the time a leader takes to come back.
+        /// </summary>
+        public static bool DkgIsUnderWay(DKGSession s, long nowSeconds) =>
+            !s.IsCompleted && s.StartTimestamp >= nowSeconds - DKG_LEADER_CAP_WINDOW_SECONDS
+            && (DkgHasProgressed(s) || s.StartTimestamp >= nowSeconds - DKG_UNPROGRESSED_SECONDS);
+
+        /// <summary>
+        /// Why a ceremony start is refused for want of room, age or novelty; null when it may go on. Counted over the
+        /// sessions given, so the rule can be tested without the store. With no leader given only what can be judged
+        /// before the leader's signature is checked (the validator's total, the start's age) is judged.
+        /// </summary>
+        public static string? DkgStartRefusal(IEnumerable<DKGSession> sessions, long nowSeconds, string? sessionId, long startTimestamp, string? leaderAddress, string? sourceIp)
+        {
+            if (Math.Abs(nowSeconds - startTimestamp) > DKG_START_MAX_AGE_SECONDS)
+                return "This ceremony start is not recent. Sign a new one.";
+            var underWay = sessions.Where(s => DkgIsUnderWay(s, nowSeconds)).ToList();
+            if (underWay.Count >= MAX_DKG_SESSIONS)
+                return "Maximum concurrent DKG sessions reached. Try again later.";
+            if (string.IsNullOrEmpty(leaderAddress)) return null;
+            if (DkgStartWasSeen(sessionId))
+                return "This ceremony start was used before. Start again under a new session id.";
+            if (underWay.Count(s => string.Equals(s.LeaderAddress, leaderAddress, StringComparison.Ordinal)) >= MAX_DKG_SESSIONS_PER_LEADER)
+                return $"Too many open DKG sessions for this leader (cap {MAX_DKG_SESSIONS_PER_LEADER}). Finish or abandon them first.";
+            if (!string.IsNullOrEmpty(sourceIp) && underWay.Count(s => string.Equals(s.SourceIp, sourceIp, StringComparison.Ordinal)) >= MAX_DKG_SESSIONS_PER_SOURCE)
+                return $"Too many key ceremonies under way from this network address (cap {MAX_DKG_SESSIONS_PER_SOURCE}). Try again shortly.";
+            return null;
+        }
 
         /// <summary>
         /// Max IN-PROGRESS DKG sessions a single leader address may hold open. Without a per-leader

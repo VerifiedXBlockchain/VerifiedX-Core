@@ -653,16 +653,17 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // FIND-0013 Fix: Enforce maximum concurrent session cap
-                            // Ceremonies under way count; finished ones kept an hour for their result, and ones abandoned
-                            // more than fifteen minutes ago, do not take a place.
-                            if (FrostSessionStorage.DKGSessions.Values.Count(s => !s.IsCompleted && s.StartTimestamp >= TimeUtil.GetTime() - FrostSessionStorage.DKG_LEADER_CAP_WINDOW_SECONDS) >= FrostSessionStorage.MAX_DKG_SESSIONS)
+                            // Room and age, before anything else is looked at (who leads is judged once its signature is checked).
+                            var dkgNow = TimeUtil.GetTime();
+                            var dkgSource = VerifiedXCore.Utilities.RemoteIp.Text(context.Connection.RemoteIpAddress);
+                            var dkgRoomRefusal = FrostSessionStorage.DkgStartRefusal(FrostSessionStorage.DKGSessions.Values, dkgNow, request.SessionId, request.Timestamp, null, null);
+                            if (dkgRoomRefusal != null)
                             {
                                 context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                                 {
                                     Success = false,
-                                    Message = "Maximum concurrent DKG sessions reached. Try again later."
+                                    Message = dkgRoomRefusal
                                 }));
                                 return;
                             }
@@ -741,6 +742,20 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // The leader is known now: a start it already used, its own places, and its network source's.
+                            var dkgLeaderRefusal = FrostSessionStorage.DkgStartRefusal(FrostSessionStorage.DKGSessions.Values, dkgNow, request.SessionId, request.Timestamp, request.LeaderAddress, dkgSource);
+                            if (dkgLeaderRefusal != null)
+                            {
+                                LogUtility.Log($"[FROST] DKG start refused for leader {request.LeaderAddress} from {dkgSource}: {dkgLeaderRefusal}", "FrostStartup.DKGStart");
+                                context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = false,
+                                    Message = dkgLeaderRefusal
+                                }));
+                                return;
+                            }
+
                             // Per-leader session cap: one address cannot exhaust the DKG session pool.
                             var leaderOpenSessions = FrostSessionStorage.CountDkgSessionsForLeader(request.LeaderAddress);
                             if (!FrostSessionStorage.LeaderMayOpenDkgSession(leaderOpenSessions))
@@ -800,6 +815,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 ParticipantAddresses = request.ParticipantAddresses,
                                 RequiredThreshold = request.RequiredThreshold,
                                 StartTimestamp = TimeUtil.GetTime(),
+                                SourceIp = dkgSource,
                                 MyParticipantIndex = myParticipantId,
                                 Round1SecretPackage = secretPackage
                             };
@@ -825,7 +841,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                             if (superseded > 0)
                                 LogUtility.Log($"[FROST] DKG start for {request.SmartContractUID}: leader {request.LeaderAddress} restarted; superseded {superseded} stale session(s).", "FrostStartup.DKGStart");
 
-                            if (!FrostSessionStorage.DKGSessions.TryAdd(request.SessionId, session))
+                            if (!FrostSessionStorage.NoteDkgStart(request.SessionId, dkgNow) || !FrostSessionStorage.DKGSessions.TryAdd(request.SessionId, session))
                             {
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
