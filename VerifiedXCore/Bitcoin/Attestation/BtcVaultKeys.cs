@@ -305,13 +305,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
         private static long _lastKeyUidTime;
 
-        /// <summary>A UID for a re-key ceremony of this due key: its fixed first part and a time, a new one for every attempt.</summary>
+        /// <summary>
+        /// A UID for a re-key ceremony of this due key: its fixed first part, then the time and six random digits, a new
+        /// one for every attempt. Random so that nobody can open sessions in advance under the UID a leader will use.
+        /// </summary>
         public static string NewKeyUid(VaultDepositScriptRow key)
         {
             long now = TimeUtil.GetTime(), last, next;
             do { last = Interlocked.Read(ref _lastKeyUidTime); next = Math.Max(now, last + 1); }
             while (Interlocked.CompareExchange(ref _lastKeyUidTime, next, last) != last);
-            return $"{NextKeyHex(key)}:{next}";
+            return $"{NextKeyHex(key)}:{next}{System.Security.Cryptography.RandomNumberGenerator.GetInt32(0, 1_000_000):D6}";
         }
 
         /// <summary>The vault whose due key's successor a UID would be (its first part is that key's <see cref="NextKeyHex"/>); null when none.</summary>

@@ -442,7 +442,11 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public static bool HasInProgressDkgForContractByOtherLeader(string? smartContractUID, string? leaderAddress, string? exceptSessionId)
         {
             if (string.IsNullOrEmpty(smartContractUID)) return false;
-            return DKGSessions.Values.Any(s => !s.IsCompleted
+            // Only a ceremony under way: an idle or given-up one kept another leader off the UID for an hour, and a
+            // validator could open such sessions under the UIDs it expected the next re-key leader to use (fourth review,
+            // round 5). Two that both finish cannot both keep a key under one UID (the key store refuses a second).
+            var now = TimeUtil.GetTime();
+            return DKGSessions.Values.Any(s => DkgIsUnderWay(s, now)
                                                && string.Equals(s.SmartContractUID, smartContractUID, StringComparison.Ordinal)
                                                && !string.Equals(s.SessionId, exceptSessionId, StringComparison.Ordinal)
                                                && !string.Equals(s.LeaderAddress, leaderAddress, StringComparison.Ordinal));

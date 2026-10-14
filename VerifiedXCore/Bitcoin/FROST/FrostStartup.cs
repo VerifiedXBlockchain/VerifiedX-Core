@@ -632,7 +632,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
-                            if (request.ParticipantAddresses == null || request.ParticipantAddresses.Count == 0 
+                            if (request.ParticipantAddresses == null || request.ParticipantAddresses.Count == 0
                                 || request.ParticipantAddresses.Count > FrostSessionStorage.MAX_PARTICIPANTS)
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
@@ -641,6 +641,16 @@ namespace VerifiedXCore.Bitcoin.FROST
                                     Success = false,
                                     Message = $"ParticipantAddresses must be 1-{FrostSessionStorage.MAX_PARTICIPANTS}"
                                 }));
+                                return;
+                            }
+                            // Each participant once and no empty entry: the start's hash reads the list as a set, so a copy
+                            // listing someone twice had the leader's hash and signature, and opened a session with one more
+                            // signer than the ceremony, which then failed here and was blamed on this validator (fourth review, round 5).
+                            if (request.ParticipantAddresses.Any(string.IsNullOrEmpty)
+                                || request.ParticipantAddresses.Distinct(StringComparer.Ordinal).Count() != request.ParticipantAddresses.Count)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "ParticipantAddresses lists each participant once" }));
                                 return;
                             }
 
@@ -717,6 +727,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                             if (FrostSessionStorage.DKGSessions.TryGetValue(request.SessionId, out var alreadyOpen) && alreadyOpen.StartBodyHash == startBodyHash
                                 && !alreadyOpen.IsAborted)
                             {
+                                // A copy without the leader's full signature may have opened it: the signed one makes it the
+                                // leader's (its Round 2 set and shares then come from the leader only).
+                                if (leaderSignedStart) alreadyOpen.LeaderSigned = true;
                                 context.Response.StatusCode = StatusCodes.Status200OK;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                                 {
@@ -876,6 +889,18 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                             if (!FrostSessionStorage.NoteDkgStart(request.SessionId, dkgNow) || !FrostSessionStorage.DKGSessions.TryAdd(request.SessionId, session))
                             {
+                                // The same start, a copy of which got here a moment earlier: answered as accepted.
+                                if (FrostSessionStorage.DKGSessions.TryGetValue(request.SessionId, out var raced) && raced.StartBodyHash == startBodyHash && !raced.IsAborted)
+                                {
+                                    if (leaderSignedStart) raced.LeaderSigned = true;
+                                    context.Response.StatusCode = StatusCodes.Status200OK;
+                                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                    {
+                                        Success = true, Message = "DKG ceremony already started with this start", SessionId = request.SessionId,
+                                        SmartContractUID = request.SmartContractUID, ParticipantCount = request.ParticipantAddresses.Count, Threshold = request.RequiredThreshold, CommitmentGenerated = true
+                                    }, Formatting.Indented));
+                                    return;
+                                }
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                                 {

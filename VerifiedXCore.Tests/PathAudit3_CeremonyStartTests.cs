@@ -368,6 +368,38 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        /// <summary>
+        /// A start's hash reads its participants as a set, so a copy listing one twice had the leader's hash and signature,
+        /// opened a session with one signer too many, and its validator was later dropped as failing. Each participant is
+        /// listed once. And an idle or given-up session no longer keeps another leader off its UID (fourth review, round 5).
+        /// </summary>
+        [Fact]
+        public async Task AStart_ListsEachParticipantOnce_AndOnlyACeremonyUnderWayHoldsItsUid()
+        {
+            using var server = new TestServer(new WebHostBuilder().UseStartup<FrostStartup>());
+            var client = server.CreateClient();
+            var body = JsonConvert.SerializeObject(new FrostDKGStartRequest
+            {
+                SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc", LeaderAddress = "xLeader", LeaderSignature = "sig", Timestamp = _now,
+                ParticipantAddresses = new List<string> { "xV1", "xV2", "xV2" }, RequiredThreshold = 67,
+            });
+            var response = await client.PostAsync("/frost/dkg/start", new StringContent(body, Encoding.UTF8, "application/json"));
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Contains("each participant once", (string)JObject.Parse(await response.Content.ReadAsStringAsync())["Message"]!);
+
+            var idle = new DKGSession { SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc-idle", LeaderAddress = "xOther", StartTimestamp = _now - 600, LastProgressTimestamp = _now - 600 };
+            var given = new DKGSession { SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc-given", LeaderAddress = "xOther", StartTimestamp = _now, LastProgressTimestamp = _now, IsAborted = true };
+            var working = new DKGSession { SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc-working", LeaderAddress = "xOther", StartTimestamp = _now, LastProgressTimestamp = _now };
+            foreach (var s in new[] { idle, given, working }) Assert.True(FrostSessionStorage.DKGSessions.TryAdd(s.SessionId, s));
+            try
+            {
+                Assert.False(FrostSessionStorage.HasInProgressDkgForContractByOtherLeader("sc-idle", "xLeader", null));
+                Assert.False(FrostSessionStorage.HasInProgressDkgForContractByOtherLeader("sc-given", "xLeader", null));
+                Assert.True(FrostSessionStorage.HasInProgressDkgForContractByOtherLeader("sc-working", "xLeader", null));
+            }
+            finally { foreach (var s in new[] { idle, given, working }) FrostSessionStorage.DKGSessions.TryRemove(s.SessionId, out _); }
+        }
+
         [Fact]
         public async Task TheRoute_RefusesAnOldStart()
         {
