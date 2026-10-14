@@ -62,8 +62,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
     /// </summary>
     public sealed class BtcReportPlanner
     {
-        /// <summary>How far below the events-through height a newly started validator looks for unrecorded events.</summary>
-        public const int SweepBack = BtcAttestRules.QuietBlocks + 96;
+        /// <summary>
+        /// How far below the events-through height a newly started validator looks for unrecorded events: a new vault's
+        /// watched blocks (<see cref="BtcAttestRules.WatchBackBlocks"/> below the height it was created at) and a quiet
+        /// report's advance beyond them.
+        /// </summary>
+        public const int SweepBack = BtcAttestRules.WatchBackBlocks + BtcAttestRules.QuietBlocks + 96;
 
         private readonly Dictionary<long, (string Hash, long Scripts, long Coins)> _empty = new();
         private long _sweepFrom = -1;
@@ -280,15 +284,17 @@ namespace VerifiedXCore.Bitcoin.Attestation
             {
                 if (scripts > _sweepScripts)
                     foreach (var row in db.GetCollection<VaultDepositScriptRow>(BtcAttestStore.Scripts).Find(x => x.LastModifiedHeight > _sweepScripts))
-                        _sweepFrom = Math.Min(_sweepFrom, row.WatchFromBitcoinHeight);
+                        _sweepFrom = Math.Min(_sweepFrom, Math.Max(row.WatchFromBitcoinHeight, meta.CheckpointHeight + 1));
                 if (coins > _sweepCoins)
                     foreach (var row in db.GetCollection<VaultCoinRow>(BtcAttestStore.Coins).Find(x => x.LastModifiedHeight > _sweepCoins))
                         if (row.Status == VaultCoinStatus.Unspent && row.CreatedInHeight < meta.EventsThroughHeight)
-                            _sweepFrom = Math.Min(_sweepFrom, row.CreatedInHeight);
+                            _sweepFrom = Math.Min(_sweepFrom, Math.Max(row.CreatedInHeight, floor));
             }
             _sweepScripts = scripts;
             _sweepCoins = coins;
-            _sweepFrom = Math.Max(_sweepFrom, floor);
+            // The floor bounds the first look and an old coin rewritten, never a sweep still owed: raised to it every pass,
+            // a new vault's watched blocks below it were skipped once the events-through height moved on (a quiet report
+            // moves it 144 at once), and a deposit there was never credited (fourth review, round 12).
 
             while (_sweepFrom <= meta.EventsThroughHeight)
             {
