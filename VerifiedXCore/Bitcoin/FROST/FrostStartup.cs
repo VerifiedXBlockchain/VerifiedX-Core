@@ -19,6 +19,9 @@ namespace VerifiedXCore.Bitcoin.FROST
     {
         public IConfiguration Configuration { get; }
 
+        /// <summary>The DKG routes no coordinator uses (POST round1, share, round3) change no session (fourth review, round 4).</summary>
+        internal static readonly bool DkgSideRoutesClosed = true;
+
         public FrostStartup(IConfiguration configuration)
         {
             Configuration = configuration;
@@ -698,6 +701,31 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 }
                             }
 
+                            // The leader's signature over the whole start (fourth review, round 4): required for a re-key, whose
+                            // leader is a validator with its key on its node; a web wallet's pre-signed start has none.
+                            var startBodyHash = FrostDkgLeaderAuth.StartBodyHash(request);
+                            var leaderSignedStart = !string.IsNullOrEmpty(request.BodySignature)
+                                && SignatureService.VerifySignature(request.LeaderAddress, FrostDkgLeaderAuth.StartMessage(startBodyHash), request.BodySignature);
+                            if (!leaderSignedStart && (!string.IsNullOrEmpty(request.BodySignature) || !string.IsNullOrEmpty(request.RekeyOf)))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "A re-key's start is signed in full by its leader (and a signature given must be valid)." }));
+                                return;
+                            }
+                            // The same start sent again (by anyone who received it) is answered as accepted: refusing it made
+                            // the leader's own copy fail when another copy arrived first.
+                            if (FrostSessionStorage.DKGSessions.TryGetValue(request.SessionId, out var alreadyOpen) && alreadyOpen.StartBodyHash == startBodyHash
+                                && !alreadyOpen.IsAborted)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status200OK;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = true, Message = "DKG ceremony already started with this start", SessionId = request.SessionId,
+                                    SmartContractUID = request.SmartContractUID, ParticipantCount = request.ParticipantAddresses.Count, Threshold = request.RequiredThreshold, CommitmentGenerated = true
+                                }, Formatting.Indented));
+                                return;
+                            }
+
                             // FIND-0013 Fix: Cryptographic signature verification using existing SignatureService
                             // Verify leader actually signed this request (message = SessionId.LeaderAddress.Timestamp)
                             if (string.IsNullOrEmpty(request.LeaderSignature))
@@ -819,6 +847,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 LastProgressTimestamp = TimeUtil.GetTime(),
                                 SourceIp = dkgSource,
                                 RekeyOf = string.IsNullOrEmpty(request.RekeyOf) ? null : request.RekeyOf,
+                                LeaderSigned = leaderSignedStart,
+                                StartBodyHash = startBodyHash,
                                 MyParticipantIndex = myParticipantId,
                                 Round1SecretPackage = secretPackage
                             };
@@ -888,6 +918,15 @@ namespace VerifiedXCore.Bitcoin.FROST
                 /// </summary>
                 endpoints.MapPost("/frost/dkg/round1", async context =>
                 {
+                    // Not used by any coordinator, and an open door: anyone could put a commitment, share or verification
+                    // into a validator's session ahead of the leader's, and the validator was then dropped as failing while
+                    // its sender was never named (fourth review, round 4). It changes no session.
+                    if (DkgSideRoutesClosed)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status410Gone;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Not used: commitments are taken from the leader's Round 2 set." }));
+                        return;
+                    }
                     try
                     {
                         using (var reader = new StreamReader(context.Request.Body))
@@ -1114,6 +1153,13 @@ namespace VerifiedXCore.Bitcoin.FROST
                         using (var reader = new StreamReader(context.Request.Body))
                         {
                             var body = await reader.ReadToEndAsync();
+                            if (session.LeaderSigned && !SignatureService.VerifySignature(session.LeaderAddress,
+                                    FrostDkgLeaderAuth.ContentMessage("ROUND2", sessionId, body), context.Request.Headers[FrostDkgLeaderAuth.ContentSignatureHeader].ToString()))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This session's Round 2 set is signed by its leader." }));
+                                return;
+                            }
 
                             // FIND-024 Fix: Parse all Round 1 commitments and call FROST native Round 2
                             if (string.IsNullOrEmpty(session.Round1SecretPackage))
@@ -1246,6 +1292,15 @@ namespace VerifiedXCore.Bitcoin.FROST
                 /// </summary>
                 endpoints.MapPost("/frost/dkg/share", async context =>
                 {
+                    // Not used by any coordinator, and an open door: anyone could put a commitment, share or verification
+                    // into a validator's session ahead of the leader's, and the validator was then dropped as failing while
+                    // its sender was never named (fourth review, round 4). It changes no session.
+                    if (DkgSideRoutesClosed)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status410Gone;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Not used: shares are taken from the leader's share batch." }));
+                        return;
+                    }
                     try
                     {
                         using (var reader = new StreamReader(context.Request.Body))
@@ -1406,6 +1461,22 @@ namespace VerifiedXCore.Bitcoin.FROST
                         using (var reader = new StreamReader(context.Request.Body))
                         {
                             var body = await reader.ReadToEndAsync();
+                            // Shares are taken only once this validator has made its Round 2 (it then holds every dealer's
+                            // commitment, and each share is checked against its dealer's before it is kept): one sent earlier
+                            // was kept unchecked and the real one dropped (fourth review, round 4).
+                            if (string.IsNullOrEmpty(session.Round2Secret))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Shares are taken after this validator's Round 2." }));
+                                return;
+                            }
+                            if (session.LeaderSigned && !SignatureService.VerifySignature(session.LeaderAddress,
+                                    FrostDkgLeaderAuth.ContentMessage("SHARES", sessionId, body), context.Request.Headers[FrostDkgLeaderAuth.ContentSignatureHeader].ToString()))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This session's shares are sent by its leader, signed." }));
+                                return;
+                            }
                             var json = Newtonsoft.Json.Linq.JObject.Parse(body);
 
                             // Verify the leader signature
@@ -1508,8 +1579,8 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                                     if (!string.IsNullOrEmpty(shareForMe))
                                     {
-                                        if (session.Round1Commitments.TryGetValue(senderAddr, out var senderCommitment)
-                                            && !FrostDkgBlame.ShareMatchesCommitment(shareForMe, senderCommitment, myFrostIdentifier!))
+                                        if (!session.Round1Commitments.TryGetValue(senderAddr, out var senderCommitment)
+                                            || !FrostDkgBlame.ShareMatchesCommitment(shareForMe, senderCommitment, myFrostIdentifier!))
                                         {
                                             accusations[senderAddr] = FrostDkgBlame.AccusationInvalidShare;
                                             LogUtility.Log($"[FROST] Share from {senderAddr} does not match its Round 1 commitment.", "FrostStartup.DKGSharesBatch");
@@ -1575,6 +1646,15 @@ namespace VerifiedXCore.Bitcoin.FROST
                 /// </summary>
                 endpoints.MapPost("/frost/dkg/round3", async context =>
                 {
+                    // Not used by any coordinator, and an open door: anyone could put a commitment, share or verification
+                    // into a validator's session ahead of the leader's, and the validator was then dropped as failing while
+                    // its sender was never named (fourth review, round 4). It changes no session.
+                    if (DkgSideRoutesClosed)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status410Gone;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Not used: a ceremony finishes from its shares." }));
+                        return;
+                    }
                     try
                     {
                         using (var reader = new StreamReader(context.Request.Body))
@@ -1924,7 +2004,10 @@ namespace VerifiedXCore.Bitcoin.FROST
                         // threshold and the participant list of this validator's own session.
                         // It also binds the public key package this validator finished with: a leader that gave participants
                         // different commitments leaves them with different packages, and no proof (fourth review, round 3).
-                        var keyPackageHash = FrostDkgAttestation.KeyPackageHash(session.FinalPubkeyPackage);
+                        // Only where consensus asks for it (a re-key, a creation from the rules' height): before, a validator
+                        // signing it while others did not failed honest creations during a rolling upgrade (round 4).
+                        var keyPackageHash = !string.IsNullOrEmpty(session.RekeyOf) || (Globals.LastBlock?.Height ?? -1) + 1 >= Globals.PathAuditRulesHeight
+                            ? FrostDkgAttestation.KeyPackageHash(session.FinalPubkeyPackage) : null;
                         var attestation = FrostDkgAttestation.SignLocal(session.SmartContractUID, session.GroupPublicKey, session.TaprootAddress,
                             session.LeaderAddress, FrostDkgAttestation.CeremonyThreshold(session.ParticipantAddresses?.Count ?? 0, session.RequiredThreshold, session.RekeyOf),
                             session.ParticipantAddresses, session.RekeyOf, keyPackageHash);

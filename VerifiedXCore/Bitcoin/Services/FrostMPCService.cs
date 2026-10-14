@@ -490,6 +490,10 @@ namespace VerifiedXCore.Bitcoin.Services
                 RequiredThreshold = threshold,
                 RekeyOf = rekeyOf,
             };
+            // A leader whose key is here signs the whole start; its Round 2 set and share batch are then signed too, and
+            // validators take that session's content from it only (a web wallet's pre-signed start cannot).
+            if (preSignedAuth == null)
+                startRequest.BodySignature = VerifiedXCore.Services.SignatureService.AddressSignature(leaderAddress, FrostDkgLeaderAuth.StartMessage(FrostDkgLeaderAuth.StartBodyHash(startRequest)));
 
             var failures = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
             var noRoom = new System.Collections.Concurrent.ConcurrentDictionary<string, bool>();
@@ -608,6 +612,9 @@ namespace VerifiedXCore.Bitcoin.Services
             // Step 1: Send all Round 1 commitments to each validator in parallel and collect their generated Round 2 shares.
             // Uses _ceremonyHttpClient (90s timeout) because FROST crypto with many participants is computationally heavy.
             var commitmentPayload = JsonConvert.SerializeObject(commitments);
+            var leaderSigns = preSignedAuth == null;
+            var round2Signature = leaderSigns
+                ? VerifiedXCore.Services.SignatureService.AddressSignature(leaderAddress, FrostDkgLeaderAuth.ContentMessage("ROUND2", sessionId, commitmentPayload)) : null;
             var allGeneratedShares = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.Ordinal);
             var generationFailures = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.Ordinal);
 
@@ -616,8 +623,9 @@ namespace VerifiedXCore.Bitcoin.Services
                 try
                 {
                     var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/dkg/round2/{sessionId}";
-                    var content = new StringContent(commitmentPayload, Encoding.UTF8, "application/json");
-                    var response = await _ceremonyHttpClient.PostAsync(url, content);
+                    using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(commitmentPayload, Encoding.UTF8, "application/json") };
+                    if (round2Signature != null) request.Headers.TryAddWithoutValidation(FrostDkgLeaderAuth.ContentSignatureHeader, round2Signature);
+                    var response = await _ceremonyHttpClient.SendAsync(request);
                     var responseBody = await response.Content.ReadAsStringAsync();
                     if (!response.IsSuccessStatusCode)
                     {
@@ -694,8 +702,11 @@ namespace VerifiedXCore.Bitcoin.Services
                         LeaderSignature = leaderSignature,
                         AllGeneratedShares = sharesByRecipient[validator.ValidatorAddress]
                     });
-                    var content = new StringContent(redistributePayload, Encoding.UTF8, "application/json");
-                    var response = await _ceremonyHttpClient.PostAsync(url, content);
+                    using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(redistributePayload, Encoding.UTF8, "application/json") };
+                    if (leaderSigns)
+                        request.Headers.TryAddWithoutValidation(FrostDkgLeaderAuth.ContentSignatureHeader,
+                            VerifiedXCore.Services.SignatureService.AddressSignature(leaderAddress, FrostDkgLeaderAuth.ContentMessage("SHARES", sessionId, redistributePayload)));
+                    var response = await _ceremonyHttpClient.SendAsync(request);
                     if (!response.IsSuccessStatusCode)
                     {
                         deliveryFailures[validator.ValidatorAddress] = $"did not accept its Round 2 shares (HTTP {(int)response.StatusCode})";

@@ -16,6 +16,38 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public int RequiredThreshold { get; set; }
         /// <summary>A re-key's ceremony (plan 8.8): the vault the new key is for. Null for a vault's creation.</summary>
         public string? RekeyOf { get; set; }
+        /// <summary>
+        /// The leader's signature over the whole start (<see cref="FrostDkgLeaderAuth.StartMessage"/>). Given by a leader
+        /// whose key is on the coordinating node (always for a re-key); the session's Round 2 set and share batch must
+        /// then be signed by the leader too. A web wallet's pre-signed start has none.
+        /// </summary>
+        public string? BodySignature { get; set; }
+    }
+
+    /// <summary>
+    /// What a key ceremony's leader signs when its key is on the coordinating node (fourth review, round 4). The start's
+    /// own signature covers only its session id and time, and the Round 2 set and the share batch were not bound to the
+    /// leader at all: a participant could send other validators a start with other content, or a Round 2 set or shares
+    /// of its choosing before the leader's arrived, have them dropped from the ceremony as failing, and never be blamed.
+    /// With these, a leader-signed ceremony takes its content from its leader only.
+    /// </summary>
+    public static class FrostDkgLeaderAuth
+    {
+        /// <summary>The header carrying the leader's signature over a request's body.</summary>
+        public const string ContentSignatureHeader = "X-Leader-Content-Signature";
+
+        private static string Sha256Hex(string text) =>
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
+
+        /// <summary>The hash of everything a start says.</summary>
+        public static string StartBodyHash(FrostDKGStartRequest r) =>
+            Sha256Hex($"{r.SessionId}|{r.SmartContractUID}|{r.LeaderAddress}|{r.Timestamp}|{r.RequiredThreshold}|{r.RekeyOf}|"
+                + string.Join(",", (r.ParticipantAddresses ?? new List<string>()).Where(a => !string.IsNullOrEmpty(a)).Distinct(StringComparer.Ordinal).OrderBy(a => a, StringComparer.Ordinal)));
+
+        public static string StartMessage(string startBodyHash) => $"DKG-START|{startBodyHash}";
+
+        /// <summary>What the leader signs for a request body of one step ("ROUND2", "SHARES") of a session.</summary>
+        public static string ContentMessage(string step, string sessionId, string body) => $"DKG-{step}|{sessionId}|{Sha256Hex(body ?? "")}";
     }
 
     /// <summary>A key ceremony's leader gives up a failed attempt (<c>POST /frost/dkg/abort</c>).</summary>

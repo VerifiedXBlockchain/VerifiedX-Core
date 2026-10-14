@@ -21,6 +21,10 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public string? SourceIp { get; set; }
         /// <summary>A re-key's ceremony: the vault the new key is for (signed into this validator's attestation).</summary>
         public string? RekeyOf { get; set; }
+        /// <summary>The leader signed the start in full (<see cref="FrostDkgLeaderAuth"/>): its Round 2 set and share batch must be signed too.</summary>
+        public bool LeaderSigned { get; set; }
+        /// <summary>The hash of the start this session was opened by: the same start sent again is answered, not refused.</summary>
+        public string? StartBodyHash { get; set; }
         
         // FROST native library state for this validator's participation
         public ushort MyParticipantIndex { get; set; }         // This validator's 1-based index

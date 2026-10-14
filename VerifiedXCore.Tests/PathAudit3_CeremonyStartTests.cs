@@ -285,6 +285,89 @@ namespace VerifiedXCore.Tests
             finally { FrostSessionStorage.DKGSessions.TryRemove(session.SessionId, out _); }
         }
 
+        /// <summary>
+        /// A participant could put commitments or shares into another validator's session ahead of the leader's (the
+        /// unauthenticated Round 2 route, the single-share and Round 1 routes, a share batch before Round 2): the real
+        /// ones were dropped, the validator failed and was dropped from the ceremony, and its sender was never named; one
+        /// validator could keep every re-key from finishing (fourth review, round 4). A leader-signed session takes its
+        /// Round 2 set and shares from its leader only, shares are taken after Round 2 and checked, and the routes no
+        /// coordinator uses change nothing.
+        /// </summary>
+        [Fact]
+        public async Task ALeaderSignedSession_TakesItsContentFromItsLeaderOnly()
+        {
+            using var server = new TestServer(new WebHostBuilder().UseStartup<FrostStartup>());
+            var client = server.CreateClient();
+            var leader = new EllipticCurve.PrivateKey("secp256k1");
+            var pub = "04" + Convert.ToHexString(leader.publicKey().toString()).ToLowerInvariant();
+            var address = VerifiedXCore.Data.AccountData.GetHumanAddress(pub);
+            var (commitment, secret, error) = FrostNative.DKGRound1Generate(1, 3, 2);
+            Assert.Equal(FrostNative.SUCCESS, error);
+            var session = new DKGSession
+            {
+                SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc", LeaderAddress = address, StartTimestamp = _now, LastProgressTimestamp = _now,
+                ParticipantAddresses = new List<string> { "xV1", "xV2", "xV3" }, RequiredThreshold = 67, MyParticipantIndex = 1, Round1SecretPackage = secret,
+                LeaderSigned = true,
+            };
+            session.Round1Commitments.TryAdd("xV1", commitment);
+            Assert.True(FrostSessionStorage.DKGSessions.TryAdd(session.SessionId, session));
+            try
+            {
+                var body = JsonConvert.SerializeObject(new Dictionary<string, string> { ["xV2"] = "{}", ["xV3"] = "{}" });
+                async Task<HttpStatusCode> Post(string path, string content, string? signature)
+                {
+                    var request = new HttpRequestMessage(HttpMethod.Post, path) { Content = new StringContent(content, Encoding.UTF8, "application/json") };
+                    if (signature != null) request.Headers.TryAddWithoutValidation(FrostDkgLeaderAuth.ContentSignatureHeader, signature);
+                    return (await client.SendAsync(request)).StatusCode;
+                }
+                string Sign(string message) => VerifiedXCore.Services.SignatureService.CreateSignature(message, leader, pub);
+
+                // Round 2 set: unsigned, or signed for another body, or by someone else: refused before anything is read.
+                Assert.Equal(HttpStatusCode.Forbidden, await Post($"/frost/dkg/round2/{session.SessionId}", body, null));
+                Assert.Equal(HttpStatusCode.Forbidden, await Post($"/frost/dkg/round2/{session.SessionId}", body, Sign(FrostDkgLeaderAuth.ContentMessage("ROUND2", session.SessionId, "{}"))));
+                var stranger = new EllipticCurve.PrivateKey("secp256k1");
+                var strangerPub = "04" + Convert.ToHexString(stranger.publicKey().toString()).ToLowerInvariant();
+                Assert.Equal(HttpStatusCode.Forbidden, await Post($"/frost/dkg/round2/{session.SessionId}", body,
+                    VerifiedXCore.Services.SignatureService.CreateSignature(FrostDkgLeaderAuth.ContentMessage("ROUND2", session.SessionId, body), stranger, strangerPub)));
+                // Signed by the leader: taken (and then refused for its made-up commitments, which a real leader would not send).
+                var signed = await Post($"/frost/dkg/round2/{session.SessionId}", body, Sign(FrostDkgLeaderAuth.ContentMessage("ROUND2", session.SessionId, body)));
+                Assert.NotEqual(HttpStatusCode.Forbidden, signed);
+                Assert.Equal(0, session.Stage);
+
+                // Shares before this validator's Round 2: refused, whoever sends them.
+                var shares = JsonConvert.SerializeObject(new { LeaderAddress = address, Timestamp = _now, LeaderSignature = Sign($"{session.SessionId}.{address}.{_now}"), AllGeneratedShares = new { xV2 = "{}" } });
+                Assert.Equal(HttpStatusCode.Conflict, await Post($"/frost/dkg/shares/{session.SessionId}", shares, Sign(FrostDkgLeaderAuth.ContentMessage("SHARES", session.SessionId, shares))));
+
+                // The routes no coordinator uses change nothing.
+                Assert.Equal(HttpStatusCode.Gone, await Post("/frost/dkg/round1", JsonConvert.SerializeObject(new { SessionId = session.SessionId, ValidatorAddress = "xV2", CommitmentData = "{}" }), null));
+                Assert.Equal(HttpStatusCode.Gone, await Post("/frost/dkg/share", "{}", null));
+                Assert.Equal(HttpStatusCode.Gone, await Post("/frost/dkg/round3", "{}", null));
+                Assert.Equal(new[] { "xV1" }, session.Round1Commitments.Keys.ToArray());
+                Assert.True(session.ReceivedSharesJson.IsEmpty);
+            }
+            finally { FrostSessionStorage.DKGSessions.TryRemove(session.SessionId, out _); }
+        }
+
+        /// <summary>The start's hash covers everything it says: another participant list, threshold, vault or contract is another start.</summary>
+        [Fact]
+        public void AStartsHash_CoversEverythingItSays()
+        {
+            FrostDKGStartRequest Start() => new() { SessionId = "s", SmartContractUID = "sc", LeaderAddress = "xL", Timestamp = 1, RequiredThreshold = 67, ParticipantAddresses = new List<string> { "xB", "xA", "xC" }, RekeyOf = "v" };
+            var hash = FrostDkgLeaderAuth.StartBodyHash(Start());
+            var reordered = Start(); reordered.ParticipantAddresses = new List<string> { "xC", "xB", "xA" };
+            Assert.Equal(hash, FrostDkgLeaderAuth.StartBodyHash(reordered)); // the set, not its order
+            foreach (var change in new Action<FrostDKGStartRequest>[]
+            {
+                r => r.ParticipantAddresses = new List<string> { "xA", "xB" }, r => r.RequiredThreshold = 100, r => r.RekeyOf = "w",
+                r => r.SmartContractUID = "other", r => r.Timestamp = 2, r => r.LeaderAddress = "xM", r => r.SessionId = "t",
+            })
+            {
+                var changed = Start();
+                change(changed);
+                Assert.NotEqual(hash, FrostDkgLeaderAuth.StartBodyHash(changed));
+            }
+        }
+
         [Fact]
         public async Task TheRoute_RefusesAnOldStart()
         {
