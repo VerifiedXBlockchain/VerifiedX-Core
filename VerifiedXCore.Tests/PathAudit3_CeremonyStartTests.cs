@@ -521,16 +521,29 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
-        /// A copy of the leader's own start with its signature removed, then a Round 2 set of the copier's: the leader's
-        /// signed start used to be answered as a repeat and ran on that set. It replaces such a session (round 7).
+        /// A session of the very start the leader signs is never replaced, nor one that reported a share: a session that
+        /// reported and was then replaced by a signed copy of its own start attested a key its reports still opened (round
+        /// 11). (A copy moved on by someone else's Round 2 set then only delays a creation; a re-key is never unsigned.)
         /// </summary>
         [Fact]
-        public void TheLeadersSignedStart_ReplacesItsOwnContent_OnceSomeoneElseMovedItOn()
+        public void TheLeadersSignedStart_NeverReplacesItsOwnStart_OrASessionThatReported()
         {
-            var copy = new DKGSession { SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc", LeaderAddress = "xL", StartTimestamp = _now, LastProgressTimestamp = _now, StartBodyHash = "same", Stage = 1 };
-            Assert.True(FrostSessionStorage.DKGSessions.TryAdd(copy.SessionId, copy));
-            try { Assert.True(FrostSessionStorage.MakeWayForSignedStart(copy.SessionId, "same")); }
-            finally { FrostSessionStorage.DKGSessions.TryRemove(copy.SessionId, out _); }
+            var same = new DKGSession { SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc", LeaderAddress = "xL", StartTimestamp = _now, LastProgressTimestamp = _now, StartBodyHash = "same", Stage = 1 };
+            var reported = new DKGSession { SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc2", LeaderAddress = "xL", StartTimestamp = _now, LastProgressTimestamp = _now, StartBodyHash = "other", Stage = 2, Reported = true };
+            Assert.True(FrostSessionStorage.DKGSessions.TryAdd(same.SessionId, same));
+            Assert.True(FrostSessionStorage.DKGSessions.TryAdd(reported.SessionId, reported));
+            try
+            {
+                Assert.False(FrostSessionStorage.MakeWayForSignedStart(same.SessionId, "same"));
+                Assert.False(FrostSessionStorage.MakeWayForSignedStart(reported.SessionId, "signed"));
+                Assert.True(FrostSessionStorage.DKGSessions.ContainsKey(same.SessionId));
+                Assert.True(FrostSessionStorage.DKGSessions.ContainsKey(reported.SessionId));
+            }
+            finally
+            {
+                FrostSessionStorage.DKGSessions.TryRemove(same.SessionId, out _);
+                FrostSessionStorage.DKGSessions.TryRemove(reported.SessionId, out _);
+            }
         }
 
         /// <summary>

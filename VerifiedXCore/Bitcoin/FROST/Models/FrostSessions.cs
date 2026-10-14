@@ -283,13 +283,14 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// leader's full signature opened, unless it is that very start with nothing done yet (then it is only marked
         /// signed): a participant could otherwise open a validator's session first with content of its choosing, or the
         /// leader's own content with a Round 2 set of its own, and the leader's start was refused or ran on that set
-        /// (fourth review, rounds 6 and 7). Never a signed session or a finished one. True when it was replaced (or there
-        /// was nothing to replace).
+        /// (fourth review, rounds 6 and 7). Never a signed session, a finished one, one that reported a share, or one of
+        /// this very start: a session that reported and was then replaced by a signed copy of its own start attested a key
+        /// its reports still opened (round 11). True when it was replaced (or there was nothing to replace).
         /// </summary>
         public static bool MakeWayForSignedStart(string sessionId, string signedHash)
         {
             if (!DKGSessions.TryGetValue(sessionId, out var held)) return true;
-            if (held.LeaderSigned || held.IsCompleted || (held.StartBodyHash == signedHash && held.Stage == 0)) return false;
+            if (held.LeaderSigned || held.IsCompleted || held.Reported || held.StartBodyHash == signedHash) return false;
             AbortDkg(held);
             DKGSessions.TryRemove(sessionId, out _);
             ForgetDkgStart(sessionId);

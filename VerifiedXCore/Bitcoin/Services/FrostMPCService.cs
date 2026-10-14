@@ -755,7 +755,9 @@ namespace VerifiedXCore.Bitcoin.Services
             var byAddress = validators.ToDictionary(v => v.ValidatorAddress, StringComparer.Ordinal);
             var disputes = accusations
                 .Where(a => !string.IsNullOrEmpty(a.Signature) && a.Accuser != a.Accused
-                    && VerifiedXCore.Services.SignatureService.VerifySignature(a.Accuser, FrostDkgBlame.AccusationMessage(sessionId, startBodyHash, a.Accuser, a.Accused), a.Signature!))
+                    && VerifiedXCore.Services.SignatureService.VerifySignature(a.Accuser, FrostDkgBlame.AccusationMessage(sessionId, startBodyHash, a.Accuser, a.Accused,
+                        commitments.TryGetValue(a.Accuser, out var accuserCommitment) ? accuserCommitment : null,
+                        commitments.TryGetValue(a.Accused, out var accusedCommitment) ? accusedCommitment : null), a.Signature!))
                 .GroupBy(a => (a.Accuser, a.Accused)).Select(g => g.First()).ToList();
             foreach (var unsigned in accusations.Where(a => !disputes.Any(d => d.Accuser == a.Accuser && d.Accused == a.Accused)))
                 LogUtility.Log($"[FROST MPC] Report by {unsigned.Accuser} against {unsigned.Accused} carries no valid signature; nobody is dropped for it.", "FrostMPCService.CoordinateShareDistribution");

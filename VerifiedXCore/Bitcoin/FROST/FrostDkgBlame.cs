@@ -161,8 +161,17 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// the start the session was opened with, so a report made in one session under an id holds for no other session
         /// opened later under the same id (fourth review, round 11).
         /// </summary>
-        public static string AccusationMessage(string sessionId, string? startBodyHash, string accuser, string accused) =>
-            $"DKG-ACCUSE|{sessionId}|{startBodyHash}|{accuser}|{accused}";
+        public static string AccusationMessage(string sessionId, string? startBodyHash, string accuser, string accused,
+            string? accuserCommitment, string? accusedCommitment) =>
+            $"DKG-ACCUSE|{sessionId}|{startBodyHash}|{accuser}|{accused}|{CommitmentHash(accuserCommitment)}|{CommitmentHash(accusedCommitment)}";
+
+        /// <summary>
+        /// The hash of a Round 1 commitment, as a report names it. Round 1 is made afresh for every session a validator
+        /// opens, so a report names the very session it was made in: one made in a session that was then replaced under
+        /// the same id and start (a signed copy of the same start, a restart) holds for no other (fourth review, round 11).
+        /// </summary>
+        public static string CommitmentHash(string? commitment) =>
+            string.IsNullOrEmpty(commitment) ? "-" : Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(commitment))).ToLowerInvariant();
 
         /// <summary>
         /// A recipient's report that a dealer's share would not open or did not match its commitment, settled by the share

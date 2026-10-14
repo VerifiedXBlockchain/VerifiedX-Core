@@ -1722,7 +1722,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 TaprootAddress = session.TaprootAddress ?? "",
                                 Accusations = accusations,
                                 // Each report signed, so the dealer reveals that share's key for it and for nothing else (round 9).
-                                AccusationSignatures = accusations.Keys.ToDictionary(accused => accused, accused => SignedReport(myAddress, sessionId, session.StartBodyHash, accused))
+                                AccusationSignatures = accusations.Keys.ToDictionary(accused => accused, accused => SignedReport(myAddress, session, accused))
                             }, Formatting.Indented));
                         }
                         }
@@ -2083,7 +2083,10 @@ namespace VerifiedXCore.Bitcoin.FROST
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "No such share" }));
                             return;
                         }
-                        if (!SignatureService.VerifySignature(accuser, FrostDkgBlame.AccusationMessage(sessionId, session.StartBodyHash, accuser, myAddress), signature))
+                        session.Round1Commitments.TryGetValue(accuser, out var accuserCommitment);
+                        session.Round1Commitments.TryGetValue(myAddress, out var myCommitment);
+                        if (string.IsNullOrEmpty(accuserCommitment) || string.IsNullOrEmpty(myCommitment)
+                            || !SignatureService.VerifySignature(accuser, FrostDkgBlame.AccusationMessage(sessionId, session.StartBodyHash, accuser, myAddress, accuserCommitment, myCommitment), signature))
                         {
                             context.Response.StatusCode = StatusCodes.Status403Forbidden;
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Not a signed report of this share's recipient" }));
@@ -3743,12 +3746,14 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// Returns true if finalization succeeded.
         /// </summary>
         /// <summary>This validator's signature on its report about a dealer's share; null when it cannot sign (the report then drops nobody).</summary>
-        private static string? SignedReport(string? myAddress, string sessionId, string? startBodyHash, string accused)
+        private static string? SignedReport(string? myAddress, DKGSession session, string accused)
         {
             try
             {
                 if (string.IsNullOrEmpty(myAddress)) return null;
-                var signature = SignatureService.AddressSignature(myAddress, FrostDkgBlame.AccusationMessage(sessionId, startBodyHash, myAddress, accused));
+                session.Round1Commitments.TryGetValue(myAddress, out var mine);
+                session.Round1Commitments.TryGetValue(accused, out var theirs);
+                var signature = SignatureService.AddressSignature(myAddress, FrostDkgBlame.AccusationMessage(session.SessionId, session.StartBodyHash, myAddress, accused, mine, theirs));
                 return string.IsNullOrEmpty(signature) || signature == "ERROR" ? null : signature;
             }
             catch { return null; }
