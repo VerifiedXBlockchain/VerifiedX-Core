@@ -734,6 +734,37 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// The bonds are seeded while their first block is applied, so that block's own transactions were judged against
+        /// no bonds: an exit in it was refused ("no validator bond") and a heartbeat with a send was held to the stake,
+        /// which builds without the bond accept: a split one block before the recording height (fourth review, round 6).
+        /// That block's transactions are judged as before the bond; the bond's rules apply from the next.
+        /// </summary>
+        [Fact]
+        public async Task TheBlockThatSeedsTheBonds_JudgesItsTransactionsAsBefore()
+        {
+            await Apply(Rule - 1);
+            var exit = LifecycleTx(_old[2], TransactionType.VBTC_V2_VALIDATOR_EXIT);
+            var (ok, why) = await Verify(exit, Rule);
+            Assert.True(ok, why);
+            var fresh = NewKey();
+            Fund(fresh, Stake + 2M);
+            var heartbeat = LifecycleTx(fresh, TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT);
+            Assert.False(ValidatorBond.StartsBond(heartbeat, Rule));
+            var state = new SameBlockDebitGuard.State { BlockHeight = Rule };
+            Assert.True(SameBlockDebitGuard.TryRegister(heartbeat, state).Ok);
+            Assert.True(SameBlockDebitGuard.TryRegister(Send(fresh, _friend, 5_000M), state).Ok);
+
+            // Mined there, the exit starts the wait of the bond seeded at the start of the same block.
+            await Apply(Rule, exit);
+            Assert.Equal(Rule, ValidatorBond.Row(_old[2].Address)!.ExitHeight);
+            // From the next block the bond's rules apply.
+            Assert.True(ValidatorBond.StartsBond(heartbeat, Rule + 1));
+            (ok, why) = await Verify(LifecycleTx(_owner, TransactionType.VBTC_V2_VALIDATOR_EXIT), Rule + 1);
+            Assert.False(ok);
+            Assert.Contains("no validator bond", why);
+        }
+
+        /// <summary>
         /// Before the bonds an exit is judged from the validators on chain at the block before, also on a node that is
         /// still catching up. Such a node used to know of no validators at all, refused the block carrying the exit and
         /// could not pass that height.

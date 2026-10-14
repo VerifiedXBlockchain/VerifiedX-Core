@@ -3303,7 +3303,7 @@ namespace VerifiedXCore.Services
                             return (txResult, "Validator exit cannot have an amount.");
                         
                         var exitHeight = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
-                        if (ValidatorBond.Active(exitHeight))
+                        if (ValidatorBond.TransactionRulesActive(exitHeight))
                         {
                             // Under the bond an exit is what unlocks a stake, so it must be open to every bonded
                             // validator, also one that went quiet long ago and is no longer listed as active; and it

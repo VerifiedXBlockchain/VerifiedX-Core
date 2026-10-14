@@ -96,6 +96,15 @@ namespace VerifiedXCore.Services
 
         public static bool Active(long height) => height >= Globals.ValidatorBondHeight;
 
+        /// <summary>
+        /// Whether a transaction mined at <paramref name="height"/> is judged under the bond's rules: from the block after
+        /// the one that seeds the bonds. The rows are written while that block is applied, so its own transactions were
+        /// judged against no bonds at all: an exit in it was refused ("no validator bond") and a registration with a
+        /// send was held to the stake, which builds without the bond accept, splitting the network one block before
+        /// the recording height (fourth review, round 6). That block's transactions are judged as before the bond.
+        /// </summary>
+        public static bool TransactionRulesActive(long height) => height > Globals.ValidatorBondHeight;
+
         private static decimal Stake => ValidatorService.ValidatorRequiredAmount();
 
         /// <summary>The bond of an address, or null when it has none. (The store's lookups ignore case; an address is matched exactly.)</summary>
@@ -235,7 +244,7 @@ namespace VerifiedXCore.Services
         /// address (second path audit, 14 October 2026).
         /// </summary>
         public static bool StartsBond(Transaction tx, long height) =>
-            tx != null && Active(height) && !string.IsNullOrEmpty(tx.FromAddress)
+            tx != null && TransactionRulesActive(height) && !string.IsNullOrEmpty(tx.FromAddress)
             && (tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER || tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT)
             && !Holds(Row(tx.FromAddress), height); // a stake the bond already holds (bonded, or in its exit wait) needs no second hold
 
@@ -249,7 +258,7 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static string? SpendRefusal(Transaction tx, long height)
         {
-            if (tx == null || !Active(height) || string.IsNullOrEmpty(tx.FromAddress)) return null;
+            if (tx == null || !TransactionRulesActive(height) || string.IsNullOrEmpty(tx.FromAddress)) return null;
             var row = Row(tx.FromAddress);
             if (!Holds(row, height)) return null;
             var spend = SameBlockDebitGuard.GetDebits(tx).Where(d => d.Key.Kind == SameBlockDebitGuard.LedgerKind.Native).Sum(d => d.Amount);
