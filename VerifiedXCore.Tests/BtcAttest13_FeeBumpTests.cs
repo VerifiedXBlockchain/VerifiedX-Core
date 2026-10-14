@@ -402,6 +402,10 @@ namespace VerifiedXCore.Tests
             Assert.False(ok);
             Assert.Equal(BtcAttestBlockRules.OneBumpReason, reason);
             Assert.Equal(new[] { a.Hash, elsewhere.Hash }, BtcAttestBlockRules.KeepOnePerBlock(new List<VfxTx> { a, elsewhere, b }).Select(t => t.Hash));
+            // The sender's later transactions wait with it, so the proposal has no nonce gap (fourth review).
+            var later = new VfxTx { Hash = "later", FromAddress = b.FromAddress, ToAddress = "xSomeone", TransactionType = TransactionType.TX };
+            var unrelated = new VfxTx { Hash = "unrelated", FromAddress = "xSomebodyElse", ToAddress = "xSomeone", TransactionType = TransactionType.TX };
+            Assert.Equal(new[] { a.Hash, elsewhere.Hash, "unrelated" }, BtcAttestBlockRules.KeepOnePerBlock(new List<VfxTx> { a, elsewhere, b, later, unrelated }).Select(t => t.Hash));
 
             // And a bump that an earlier one has overtaken changes nothing when applied (defence in depth).
             await Apply(Tip + 1, b, a);

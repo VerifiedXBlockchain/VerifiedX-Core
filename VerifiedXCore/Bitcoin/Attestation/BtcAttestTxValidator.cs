@@ -255,11 +255,23 @@ namespace VerifiedXCore.Bitcoin.Attestation
             return (true, "");
         }
 
-        /// <summary>Block building: the first report and the first fee bump of each withdrawal stay; later ones wait in the mempool for the next block.</summary>
+        /// <summary>
+        /// Block building: the first report and the first fee bump of each withdrawal stay; later ones wait in the mempool
+        /// for the next block, and so do their sender's later transactions, so the proposal has no nonce gap (as the other
+        /// builder filters do; reports and re-keys have no sender).
+        /// </summary>
         public static List<Transaction> KeepOnePerBlock(List<Transaction> approved)
         {
             var state = new State();
-            return approved.Where(tx => TryRegister(tx, state).Ok).ToList();
+            var blockedSenders = new HashSet<string>(StringComparer.Ordinal);
+            var result = new List<Transaction>();
+            foreach (var tx in approved)
+            {
+                if (!string.IsNullOrEmpty(tx.FromAddress) && blockedSenders.Contains(tx.FromAddress)) continue;
+                if (TryRegister(tx, state).Ok) result.Add(tx);
+                else if (!string.IsNullOrEmpty(tx.FromAddress)) blockedSenders.Add(tx.FromAddress);
+            }
+            return result;
         }
     }
 }
