@@ -262,6 +262,20 @@ namespace VerifiedXCore.Tests
 
         // ── The raw path ───────────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// The same local-wallet path with the nonce rule (TXHeightRule4) on: the block builder's nonce ordering skipped
+        /// every Bitcoin report and re-key (their shared sender name's "next nonce" counted the mempool's own copy), so
+        /// none would ever have been proposed (fourth review, round 2).
+        /// </summary>
+        [Fact]
+        public async Task TheLocalWalletPath_AlsoRuns_WithTheNonceRuleOn()
+        {
+            var prior = Globals.TXHeightRule4;
+            Globals.TXHeightRule4 = 0;
+            try { await TheLocalWallet_CreatesAVault_TakesDeposits_Transfers_AndWithdraws_AsOwnerAndAsHolder(); }
+            finally { Globals.TXHeightRule4 = prior; }
+        }
+
         [Fact]
         public async Task AWebWallet_CreatesAVault_TakesDeposits_Transfers_AndWithdraws_AsOwnerAndAsHolder_SigningOnlyHashes()
         {

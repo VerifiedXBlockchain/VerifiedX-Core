@@ -1046,11 +1046,18 @@ namespace VerifiedXCore.Data
 
                                     if (txVerify.Item1 && !dblspndChk && !isCraftedIntoBlock)
                                     {
-                                        // HAL-067 Fix: RBF + Nonce Ordering (only after TXHeightRule4 activation)
-                                        if (Globals.LastBlock.Height > Globals.TXHeightRule4)
+                                        // HAL-067 Fix: RBF + Nonce Ordering (only after TXHeightRule4 activation). Not for the
+                                        // Bitcoin attestation's transactions: they have no sender and no nonce, and the
+                                        // shared sender name's "next nonce" counts the mempool's own copy (1 against their 0),
+                                        // so no report, rewind or re-key would ever be proposed (fourth review, round 2).
+                                        if (Globals.LastBlock.Height > Globals.TXHeightRule4
+                                            && !VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(tx.TransactionType))
                                         {
-                                            // Get current expected nonce for this account
-                                            var expectedNonce = AccountStateTrei.GetNextNonce(tx.FromAddress);
+                                            // The nonce the account's state expects (block validation's). GetNextNonce counts the
+                                            // mempool, this transaction included, so a sender's only pending transaction was always
+                                            // "one behind" and nothing was ever proposed once the rule is on (fourth review, round 2).
+                                            // The sender's transactions approved in this pass raise it below.
+                                            var expectedNonce = StateData.GetSpecificAccountStateTrei(tx.FromAddress)?.Nonce ?? 0;
                                             
                                             // Check if there are already approved TXs from this address
                                             var approvedTxsFromSender = approvedMemPoolList

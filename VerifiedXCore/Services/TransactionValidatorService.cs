@@ -339,7 +339,10 @@ namespace VerifiedXCore.Services
             // Only enforced after TXHeightRule4 activation to avoid rejecting historical blocks
             if (Globals.LastBlock.Height > Globals.TXHeightRule4)
             {
-                if (txRequest.FromAddress != "Coinbase_BlkRwd" && txRequest.FromAddress != "Coinbase_TrxFees")
+                // The Bitcoin attestation's transactions have no sender and no nonce (their authority is their
+                // signatures): two in one block (a report and a re-key) would otherwise both need nonce 0 of one name.
+                if (txRequest.FromAddress != "Coinbase_BlkRwd" && txRequest.FromAddress != "Coinbase_TrxFees"
+                    && !VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(txRequest.TransactionType))
                 {
                     long expectedNonce;
                     
