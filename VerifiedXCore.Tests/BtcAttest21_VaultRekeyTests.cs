@@ -827,6 +827,15 @@ namespace VerifiedXCore.Tests
                 Assert.Null(BtcVaultLedger.CreditRefusal(state, holder.Address));       // named already
                 Assert.Contains("the most a vault holds", BtcVaultLedger.CreditRefusal(state, "xNew"));
                 await Refused(PoolUnlock("xNew"), "the most a vault holds");
+                // A field apply ignores does not hide the vault a transfer credits (an empty "Inputs" did; round 7).
+                var stranger = NewKey().Address;
+                await Refused(SignedBy(holder, stranger, TransactionType.VBTC_V2_TRANSFER,
+                    new { Function = "TransferVBTCV2()", ContractUID = vault.Uid, FromAddress = holder.Address, ToAddress = stranger, Amount = 0.00001M, Inputs = new object[0] }), "the most a vault holds");
+                // A full vault changes hands only to an address its ledger names: each owner a chain of owners left behind
+                // was one holder more (round 7).
+                VfxTx HandOver(string to) => SignedBy(Minter, to, TransactionType.TKNZ_TX, new[] { new { Function = "Transfer()", ContractUID = vault.Uid, ToAddress = to, Data = "x", MD5List = "NA" } });
+                Assert.Contains("the most a vault holds", BtcVaultLedger.HolderLimitRefusal(HandOver("xNew")));
+                Assert.Null(BtcVaultLedger.HolderLimitRefusal(HandOver(holder.Address)));
                 Assert.Null(BtcVaultLedger.HolderLimitRefusal(PoolUnlock(holder.Address)));
                 Assert.Null(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.0001M, Tip + 1, "xNew"));   // its one lock is on the full vault
                 Assert.Equal(lockId, Assert.Single(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.0001M, Tip + 1, holder.Address)!).LockId);

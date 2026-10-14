@@ -30,7 +30,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
     /// (SmartContractStateTrei.UpdateSmartContract), and a withdrawal's debit is written before its row.</item>
     /// </list>
     /// What is left is what one block can add past the limit (its credits are each judged against the state before it,
-    /// under 20,000 in a 10 MB block) and a changed owner or a recovery address: far inside the document's room.
+    /// under 20,000 in a 10 MB block) and a recovery address: far inside the document's room. A full vault changes hands
+    /// only to an address its ledger names.
     /// </summary>
     public static class BtcVaultLedger
     {
@@ -191,19 +192,31 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     default:
                     {
                         if (string.IsNullOrEmpty(tx.ToAddress)) return null;
-                        var function = tx.TransactionType == TransactionType.VBTC_V2_TRANSFER ? "TransferVBTCV2()" : LedgerIntegrityRules.DispatchedCall(tx.Data).Function;
-                        if (tx.TransactionType != TransactionType.VBTC_V2_TRANSFER && function != "TransferVBTCV2()" && function != "TransferVBTCMultiV2()") return null;
+                        var function = LedgerIntegrityRules.DispatchedCall(tx.Data).Function;
+                        var vbtcTransfer = tx.TransactionType == TransactionType.VBTC_V2_TRANSFER || function == "TransferVBTCV2()" || function == "TransferVBTCMultiV2()";
+                        var vaultTransfer = function == "Transfer()";
+                        if (!vbtcTransfer && !vaultTransfer) return null;
                         var token = JToken.Parse(tx.Data);
                         var obj = token is JArray array ? array.FirstOrDefault() as JObject : token as JObject;
                         if (obj == null) return null;
-                        if (obj["Inputs"] is JArray inputs)
+                        var named = obj["ContractUID"]?.Type == JTokenType.String ? (string)obj["ContractUID"]! : null;
+                        if (vaultTransfer)
                         {
+                            // A vault handed to a new owner: the owner is never refused a credit, so a chain of owners, each
+                            // left on the ledger as a holder, grew it without bound (fourth review, round 7). On a full vault
+                            // it goes only to an address the ledger names.
+                            credits.Add((named, tx.ToAddress));
+                            if (obj["ToAddress"]?.Type == JTokenType.String) credits.Add((named, (string)obj["ToAddress"]!));
+                            break;
+                        }
+                        // Every vault the data names: which one apply credits depends on the function and the height, and a
+                        // field apply ignores must not hide the one it credits (an empty "Inputs" on a single transfer did,
+                        // fourth review, round 7).
+                        if (named != null) credits.Add((named, tx.ToAddress));
+                        if (obj["Inputs"] is JArray inputs)
                             foreach (var input in inputs.OfType<JObject>())
                                 if (input["SCUID"]?.Type == JTokenType.String)
                                     credits.Add(((string)input["SCUID"]!, tx.ToAddress));
-                        }
-                        else if (obj["ContractUID"]?.Type == JTokenType.String)
-                            credits.Add(((string)obj["ContractUID"]!, tx.ToAddress));
                         break;
                     }
                 }
