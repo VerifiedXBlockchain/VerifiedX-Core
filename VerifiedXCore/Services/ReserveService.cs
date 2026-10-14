@@ -24,7 +24,7 @@ namespace VerifiedXCore.Services
                         // Awaited so RunLock actually covers the work — a fire-and-forget here let
                         // the next block's Run() re-select still-Pending rows and double-apply them
                         // (which for vBTC transfers would mint ledger entries).
-                        await StateData.UpdateTreiFromReserve(reserveTxList);
+                        await StateData.UpdateTreiFromReserve(reserveTxList, Globals.LastBlock);
                     }
                 }
             }

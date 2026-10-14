@@ -711,7 +711,7 @@ namespace VerifiedXCore.Utilities
                                 {
                                     var maturedRows = pendingRows.Where(x => x.ConfirmTimestamp < block.Timestamp).ToList();
                                     if (maturedRows.Count > 0)
-                                        await StateData.UpdateTreiFromReserve(maturedRows);
+                                        await StateData.UpdateTreiFromReserve(maturedRows, block);
                                 }
                             }
                         }

@@ -230,7 +230,7 @@ namespace VerifiedXCore.Models.SmartContracts
 
                     var repl = new TrilliumRepl();
                     repl.Run("#reset");
-                    repl.Run(textFromByte);
+                    repl.Run(VerifiedXCore.Services.ContractClock.Prepare(textFromByte)); // in a block: the block's time, not this node's clock
 
                     var scUID = repl.Run(@"GetNFTId()").Value.ToString();
                     var features = repl.Run(@"GetNFTFeatures()").Value.ToString();
@@ -367,7 +367,7 @@ namespace VerifiedXCore.Models.SmartContracts
 
                                         if (isDynamic == true)
                                         {
-                                            var blockHeight = Globals.LastBlock.Height.ToString();
+                                            var blockHeight = VerifiedXCore.Services.ContractClock.TipHeight().ToString(); // in a block: the block before it, not this node's tip
                                             var evolveState = (int)repl.Run(@"DynamicEvolve(1, " + blockHeight + ")").Value;
 
                                             var evolveFeature = evolveFeatureList.Where(x => x.EvolutionState == evolveState).FirstOrDefault();
@@ -485,7 +485,7 @@ namespace VerifiedXCore.Models.SmartContracts
 
                                     if (isDynamic == true)
                                     {
-                                        var blockHeight = Globals.LastBlock.Height.ToString();
+                                        var blockHeight = VerifiedXCore.Services.ContractClock.TipHeight().ToString(); // in a block: the block before it, not this node's tip
                                         var evolveState = (int)repl.Run(@"DynamicEvolve(1, " + blockHeight + ")").Value;
 
                                         var evolveFeature = evolveFeatureList.Where(x => x.EvolutionState == evolveState).FirstOrDefault();
@@ -542,7 +542,7 @@ namespace VerifiedXCore.Models.SmartContracts
 
             var repl = new TrilliumRepl();
             repl.Run("#reset");
-            repl.Run(textFromByte);
+            repl.Run(VerifiedXCore.Services.ContractClock.Prepare(textFromByte)); // in a block: the block's time, not this node's clock
 
             var scUID = repl.Run(@"GetNFTId()").Value.ToString();
             var features = repl.Run(@"GetNFTFeatures()").Value.ToString();
@@ -738,7 +738,7 @@ namespace VerifiedXCore.Models.SmartContracts
 
                                 if (isDynamic == true)
                                 {
-                                    var blockHeight = Globals.LastBlock.Height.ToString();
+                                    var blockHeight = VerifiedXCore.Services.ContractClock.TipHeight().ToString(); // in a block: the block before it, not this node's tip
                                     var evolveStateDynamic = (int)repl.Run(@"DynamicEvolve(1, " + blockHeight + ")").Value;
 
                                     var evolveFeature = evolveFeatureList.Where(x => x.EvolutionState == evolveStateDynamic).FirstOrDefault();
@@ -921,7 +921,7 @@ namespace VerifiedXCore.Models.SmartContracts
 
                             if (isDynamic == true)
                             {
-                                var blockHeight = Globals.LastBlock.Height.ToString();
+                                var blockHeight = VerifiedXCore.Services.ContractClock.TipHeight().ToString(); // in a block: the block before it, not this node's tip
                                 var evolveStateDynamic = (int)repl.Run(@"DynamicEvolve(1, " + blockHeight + ")").Value;
 
                                 var evolveFeature = evolveFeatureList.Where(x => x.EvolutionState == evolveStateDynamic).FirstOrDefault();

@@ -146,6 +146,7 @@ namespace VerifiedXCore.Data
             Globals.TreisUpdating = true;
             StateWriteContext.SetHeight(block.Height); //stamp LastModifiedHeight on state writes for snapshot diffing
             LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13: every apply path uses the block's height
+            using var contractClock = ContractClock.ForBlock(block.Timestamp, block.Height); // contract code is read as of this block
             await ApplyForgedVfxBurnsAsync(block); // fund-loss audit item 1 (burn): at ForgedVfxBurnHeight, before the block's transactions
             PrivacyEpochService.ApplyIfResetBlock(block); // fund-loss audit item 1 (stage 2): shielded pools restart at PrivateTxProofRulesHeight
             // The steps a block takes before its transactions write consensus state (signer sets, bonds). One that
@@ -804,8 +805,10 @@ namespace VerifiedXCore.Data
             return txTreiUpdateSuccessCount == txCount && !blockStartFailed;
         }
 
-        public static async Task UpdateTreiFromReserve(List<ReserveTransactions> txList)
+        /// <param name="asOf">The block whose timestamp made these transfers fall due: contract code is read as of it.</param>
+        public static async Task UpdateTreiFromReserve(List<ReserveTransactions> txList, Block? asOf = null)
         {
+            using var contractClock = asOf != null ? ContractClock.ForBlock(asOf.Timestamp, asOf.Height + 1) : null;
             var accStTrei = GetAccountStateTrei();
             var rtxDb = ReserveTransactions.GetReserveTransactionsDb();
             var txDb = Transaction.GetAll();

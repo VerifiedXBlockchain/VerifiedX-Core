@@ -632,6 +632,15 @@ namespace VerifiedXCore.Services
         public static readonly string[] NondeterministicBuiltins = { "rand", "input" };
 
         /// <summary>
+        /// Two more, refused from Globals.PathAuditRulesHeight: `send` writes a table that lives as long as the node's
+        /// process and throws on a second call with the same key (a body using it is read once per process and never
+        /// again), and `createSig` draws a random number. Neither is used by any contract the node writes. The
+        /// remaining input from outside the code, the clock (dateProc), is answered from the block's timestamp
+        /// (<see cref="ContractClock"/>).
+        /// </summary>
+        public static readonly string[] ProcessBoundBuiltins = { "send", "createSig" };
+
+        /// <summary>
         /// Every node runs contract code to read a contract (VX-01, VX-02, NEW-26, NEW-28, token-deploy apply), so the code
         /// must give every node the same answer and must finish. Trillium's rand() is unseeded and input() reads the node's
         /// console: a body whose minter or features depend on them is accepted by some nodes and refused by others. A
@@ -641,8 +650,9 @@ namespace VerifiedXCore.Services
         /// words inside a broken multi-line string (e.g. "do" in a description) must not refuse it. No mainnet or testnet
         /// body uses these, so there is no activation height. Null when the rule passes.
         /// </summary>
-        public static string? ContractBodyAllowed(Transaction tx)
+        public static string? ContractBodyAllowed(Transaction tx, long height = 0)
         {
+            var alsoRefused = height >= Globals.PathAuditRulesHeight ? ProcessBoundBuiltins : Array.Empty<string>();
             foreach (var body in CarriedContractBodies(tx?.Data))
             {
                 string text;
@@ -657,7 +667,8 @@ namespace VerifiedXCore.Services
                     var node = pending.Pop();
                     if (node is global::Trillium.Syntax.DoWhileStatementSyntax)
                         return "Contract code may not use a do-while loop.";
-                    if (node is global::Trillium.Syntax.CallExpressionSyntax call && NondeterministicBuiltins.Contains(call.Identifier.Text))
+                    if (node is global::Trillium.Syntax.CallExpressionSyntax call
+                        && (NondeterministicBuiltins.Contains(call.Identifier.Text) || alsoRefused.Contains(call.Identifier.Text)))
                         return $"Contract code may not call {call.Identifier.Text}().";
                     foreach (var child in node.GetChildren())
                         pending.Push(child);

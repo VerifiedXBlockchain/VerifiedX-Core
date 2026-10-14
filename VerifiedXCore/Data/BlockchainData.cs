@@ -80,10 +80,6 @@ namespace VerifiedXCore.Data
                         return null;
                     }
 
-                    //Get tx's from Mempool                
-                    var processedTxPool = await TransactionData.ProcessTxPool();
-                    var txPool = TransactionData.GetPool();
-
                     var lastBlock = Globals.LastBlock;
                     var height = lastBlock.Height + 1;
 
@@ -92,6 +88,13 @@ namespace VerifiedXCore.Data
 
                     if (timestamp <= Globals.LastBlock.Timestamp)
                         timestamp = Globals.LastBlock.Timestamp + 1;
+
+                    //Get tx's from Mempool. The block's time is fixed first: the transactions are chosen with contract
+                    //code read as of the block they will be in, as every node will read it when it judges the block.
+                    List<Transaction> processedTxPool;
+                    using (VerifiedXCore.Services.ContractClock.ForBlock(timestamp, height))
+                        processedTxPool = await TransactionData.ProcessTxPool();
+                    var txPool = TransactionData.GetPool();
 
                     var transactionList = new List<Transaction>();
 
@@ -208,15 +211,18 @@ namespace VerifiedXCore.Data
                         return null;
                     }
 
-                    //Get tx's from Mempool                
-                    var processedTxPool = await TransactionData.ProcessTxPool();
-                    var txPool = TransactionData.GetPool();
-
                     //Need to get master node validator.
                     var timestamp = TimeUtil.GetTime();
 
                     if (timestamp <= Globals.LastBlock.Timestamp)
                         timestamp = Globals.LastBlock.Timestamp + 1;
+
+                    //Get tx's from Mempool. The block's time is fixed first: the transactions are chosen with contract
+                    //code read as of the block they will be in, as every node will read it when it judges the block.
+                    List<Transaction> processedTxPool;
+                    using (VerifiedXCore.Services.ContractClock.ForBlock(timestamp, Globals.LastBlock.Height + 1))
+                        processedTxPool = await TransactionData.ProcessTxPool();
+                    var txPool = TransactionData.GetPool();
 
                     var transactionList = new List<Transaction>();
 
@@ -347,15 +353,18 @@ namespace VerifiedXCore.Data
                             return specialBlock;
                     }
 
-                    //Get tx's from Mempool                
-                    var processedTxPool = await TransactionData.ProcessTxPool();
-                    var txPool = TransactionData.GetPool();
-
                     //Need to get master node validator.
                     var timestamp = TimeUtil.GetTime();
 
                     if (timestamp <= Globals.LastBlock.Timestamp)
                         timestamp = Globals.LastBlock.Timestamp + 1;
+
+                    //Get tx's from Mempool. The block's time is fixed first: the transactions are chosen with contract
+                    //code read as of the block they will be in, as every node will read it when it judges the block.
+                    List<Transaction> processedTxPool;
+                    using (VerifiedXCore.Services.ContractClock.ForBlock(timestamp, Globals.LastBlock.Height + 1))
+                        processedTxPool = await TransactionData.ProcessTxPool();
+                    var txPool = TransactionData.GetPool();
 
                     var transactionList = new List<Transaction>();
 
