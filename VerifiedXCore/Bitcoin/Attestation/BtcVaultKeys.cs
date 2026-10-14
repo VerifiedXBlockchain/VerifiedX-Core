@@ -158,13 +158,23 @@ namespace VerifiedXCore.Bitcoin.Attestation
         {
             var active = new HashSet<string>(VBTCValidatorRegistry.GetActiveValidatorsAt(vfxHeight - 1)
                 .Where(v => v != null && v.IsActive && !string.IsNullOrEmpty(v.ValidatorAddress)).Select(v => v.ValidatorAddress), StringComparer.Ordinal);
+            // Each validator is looked at once per count, however many keys it holds a share of: the same validators
+            // hold most keys, and a lookup per key and holder grew with vaults times validators (fourth review, round 2).
+            // Nothing changes the bonds while the count runs.
+            var healthyByAddress = new Dictionary<string, bool>(StringComparer.Ordinal);
+            bool Counts(string address)
+            {
+                if (!healthyByAddress.TryGetValue(address, out var counts))
+                    healthyByAddress[address] = counts = IsHealthy(address, active, vfxHeight, db);
+                return counts;
+            }
             foreach (var key in (db ?? BtcAttestStore.Db).GetCollection<VaultDepositScriptRow>(BtcAttestStore.Scripts)
                          .Find(x => x.RetiredAtVfxHeight == 0).OrderBy(x => x.ScriptHex, StringComparer.Ordinal).ToList())
             {
                 var holders = Holders(key);
                 var threshold = MinSigners(key);
                 if (holders.Count == 0 || threshold <= 0) continue;
-                var healthy = holders.Count(a => IsHealthy(a, active, vfxHeight, db));
+                var healthy = holders.Count(Counts);
                 var due = healthy < threshold + SpareBeforeRekey(holders.Count, threshold);
                 if (!due && key.RekeyDueSinceVfxHeight > 0 && healthy < holders.Count) due = true; // once due, due until replaced
                 var dueSince = due ? (key.RekeyDueSinceVfxHeight > 0 ? key.RekeyDueSinceVfxHeight : vfxHeight) : 0;
