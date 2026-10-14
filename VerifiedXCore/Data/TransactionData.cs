@@ -329,6 +329,16 @@ namespace VerifiedXCore.Data
         {
             var TransactionPool = GetPool();
 
+            // A block is built only from rated transactions (MempoolSizeUtility). A peer rates what it receives; the
+            // routes of this node that send their own (every vBTC route, local and raw) did not, so this node never
+            // put the transactions sent through it in its own blocks and left them to its peers (on a network of one
+            // validator, to nobody). Rated here when the sender has not (third pass, 14 October 2026).
+            if (transaction.TransactionRating == null)
+            {
+                try { transaction.TransactionRating = await TransactionRatingService.GetTransactionRating(transaction); }
+                catch (Exception ex) { ErrorLogUtility.LogError($"Rating transaction {transaction.Hash} failed: {ex.Message}", "TransactionData.AddToPool()"); }
+            }
+
             // ===== EXIT_TO_BTC MEMPOOL CONFLICT DETECTION =====
             // Reject EXIT_TO_BTC transactions that overlap with existing mempool TXs
             // on BaseBurnTxHash or LockId to prevent double-spend of FIFO allocations.
