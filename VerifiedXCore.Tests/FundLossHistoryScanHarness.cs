@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using LiteDB;
 using VerifiedXCore.Data;
 using VerifiedXCore.Models;
@@ -107,6 +108,70 @@ namespace VerifiedXCore.Tests
             if (stopped != null) lines.Insert(0, $"STOPPED after height {lastHeight}: {stopped}");
             lines.Insert(0, $"{network}: {scanned} blocks to height {lastHeight}, {withBody} transactions carrying a Data field, {lines.Count} refused only by the process-bound built-ins rule");
             File.WriteAllLines(reportPath, lines);
+        }
+
+        /// <summary>
+        /// Lists every mined vault creation (a created contract whose body declares TokenizationV2) and whether its code is
+        /// plain (LedgerIntegrityRules.VaultCodeIsPlain): from Globals.PathAuditRulesHeight a vault whose code is not plain
+        /// is no longer read as a vault. Block database opened READ-ONLY in place; inert unless VAULTPLAIN_SCAN_DB is set.
+        /// Writes vaultplain-scan-{network}.txt to FUNDLOSS_SCAN_OUT.
+        /// </summary>
+        [Fact]
+        public void VaultPlainnessScan()
+        {
+            var dbDir = Environment.GetEnvironmentVariable("VAULTPLAIN_SCAN_DB");
+            if (string.IsNullOrWhiteSpace(dbDir)) return;
+            var outDir = Environment.GetEnvironmentVariable("FUNDLOSS_SCAN_OUT");
+            if (string.IsNullOrWhiteSpace(outDir)) outDir = dbDir;
+            Directory.CreateDirectory(outDir);
+            var dbPath = Path.Combine(dbDir, DbContext.RSRV_DB_NAME);
+            Assert.True(File.Exists(dbPath), $"Block database not found: {dbPath}");
+            var mapper = new BsonMapper(null, LegacyTypeNameBinder.Instance);
+            mapper.RegisterType<DateTime>(
+                value => value.ToString("o", CultureInfo.InvariantCulture),
+                bson => DateTime.ParseExact(bson, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+            mapper.RegisterType<DateTimeOffset>(
+                value => value.ToString("o", CultureInfo.InvariantCulture),
+                bson => DateTimeOffset.ParseExact(bson, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+            // Not disposed: a read-only database with a write-ahead log would try to checkpoint it on dispose (and fail).
+            var db = new LiteDatabase(new ConnectionString { Filename = dbPath, Connection = ConnectionType.Direct, ReadOnly = true }, mapper);
+            var blocks = db.GetCollection<Block>(DbContext.RSRV_BLOCKS);
+            var network = dbDir.Contains("TestNet", StringComparison.OrdinalIgnoreCase) ? "testnet" : "mainnet";
+            var lines = new System.Collections.Generic.List<string>();
+            long scanned = 0, vaults = 0, notPlain = 0, lastHeight = -1;
+            string? stopped = null;
+            try
+            {
+                foreach (var block in blocks.Query().OrderBy(b => b.Height).ToEnumerable())
+                {
+                    lastHeight = block.Height;
+                    scanned++;
+                    foreach (var tx in block.Transactions ?? new System.Collections.Generic.List<Transaction>())
+                    {
+                        if (tx?.Data == null || !tx.Data.Contains("\"Data\"")) continue;
+                        var uid = LedgerIntegrityRules.CreatedContractUid(tx);
+                        if (uid == null) continue;
+                        var body = SmartContractDeployBinding.ReadPayload(tx.Data).Data;
+                        if (string.IsNullOrEmpty(body)) continue;
+                        VerifiedXCore.Models.SmartContracts.SmartContractMain? main;
+                        try { main = VerifiedXCore.Models.SmartContracts.SmartContractMain.GenerateSmartContractInMemory(body); }
+                        catch { continue; }
+                        if (main?.Features?.Any(x => x != null && x.FeatureName == FeatureName.TokenizationV2) != true) continue;
+                        vaults++;
+                        var timeless = LedgerIntegrityRules.ContractCodeIsTimeless(body);
+                        var plain = timeless && LedgerIntegrityRules.VaultCodeIsPlain(main, body);
+                        if (!plain)
+                        {
+                            notPlain++;
+                            lines.Add($"{block.Height} {tx.Hash} {uid} features={string.Join(",", main.Features.Where(x => x != null).Select(x => x.FeatureName))} timeless={timeless}");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { stopped = ex.ToString(); }
+            if (stopped != null) lines.Insert(0, $"STOPPED after height {lastHeight}: {stopped}");
+            lines.Insert(0, $"{network}: {scanned} blocks to height {lastHeight}, {vaults} vault creations, {notPlain} whose code is not plain");
+            File.WriteAllLines(Path.Combine(outDir, $"vaultplain-scan-{network}.txt"), lines);
         }
 
         /// <summary>
