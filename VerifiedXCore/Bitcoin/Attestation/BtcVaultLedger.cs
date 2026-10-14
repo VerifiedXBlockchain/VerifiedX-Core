@@ -180,6 +180,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 if (function != "Sale_Start()" && function != "M_Sale_Start()" && function != "Sale_Complete()" && function != "M_Sale_Complete()" && function != "Sale_Cancel()") return null;
                 var uid = data["ContractUID"]?.Type == JTokenType.String ? (string)data["ContractUID"]! : null;
                 if (string.IsNullOrEmpty(uid) || !BtcAttestBalance.IsAttestedVault(uid)) return null;
+                // Read as validation and apply read it (a number becomes its digits), so the bound is exact (round 10).
+                if (data["KeySign"] is JToken keyToken && keyToken.Type != JTokenType.Null && keyToken.Type != JTokenType.String)
+                    return $"A sale of vault {uid} carries its key as text.";
                 var key = data["KeySign"]?.Type == JTokenType.String ? (string)data["KeySign"]! : null;
                 if (key != null && key.Length > MaxSaleKeyLength)
                     return $"A sale of vault {uid} carries a key of at most {MaxSaleKeyLength} characters.";

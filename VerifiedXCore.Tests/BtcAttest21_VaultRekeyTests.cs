@@ -862,6 +862,9 @@ namespace VerifiedXCore.Tests
                 VfxTx Sell(string key) => SignedBy(Minter, Minter.Address, TransactionType.NFT_SALE, new { Function = "M_Sale_Start()", ContractUID = vault.Uid, NextOwner = holder.Address, SoldFor = 1M, KeySign = key });
                 Assert.Null(BtcVaultLedger.SaleRefusal(Sell("abcdefghij")));
                 Assert.Contains("a key of at most", BtcVaultLedger.SaleRefusal(Sell(new string('k', BtcVaultLedger.MaxSaleKeyLength + 1))));
+                // A key given as a number is read as its digits by apply: refused, so the bound is exact (round 10).
+                Assert.Contains("its key as text", BtcVaultLedger.SaleRefusal(SignedBy(Minter, Minter.Address, TransactionType.NFT_SALE,
+                    new { Function = "M_Sale_Complete()", ContractUID = vault.Uid, KeySign = 123456789 })));
                 var sold = SmartContractStateTrei.GetSmartContractState(vault.Uid)!;
                 sold.PurchaseKeys = Enumerable.Range(0, BtcVaultLedger.MaxPurchaseKeys).Select(i => "k" + i).ToList();
                 SmartContractStateTrei.GetSCST().Update(sold);
