@@ -858,14 +858,15 @@ namespace VerifiedXCore.Data
         }
 
         /// <param name="asOf">The block whose timestamp made these transfers fall due: contract code is read as of it.</param>
-        public static async Task UpdateTreiFromReserve(List<ReserveTransactions> txList, Block? asOf = null)
+        public static async Task<bool> UpdateTreiFromReserve(List<ReserveTransactions> txList, Block? asOf = null)
         {
             using var contractClock = asOf != null ? ContractClock.ForBlock(asOf.Timestamp, asOf.Height + 1) : null;
             var accStTrei = GetAccountStateTrei();
             var rtxDb = ReserveTransactions.GetReserveTransactionsDb();
             var txDb = Transaction.GetAll();
 
-            foreach(var rtx in  txList)
+            var appliedCleanly = true;
+            foreach (var rtx in txList)
             {
                 try
                 {
@@ -1077,9 +1078,13 @@ namespace VerifiedXCore.Data
                     // storage marks the state failed here. Left as it was, the row stayed Pending on this node alone and
                     // was judged again a block later, against other state than its peers' (fourth review, round 6).
                     if (IsNodeLocalFault(ex))
+                    {
+                        appliedCleanly = false;
                         StateTreiStatusService.SetFailed($"Reserve settlement {rtx.Hash} failed on this node: {ex.Message}");
+                    }
                 }
             }
+            return appliedCleanly;
         }
 
         public static LiteDB.ILiteCollection<AccountStateTrei> GetAccountStateTrei()
@@ -1503,6 +1508,7 @@ namespace VerifiedXCore.Data
                             }
                             catch (Exception ex)
                             {
+                                NoteApplyStepFailed(height, ex); // a fault of this node's storage is flagged (fourth review, round 7)
                                 ErrorLogUtility.LogError($"Recover failed to redirect pending vBTC transfer {rTX.Hash}: {ex.Message}", "StateData.RecoverReserveAccountTx()");
                             }
                         }

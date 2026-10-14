@@ -154,8 +154,8 @@ namespace VerifiedXCore.Utilities
                                 else
                                 {
                                     var maturedRows = pendingRows.Where(x => x.ConfirmTimestamp < block.Timestamp).ToList();
-                                    if (maturedRows.Count > 0)
-                                        await StateData.UpdateTreiFromReserve(maturedRows, block);
+                                    if (maturedRows.Count > 0 && !await StateData.UpdateTreiFromReserve(maturedRows, block))
+                                        replayFails++; // a settlement this node could not write is a replay failure (round 7)
                                 }
                             }
                         }
