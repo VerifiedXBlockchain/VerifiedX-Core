@@ -51,5 +51,25 @@ namespace VerifiedXCore.Tests
             Assert.Equal(1.0M, rec.Amount);
             Assert.Equal("x", rec.BtcDestination);
         }
+    
+        /// <summary>
+        /// A pool unlock was marked complete once broadcast; refused afterwards (its destination's vault filled, its locks
+        /// drawn first), its burn sat unused for good. Some blocks after the broadcast, one whose burn the chain has not
+        /// consumed is made again (fourth review, round 7).
+        /// </summary>
+        [Fact]
+        public void APoolUnlockNotMined_IsMadeAgain_OneMinedIsNot()
+        {
+            var rec = new BurnExitConsensusService.ProcessedBurnRecord
+            {
+                BaseBurnTxHash = "0xburn", ExitType = BurnExitConsensusService.BurnExitType.VfxPoolUnlock,
+                Status = BurnExitConsensusService.BurnExitStatus.Complete, CompletionBroadcastAtBlock = 1_000,
+            };
+            Assert.Null(BurnExitConsensusService.UnlockToRemake(rec, 1_010, _ => false));       // too soon
+            Assert.True(BurnExitConsensusService.UnlockToRemake(rec, 1_100, _ => false));       // never mined
+            Assert.False(BurnExitConsensusService.UnlockToRemake(rec, 1_100, _ => true));       // mined
+            rec.ExitType = BurnExitConsensusService.BurnExitType.BtcExit;
+            Assert.Null(BurnExitConsensusService.UnlockToRemake(rec, 1_100, _ => false));       // not an unlock
+        }
     }
 }

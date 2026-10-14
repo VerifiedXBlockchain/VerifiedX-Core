@@ -46,6 +46,8 @@ namespace VerifiedXCore.Bitcoin.Services
             public string HandlerCasterAddress { get; set; } = "";
             public List<CasterConsensusVote> ConsensusVotes { get; set; } = new();
             public string CompletionVfxTxHash { get; set; } = "";
+            /// <summary>The VFX height a pool unlock's transaction was broadcast at (0 before).</summary>
+            public long CompletionBroadcastAtBlock { get; set; }
             public string BtcTxHash { get; set; } = "";
             /// <summary>Serialized BtcExitWithdrawalRecord list for stuck exit COMPLETE retry.</summary>
             public string BtcWithdrawalsJson { get; set; } = "";
@@ -567,6 +569,7 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 record.Status = BurnExitStatus.Complete;
                 record.CompletionVfxTxHash = result.TxHashOrError;
+                record.CompletionBroadcastAtBlock = Globals.LastBlock?.Height ?? 0;
                 LogUtility.Log($"[BurnExitConsensus] VFX pool unlock TX: {result.TxHashOrError} for burn {record.BaseBurnTxHash}",
                     "BurnExitConsensusService.ExecuteVfxPoolUnlock()");
             }
@@ -1155,6 +1158,40 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// A pool unlock was marked complete once broadcast. If its transaction is then refused (the destination's vault
+        /// filled up meanwhile, or its locks were drawn by another unlock first) the burn sat unused for good. One whose
+        /// burn the chain has not consumed some blocks after the broadcast is made again, from a new plan (fourth review,
+        /// round 7). The burn hash is single-use in consensus, so a late first transaction and a second cannot both credit.
+        /// </summary>
+        /// <summary>
+        /// Whether a pool unlock's record is to be made again: null when it is not one waiting to be seen mined (another
+        /// kind, not complete, broadcast too recently), false when its burn was consumed, true when it was not.
+        /// </summary>
+        internal static bool? UnlockToRemake(ProcessedBurnRecord r, long currentBlock, Func<string, bool>? burnUsed = null)
+        {
+            if (r.ExitType != BurnExitType.VfxPoolUnlock || r.Status != BurnExitStatus.Complete || r.CompletionBroadcastAtBlock <= 0
+                || currentBlock - r.CompletionBroadcastAtBlock <= STUCK_EXIT_BLOCK_THRESHOLD)
+                return null;
+            return burnUsed == null ? true : !burnUsed(r.BaseBurnTxHash);
+        }
+
+        internal static async Task RetryUnminedPoolUnlocks(long currentBlock)
+        {
+            foreach (var record in _processedBurns.Values.Where(r => UnlockToRemake(r, currentBlock) != null).ToList())
+            {
+                if (UnlockToRemake(record, currentBlock, VBTCBridgeConsumedBurn.IsBurnUsedAnywhere) == false) { record.CompletionBroadcastAtBlock = 0; continue; } // mined
+                LogUtility.Log($"[BurnExitConsensus] Pool unlock {record.CompletionVfxTxHash} for burn {record.BaseBurnTxHash} was not mined in {STUCK_EXIT_BLOCK_THRESHOLD} blocks; made again.", "BurnExitConsensusService.RetryUnminedPoolUnlocks()");
+                record.CompletionBroadcastAtBlock = 0;
+                record.Status = BurnExitStatus.Pending;
+                record.DetectedAtBlock = currentBlock;
+                record.HandlerCasterAddress = "";
+                record.ConsensusVotes.Clear();
+                record.CompletionVfxTxHash = "";
+                await RunConsensusRound(record.BaseBurnTxHash);
+            }
+        }
+
+        /// <summary>
         /// Detects exits stuck in any intermediate state for too long.
         /// For BTC exits where BTC was already sent, only retries the COMPLETE broadcast.
         /// For all other cases, resets to Pending for re-consensus.
@@ -1162,6 +1199,7 @@ namespace VerifiedXCore.Bitcoin.Services
         private static async Task CheckForStuckExits()
         {
             var currentBlock = Globals.LastBlock?.Height ?? 0;
+            await RetryUnminedPoolUnlocks(currentBlock);
             var stuckExits = _processedBurns.Values
                 .Where(r => (r.Status == BurnExitStatus.InConsensus ||
                              r.Status == BurnExitStatus.ConsensusReached ||
