@@ -148,6 +148,28 @@ namespace VerifiedXCore.Tests
             Assert.Equal(allowed, error == null);
         }
 
+        /// <summary>
+        /// Contract state is indexed by UID (round 7) and LiteDB refuses an index key over 1,023 bytes: a UID that long would
+        /// be stored on some nodes and not on others. A created UID is at most 64 hex digits, ':' and 20 digits, at every
+        /// height, for a mint, a token and a vault alike, so none comes near it (fourth review, round 11).
+        /// </summary>
+        [Theory]
+        [InlineData("SC_MINT", "Mint()")]
+        [InlineData("NFT_MINT", "Mint()")]
+        [InlineData("FTKN_MINT", "TokenDeploy()")]
+        public void NEW10_ACreatedUid_IsNeverLongEnoughToMissTheIndex(string type, string function)
+        {
+            foreach (var uid in new[] { new string('a', 32) + ":" + new string('0', 1_100), new string('a', 65) + ":1790500011", new string('a', 32) + ":" + new string('1', 21) })
+            {
+                var tx = new Transaction
+                {
+                    FromAddress = _owner.Address, TransactionType = Enum.Parse<TransactionType>(type),
+                    Data = JsonConvert.SerializeObject(new[] { new { Function = function, ContractUID = uid, Data = "x" } }),
+                };
+                Assert.NotNull(LedgerIntegrityRules.ContractUids(tx));
+            }
+        }
+
         [Theory]
         [InlineData("scuid")]
         [InlineData("Scuid")]
