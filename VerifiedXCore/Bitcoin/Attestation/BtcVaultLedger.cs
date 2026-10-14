@@ -31,7 +31,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
     /// </list>
     /// What is left is what one block can add past the limit (its credits are each judged against the state before it,
     /// under 20,000 in a 10 MB block) and a recovery address: far inside the document's room. A full vault changes hands
-    /// only to an address its ledger names.
+    /// (Transfer(), a sale's completion) only to an address its ledger names.
     /// </summary>
     public static class BtcVaultLedger
     {
@@ -191,15 +191,23 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     }
                     default:
                     {
-                        if (string.IsNullOrEmpty(tx.ToAddress)) return null;
                         var function = LedgerIntegrityRules.DispatchedCall(tx.Data).Function;
+                        // A sale's completion makes its sender (the buyer) the owner: another change of hands the owner's
+                        // exemption let grow a full vault one former owner at a time (fourth review, round 8).
+                        var saleComplete = function == "Sale_Complete()" || function == "M_Sale_Complete()";
+                        if (string.IsNullOrEmpty(saleComplete ? tx.FromAddress : tx.ToAddress)) return null;
                         var vbtcTransfer = tx.TransactionType == TransactionType.VBTC_V2_TRANSFER || function == "TransferVBTCV2()" || function == "TransferVBTCMultiV2()";
                         var vaultTransfer = function == "Transfer()";
-                        if (!vbtcTransfer && !vaultTransfer) return null;
+                        if (!vbtcTransfer && !vaultTransfer && !saleComplete) return null;
                         var token = JToken.Parse(tx.Data);
                         var obj = token is JArray array ? array.FirstOrDefault() as JObject : token as JObject;
                         if (obj == null) return null;
                         var named = obj["ContractUID"]?.Type == JTokenType.String ? (string)obj["ContractUID"]! : null;
+                        if (saleComplete)
+                        {
+                            credits.Add((named, tx.FromAddress));
+                            break;
+                        }
                         if (vaultTransfer)
                         {
                             // A vault handed to a new owner: the owner is never refused a credit, so a chain of owners, each

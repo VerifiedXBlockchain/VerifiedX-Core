@@ -836,6 +836,11 @@ namespace VerifiedXCore.Tests
                 VfxTx HandOver(string to) => SignedBy(Minter, to, TransactionType.TKNZ_TX, new[] { new { Function = "Transfer()", ContractUID = vault.Uid, ToAddress = to, Data = "x", MD5List = "NA" } });
                 Assert.Contains("the most a vault holds", BtcVaultLedger.HolderLimitRefusal(HandOver("xNew")));
                 Assert.Null(BtcVaultLedger.HolderLimitRefusal(HandOver(holder.Address)));
+                // A sale's completion hands the vault to its sender, the buyer: held to the same rule (round 8).
+                var buyer = NewKey();
+                VfxTx Buy(V who) => SignedBy(who, Minter.Address, TransactionType.NFT_SALE, new { Function = "M_Sale_Complete()", ContractUID = vault.Uid, KeySign = "k" });
+                Assert.Contains("the most a vault holds", BtcVaultLedger.HolderLimitRefusal(Buy(buyer)));
+                Assert.Null(BtcVaultLedger.HolderLimitRefusal(Buy(holder)));
                 Assert.Null(BtcVaultLedger.HolderLimitRefusal(PoolUnlock(holder.Address)));
                 Assert.Null(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.0001M, Tip + 1, "xNew"));   // its one lock is on the full vault
                 Assert.Equal(lockId, Assert.Single(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.0001M, Tip + 1, holder.Address)!).LockId);
