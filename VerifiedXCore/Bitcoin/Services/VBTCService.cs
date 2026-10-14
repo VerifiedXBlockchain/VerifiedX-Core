@@ -298,13 +298,22 @@ namespace VerifiedXCore.Bitcoin.Services
                 .Where(a => !string.IsNullOrEmpty(a) && a != "+" && a != "-" && a != ownerAddress)
                 .Distinct(StringComparer.Ordinal);
 
-            decimal negative = 0M;
-            foreach (var address in others)
+            // One pass over the rows: a row counts for each address it names, as each address's own balance reads it.
+            // Summing the whole list again for every address took holders times rows, on every owner action on every
+            // node (fourth review, round 6).
+            var holders = new HashSet<string>(others, StringComparer.Ordinal);
+            var positions = new Dictionary<string, decimal>(StringComparer.Ordinal);
+            foreach (var r in rows)
             {
-                var position = rows.Where(r => r.FromAddress == address || r.ToAddress == address).Sum(r => r.Amount);
+                if (r.FromAddress != null && holders.Contains(r.FromAddress))
+                    positions[r.FromAddress] = (positions.TryGetValue(r.FromAddress, out var a) ? a : 0M) + r.Amount;
+                if (r.ToAddress != null && r.ToAddress != r.FromAddress && holders.Contains(r.ToAddress))
+                    positions[r.ToAddress] = (positions.TryGetValue(r.ToAddress, out var b) ? b : 0M) + r.Amount;
+            }
+            decimal negative = 0M;
+            foreach (var position in positions.Values)
                 if (position < 0M)
                     negative += position;
-            }
             return negative;
         }
 

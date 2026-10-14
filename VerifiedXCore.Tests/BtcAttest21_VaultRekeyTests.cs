@@ -650,6 +650,33 @@ namespace VerifiedXCore.Tests
             Assert.False(BtcVaultLedger.Compact(odd));
         }
 
+        /// <summary>
+        /// The sum of the holders' negative positions was read by summing the whole ledger once a holder: holders times
+        /// rows, on every owner action on every node. One pass gives the same figure (fourth review, round 6).
+        /// </summary>
+        [Fact]
+        public void TheHoldersNegativePositions_AreReadInOnePass_WithTheSameFigure()
+        {
+            var random = new Random(6);
+            for (var round = 0; round < 50; round++)
+            {
+                var rows = new List<SmartContractStateTreiTokenizationTX>();
+                var names = Enumerable.Range(0, 1 + random.Next(30)).Select(i => "xH" + i).Append("xOwner").ToList();
+                for (var i = random.Next(200); i > 0; i--)
+                {
+                    var who = names[random.Next(names.Count)];
+                    var amount = random.Next(1, 1000) / 100_000M;
+                    rows.Add(random.Next(2) == 0
+                        ? new SmartContractStateTreiTokenizationTX { FromAddress = "+", ToAddress = who, Amount = amount }
+                        : new SmartContractStateTreiTokenizationTX { FromAddress = who, ToAddress = "-", Amount = -amount });
+                }
+                var state = new SmartContractStateTrei { SmartContractUID = "v", OwnerAddress = "xOwner", SCStateTreiTokenizationTXes = rows };
+                var expected = names.Where(n => n != "xOwner")
+                    .Select(n => rows.Where(r => r.FromAddress == n || r.ToAddress == n).Sum(r => r.Amount)).Where(p => p < 0M).Sum();
+                Assert.Equal(expected, VBTCService.NegativeNonOwnerPositions(state, "xOwner"));
+            }
+        }
+
         [Fact]
         public async Task AWatchedVaultsLedger_StaysBounded_AndHoldsAtMostItsHolders()
         {
