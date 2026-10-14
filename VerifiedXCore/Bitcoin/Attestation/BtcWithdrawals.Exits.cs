@@ -131,6 +131,22 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         var watched = ExitIsOnWatchedVaults(allocations, out var mixed);
                         if (watched == null) return mixed;
                         if (watched == false) return null;
+                        // Each lock once, named by its own id, asked for no more than it holds: a lock's look-up trims and
+                        // ignores case, and "L1" with "l1 " drew on one lock twice; the second draw failed at apply and
+                        // the part was paid in full anyway (fourth review, round 11). Every watched exit is held to it,
+                        // whatever the bridge's own gates.
+                        var named = new HashSet<string>(StringComparer.Ordinal);
+                        var burnUsed = VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(data["BaseBurnTxHash"]?.ToObject<string?>()); // refused below as a repeat
+                        foreach (var allocation in burnUsed ? new List<PoolUnlockAllocation>() : allocations)
+                        {
+                            var held = VBTCBridgeLockState.GetByLockId(allocation?.LockId ?? "");
+                            if (allocation == null || held == null) return $"The exit names a lock that does not exist: {allocation?.LockId}";
+                            if (!string.Equals(allocation.LockId, held.LockId, StringComparison.Ordinal))
+                                return $"The exit names lock {held.LockId} as {allocation.LockId}; a lock is named by its own id.";
+                            if (!named.Add(held.LockId)) return $"The exit draws on lock {held.LockId} twice.";
+                            if (allocation.UnlockAmount <= 0M || allocation.UnlockAmount > held.RemainingAmount)
+                                return $"The exit asks lock {held.LockId} for {allocation.UnlockAmount}; it holds {held.RemainingAmount}.";
+                        }
                         var destination = data["BtcDestination"]?.ToObject<string?>();
                         if (!BtcCanonicalWithdrawal.TryDestinationScript(destination, out var script))
                             return $"The exit's Bitcoin destination is not an address on this network: {destination}";

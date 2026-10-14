@@ -4062,7 +4062,7 @@ namespace VerifiedXCore.Services
                         if (VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(poolBurnHash))
                             return (txResult, "Exit burn transaction has already been consumed.");
 
-                        var (allocOk, allocReason) = ValidateBridgeAllocations(allocations, totalAmount.Value);
+                        var (allocOk, allocReason) = ValidateBridgeAllocations(allocations, totalAmount.Value, poolGateHeight);
                         if (!allocOk)
                             return (txResult, $"Bridge pool unlock allocations invalid: {allocReason}");
 
@@ -4179,7 +4179,7 @@ namespace VerifiedXCore.Services
                         var exitAllocs = jobj["Allocations"];
                         if (exitAllocs != null && exitAllocs.Type == JTokenType.Array && exitAllocs.HasValues)
                         {
-                            var (allocOk, allocReason) = ValidateBridgeAllocations(exitAllocs, exitTotal);
+                            var (allocOk, allocReason) = ValidateBridgeAllocations(exitAllocs, exitTotal, exitGateHeight);
                             if (!allocOk)
                                 return (txResult, $"Bridge exit to BTC allocations invalid: {allocReason}");
                         }
@@ -4378,8 +4378,13 @@ namespace VerifiedXCore.Services
         /// not unlocked/blacklisted, positive amounts within each lock's remaining balance, and a
         /// sum equal to the declared total.
         /// </summary>
-        private static (bool Ok, string Reason) ValidateBridgeAllocations(JToken? allocationsToken, decimal totalAmount)
+        private static (bool Ok, string Reason) ValidateBridgeAllocations(JToken? allocationsToken, decimal totalAmount, long height = 0)
         {
+            // From the path-audit height a lock is named by its own id exactly and asked for no more than it holds. A lock's
+            // look-up trims its id and ignores case, while the duplicate check (here and across a block) compared ids
+            // exactly: "L1" and "l1 " drew on one lock twice, the second draw failed at apply and the part was paid in full
+            // anyway, and an expired exit restored both (fourth review, round 11).
+            var exact = height >= Globals.PathAuditRulesHeight;
             List<PoolUnlockAllocation>? allocations;
             try { allocations = allocationsToken?.ToObject<List<PoolUnlockAllocation>>(); }
             catch (Exception ex) { return (false, $"unparseable allocations: {ApiErrorText.For(ex)}"); }
@@ -4398,7 +4403,9 @@ namespace VerifiedXCore.Services
                 if (rec.IsBlacklisted) return (false, $"lock {a.LockId} is blacklisted");
                 if (!string.IsNullOrEmpty(a.SmartContractUID) && !string.Equals(a.SmartContractUID, rec.SmartContractUID, StringComparison.Ordinal))
                     return (false, $"lock {a.LockId} contract mismatch");
-                if (a.UnlockAmount > rec.RemainingAmount + 0.00000001M)
+                if (exact && !string.Equals(a.LockId, rec.LockId, StringComparison.Ordinal))
+                    return (false, $"lock {a.LockId} is not named by its own id {rec.LockId}");
+                if (a.UnlockAmount > rec.RemainingAmount + (exact ? 0M : 0.00000001M))
                     return (false, $"lock {a.LockId} has {rec.RemainingAmount} remaining, allocation asks {a.UnlockAmount}");
                 sum += a.UnlockAmount;
             }

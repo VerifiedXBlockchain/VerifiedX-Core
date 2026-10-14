@@ -203,6 +203,25 @@ namespace VerifiedXCore.Tests
 
         // ── The ordinary path ───────────────────────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// A lock's look-up trims its id and ignores case, while the duplicate check (in the exit and across a block)
+        /// compared ids exactly: "L1" and "l1 " drew on one lock twice, the second draw failed at apply and the part was
+        /// paid in full anyway. A lock is named by its own id exactly, and asked for no more than it holds (fourth review,
+        /// round 11).
+        /// </summary>
+        [Fact]
+        public async Task AnExit_NamesEachLockByItsOwnId_AndAsksNoMoreThanItHolds()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.004M);
+            await RefusedInBlock(Exit(NewBurn(), BtcDest, (lockId, vault.Uid, 0.002M), (lockId.ToUpperInvariant(), vault.Uid, 0.002M)), "a lock is named by its own id");
+            await RefusedInBlock(Exit(NewBurn(), BtcDest, (lockId + " ", vault.Uid, 0.004M)), "a lock is named by its own id");
+            await RefusedInBlock(Exit(NewBurn(), BtcDest, (lockId, vault.Uid, 0.002M), (lockId, vault.Uid, 0.002M)), "twice");
+            await RefusedInBlock(Exit(NewBurn(), BtcDest, (lockId, vault.Uid, 0.00400001M)), "it holds");
+        }
+
         [Fact]
         public async Task AnExit_IsPinnedInItsOwnBlock_BitcoinCompletesIt_AndTheOwnerIsChargedOnce()
         {
