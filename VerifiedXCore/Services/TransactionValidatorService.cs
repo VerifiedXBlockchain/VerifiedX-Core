@@ -3241,6 +3241,12 @@ namespace VerifiedXCore.Services
                         if (txRequest.ToAddress != validatorAddress)
                             return (txResult, "To address must match validator address (self-transaction).");
                         
+                        // The key shares are sealed to: it must be the validator's own. One that is not had every honest
+                        // dealer of each ceremony refuse Round 2 and be dropped (fifth review, round 13).
+                        if ((blockHeight ?? (Globals.LastBlock.Height + 1)) >= Globals.PathAuditRulesHeight
+                            && !FrostKeyIsOwn(jobj["FrostPublicKey"], validatorAddress, required: true))
+                            return (txResult, "FrostPublicKey must be the validator's own public key.");
+
                         if (txRequest.Fee != 0M)
                             return (txResult, "Validator registration must be a free transaction (Fee = 0).");
                         
@@ -3370,6 +3376,10 @@ namespace VerifiedXCore.Services
 
                         if (txRequest.ToAddress != validatorAddress)
                             return (txResult, "To address must match validator address (self-transaction).");
+
+                        if ((blockHeight ?? (Globals.LastBlock.Height + 1)) >= Globals.PathAuditRulesHeight
+                            && !FrostKeyIsOwn(jobj["FrostPublicKey"], validatorAddress, required: false))
+                            return (txResult, "FrostPublicKey must be the validator's own public key.");
 
                         if (txRequest.Fee != 0M)
                             return (txResult, "Validator heartbeat must be a free transaction (Fee = 0).");
@@ -4411,6 +4421,18 @@ namespace VerifiedXCore.Services
             }
             if (Math.Abs(sum - totalAmount) > 0.00000001M) return (false, $"allocation sum {sum} != total {totalAmount}");
             return (true, "");
+        }
+
+        /// <summary>
+        /// A validator's FrostPublicKey, read as the registry reads it, is its own account key (derives its address). A
+        /// heartbeat may leave it out (the registry then keeps the one it has); a registration may not.
+        /// </summary>
+        internal static bool FrostKeyIsOwn(JToken? token, string address, bool required)
+        {
+            string? key;
+            try { key = token?.ToObject<string?>(); } catch { return false; }
+            if (string.IsNullOrEmpty(key)) return !required;
+            try { return AccountData.GetHumanAddress(key) == address; } catch { return false; }
         }
 
         private static bool IsValidEvmTxHash32(string? h)

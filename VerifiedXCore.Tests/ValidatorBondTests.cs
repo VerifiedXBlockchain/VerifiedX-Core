@@ -941,5 +941,56 @@ namespace VerifiedXCore.Tests
             Assert.False((bool)none["Bonded"]!);
             Assert.Equal(100M, (decimal)none["Spendable"]!);
         }
+    
+
+        /// <summary>
+        /// Shares are sealed to a validator's registered FrostPublicKey. One that was not the validator's own could be sent
+        /// no share, and every honest dealer of each ceremony refused Round 2 and was dropped (fifth review, round 13). From
+        /// the path-audit rules, a registration names the validator's own key, and a heartbeat names it or none.
+        /// </summary>
+        [Fact]
+        public async Task AValidatorsRegisteredKey_MustBeItsOwn_FromThePathAuditRules()
+        {
+            var prior = Globals.PathAuditRulesHeight;
+            Globals.PathAuditRulesHeight = 200;
+            try
+            {
+                var fresh = NewKey();
+                Fund(fresh, Stake);
+                var other = NewKey();
+                Transaction WithKey(TransactionType type, object? key)
+                {
+                    var tx = new Transaction
+                    {
+                        Timestamp = TimeUtil.GetTime(), FromAddress = fresh.Address, ToAddress = fresh.Address, Amount = 0.0M, Fee = 0.0M, Nonce = 0, TransactionType = type,
+                        Data = key == null
+                            ? JsonConvert.SerializeObject(new { ValidatorAddress = fresh.Address, IPAddress = "8.8.8.8", IsS3C = false })
+                            : JsonConvert.SerializeObject(new { ValidatorAddress = fresh.Address, IPAddress = "8.8.8.8", FrostPublicKey = key, IsS3C = false }),
+                    };
+                    tx.Build();
+                    tx.Signature = SignatureService.CreateSignature(tx.Hash, fresh.Key, fresh.Pub);
+                    return tx;
+                }
+
+                foreach (var type in new[] { TransactionType.VBTC_V2_VALIDATOR_REGISTER, TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT })
+                {
+                    var (foreignOk, foreignWhy) = await Verify(WithKey(type, other.Pub), 250);
+                    Assert.False(foreignOk);
+                    Assert.Contains("own public key", foreignWhy);
+                    Assert.False((await Verify(WithKey(type, "PLACEHOLDER_FROST_PUBLIC_KEY"), 250)).Ok);
+                }
+                // Before the rules, as before.
+                var (beforeOk, beforeWhy) = await Verify(WithKey(TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT, other.Pub), 150);
+                Assert.True(beforeOk, beforeWhy);
+                Assert.False((await Verify(WithKey(TransactionType.VBTC_V2_VALIDATOR_REGISTER, null), 250)).Ok);
+                Assert.True((await Verify(WithKey(TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT, null), 250)).Ok);
+                var (ownOk, ownWhy) = await Verify(WithKey(TransactionType.VBTC_V2_VALIDATOR_REGISTER, fresh.Pub), 250);
+                Assert.True(ownOk, ownWhy);
+            }
+            finally
+            {
+                Globals.PathAuditRulesHeight = prior;
+            }
+        }
     }
 }
