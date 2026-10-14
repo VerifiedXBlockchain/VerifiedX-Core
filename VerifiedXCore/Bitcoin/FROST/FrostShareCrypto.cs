@@ -152,9 +152,23 @@ namespace VerifiedXCore.Bitcoin.FROST
         public static string? VerifiedPublicKey(string address)
         {
             var pub = Services.VBTCValidatorRegistry.GetValidator(address)?.FrostPublicKey;
-            if (string.IsNullOrEmpty(pub)) return null;
-            try { return VerifiedXCore.Data.AccountData.GetHumanAddress(pub) == address ? pub : null; }
-            catch { return null; }
+            return IsOwnKey(pub, address) ? pub : null;
+        }
+
+        /// <summary>
+        /// A validator key in the one spelling every reader takes: "04" and 128 hex digits, nothing else. The address check
+        /// parses hex leniently (a space next to a digit passes) while sealing does not, so " 4..." passed the check and
+        /// failed every honest dealer's Round 2 (fifth review, round 14).
+        /// </summary>
+        public static bool IsCanonicalKey(string? key) =>
+            key != null && key.Length == 130 && key.StartsWith("04", StringComparison.Ordinal) && key.All(Uri.IsHexDigit);
+
+        /// <summary>A canonical key that derives <paramref name="address"/>.</summary>
+        public static bool IsOwnKey(string? key, string address)
+        {
+            if (!IsCanonicalKey(key)) return false;
+            try { return VerifiedXCore.Data.AccountData.GetHumanAddress(key!) == address; }
+            catch { return false; }
         }
 
         /// <summary>This validator's own private key as 32 big-endian bytes (for opening shares), or null.</summary>

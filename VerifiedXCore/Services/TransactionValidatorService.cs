@@ -4432,7 +4432,7 @@ namespace VerifiedXCore.Services
             string? key;
             try { key = token?.ToObject<string?>(); } catch { return false; }
             if (string.IsNullOrEmpty(key)) return !required;
-            try { return AccountData.GetHumanAddress(key) == address; } catch { return false; }
+            return Bitcoin.FROST.FrostShareCrypto.IsOwnKey(key, address); // one spelling (round 14)
         }
 
         private static bool IsValidEvmTxHash32(string? h)

@@ -978,6 +978,14 @@ namespace VerifiedXCore.Tests
                     Assert.False(foreignOk);
                     Assert.Contains("own public key", foreignWhy);
                     Assert.False((await Verify(WithKey(type, "PLACEHOLDER_FROST_PUBLIC_KEY"), 250)).Ok);
+                    // Its own key's bytes in another spelling: the address check parsed " 4..." as "04...", sealing did
+                    // not, and every honest dealer failed (round 14). One spelling only.
+                    foreach (var spelling in new[] { " 4" + fresh.Pub[2..], "4 " + fresh.Pub[2..], fresh.Pub + " ", "0x" + fresh.Pub })
+                    {
+                        var (spelledOk, spelledWhy) = await Verify(WithKey(type, spelling), 250);
+                        Assert.False(spelledOk, spelling);
+                        Assert.Contains("own public key", spelledWhy);
+                    }
                 }
                 // Before the rules, as before.
                 var (beforeOk, beforeWhy) = await Verify(WithKey(TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT, other.Pub), 150);
