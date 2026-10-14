@@ -3420,6 +3420,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged (fourth review, round 8)
                 ErrorLogUtility.LogError($"ApplyVBTCBridgeLock error: {ex.Message}", "StateData.ApplyVBTCBridgeLock()");
             }
         }
@@ -3500,6 +3501,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged (fourth review, round 8)
                 ErrorLogUtility.LogError($"ApplyVBTCBridgeUnlock error: {ex.Message}", "StateData.ApplyVBTCBridgeUnlock()");
             }
         }
@@ -3688,6 +3690,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged (fourth review, round 8)
                 ErrorLogUtility.LogError($"ApplyVBTCBridgePoolUnlock error: {ex.Message}", "StateData.ApplyVBTCBridgePoolUnlock()");
             }
         }
@@ -3816,6 +3819,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage is flagged (fourth review, round 8)
                 ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTC error: {ex.Message}", "StateData.ApplyVBTCBridgeExitToBTC()");
             }
         }
