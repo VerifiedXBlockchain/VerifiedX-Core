@@ -252,6 +252,43 @@ namespace VerifiedXCore.Tests
             Assert.Equal(0.0004M, await Spendable(vault.Uid, Minter));
         }
 
+        /// <summary>
+        /// Two requests of one block for a vault's only free coin. The one its producer placed first used to get it;
+        /// now the one paying the higher Bitcoin fee rate does, wherever it stands in the block.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task TwoRequestsOfOneBlock_ForTheLastFreeCoin_AreServedByFeeRate_NotByTheirPlaceInTheBlock(bool lowerFirst)
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var coin = await Deposit(vault.Script, 100_000);
+            await Mine(Transfer(vault.Uid, 0.0004M));
+
+            var low = Request(vault.Uid, 0.0003M, feeRate: 5);
+            var high = Request(vault.Uid, 0.0003M, from: _holder, feeRate: 9);
+            foreach (var tx in new[] { low, high })
+            {
+                var (ok, why) = await Verify(tx, Tip + 1);
+                Assert.True(ok, why);
+            }
+            if (lowerFirst) await Apply(Tip + 1, low, high);
+            else await Apply(Tip + 1, high, low);
+
+            var served = Row(high, vault.Uid);
+            Assert.Equal(VaultWithdrawalState.Pinned, served.State);
+            Assert.Equal(new[] { Outpoint(coin, 0) }, served.Pins[0].Inputs);
+            Assert.Equal(Tip, served.Pins[0].PinnedAtVfxHeight);
+            var waits = Row(low, vault.Uid);
+            Assert.Equal(VaultWithdrawalState.Waiting, waits.State);
+            Assert.Empty(waits.Pins);
+
+            // The change of the first comes back, and the other is fixed on it.
+            await SignAndConfirm(served.Pins[0]);
+            Assert.Equal(VaultWithdrawalState.Pinned, Row(low, vault.Uid).State);
+        }
+
         [Fact]
         public async Task ARequestTooLargeForOneCoin_TakesTheLargestCoinsFirst()
         {

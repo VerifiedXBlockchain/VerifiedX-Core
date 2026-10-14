@@ -198,8 +198,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
         // ── Block application ───────────────────────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// A withdrawal request on a watched vault has just been applied (its row written, its amount debited): record
-        /// it and pin its Bitcoin transaction if the vault's free coins allow.
+        /// A withdrawal request on a watched vault has just been applied (its row written, its amount debited): it is
+        /// recorded. Its Bitcoin transaction is fixed once all of the block's transactions are applied
+        /// (<see cref="OnBlockTransactionsApplied"/>).
         /// </summary>
         public static void OnRequestApplied(string? scUID, string requestHash, long vfxHeight, LiteDatabase? db = null)
         {
@@ -227,12 +228,39 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 else
                     row.WaitingReason = "the destination is not a Bitcoin address on this network";
                 BtcAttestStore.SaveWithdrawal(row, db);
-                TryPin(row, vfxHeight, db);
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Recording withdrawal {requestHash} on {scUID} failed: {ex}", "BtcWithdrawals.OnRequestApplied()");
             }
+        }
+
+        /// <summary>
+        /// After a block's transactions: the withdrawals the block requested are fixed on coins, the one paying the
+        /// higher Bitcoin fee rate first, then by reference. Each used to be fixed as its transaction was applied, so
+        /// when two of a block asked for a vault's last free coin, the one its producer had placed first got it.
+        /// The order a producer gives a block's transactions now decides nothing here. No catch around the whole: a
+        /// failure counts against the block's application, as at the block's start.
+        /// </summary>
+        public static void OnBlockTransactionsApplied(long vfxHeight, LiteDatabase? db = null)
+        {
+            if (!BtcAttestRules.Recording(vfxHeight)) return;
+            Exception? failed = null;
+            foreach (var requested in InTurn(BtcAttestStore.WaitingWithdrawalsRequestedAt(vfxHeight, db).Where(w => !w.IsBridgeExit)))
+            {
+                try
+                {
+                    // Read again: fixing an earlier one of the block may have changed what this one can have.
+                    var row = BtcAttestStore.Withdrawal(requested.Ref, db);
+                    if (row != null) TryPin(row, vfxHeight, db);
+                }
+                catch (Exception ex)
+                {
+                    failed ??= ex;
+                    ErrorLogUtility.LogError($"Fixing withdrawal {requested.Ref} on coins at block {vfxHeight} failed: {ex}", "BtcWithdrawals.OnBlockTransactionsApplied()");
+                }
+            }
+            if (failed != null) throw new InvalidOperationException($"a withdrawal requested in block {vfxHeight} could not be fixed on coins", failed);
         }
 
         /// <summary>
@@ -293,8 +321,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// </summary>
         private static void RetryWaiting(IEnumerable<string> vaults, long vfxHeight, LiteDatabase? db)
         {
+            // The requests of this very block have their turn when all of its transactions are applied.
             foreach (var vault in vaults)
-                foreach (var waiting in InTurn(BtcAttestStore.WithdrawalsOf(vault, VaultWithdrawalState.Waiting, db)))
+                foreach (var waiting in InTurn(BtcAttestStore.WithdrawalsOf(vault, VaultWithdrawalState.Waiting, db).Where(w => w.IsBridgeExit || w.RequestVfxHeight != vfxHeight)))
                     TryPin(waiting, vfxHeight, db);
         }
 

@@ -412,6 +412,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 .Where(x => x.IsBridgeExit && x.RequestVfxHeight == exitVfxHeight).ToList();
 
         /// <summary>The requests still waiting for a pin that were mined before <paramref name="vfxHeight"/>.</summary>
+        /// <summary>The withdrawals requested in one block that are still waiting.</summary>
+        public static List<VaultWithdrawalRow> WaitingWithdrawalsRequestedAt(long vfxHeight, LiteDatabase? db = null) =>
+            (db ?? Db).GetCollection<VaultWithdrawalRow>(Withdrawals).Find(x => x.State == VaultWithdrawalState.Waiting && x.RequestVfxHeight == vfxHeight).ToList();
+
         public static List<VaultWithdrawalRow> WaitingWithdrawalsRequestedBefore(long vfxHeight, LiteDatabase? db = null) =>
             (db ?? Db).GetCollection<VaultWithdrawalRow>(Withdrawals).Find(x => x.State == VaultWithdrawalState.Waiting && x.RequestVfxHeight < vfxHeight).ToList();
 

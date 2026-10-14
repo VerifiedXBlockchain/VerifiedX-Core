@@ -767,6 +767,18 @@ namespace VerifiedXCore.Data
                 }
             }
 
+            try
+            {
+                // Bitcoin attestation: the withdrawals this block requested are fixed on coins in an order no producer chooses.
+                VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.OnBlockTransactionsApplied(block.Height);
+            }
+            catch (Exception ex)
+            {
+                blockStartFailed = true;
+                BlockStartFailedAtHeight = block.Height;
+                ErrorLogUtility.LogError($"Block {block.Height}: fixing the block's withdrawals on coins failed: {ex}", "StateData.UpdateTreis() - block end");
+            }
+
             if(txTreiUpdateSuccessCount != txCount)
             {
                 var txFailListJson = JsonConvert.SerializeObject(txFailList);
