@@ -150,9 +150,10 @@ namespace VerifiedXCore.Tests
             var address = FrostDkgAttestation.DeriveTaprootAddress(groupKey, FrostDkgAttestation.ConsensusNetwork)!;
             var participants = FrostDkgAttestation.Canonical(Signers.Select(s => s.Address));
             const int threshold = 3; // 67% of four
-            var message = FrostDkgAttestation.Message(uid, groupKey, address, owner.Address, threshold, participants);
+            var keyPackageHash = FrostDkgAttestation.KeyPackageHash("pkp|" + uid); // the package every participant finished with
+            var message = FrostDkgAttestation.Message(uid, groupKey, address, owner.Address, threshold, participants, keyPackageHash: keyPackageHash);
             var proof = FrostDkgAttestation.BuildProof(uid, groupKey, address, owner.Address, threshold, participants,
-                Signers.Select(s => new FrostDkgAttestation.Attestation { ValidatorAddress = s.Address, Signature = VerifiedXCore.Services.SignatureService.CreateSignature(message, s.Key, s.Pub) }));
+                Signers.Select(s => new FrostDkgAttestation.Attestation { ValidatorAddress = s.Address, Signature = VerifiedXCore.Services.SignatureService.CreateSignature(message, s.Key, s.Pub) }), keyPackageHash);
             var ceremonies = (ConcurrentDictionary<string, MPCCeremonyState>)Ceremonies.GetValue(null)!;
             ceremonies[uid] = new MPCCeremonyState
             {
@@ -382,9 +383,10 @@ namespace VerifiedXCore.Tests
             var groupKey = Convert.ToHexString(new Key().PubKey.ToBytes()[1..]).ToLowerInvariant();
             var newAddress = FrostDkgAttestation.DeriveTaprootAddress(groupKey, FrostDkgAttestation.ConsensusNetwork)!;
             var participants = FrostDkgAttestation.Canonical(stillHere.Select(s => s.Address));
-            var message = FrostDkgAttestation.Message(keyUid, groupKey, newAddress, stillHere[0].Address, FrostDkgAttestation.RekeyThreshold(participants.Count), participants, rekeyOf: ceremony);
+            var rekeyPackageHash = FrostDkgAttestation.KeyPackageHash("pkp|" + keyUid);
+            var message = FrostDkgAttestation.Message(keyUid, groupKey, newAddress, stillHere[0].Address, FrostDkgAttestation.RekeyThreshold(participants.Count), participants, rekeyOf: ceremony, keyPackageHash: rekeyPackageHash);
             var proof = FrostDkgAttestation.BuildProof(keyUid, groupKey, newAddress, stillHere[0].Address, FrostDkgAttestation.RekeyThreshold(participants.Count), participants,
-                stillHere.Select(s => new FrostDkgAttestation.Attestation { ValidatorAddress = s.Address, Signature = VerifiedXCore.Services.SignatureService.CreateSignature(message, s.Key, s.Pub) }));
+                stillHere.Select(s => new FrostDkgAttestation.Attestation { ValidatorAddress = s.Address, Signature = VerifiedXCore.Services.SignatureService.CreateSignature(message, s.Key, s.Pub) }), rekeyPackageHash);
             var rekey = BtcAttestTxValidator.Create(TransactionType.VBTC_V2_VAULT_REKEY, new BtcRekey { ContractUID = ceremony, DKGProof = proof }.ToCanonicalJson());
             var (ok, why) = await TransactionValidatorService.VerifyTX(rekey);
             Assert.True(ok, why);

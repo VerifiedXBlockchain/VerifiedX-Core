@@ -557,7 +557,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(3, CountOf(controller, "var scUID = ceremony.EffectiveContractUID;"));   // the attested UID (the ceremony id unless rerun)
 
             var mpc = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "Services", "FrostMPCService.cs"));
-            Assert.Contains("var dkgProof = FrostDkgAttestation.BuildProof(contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, attestations);", mpc);
+            Assert.Contains("var dkgProof = FrostDkgAttestation.BuildProof(contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, attestations, keyPackageHashOfAll);", mpc);
             var startup = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "FROST", "FrostStartup.cs"));
             Assert.Contains("FrostDkgAttestation.SignLocal(session.SmartContractUID, session.GroupPublicKey, session.TaprootAddress,", startup);
             Assert.Contains("session.LeaderAddress, FrostDkgAttestation.CeremonyThreshold(session.ParticipantAddresses?.Count ?? 0, session.RequiredThreshold, session.RekeyOf),", startup);

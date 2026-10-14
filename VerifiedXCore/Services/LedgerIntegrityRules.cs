@@ -546,7 +546,8 @@ namespace VerifiedXCore.Services
                 && VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.ScriptRow(depositScript) is { } taken && taken.SmartContractUID != uid)
                 return $"This deposit address already belongs to vault {taken.SmartContractUID}.";
             var ceremonyError = VerifiedXCore.Bitcoin.FROST.FrostDkgAttestation.Validate(feature, uid, tx.FromAddress,
-                () => ValidatorBond.CeremonyEligible(VBTCValidatorRegistry.GetActiveValidatorsAt(height - 1), height)); // active, funded now, and (from the bond height) a stake locked for two days
+                () => ValidatorBond.CeremonyEligible(VBTCValidatorRegistry.GetActiveValidatorsAt(height - 1), height), // active, funded now, and (from the bond height) a stake locked for two days
+                requireKeyPackageHash: height >= Globals.PathAuditRulesHeight); // every participant finished with the same key package
             if (ceremonyError != null) return ceremonyError;
             // A public vault's key never needs (nearly) all of its holders: at all of them any one could freeze its
             // Bitcoin for good, and the new key that would replace it must be swept by that same key. The creator chose

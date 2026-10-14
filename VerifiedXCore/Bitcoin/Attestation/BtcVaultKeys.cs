@@ -258,7 +258,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             // the threshold is the one every re-key uses, and two thirds of the eligible validators suffice.
             var ceremonyError = FrostDkgAttestation.Validate(feature, keyUid, proof.Owner ?? "",
                 () => VerifiedXCore.Services.ValidatorBond.CeremonyEligible(VBTCValidatorRegistry.GetActiveValidatorsAt(vfxHeight - 1), vfxHeight),
-                rekeyOf: rekey.ContractUID);
+                rekeyOf: rekey.ContractUID, requireKeyPackageHash: true);
             if (ceremonyError != null) return ceremonyError;
 
             string scriptHex;

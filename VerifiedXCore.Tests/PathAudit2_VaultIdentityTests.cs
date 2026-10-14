@@ -102,15 +102,16 @@ namespace VerifiedXCore.Tests
             return (key, pub, AccountData.GetHumanAddress(pub));
         }
 
-        private SmartContractFeatures VaultFeature(string uid, long proofBlockHeight = 1, int thresholdPercent = 51)
+        private SmartContractFeatures VaultFeature(string uid, long proofBlockHeight = 1, int thresholdPercent = 51, bool namesKeyPackage = true)
         {
             var participants = _validators.Select(v => v.Address).ToList();
             var threshold = FrostDkgAttestation.ThresholdFor(participants.Count, thresholdPercent);
+            var keyPackageHash = namesKeyPackage ? FrostDkgAttestation.KeyPackageHash("pkp|" + uid) : null; // the package every participant finished with
             var proof = FrostDkgAttestation.BuildProof(uid, _groupKey, _address, _owner.Address, threshold, participants, _validators.Select(v => new FrostDkgAttestation.Attestation
             {
                 ValidatorAddress = v.Address,
-                Signature = SignatureService.CreateSignature(FrostDkgAttestation.Message(uid, _groupKey, _address, _owner.Address, threshold, participants), v.Key, v.Pub),
-            }));
+                Signature = SignatureService.CreateSignature(FrostDkgAttestation.Message(uid, _groupKey, _address, _owner.Address, threshold, participants, keyPackageHash: keyPackageHash), v.Key, v.Pub),
+            }), keyPackageHash);
             return new SmartContractFeatures
             {
                 FeatureName = FeatureName.TokenizationV2,
@@ -220,6 +221,26 @@ namespace VerifiedXCore.Tests
                 (ok, why) = await Verify(Create(uid, body), Rule - 1);
                 Assert.True(ok, $"{percent}% before the rule: {why}");
             }
+        }
+
+        /// <summary>
+        /// From the rules' height a vault's creation proof names the public key package every participant finished with
+        /// (each attestation signs it): a creator's coordinator could otherwise give participants different commitments
+        /// and create a vault whose key no group of holders can sign with (fourth review, round 3). Before, as before.
+        /// </summary>
+        [Fact]
+        public async Task AVaultsCreation_NamesTheKeyPackageEveryParticipantFinishedWith()
+        {
+            var uid = FrostDkgAttestation.NewContractUid();
+            var body = Body(uid, VaultFeature(uid, namesKeyPackage: false));
+            var (ok, why) = await Verify(Create(uid, body), Rule);
+            Assert.False(ok);
+            Assert.Contains("does not name the public key package", why);
+            (ok, why) = await Verify(Create(uid, body), Rule - 1);
+            Assert.True(ok, why);
+            var named = Body(uid, VaultFeature(uid));
+            (ok, why) = await Verify(Create(uid, named), Rule);
+            Assert.True(ok, why);
         }
 
         /// <summary>

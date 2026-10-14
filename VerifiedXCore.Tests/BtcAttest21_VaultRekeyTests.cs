@@ -154,9 +154,10 @@ namespace VerifiedXCore.Tests
             var address = FrostDkgAttestation.DeriveTaprootAddress(groupKey, FrostDkgAttestation.ConsensusNetwork)!;
             var list = participants.ToList();
             var canonical = FrostDkgAttestation.Canonical(list.Select(p => p.Address));
-            var message = FrostDkgAttestation.Message(keyUid, groupKey, address, leader, threshold, canonical, rekeyOf);
+            var keyPackageHash = FrostDkgAttestation.KeyPackageHash("pkp|" + keyUid); // the package every participant finished with
+            var message = FrostDkgAttestation.Message(keyUid, groupKey, address, leader, threshold, canonical, rekeyOf, keyPackageHash);
             var proof = FrostDkgAttestation.BuildProof(keyUid, groupKey, address, leader, threshold, canonical,
-                list.Select(p => new FrostDkgAttestation.Attestation { ValidatorAddress = p.Address, Signature = VerifiedXCore.Services.SignatureService.CreateSignature(message, p.Key, p.Pub) }));
+                list.Select(p => new FrostDkgAttestation.Attestation { ValidatorAddress = p.Address, Signature = VerifiedXCore.Services.SignatureService.CreateSignature(message, p.Key, p.Pub) }), keyPackageHash);
             return (keyUid, address, ScriptOf(address), proof);
         }
 
@@ -275,7 +276,7 @@ namespace VerifiedXCore.Tests
             var forged = Ceremony(vault.Uid, stillHere, 2, Signers[0].Address);
             var proof = FrostDkgAttestation.ParseProof(forged.Proof)!;
             proof.Attestations[0].Signature = proof.Attestations[1].Signature;
-            await Refused(RekeyTx(vault.Uid, FrostDkgAttestation.BuildProof(proof.ContractUID, proof.GroupPublicKey, proof.TaprootAddress, proof.Owner, proof.Threshold, proof.Participants, proof.Attestations)), "has no valid attestation");
+            await Refused(RekeyTx(vault.Uid, FrostDkgAttestation.BuildProof(proof.ContractUID, proof.GroupPublicKey, proof.TaprootAddress, proof.Owner, proof.Threshold, proof.Participants, proof.Attestations, proof.PublicKeyPackageHash)), "has no valid attestation");
             // The new key's UID is its own: not the vault's, not a contract's.
             var asVault = FrostDkgAttestation.ParseProof(Ceremony(vault.Uid, stillHere, 2, Signers[0].Address).Proof)!;
             await Refused(RekeyTx(vault.Uid, BuildWithUid(asVault, vault.Uid, stillHere)), "the new key's UID is the vault's own");
@@ -555,6 +556,48 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A re-key's leader relays every participant's commitments, and nobody compared what they were given: a leader
+        /// could give some participants other commitments than the rest, all attested the same group key, and no group of
+        /// holders could ever sign with it (fourth review, round 3). Every attestation now signs the hash of the public
+        /// key package its participant finished with, and a re-key's proof must name the one hash all of them signed.
+        /// </summary>
+        [Fact]
+        public async Task AReKey_StandsOnlyIfEveryParticipantFinishedWithTheSameKeyPackage()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 100_000);
+            var stillHere = Signers.Take(3).ToList();
+            await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
+            var current = BtcAttestStore.ScriptRowForVault(vault.Uid)!;
+            var keyUid = BtcVaultKeys.NewKeyUid(current);
+            var groupKey = Convert.ToHexString(new Key().PubKey.ToBytes()[1..]).ToLowerInvariant();
+            var address = FrostDkgAttestation.DeriveTaprootAddress(groupKey, FrostDkgAttestation.ConsensusNetwork)!;
+            var canonical = FrostDkgAttestation.Canonical(stillHere.Select(p => p.Address));
+            string Proof(Func<V, string?> hashSeenBy, string? hashNamed)
+            {
+                var attestations = stillHere.Select(p => new FrostDkgAttestation.Attestation
+                {
+                    ValidatorAddress = p.Address,
+                    Signature = VerifiedXCore.Services.SignatureService.CreateSignature(
+                        FrostDkgAttestation.Message(keyUid, groupKey, address, Signers[0].Address, 2, canonical, vault.Uid, hashSeenBy(p)), p.Key, p.Pub),
+                });
+                return FrostDkgAttestation.BuildProof(keyUid, groupKey, address, Signers[0].Address, 2, canonical, attestations, hashNamed);
+            }
+            var honest = FrostDkgAttestation.KeyPackageHash("the package all finished with");
+            var other = FrostDkgAttestation.KeyPackageHash("the package one was misled into");
+
+            // No package named: refused.
+            await Refused(RekeyTx(vault.Uid, Proof(_ => null, null)), "does not name the public key package");
+            // One participant finished with another package: whichever hash the proof names, one attestation fails.
+            await Refused(RekeyTx(vault.Uid, Proof(p => p == stillHere[2] ? other : honest, honest)), "has no valid attestation");
+            await Refused(RekeyTx(vault.Uid, Proof(p => p == stillHere[2] ? other : honest, other)), "has no valid attestation");
+            // All the same: the vault's new key.
+            await Mine(RekeyTx(vault.Uid, Proof(_ => honest, honest)));
+            Assert.Equal(keyUid, BtcAttestStore.ScriptRowForVault(vault.Uid)!.KeyUID);
+        }
+
+        /// <summary>
         /// A withdrawal request mined a second time (by a producer, once the recent-blocks check has forgotten its hash)
         /// debited its requester again with no row to pay, expire or cancel. A watched vault's request is mined once
         /// (fourth review, round 2).
@@ -629,9 +672,10 @@ namespace VerifiedXCore.Tests
             var groupKey = Convert.ToHexString(new Key().PubKey.ToBytes()[1..]).ToLowerInvariant();
             var address = FrostDkgAttestation.DeriveTaprootAddress(groupKey, FrostDkgAttestation.ConsensusNetwork)!;
             var canonical = FrostDkgAttestation.Canonical(stillHere.Select(p => p.Address));
-            var creationMessage = FrostDkgAttestation.Message(keyUid, groupKey, address, Signers[0].Address, 2, canonical);
+            var creationHash = FrostDkgAttestation.KeyPackageHash("pkp|" + keyUid);
+            var creationMessage = FrostDkgAttestation.Message(keyUid, groupKey, address, Signers[0].Address, 2, canonical, keyPackageHash: creationHash);
             var creationProof = FrostDkgAttestation.BuildProof(keyUid, groupKey, address, Signers[0].Address, 2, canonical,
-                stillHere.Select(p => new FrostDkgAttestation.Attestation { ValidatorAddress = p.Address, Signature = VerifiedXCore.Services.SignatureService.CreateSignature(creationMessage, p.Key, p.Pub) }));
+                stillHere.Select(p => new FrostDkgAttestation.Attestation { ValidatorAddress = p.Address, Signature = VerifiedXCore.Services.SignatureService.CreateSignature(creationMessage, p.Key, p.Pub) }), creationHash);
             await Refused(RekeyTx(vault.Uid, creationProof), "has no valid attestation");
         }
 

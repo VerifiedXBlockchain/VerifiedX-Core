@@ -33,10 +33,57 @@ namespace VerifiedXCore.Tests
 
         private static string Id(int i) => i.ToString("x").PadLeft(64, '0');
 
+        /// <summary>Each dealer's Round 2 secret from the last RealDkg (what it finishes Round 3 with).</summary>
+        private readonly Dictionary<int, string> _round2Secrets = new();
+
+        /// <summary>
+        /// Every participant of an honest ceremony finishes with the same public key package, byte for byte, so the hash
+        /// each signs into its attestation (FrostDkgAttestation.KeyPackageHash) is the same for all; a participant given
+        /// another dealer's commitments finishes with another package (fourth review, round 3).
+        /// </summary>
+        [Fact]
+        public void HonestParticipants_FinishWithTheSamePublicKeyPackage_AndOneGivenOtherCommitmentsDoesNot()
+        {
+            const int n = 3, min = 2;
+            var (commitments, sharesByDealer) = RealDkg(n, min);
+            string Finish(int me, string[] seen, Dictionary<int, JObject> shares)
+            {
+                // Each participant's own Round 2 secret: run Round 2 again for it from the commitments it saw.
+                var others = new JObject();
+                for (int j = 1; j <= n; j++) if (j != me) others[Id(j)] = JToken.Parse(seen[j]);
+                var received = new JObject();
+                for (int j = 1; j <= n; j++) if (j != me) received[Id(j)] = shares[j][Id(me)];
+                var (gpk, keyPackage, pubkeyPackage, err) = FrostNative.DKGRound3Finalize(_round2Secrets[me], others.ToString(Newtonsoft.Json.Formatting.None), received.ToString(Newtonsoft.Json.Formatting.None));
+                Assert.Equal(FrostNative.SUCCESS, err);
+                Assert.False(string.IsNullOrEmpty(pubkeyPackage));
+                return pubkeyPackage;
+            }
+            var packages = Enumerable.Range(1, n).Select(i => Finish(i, commitments, sharesByDealer)).ToList();
+            Assert.Single(packages.Distinct());
+            Assert.Single(packages.Select(FrostDkgAttestation.KeyPackageHash).Distinct());
+
+            // Participant 1 is given another commitment for dealer 2 (and a share that matches it): it does not finish
+            // with the package the others finished with.
+            var (other2, other2Secret, e1) = FrostNative.DKGRound1Generate(2, n, min);
+            Assert.Equal(FrostNative.SUCCESS, e1);
+            var for2 = new JObject { [Id(1)] = JToken.Parse(commitments[1]), [Id(3)] = JToken.Parse(commitments[3]) };
+            var (other2Shares, _, e2) = FrostNative.DKGRound2GenerateShares(other2Secret, for2.ToString(Newtonsoft.Json.Formatting.None));
+            Assert.Equal(FrostNative.SUCCESS, e2);
+            var seenBy1 = (string[])commitments.Clone();
+            seenBy1[2] = other2;
+            var sharesSeenBy1 = new Dictionary<int, JObject>(sharesByDealer) { [2] = JObject.Parse(other2Shares) };
+            var seen = new JObject();
+            for (int j = 2; j <= n; j++) seen[Id(j)] = JToken.Parse(seenBy1[j]);
+            var received = new JObject();
+            for (int j = 2; j <= n; j++) received[Id(j)] = sharesSeenBy1[j][Id(1)];
+            var (_, _, misled, err) = FrostNative.DKGRound3Finalize(_round2Secrets[1], seen.ToString(Newtonsoft.Json.Formatting.None), received.ToString(Newtonsoft.Json.Formatting.None));
+            Assert.True(err != FrostNative.SUCCESS || misled != packages[1], "a participant given other commitments finished with the same package");
+        }
+
         // ── Round 2 share check (recipient side) ─────────────────────────────────────────────────────────────────
 
         /// <summary>A real n-participant Round 1 and the plaintext Round 2 shares each dealer produces.</summary>
-        private static (string[] Commitments, Dictionary<int, JObject> SharesByDealer) RealDkg(int n, int min)
+        private (string[] Commitments, Dictionary<int, JObject> SharesByDealer) RealDkg(int n, int min)
         {
             var commitments = new string[n + 1];
             var secrets = new string[n + 1];
@@ -51,9 +98,10 @@ namespace VerifiedXCore.Tests
             {
                 var others = new JObject();
                 for (int j = 1; j <= n; j++) if (j != dealer) others[Id(j)] = JToken.Parse(commitments[j]);
-                var (sh, _, err) = FrostNative.DKGRound2GenerateShares(secrets[dealer], others.ToString(Newtonsoft.Json.Formatting.None));
+                var (sh, round2Secret, err) = FrostNative.DKGRound2GenerateShares(secrets[dealer], others.ToString(Newtonsoft.Json.Formatting.None));
                 Assert.Equal(FrostNative.SUCCESS, err);
                 shares[dealer] = JObject.Parse(sh);
+                _round2Secrets[dealer] = round2Secret;
             }
             return (commitments, shares);
         }

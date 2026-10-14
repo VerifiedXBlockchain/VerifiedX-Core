@@ -69,7 +69,29 @@ namespace VerifiedXCore.Bitcoin.FROST
             public int Threshold { get; set; }
             public List<string> Participants { get; set; } = new();
             public List<Attestation> Attestations { get; set; } = new();
+            /// <summary>
+            /// SHA-256 of the public key package every participant finished with (the group key and every holder's
+            /// verifying share, derived from all the commitments it was given), lowercase hex. Every attestation signs it,
+            /// so a proof stands only if all participants were given the same commitments (see <see cref="KeyPackageHash"/>).
+            /// </summary>
+            [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+            public string? PublicKeyPackageHash { get; set; }
         }
+
+        /// <summary>
+        /// The hash a participant signs of the public key package it finished a ceremony with. The ceremony's leader relays
+        /// every Round 1 commitment and nobody compared what they were given: a leader could give some participants other
+        /// commitments (and matching shares) than the rest, every check passed, every participant derived and attested the
+        /// same group key, and no group of holders could ever sign with it; through a re-key, one validator froze a
+        /// vault's Bitcoin for good (fourth review, round 3). Each holder's verifying share is derived from every
+        /// commitment it saw, so participants given different commitments finish with different packages.
+        /// </summary>
+        public static string? KeyPackageHash(string? publicKeyPackage) =>
+            string.IsNullOrEmpty(publicKeyPackage) ? null
+                : Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(publicKeyPackage))).ToLowerInvariant();
+
+        private static bool IsKeyPackageHash(string? hash) =>
+            hash != null && hash.Length == 64 && hash.All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
 
         /// <summary>Participants in the one canonical order every signer and verifier uses.</summary>
         public static List<string> Canonical(IEnumerable<string>? participants) =>
@@ -80,9 +102,11 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// For a re-key's ceremony, the vault it makes a new key for. Part of what each participant signs, so a
         /// creation's proof is never a re-key's and a re-key's names its vault.
         /// </param>
-        public static string Message(string contractUid, string groupPublicKey, string taprootAddress, string owner, int threshold, IEnumerable<string> participants, string? rekeyOf = null) =>
+        /// <param name="keyPackageHash">The <see cref="KeyPackageHash"/> of the package this participant finished with.</param>
+        public static string Message(string contractUid, string groupPublicKey, string taprootAddress, string owner, int threshold, IEnumerable<string> participants, string? rekeyOf = null, string? keyPackageHash = null) =>
             $"VFX_DKG_ATTEST_V2|{contractUid}|{groupPublicKey}|{taprootAddress}|{owner}|{threshold}|{string.Join(",", Canonical(participants))}"
-            + (string.IsNullOrEmpty(rekeyOf) ? "" : $"|REKEY|{rekeyOf}");
+            + (string.IsNullOrEmpty(rekeyOf) ? "" : $"|REKEY|{rekeyOf}")
+            + (string.IsNullOrEmpty(keyPackageHash) ? "" : $"|PKP|{keyPackageHash}");
 
         /// <summary>The FROST signing threshold the validators use for n participants at a threshold percentage.</summary>
         public static int ThresholdFor(int participants, int thresholdPercent) => (int)Math.Ceiling(participants * (thresholdPercent / 100.0));
@@ -125,7 +149,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         }
 
         public static string BuildProof(string contractUid, string groupPublicKey, string taprootAddress, string owner, int threshold,
-            IEnumerable<string> participants, IEnumerable<Attestation> attestations) =>
+            IEnumerable<string> participants, IEnumerable<Attestation> attestations, string? keyPackageHash = null) =>
             Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new Proof
             {
                 ProofType = ProofType,
@@ -136,6 +160,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 Threshold = threshold,
                 Participants = Canonical(participants),
                 Attestations = attestations.ToList(),
+                PublicKeyPackageHash = string.IsNullOrEmpty(keyPackageHash) ? null : keyPackageHash,
             })));
 
         public static Proof? ParseProof(string? base64)
@@ -148,9 +173,9 @@ namespace VerifiedXCore.Bitcoin.FROST
             catch { return null; }
         }
 
-        public static bool Verify(Attestation? a, string contractUid, string groupPublicKey, string taprootAddress, string owner, int threshold, IEnumerable<string> participants, string? rekeyOf = null) =>
+        public static bool Verify(Attestation? a, string contractUid, string groupPublicKey, string taprootAddress, string owner, int threshold, IEnumerable<string> participants, string? rekeyOf = null, string? keyPackageHash = null) =>
             a != null && !string.IsNullOrEmpty(a.ValidatorAddress) && !string.IsNullOrEmpty(a.Signature)
-            && SignatureService.VerifySignature(a.ValidatorAddress, Message(contractUid, groupPublicKey, taprootAddress, owner, threshold, participants, rekeyOf), a.Signature);
+            && SignatureService.VerifySignature(a.ValidatorAddress, Message(contractUid, groupPublicKey, taprootAddress, owner, threshold, participants, rekeyOf, keyPackageHash), a.Signature);
 
         /// <summary>A majority (51%) of n, and never fewer than two.</summary>
         public static int Required(int n) => Math.Max(2, (int)Math.Ceiling(n * 0.51));
@@ -164,7 +189,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// list), and the address is the group key's Taproot address. Owner, threshold and participants come from its own
         /// session: the leader is authenticated at the ceremony start.
         /// </summary>
-        public static Attestation? SignLocal(string? contractUid, string? groupPublicKey, string? taprootAddress, string? owner, int threshold, List<string>? participants, string? rekeyOf = null)
+        public static Attestation? SignLocal(string? contractUid, string? groupPublicKey, string? taprootAddress, string? owner, int threshold, List<string>? participants, string? rekeyOf = null, string? keyPackageHash = null)
         {
             try
             {
@@ -183,7 +208,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     var recorded = Canonical(JsonConvert.DeserializeObject<List<string>>(stored.ParticipantOrderJson));
                     if (!recorded.SequenceEqual(list, StringComparer.Ordinal)) return null;
                 }
-                var signature = SignatureService.ValidatorSignature(Message(contractUid, groupPublicKey, taprootAddress, owner, threshold, list, rekeyOf));
+                var signature = SignatureService.ValidatorSignature(Message(contractUid, groupPublicKey, taprootAddress, owner, threshold, list, rekeyOf, keyPackageHash));
                 return string.IsNullOrEmpty(signature) || signature == "ERROR" || signature == "F" ? null
                     : new Attestation { ValidatorAddress = me, Signature = signature };
             }
@@ -228,7 +253,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                 DepositAddress = taprootAddress ?? "", FrostGroupPublicKey = groupPublicKey ?? "", DKGProof = dkgProof ?? "",
                 ValidatorAddressesSnapshot = participants ?? new List<string>(), IsS3C = isS3C,
             };
-            return Validate(feature, contractUid, owner, EligibleAtTip, rekeyOf);
+            return Validate(feature, contractUid, owner, EligibleAtTip, rekeyOf,
+                requireKeyPackageHash: rekeyOf != null || (Globals.LastBlock?.Height ?? -1) + 1 >= Globals.PathAuditRulesHeight);
         }
 
         /// <summary>
@@ -240,7 +266,11 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// <param name="rekeyOf">For a re-key (plan 8.8): the vault the new key is for. The attestations must name it, the
         /// threshold is <see cref="RekeyThresholdPercent"/> of the participants exactly, and the ceremony includes at
         /// least <see cref="RekeyParticipationShare"/> of the eligible validators.</param>
-        public static string? Validate(TokenizationV2Feature? feature, string contractUid, string owner, Func<List<VBTCValidator>> activeAtPreviousBlock, string? rekeyOf = null)
+        /// <param name="requireKeyPackageHash">
+        /// The proof must carry the hash of the public key package every participant attested (<see cref="KeyPackageHash"/>):
+        /// always for a re-key, from Globals.PathAuditRulesHeight for a creation.
+        /// </param>
+        public static string? Validate(TokenizationV2Feature? feature, string contractUid, string owner, Func<List<VBTCValidator>> activeAtPreviousBlock, string? rekeyOf = null, bool requireKeyPackageHash = false)
         {
             if (feature == null) return "vBTC V2 contract has no TokenizationV2 data.";
             var groupKey = feature.FrostGroupPublicKey ?? "";
@@ -255,6 +285,8 @@ namespace VerifiedXCore.Bitcoin.FROST
             var proof = ParseProof(feature.DKGProof);
             if (proof == null || proof.ProofType != ProofType)
                 return "vBTC V2 contract DKG proof is not a validator attestation proof.";
+            if (requireKeyPackageHash && !IsKeyPackageHash(proof.PublicKeyPackageHash))
+                return "vBTC V2 contract DKG proof does not name the public key package its participants finished with.";
             if (!string.Equals(proof.ContractUID, contractUid, StringComparison.Ordinal)
                 || !string.Equals(proof.GroupPublicKey, groupKey, StringComparison.Ordinal)
                 || !string.Equals(proof.TaprootAddress, address, StringComparison.Ordinal))
@@ -298,7 +330,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     return "vBTC V2 contract DKG proof carries a duplicate or unnamed attestation.";
             foreach (var p in canonical)
             {
-                if (!byAddress.TryGetValue(p, out var a) || !Verify(a, contractUid, groupKey, address, owner, proof.Threshold, canonical, rekeyOf))
+                if (!byAddress.TryGetValue(p, out var a) || !Verify(a, contractUid, groupKey, address, owner, proof.Threshold, canonical, rekeyOf, proof.PublicKeyPackageHash))
                     return $"vBTC V2 contract DKG proof has no valid attestation from participant {p}.";
             }
             return null;

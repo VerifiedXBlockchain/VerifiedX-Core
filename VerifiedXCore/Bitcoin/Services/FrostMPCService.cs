@@ -786,7 +786,7 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             LogUtility.Log($"[FROST MPC] Collecting DKG results from {validators.Count} validators...", "FrostMPCService.AggregateDKGResult");
 
-            var results = new System.Collections.Concurrent.ConcurrentDictionary<string, (string Gpk, string Address, FrostDkgAttestation.Attestation? Attestation)>(StringComparer.Ordinal);
+            var results = new System.Collections.Concurrent.ConcurrentDictionary<string, (string Gpk, string Address, FrostDkgAttestation.Attestation? Attestation, string? KeyPackageHash)>(StringComparer.Ordinal);
             var resultTasks = validators.Select(async validator =>
             {
                 try
@@ -802,8 +802,9 @@ namespace VerifiedXCore.Bitcoin.Services
                     var addr = json["TaprootAddress"]?.Value<string>();
                     FrostDkgAttestation.Attestation? attestation = null;
                     try { attestation = json["Attestation"]?.Type == JTokenType.Object ? json["Attestation"]!.ToObject<FrostDkgAttestation.Attestation>() : null; } catch { }
+                    var keyPackageHash = json["PublicKeyPackageHash"]?.Type == JTokenType.String ? json["PublicKeyPackageHash"]!.Value<string>() : null;
                     if (!string.IsNullOrEmpty(gpk) && !string.IsNullOrEmpty(addr))
-                        results[validator.ValidatorAddress] = (gpk, addr, attestation);
+                        results[validator.ValidatorAddress] = (gpk, addr, attestation, keyPackageHash);
                 }
                 catch (Exception ex)
                 {
@@ -818,12 +819,18 @@ namespace VerifiedXCore.Bitcoin.Services
             if (results.IsEmpty)
                 return null;
 
-            // The key the majority finished with; a participant reporting another key is dropped.
-            var majority = results.GroupBy(r => (r.Value.Gpk, r.Value.Address)).OrderByDescending(g => g.Count()).First();
+            // The key the majority finished with, and the public key package: a participant reporting another key, or
+            // another package (it was given other commitments than the rest), is dropped. Every attestation signs the
+            // package's hash, so a proof only stands if all participants finished with the same one.
+            var majority = results.GroupBy(r => (r.Value.Gpk, r.Value.Address, r.Value.KeyPackageHash)).OrderByDescending(g => g.Count())
+                .ThenBy(g => g.Key.KeyPackageHash ?? "", StringComparer.Ordinal).First();
             var groupPublicKey = majority.Key.Gpk;
             var taprootAddress = majority.Key.Address;
+            var keyPackageHashOfAll = majority.Key.KeyPackageHash;
             foreach (var r in results.Where(r => r.Value.Gpk != groupPublicKey || r.Value.Address != taprootAddress))
                 failed[r.Key] = "reported a different group key";
+            foreach (var r in results.Where(r => !failed.ContainsKey(r.Key) && r.Value.KeyPackageHash != keyPackageHashOfAll))
+                failed[r.Key] = "finished with a different public key package (it was given other commitments)";
 
             // NEW-26: the address must be the group key's Taproot address (consensus derives it the same way).
             try
@@ -850,7 +857,7 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 var a = r.Value.Attestation;
                 if (a != null && a.ValidatorAddress == r.Key
-                    && FrostDkgAttestation.Verify(a, contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, rekeyOf))
+                    && FrostDkgAttestation.Verify(a, contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, rekeyOf, keyPackageHashOfAll))
                     attestations.Add(a);
                 else
                     failed[r.Key] = "did not return a valid attestation";
@@ -860,7 +867,7 @@ namespace VerifiedXCore.Bitcoin.Services
             if (failed.Count > 0)
                 return null;
 
-            var dkgProof = FrostDkgAttestation.BuildProof(contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, attestations);
+            var dkgProof = FrostDkgAttestation.BuildProof(contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, attestations, keyPackageHashOfAll);
             LogUtility.Log($"[FROST MPC] DKG aggregation complete. GroupPubKey: {groupPublicKey.Substring(0, 16)}..., Address: {taprootAddress}",
                 "FrostMPCService.AggregateDKGResult");
 

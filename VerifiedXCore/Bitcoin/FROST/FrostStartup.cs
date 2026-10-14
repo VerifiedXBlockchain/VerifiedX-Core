@@ -1922,9 +1922,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                         // NEW-26: this validator's attestation that the key is one it holds a share of, for this contract.
                         // NEW-26 (follow-up): the attestation also binds the owner (the authenticated leader), the signing
                         // threshold and the participant list of this validator's own session.
+                        // It also binds the public key package this validator finished with: a leader that gave participants
+                        // different commitments leaves them with different packages, and no proof (fourth review, round 3).
+                        var keyPackageHash = FrostDkgAttestation.KeyPackageHash(session.FinalPubkeyPackage);
                         var attestation = FrostDkgAttestation.SignLocal(session.SmartContractUID, session.GroupPublicKey, session.TaprootAddress,
                             session.LeaderAddress, FrostDkgAttestation.CeremonyThreshold(session.ParticipantAddresses?.Count ?? 0, session.RequiredThreshold, session.RekeyOf),
-                            session.ParticipantAddresses, session.RekeyOf);
+                            session.ParticipantAddresses, session.RekeyOf, keyPackageHash);
 
                         // Return final result
                         context.Response.StatusCode = StatusCodes.Status200OK;
@@ -1938,6 +1941,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                             TaprootAddress = session.TaprootAddress,
                             DKGProof = session.DKGProof,
                             Attestation = attestation,
+                            PublicKeyPackageHash = keyPackageHash,
                             IsCompleted = session.IsCompleted
                         }, Formatting.Indented));
                     }
