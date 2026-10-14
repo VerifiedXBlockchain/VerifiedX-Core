@@ -66,6 +66,15 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 LogUtility.Log($"[BridgeAttest] Found lock in consensus state: lockId={chainLock.LockId}, owner={chainLock.OwnerAddress}, evmDest={chainLock.EvmDestination}, amountSats={chainLock.AmountSats}, lockTxHash={chainLock.LockTxHash}", TAG);
 
+                // The lock as it is stored, exactly. The look-up trims the id and ignores case, while Base refuses a repeat
+                // only by the exact bytes of the id it is given: "abc", "ABC" and "abc " were signed for one lock, and
+                // each minted it again (fourth review, round 12).
+                if (!string.Equals(request.LockId, chainLock.LockId, StringComparison.Ordinal))
+                {
+                    LogUtility.Log($"[BridgeAttest] REJECT: lock id {request.LockId} is not the stored id {chainLock.LockId}", TAG);
+                    return Task.FromResult<(bool, string?, string?)>((false, null, "Lock id must be the lock's own id exactly"));
+                }
+
                 if (!string.Equals(chainLock.EvmDestination?.Trim(), request.EvmDestination?.Trim(), StringComparison.OrdinalIgnoreCase))
                 {
                     LogUtility.Log($"[BridgeAttest] REJECT: EVM destination mismatch. Chain={chainLock.EvmDestination}, Request={request.EvmDestination}", TAG);
@@ -102,7 +111,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 var hash = ConstructMintMessageHash(
                     request.EvmDestination,
                     request.AmountSats,
-                    request.LockId,
+                    chainLock.LockId,
                     request.Nonce,
                     request.ChainId,
                     request.ContractAddress);

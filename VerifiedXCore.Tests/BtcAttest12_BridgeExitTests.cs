@@ -220,6 +220,54 @@ namespace VerifiedXCore.Tests
             await RefusedInBlock(Exit(NewBurn(), BtcDest, (lockId + " ", vault.Uid, 0.004M)), "a lock is named by its own id");
             await RefusedInBlock(Exit(NewBurn(), BtcDest, (lockId, vault.Uid, 0.002M), (lockId, vault.Uid, 0.002M)), "twice");
             await RefusedInBlock(Exit(NewBurn(), BtcDest, (lockId, vault.Uid, 0.00400001M)), "it holds");
+            // The first version's single-lock shape, naming no watched contract but a watched vault's lock: refused, as an
+            // exit from that vault (it was recorded with no part, and its burn was used for good; round 12).
+            var single = SignedBy(Caster, Caster.Address, TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC, new
+            {
+                Function = "VBTCBridgeExitToBTC()", ContractUID = Guid.NewGuid().ToString("N") + ":1", LockId = lockId,
+                Amount = 0.004M, AmountSats = 400_000L, BtcDestination = BtcDest, BaseBurnTxHash = NewBurn(),
+            }, free: true);
+            await RefusedInBlock(single, "carries its allocations");
+        }
+
+        /// <summary>
+        /// A validator signed a Base mint over the lock id the caller gave, after finding the lock by a look-up that trims
+        /// and ignores case; Base refuses a repeat only by the exact bytes of that id, so "abc", "ABC" and "abc " each
+        /// minted one lock again (fourth review, round 12). Only the lock's own id is signed.
+        /// </summary>
+        [Fact]
+        public async Task AMintAttestation_IsGivenOnlyForTheLocksOwnId()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.004M);
+            var priorValidator = Globals.ValidatorAddress;
+            var priorCastersOnly = Globals.BaseValidatorSetCastersOnly;
+            Globals.ValidatorAddress = "xNotLoadedHere";
+            Globals.BaseValidatorSetCastersOnly = false;
+            try
+            {
+                VerifiedXCore.Bitcoin.Models.MintAttestationRequest Ask(string id) => new()
+                {
+                    LockId = id, EvmDestination = "0x" + new string('a', 40), AmountSats = 400_000, Nonce = 1,
+                    ChainId = Globals.BaseEvmChainId, ContractAddress = "0x" + new string('b', 40),
+                };
+                foreach (var variant in new[] { lockId.ToUpperInvariant(), lockId + " ", " " + lockId })
+                {
+                    var (ok, _, error) = await VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.HandleMintAttestationRequest(Ask(variant));
+                    Assert.False(ok);
+                    Assert.Contains("own id exactly", error);
+                }
+                // The lock's own id passes this check (and goes on to the signing key, not loaded in this test).
+                var (_, _, exactError) = await VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.HandleMintAttestationRequest(Ask(lockId));
+                Assert.DoesNotContain("own id exactly", exactError ?? "");
+            }
+            finally
+            {
+                Globals.ValidatorAddress = priorValidator;
+                Globals.BaseValidatorSetCastersOnly = priorCastersOnly;
+            }
         }
 
         [Fact]
