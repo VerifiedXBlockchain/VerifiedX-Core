@@ -154,6 +154,17 @@ namespace VerifiedXCore.Tests
             Assert.Single(BtcReportSignatures.For(early, 0));
         }
 
+        /// <summary>A report with an empty signature entry is refused by the parser, not thrown from its canonical form's sort.</summary>
+        [Fact]
+        public void AReportWithAnEmptyEntry_IsRefused_NotThrown()
+        {
+            var json = new BtcReport { Scope = BtcReport.ScopeAll, Signatures = new List<BtcReportSignature>() }.ToCanonicalJson();
+            Assert.Contains("\"Signatures\":[]", json);
+            Assert.False(BtcReport.TryParse(json.Replace("\"Signatures\":[]", "\"Signatures\":[null]"), out var report, out var why));
+            Assert.Null(report);
+            Assert.Contains("empty entry", why);
+        }
+
         /// <summary>
         /// A signer could answer a signature request with thousands of entries naming signers this node already holds,
         /// each checked again at the cost of a signature verification (and with gigabytes, read whole). A held signer's

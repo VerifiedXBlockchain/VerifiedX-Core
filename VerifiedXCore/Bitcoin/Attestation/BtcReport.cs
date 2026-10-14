@@ -221,6 +221,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (report == null) { reason = "the Bitcoin report does not parse"; return false; }
             report.Headers ??= new List<string>();
             report.Events ??= new List<BtcReportEvent>();
+            // An empty signature or header entry is refused here, not left to throw in the canonical form's sort.
+            if (report.Signatures != null && report.Signatures.Any(s => s == null) || report.Headers.Any(h => h == null) || report.Events.Any(e => e == null))
+            {
+                report = null;
+                reason = "the Bitcoin report has an empty entry";
+                return false;
+            }
             if (!string.Equals(report.ToCanonicalJson(), data, StringComparison.Ordinal))
             {
                 report = null;
