@@ -4646,7 +4646,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                                 {
                                     SmartContractUID = scUID,
                                     OwnerAddress = scStateTrei.OwnerAddress,
-                                    DepositAddress = tknzFallback.DepositAddress,
+                                    DepositAddress = Services.VBTCService.CurrentDepositAddress(scUID, tknzFallback.DepositAddress),
                                     FrostGroupPublicKey = tknzFallback.FrostGroupPublicKey,
                                     RequiredThreshold = tknzFallback.RequiredThreshold,
                                     DKGProof = tknzFallback.DKGProof,
@@ -4675,6 +4675,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 // A vault the chain watches: its balance is its attested Bitcoin (not saved here either).
                 if (VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(scUID))
                     contract.Balance = VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.DepositBtc(contract.SmartContractUID);
+                // ... and the address to deposit to is its newest key's (round 16; not saved).
+                contract.DepositAddress = Services.VBTCService.CurrentDepositAddress(scUID, contract.DepositAddress);
 
                 return JsonConvert.SerializeObject(new
                 {
@@ -4851,6 +4853,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                             "VBTCController.GetContractHealth()");
                     }
                 }
+                depositAddress = Services.VBTCService.CurrentDepositAddress(scUID, depositAddress) ?? ""; // the newest key's (round 16)
 
                 if (originalValidators == null || !originalValidators.Any())
                 {
@@ -5034,7 +5037,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     {
                         v.SmartContractUID,
                         v.OwnerAddress,
-                        v.Feature.DepositAddress,
+                        DepositAddress = Services.VBTCService.CurrentDepositAddress(v.SmartContractUID, v.Feature.DepositAddress), // the newest key's (round 16)
                         // Attested: the vault's Bitcoin as the chain records it. Legacy: created before Bitcoin
                         // attestation and frozen from FreezeHeight.
                         kind.Attested,

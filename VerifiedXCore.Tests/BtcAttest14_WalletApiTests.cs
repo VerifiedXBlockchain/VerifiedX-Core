@@ -155,6 +155,22 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Outpoint(deposit, 0), (string)coin["Outpoint"]!);
             Assert.Equal("Unspent", (string)coin["Status"]!);
 
+            // After a re-key the routes give the newest key's address, not the one the vault was created with: a deposit
+            // to a retired key whose holders have left can never be moved (fifth review, round 16).
+            Assert.Equal(vault.Address, (string)listed["DepositAddress"]!);
+            var newer = NewTaprootAddress();
+            var first = BtcAttestStore.ScriptRowForVault(vault.Uid)!;
+            BtcAttestStore.Db.GetCollection<VaultDepositScriptRow>(BtcAttestStore.Scripts).Insert(new VaultDepositScriptRow
+            {
+                ScriptHex = ScriptOf(newer).ToHex(), SmartContractUID = vault.Uid, DepositAddress = newer, Generation = first.Generation + 1,
+                CreatedAtVfxHeight = Tip, WatchFromBitcoinHeight = first.WatchFromBitcoinHeight, MinSigners = first.MinSigners,
+            });
+            var relisted = ((JArray)JObject.Parse(await _api.GetContractList(Minter.Address))["Contracts"]!).Single(c => (string)c["SmartContractUID"]! == vault.Uid);
+            Assert.Equal(newer, (string)relisted["DepositAddress"]!);
+            Assert.Equal(newer, (string)JObject.Parse(await _api.GetContractDetails(vault.Uid))["Contract"]!["DepositAddress"]!);
+            var health = JObject.Parse(await _api.GetContractHealth(vault.Uid));
+            if (health["DepositAddress"] != null) Assert.Equal(newer, (string)health["DepositAddress"]!);
+
             var status = JObject.Parse(await _api.GetBitcoinAttestationStatus())["Attestation"]!;
             Assert.True((bool)status["Started"]!);
             Assert.True((bool)status["Recording"]!);

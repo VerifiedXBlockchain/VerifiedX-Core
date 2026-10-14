@@ -69,8 +69,8 @@ namespace VerifiedXCore.BrowserWalletServices
                     if (kind.Attested)
                     {
                         totalBalance = Bitcoin.Attestation.BtcAttestBalance.DepositBtc(scState.SmartContractUID) + ledgerBalance;
-                        if (string.IsNullOrEmpty(depositAddress))
-                            depositAddress = Bitcoin.Attestation.BtcAttestStore.ScriptRowForVault(scState.SmartContractUID)?.DepositAddress ?? "";
+                        // The newest key's address, ahead of the local record's (written at creation; round 16).
+                        depositAddress = Bitcoin.Attestation.BtcAttestStore.ScriptRowForVault(scState.SmartContractUID)?.DepositAddress ?? depositAddress;
                     }
                 }
 

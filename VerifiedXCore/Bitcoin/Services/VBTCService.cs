@@ -318,6 +318,19 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// The address to deposit to: for a vault the chain watches, its newest key's (a re-key retires the earlier
+        /// ones; their coins are swept, and once a retired key's holders leave, a deposit to it can never be moved
+        /// while it still counts as the vault's Bitcoin; fifth review, round 16). Otherwise <paramref name="fallback"/>.
+        /// </summary>
+        public static string? CurrentDepositAddress(string? scUID, string? fallback)
+        {
+            if (!string.IsNullOrEmpty(scUID) && Attestation.BtcAttestBalance.IsAttestedVault(scUID)
+                && Attestation.BtcAttestStore.ScriptRowForVault(scUID)?.DepositAddress is { Length: > 0 } current)
+                return current;
+            return fallback;
+        }
+
+        /// <summary>
         /// Deposit address for a vBTC contract: the local VBTCContractV2 record when present, else
         /// decompiled from the contract code stored in the state trei — available on ALL nodes, so
         /// owner balances resolve correctly on casters/remote nodes with no local record.
