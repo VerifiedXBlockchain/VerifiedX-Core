@@ -102,10 +102,10 @@ namespace VerifiedXCore.Tests
             return (key, pub, AccountData.GetHumanAddress(pub));
         }
 
-        private SmartContractFeatures VaultFeature(string uid, long proofBlockHeight = 1)
+        private SmartContractFeatures VaultFeature(string uid, long proofBlockHeight = 1, int thresholdPercent = 51)
         {
             var participants = _validators.Select(v => v.Address).ToList();
-            var threshold = FrostDkgAttestation.ThresholdFor(participants.Count, 51);
+            var threshold = FrostDkgAttestation.ThresholdFor(participants.Count, thresholdPercent);
             var proof = FrostDkgAttestation.BuildProof(uid, _groupKey, _address, _owner.Address, threshold, participants, _validators.Select(v => new FrostDkgAttestation.Attestation
             {
                 ValidatorAddress = v.Address,
@@ -199,6 +199,27 @@ namespace VerifiedXCore.Tests
             // later shows the feature) was a vault to every reader; from the rule it is not one.
             Assert.True(IsVaultAtTip(uid, body, Rule - 10));
             Assert.False(IsVaultAtTip(uid, body, Rule + 10));
+        }
+
+        /// <summary>
+        /// A creator could choose a key that every holder must sign (the proof only had to name a majority or more):
+        /// any one holder could then freeze the vault's Bitcoin, and the sweep to a new key needs that same key. From the
+        /// rules' height a public vault's key needs at most a re-key's share: 67%, never all (fourth review, round 2).
+        /// </summary>
+        [Fact]
+        public async Task APublicVaultsKey_NeverNeedsAllItsHolders()
+        {
+            foreach (var (percent, allowed) in new[] { (51, true), (67, true), (80, false), (100, false) })
+            {
+                var uid = FrostDkgAttestation.NewContractUid();
+                var body = Body(uid, VaultFeature(uid, thresholdPercent: percent));
+                var (ok, why) = await Verify(Create(uid, body), Rule);
+                if (allowed) Assert.True(ok, $"{percent}%: {why}");
+                else Assert.Contains("signs with at most 7 of its 10 holders", why);
+                // Before the rule, as before.
+                (ok, why) = await Verify(Create(uid, body), Rule - 1);
+                Assert.True(ok, $"{percent}% before the rule: {why}");
+            }
         }
 
         /// <summary>

@@ -541,8 +541,18 @@ namespace VerifiedXCore.Services
             if (VerifiedXCore.Bitcoin.Attestation.BtcCanonicalWithdrawal.TryDestinationScript(feature?.DepositAddress, out var depositScript)
                 && VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.ScriptRow(depositScript) is { } taken && taken.SmartContractUID != uid)
                 return $"This deposit address already belongs to vault {taken.SmartContractUID}.";
-            return VerifiedXCore.Bitcoin.FROST.FrostDkgAttestation.Validate(feature, uid, tx.FromAddress,
+            var ceremonyError = VerifiedXCore.Bitcoin.FROST.FrostDkgAttestation.Validate(feature, uid, tx.FromAddress,
                 () => ValidatorBond.CeremonyEligible(VBTCValidatorRegistry.GetActiveValidatorsAt(height - 1), height)); // active, funded now, and (from the bond height) a stake locked for two days
+            if (ceremonyError != null) return ceremonyError;
+            // A public vault's key never needs (nearly) all of its holders: at all of them any one could freeze its
+            // Bitcoin for good, and the new key that would replace it must be swept by that same key. The creator chose
+            // the threshold and could sell the vault's vBTC before anyone noticed (fourth review). The bound is a
+            // re-key's: 67%, never all.
+            if (height >= Globals.PathAuditRulesHeight && feature != null && !feature.IsS3C
+                && VerifiedXCore.Bitcoin.FROST.FrostDkgAttestation.ParseProof(feature.DKGProof) is { } proof
+                && proof.Threshold > VerifiedXCore.Bitcoin.FROST.FrostDkgAttestation.RekeyThreshold(proof.Participants?.Count ?? 0))
+                return $"A public vault's key signs with at most {VerifiedXCore.Bitcoin.FROST.FrostDkgAttestation.RekeyThreshold(proof.Participants?.Count ?? 0)} of its {proof.Participants?.Count ?? 0} holders; this one needs {proof.Threshold}.";
+            return null;
         }
 
         // ── A vault's contract reads the same on every node, at every time ───────────────────────────────────────
