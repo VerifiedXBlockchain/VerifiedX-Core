@@ -59,6 +59,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public static readonly BtcChainRules Testnet4 = new("testnet4", PowLimitBits, MainLimit, allowMinDifficulty: true, enforceBip94: true, noRetarget: false);
 
         /// <summary>
+        /// Tests only: regtest's easiest target with the testnet rule that a block more than twenty minutes after its
+        /// parent uses it, so that tests can produce chains mixing blocks of full difficulty (any harder target, fixed
+        /// by the checkpoint's) with easy ones. Heights in tests stay inside one interval.
+        /// </summary>
+        internal static readonly BtcChainRules RegtestWithEasyBlocks = new("regtest-easy", 0x207fffff, (BigInteger.One << 255) - BigInteger.One, allowMinDifficulty: true, enforceBip94: true, noRetarget: false);
+
+        /// <summary>
         /// Bitcoin's regression-test rules (easiest possible target, never retargeted), so that tests can produce valid
         /// chains of headers. Reachable only through <see cref="OverrideForTests"/>, which production never sets.
         /// </summary>
@@ -69,6 +76,34 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
         /// <summary>The rules for the Bitcoin network this node's chain follows (testnet4 on VFX testnet, mainnet otherwise).</summary>
         public static BtcChainRules Current => OverrideForTests ?? (Globals.IsTestNet ? Testnet4 : Mainnet);
+
+        /// <summary>
+        /// Whether a header counts toward the burial of the blocks below it. On a network with the testnet rule a
+        /// block timed more than twenty minutes after its parent carries the easiest target there is: a header anyone
+        /// makes in a moment on a laptop. Such headers are Bitcoin and are followed, but they bury nothing: counted,
+        /// a made-up block could be buried for free, and the two thirds of the signers who saw it first on their best
+        /// chain would have signed a deposit that never happened. A header counts when it carries more work than the
+        /// easiest target. On mainnet there is no such rule and every header counts.
+        /// </summary>
+        public bool CountsTowardBurial(BtcHeader header) => !AllowMinDifficulty || header.Bits != LimitBits;
+
+        /// <summary>
+        /// The lowest height at which the block at <paramref name="block"/> is buried: <paramref name="depth"/> headers
+        /// that count sit above it. Null when that is not reached by <paramref name="through"/>, or a header on the
+        /// way is not held. On mainnet this is block + depth.
+        /// </summary>
+        public long? BuriedAt(long block, long through, int depth, Func<long, BtcHeader?> at)
+        {
+            if (depth <= 0) return block <= through ? block : null;
+            var counted = 0;
+            for (var h = block + 1; h <= through; h++)
+            {
+                var header = at(h);
+                if (header == null) return null;
+                if (CountsTowardBurial(header) && ++counted == depth) return h;
+            }
+            return null;
+        }
 
         /// <summary>
         /// Checks <paramref name="header"/> as the block at <paramref name="height"/>. <paramref name="at"/> returns the

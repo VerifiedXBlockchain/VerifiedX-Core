@@ -125,9 +125,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
             PlanBackfill(plan, view, meta, epoch, scripts, coins, db);
 
             // ── 3b. The first buried block above the events-through height with a vault event ───────────────
-            var last = Math.Min(meta.EventsThroughHeight + BtcAttestRules.QuietBlocks, view.TipHeight - depth);
-            for (var h = meta.EventsThroughHeight + 1; h <= last; h++)
+            // A block is reported once it is buried: `depth` headers that count are above it (on testnet4 a
+            // minimum-difficulty header does not count, so the burying header can be further up than h + depth).
+            var rules = BtcChainRules.Current;
+            var quietThrough = meta.EventsThroughHeight + BtcAttestRules.QuietBlocks;
+            var last = meta.EventsThroughHeight;
+            for (var h = meta.EventsThroughHeight + 1; h <= quietThrough; h++)
             {
+                var buriedAt = rules.BuriedAt(h, view.TipHeight, depth, view.HeaderAt);
+                if (buriedAt == null) break; // not buried yet, and so nothing above it is
+                last = h;
                 var header = view.HeaderAt(h);
                 if (header == null)
                 {
@@ -143,10 +150,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     plan.Waiting = $"Bitcoin block {h} is not fetched yet";
                     return plan;
                 }
-                var headers = Hexes(view, meta.TipHeight + 1, h + depth);
+                var headers = Hexes(view, meta.TipHeight + 1, buriedAt.Value);
                 if (headers == null)
                 {
-                    plan.Waiting = $"the headers through {h + depth} are not held";
+                    plan.Waiting = $"the headers through {buriedAt.Value} are not held";
                     return plan;
                 }
                 var parts = BtcBlockScanner.BuildForward(block, h, headers, epoch, db);
@@ -155,12 +162,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
 
             // ── 3c. A whole quiet range, buried, with no event ──────────────────────────────────────────────
-            if (last == meta.EventsThroughHeight + BtcAttestRules.QuietBlocks)
+            if (last == quietThrough)
             {
-                var headers = Hexes(view, meta.TipHeight + 1, last + depth);
+                var quietBuriedAt = rules.BuriedAt(last, view.TipHeight, depth, view.HeaderAt)!.Value;
+                var headers = Hexes(view, meta.TipHeight + 1, quietBuriedAt);
                 if (headers == null)
                 {
-                    plan.Waiting = $"the headers through {last + depth} are not held";
+                    plan.Waiting = $"the headers through {quietBuriedAt} are not held";
                     return plan;
                 }
                 plan.With(BtcPlannedReport.Quiet, BtcBlockScanner.BuildQuiet(headers, epoch));

@@ -143,9 +143,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 // The range is fixed by state: exactly the next QuietBlocks blocks, buried like any reported block. It
                 // carries the headers that bury them and no others, so every validator builds the same report.
                 var quietThrough = meta.EventsThroughHeight + BtcAttestRules.QuietBlocks;
-                var buriedAt = quietThrough + BtcAttestRules.Depth;
-                if (report.Headers.Count != Math.Max(0, buriedAt - meta.TipHeight))
-                    return BtcReportOutcome.Fail($"a quiet report covers blocks {meta.EventsThroughHeight + 1} to {quietThrough} and carries the headers through {buriedAt}, no more and no fewer");
+                // Already buried by the attested headers: it carries none. Otherwise it carries the headers up to the
+                // one that completes the burial, and that one is its last.
+                var exact = rules.BuriedAt(quietThrough, meta.TipHeight, BtcAttestRules.Depth, Lookup) != null
+                    ? report.Headers.Count == 0
+                    : rules.BuriedAt(quietThrough, newTip, BtcAttestRules.Depth, Lookup) == newTip;
+                if (!exact)
+                    return BtcReportOutcome.Fail($"a quiet report covers blocks {meta.EventsThroughHeight + 1} to {quietThrough} and carries the headers through the one that buries them ({BtcAttestRules.Depth} of full difficulty), no more and no fewer");
                 return new BtcReportOutcome { ReportHash = hash, NewHeaders = newHeaders, NewTipHeight = newTip, NewTipHash = newTipHash, QuietThroughHeight = quietThrough };
             }
 
@@ -183,8 +187,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
 
             // Burial: enforced here, not left to the signers.
-            if (block + BtcAttestRules.Depth > newTip)
-                return BtcReportOutcome.Fail($"block {block} is not under {BtcAttestRules.Depth} attested headers (attested tip {newTip})");
+            if (rules.BuriedAt(block, newTip, BtcAttestRules.Depth, Lookup) == null)
+                return BtcReportOutcome.Fail($"block {block} is not under {BtcAttestRules.Depth} attested headers of full difficulty (attested tip {newTip})");
 
             var blockHeader = Lookup(block);
             if (blockHeader == null) return BtcReportOutcome.Fail($"the header of block {block} is not attested");

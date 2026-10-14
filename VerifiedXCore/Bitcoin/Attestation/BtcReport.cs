@@ -69,7 +69,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
         /// <summary>
         /// Blocks of proof-of-work that must sit on top of a Bitcoin block before its events count: 3 on testnet, 6 on
-        /// mainnet. Enforced by consensus: an event is accepted only when its block is this far below the attested tip.
+        /// mainnet. Enforced by consensus: an event is accepted only when this many attested headers that count
+        /// (<see cref="BtcChainRules.CountsTowardBurial"/>: on testnet4 a minimum-difficulty header does not) are
+        /// above its block.
         /// </summary>
         public static int Depth => DepthOverride ?? (Globals.IsTestNet ? 3 : 6);
 

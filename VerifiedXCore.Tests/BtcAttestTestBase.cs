@@ -267,6 +267,12 @@ namespace VerifiedXCore.Tests
             private readonly List<BtcBlock> _blocks = new();
             private readonly List<BtcHeader> _headers = new();
             private uint _time;
+            private bool _easyNext;
+            /// <summary>
+            /// The target of this chain's ordinary blocks. Regtest's easiest by default; a test of the testnet rule
+            /// sets a harder one, and <see cref="MineEasy"/> then makes the blocks that use the easiest.
+            /// </summary>
+            public uint Bits = 0x207fffffu;
 
             public Btc(long firstHeight, uint time = 1_760_000_000)
             {
@@ -290,11 +296,23 @@ namespace VerifiedXCore.Tests
                     fork._headers.Add(Header(h));
                 }
                 fork._time = Header(height).Time;
+                fork.Bits = Bits;
                 return fork;
             }
 
             /// <summary>Mines the next block with these transactions after its coinbase; returns its height.</summary>
             public long Mine(params BtcTx[] txs) => MineWithCoinbase(null, txs);
+
+            /// <summary>
+            /// Mines a block as the testnet rule allows: timed more than twenty minutes after its parent, at the
+            /// easiest target. What anyone can make in a moment.
+            /// </summary>
+            public long MineEasy(params BtcTx[] txs)
+            {
+                _easyNext = true;
+                try { return MineWithCoinbase(null, txs); }
+                finally { _easyNext = false; }
+            }
 
             /// <summary>As <see cref="Mine"/>, with further outputs on the coinbase transaction (a miner paying out directly).</summary>
             public long MineWithCoinbase(IEnumerable<(NBitcoin.Script Script, long Sats)>? coinbaseOutputs, params BtcTx[] txs)
@@ -303,9 +321,9 @@ namespace VerifiedXCore.Tests
                 var block = Network.Main.Consensus.ConsensusFactory.CreateBlock();
                 block.Header.Version = 0x20000000;
                 block.Header.HashPrevBlock = _headers.Count == 0 ? uint256.Zero : uint256.Parse(_headers[^1].Hash);
-                _time += 600;
+                _time += _easyNext ? 1201u : 600u;
                 block.Header.BlockTime = DateTimeOffset.FromUnixTimeSeconds(_time);
-                block.Header.Bits = new Target(0x207fffffu);
+                block.Header.Bits = new Target(_easyNext ? 0x207fffffu : Bits);
 
                 var coinbase = Network.Main.CreateTransaction();
                 coinbase.Inputs.Add(new TxIn(new OutPoint(uint256.Zero, uint.MaxValue), new NBitcoin.Script(Op.GetPushOp(height), Op.GetPushOp(RandomUtils.GetBytes(8)))));
