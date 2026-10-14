@@ -345,6 +345,9 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Why a dealer's Round 2 output is not one sealed package for each of <paramref name="recipientIds"/>, each within
         /// the size a recipient opens (as relayed to it); null when it is.
         /// </summary>
+        /// <summary>The longest sealed share the coordinator relays (an honest one is about 300 characters).</summary>
+        public const int MaxSealedShareLength = 4_096;
+
         internal static string? Round2OutputRefusal(string shares, IReadOnlyCollection<string> recipientIds)
         {
             JObject map;
@@ -359,6 +362,11 @@ namespace VerifiedXCore.Bitcoin.Services
                     return "gave a Round 2 share that is not sealed";
                 if (new JObject { [p.Name] = p.Value }.ToString(Formatting.None).Length > FrostDkgBlame.MaxDealerEntryLength)
                     return "gave a Round 2 share over the size a recipient opens";
+                // An honest sealed share is a few hundred characters, always: one near the recipients' limit, copied into
+                // every other recipient's batch, could time their deliveries out (round 14). Only the coordinator is this
+                // strict; it only ever drops the dealer.
+                if (((string)p.Value!).Length > MaxSealedShareLength)
+                    return "gave a Round 2 share far over a sealed share's size";
             }
             return null;
         }

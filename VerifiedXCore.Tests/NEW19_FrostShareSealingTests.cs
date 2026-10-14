@@ -63,6 +63,7 @@ namespace VerifiedXCore.Tests
                 var sealedShares = FrostShareCrypto.SealAll(shares, session, idToAddr, a => keys[int.Parse(a.Substring(4))].PubHex, out var sealErr);
                 Assert.Null(sealErr);
                 Assert.DoesNotContain("signing_share", sealedShares);                            // coordinator's view
+                Assert.All(JObject.Parse(sealedShares!).Properties(), p => Assert.True(((string)p.Value!).Length < 1_000)); // far under the coordinator's bound
                 Assert.Null(VerifiedXCore.Bitcoin.Services.FrostMPCService.Round2OutputRefusal(sealedShares!,
                     Enumerable.Range(1, 3).Where(j => j != dealer).Select(Id).ToList()));        // an honest output is taken (round 13)
                 sealedByDealer[dealer] = sealedShares!;
@@ -121,6 +122,7 @@ namespace VerifiedXCore.Tests
             Assert.Contains("not sealed", Refusal(Map((Id(2), Sealed()), (Id(3), JToken.Parse("{\"signing_share\":\"00\"}")))));
             Assert.Contains("not sealed", Refusal(Map((Id(2), Sealed()), (Id(3), "plain"))));
             Assert.Contains("size", Refusal(Map((Id(2), Sealed()), (Id(3), Sealed(FrostDkgBlame.MaxDealerEntryLength)))));
+            Assert.Contains("far over", Refusal(Map((Id(2), Sealed()), (Id(3), Sealed(VerifiedXCore.Bitcoin.Services.FrostMPCService.MaxSealedShareLength)))));
         }
 
         [Fact]
