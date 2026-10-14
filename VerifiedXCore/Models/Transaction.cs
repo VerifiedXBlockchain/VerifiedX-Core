@@ -156,6 +156,7 @@ namespace VerifiedXCore.Models
         VBTC_V2_BTC_REPORT = 43, // Bitcoin headers plus the transactions of one Bitcoin block that touch a vault
         VBTC_V2_COIN_PIN = 44, // A requester pins its withdrawal again at a higher Bitcoin fee rate (fee bump; watched vaults)
         VBTC_V2_BTC_REORG = 45, // Rewind: Bitcoin reorganised below reported events; they are taken back and the headers replaced
+        VBTC_V2_VAULT_REKEY = 46, // Sender-less: a vault's key is replaced by one the validators of the day made (plan 8.8)
     }
 
     public enum ReserveTransactionType

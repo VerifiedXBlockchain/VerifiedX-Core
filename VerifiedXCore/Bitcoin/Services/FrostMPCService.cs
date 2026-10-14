@@ -1759,7 +1759,11 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
                 if (scStateTreiRec == null || string.IsNullOrEmpty(scStateTreiRec.ContractData))
-                    return null;
+                {
+                    // A later key of a watched vault (plan 8.8): its holders, as the re-key recorded them.
+                    var key = VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(scUID);
+                    return key != null && key.Generation > 0 ? VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.Holders(key) : null;
+                }
 
                 var scMain = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
                 var tknz = scMain?.Features?

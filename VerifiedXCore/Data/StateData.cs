@@ -756,6 +756,8 @@ namespace VerifiedXCore.Data
                         VerifiedXCore.Bitcoin.Attestation.BtcAttestApply.ApplyReport(tx, block.Height);
                     if (tx.TransactionType == TransactionType.VBTC_V2_BTC_REORG)
                         VerifiedXCore.Bitcoin.Attestation.BtcAttestApply.ApplyRewind(tx, block.Height);
+                    if (tx.TransactionType == TransactionType.VBTC_V2_VAULT_REKEY)
+                        VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.ApplyRekey(tx, block.Height);
 
                     txTreiUpdateSuccessCount += 1;
                 }

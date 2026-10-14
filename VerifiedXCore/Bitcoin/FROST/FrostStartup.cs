@@ -3157,7 +3157,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 // A vault the chain watches: which transactions may be signed for a withdrawal is fixed in state
                 // (FrostSigningAuthorization has just checked this one against it). They all spend the same coins, so
                 // at most one confirms; a replacement at a higher fee is one of them and must be signable.
-                if (VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(scUID))
+                if (VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(scUID) != null)
                     return (true, "");
 
                 var evidence = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.Get(scUID, withdrawalRequestHash);

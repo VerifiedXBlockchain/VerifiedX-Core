@@ -780,6 +780,7 @@ namespace VerifiedXCore
             _ = Task.Run(() => Bitcoin.Attestation.BtcReportService.RunLoop(CancellationToken.None));
             // ... and sign the Bitcoin transaction consensus has pinned for a withdrawal from a vault they hold shares of.
             _ = Task.Run(() => Bitcoin.Attestation.BtcWithdrawalSigner.RunLoop(CancellationToken.None));
+            _ = Task.Run(() => Bitcoin.Attestation.BtcVaultKeyService.RunLoop(CancellationToken.None)); // replaces vault keys that are due (plan 8.8)
 
             //API Port URL
             string url = !Globals.TestURL ? "http://*:" + Globals.APIPort : "https://*:" + Globals.APIPortSSL;

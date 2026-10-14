@@ -2985,6 +2985,9 @@ namespace VerifiedXCore.Bitcoin.Services
                         .FirstOrDefault() as TokenizationV2Feature;
                     if (tknz?.ValidatorAddressesSnapshot != null) return tknz.ValidatorAddressesSnapshot;
                 }
+                // A later key of a watched vault (plan 8.8) is no contract: its holders are recorded with it.
+                var key = Attestation.BtcVaultKeys.KeyRow(scUID);
+                if (key != null && key.Generation > 0) return Attestation.BtcVaultKeys.Holders(key);
             }
             catch { }
             return new List<string>();

@@ -101,7 +101,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                 request.BtcTxId = derivedTxId;
 
                 // ── 2. Every input must spend the contract's own deposit address ───────────────
-                var depositAddress = ResolveDepositAddress(request.SmartContractUID);
+                // A vault the chain watches can have more than one key (plan 8.8): the session names the key it signs
+                // with by that key's UID (the vault's own UID for its first key), every input must be held under that
+                // key, and everything else below is judged for the vault the key belongs to.
+                var watchedKey = Attestation.BtcVaultKeys.KeyRow(request.SmartContractUID);
+                var vaultUid = watchedKey?.SmartContractUID ?? request.SmartContractUID;
+                var depositAddress = watchedKey?.DepositAddress ?? ResolveDepositAddress(request.SmartContractUID);
                 if (string.IsNullOrWhiteSpace(depositAddress)) return (false, "Contract deposit address could not be resolved");
 
                 Script depositScript;
@@ -127,7 +132,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 if (wrh.StartsWith(BtcExitPrefix, StringComparison.OrdinalIgnoreCase))
                 {
                     isBridgeExit = true;
-                    var (exit, capSats, exitReason) = ResolveBtcExitForContract(wrh, request.SmartContractUID);
+                    var (exit, capSats, exitReason) = ResolveBtcExitForContract(wrh, vaultUid);
                     if (exit == null) return (false, exitReason);
                     if (exit.IsComplete) return (false, "Bridge exit already completed");
                     destination = exit.BtcDestination;
@@ -136,14 +141,28 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                     // A vault the chain watches: only the transaction consensus pinned for this vault's part of the exit
                     // is signed, and any signer of the vault may lead (as for a withdrawal, below).
-                    if (Attestation.BtcAttestBalance.IsAttestedVault(request.SmartContractUID))
+                    if (watchedKey != null)
                     {
-                        var (pinned, pinReason) = Attestation.BtcWithdrawals.MaySignExit(exit, request.SmartContractUID, txId);
+                        var (pinned, pinReason) = Attestation.BtcWithdrawals.MaySignExit(exit, vaultUid, txId);
                         if (!pinned) return (false, pinReason);
-                        pinnedDestinationScriptHex = Attestation.BtcWithdrawals.ExitDestinationScriptOf(exit, request.SmartContractUID);
+                        pinnedDestinationScriptHex = Attestation.BtcWithdrawals.ExitDestinationScriptOf(exit, vaultUid);
                         leaderIsVaultSignerOfPinned = Attestation.BtcWithdrawalSigner.SignersOf(request.SmartContractUID)
                             .Contains(request.LeaderAddress, StringComparer.Ordinal);
                     }
+                }
+                else if (Attestation.BtcWithdrawals.IsSweepReference(wrh))
+                {
+                    // A sweep: a replaced key's coins moving to the vault's current key, fixed by rule. Any holder of the
+                    // key being signed with may lead; the transaction is the pinned one and pays only the vault.
+                    if (watchedKey == null) return (false, "A sweep is signed only for a vault the chain watches");
+                    var (pinned, pinReason) = Attestation.BtcWithdrawals.MaySignSweep(wrh, vaultUid, txId);
+                    if (!pinned) return (false, pinReason);
+                    var sweep = Attestation.BtcAttestStore.Withdrawal(wrh)!;
+                    pinnedDestinationScriptHex = sweep.DestinationScriptHex;
+                    destination = Attestation.BtcAttestStore.ScriptRow(sweep.DestinationScriptHex)?.DepositAddress ?? "";
+                    maxDestinationSats = sweep.AmountSats;
+                    leaderIsVaultSignerOfPinned = Attestation.BtcWithdrawalSigner.SignersOf(request.SmartContractUID)
+                        .Contains(request.LeaderAddress, StringComparer.Ordinal);
                 }
                 else
                 {
@@ -152,10 +171,10 @@ namespace VerifiedXCore.Bitcoin.FROST
                     // The hash alone would return an arbitrary sibling (wrong amount cap, and
                     // IsWithdrawalSignable would reject on the contract mismatch), and a
                     // cancellation filed against another vault's share would block this one.
-                    var wr = VBTCWithdrawalRequest.GetByTransactionHash(wrh, request.SmartContractUID);
+                    var wr = VBTCWithdrawalRequest.GetByTransactionHash(wrh, vaultUid);
                     var pendingCancellation = VBTCWithdrawalCancellation.HasPendingCancellation(
-                        wrh, VerifiedXCore.Utilities.TimeUtil.GetTime(), request.SmartContractUID);
-                    var (signable, signableReason) = IsWithdrawalSignable(wr, request.SmartContractUID, pendingCancellation);
+                        wrh, VerifiedXCore.Utilities.TimeUtil.GetTime(), vaultUid);
+                    var (signable, signableReason) = IsWithdrawalSignable(wr, vaultUid, pendingCancellation);
                     if (!signable) return (false, signableReason);
                     destination = wr!.BTCDestination;
                     maxDestinationSats = (long)(wr.Amount * 100_000_000M);
@@ -173,7 +192,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         // the vault and pays nobody.
                         pinnedRelease = Attestation.BtcWithdrawals.IsPinnedRelease(wrh, wr.SmartContractUID, txId);
                         pinnedDestinationScriptHex = Attestation.BtcWithdrawals.DestinationScriptOf(wrh, wr.SmartContractUID);
-                        leaderIsVaultSignerOfPinned = Attestation.BtcWithdrawalSigner.SignersOf(wr.SmartContractUID)
+                        leaderIsVaultSignerOfPinned = Attestation.BtcWithdrawalSigner.SignersOf(request.SmartContractUID)
                             .Contains(request.LeaderAddress, StringComparer.Ordinal);
                     }
                 }
@@ -191,11 +210,16 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                 // ── 4. Outputs: destination (bounded) or change to the vault, nothing else ─────
                 //      AND the vault's total cost (destination + miner fee) must fit the authorization.
+                // Back to the vault means to any of its keys on a watched vault: change of a payment fixed before a
+                // re-key goes to the key it was fixed under, a release after it to the current one.
+                var vaultScripts = watchedKey != null
+                    ? Attestation.BtcAttestStore.ScriptRowsForVault(vaultUid).Select(k => Script.FromHex(k.ScriptHex)).ToList()
+                    : new List<Script> { depositScript };
                 long destinationSats = 0, changeSats = 0;
                 foreach (var o in tx.Outputs)
                 {
                     if (o.ScriptPubKey == destinationScript) destinationSats += o.Value.Satoshi;
-                    else if (o.ScriptPubKey == depositScript) changeSats += o.Value.Satoshi;
+                    else if (vaultScripts.Contains(o.ScriptPubKey)) changeSats += o.Value.Satoshi;
                     else return (false, "Transaction pays an output that is neither the authorized destination nor vault change");
                 }
                 long inputSats = 0;
@@ -226,7 +250,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// record per pinned transaction, so the replacement can be signed and two ceremonies do not disturb each other.
         /// </summary>
         public static string? SigningScope(string? scUID, string? btcTxId) =>
-            !string.IsNullOrEmpty(btcTxId) && Attestation.BtcAttestBalance.IsAttestedVault(scUID) ? btcTxId.Trim().ToLowerInvariant() : null;
+            !string.IsNullOrEmpty(btcTxId) && Attestation.BtcVaultKeys.KeyRow(scUID) != null ? btcTxId.Trim().ToLowerInvariant() : null;
 
         /// <summary>
         /// Who may lead a ceremony. A USER withdrawal is led only by its owner: every legitimate
@@ -343,6 +367,11 @@ namespace VerifiedXCore.Bitcoin.FROST
         {
             try
             {
+                // A later key of a watched vault (plan 8.8) is no contract: its address is recorded with it.
+                var key = Attestation.BtcVaultKeys.KeyRow(scUID);
+                if (key != null && key.Generation > 0 && string.Equals(key.KeyUID, scUID, StringComparison.Ordinal))
+                    return key.DepositAddress;
+
                 var local = VBTCContractV2.GetContract(scUID);
                 if (local != null && !string.IsNullOrWhiteSpace(local.DepositAddress))
                     return local.DepositAddress;

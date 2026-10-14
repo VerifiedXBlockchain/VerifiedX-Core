@@ -3821,6 +3821,11 @@ namespace VerifiedXCore.Services
                     if (Bitcoin.Services.VBTCService.ResolveContractIsS3C(scUID))
                         return (txResult, "vBTC.b bridge is not available for S3C contracts.");
 
+                    // A watched vault whose key cannot sign any more pays nobody: its vBTC does not go into the pool
+                    // that bridge exits are paid from (plan 8.8).
+                    if (Bitcoin.Attestation.BtcVaultKeys.CannotSignRefusal(SmartContractStateTrei.GetSmartContractState(scUID)?.SmartContractUID ?? scUID) is { } cannotSign)
+                        return (txResult, cannotSign);
+
                     if (txRequest.FromAddress != txRequest.ToAddress)
                         return (txResult, "Bridge lock must be a self-transaction (from == to).");
 

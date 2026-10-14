@@ -250,7 +250,7 @@ namespace VerifiedXCore.Tests
             var pinnedAt = pin.PinnedAtVfxHeight;
 
             var addresses = Signers.Select(s => s.Address).ToList();
-            Assert.Equal(addresses, BtcWithdrawalSigner.SignersOf(vault.Uid));
+            Assert.Equal(addresses.OrderBy(a => a, StringComparer.Ordinal), BtcWithdrawalSigner.SignersOf(vault.Uid)); // in ordinal order, as the key records them
             var order = addresses.OrderBy(a => BtcWithdrawalSigner.Turn(pin.Txid, a, addresses)).ToList();
             Assert.Equal(new[] { 0, 1, 2, 3 }, order.Select(a => BtcWithdrawalSigner.Turn(pin.Txid, a, addresses)));
 

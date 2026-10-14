@@ -93,16 +93,25 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var meta = BtcAttestStore.GetMeta(db);
             if (meta == null) { reason = "the Bitcoin view has not started"; return null; }
 
-            var chosen = Choose(FreeCoins(scUID, meta, db), amountSats, out reason);
+            var chosen = Choose(FreeCoins(vault, meta, db), amountSats, out reason);
             return chosen == null ? null : Assemble(vault, destinationScriptHex, amountSats, feeRate, chosen, out reason);
         }
 
-        /// <summary>The vault's coins no withdrawal holds, less coinbase outputs too young to spend.</summary>
-        private static List<VaultCoinRow> FreeCoins(string scUID, AttestationMetaRow meta, LiteDatabase? db) =>
-            BtcAttestStore.FreeCoinsOf(scUID, db)
+        /// <summary>
+        /// The vault's coins no withdrawal holds, under its current key, less coinbase outputs too young to spend. A
+        /// transaction spends the coins of one key only: each input is signed by its own key's holders, and a key on
+        /// its way out (its coins are being moved to the new one, plan 8.8) is not mixed into a payment.
+        /// </summary>
+        private static List<VaultCoinRow> FreeCoins(VaultDepositScriptRow vault, AttestationMetaRow meta, LiteDatabase? db) =>
+            BtcAttestStore.FreeCoinsOf(vault.SmartContractUID, db)
                 .Where(c => c.ValueSats > 0)
                 .Where(c => !c.IsCoinbase || meta.TipHeight >= c.CreatedInHeight + BtcAttestRules.CoinbaseMaturity)
+                .Where(c => IsUnder(c, vault, db))
                 .ToList();
+
+        /// <summary>Whether a coin is held under this key (script) of its vault.</summary>
+        internal static bool IsUnder(VaultCoinRow coin, VaultDepositScriptRow key, LiteDatabase? db) =>
+            string.Equals(BtcAttestStore.ScriptRowOfCoin(coin, db)?.ScriptHex, key.ScriptHex, StringComparison.Ordinal);
 
         /// <summary>The coin rule: the smallest single coin that covers the amount, otherwise the largest coins first.</summary>
         private static List<VaultCoinRow>? Choose(List<VaultCoinRow> coins, long amountSats, out string? reason)
@@ -149,10 +158,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var meta = BtcAttestStore.GetMeta(db);
             if (meta == null) { reason = "the Bitcoin view has not started"; return null; }
 
-            var takeable = BtcWithdrawals.TakeableCoins(scUID, feeRate, vfxHeight, db);
+            var takeable = BtcWithdrawals.TakeableCoins(scUID, feeRate, vfxHeight, db).Where(t => IsUnder(t.Coin, vault, db)).ToList();
             if (takeable.Count == 0) { reason = "no coin of the vault is held by a withdrawal that has stopped moving and pays a lower fee rate"; return null; }
 
-            var chosen = Choose(FreeCoins(scUID, meta, db).Concat(takeable.Select(t => t.Coin)).ToList(), amountSats, out reason);
+            var chosen = Choose(FreeCoins(vault, meta, db).Concat(takeable.Select(t => t.Coin)).ToList(), amountSats, out reason);
             if (chosen == null) return null;
             var tx = Assemble(vault, destinationScriptHex, amountSats, feeRate, chosen, out reason);
             if (tx == null) return null;
@@ -170,6 +179,52 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
             takenFrom = replaced.Keys.ToList();
             return tx;
+        }
+
+        /// <summary>
+        /// The transaction that moves a replaced key's coins to the vault's current key (plan 8.8): the old key's free
+        /// coins, largest first (up to <see cref="MaxInputs"/>), and the coins of withdrawals on that key that have
+        /// stopped moving (<see cref="BtcWithdrawals.TakeableCoins"/>), as for a withdrawal that takes them; one output,
+        /// everything less the fee, to the current key. Null with the reason when there is nothing to move or the fee
+        /// leaves less than an output. Without the coins it would take when its fee could not replace their transactions.
+        /// </summary>
+        public static BtcCanonicalTx? BuildSweep(VaultDepositScriptRow from, VaultDepositScriptRow to, long feeRate, long vfxHeight,
+            out List<string> takenFrom, out string? reason, LiteDatabase? db = null)
+        {
+            reason = null;
+            takenFrom = new List<string>();
+            if (feeRate <= 0) { reason = "the fee rate must be positive"; return null; }
+            if (from.ScriptHex == to.ScriptHex || from.SmartContractUID != to.SmartContractUID) { reason = "a sweep moves coins from one key of a vault to another"; return null; }
+            var meta = BtcAttestStore.GetMeta(db);
+            if (meta == null) { reason = "the Bitcoin view has not started"; return null; }
+
+            var free = FreeCoins(from, meta, db);
+            var takeable = BtcWithdrawals.TakeableCoins(from.SmartContractUID, feeRate, vfxHeight, db)
+                .Where(t => IsUnder(t.Coin, from, db) && t.Holders.All(h => !h.IsSweep && !h.IsBridgeExit)).ToList();
+            BtcCanonicalTx? Try(List<VaultCoinRow> coins, out string? why)
+            {
+                var chosen = coins.OrderByDescending(c => c.ValueSats).ThenBy(c => c.CreatedInHeight).ThenBy(c => c.Outpoint, StringComparer.Ordinal).Take(MaxInputs).ToList();
+                if (chosen.Count == 0) { why = "the key holds no free coin"; return null; }
+                return Assemble(to, to.ScriptHex, chosen.Sum(c => c.ValueSats), feeRate, chosen, out why);
+            }
+
+            if (takeable.Count > 0)
+            {
+                var withTaken = Try(free.Concat(takeable.Select(t => t.Coin)).ToList(), out reason);
+                if (withTaken != null)
+                {
+                    var replaced = new SortedDictionary<string, long>(StringComparer.Ordinal);
+                    foreach (var (coin, holders) in takeable.Where(t => withTaken.Inputs.Contains(t.Coin.Outpoint)))
+                        foreach (var holder in holders)
+                            replaced[holder.Ref] = holder.Pins.Last(p => !p.Dead).FeeSats;
+                    if (replaced.Count == 0 || withTaken.FeeSats >= replaced.Values.Sum() + VSize(withTaken.Inputs.Count))
+                    {
+                        takenFrom = replaced.Keys.ToList();
+                        return withTaken;
+                    }
+                }
+            }
+            return Try(free, out reason);
         }
 
         /// <summary>

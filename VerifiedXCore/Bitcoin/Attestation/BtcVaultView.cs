@@ -101,6 +101,19 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 PaidOutForBridgeExitsSats = total.SettledExitSats,
                 // Bitcoin fees of releases (a requester had its withdrawal's coins sent back to the vault); each came out of that requester's refund.
                 ReleaseFeesSats = total.ReleaseFeeSats,
+                // Bitcoin fees of moving the vault's coins to a new key (plan 8.8); they fall on the owner's figure.
+                SweepFeesSats = total.SweepFeeSats,
+                // The vault's keys, oldest first: DepositAddress above is the current one. An older address still counts
+                // (what is sent there is credited and moved on) for as long as its key's holders sign.
+                Keys = BtcAttestStore.ScriptRowsForVault(scUID).Select(k => new
+                {
+                    k.Generation, k.DepositAddress, KeyUID = BtcVaultKeys.KeyUidOf(k), Holders = BtcVaultKeys.Holders(k).Count,
+                    MinSigners = BtcVaultKeys.MinSigners(k), HealthyHolders = k.HealthyHolders < 0 ? (int?)null : k.HealthyHolders,
+                    k.HealthCheckedAtVfxHeight, RekeyDue = k.RekeyDueSinceVfxHeight > 0 && k.RetiredAtVfxHeight == 0,
+                    k.RekeyDueSinceVfxHeight, Current = k.RetiredAtVfxHeight == 0, k.RetiredAtVfxHeight, k.CreatedAtVfxHeight,
+                    FreeSats = BtcAttestStore.FreeCoinsOf(scUID).Where(c => BtcAttestStore.ScriptRowOfCoin(c)?.ScriptHex == k.ScriptHex).Sum(c => c.ValueSats),
+                }).ToList(),
+                CanSign = BtcVaultKeys.CannotSignRefusal(scUID) == null,
                 Coins = coins.Where(c => c.Status != VaultCoinStatus.Spent && c.Status != VaultCoinStatus.Orphaned)
                     .OrderBy(c => c.CreatedInHeight).ThenBy(c => c.Outpoint, StringComparer.Ordinal)
                     .Select(c => new { c.Outpoint, c.ValueSats, Status = c.Status.ToString(), c.CreatedInHeight, c.IsCoinbase, HeldFor = c.PinnedToRef, AlsoHeldFor = c.AlsoPinnedTo }).ToList(),
@@ -158,12 +171,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
         {
             var newest = row.Pins.LastOrDefault(p => !p.Dead);
             var open = row.State == VaultWithdrawalState.Waiting || row.State == VaultWithdrawalState.Pinned;
-            var pinned = row.State == VaultWithdrawalState.Pinned && !row.IsBridgeExit;
+            var pinned = row.State == VaultWithdrawalState.Pinned && !row.IsBridgeExit && !row.IsSweep;
             return new
             {
                 row.SmartContractUID,
                 RequestHash = row.RequestHash,
-                Kind = row.IsBridgeExit ? "BridgeExit" : "Withdrawal",
+                Kind = row.IsBridgeExit ? "BridgeExit" : row.IsSweep ? "Sweep" : "Withdrawal",
                 BaseBurnTxHash = row.ExitBurnHash,
                 Requester = string.IsNullOrEmpty(row.Requester) ? null : row.Requester,
                 State = row.State.ToString(),
@@ -180,7 +193,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 BitcoinTxid = row.SettledTxid ?? newest?.Txid,
                 row.SettledTxid,
                 ClosedAtVfxHeight = open ? (long?)null : row.ClosedAtVfxHeight,
-                CanCancel = row.State == VaultWithdrawalState.Waiting && !row.IsBridgeExit,
+                CanCancel = row.State == VaultWithdrawalState.Waiting && !row.IsBridgeExit && !row.IsSweep,
                 CanRaiseFee = pinned && BtcWithdrawals.HasRoomForPayment(row) && !row.Pins.Any(p => !p.Dead && p.IsRelease),
                 // The requester may give a pinned withdrawal up: its coins are sent back to the vault, and it is refunded less that Bitcoin fee.
                 CanRelease = pinned && BtcWithdrawals.HasRoomForRelease(row),
@@ -207,7 +220,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
         private static string Summary(VaultWithdrawalRow row)
         {
-            var what = row.IsBridgeExit ? "This part of the bridge exit" : "This withdrawal";
+            var what = row.IsBridgeExit ? "This part of the bridge exit" : row.IsSweep ? "This move of the vault's coins to its new key" : "This withdrawal";
             var newest = row.Pins.LastOrDefault(p => !p.Dead);
             switch (row.State)
             {

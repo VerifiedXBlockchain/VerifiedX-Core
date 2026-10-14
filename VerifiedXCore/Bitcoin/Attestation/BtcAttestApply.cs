@@ -16,7 +16,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
     public static class BtcAttestTx
     {
         public static bool IsAttestationType(TransactionType type) =>
-            type == TransactionType.VBTC_V2_BTC_REPORT || type == TransactionType.VBTC_V2_BTC_REORG;
+            type == TransactionType.VBTC_V2_BTC_REPORT || type == TransactionType.VBTC_V2_BTC_REORG || type == TransactionType.VBTC_V2_VAULT_REKEY;
     }
 
     /// <summary>
@@ -38,7 +38,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 if (BtcAttestStore.GetMeta(db) == null)
                     Initialize(vfxHeight, db);
                 if (BtcAttestRules.IsEpochStart(vfxHeight))
+                {
                     StoreSignerSet(vfxHeight, db);
+                    BtcVaultKeys.CheckHealth(vfxHeight, db); // which vault keys have too few holders left (plan 8.8)
+                }
                 BtcWithdrawals.OnBlockStart(vfxHeight, db); // requests never pinned and past their window: closed, refunded
             }
             catch (Exception ex)
@@ -128,10 +131,15 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
                 var meta = BtcAttestStore.GetMeta(db);
                 var watchFrom = meta == null ? 0 : Math.Max(meta.CheckpointHeight + 1, meta.EventsThroughHeight - BtcAttestRules.WatchBackBlocks + 1);
+                // The key as its ceremony made it: who holds it and how many of them sign together.
+                var holders = (vault.Feature.ValidatorAddressesSnapshot ?? new List<string>())
+                    .Where(a => !string.IsNullOrEmpty(a)).Distinct(StringComparer.Ordinal).OrderBy(a => a, StringComparer.Ordinal).ToList();
                 BtcAttestStore.SaveScript(new VaultDepositScriptRow
                 {
                     ScriptHex = scriptHex, SmartContractUID = scUID, DepositAddress = address.Trim(),
                     CreatedAtVfxHeight = vfxHeight, WatchFromBitcoinHeight = watchFrom,
+                    Generation = 0, KeyUID = scUID, Holders = holders, GroupKeyHex = vault.Feature.FrostGroupPublicKey,
+                    MinSigners = FrostDkgAttestation.ThresholdFor(holders.Count, vault.Feature.RequiredThreshold),
                 }, db);
             }
             catch (Exception ex)
@@ -197,7 +205,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     {
                         Outpoint = effect.Outpoint, SmartContractUID = effect.SmartContractUID, ValueSats = effect.Sats,
                         PinnedToRef = existing?.PinnedToRef, AlsoPinnedTo = existing?.AlsoPinnedTo?.ToList(),
-                        CreatedInHeight = effect.BitcoinHeight, IsCoinbase = effect.IsCoinbase,
+                        CreatedInHeight = effect.BitcoinHeight, IsCoinbase = effect.IsCoinbase, ScriptHex = effect.ScriptHex,
                     };
                     created.Status = BtcWithdrawals.SetHolders(created, db) ? VaultCoinStatus.Pinned : VaultCoinStatus.Unspent;
                     BtcAttestStore.SaveCoin(created, existing, db);
@@ -282,7 +290,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         {
             Outpoint = c.Outpoint, SmartContractUID = c.SmartContractUID, ValueSats = c.ValueSats, Status = c.Status, CreatedInHeight = c.CreatedInHeight,
             IsCoinbase = c.IsCoinbase, SpentByTxid = c.SpentByTxid, SpentInHeight = c.SpentInHeight, PinnedToRef = c.PinnedToRef,
-            AlsoPinnedTo = c.AlsoPinnedTo?.ToList(), LastModifiedHeight = c.LastModifiedHeight,
+            AlsoPinnedTo = c.AlsoPinnedTo?.ToList(), ScriptHex = c.ScriptHex, LastModifiedHeight = c.LastModifiedHeight,
         };
     }
 }

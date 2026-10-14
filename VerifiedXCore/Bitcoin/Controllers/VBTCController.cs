@@ -1241,8 +1241,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Legacy = depositKind.Legacy,
                     Frozen = depositKind.Frozen,
                     Note = depositKind.Note,
-                    DepositAddress = vault.Feature.DepositAddress,
-                    FrostGroupPublicKey = vault.Feature.FrostGroupPublicKey ?? string.Empty,
+                    // A watched vault moved to a new key (plan 8.8) is deposited to at its current key's address.
+                    DepositAddress = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.ScriptRowForVault(scUID)?.DepositAddress ?? vault.Feature.DepositAddress,
+                    FrostGroupPublicKey = (VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.ScriptRowForVault(scUID) is { } currentKey
+                        ? VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.GroupKey(currentKey) : vault.Feature.FrostGroupPublicKey) ?? string.Empty,
                     RequiredThreshold = vault.Feature.RequiredThreshold,
                     DKGProof = vault.Feature.DKGProof ?? string.Empty
                 });
@@ -4521,7 +4523,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                         // Owner and deposit address from chain; the local record (owner's node only) just caches the BTC balance.
                         var local = VBTCContractV2.GetContract(contract.SmartContractUID);
-                        var depositAddress = contract.Feature.DepositAddress;
+                        var depositAddress = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.ScriptRowForVault(contract.SmartContractUID)?.DepositAddress ?? contract.Feature.DepositAddress; // the current key's (plan 8.8)
                         bool isOwner = scState?.OwnerAddress == address;
                         decimal depositBalance = 0.0M;
                         bool depositStale = false;

@@ -84,7 +84,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 // After a deep Bitcoin reorganisation a pinned transaction can spend a coin that is not there (yet):
                 // it cannot be broadcast until that coin's own transaction has confirmed again.
                 if (pin.Inputs.Any(o => BtcAttestStore.Coin(o)?.Status != VaultCoinStatus.Pinned)) continue;
-                var signers = SignersOf(row.SmartContractUID);
+                // The holders of the key its coins are under (a vault can have had more than one, plan 8.8).
+                var key = BtcVaultKeys.KeyOfCoins(pin.Inputs);
+                if (key == null) continue;
+                var signers = BtcVaultKeys.Holders(key);
                 if (!signers.Contains(me, StringComparer.Ordinal)) continue;
                 if (tipHeight < pin.PinnedAtVfxHeight + SettleBlocks + (long)Turn(pin.Txid, me, signers) * TurnBlocks) continue;
 
@@ -115,10 +118,17 @@ namespace VerifiedXCore.Bitcoin.Attestation
             return led;
         }
 
-        /// <summary>The validators that hold this vault's key shares (the participants of its key ceremony).</summary>
-        public static List<string> SignersOf(string scUID) =>
-            VBTCChainView.GetVault(scUID)?.Feature.ValidatorAddressesSnapshot?.Where(a => !string.IsNullOrEmpty(a)).Distinct(StringComparer.Ordinal).ToList()
-            ?? new List<string>();
+        /// <summary>
+        /// The validators that hold the shares of the key a UID names (the participants of its key ceremony): a vault's
+        /// UID names its first key, a later key is named by its own UID (plan 8.8).
+        /// </summary>
+        public static List<string> SignersOf(string uid)
+        {
+            var key = BtcVaultKeys.KeyRow(uid);
+            if (key != null) return BtcVaultKeys.Holders(key);
+            return VBTCChainView.GetVault(uid)?.Feature.ValidatorAddressesSnapshot?.Where(a => !string.IsNullOrEmpty(a)).Distinct(StringComparer.Ordinal).ToList()
+                ?? new List<string>();
+        }
 
         /// <summary>
         /// A signer's place in line for one transaction: 0 starts at once, 1 after one turn, and so on. The order is the
@@ -136,14 +146,22 @@ namespace VerifiedXCore.Bitcoin.Attestation
         private static async Task<(bool Ok, string Detail)> SignAndBroadcastWithFrostAsync(VaultWithdrawalRow row, VaultPin pin)
         {
             var vault = VBTCChainView.GetVault(row.SmartContractUID);
-            var script = BtcAttestStore.ScriptRowForVault(row.SmartContractUID);
-            if (vault == null || script == null) return (false, "the vault is not in state");
+            // The key the pinned coins are under: its address, its holders, the UID its shares are filed under.
+            var script = BtcVaultKeys.KeyOfCoins(pin.Inputs);
+            if (vault == null || script == null) return (false, "the vault, or the one key its coins are under, is not in state");
 
             // What the ceremony is told it is signing for. The transaction itself is the pinned one either way.
             string reference, destination;
             decimal amount;
             long feeRate;
-            if (row.IsBridgeExit)
+            if (row.IsSweep)
+            {
+                reference = row.Ref;
+                destination = BtcAttestStore.ScriptRow(row.DestinationScriptHex)?.DepositAddress ?? "";
+                amount = pin.DestinationSats / BtcAttestBalance.SatsPerBtc;
+                feeRate = pin.FeeRate > 0 ? pin.FeeRate : row.FeeRate;
+            }
+            else if (row.IsBridgeExit)
             {
                 var exit = VBTCBridgeBtcExitState.GetByBurnHash(row.ExitBurnHash ?? "");
                 if (exit == null) return (false, "the bridge exit is not in state");
@@ -176,15 +194,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 });
             }
 
-            var snapshot = SignersOf(row.SmartContractUID);
+            var snapshot = BtcVaultKeys.Holders(script);
             var registered = VBTCValidatorRegistry.GetActiveValidators().Where(v => snapshot.Contains(v.ValidatorAddress, StringComparer.Ordinal)).ToList();
             var reachable = await FrostMPCService.ProbeValidatorReachability(registered);
-            if (reachable.Count == 0) return (false, $"none of the vault's {snapshot.Count} signers is reachable");
+            if (reachable.Count == 0) return (false, $"none of the key's {snapshot.Count} signers is reachable");
+            var madeAt = script.Generation > 0 ? script.CreatedAtVfxHeight : vault.Feature.ProofBlockHeight; // the height a vault names is its creator's word: never after the tip
             var threshold = VBTCThresholdCalculator.CalculateAdjustedThreshold(snapshot.Count, reachable.Count,
-                Math.Max(0, Math.Min(vault.Feature.ProofBlockHeight, Globals.LastBlock?.Height ?? 0)), Globals.LastBlock?.Height ?? 0); // the height a vault names is its creator's word: never after the tip
+                Math.Max(0, Math.Min(madeAt, Globals.LastBlock?.Height ?? 0)), Globals.LastBlock?.Height ?? 0);
 
             var result = await BitcoinTransactionService.ExecuteFROSTWithdrawal(
-                script.DepositAddress, destination, amount, feeRate, row.SmartContractUID, reachable, threshold,
+                script.DepositAddress, destination, amount, feeRate, BtcVaultKeys.KeyUidOf(script), reachable, threshold,
                 broadcast: true, coordinatorAddress: Globals.ValidatorAddress, withdrawalRequestHash: reference,
                 pinnedUnsignedTxHex: pin.TxHex, pinnedCoins: coins);
             if (!result.Success) return (false, result.ErrorMessage);

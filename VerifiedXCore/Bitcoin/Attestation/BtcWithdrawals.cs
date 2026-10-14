@@ -56,6 +56,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         var outflows = VBTCService.GetVbtcV2WithdrawalOutflows(tx).Where(o => BtcAttestBalance.IsAttestedVault(Stored(o.ScUid))).ToList();
                         var watched = outflows.Select(o => o.ScUid).ToList();
                         if (watched.Count == 0) return null;
+                        // Nobody is debited for a transaction the vault's key holders can no longer sign (plan 8.8).
+                        foreach (var vault in watched)
+                            if (BtcVaultKeys.CannotSignRefusal(Stored(vault)) is { } cannotSign)
+                                return cannotSign;
                         var data = JObject.Parse(tx.Data);
                         var address = data["BTCAddress"]?.ToObject<string?>();
                         if (!BtcCanonicalWithdrawal.TryDestinationScript(address, out var script))
@@ -81,7 +85,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         // A payment to the vault's own address cannot be told from its change: the vault's signers
                         // would refuse the transaction and the withdrawal would hold its coins without ever being paid.
                         foreach (var vault in watched)
-                            if (BtcAttestStore.ScriptRowForVault(Stored(vault))?.ScriptHex == script)
+                            if (BtcAttestStore.ScriptRowsForVault(Stored(vault)).Any(k => k.ScriptHex == script))
                                 return $"The withdrawal's Bitcoin address is the deposit address of vault {vault}, which it withdraws from. Bitcoin that is to stay in the vault is not withdrawn.";
                         return null;
                     }
@@ -306,6 +310,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 }
 
                 RetryWaiting(vaults, vfxHeight, db);
+                // What a replaced key of these vaults now holds free (change of an earlier withdrawal, a late deposit) moves on.
+                foreach (var vault in vaults)
+                    PlanSweeps(vault, vfxHeight, db);
             }
             catch (Exception ex)
             {
@@ -354,11 +361,15 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         ExpireExit(row, vfxHeight, db); // an exit is failed as a whole, once
                 }
                 RetryWaitingForTakeover(vfxHeight, db);
-                RaiseStuckExitFees(vfxHeight, db);
+                RaiseStuckExitFees(vfxHeight, db); // and sweeps' (plan 8.8)
+                PlanAllSweeps(vfxHeight, db);
             }
             catch (Exception ex)
             {
+                // Passed on: what this does is consensus state, and a failure here counts against the block's
+                // application (it used to be swallowed, leaving this node with other withdrawals than its peers).
                 ErrorLogUtility.LogError($"Expiring unpinned withdrawals at {vfxHeight} failed: {ex}", "BtcWithdrawals.OnBlockStart()");
+                throw;
             }
         }
 
@@ -456,6 +467,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 SettleExitPart(row, txid, report, vfxHeight, db);
                 return;
             }
+            if (row.IsSweep)
+            {
+                SettleSweep(row, txid, vfxHeight, db);
+                return;
+            }
 
             var request = VBTCWithdrawalRequest.GetByTransactionHash(row.RequestHash, row.SmartContractUID);
             if (request == null)
@@ -488,6 +504,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (row.IsBridgeExit)
             {
                 VoidExitPart(row, vfxHeight, db, why);
+                return;
+            }
+            if (row.IsSweep)
+            {
+                // Nothing was debited for a sweep: its coins are free again and the next sweep takes what is left.
+                SCLogUtility.Log($"Vault {row.SmartContractUID}: sweep {row.Ref} closed ({state}): {why}.", "BtcWithdrawals.Close()");
                 return;
             }
 
@@ -595,7 +617,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         {
             Outpoint = c.Outpoint, SmartContractUID = c.SmartContractUID, ValueSats = c.ValueSats, Status = c.Status, CreatedInHeight = c.CreatedInHeight,
             IsCoinbase = c.IsCoinbase, SpentByTxid = c.SpentByTxid, SpentInHeight = c.SpentInHeight, PinnedToRef = c.PinnedToRef,
-            AlsoPinnedTo = c.AlsoPinnedTo?.ToList(), LastModifiedHeight = c.LastModifiedHeight,
+            AlsoPinnedTo = c.AlsoPinnedTo?.ToList(), ScriptHex = c.ScriptHex, LastModifiedHeight = c.LastModifiedHeight,
         };
     }
 }

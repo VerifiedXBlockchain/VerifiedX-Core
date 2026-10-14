@@ -26,6 +26,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
     /// A vault's Bitcoin deposit script. The id is the scriptPubKey, hex. A row is written when a vault is created at or
     /// after the recording height; a vault with no row predates this layer (a legacy vault, plan 8.2): its coins are
     /// not known to consensus and it is frozen at enforcement.
+    ///
+    /// A vault can have more than one: each is one key (plan 8.8). The key its creation's ceremony made is generation
+    /// 0; when too many of a key's holders have left, the vault is moved to a new key made by the validators of the
+    /// day (a re-key), which is the next generation, and its coins are sent there. The vault's current key is its
+    /// newest generation. Every coin records the script it is at, so each is signed by the holders of its own key.
     /// </summary>
     public sealed class VaultDepositScriptRow
     {
@@ -39,6 +44,26 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// mined can still be reported.
         /// </summary>
         public long WatchFromBitcoinHeight { get; set; }
+        /// <summary>0 for the key of the vault's creation, one more for each re-key.</summary>
+        public int Generation { get; set; }
+        /// <summary>The UID the validators file this key's shares under: the vault's own UID for generation 0.</summary>
+        public string? KeyUID { get; set; }
+        /// <summary>The validators holding shares of this key (its ceremony's participants), ordinal order.</summary>
+        public List<string>? Holders { get; set; }
+        /// <summary>Shares that sign together with this key.</summary>
+        public int MinSigners { get; set; }
+        /// <summary>The key's public key, hex, as its ceremony made it.</summary>
+        public string? GroupKeyHex { get; set; }
+        /// <summary>The block a newer key replaced this one at; 0 while it is the vault's key.</summary>
+        public long RetiredAtVfxHeight { get; set; }
+        /// <summary>
+        /// Holders of this key that were active validators with their stake bonded and no exit, at the last look
+        /// (every epoch, <see cref="BtcVaultKeys.CheckHealth"/>); -1 before the first.
+        /// </summary>
+        public int HealthyHolders { get; set; } = -1;
+        public long HealthCheckedAtVfxHeight { get; set; }
+        /// <summary>The block from which the key had too few healthy holders to be kept (a re-key may be made); 0 while it has enough.</summary>
+        public long RekeyDueSinceVfxHeight { get; set; }
         public long LastModifiedHeight { get; set; }
     }
 
@@ -82,6 +107,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// without reading every coin it ever held. Set by <see cref="BtcAttestStore.SaveCoin"/> from the status.
         /// </summary>
         public string? FreeOf { get; set; }
+        /// <summary>The deposit script the coin pays (which of the vault's keys signs for it). Null: the vault's first script.</summary>
+        public string? ScriptHex { get; set; }
         public long LastModifiedHeight { get; set; }
     }
 
@@ -102,6 +129,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// the Bitcoin left the vault once and must be counted against one party only.
         /// </summary>
         public long ReleaseFeeSats { get; set; }
+        /// <summary>
+        /// Bitcoin fees this vault has paid to move its coins to a new key (sweeps, plan 8.8), in all. Not added back:
+        /// nobody else was charged for them, so they fall on the owner's figure.
+        /// </summary>
+        public long SweepFeeSats { get; set; }
         public long LastModifiedHeight { get; set; }
 
         /// <summary>What the vault holds on Bitcoin: unspent coins and coins pinned to a withdrawal not yet confirmed.</summary>
@@ -209,6 +241,14 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public bool IsBridgeExit { get; set; }
         /// <summary>For a bridge exit: the Base burn it pays, as its exit record holds it.</summary>
         public string? ExitBurnHash { get; set; }
+        /// <summary>
+        /// A sweep: the vault's coins moving from a replaced key to its current one (plan 8.8). No requester, nothing
+        /// debited or refunded; the id is "sweep:scUID|gN@height#n" and <see cref="DestinationScriptHex"/> is the
+        /// current key's script.
+        /// </summary>
+        public bool IsSweep { get; set; }
+        /// <summary>For a sweep: the script of the key it moves coins from.</summary>
+        public string? SweepFromScriptHex { get; set; }
         public List<VaultPin> Pins { get; set; } = new();
         public string? SettledTxid { get; set; }
         public long ClosedAtVfxHeight { get; set; }
@@ -243,6 +283,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var scripts = db.GetCollection<VaultDepositScriptRow>(Scripts);
             scripts.EnsureIndex(x => x.SmartContractUID);
             scripts.EnsureIndex(x => x.LastModifiedHeight);
+            scripts.EnsureIndex(x => x.KeyUID);
+            scripts.EnsureIndex(x => x.RetiredAtVfxHeight);
             var coins = db.GetCollection<VaultCoinRow>(Coins);
             coins.EnsureIndex(x => x.SmartContractUID);
             coins.EnsureIndex(x => x.FreeOf);
@@ -293,8 +335,19 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public static VaultDepositScriptRow? ScriptRow(string? scriptHex, LiteDatabase? db = null) =>
             string.IsNullOrEmpty(scriptHex) ? null : (db ?? Db).GetCollection<VaultDepositScriptRow>(Scripts).FindById(scriptHex.ToLowerInvariant());
 
+        /// <summary>The vault's current key: its newest generation. Null when the chain does not watch the vault.</summary>
         public static VaultDepositScriptRow? ScriptRowForVault(string? scUID, LiteDatabase? db = null) =>
-            string.IsNullOrEmpty(scUID) ? null : (db ?? Db).GetCollection<VaultDepositScriptRow>(Scripts).FindOne(x => x.SmartContractUID == scUID);
+            string.IsNullOrEmpty(scUID) ? null : ScriptRowsForVault(scUID, db).LastOrDefault();
+
+        /// <summary>Every key the vault has had, oldest first.</summary>
+        public static List<VaultDepositScriptRow> ScriptRowsForVault(string? scUID, LiteDatabase? db = null) =>
+            string.IsNullOrEmpty(scUID) ? new List<VaultDepositScriptRow>()
+                : (db ?? Db).GetCollection<VaultDepositScriptRow>(Scripts).Find(x => x.SmartContractUID == scUID)
+                    .OrderBy(r => r.Generation).ThenBy(r => r.ScriptHex, StringComparer.Ordinal).ToList();
+
+        /// <summary>The key a coin is held under: the script it pays (the vault's first script for a coin recorded without one).</summary>
+        public static VaultDepositScriptRow? ScriptRowOfCoin(VaultCoinRow? coin, LiteDatabase? db = null) =>
+            coin == null ? null : (coin.ScriptHex != null ? ScriptRow(coin.ScriptHex, db) : ScriptRowsForVault(coin.SmartContractUID, db).FirstOrDefault());
 
         public static void SaveScript(VaultDepositScriptRow row, LiteDatabase? db = null)
         {
@@ -373,6 +426,15 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var d = db ?? Db;
             var total = Total(scUID, d);
             total.ReleaseFeeSats += sats;
+            total.LastModifiedHeight = StateWriteContext.StampHeight;
+            d.GetCollection<VaultDepositTotalRow>(Totals).Upsert(total);
+        }
+
+        public static void AddSweepFee(string scUID, long sats, LiteDatabase? db = null)
+        {
+            var d = db ?? Db;
+            var total = Total(scUID, d);
+            total.SweepFeeSats += sats;
             total.LastModifiedHeight = StateWriteContext.StampHeight;
             d.GetCollection<VaultDepositTotalRow>(Totals).Upsert(total);
         }

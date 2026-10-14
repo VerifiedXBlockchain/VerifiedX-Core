@@ -16,6 +16,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public string Txid { get; init; } = "";
         public long BitcoinHeight { get; init; }
         public bool IsCoinbase { get; init; }
+        /// <summary>For a new coin: the vault deposit script it pays (which of the vault's keys holds it).</summary>
+        public string? ScriptHex { get; init; }
     }
 
     public sealed class BtcReportOutcome
@@ -350,7 +352,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 var outpoint = BtcAttestStore.OutpointKey(txid, vout);
                 // Already known: one coin, once. (A coin a rewind orphaned is not known: its transaction confirming again creates it again.)
                 if (overlay.ContainsKey(outpoint) || BtcAttestStore.Coin(outpoint, db) is { Status: not VaultCoinStatus.Orphaned }) continue;
-                effects.Add(new BtcCoinEffect { Outpoint = outpoint, SmartContractUID = row.SmartContractUID, Sats = sats, Txid = txid, BitcoinHeight = block, IsCoinbase = isCoinbase });
+                effects.Add(new BtcCoinEffect { Outpoint = outpoint, SmartContractUID = row.SmartContractUID, Sats = sats, Txid = txid, BitcoinHeight = block, IsCoinbase = isCoinbase, ScriptHex = row.ScriptHex });
                 overlay[outpoint] = VaultCoinStatus.Unspent;
             }
 

@@ -152,6 +152,15 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// </summary>
         public static string ResolveOnChainGroupPublicKey(string smartContractUID)
         {
+            // A later key of a vault the chain watches (plan 8.8) is filed under a UID of its own, which is no contract.
+            try
+            {
+                var key = VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(smartContractUID);
+                if (key != null && key.Generation > 0 && string.Equals(key.KeyUID, smartContractUID, StringComparison.Ordinal))
+                    return key.GroupKeyHex ?? string.Empty;
+            }
+            catch { }
+
             try
             {
                 var local = VBTCContractV2.GetContract(smartContractUID);

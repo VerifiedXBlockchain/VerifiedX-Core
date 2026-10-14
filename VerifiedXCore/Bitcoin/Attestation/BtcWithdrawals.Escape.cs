@@ -79,7 +79,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// </summary>
         private static bool IsStuck(VaultWithdrawalRow row, long feeRate, long vfxHeight)
         {
-            if (row.IsBridgeExit || row.State != VaultWithdrawalState.Pinned) return false;
+            // A sweep's fee is raised by rule, like an exit's; it gives its coins to nobody.
+            if (row.IsBridgeExit || row.IsSweep || row.State != VaultWithdrawalState.Pinned) return false;
             var newest = row.Pins.LastOrDefault(p => !p.Dead);
             if (newest == null) return false;
             var pays = newest.FeeRate > 0 ? newest.FeeRate : row.FeeRate;
@@ -140,11 +141,15 @@ namespace VerifiedXCore.Bitcoin.Attestation
         {
             if (waiting.IsBridgeExit || waiting.State != VaultWithdrawalState.Waiting || string.IsNullOrEmpty(waiting.DestinationScriptHex)) return 0;
             long until = 0;
-            foreach (var pinned in pinnedOnItsVault)
+            var pinnedRows = pinnedOnItsVault.ToList();
+            var current = BtcAttestStore.ScriptRowForVault(waiting.SmartContractUID);
+            foreach (var pinned in pinnedRows)
             {
-                if (pinned.IsBridgeExit || pinned.State != VaultWithdrawalState.Pinned) continue;
+                if (pinned.IsBridgeExit || pinned.IsSweep || pinned.State != VaultWithdrawalState.Pinned) continue;
                 var newest = pinned.Pins.LastOrDefault(p => !p.Dead);
                 if (newest == null) continue;
+                // Coins of a replaced key are never a withdrawal's to take (a sweep takes them).
+                if (current != null && BtcVaultKeys.KeyOfCoins(newest.Inputs)?.ScriptHex != current.ScriptHex) continue;
                 var pays = newest.FeeRate > 0 ? newest.FeeRate : pinned.FeeRate;
                 if (pays >= waiting.FeeRate) continue; // never takeable by this one
                 until = Math.Max(until, MovingSince(pinned) + BtcAttestRules.StuckPinBlocks + BtcAttestRules.TakeRetryBlocks);

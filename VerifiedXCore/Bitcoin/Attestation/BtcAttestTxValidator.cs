@@ -100,6 +100,17 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     if (admission) DropLaterCopies(tx, outcome.ReportHash);
                     return (true, "Transaction has been verified.");
                 }
+                case TransactionType.VBTC_V2_VAULT_REKEY:
+                {
+                    if (!BtcRekey.TryParse(tx.Data, out var rekey, out var parseReason) || rekey == null)
+                        return (false, parseReason ?? "The re-key does not parse.");
+                    var refusal = BtcVaultKeys.Refusal(rekey, height, out _);
+                    if (refusal != null)
+                        return (false, $"Re-key refused: {refusal}");
+                    if (admission && RekeyInMempool(rekey.ContractUID, tx.Hash))
+                        return (false, "A re-key of this vault is already in the mempool.");
+                    return (true, "Transaction has been verified.");
+                }
                 default:
                     return (false, "This Bitcoin attestation transaction type is not enabled yet.");
             }
@@ -136,6 +147,23 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 }
             }
             catch { }
+        }
+
+        /// <summary>
+        /// Whether a re-key of this vault (any one: several leaders may have finished a ceremony) is already waiting in
+        /// this node's mempool. The first kept is the one mined; a later one would be refused in its block anyway.
+        /// </summary>
+        public static bool RekeyInMempool(string vaultUid, string? exceptHash = null)
+        {
+            try
+            {
+                foreach (var held in TransactionData.GetPool().Find(x => x.TransactionType == TransactionType.VBTC_V2_VAULT_REKEY).ToList())
+                    if (held.Hash != exceptHash && BtcRekey.TryParse(held.Data, out var other, out _) && other != null
+                        && string.Equals(other.ContractUID, vaultUid, StringComparison.Ordinal))
+                        return true;
+            }
+            catch { }
+            return false;
         }
 
         /// <summary>How old a report's transaction may be when a mempool first takes it, in seconds.</summary>
@@ -195,10 +223,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
             public string? ReportHash;
             /// <summary>The withdrawals a fee bump of this block has already raised.</summary>
             public readonly HashSet<string> BumpedWithdrawals = new(StringComparer.Ordinal);
+            /// <summary>The vaults a re-key of this block has already moved.</summary>
+            public readonly HashSet<string> RekeyedVaults = new(StringComparer.Ordinal);
         }
 
         public const string OneReportReason = "A block carries at most one Bitcoin report or rewind.";
         public const string OneBumpReason = "A block carries at most one fee bump for a withdrawal.";
+        public const string OneRekeyReason = "A block carries at most one re-key for a vault.";
 
         /// <summary>
         /// The same holds for fee bumps of one withdrawal: each is judged against the withdrawal's newest transaction
@@ -210,6 +241,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
             {
                 var bumped = BtcWithdrawals.FeeBumpRef(tx);
                 return bumped == null || state.BumpedWithdrawals.Add(bumped) ? (true, "") : (false, OneBumpReason);
+            }
+            // Each re-key is judged against the vault's key before the block; a second would find it replaced.
+            if (tx.TransactionType == TransactionType.VBTC_V2_VAULT_REKEY)
+            {
+                var vault = BtcRekey.TryParse(tx.Data, out var rekey, out _) && rekey != null ? rekey.ContractUID : tx.Hash;
+                return state.RekeyedVaults.Add(vault) ? (true, "") : (false, OneRekeyReason);
             }
             // A rewind takes the report's place in a block: each is judged against the state before the block.
             if (tx.TransactionType != TransactionType.VBTC_V2_BTC_REPORT && tx.TransactionType != TransactionType.VBTC_V2_BTC_REORG) return (true, "");

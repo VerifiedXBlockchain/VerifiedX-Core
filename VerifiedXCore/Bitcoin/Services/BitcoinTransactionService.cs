@@ -546,6 +546,17 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 if (string.IsNullOrEmpty(frostGroupPublicKey))
                 {
+                    // A later key of a watched vault (plan 8.8) is no contract: its public key is recorded with it, and its
+                    // holders file their shares under its own UID.
+                    var key = VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(scUID);
+                    if (key != null && key.Generation > 0)
+                    {
+                        frostGroupPublicKey = key.GroupKeyHex;
+                        ceremonyId = VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyUidOf(key);
+                    }
+                }
+                if (string.IsNullOrEmpty(frostGroupPublicKey))
+                {
                     return (false, string.Empty, string.Empty, "FROST group public key not found in contract or State Trei", null);
                 }
 

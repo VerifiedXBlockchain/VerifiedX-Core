@@ -132,6 +132,15 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 return;
             }
 
+            if (row.IsSweep)
+            {
+                // Its fee is no longer paid: the vault holds its old key's coin again, and the sweep is fixed again.
+                var paid = row.Pins.FirstOrDefault(p => p.Txid == paidBy);
+                if (paid != null) BtcAttestStore.AddSweepFee(row.SmartContractUID, -paid.FeeSats, db);
+                SCLogUtility.Log($"Bitcoin rewind to block {bitcoinHeight}: sweep {row.Ref} of vault {row.SmartContractUID} is no longer settled ({paidBy} was in a block Bitcoin dropped); it is pinned again.", "BtcWithdrawals.Unsettle()");
+                return;
+            }
+
             var request = VBTCWithdrawalRequest.GetByTransactionHash(row.RequestHash, row.SmartContractUID);
             if (request == null)
             {

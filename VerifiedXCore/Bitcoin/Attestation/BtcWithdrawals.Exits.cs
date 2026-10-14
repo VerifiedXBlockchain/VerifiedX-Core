@@ -139,7 +139,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                             if (sats < MinExitPartSats)
                                 return $"The exit asks vault {vault} for {sats} sats; a vault's part of an exit is at least {MinExitPartSats} sats (its Bitcoin fee and an output above dust).";
                             // As for a withdrawal: a payment to the vault's own address cannot be told from its change.
-                            if (BtcAttestStore.ScriptRowForVault(vault)?.ScriptHex == script)
+                            if (BtcAttestStore.ScriptRowsForVault(vault).Any(k => k.ScriptHex == script))
                                 return $"The exit's Bitcoin destination is the deposit address of vault {vault}, which it would be paid from.";
                         }
                         return null;
@@ -241,7 +241,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         {
             if (vfxHeight % BtcAttestRules.TakeRetryBlocks != 0) return;
             foreach (var row in BtcAttestStore.WithdrawalsInState(VaultWithdrawalState.Pinned, db)
-                         .Where(r => r.IsBridgeExit && HasRoomForPayment(r))
+                         .Where(r => (r.IsBridgeExit || r.IsSweep) && HasRoomForPayment(r))
                          .OrderBy(r => r.Ref, StringComparer.Ordinal))
             {
                 var newest = row.Pins.LastOrDefault(p => !p.Dead);
