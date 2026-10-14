@@ -386,6 +386,33 @@ namespace VerifiedXCore.Tests
 
         // ── The rules ───────────────────────────────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// A copy of a rewind the mempool holds is refused before it is verified, as a report's copy is: each copy used to
+        /// cost a full check of its signatures and headers (fourth review, round 10). A copy too poorly signed to pass
+        /// verification shows it: it is refused as a copy, not for its signatures.
+        /// </summary>
+        [Fact]
+        public async Task ACopyOfAHeldRewind_IsRefusedBeforeItIsVerified()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var at = await MineAndReport(Pay(vault.Script, 40_000));
+            var branch = _btc.ForkAfter(at - 1);
+            branch.MineEmpty((int)(_btc.Tip - at) + 3);
+            var held = RewindTo(branch, at - 1);
+            held.TransactionRating = await TransactionRatingService.GetTransactionRating(held);
+            var admitted = await TransactionValidatorService.VerifyTX(held);
+            Assert.True(admitted.Item1, admitted.Item2);
+            TransactionData.GetPool().InsertSafe(held);
+
+            var copy = RewindTo(branch, at - 1, signers: Signers.Take(1));
+            copy.Timestamp = held.Timestamp + 1;
+            copy.Build();
+            var (ok, why) = await TransactionValidatorService.VerifyTX(copy);
+            Assert.False(ok);
+            Assert.Contains("already in the mempool", why);
+        }
+
         [Fact]
         public async Task ARewind_NeedsAHeavierBranch_TwoThirdsOfTheSigners_AndSomethingToTakeBack()
         {

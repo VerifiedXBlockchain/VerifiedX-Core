@@ -96,6 +96,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 {
                     if (!BtcReport.TryParse(tx.Data, out var rewind, out var parseReason) || rewind == null)
                         return (false, parseReason ?? "The Bitcoin rewind does not parse.");
+                    // A copy of a rewind the mempool holds is refused before it is verified, as a report's is: each copy
+                    // cost a full check of its signatures and up to 500 headers (fourth review, round 10).
+                    if (admission && EarlierCopyInMempool(tx, rewind.Hash(), height, recheckSignatures: false))
+                        return (false, "This Bitcoin rewind is already in the mempool.");
                     var outcome = BtcReportVerifier.VerifyRewind(rewind, height);
                     if (!outcome.Ok)
                         return (false, $"Bitcoin rewind refused: {outcome.Error}");
