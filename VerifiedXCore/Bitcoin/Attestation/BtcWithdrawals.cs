@@ -56,6 +56,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         var outflows = VBTCService.GetVbtcV2WithdrawalOutflows(tx).Where(o => BtcAttestBalance.IsAttestedVault(Stored(o.ScUid))).ToList();
                         var watched = outflows.Select(o => o.ScUid).ToList();
                         if (watched.Count == 0) return null;
+                        // A request is mined once. Mined again (a producer putting it in a block after the recent-blocks
+                        // check has forgotten it, with the nonce rule off), its requester was debited a second time with
+                        // no row to pay, expire or cancel, and a settled withdrawal's request was reopened (fourth review,
+                        // round 2). A new request has a new hash.
+                        foreach (var vault in watched)
+                            if (BtcAttestStore.Withdrawal(RefOf(tx.Hash, Stored(vault)!)) != null)
+                                return $"Withdrawal request {tx.Hash} on vault {vault} was mined before.";
                         // Nobody is debited for a transaction the vault's key holders can no longer sign (plan 8.8).
                         foreach (var vault in watched)
                             if (BtcVaultKeys.CannotSignRefusal(Stored(vault)) is { } cannotSign)

@@ -506,6 +506,22 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A withdrawal request mined a second time (by a producer, once the recent-blocks check has forgotten its hash)
+        /// debited its requester again with no row to pay, expire or cancel. A watched vault's request is mined once
+        /// (fourth review, round 2).
+        /// </summary>
+        [Fact]
+        public async Task AWithdrawalRequest_IsMinedOnce()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 200_000);
+            var request = await Mine(Request(vault.Uid, 0.0005M));
+            Assert.NotNull(Row(request, vault.Uid));
+            await Refused(request, "was mined before");
+        }
+
+        /// <summary>
         /// A step inside a transaction's apply (recording a withdrawal, settling after a report, a cancel, a fee raise, a
         /// bridge exit) caught its own error and only logged it: a store fault on one node left it debited with no
         /// withdrawal row, unlike its peers, and nothing flagged it. It now marks the block (fourth review).
