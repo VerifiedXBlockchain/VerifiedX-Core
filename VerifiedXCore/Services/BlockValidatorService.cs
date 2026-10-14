@@ -1513,6 +1513,12 @@ namespace VerifiedXCore.Services
                             {
                                 _cleanBlockStreak = 0;
                             }
+                            // State built under other attestation settings stays marked failed until it is rebuilt: blocks that
+                            // apply without an error do not make its bonds and signer sets the network's (fourth review, round 5).
+                            else if (VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.BuiltUnderOtherSettings(block.Height) != null)
+                            {
+                                _cleanBlockStreak = 0;
+                            }
                             else if (++_cleanBlockStreak >= STATE_PROBATION_BLOCKS)
                             {
                                 StateTreiStatusService.SetSynced(block.Height);

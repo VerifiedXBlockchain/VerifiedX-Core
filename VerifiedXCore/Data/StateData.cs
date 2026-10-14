@@ -88,7 +88,9 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
-                // No marker is written, so the next block tries again.
+                // No marker is written, so the next block tries again. A fault of this node's storage also flags the block:
+                // the same block sets the validator bonds and the first signer set from these balances (fourth review, round 5).
+                NoteApplyStepFailed(block.Height, ex);
                 ErrorLogUtility.LogError($"Forged-VFX burn at block {block.Height} failed (retried at the next block): {ex}", "StateData.ApplyForgedVfxBurnsAsync()");
             }
         }
