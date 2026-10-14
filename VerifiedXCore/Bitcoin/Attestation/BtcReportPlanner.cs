@@ -138,6 +138,15 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
             var scripts = MaxStamp(db, BtcAttestStore.Scripts);
             var coins = MaxStamp(db, BtcAttestStore.Coins);
+            // Stamps read while a block is being applied may be the block's own, with rows of that block still to come
+            // under the same stamp: the memo would take them for done and never look at them again (fourth review, round
+            // 5). A block is being applied, or has been, when the tip has moved from the one planned for (the tip moves
+            // before a block's state is applied): plan again later, the memo untouched.
+            if (Globals.TreisUpdating || (Globals.LastBlock?.Height ?? tipHeight) != tipHeight)
+            {
+                plan.Waiting = "a block is being applied; planned again after it";
+                return plan;
+            }
             static string? HashAt(long h) => VerifiedXCore.Data.BlockchainData.GetBlockByHeight(h)?.Hash;
             if (StateWentBack(scripts, coins, _sweepScripts, _sweepCoins, _sweepFrom, meta.EventsThroughHeight, _anchorHeight, _anchorHash, HashAt))
                 Reset();

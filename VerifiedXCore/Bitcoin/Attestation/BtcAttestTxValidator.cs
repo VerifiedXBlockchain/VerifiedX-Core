@@ -80,6 +80,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 {
                     if (!BtcReport.TryParse(tx.Data, out var report, out var parseReason) || report == null)
                         return (false, parseReason ?? "The Bitcoin report does not parse.");
+                    // A later copy of a report the mempool holds is refused before it is verified: anyone could wrap a
+                    // report waiting to be mined anew and have each copy's signatures checked (fourth review, round 5).
+                    if (admission && EarlierCopyInMempool(tx, report.Hash(), height, recheckSignatures: false))
+                        return (false, "This Bitcoin report is already in the mempool.");
                     var outcome = BtcReportVerifier.Verify(report, height);
                     if (!outcome.Ok)
                         return (false, $"Bitcoin report refused: {outcome.Error}");
@@ -188,7 +192,30 @@ namespace VerifiedXCore.Bitcoin.Attestation
             return false;
         }
 
-        private static bool EarlierCopyInMempool(Transaction tx, string reportHash, long height)
+
+        /// <summary>Without checking signatures: enough distinct signers of the report's epoch (which must still count) for the copy to stand.</summary>
+
+        private static bool CarriesEnoughSigners(BtcReport held, long height)
+
+        {
+
+            if (held.SignerEpoch < BtcAttestRules.EpochOf(height) - 1) return false;
+
+            var set = BtcAttestStore.SignerSet(held.SignerEpoch);
+
+            if (set == null) return false;
+
+            var members = new HashSet<string>(set.Addresses, StringComparer.Ordinal);
+
+            var signers = (held.Signatures ?? new List<BtcReportSignature>()).Where(s => s?.ValidatorAddress != null && members.Contains(s.ValidatorAddress))
+
+                .Select(s => s.ValidatorAddress).Distinct(StringComparer.Ordinal).Count();
+
+            return signers >= BtcAttestRules.RequiredSignatures(set.Addresses.Count);
+
+        }
+
+        private static bool EarlierCopyInMempool(Transaction tx, string reportHash, long height, bool recheckSignatures = true)
         {
             try
             {
@@ -201,7 +228,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         || (other.Timestamp == tx.Timestamp && string.CompareOrdinal(other.Hash, tx.Hash) < 0);
                     if (!earlier) continue;
                     if (BtcReport.TryParse(other.Data, out var held, out _) && held != null && held.Hash() == reportHash
-                        && BtcReportVerifier.CheckSignatures(held, reportHash, height) == null)
+                        && (recheckSignatures ? BtcReportVerifier.CheckSignatures(held, reportHash, height) == null
+                                              : CarriesEnoughSigners(held, height))) // its signatures were verified when it was taken in
                         return true;
                 }
             }
