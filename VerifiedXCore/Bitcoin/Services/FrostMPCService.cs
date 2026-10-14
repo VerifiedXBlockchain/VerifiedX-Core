@@ -399,7 +399,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 // Results: every participant must have finished with the same key and attested it.
                 progressCallback?.Invoke(3, 85);
-                attempt.Result = await AggregateDKGResult(sessionId, contractUid, validators, threshold, leaderAddress, attempt.Failed, rekeyOf);
+                attempt.Result = await AggregateDKGResult(sessionId, contractUid, validators, threshold, leaderAddress, attempt.Failed, rekeyOf, commitments);
                 if (attempt.Result == null)
                     await AbortDkgAttempt(sessionId, leaderAddress, validators, preSignedAuth);
                 if (attempt.Result == null)
@@ -841,7 +841,8 @@ namespace VerifiedXCore.Bitcoin.Services
             int threshold,
             string leaderAddress,
             Dictionary<string, string> failed,
-            string? rekeyOf = null)
+            string? rekeyOf = null,
+            IReadOnlyDictionary<string, string>? round1Packages = null)
         {
             LogUtility.Log($"[FROST MPC] Collecting DKG results from {validators.Count} validators...", "FrostMPCService.AggregateDKGResult");
 
@@ -926,7 +927,10 @@ namespace VerifiedXCore.Bitcoin.Services
             if (failed.Count > 0)
                 return null;
 
-            var dkgProof = FrostDkgAttestation.BuildProof(contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, attestations, keyPackageHashOfAll);
+            // A creation's proof carries each participant's Round 1 constant term and proof of knowledge: that its
+            // participants hold the key (consensus asks it of an S3C vault; round 11). A re-key's proof needs none.
+            var round1Proofs = rekeyOf == null ? FrostDkgAttestation.Round1ProofsOf(round1Packages, participants) : null;
+            var dkgProof = FrostDkgAttestation.BuildProof(contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, attestations, keyPackageHashOfAll, round1Proofs);
             LogUtility.Log($"[FROST MPC] DKG aggregation complete. GroupPubKey: {groupPublicKey.Substring(0, 16)}..., Address: {taprootAddress}",
                 "FrostMPCService.AggregateDKGResult");
 

@@ -76,6 +76,141 @@ namespace VerifiedXCore.Bitcoin.FROST
             /// </summary>
             [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
             public string? PublicKeyPackageHash { get; set; }
+
+            /// <summary>
+            /// Each participant's Round 1 constant term and its proof of knowledge, by address (a creation's proof). The
+            /// terms sum to the group key, and each proof shows its dealer knows its term's secret: together, that the
+            /// participants hold the key (<see cref="KeyPossessionRefusal"/>).
+            /// </summary>
+            [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+            public Dictionary<string, Round1Proof>? Round1Proofs { get; set; }
+        }
+
+        /// <summary>A dealer's Round 1 constant term (33-byte compressed point, hex) and its proof of knowledge (R x-only || z, hex).</summary>
+        public class Round1Proof
+        {
+            public string ConstantTerm { get; set; } = "";
+            public string ProofOfKnowledge { get; set; } = "";
+        }
+
+        // ── Possession of the key ─────────────────────────────────────────────────────────────────────────────
+
+        private static readonly System.Numerics.BigInteger CurveOrder = System.Numerics.BigInteger.Parse(
+            "0FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", System.Globalization.NumberStyles.HexNumber);
+
+        private static byte[] Be32(System.Numerics.BigInteger value)
+        {
+            var bytes = value.ToByteArray(isUnsigned: true, isBigEndian: true);
+            var result = new byte[32];
+            Buffer.BlockCopy(bytes, 0, result, 32 - bytes.Length, bytes.Length);
+            return result;
+        }
+
+        /// <summary>expand_message_xmd with SHA-256 (RFC 9380 section 5.3.1).</summary>
+        private static byte[] ExpandMessageXmd(byte[] message, byte[] dst, int length)
+        {
+            var dstPrime = dst.Concat(new[] { (byte)dst.Length }).ToArray();
+            var b0 = System.Security.Cryptography.SHA256.HashData(new byte[64].Concat(message).Concat(new[] { (byte)(length >> 8), (byte)length, (byte)0 }).Concat(dstPrime).ToArray());
+            var b = System.Security.Cryptography.SHA256.HashData(b0.Concat(new byte[] { 1 }).Concat(dstPrime).ToArray());
+            var output = new List<byte>(b);
+            for (var i = 2; output.Count < length; i++)
+            {
+                b = System.Security.Cryptography.SHA256.HashData(b0.Zip(b, (x, y) => (byte)(x ^ y)).Concat(new[] { (byte)i }).Concat(dstPrime).ToArray());
+                output.AddRange(b);
+            }
+            return output.Take(length).ToArray();
+        }
+
+        /// <summary>The challenge of a Round 1 proof of knowledge: H_dkg(identifier ‖ φ ‖ R), R the even-y point of x <paramref name="rX"/>.</summary>
+        internal static System.Numerics.BigInteger DkgChallenge(byte[] identifier32, byte[] phiCompressed33, byte[] rX32)
+        {
+            var preimage = identifier32.Concat(phiCompressed33).Concat(new byte[] { 0x02 }).Concat(rX32).ToArray();
+            var uniform = ExpandMessageXmd(preimage, Encoding.ASCII.GetBytes("FROST-secp256k1-SHA256-TR-v1dkg"), 48);
+            return System.Numerics.BigInteger.Parse("0" + Convert.ToHexString(uniform), System.Globalization.NumberStyles.HexNumber) % CurveOrder;
+        }
+
+        /// <summary>
+        /// Whether a dealer's Round 1 proof of knowledge holds, as the FROST library (ciphersuite
+        /// FROST-secp256k1-SHA256-TR-v1) makes it: R = z·G − c·φ with c = H_dkg(identifier ‖ φ ‖ R), R of even y. Checked in
+        /// managed code against the library's own packages (FrostDkgRetryTests).
+        /// </summary>
+        public static bool ProofOfKnowledgeHolds(string identifierHex, string constantTermHex, string proofHex)
+        {
+            try
+            {
+                var identifier = Convert.FromHexString(identifierHex);
+                var phiBytes = Convert.FromHexString(constantTermHex);
+                var proof = Convert.FromHexString(proofHex);
+                if (identifier.Length != 32 || phiBytes.Length != 33 || proof.Length != 64) return false;
+                var rX = proof.AsSpan(0, 32).ToArray();
+                var z = proof.AsSpan(32, 32).ToArray();
+                if (!NBitcoin.Secp256k1.ECPubKey.TryCreate(phiBytes, NBitcoin.Secp256k1.Context.Instance, out _, out var phi) || phi == null) return false;
+                var c = DkgChallenge(identifier, phi.ToBytes(true), rX);
+                if (c.IsZero) return false;
+                if (!NBitcoin.Secp256k1.ECPrivKey.TryCreate(z, out var zKey) || zKey == null) return false;
+                if (!NBitcoin.Secp256k1.ECPrivKey.TryCreate(Be32(CurveOrder - c), out var negC) || negC == null) return false;
+                if (!NBitcoin.Secp256k1.ECPubKey.TryCombine(NBitcoin.Secp256k1.Context.Instance, new[] { zKey.CreatePubKey(), phi.GetSharedPubkey(negC) }, out var r) || r == null)
+                    return false;
+                var rBytes = r.ToBytes(true);
+                return rBytes[0] == 0x02 && rBytes.AsSpan(1).SequenceEqual(rX);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// Why a creation's proof does not show that its participants hold the key it names; null when it does. Every
+        /// participant gives its Round 1 constant term and proof of knowledge (under its identifier, from the sorted
+        /// participant list), each proof holds, and the terms sum to the group key. An S3C vault needs only a few of its
+        /// own validators' attestations, and the deposit address is the group key itself: three self-declared S3C
+        /// validators could name any Taproot address (a pending vault's, a re-key's, anyone's) and have its Bitcoin
+        /// credited to their vault (fourth review, round 11). Nobody can prove knowledge of a key they do not hold.
+        /// </summary>
+        public static string? KeyPossessionRefusal(Proof proof, IReadOnlyList<string> canonicalParticipants, string groupKeyHex)
+        {
+            if (proof.Round1Proofs == null || proof.Round1Proofs.Count != canonicalParticipants.Count)
+                return "The key ceremony proof carries no proof that its participants hold the key (each participant's Round 1 constant term and proof of knowledge).";
+            var identifiers = FrostStartup.BuildAddressToIdentifierMap(canonicalParticipants.ToList());
+            var terms = new List<NBitcoin.Secp256k1.ECPubKey>();
+            foreach (var participant in canonicalParticipants)
+            {
+                if (!proof.Round1Proofs.TryGetValue(participant, out var round1) || round1 == null
+                    || !ProofOfKnowledgeHolds(identifiers[participant], round1.ConstantTerm, round1.ProofOfKnowledge))
+                    return $"The key ceremony proof has no valid proof of knowledge from participant {participant}.";
+                if (!NBitcoin.Secp256k1.ECPubKey.TryCreate(Convert.FromHexString(round1.ConstantTerm), NBitcoin.Secp256k1.Context.Instance, out _, out var term) || term == null)
+                    return $"The key ceremony proof has an unreadable constant term from participant {participant}.";
+                terms.Add(term);
+            }
+            if (!NBitcoin.Secp256k1.ECPubKey.TryCombine(NBitcoin.Secp256k1.Context.Instance, terms, out var sum) || sum == null)
+                return "The participants' constant terms do not sum to a key.";
+            var groupKey = Convert.FromHexString(groupKeyHex);
+            var groupX = groupKey.Length == 33 ? groupKey.AsSpan(1).ToArray() : groupKey;
+            // The library's group key is the sum taken as a Taproot internal key and tweaked (BIP341, no script tree);
+            // knowing the sum's secret is knowing the tweaked key's, whose tweak is public. Either form is accepted.
+            var internalX = sum.ToBytes(true).AsSpan(1).ToArray();
+            var tweakedX = new TaprootInternalPubKey(internalX).GetTaprootFullPubKey().ToBytes();
+            return internalX.AsSpan().SequenceEqual(groupX) || tweakedX.AsSpan().SequenceEqual(groupX)
+                ? null : "The participants' constant terms do not sum to the vault's group key: they do not hold it.";
+        }
+
+        /// <summary>Each participant's constant term and proof of knowledge, read from the Round 1 packages a coordinator collected.</summary>
+        public static Dictionary<string, Round1Proof>? Round1ProofsOf(IReadOnlyDictionary<string, string>? round1Packages, IEnumerable<string> participants)
+        {
+            if (round1Packages == null) return null;
+            var proofs = new Dictionary<string, Round1Proof>(StringComparer.Ordinal);
+            foreach (var participant in participants)
+            {
+                if (!round1Packages.TryGetValue(participant, out var package)) return null;
+                try
+                {
+                    var json = Newtonsoft.Json.Linq.JObject.Parse(package);
+                    var term = (json["commitment"] as Newtonsoft.Json.Linq.JArray)?.FirstOrDefault()?.ToString();
+                    var pok = json["proof_of_knowledge"]?.ToString();
+                    if (string.IsNullOrEmpty(term) || string.IsNullOrEmpty(pok)) return null;
+                    proofs[participant] = new Round1Proof { ConstantTerm = term, ProofOfKnowledge = pok };
+                }
+                catch { return null; }
+            }
+            return proofs;
         }
 
         /// <summary>
@@ -149,7 +284,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         }
 
         public static string BuildProof(string contractUid, string groupPublicKey, string taprootAddress, string owner, int threshold,
-            IEnumerable<string> participants, IEnumerable<Attestation> attestations, string? keyPackageHash = null) =>
+            IEnumerable<string> participants, IEnumerable<Attestation> attestations, string? keyPackageHash = null, Dictionary<string, Round1Proof>? round1Proofs = null) =>
             Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new Proof
             {
                 ProofType = ProofType,
@@ -161,6 +296,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 Participants = Canonical(participants),
                 Attestations = attestations.ToList(),
                 PublicKeyPackageHash = string.IsNullOrEmpty(keyPackageHash) ? null : keyPackageHash,
+                Round1Proofs = round1Proofs,
             })));
 
         public static Proof? ParseProof(string? base64)
@@ -270,7 +406,8 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// The proof must carry the hash of the public key package every participant attested (<see cref="KeyPackageHash"/>):
         /// always for a re-key, from Globals.PathAuditRulesHeight for a creation.
         /// </param>
-        public static string? Validate(TokenizationV2Feature? feature, string contractUid, string owner, Func<List<VBTCValidator>> activeAtPreviousBlock, string? rekeyOf = null, bool requireKeyPackageHash = false)
+        public static string? Validate(TokenizationV2Feature? feature, string contractUid, string owner, Func<List<VBTCValidator>> activeAtPreviousBlock, string? rekeyOf = null, bool requireKeyPackageHash = false,
+            bool requireKeyPossession = false)
         {
             if (feature == null) return "vBTC V2 contract has no TokenizationV2 data.";
             var groupKey = feature.FrostGroupPublicKey ?? "";
@@ -333,7 +470,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 if (!byAddress.TryGetValue(p, out var a) || !Verify(a, contractUid, groupKey, address, owner, proof.Threshold, canonical, rekeyOf, proof.PublicKeyPackageHash))
                     return $"vBTC V2 contract DKG proof has no valid attestation from participant {p}.";
             }
-            return null;
+            return requireKeyPossession ? KeyPossessionRefusal(proof, canonical, groupKey) : null;
         }
     }
 }

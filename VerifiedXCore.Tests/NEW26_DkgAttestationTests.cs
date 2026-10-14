@@ -349,6 +349,85 @@ namespace VerifiedXCore.Tests
             Assert.False((await Verify(CreateFor(uid2, mixed, Proof(uid2, mixed), isS3C: true))).Ok);
         }
 
+        /// <summary>
+        /// Participants that hold a key, made as a FROST Round 1 makes it: each a secret, its constant term and a proof of
+        /// knowledge (R even, z = k + c·a), the group key the sum of the terms.
+        /// </summary>
+        private static (string GroupKey, string Address, Dictionary<string, FrostDkgAttestation.Round1Proof> Proofs) HeldKey(IEnumerable<string> participants)
+        {
+            var order = System.Numerics.BigInteger.Parse("0FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", System.Globalization.NumberStyles.HexNumber);
+            System.Numerics.BigInteger Num(byte[] b) => new System.Numerics.BigInteger(b, isUnsigned: true, isBigEndian: true);
+            byte[] Be32(System.Numerics.BigInteger v) { var b = v.ToByteArray(isUnsigned: true, isBigEndian: true); var r = new byte[32]; Buffer.BlockCopy(b, 0, r, 32 - b.Length, b.Length); return r; }
+            var ids = FrostStartup.BuildAddressToIdentifierMap(participants.ToList());
+            var proofs = new Dictionary<string, FrostDkgAttestation.Round1Proof>();
+            var terms = new List<NBitcoin.Secp256k1.ECPubKey>();
+            foreach (var p in participants)
+            {
+                var a = new NBitcoin.Key().ToBytes();
+                var phi = NBitcoin.Secp256k1.ECPrivKey.Create(a).CreatePubKey();
+                byte[] k; byte[] r;
+                do { k = new NBitcoin.Key().ToBytes(); r = NBitcoin.Secp256k1.ECPrivKey.Create(k).CreatePubKey().ToBytes(true); } while (r[0] != 0x02);
+                var c = FrostDkgAttestation.DkgChallenge(Convert.FromHexString(ids[p]), phi.ToBytes(true), r[1..]);
+                var z = (Num(k) + c * Num(a)) % order;
+                proofs[p] = new FrostDkgAttestation.Round1Proof
+                {
+                    ConstantTerm = Convert.ToHexString(phi.ToBytes(true)).ToLowerInvariant(),
+                    ProofOfKnowledge = Convert.ToHexString(r[1..].Concat(Be32(z)).ToArray()).ToLowerInvariant(),
+                };
+                terms.Add(phi);
+            }
+            NBitcoin.Secp256k1.ECPubKey.TryCombine(NBitcoin.Secp256k1.Context.Instance, terms, out var sum);
+            var groupKey = Convert.ToHexString(sum!.ToBytes(true)[1..]).ToLowerInvariant();
+            return (groupKey, FrostDkgAttestation.DeriveTaprootAddress(groupKey, NBitcoin.Network.Main)!, proofs);
+        }
+
+        /// <summary>
+        /// An S3C vault's deposit address is its group key and only its own few validators attest it: three self-declared
+        /// S3C validators could name any Taproot address (a pending public vault's, a re-key's, anyone's) as their vault's
+        /// and have its Bitcoin credited to them. From the path-audit height an S3C vault's proof shows its participants
+        /// hold the key: each one's Round 1 constant term with its proof of knowledge, summing to the group key (fourth
+        /// review, round 11).
+        /// </summary>
+        [Fact]
+        public async Task NEW26_S3c_MustShowItsParticipantsHoldTheKey()
+        {
+            var priorRules = Globals.PathAuditRulesHeight;
+            Globals.PathAuditRulesHeight = 100;
+            try
+            {
+                var addresses = _s3c.Select(s => s.Address).ToList();
+                var t = FrostDkgAttestation.ThresholdFor(addresses.Count, 51);
+                var pkg = new string('a', 64);
+                string ProofOf(string uid, string groupKey, string address, Dictionary<string, FrostDkgAttestation.Round1Proof>? round1) =>
+                    FrostDkgAttestation.BuildProof(uid, groupKey, address, _minter.Address, t, addresses,
+                        _s3c.Select(s => new FrostDkgAttestation.Attestation
+                        {
+                            ValidatorAddress = s.Address,
+                            Signature = SignatureService.CreateSignature(FrostDkgAttestation.Message(uid, groupKey, address, _minter.Address, t, addresses, null, pkg), s.Key, s.Pub),
+                        }), pkg, round1);
+
+                // Someone else's address (a key the pool does not hold): attested by the pool, refused.
+                var uid = NewUid();
+                var (ok, message) = await Verify(Create(uid, _address, _groupKey, ProofOf(uid, _groupKey, _address, null), addresses, isS3C: true));
+                Assert.False(ok);
+                Assert.Contains("hold the key", message);
+
+                // ... and with proofs of knowledge for other terms: refused.
+                var other = HeldKey(addresses);
+                uid = NewUid();
+                (ok, message) = await Verify(Create(uid, _address, _groupKey, ProofOf(uid, _groupKey, _address, other.Proofs), addresses, isS3C: true));
+                Assert.False(ok);
+                Assert.Contains("do not hold it", message);
+
+                // A key the pool holds: accepted.
+                var held = HeldKey(addresses);
+                uid = NewUid();
+                (ok, message) = await Verify(Create(uid, held.Address, held.GroupKey, ProofOf(uid, held.GroupKey, held.Address, held.Proofs), addresses, isS3C: true));
+                Assert.True(ok, message);
+            }
+            finally { Globals.PathAuditRulesHeight = priorRules; }
+        }
+
         [Fact]
         public async Task NEW26_ValidatorWhoseBalanceMovedAway_NotEligible()
         {
@@ -557,7 +636,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(3, CountOf(controller, "var scUID = ceremony.EffectiveContractUID;"));   // the attested UID (the ceremony id unless rerun)
 
             var mpc = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "Services", "FrostMPCService.cs"));
-            Assert.Contains("var dkgProof = FrostDkgAttestation.BuildProof(contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, attestations, keyPackageHashOfAll);", mpc);
+            Assert.Contains("var dkgProof = FrostDkgAttestation.BuildProof(contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, attestations, keyPackageHashOfAll, round1Proofs);", mpc);
             var startup = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "FROST", "FrostStartup.cs"));
             Assert.Contains("FrostDkgAttestation.SignLocal(session.SmartContractUID, session.GroupPublicKey, session.TaprootAddress,", startup);
             Assert.Contains("session.LeaderAddress, FrostDkgAttestation.CeremonyThreshold(session.ParticipantAddresses?.Count ?? 0, session.RequiredThreshold, session.RekeyOf),", startup);

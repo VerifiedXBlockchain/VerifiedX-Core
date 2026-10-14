@@ -224,6 +224,68 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// An S3C vault's deposit address is its group key, and only a few of its own validators attest it: three
+        /// self-declared S3C validators could name any Taproot address (a pending vault's, a re-key's, anyone's) as their
+        /// vault's. Its proof now carries each participant's Round 1 constant term and proof of knowledge; the proofs hold
+        /// and the terms sum to the group key only if the participants hold the key (fourth review, round 11). Checked here
+        /// in managed code against the FROST library's own Round 1 packages and finished key.
+        /// </summary>
+        [Fact]
+        public void APossessionProof_HoldsForTheLibrarysKey_AndForNoOtherKey()
+        {
+            var participants = new List<string> { "xA", "xB", "xC" };
+            var ids = FrostStartup.BuildAddressToIdentifierMap(participants);
+            var packages = new Dictionary<string, string>();
+            var secrets = new Dictionary<string, string>();
+            foreach (var p in participants)
+            {
+                var (c, s, e) = FrostNative.DKGRound1Generate((ushort)Convert.ToInt32(ids[p], 16), 3, 2);
+                Assert.Equal(FrostNative.SUCCESS, e);
+                (packages[p], secrets[p]) = (c, s);
+            }
+            // Each library proof holds under its own identifier, and under no other.
+            foreach (var p in participants)
+            {
+                var term = (string)JObject.Parse(packages[p])["commitment"]![0]!;
+                var pok = (string)JObject.Parse(packages[p])["proof_of_knowledge"]!;
+                Assert.True(FrostDkgAttestation.ProofOfKnowledgeHolds(ids[p], term, pok));
+                Assert.False(FrostDkgAttestation.ProofOfKnowledgeHolds(ids[participants.First(o => o != p)], term, pok));
+                Assert.False(FrostDkgAttestation.ProofOfKnowledgeHolds(ids[p], term, pok[..^2] + (pok[^2..] == "00" ? "01" : "00")));
+            }
+
+            // The library's finished group key: the constant terms sum to it.
+            var round2 = new Dictionary<string, JObject>();
+            var round2Secrets = new Dictionary<string, string>();
+            foreach (var p in participants)
+            {
+                var others = new JObject();
+                foreach (var o in participants.Where(o => o != p)) others[ids[o]] = JToken.Parse(packages[o]);
+                var (sh, secret2, err) = FrostNative.DKGRound2GenerateShares(secrets[p], others.ToString(Newtonsoft.Json.Formatting.None));
+                Assert.Equal(FrostNative.SUCCESS, err);
+                (round2[p], round2Secrets[p]) = (JObject.Parse(sh), secret2);
+            }
+            var me = participants[0];
+            var r1 = new JObject(); var r2 = new JObject();
+            foreach (var o in participants.Where(o => o != me)) { r1[ids[o]] = JToken.Parse(packages[o]); r2[ids[o]] = round2[o][ids[me]]; }
+            var (groupKey, _, _, finishErr) = FrostNative.DKGRound3Finalize(round2Secrets[me], r1.ToString(Newtonsoft.Json.Formatting.None), r2.ToString(Newtonsoft.Json.Formatting.None));
+            Assert.Equal(FrostNative.SUCCESS, finishErr);
+
+            var proof = new FrostDkgAttestation.Proof { Round1Proofs = FrostDkgAttestation.Round1ProofsOf(packages, participants) };
+            var canonical = FrostDkgAttestation.Canonical(participants);
+
+            Assert.Null(FrostDkgAttestation.KeyPossessionRefusal(proof, canonical, groupKey));
+            // Someone else's key (a pending vault's, an exchange's): refused.
+            var stranger = Convert.ToHexString(new NBitcoin.Key().PubKey.TaprootInternalKey.ToBytes()).ToLowerInvariant();
+            Assert.NotNull(FrostDkgAttestation.KeyPossessionRefusal(proof, canonical, stranger));
+            // A forged constant term that makes the sum the stranger's key has no proof of knowledge: refused.
+            var forged = new FrostDkgAttestation.Proof { Round1Proofs = new Dictionary<string, FrostDkgAttestation.Round1Proof>(proof.Round1Proofs!) };
+            forged.Round1Proofs[me] = new FrostDkgAttestation.Round1Proof { ConstantTerm = "02" + stranger, ProofOfKnowledge = forged.Round1Proofs[me].ProofOfKnowledge };
+            Assert.NotNull(FrostDkgAttestation.KeyPossessionRefusal(forged, canonical, stranger));
+            // No proofs at all: refused.
+            Assert.NotNull(FrostDkgAttestation.KeyPossessionRefusal(new FrostDkgAttestation.Proof(), canonical, groupKey));
+        }
+
+        /// <summary>
         /// The dealer reveals a share's key only against its recipient's signed report about that share: the share is
         /// the reporting recipient's own, which it holds already. Nobody else (a coordinator collecting shares) gets one.
         /// </summary>
