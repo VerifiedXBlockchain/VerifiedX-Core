@@ -31,8 +31,21 @@ namespace VerifiedXCore.Bitcoin.Attestation
             Build(block, blockHeight, BtcReport.ScopeAll, Array.Empty<string>(), signerEpoch, db, afterPosition, nextPart);
 
         /// <summary>The backfill report for one vault in one already-reported block; empty when the block holds nothing new for it.</summary>
-        public static List<BtcReport> BuildBackfill(Block block, long blockHeight, string scUID, long signerEpoch, LiteDatabase? db = null) =>
-            Build(block, blockHeight, scUID, Array.Empty<string>(), signerEpoch, db, afterPosition: -1, firstPart: 1);
+        /// <remarks>
+        /// A backfill is one part (the verifier takes no other). When a vault's unrecorded events in the block do not fit
+        /// in one, the report carries the first part's worth and is final; the rest are still unrecorded afterwards, and
+        /// the next backfill of the block carries them. A built second part used to be marked as such and was refused by
+        /// every node, and the sweep stopped at that block (fourth review).
+        /// </remarks>
+        public static List<BtcReport> BuildBackfill(Block block, long blockHeight, string scUID, long signerEpoch, LiteDatabase? db = null)
+        {
+            var parts = Build(block, blockHeight, scUID, Array.Empty<string>(), signerEpoch, db, afterPosition: -1, firstPart: 1);
+            if (parts.Count == 0) return parts;
+            var first = parts[0];
+            first.Part = 1;
+            first.Final = true;
+            return new List<BtcReport> { first };
+        }
 
         /// <summary>
         /// The vaults for which an already-reported block still holds something unrecorded (a deposit mined before the

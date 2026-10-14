@@ -1112,6 +1112,41 @@ namespace VerifiedXCore.Tests
             Assert.Equal(34_500, BtcAttestStore.Total(b.Uid).HeldSats);
         }
 
+        /// <summary>
+        /// More of a vault's unrecorded deposits in one block than one report carries: the backfill was built in parts,
+        /// its first marked "not final", and every node refused it ("a backfill report has one part"); the sweep stopped
+        /// at that block for every vault, and the deposits were never credited. Each backfill is one final report now,
+        /// and the next carries what is left (fourth review).
+        /// </summary>
+        [Fact]
+        public async Task ABackfillTooLargeForOneReport_IsCarriedByOneAfterAnother()
+        {
+            await Start();
+            var a = await CreateVault(H1 + 1);
+            var bAddress = NewTaprootAddress();
+            var at = _btc.Mine(new[] { Pay(a.Script, 5_000) }.Concat(Enumerable.Range(0, 450).Select(i => Pay(ScriptOf(bAddress), 1_000 + i))).ToArray());
+            _btc.MineEmpty(3);
+            var height = H1 + 2;
+            await Apply(height++, Signed(Forward(at)));
+            Assert.Equal(at, Meta.EventsThroughHeight);
+
+            var b = await CreateVault(height++, bAddress);
+            var reports = 0;
+            while (BtcBlockScanner.VaultsWithUnrecordedEvents(_btc.Block(at), at).Contains(b.Uid))
+            {
+                var backfill = Assert.Single(BtcBlockScanner.BuildBackfill(_btc.Block(at), at, b.Uid, 0));
+                Assert.True(backfill.Final);
+                Assert.Equal(1, backfill.Part);
+                var tx = Signed(backfill);
+                await Accepted(tx, height);
+                await Apply(height++, tx);
+                Assert.True(++reports < 10);
+            }
+            Assert.True(reports > 1, "the deposits needed more than one report");
+            Assert.Equal(Enumerable.Range(0, 450).Sum(i => 1_000L + i), BtcAttestStore.Total(b.Uid).HeldSats);
+            Assert.Equal(450, BtcAttestStore.CoinsOf(b.Uid).Count);
+        }
+
         [Fact]
         public async Task ABackfill_ReachesBackAboutADay_NoFurther()
         {
