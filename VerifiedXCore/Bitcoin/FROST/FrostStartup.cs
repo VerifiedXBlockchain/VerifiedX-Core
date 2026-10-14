@@ -1533,6 +1533,10 @@ namespace VerifiedXCore.Bitcoin.FROST
                             return;
                         }
 
+                        // One batch at a time per session, and none while it gives its attestation (round 11).
+                        await session.Gate.WaitAsync();
+                        try
+                        {
                         using (var reader = new StreamReader(context.Request.Body))
                         {
                             var body = await reader.ReadToEndAsync();
@@ -2133,6 +2137,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                             return;
                         }
 
+                        await session.Gate.WaitAsync(); // not while a share batch is being taken (round 11)
+                        try
+                        {
                         // A session that reported a share attests nothing (round 10).
                         if (session.Reported)
                         {
@@ -2183,6 +2190,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                             PublicKeyPackageHash = keyPackageHash,
                             IsCompleted = session.IsCompleted
                         }, Formatting.Indented));
+                        }
+                        finally { session.Gate.Release(); }
                     }
                     catch (Exception ex)
                     {

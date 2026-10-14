@@ -40,6 +40,13 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// </summary>
         public bool Reported { get; set; }
 
+        /// <summary>
+        /// Taken around taking a share batch (and finishing) and around giving an attestation: two batches at once could
+        /// otherwise leave one session both reporting and attesting (fourth review, round 11).
+        /// </summary>
+        [Newtonsoft.Json.JsonIgnore]
+        public SemaphoreSlim Gate { get; } = new(1, 1);
+
         /// <summary>The one-time key each of this validator's shares was sealed with, by recipient identifier (revealed only to settle that recipient's signed report).</summary>
         [Newtonsoft.Json.JsonIgnore]
         public ConcurrentDictionary<string, string> SealEphemerals { get; set; } = new();

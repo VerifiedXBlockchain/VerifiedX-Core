@@ -411,6 +411,35 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        /// <summary>
+        /// Two batches at once could leave one session both reporting and attesting. A batch is taken, and an attestation
+        /// given, under the session's lock: an attestation asked for while a batch is being taken waits for it, and sees
+        /// the report it made (fourth review, round 11).
+        /// </summary>
+        [Fact]
+        public async Task AnAttestation_WaitsForTheBatchBeingTaken_AndSeesItsReport()
+        {
+            using var server = new TestServer(new WebHostBuilder().UseStartup<FrostStartup>());
+            var client = server.CreateClient();
+            var session = new DKGSession
+            {
+                SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc", LeaderAddress = "xL", StartTimestamp = _now, LastProgressTimestamp = _now,
+                ParticipantAddresses = new List<string> { "xV1", "xV2", "xV3" }, RequiredThreshold = 67, IsCompleted = true,
+            };
+            Assert.True(FrostSessionStorage.DKGSessions.TryAdd(session.SessionId, session));
+            try
+            {
+                await session.Gate.WaitAsync();                       // a batch being taken
+                var asked = client.GetAsync($"/frost/dkg/result/{session.SessionId}");
+                await Task.Delay(300);
+                Assert.False(asked.IsCompleted);                      // the attestation waits for it
+                session.Reported = true;                              // the batch reported a share
+                session.Gate.Release();
+                Assert.Equal(HttpStatusCode.Conflict, (await asked).StatusCode);
+            }
+            finally { FrostSessionStorage.DKGSessions.TryRemove(session.SessionId, out _); }
+        }
+
         /// <summary>The start's hash covers everything it says: another participant list, threshold, vault or contract is another start.</summary>
         [Fact]
         public void AStartsHash_CoversEverythingItSays()
