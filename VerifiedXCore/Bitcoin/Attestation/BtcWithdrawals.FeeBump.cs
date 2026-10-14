@@ -157,7 +157,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
             catch (Exception ex)
             {
-                VerifiedXCore.Data.StateData.NoteApplyStepFailed(vfxHeight);
+                VerifiedXCore.Data.StateData.NoteApplyStepFailed(vfxHeight, ex);
                 ErrorLogUtility.LogError($"Applying fee bump {tx.Hash} failed: {ex}", "BtcWithdrawals.ApplyFeeBump()");
             }
         }

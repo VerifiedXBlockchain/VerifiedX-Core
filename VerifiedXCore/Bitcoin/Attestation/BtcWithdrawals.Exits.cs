@@ -194,7 +194,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
             catch (Exception ex)
             {
-                VerifiedXCore.Data.StateData.NoteApplyStepFailed(vfxHeight);
+                VerifiedXCore.Data.StateData.NoteApplyStepFailed(vfxHeight, ex);
                 ErrorLogUtility.LogError($"Recording bridge exit {exit?.BaseBurnTxHash} failed: {ex}", "BtcWithdrawals.OnExitApplied()");
             }
         }

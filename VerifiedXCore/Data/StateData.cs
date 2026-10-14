@@ -150,10 +150,33 @@ namespace VerifiedXCore.Data
         /// incomplete and marked like a failed block-start step, so the node is flagged instead of quietly holding other
         /// state than its peers (fourth review).
         /// </summary>
-        public static void NoteApplyStepFailed(long height)
+        /// <remarks>
+        /// Only a fault of this node's storage flags the block (<see cref="IsNodeLocalFault"/>). An exception the
+        /// transaction's own data causes is thrown on every node alike: the step is a no-op everywhere, as before, and
+        /// flagging it let anyone send one cheap request with an unreadable field and leave every node's state marked
+        /// failed, its snapshots stopped and every later rebuild failing (fourth review, round 4).
+        /// </remarks>
+        public static void NoteApplyStepFailed(long height, Exception ex)
         {
+            if (!IsNodeLocalFault(ex)) return;
             _applyStepFailed = true;
             BlockStartFailedAtHeight = height;
+        }
+
+        /// <summary>Whether an exception comes from this node's storage or process (not from what a transaction says).</summary>
+        public static bool IsNodeLocalFault(Exception? ex)
+        {
+            for (var e = ex; e != null; e = e.InnerException)
+            {
+                if (e is System.IO.IOException || e is UnauthorizedAccessException || e is ObjectDisposedException
+                    || e is TimeoutException || e is OutOfMemoryException)
+                    return true;
+                if (e is LiteDB.LiteException lite && (lite.ErrorCode == LiteDB.LiteException.LOCK_TIMEOUT || lite.ErrorCode == LiteDB.LiteException.DATABASE_SHUTDOWN
+                        || lite.ErrorCode == LiteDB.LiteException.FILE_NOT_FOUND || lite.ErrorCode == LiteDB.LiteException.INVALID_DATABASE
+                        || lite.ErrorCode == LiteDB.LiteException.FILE_SIZE_EXCEEDED || lite.ErrorCode == LiteDB.LiteException.ALREADY_OPEN_DATAFILE))
+                    return true;
+            }
+            return false;
         }
 
         public static async Task<bool> UpdateTreis(Block block)
@@ -3106,7 +3129,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
-                NoteApplyStepFailed(tx.Height); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
+                NoteApplyStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
                 ErrorLogUtility.LogError($"TransferVBTCV2 error: {ex.Message}", "StateData.TransferVBTCV2()");
             }
         }
@@ -3145,7 +3168,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
-                NoteApplyStepFailed(tx.Height); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
+                NoteApplyStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
                 ErrorLogUtility.LogError($"TransferVBTCV2Multi error: {ex.Message}", "StateData.TransferVBTCV2Multi()");
             }
         }
@@ -3936,7 +3959,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
-                NoteApplyStepFailed(tx.Height); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
+                NoteApplyStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
                 ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal error: {ex.Message}", "StateData.RequestVBTCV2Withdrawal()");
             }
         }
@@ -4034,7 +4057,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
-                NoteApplyStepFailed(tx.Height); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
+                NoteApplyStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
                 ErrorLogUtility.LogError($"RequestVBTCV2WithdrawalMulti error: {ex.Message}", "StateData.RequestVBTCV2WithdrawalMulti()");
             }
         }
@@ -4353,9 +4376,11 @@ namespace VerifiedXCore.Data
 
                 // S3C §7.4: voter must be active AND in the contract's DKG snapshot (or the public
                 // set for legacy no-snapshot contracts). Public→public-only; S3C→S3C-only.
-                // The set as of the block before this vote's, as block validation judged it.
-                var voterSet = Bitcoin.Services.VBTCService.ResolveCancellationVoterSet(cancellation.SmartContractUID, tx.Height - 1);
-                var validator = Bitcoin.Services.VBTCValidatorRegistry.GetValidatorAt(tx.FromAddress, tx.Height - 1);
+                // Every vote on this path is history (below VbtcCancellationVoteRulesHeight): it is read as live nodes read it
+                // when they applied the block, whose tip was then the block itself (fourth review, round 4: the block
+                // before differed at the window's edge), from committed blocks rather than the synced-only cache.
+                var voterSet = Bitcoin.Services.VBTCService.ResolveCancellationVoterSet(cancellation.SmartContractUID, tx.Height);
+                var validator = Bitcoin.Services.VBTCValidatorRegistry.GetValidatorAt(tx.FromAddress, tx.Height);
                 if (validator == null || !validator.IsActive || !voterSet.Contains(tx.FromAddress))
                 {
                     ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation failed: {tx.FromAddress} is not an eligible voter for contract {cancellation.SmartContractUID}", "StateData.VoteOnVBTCV2Cancellation()");
@@ -4445,7 +4470,7 @@ namespace VerifiedXCore.Data
             {
                 // A vote this node could not judge (the validator set is read from committed blocks and a read error is
                 // thrown, not answered "no") leaves its state unlike its peers': marked, so a restart rebuilds state.
-                NoteApplyStepFailed(tx.Height);
+                NoteApplyStepFailed(tx.Height, ex);
                 ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation error: {ex.Message}", "StateData.VoteOnVBTCV2Cancellation()");
             }
         }
