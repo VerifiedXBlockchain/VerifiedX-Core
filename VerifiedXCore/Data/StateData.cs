@@ -1062,7 +1062,14 @@ namespace VerifiedXCore.Data
                     // Flip ALL local rows for the hash (same-wallet sends store two).
                     await TransactionData.UpdateTxStatusForAllByHash(hash, TransactionStatus.Success);
                 }
-                catch {  }
+                catch (Exception ex)
+                {
+                    // Runs after the block's state is applied, so the block is not flagged for it: a fault of this node's
+                    // storage marks the state failed here. Left as it was, the row stayed Pending on this node alone and
+                    // was judged again a block later, against other state than its peers' (fourth review, round 6).
+                    if (IsNodeLocalFault(ex))
+                        StateTreiStatusService.SetFailed($"Reserve settlement {rtx.Hash} failed on this node: {ex.Message}");
+                }
             }
         }
 
@@ -1324,7 +1331,7 @@ namespace VerifiedXCore.Data
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { NoteApplyStepFailed(height, ex); } // a fault of this node's storage is flagged (fourth review, round 6)
         }
         /// <param name="keepTransfersPending">Only for the historical mainnet recovery in HistoricalTransactionExceptions:
         /// redirect as usual but leave the reserve rows Pending, as the network applied it.</param>
@@ -1583,6 +1590,7 @@ namespace VerifiedXCore.Data
                             }
                             catch (Exception ex)
                             {
+                                NoteApplyStepFailed(height, ex);
                                 ErrorLogUtility.LogError($"Recover failed to sweep vBTC balance on {sc.SmartContractUID}: {ex.Message}", "StateData.RecoverReserveAccountTx()");
                             }
                         }
@@ -1590,7 +1598,7 @@ namespace VerifiedXCore.Data
                 }
 
             }
-            catch { }
+            catch (Exception ex) { NoteApplyStepFailed(height, ex); } // a fault of this node's storage is flagged (fourth review, round 6)
         }
         private static void AddNewDecShop(Transaction tx)
         {
