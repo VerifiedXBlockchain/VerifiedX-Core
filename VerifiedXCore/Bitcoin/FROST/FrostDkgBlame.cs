@@ -156,8 +156,13 @@ namespace VerifiedXCore.Bitcoin.FROST
 
         private static string ParticipantIdentifier(int index) => index.ToString("x").PadLeft(64, '0');
 
-        /// <summary>What a recipient signs to report a dealer's share (the dealer reveals that share's key only against it).</summary>
-        public static string AccusationMessage(string sessionId, string accuser, string accused) => $"DKG-ACCUSE|{sessionId}|{accuser}|{accused}";
+        /// <summary>
+        /// What a recipient signs to report a dealer's share (the dealer reveals that share's key only against it). It names
+        /// the start the session was opened with, so a report made in one session under an id holds for no other session
+        /// opened later under the same id (fourth review, round 11).
+        /// </summary>
+        public static string AccusationMessage(string sessionId, string? startBodyHash, string accuser, string accused) =>
+            $"DKG-ACCUSE|{sessionId}|{startBodyHash}|{accuser}|{accused}";
 
         /// <summary>
         /// A recipient's report that a dealer's share would not open or did not match its commitment, settled by the share

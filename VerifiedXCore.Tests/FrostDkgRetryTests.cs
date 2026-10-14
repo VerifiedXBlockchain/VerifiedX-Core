@@ -242,7 +242,7 @@ namespace VerifiedXCore.Tests
             var participants = new List<string> { dealerAddress, recipientAddress, otherAddress };
             var ids = FrostStartup.BuildAddressToIdentifierMap(participants);
             var session = new DKGSession { SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc", LeaderAddress = otherAddress, ParticipantAddresses = participants,
-                StartTimestamp = TimeUtil.GetTime(), LastProgressTimestamp = TimeUtil.GetTime() };
+                StartTimestamp = TimeUtil.GetTime(), LastProgressTimestamp = TimeUtil.GetTime(), StartBodyHash = "start-hash" };
             session.SealEphemerals[ids[recipientAddress]] = "ab".PadLeft(64, '0');
             session.SealEphemerals[ids[otherAddress]] = "cd".PadLeft(64, '0');
             Assert.True(FrostSessionStorage.DKGSessions.TryAdd(session.SessionId, session));
@@ -261,18 +261,21 @@ namespace VerifiedXCore.Tests
                 string Sign(EllipticCurve.PrivateKey key, string pub, string message) => VerifiedXCore.Services.SignatureService.CreateSignature(message, key, pub);
 
                 // The recipient's own signed report: its share's key.
-                var (code, body) = await Reveal(recipientAddress, Sign(recipient, recipientPub, FrostDkgBlame.AccusationMessage(session.SessionId, recipientAddress, dealerAddress)));
+                var (code, body) = await Reveal(recipientAddress, Sign(recipient, recipientPub, FrostDkgBlame.AccusationMessage(session.SessionId, session.StartBodyHash, recipientAddress, dealerAddress)));
                 Assert.Equal(System.Net.HttpStatusCode.OK, code);
                 Assert.Equal("ab".PadLeft(64, '0'), (string)JObject.Parse(body)["EphemeralKey"]!);
                 // Somebody else's signature on that recipient's behalf, or a report about another dealer: nothing.
-                (code, _) = await Reveal(recipientAddress, Sign(other, otherPub, FrostDkgBlame.AccusationMessage(session.SessionId, recipientAddress, dealerAddress)));
+                (code, _) = await Reveal(recipientAddress, Sign(other, otherPub, FrostDkgBlame.AccusationMessage(session.SessionId, session.StartBodyHash, recipientAddress, dealerAddress)));
                 Assert.Equal(System.Net.HttpStatusCode.Forbidden, code);
-                (code, _) = await Reveal(recipientAddress, Sign(recipient, recipientPub, FrostDkgBlame.AccusationMessage(session.SessionId, recipientAddress, otherAddress)));
+                (code, _) = await Reveal(recipientAddress, Sign(recipient, recipientPub, FrostDkgBlame.AccusationMessage(session.SessionId, session.StartBodyHash, recipientAddress, otherAddress)));
+                Assert.Equal(System.Net.HttpStatusCode.Forbidden, code);
+                // A report made in another session under this id (another start) holds for none other (round 11).
+                (code, _) = await Reveal(recipientAddress, Sign(recipient, recipientPub, FrostDkgBlame.AccusationMessage(session.SessionId, "another-start", recipientAddress, dealerAddress)));
                 Assert.Equal(System.Net.HttpStatusCode.Forbidden, code);
                 // Not a participant, or the dealer itself: nothing.
                 (code, _) = await Reveal("xStranger", "sig");
                 Assert.Equal(System.Net.HttpStatusCode.NotFound, code);
-                (code, _) = await Reveal(dealerAddress, Sign(dealer, dealerPub, FrostDkgBlame.AccusationMessage(session.SessionId, dealerAddress, dealerAddress)));
+                (code, _) = await Reveal(dealerAddress, Sign(dealer, dealerPub, FrostDkgBlame.AccusationMessage(session.SessionId, session.StartBodyHash, dealerAddress, dealerAddress)));
                 Assert.Equal(System.Net.HttpStatusCode.NotFound, code);
             }
             finally
