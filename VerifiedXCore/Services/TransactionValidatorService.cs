@@ -313,6 +313,13 @@ namespace VerifiedXCore.Services
 
             // Withdrawals on a vault the chain watches: no completion transaction, no vote, cancellation only before
             // the Bitcoin transaction is fixed, and a destination that is a Bitcoin address.
+            // The fee raise (type 44) is new with the attestation: not accepted before the recording height, as the other
+            // new types are not. Its refusal below runs only from that height, and before it a 9.x node took a type 44
+            // that 8.x nodes, still peers until then, refuse: one transaction's fee to split them (fourth review, round 5).
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_COIN_PIN
+                && !VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)))
+                return (false, "A withdrawal's fee is raised only from the Bitcoin attestation's recording height.");
+
             // Only from the recording height (no vault is watched before it): both read the transaction's data first and
             // refuse what they cannot read, which older builds did not do for historical blocks (fourth review, round 4).
             var watchedWithdrawalRefusal = VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))

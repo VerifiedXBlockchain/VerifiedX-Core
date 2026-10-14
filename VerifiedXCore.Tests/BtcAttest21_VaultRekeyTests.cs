@@ -694,6 +694,32 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// The fee raise is new with the attestation. Its own refusal runs from the recording height, and before it a 9.x
+        /// node took a type 44 that 8.x nodes (peers until then) refuse: one fee to split them (fourth review, round 5).
+        /// </summary>
+        [Fact]
+        public async Task AFeeRaise_IsNotTakenBeforeTheRecordingHeight()
+        {
+            await Start();
+            var raise = SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_COIN_PIN, new { Function = "VBTCWithdrawalFeeBump()" });
+            var (ok, why) = await Verify(raise, H1 - 1);
+            Assert.False(ok);
+            Assert.Contains("only from the Bitcoin attestation's recording height", why);
+        }
+
+        /// <summary>A re-key's UID ends in random digits after its time, so nobody opens sessions under it ahead of its leader.</summary>
+        [Fact]
+        public void AReKeysUid_EndsInDigitsNobodyCanGuess()
+        {
+            var key = new VaultDepositScriptRow { SmartContractUID = "v", Generation = 0, RekeyDueSinceVfxHeight = 5 };
+            var uids = Enumerable.Range(0, 20).Select(_ => BtcVaultKeys.NewKeyUid(key)).ToList();
+            Assert.Equal(20, uids.Distinct().Count());
+            Assert.All(uids, u => Assert.Matches("^[0-9a-f]{32}:[0-9]+$", u));
+            Assert.All(uids, u => Assert.StartsWith(BtcVaultKeys.NextKeyHex(key) + ":", u));
+            Assert.True(uids.Select(u => u[^6..]).Distinct().Count() > 1); // the random tail
+        }
+
+        /// <summary>
         /// A withdrawal request mined a second time (by a producer, once the recent-blocks check has forgotten its hash)
         /// debited its requester again with no row to pay, expire or cancel. A watched vault's request is mined once
         /// (fourth review, round 2).
