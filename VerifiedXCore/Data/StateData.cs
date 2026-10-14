@@ -865,8 +865,12 @@ namespace VerifiedXCore.Data
             var rtxDb = ReserveTransactions.GetReserveTransactionsDb();
             var txDb = Transaction.GetAll();
 
+            // In one order on every node: a row's id is a random Guid made on each node, and the rows were read in that
+            // order. The checks when a row falls due (still covered, the vault's holder limit) read what earlier rows of
+            // the batch left, so two rows competing for one balance or one place on a ledger came out differently on
+            // different nodes (fourth review, round 7).
             var appliedCleanly = true;
-            foreach (var rtx in txList)
+            foreach (var rtx in txList.OrderBy(x => x.ConfirmTimestamp).ThenBy(x => x.Height).ThenBy(x => x.Hash, StringComparer.Ordinal))
             {
                 try
                 {
@@ -1359,7 +1363,8 @@ namespace VerifiedXCore.Data
                 if(rTXList?.Count() > 0)
                 {
                     // HAL-070 Fix: Filter to only Pending transactions for recovery
-                    var pendingTXList = rTXList.Where(x => x.ReserveTransactionStatus == ReserveTransactionStatus.Pending).ToList();
+                    var pendingTXList = rTXList.Where(x => x.ReserveTransactionStatus == ReserveTransactionStatus.Pending)
+                        .OrderBy(x => x.ConfirmTimestamp).ThenBy(x => x.Height).ThenBy(x => x.Hash, StringComparer.Ordinal).ToList(); // one order on every node (round 7)
                     
                     foreach(var rTX in pendingTXList) 
                     {

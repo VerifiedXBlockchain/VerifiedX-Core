@@ -271,6 +271,69 @@ namespace VerifiedXCore.Tests
             Assert.Equal(1.0M, HeldOn(_reserve.Address));
         }
 
+        /// <summary>
+        /// Rows falling due together were read in the order of their ids, random Guids made on each node, and the checks
+        /// when a row falls due read what the rows before it left: two transfers competing for the last place on a vault
+        /// came out differently on different nodes. They are taken in one order everywhere: the earlier due first
+        /// (fourth review, round 7).
+        /// </summary>
+        [Fact]
+        public async Task DelayedTransfersFallingDueTogether_AreTakenInOneOrderOnEveryNode()
+        {
+            var watched = Guid.NewGuid().ToString("N") + ":1755000003";
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
+            {
+                SmartContractUID = watched, ContractData = VbtcTestContracts.VbtcV2ContractData, MinterAddress = _firstBuyer.Address, OwnerAddress = _firstBuyer.Address, Nonce = 0,
+                SCStateTreiTokenizationTXes = new List<SmartContractStateTreiTokenizationTX>
+                {
+                    new() { Amount = 1.5M, FromAddress = "+", ToAddress = _reserve.Address },
+                    new() { Amount = -1.5M, FromAddress = _firstBuyer.Address, ToAddress = "-" },
+                },
+            });
+            VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.SaveScript(new VerifiedXCore.Bitcoin.Attestation.VaultDepositScriptRow
+            {
+                ScriptHex = "5120" + new string('c', 64), SmartContractUID = watched, DepositAddress = "bc1pwatched3", CreatedAtVfxHeight = Rule, WatchFromBitcoinHeight = 1,
+            });
+            // A second reserve holding vBTC on the vault (one transfer of a reserve may be pending on a vault at a time).
+            PrivateKey key; string pub, second;
+            do
+            {
+                key = new PrivateKey("secp256k1");
+                pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+                second = ReserveAccount.GetHumanAddress(pub);
+            } while (!second.StartsWith("xRBX", StringComparison.Ordinal));
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = second, Balance = 100M, Nonce = 0, RecoveryAccount = _later.Address });
+            var contract = SmartContractStateTrei.GetSmartContractState(watched)!;
+            contract.SCStateTreiTokenizationTXes!.Add(new SmartContractStateTreiTokenizationTX { Amount = 1.0M, FromAddress = "+", ToAddress = second });
+            contract.SCStateTreiTokenizationTXes.Add(new SmartContractStateTreiTokenizationTX { Amount = -1.0M, FromAddress = _firstBuyer.Address, ToAddress = "-" });
+            SmartContractStateTrei.GetSCST().Update(contract);
+            Transaction Send(string to, long unlockInHours, bool fromSecond)
+            {
+                if (!fromSecond)
+                    return FromReserve(TransactionType.VBTC_V2_TRANSFER, to, new { Function = "TransferVBTCV2()", ContractUID = watched, FromAddress = _reserve.Address, ToAddress = to, Amount = 0.5M }, unlockInHours);
+                var tx = new Transaction
+                {
+                    Timestamp = _now, FromAddress = second, ToAddress = to, Amount = 0.0M, Fee = 0, Nonce = 0, TransactionType = TransactionType.VBTC_V2_TRANSFER,
+                    Data = JsonConvert.SerializeObject(new { Function = "TransferVBTCV2()", ContractUID = watched, FromAddress = second, ToAddress = to, Amount = 0.5M }),
+                    UnlockTime = _now + unlockInHours * Hour,
+                };
+                tx.Fee = FeeCalcService.CalculateTXFee(tx);
+                tx.Build();
+                tx.Signature = SignatureService.CreateSignature(tx.Hash, key, pub);
+                return tx;
+            }
+
+            var later = Send(_recipient.Address, 31, fromSecond: false);
+            var sooner = Send(_later.Address, 30, fromSecond: true);
+            await Mine(0, later, sooner);
+            // Room for one more address: both fall due in the same block, and the one due first takes the place.
+            VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.MaxHoldersOverride = VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.LedgerAddresses(SmartContractStateTrei.GetSmartContractState(watched)) + 1;
+            try { await Mine(32); }
+            finally { VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.MaxHoldersOverride = null; }
+            Assert.Equal(ReserveTransactionStatus.Confirmed, StatusOf(sooner));
+            Assert.Equal(ReserveTransactionStatus.CalledBack, StatusOf(later));
+        }
+
         // ── A called-back row and somebody else's lock ──────────────────────────────────────────────────────
 
         private Transaction UnknownCall(string to, long unlockInHours) =>
