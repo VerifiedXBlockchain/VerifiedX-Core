@@ -187,13 +187,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
             MissingMemberHandling = MissingMemberHandling.Error,
         };
 
+        /// <summary>The length of an event's text inside a report's canonical text.</summary>
+        internal static int CanonicalLength(BtcReportEvent ev) => JsonConvert.SerializeObject(ev, Canonical).Length;
+
         /// <summary>
         /// The one text form of this report: fields in a fixed order, absent fields omitted, signatures in address order.
         /// A report transaction's Data must be exactly this text, so one report has one transaction hash.
         /// </summary>
-        /// <summary>The length of an event's text inside a report's canonical text.</summary>
-        internal static int CanonicalLength(BtcReportEvent ev) => JsonConvert.SerializeObject(ev, Canonical).Length;
-
         public string ToCanonicalJson()
         {
             if (Signatures != null)
