@@ -1324,6 +1324,8 @@ namespace VerifiedXCore.Data
                           }
                           catch (Exception unwindEx)
                           {
+                              // A watched vault's write throws on a storage fault: flagged, not left locked on this node alone (round 9).
+                              NoteApplyStepFailed(height, unwindEx);
                               ErrorLogUtility.LogError($"CallBack SC unwind failed for {rTX.Hash} (status flip proceeds): {unwindEx.Message}", "StateData.CallBackReserveAccountTx()");
                           }
                         }
