@@ -37,8 +37,9 @@ namespace VerifiedXCore.Bitcoin.Services
             try { jobj = JObject.Parse(tx.Data); }
             catch { return (true, ""); }
 
-            var burn = NormalizeBurn(RedeemedBurn(tx.TransactionType, jobj, height ?? ((Globals.LastBlock?.Height ?? -1) + 1)));
-            var lockIds = ExtractLockIds(jobj);
+            var at = height ?? ((Globals.LastBlock?.Height ?? -1) + 1);
+            var burn = NormalizeBurn(RedeemedBurn(tx.TransactionType, jobj, at));
+            var lockIds = ExtractLockIds(jobj, asApply: at >= Globals.PathAuditRulesHeight);
 
             // Check everything first, then register, so a rejected tx leaves the state untouched.
             if (burn.Length > 0 && state.BurnHashes.Contains(burn))
@@ -72,10 +73,22 @@ namespace VerifiedXCore.Bitcoin.Services
             return h;
         }
 
-        public static List<string> ExtractLockIds(JObject jobj)
+        public static List<string> ExtractLockIds(JObject jobj, bool asApply = false)
         {
             var ids = new List<string>();
             var allocs = jobj["Allocations"];
+            // From the path-audit rules, as apply reads them (the typed reader matches a key in any case, and the last of
+            // two spellings wins): "lockId" was not seen here, and two exits drew one lock in one block; the second was
+            // paid without its draw (fifth review, round 16).
+            if (asApply && allocs is JArray)
+            {
+                foreach (var a in allocs.ToObject<List<VerifiedXCore.Bitcoin.Models.PoolUnlockAllocation>>() ?? new())
+                {
+                    var id = a?.LockId?.Trim();
+                    if (!string.IsNullOrEmpty(id)) ids.Add(id);
+                }
+                return ids.Distinct(StringComparer.Ordinal).ToList();
+            }
             if (allocs is JArray arr)
             {
                 foreach (var a in arr)

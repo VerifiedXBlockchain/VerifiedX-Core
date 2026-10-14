@@ -40,6 +40,25 @@ namespace VerifiedXCore.Tests
             Data = JsonConvert.SerializeObject(new { Function = "VBTCBridgeUnlock()", ExitBurnTxHash = burn, LockId = lockId }),
         };
 
+        /// <summary>
+        /// Apply reads allocations with a typed reader that matches "lockId" as LockId: the guard, reading the exact key,
+        /// let two exits draw one lock in one block (fifth review, round 16). From the path-audit rules it reads as apply.
+        /// </summary>
+        [Fact]
+        public void ALockNamedUnderAnotherSpellingOfTheKey_IsStillOneLock()
+        {
+            Transaction Spelled(string burn, string key, string lockId) => new Transaction
+            {
+                TransactionType = TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC,
+                Data = "{\"Function\":\"VBTCBridgeExitToBTC()\",\"BaseBurnTxHash\":\"" + burn + "\",\"Allocations\":[{\"" + key + "\":\"" + lockId + "\",\"UnlockAmount\":0.1}]}",
+            };
+            var st = new BridgeIntraBlockGuard.State();
+            var h = VerifiedXCore.Globals.PathAuditRulesHeight;
+            Assert.True(BridgeIntraBlockGuard.TryRegister(Spelled("0x01", "LockId", "L1"), st, h).Ok);
+            Assert.False(BridgeIntraBlockGuard.TryRegister(Spelled("0x02", "lockId", "L1"), st, h).Ok);
+            Assert.False(BridgeIntraBlockGuard.TryRegister(Spelled("0x03", "lockid", "L1"), st, h).Ok);
+        }
+
         [Fact]
         public void SameBurnTwiceInBlock_SecondRejected()
         {
