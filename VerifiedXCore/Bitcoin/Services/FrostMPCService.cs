@@ -31,7 +31,10 @@ namespace VerifiedXCore.Bitcoin.Services
         /// </summary>
         private static readonly HttpClient _ceremonyHttpClient = new HttpClient
         {
-            Timeout = TimeSpan.FromSeconds(90)
+            Timeout = TimeSpan.FromSeconds(90),
+            // An honest Round 2 output is a few hundred bytes per participant; a larger answer fails its sender, not its
+            // recipients (fifth review, round 13).
+            MaxResponseContentBufferSize = 64L * 1024 * 1024,
         };
 
         #region Validator Reachability
@@ -336,6 +339,28 @@ namespace VerifiedXCore.Bitcoin.Services
 
             LogUtility.Log($"[FROST MPC] DKG ceremony {ceremonyId} failed after {run.Attempts} attempt(s): {run.Error}", "FrostMPCService.CoordinateDKGCeremony");
             return run;
+        }
+
+        /// <summary>
+        /// Why a dealer's Round 2 output is not one sealed package for each of <paramref name="recipientIds"/>, each within
+        /// the size a recipient opens (as relayed to it); null when it is.
+        /// </summary>
+        internal static string? Round2OutputRefusal(string shares, IReadOnlyCollection<string> recipientIds)
+        {
+            JObject map;
+            try { map = JObject.Parse(shares); }
+            catch { return "gave a Round 2 output that is not a map of sealed shares"; }
+            var names = map.Properties().Select(p => p.Name).ToList();
+            if (names.Count != recipientIds.Count || !recipientIds.All(id => map.Property(id, StringComparison.Ordinal) != null))
+                return "gave a Round 2 output that is not one share for each other participant";
+            foreach (var p in map.Properties())
+            {
+                if (p.Value.Type != JTokenType.String || !((string)p.Value!).StartsWith(FrostShareCrypto.Prefix, StringComparison.Ordinal))
+                    return "gave a Round 2 share that is not sealed";
+                if (new JObject { [p.Name] = p.Value }.ToString(Formatting.None).Length > FrostDkgBlame.MaxDealerEntryLength)
+                    return "gave a Round 2 share over the size a recipient opens";
+            }
+            return null;
         }
 
         /// <summary>The participants no share can be sealed to: no registered key, or one that does not derive the address.</summary>
@@ -678,6 +703,17 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
             });
             await Task.WhenAll(round2Tasks);
+
+            // Each dealer's output in the form every recipient takes: one sealed package per other participant, each
+            // within the recipient's size limit. One that is not failed every recipient's batch with no report, and the
+            // recipients were dropped instead of the dealer (fifth review, round 13).
+            var participantIds = FrostStartup.BuildAddressToIdentifierMap(validators.Select(v => v.ValidatorAddress).ToList());
+            foreach (var (dealer, shares) in allGeneratedShares)
+            {
+                var others = participantIds.Where(kv => kv.Key != dealer).Select(kv => kv.Value).ToList();
+                var refusal = Round2OutputRefusal(shares, others);
+                if (refusal != null) generationFailures[dealer] = refusal;
+            }
 
             if (!generationFailures.IsEmpty)
             {
