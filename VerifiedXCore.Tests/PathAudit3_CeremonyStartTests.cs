@@ -286,6 +286,47 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// Two Round 2 requests at once (the leader's signed request replayed by a participant) each sealed the shares with
+        /// their own one-time keys; the last stored won while the leader relayed the other's ciphertext, so a reveal could
+        /// not open it and the honest dealer was dropped (fifth review, round 13). A request that comes while another is
+        /// being made waits for it and answers what it stored.
+        /// </summary>
+        [Fact]
+        public async Task ARound2RequestWhileAnotherIsBeingMade_WaitsAndAnswersTheStoredShares()
+        {
+            using var server = new TestServer(new WebHostBuilder().UseStartup<FrostStartup>());
+            var client = server.CreateClient();
+            var (_, secret, error) = FrostNative.DKGRound1Generate(1, 3, 2);
+            Assert.Equal(FrostNative.SUCCESS, error);
+            var session = new DKGSession
+            {
+                SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc", LeaderAddress = "xLeader", StartTimestamp = _now, LastProgressTimestamp = _now,
+                ParticipantAddresses = new List<string> { "xV1", "xV2", "xV3" }, RequiredThreshold = 67, MyParticipantIndex = 1, Round1SecretPackage = secret,
+            };
+            Assert.True(FrostSessionStorage.DKGSessions.TryAdd(session.SessionId, session));
+            try
+            {
+                await session.Gate.WaitAsync(); // the first request, still being made
+                var body = JsonConvert.SerializeObject(new Dictionary<string, string> { ["xV2"] = "{}", ["xV3"] = "{}" });
+                var second = client.PostAsync($"/frost/dkg/round2/{session.SessionId}", new StringContent(body, Encoding.UTF8, "application/json"));
+                await Task.Delay(300);
+                Assert.False(second.IsCompleted);
+
+                // The first stores its shares and lets go; the second answers exactly those.
+                session.Round2Secret = "first-secret";
+                session.GeneratedSharesJson = "{\"first\":\"enc1:AAAA\"}";
+                session.Gate.Release();
+                var response = await second;
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                var answer = Newtonsoft.Json.Linq.JObject.Parse(await response.Content.ReadAsStringAsync());
+                Assert.Equal(session.GeneratedSharesJson, (string?)answer["GeneratedShares"]);
+                Assert.Equal("first-secret", session.Round2Secret);
+                Assert.Equal(1, session.Gate.CurrentCount); // and the request let go of the session
+            }
+            finally { FrostSessionStorage.DKGSessions.TryRemove(session.SessionId, out _); }
+        }
+
+        /// <summary>
         /// A participant could put commitments or shares into another validator's session ahead of the leader's (the
         /// unauthenticated Round 2 route, the single-share and Round 1 routes, a share batch before Round 2): the real
         /// ones were dropped, the validator failed and was dropped from the ceremony, and its sender was never named; one

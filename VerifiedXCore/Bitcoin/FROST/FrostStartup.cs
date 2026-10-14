@@ -1222,6 +1222,31 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // One Round 2 per session: two requests at once (the leader's signed request replayed by a
+                            // participant) each sealed with their own one-time keys, the last one stored, and the leader
+                            // relayed the other's ciphertext; a reveal then failed to open it and the dealer was dropped
+                            // (fifth review, round 13). Held to the end of this request; asked again, the stored answer.
+                            using var round2Hold = await HoldGate(session.Gate, TimeSpan.FromSeconds(30));
+                            if (round2Hold == null)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Busy with this session; ask again." }));
+                                return;
+                            }
+                            if (!string.IsNullOrEmpty(session.Round2Secret) && !string.IsNullOrEmpty(session.GeneratedSharesJson))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status200OK;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = true,
+                                    Message = "Round 2 shares were generated before",
+                                    SessionId = sessionId,
+                                    SharesGenerated = true,
+                                    GeneratedShares = session.GeneratedSharesJson
+                                }, Formatting.Indented));
+                                return;
+                            }
+
                             // FIND-024 Fix: Parse all Round 1 commitments and call FROST native Round 2
                             if (string.IsNullOrEmpty(session.Round1SecretPackage))
                             {
@@ -1537,8 +1562,22 @@ namespace VerifiedXCore.Bitcoin.FROST
                         // the leader's batch to this validator timed out (fourth review, round 12).
                         string body;
                         using (var bodyReader = new StreamReader(context.Request.Body)) body = await bodyReader.ReadToEndAsync();
+                        // The leader's signature is checked before the lock, and the lock is waited for a bounded time:
+                        // unsigned bodies queued behind it were hashed one by one while the leader's batch waited (round 13).
+                        if (session.LeaderSigned && !SignatureService.VerifySignature(session.LeaderAddress,
+                                FrostDkgLeaderAuth.ContentMessage("SHARES", sessionId, body), context.Request.Headers[FrostDkgLeaderAuth.ContentSignatureHeader].ToString()))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This session's shares are sent by its leader, signed." }));
+                            return;
+                        }
                         // One batch at a time per session, and none while it gives its attestation (round 11).
-                        await session.Gate.WaitAsync();
+                        if (!await session.Gate.WaitAsync(TimeSpan.FromSeconds(30)))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Busy with this session; ask again." }));
+                            return;
+                        }
                         try
                         {
                         using (var reader = new StreamReader(context.Request.Body))
@@ -1560,13 +1599,6 @@ namespace VerifiedXCore.Bitcoin.FROST
                             {
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This validator's shares for this session are settled." }));
-                                return;
-                            }
-                            if (session.LeaderSigned && !SignatureService.VerifySignature(session.LeaderAddress,
-                                    FrostDkgLeaderAuth.ContentMessage("SHARES", sessionId, body), context.Request.Headers[FrostDkgLeaderAuth.ContentSignatureHeader].ToString()))
-                            {
-                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This session's shares are sent by its leader, signed." }));
                                 return;
                             }
                             var json = Newtonsoft.Json.Linq.JObject.Parse(body);
@@ -3905,6 +3937,17 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// This ensures DKG and signing ceremonies use consistent identifiers even when
         /// the validator list grows, shrinks, or the dictionary iteration order changes.
         /// </summary>
+        /// <summary>The gate, taken within <paramref name="wait"/> and released when the result is disposed; null when not taken.</summary>
+        internal static async Task<IDisposable?> HoldGate(SemaphoreSlim gate, TimeSpan wait) =>
+            await gate.WaitAsync(wait) ? new GateRelease(gate) : null;
+
+        private sealed class GateRelease : IDisposable
+        {
+            private SemaphoreSlim? _gate;
+            public GateRelease(SemaphoreSlim gate) { _gate = gate; }
+            public void Dispose() => Interlocked.Exchange(ref _gate, null)?.Release();
+        }
+
         internal static Dictionary<string, string> BuildAddressToIdentifierMap(List<string> participantAddresses)
         {
             var sorted = participantAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();
