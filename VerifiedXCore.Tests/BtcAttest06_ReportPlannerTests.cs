@@ -39,11 +39,17 @@ namespace VerifiedXCore.Tests
             public Btc Chain;
             public long? SeenThrough;
             public readonly HashSet<long> NotFetched = new();
+            /// <summary>Every block height the planner asked for.</summary>
+            public readonly List<long> Asked = new();
 
             public View(Btc chain) { Chain = chain; }
             public long TipHeight => Math.Min(Chain.Tip, SeenThrough ?? long.MaxValue);
             public BtcHeader? HeaderAt(long height) => height >= Checkpoint - 11 && height <= TipHeight ? Chain.Header(height) : null;
-            public BtcBlock? BlockAt(long height) => height >= Checkpoint - 11 && height <= TipHeight && !NotFetched.Contains(height) ? Chain.Block(height) : null;
+            public BtcBlock? BlockAt(long height)
+            {
+                Asked.Add(height);
+                return height >= Checkpoint - 11 && height <= TipHeight && !NotFetched.Contains(height) ? Chain.Block(height) : null;
+            }
         }
 
         private static AttestationMetaRow Meta => BtcAttestStore.GetMeta()!;
@@ -271,6 +277,55 @@ namespace VerifiedXCore.Tests
 
             // A validator that starts now looks back over the reported blocks and finds nothing owed.
             Assert.Empty(new BtcReportPlanner().Plan(view, Tip).Reports);
+        }
+
+        /// <summary>
+        /// A new vault is watched from 143 blocks below the events-through height when it is created. The sweep used to be
+        /// raised to 240 below the current events-through height on every pass, so quiet reports mined first carried it
+        /// past the new vault's watched blocks and a deposit there was never credited (fourth review, round 12). And a
+        /// key row written again (a health check, a retired key) sent every validator's sweep back to that vault's
+        /// creation, a block at a time (round 13). A sweep owed is finished; a row written again moves nothing.
+        /// </summary>
+        [Fact]
+        public async Task ANewVaultsWatchedBlocks_AreSweptEvenAfterQuietReports_AndOldRowsWrittenAgainMoveNothing()
+        {
+            await Start();
+            var a = await CreateVault(H1 + 1);
+            var bAddress = NewTaprootAddress();
+            var first = Pay(ScriptOf(bAddress), 11_000);
+            var second = Pay(ScriptOf(bAddress), 22_000);
+            // In a block reported for vault A (a quiet block alone is not reported until 144 have passed).
+            var depositsAt = _btc.Mine(Pay(a.Script, 1_000), first, second);
+            _btc.MineEmpty(BtcAttestRules.Depth);
+            var view = new View(_btc);
+            await Drive(view);
+            var b = await CreateVault(Tip + 1, bAddress);
+            // Both deposits lie in B's watched blocks, already reported (only a backfill can credit them).
+            Assert.True(BtcAttestStore.ScriptRowForVault(b.Uid)!.WatchFromBitcoinHeight <= depositsAt);
+            Assert.True(depositsAt <= Meta.EventsThroughHeight);
+
+            // Bitcoin moves on with nothing for the vaults: quiet reports are mined first, well past B's watched blocks.
+            _btc.MineEmpty(3 * BtcAttestRules.QuietBlocks + BtcAttestRules.Depth);
+            var through = Meta.EventsThroughHeight;
+            for (var i = 0; i < 10; i++)
+            {
+                var quiet = _planner.Plan(view, Tip).Reports.FirstOrDefault(r => r.Kind != BtcPlannedReport.Backfill);
+                if (quiet == null) break;
+                await Apply(Tip + 1, Signed(quiet.Report));
+            }
+            Assert.True(Meta.EventsThroughHeight > through + BtcReportPlanner.SweepBack);
+
+            // Both earlier deposits (one block) are still found and credited.
+            Assert.Equal(new[] { BtcPlannedReport.Backfill }, await Drive(view));
+            Assert.Equal(33_000, BtcAttestStore.Total(b.Uid).HeldSats);
+
+            // A key row written again moves the sweep nowhere: no block below the restart floor is asked for.
+            var row = BtcAttestStore.ScriptRowForVault(a.Uid)!;
+            row.LastModifiedHeight = Tip + 1;
+            BtcAttestStore.Db.GetCollection<VaultDepositScriptRow>(BtcAttestStore.Scripts).Update(row);
+            view.Asked.Clear();
+            Assert.Empty(_planner.Plan(view, Tip).Reports);
+            Assert.DoesNotContain(view.Asked, h => h < Meta.EventsThroughHeight - BtcReportPlanner.SweepBack);
         }
 
         [Fact]

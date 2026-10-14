@@ -63,11 +63,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
     public sealed class BtcReportPlanner
     {
         /// <summary>
-        /// How far below the events-through height a newly started validator looks for unrecorded events: a new vault's
-        /// watched blocks (<see cref="BtcAttestRules.WatchBackBlocks"/> below the height it was created at) and a quiet
-        /// report's advance beyond them.
+        /// How far below the events-through height a newly started validator looks for unrecorded events. Within the
+        /// blocks a node keeps and a pruned peer serves (288); a vault created while the validator runs is swept from its
+        /// own first watched block, however far the events-through height has moved since.
         /// </summary>
-        public const int SweepBack = BtcAttestRules.WatchBackBlocks + BtcAttestRules.QuietBlocks + 96;
+        public const int SweepBack = BtcAttestRules.QuietBlocks + 96;
 
         private readonly Dictionary<long, (string Hash, long Scripts, long Coins)> _empty = new();
         private long _sweepFrom = -1;
@@ -282,9 +282,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
             else
             {
+                // Only a key row made since the last look (a new vault, a re-key's new key): a health check or a re-key also
+                // writes old rows again, and each sent every validator's sweep back to that vault's creation (round 13).
                 if (scripts > _sweepScripts)
                     foreach (var row in db.GetCollection<VaultDepositScriptRow>(BtcAttestStore.Scripts).Find(x => x.LastModifiedHeight > _sweepScripts))
-                        _sweepFrom = Math.Min(_sweepFrom, Math.Max(row.WatchFromBitcoinHeight, meta.CheckpointHeight + 1));
+                        if (row.CreatedAtVfxHeight > _sweepScripts)
+                            _sweepFrom = Math.Min(_sweepFrom, Math.Max(row.WatchFromBitcoinHeight, meta.CheckpointHeight + 1));
                 if (coins > _sweepCoins)
                     foreach (var row in db.GetCollection<VaultCoinRow>(BtcAttestStore.Coins).Find(x => x.LastModifiedHeight > _sweepCoins))
                         if (row.Status == VaultCoinStatus.Unspent && row.CreatedInHeight < meta.EventsThroughHeight)
