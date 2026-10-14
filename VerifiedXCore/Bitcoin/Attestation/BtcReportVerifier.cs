@@ -91,7 +91,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 {
                     if (meta.PendingNextPart == 0)
                     {
-                        if (report.Part == 1 && report.BlockHeight <= meta.EventsThroughHeight)
+                        if (report.Part != 1) return BtcReportOutcome.Fail("the first part of this block's report has not been applied");
+                        if (report.BlockHeight <= meta.EventsThroughHeight)
                             return BtcReportOutcome.Fail($"block {report.BlockHeight} is at or below the events-through height {meta.EventsThroughHeight}");
                     }
                     else if (report.BlockHeight != meta.PendingPartBlockHeight || report.Part != meta.PendingNextPart)
@@ -99,6 +100,17 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 }
                 else if (report.BlockHeight > meta.EventsThroughHeight)
                     return BtcReportOutcome.Fail("a backfill report is for a block whose events were already reported");
+            }
+            if (report.ReplaceAbove != 0)
+            {
+                // A header replacement's copy: its headers are now the stored ones (fourth review, round 4).
+                if (meta.PendingNextPart != 0) return BtcReportOutcome.Fail("a header replacement cannot interrupt a multi-part report");
+                if (report.ReplaceAbove < meta.EventsThroughHeight || report.ReplaceAbove < meta.CheckpointHeight)
+                    return BtcReportOutcome.Fail("headers at or below the events-through height cannot be replaced by this report (that takes a rewind)");
+                if (report.ReplaceAbove >= meta.TipHeight) return BtcReportOutcome.Fail("there is nothing above that height to replace");
+                if (report.Headers.Count > 0 && BtcHeader.TryParse(report.Headers[0], out var firstReplacing) && firstReplacing != null
+                    && string.Equals(BtcAttestStore.HeaderAt(report.ReplaceAbove + 1, db)?.Hash, firstReplacing.Hash, StringComparison.Ordinal))
+                    return BtcReportOutcome.Fail("the replacing headers do not carry more work than the headers they replace");
             }
 
             // ── Signatures (checked before the heavier work; they bind every field through the hash) ─────────
