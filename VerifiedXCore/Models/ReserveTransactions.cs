@@ -108,7 +108,8 @@ namespace VerifiedXCore.Models
         #endregion
 
         #region Save Reserve Transactions
-        public static void SaveReserveTx(ReserveTransactions rTx)
+        /// <summary>Keeps the row unless one of its hash is kept already. False when it could not be written.</summary>
+        public static bool SaveReserveTx(ReserveTransactions rTx)
         {
             try
             {
@@ -116,12 +117,13 @@ namespace VerifiedXCore.Models
                 var rec = db.FindOne(x => x.Hash == rTx.Hash);
                 if(rec == null)
                 {
-                    db.InsertSafe(rTx);
+                    return db.InsertSafe(rTx) != null;
                 }
+                return true;
             }
             catch (Exception ex)
             {
-
+                return false;
             }
 
         }

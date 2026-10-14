@@ -306,7 +306,9 @@ namespace VerifiedXCore.Data
                                         UnlockTime = tx.UnlockTime,
                                     };
 
-                                    ReserveTransactions.SaveReserveTx(rTx);
+                                    // Not kept on this node, the delayed transaction would never settle here (round 8).
+                                    if (!ReserveTransactions.SaveReserveTx(rTx))
+                                        NoteApplyStepFailed(block.Height, new System.IO.IOException($"The reserve row of {tx.Hash} was not written on this node."));
                                 }
 
                                 from.Nonce += 1;
@@ -901,7 +903,7 @@ namespace VerifiedXCore.Data
                                     ErrorLogUtility.LogError($"UpdateTreiFromReserve clamping LockedBalance to 0 for {from.Key} - attempted to subtract {rtx.Amount} from {from.LockedBalance}", "StateData.UpdateTreiFromReserve()");
                                     from.LockedBalance = 0;
                                 }
-                                await accStTrei.UpdateSafeAsync(from);
+                                await Written(accStTrei.UpdateSafeAsync(from), "from");
                             }
 
                         }
@@ -932,7 +934,7 @@ namespace VerifiedXCore.Data
                                             to.LockedBalance = 0;
                                         }
 
-                                        await accStTrei.UpdateSafeAsync(to);
+                                        await Written(accStTrei.UpdateSafeAsync(to), "to");
                                     }
                                 }
                             }
@@ -962,7 +964,7 @@ namespace VerifiedXCore.Data
                                 {
                                     ErrorLogUtility.LogError($"UpdateTreiFromReserve: transfer {rtx.Hash} of {scUID} from {rtx.FromAddress} to {rtx.ToAddress} no longer stands (owner {scStateTreiRec.OwnerAddress}, next owner {scStateTreiRec.NextOwner ?? "none"}); not applied.", "StateData.UpdateTreiFromReserve()");
                                     rtx.ReserveTransactionStatus = ReserveTransactionStatus.CalledBack;
-                                    await rtxDb.UpdateSafeAsync(rtx);
+                                    await Written(rtxDb.UpdateSafeAsync(rtx), "rtx");
                                     await TransactionData.UpdateTxStatusForAllByHash(rtx.Hash, TransactionStatus.Failed);
                                     continue;
                                 }
@@ -1034,7 +1036,7 @@ namespace VerifiedXCore.Data
                         {
                             ErrorLogUtility.LogError($"UpdateTreiFromReserve: vBTC transfer {rtx.Hash} on {vbtcScUID} to {rtx.ToAddress} not applied: {holderLimitRefusal}", "StateData.UpdateTreiFromReserve()");
                             rtx.ReserveTransactionStatus = ReserveTransactionStatus.CalledBack;
-                            await rtxDb.UpdateSafeAsync(rtx);
+                            await Written(rtxDb.UpdateSafeAsync(rtx), "rtx");
                             await TransactionData.UpdateTxStatusForAllByHash(rtx.Hash, TransactionStatus.Failed);
                             continue;
                         }
@@ -1045,7 +1047,7 @@ namespace VerifiedXCore.Data
                             // Judged again now that it falls due: nothing was taken from the sender when it was sent.
                             ErrorLogUtility.LogError($"UpdateTreiFromReserve: vBTC transfer {rtx.Hash} of {vbtcAmount.Value} on {vbtcScUID} from {rtx.FromAddress} is no longer covered by its sender's balance; not applied.", "StateData.UpdateTreiFromReserve()");
                             rtx.ReserveTransactionStatus = ReserveTransactionStatus.CalledBack;
-                            await rtxDb.UpdateSafeAsync(rtx);
+                            await Written(rtxDb.UpdateSafeAsync(rtx), "rtx");
                             await TransactionData.UpdateTxStatusForAllByHash(rtx.Hash, TransactionStatus.Failed);
                             continue;
                         }
@@ -1058,7 +1060,7 @@ namespace VerifiedXCore.Data
                         {
                             ErrorLogUtility.LogError($"UpdateTreiFromReserve could not parse vBTC V2 transfer data for hash {rtx.Hash} - marking CalledBack (no funds moved)", "StateData.UpdateTreiFromReserve()");
                             rtx.ReserveTransactionStatus = ReserveTransactionStatus.CalledBack;
-                            await rtxDb.UpdateSafeAsync(rtx);
+                            await Written(rtxDb.UpdateSafeAsync(rtx), "rtx");
                             await TransactionData.UpdateTxStatusForAllByHash(rtx.Hash, TransactionStatus.Failed);
                             continue;
                         }
@@ -1070,7 +1072,7 @@ namespace VerifiedXCore.Data
                     if (rtxRec != null)
                     {
                         rtx.ReserveTransactionStatus = ReserveTransactionStatus.Confirmed;
-                        await rtxDb.UpdateSafeAsync(rtx);
+                        await Written(rtxDb.UpdateSafeAsync(rtx), "rtx");
                     }
 
                     // Flip ALL local rows for the hash (same-wallet sends store two).
@@ -1192,7 +1194,7 @@ namespace VerifiedXCore.Data
                                 }
                                 stateTreiFrom.Balance += rTX.Amount;
                                 if (stDb != null)
-                                    await stDb.UpdateSafeAsync(stateTreiFrom);
+                                    await Written(stDb.UpdateSafeAsync(stateTreiFrom), "stateTreiFrom");
 
                                 var rLocalAccount = ReserveAccount.GetReserveAccountSingle(stateTreiFrom.Key);
                                 if (rLocalAccount != null)
@@ -1227,7 +1229,7 @@ namespace VerifiedXCore.Data
                                     stateTreiTo.LockedBalance = 0;
                                 }
                                 if (stDb != null)
-                                    await stDb.UpdateSafeAsync(stateTreiTo);
+                                    await Written(stDb.UpdateSafeAsync(stateTreiTo), "stateTreiTo");
 
                                 var localAccount = AccountData.GetSingleAccount(stateTreiTo.Key);
                                 if (localAccount != null)
@@ -1340,7 +1342,7 @@ namespace VerifiedXCore.Data
                         {
                             rTX.ReserveTransactionStatus = ReserveTransactionStatus.CalledBack;
                             if (rtxDb != null)
-                                await rtxDb.UpdateSafeAsync(rTX);
+                                await Written(rtxDb.UpdateSafeAsync(rTX), "rTX");
                         }
 
                         // Local wallet rows (0, 1, or 2 — same-wallet sends store both the
@@ -1390,7 +1392,7 @@ namespace VerifiedXCore.Data
                                         stateTreiFrom.LockedBalance = 0;
                                     }
                                     if (stDb != null)
-                                        await stDb.UpdateSafeAsync(stateTreiFrom);
+                                        await Written(stDb.UpdateSafeAsync(stateTreiFrom), "stateTreiFrom");
 
                                     var rLocalAccount = ReserveAccount.GetReserveAccountSingle(stateTreiFrom.Key);
                                     if (rLocalAccount != null)
@@ -1415,7 +1417,7 @@ namespace VerifiedXCore.Data
                                     {
                                         stateTreiRecovery.Balance += rTX.Amount;
                                         if (stDb != null)
-                                            await stDb.UpdateSafeAsync(stateTreiRecovery);
+                                            await Written(stDb.UpdateSafeAsync(stateTreiRecovery), "stateTreiRecovery");
                                     }
                                     else
                                     {
@@ -1428,7 +1430,7 @@ namespace VerifiedXCore.Data
                                         };
 
                                         if (stDb != null)
-                                            await stDb.InsertSafeAsync(acctStateTreiTo);
+                                            await Written(stDb.InsertSafeAsync(acctStateTreiTo), "acctStateTreiTo");
 
                                     }
 
@@ -1456,7 +1458,7 @@ namespace VerifiedXCore.Data
                                     stateTreiTo.LockedBalance = 0;
                                 }
                                 if (stDb != null)
-                                    await stDb.UpdateSafeAsync(stateTreiTo);
+                                    await Written(stDb.UpdateSafeAsync(stateTreiTo), "stateTreiTo");
                             }
                         }
 
@@ -1525,7 +1527,7 @@ namespace VerifiedXCore.Data
                         {
                             rTX.ReserveTransactionStatus = ReserveTransactionStatus.Recovered;
                             if (rtxDb != null)
-                                await rtxDb.UpdateSafeAsync(rTX);
+                                await Written(rtxDb.UpdateSafeAsync(rTX), "rTX");
                         }
 
                         await TransactionData.UpdateTxStatusForAllByHash(rTX.Hash, TransactionStatus.Recovered);
@@ -1541,7 +1543,7 @@ namespace VerifiedXCore.Data
                 {
                     _stateTreiRecovery.Balance += rsrvAccount.Balance;
                     if (stDb != null)
-                        await stDb.UpdateSafeAsync(_stateTreiRecovery);
+                        await Written(stDb.UpdateSafeAsync(_stateTreiRecovery), "_stateTreiRecovery");
                 }
                 else
                 {
@@ -1554,13 +1556,13 @@ namespace VerifiedXCore.Data
                     };
 
                     if (stDb != null)
-                        await stDb.InsertSafeAsync(acctStateTreiTo);
+                        await Written(stDb.InsertSafeAsync(acctStateTreiTo), "acctStateTreiTo");
                 }
 
                 rsrvAccount.Balance = 0.0M;
                 rsrvAccount.LockedBalance = 0.0M;
 
-                await stDb.UpdateSafeAsync(rsrvAccount);
+                await Written(stDb.UpdateSafeAsync(rsrvAccount), "rsrvAccount");
 
                 var _scDb = SmartContractStateTrei.GetSCST();
 
@@ -3261,6 +3263,22 @@ namespace VerifiedXCore.Data
                     || Bitcoin.Services.VBTCService.AttestedOwnerSpendable(contract, fromAddress, long.MaxValue) >= amount;
             var held = contract.SCStateTreiTokenizationTXes?.Where(x => x.FromAddress == fromAddress || x.ToAddress == fromAddress).Sum(x => x.Amount) ?? 0M;
             return held >= amount;
+        }
+
+        /// <summary>
+        /// A consensus write of a reserve's settlement, call-back or recovery. The safe writers log a failure and answer
+        /// false (an update) or null (an insert): the row was read just before, so that is a fault of this node's storage.
+        /// Swallowed, a settlement whose status write failed was settled again a block later on this node, a second credit,
+        /// and nothing was flagged (fourth review, round 8). Thrown, it is caught where the step runs and flags the state.
+        /// </summary>
+        private static async Task Written(Task<bool> write, string what)
+        {
+            if (!await write) throw new System.IO.IOException($"{what} was not written on this node.");
+        }
+
+        private static async Task Written(Task<LiteDB.BsonValue> insert, string what)
+        {
+            if (await insert == null) throw new System.IO.IOException($"{what} was not written on this node.");
         }
 
         /// <summary>
