@@ -175,6 +175,83 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// Delayed owner changes of one contract made by reserve accounts (fourth review, round 8): reserve rows falling due
+        /// together are now settled in (ConfirmTimestamp, Height, Hash) order, where nodes used their own random row ids.
+        /// Before the path-audit gate a delayed Transfer() or TokenContractOwnerChange() is applied without a "still stands"
+        /// check, so two of one contract falling due between the same two blocks would now resolve one way on every
+        /// rebuilt node. Lists every contract with more than one such transaction, with heights and unlock times, and
+        /// marks pairs whose unlock times fall between the same two blocks. Inert unless RESERVE_ORDER_SCAN_DB names the
+        /// database folder; the block database is opened read-only, in place.
+        /// </summary>
+        [Fact]
+        public void ReserveOwnerChangeOrderScan()
+        {
+            var dbDir = Environment.GetEnvironmentVariable("RESERVE_ORDER_SCAN_DB");
+            if (string.IsNullOrWhiteSpace(dbDir)) return;
+            var outDir = Environment.GetEnvironmentVariable("FUNDLOSS_SCAN_OUT");
+            if (string.IsNullOrWhiteSpace(outDir)) outDir = dbDir;
+            Directory.CreateDirectory(outDir);
+            var dbPath = Path.Combine(dbDir, DbContext.RSRV_DB_NAME);
+            Assert.True(File.Exists(dbPath), $"Block database not found: {dbPath}");
+            var mapper = new BsonMapper(null, LegacyTypeNameBinder.Instance);
+            mapper.RegisterType<DateTime>(
+                value => value.ToString("o", CultureInfo.InvariantCulture),
+                bson => DateTime.ParseExact(bson, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+            mapper.RegisterType<DateTimeOffset>(
+                value => value.ToString("o", CultureInfo.InvariantCulture),
+                bson => DateTimeOffset.ParseExact(bson, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+            var db = new LiteDatabase(new ConnectionString { Filename = dbPath, Connection = ConnectionType.Direct, ReadOnly = true }, mapper);
+            var blocks = db.GetCollection<Block>(DbContext.RSRV_BLOCKS);
+            var network = dbDir.Contains("TestNet", StringComparison.OrdinalIgnoreCase) ? "testnet" : "mainnet";
+            var changes = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<(long Height, string Hash, string Function, long Unlock)>>(StringComparer.Ordinal);
+            var blockTimes = new System.Collections.Generic.List<(long Height, long Time)>();
+            long scanned = 0, lastHeight = -1, reserveTxs = 0;
+            string? stopped = null;
+            try
+            {
+                foreach (var block in blocks.Query().OrderBy(b => b.Height).ToEnumerable())
+                {
+                    lastHeight = block.Height;
+                    scanned++;
+                    blockTimes.Add((block.Height, block.Timestamp));
+                    foreach (var tx in block.Transactions ?? new System.Collections.Generic.List<Transaction>())
+                    {
+                        if (tx?.FromAddress == null || !tx.FromAddress.StartsWith("xRBX", StringComparison.Ordinal) || tx.TransactionType == TransactionType.RESERVE) continue;
+                        reserveTxs++;
+                        var (function, uid) = LedgerIntegrityRules.DispatchedCall(tx.Data);
+                        if ((function != "Transfer()" && function != "TokenContractOwnerChange()") || uid == null) continue;
+                        if (!changes.TryGetValue(uid, out var list)) changes[uid] = list = new();
+                        list.Add((block.Height, tx.Hash, function, tx.UnlockTime ?? 0));
+                    }
+                }
+            }
+            catch (Exception ex) { stopped = ex.ToString(); }
+            // The block a row falls due in: the first block whose timestamp is above its unlock time.
+            long DueAt(long unlock)
+            {
+                int lo = 0, hi = blockTimes.Count - 1, found = -1;
+                while (lo <= hi) { var mid = (lo + hi) / 2; if (blockTimes[mid].Time > unlock) { found = mid; hi = mid - 1; } else lo = mid + 1; }
+                return found < 0 ? -1 : blockTimes[found].Height;
+            }
+            var lines = new System.Collections.Generic.List<string>();
+            long contractsWithMany = 0, sameBatch = 0;
+            foreach (var (uid, list) in changes.Where(kv => kv.Value.Count > 1))
+            {
+                contractsWithMany++;
+                var due = list.Select(c => (c, Due: DueAt(c.Unlock))).ToList();
+                foreach (var group in due.GroupBy(d => d.Due).Where(g => g.Count() > 1))
+                {
+                    sameBatch++;
+                    lines.Add($"SAME BATCH {uid} due at {group.Key}: " + string.Join("; ", group.Select(d => $"{d.c.Function} {d.c.Hash} mined {d.c.Height} unlock {d.c.Unlock}")));
+                }
+                lines.Add($"{uid}: " + string.Join("; ", due.Select(d => $"{d.c.Function} mined {d.c.Height} due {d.Due}")));
+            }
+            if (stopped != null) lines.Insert(0, $"STOPPED after height {lastHeight}: {stopped}");
+            lines.Insert(0, $"{network}: {scanned} blocks to height {lastHeight}, {reserveTxs} reserve transactions, {changes.Count} contracts with a delayed owner change, {contractsWithMany} with more than one, {sameBatch} pairs falling due together");
+            File.WriteAllLines(Path.Combine(outDir, $"reserve-order-scan-{network}.txt"), lines);
+        }
+
+        /// <summary>
         /// Runs the production privacy-store rebuild (PrivacyDbRebuildService) over a real block database opened
         /// read-only into a scratch DB_Privacy, and writes the resulting pool rows next to the scan report, so the
         /// figure every node will hold after the one-time startup rebuild can be compared with the scan's
