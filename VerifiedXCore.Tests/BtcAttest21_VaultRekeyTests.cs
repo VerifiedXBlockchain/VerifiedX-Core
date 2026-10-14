@@ -617,6 +617,83 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A vault's ledger is one list in one database document, two rows a transfer, never pruned, and a write LiteDB
+        /// refused (above its document limit) was dropped silently: transfers and requests then wrote nothing while their
+        /// withdrawals were still pinned and paid (fourth review, round 5). Rows become one row an address once that saves
+        /// enough, with every balance as it was; a vault holds a bounded number of holders with a balance.
+        /// </summary>
+        [Fact]
+        public void AVaultsLedger_IsCompactedToOneRowAnAddress_WithEveryBalanceAsItWas()
+        {
+            string A(int i) => "xHolder" + i.ToString("D5");
+            var rows = new List<SmartContractStateTreiTokenizationTX>();
+            for (var i = 0; i < 3_000; i++)
+            {
+                rows.Add(new SmartContractStateTreiTokenizationTX { FromAddress = "+", ToAddress = A(i % 7), Amount = 0.00001M * (i + 1) });
+                rows.Add(new SmartContractStateTreiTokenizationTX { FromAddress = A((i + 3) % 7), ToAddress = "-", Amount = -0.00001M * (i + 1) });
+            }
+            rows.Add(new SmartContractStateTreiTokenizationTX { FromAddress = "+", ToAddress = "xOwner", Amount = 0.5M });
+            var contract = new SmartContractStateTrei { SmartContractUID = "v", SCStateTreiTokenizationTXes = rows.ToList() };
+            decimal Balance(SmartContractStateTrei c, string a) => c.SCStateTreiTokenizationTXes!.Where(x => x.FromAddress == a || x.ToAddress == a).Sum(x => x.Amount);
+            var before = Enumerable.Range(0, 7).Select(A).Append("xOwner").ToDictionary(a => a, a => Balance(contract, a));
+            var total = rows.Sum(x => x.Amount);
+
+            Assert.True(BtcVaultLedger.Compact(contract));
+            Assert.True(contract.SCStateTreiTokenizationTXes!.Count <= 8);
+            foreach (var (a, b) in before) Assert.Equal(b, Balance(contract, a));
+            Assert.Equal(total, contract.SCStateTreiTokenizationTXes.Sum(x => x.Amount));
+            Assert.Equal(before.Count(kv => kv.Value != 0M), BtcVaultLedger.HoldersWithABalance(contract));
+            Assert.False(BtcVaultLedger.Compact(contract)); // nothing more to save
+
+            // A row naming two addresses (or none) is not a shape compaction knows: left as it is.
+            var odd = new SmartContractStateTrei { SmartContractUID = "w", SCStateTreiTokenizationTXes = rows.Append(new SmartContractStateTreiTokenizationTX { FromAddress = "xA", ToAddress = "xB", Amount = 1M }).ToList() };
+            Assert.False(BtcVaultLedger.Compact(odd));
+        }
+
+        [Fact]
+        public async Task AWatchedVaultsLedger_StaysBounded_AndHoldsAtMostItsHolders()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 500_000);
+            var holder = NewKey();
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = holder.Address, Balance = 100M, Nonce = 0 });
+            await Mine(SignedBy(Minter, holder.Address, TransactionType.VBTC_V2_TRANSFER,
+                new { Function = "TransferVBTCV2()", ContractUID = vault.Uid, FromAddress = Minter.Address, ToAddress = holder.Address, Amount = 0.001M }));
+
+            // A long history of transfers back and forth (written as the ledger holds them).
+            var state = SmartContractStateTrei.GetSmartContractState(vault.Uid)!;
+            for (var i = 0; i < 2_500; i++)
+            {
+                state.SCStateTreiTokenizationTXes!.Add(new SmartContractStateTreiTokenizationTX { FromAddress = "+", ToAddress = holder.Address, Amount = 0.00000001M });
+                state.SCStateTreiTokenizationTXes.Add(new SmartContractStateTreiTokenizationTX { FromAddress = holder.Address, ToAddress = "-", Amount = -0.00000001M });
+            }
+            SmartContractStateTrei.GetSCST().Update(state);
+            var spendableBefore = await Spendable(vault.Uid, Minter);
+
+            // The next write on the vault compacts it; every balance is as it was, and the transfer is applied.
+            await Mine(SignedBy(holder, Minter.Address, TransactionType.VBTC_V2_TRANSFER,
+                new { Function = "TransferVBTCV2()", ContractUID = vault.Uid, FromAddress = holder.Address, ToAddress = Minter.Address, Amount = 0.0004M }));
+            state = SmartContractStateTrei.GetSmartContractState(vault.Uid)!;
+            Assert.True(state.SCStateTreiTokenizationTXes!.Count < 10);
+            Assert.Equal(0.0006M, state.SCStateTreiTokenizationTXes.Where(x => x.FromAddress == holder.Address || x.ToAddress == holder.Address).Sum(x => x.Amount));
+            Assert.Equal(spendableBefore + 0.0004M, await Spendable(vault.Uid, Minter));
+
+            // At the holder limit, a new holder is refused; an existing one is not.
+            BtcVaultLedger.MaxHoldersOverride = BtcVaultLedger.HoldersWithABalance(state);
+            try
+            {
+                var newcomer = NewKey();
+                await Refused(SignedBy(holder, newcomer.Address, TransactionType.VBTC_V2_TRANSFER,
+                    new { Function = "TransferVBTCV2()", ContractUID = vault.Uid, FromAddress = holder.Address, ToAddress = newcomer.Address, Amount = 0.0001M }), "the most a vault holds");
+                var (ok, why) = await Verify(SignedBy(holder, Minter.Address, TransactionType.VBTC_V2_TRANSFER,
+                    new { Function = "TransferVBTCV2()", ContractUID = vault.Uid, FromAddress = holder.Address, ToAddress = Minter.Address, Amount = 0.0001M }), Tip + 1);
+                Assert.True(ok, why);
+            }
+            finally { BtcVaultLedger.MaxHoldersOverride = null; }
+        }
+
+        /// <summary>
         /// A withdrawal request mined a second time (by a producer, once the recent-blocks check has forgotten its hash)
         /// debited its requester again with no row to pay, expire or cancel. A watched vault's request is mined once
         /// (fourth review, round 2).

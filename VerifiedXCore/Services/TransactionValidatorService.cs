@@ -291,7 +291,9 @@ namespace VerifiedXCore.Services
 
             // A vault that is changing hands keeps its owner's balance; vBTC goes only to an address that can hold it.
             var vaultInTransitError = LedgerIntegrityRules.OwnerKeepsAVaultWholeWhileItChangesHands(txRequest)
-                ?? LedgerIntegrityRules.VbtcRecipientCanHoldIt(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+                ?? LedgerIntegrityRules.VbtcRecipientCanHoldIt(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // A watched vault holds at most so many holders with a balance, so its ledger stays within one document.
+                ?? VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.HolderLimitRefusal(txRequest);
             if (vaultInTransitError != null)
                 return (false, vaultInTransitError);
 

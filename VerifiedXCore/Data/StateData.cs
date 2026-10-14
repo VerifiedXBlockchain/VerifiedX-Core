@@ -3921,7 +3921,19 @@ namespace VerifiedXCore.Data
                 // pre-registration row already exists under the same (Requestor, UniqueId, scUID)
                 // composite key; the mined record must UPDATE it (stamping the real TransactionHash
                 // and mined height) rather than fail the insert and leave the row incomplete forever.
+                // A vault the chain watches: the debit first (its write throws when it fails), then the request's row, which
+                // must then exist; only then is the withdrawal fixed on coins. The other order left a request that could be
+                // pinned and paid when its debit had not been written (fourth review, round 5).
+                var watchedVault = VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(scUID);
+                if (watchedVault && VBTCWithdrawalRequest.EscrowAppliesTo(tx.Height) && !WriteWithdrawalEscrowDebit(scUID, requesterAddress, amount.Value))
+                {
+                    ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal: escrow debit could not be written for {scUID} (contract state missing)", "StateData.RequestVBTCV2Withdrawal()");
+                    return;
+                }
+
                 var saved = VBTCWithdrawalRequest.Save(withdrawalRequest, update: true);
+                if (watchedVault && (!saved || VBTCWithdrawalRequest.GetByTransactionHash(tx.Hash, scUID) == null))
+                    throw new System.IO.IOException($"Withdrawal request {tx.Hash} on vault {scUID} was debited but its row was not written.");
                 if (!saved)
                 {
                     ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal failed: Could not save withdrawal request", "StateData.RequestVBTCV2Withdrawal()");
@@ -3931,7 +3943,7 @@ namespace VerifiedXCore.Data
                 // ESCROW (gated): debit the requester NOW. vBTC used to be burned only at COMPLETE, so a
                 // holder could receive the BTC, never complete, keep the vBTC and repeat after expiry.
                 // Refunded only by an approved cancellation — never by expiry.
-                if (VBTCWithdrawalRequest.EscrowAppliesTo(tx.Height))
+                if (!watchedVault && VBTCWithdrawalRequest.EscrowAppliesTo(tx.Height))
                 {
                     if (!WriteWithdrawalEscrowDebit(scUID, requesterAddress, amount.Value))
                         ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal: escrow debit could not be written for {scUID} (contract state missing)", "StateData.RequestVBTCV2Withdrawal()");
@@ -4023,14 +4035,24 @@ namespace VerifiedXCore.Data
                         RequestBlockHeight = tx.Height
                     };
 
-                    if (!VBTCWithdrawalRequest.Save(withdrawalRequest, update: true))
+                    // A watched vault: the debit first, then the row, which must exist (as for the single shape).
+                    var watchedVault = VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(input.SCUID);
+                    if (watchedVault && VBTCWithdrawalRequest.EscrowAppliesTo(tx.Height) && !WriteWithdrawalEscrowDebit(input.SCUID, requesterAddress, input.Amount))
+                    {
+                        ErrorLogUtility.LogError($"RequestVBTCV2WithdrawalMulti: escrow debit could not be written for {input.SCUID} (contract state missing)", "StateData.RequestVBTCV2WithdrawalMulti()");
+                        continue;
+                    }
+                    var savedRow = VBTCWithdrawalRequest.Save(withdrawalRequest, update: true);
+                    if (watchedVault && (!savedRow || VBTCWithdrawalRequest.GetByTransactionHash(tx.Hash, input.SCUID) == null))
+                        throw new System.IO.IOException($"Withdrawal request {tx.Hash} on vault {input.SCUID} was debited but its row was not written.");
+                    if (!savedRow)
                     {
                         ErrorLogUtility.LogError($"RequestVBTCV2WithdrawalMulti failed: Could not save withdrawal request for {input.SCUID}. TX: {tx.Hash}", "StateData.RequestVBTCV2WithdrawalMulti()");
                         continue;
                     }
 
                     // ESCROW (gated): identical rule to the single shape, applied per contract.
-                    if (VBTCWithdrawalRequest.EscrowAppliesTo(tx.Height))
+                    if (!watchedVault && VBTCWithdrawalRequest.EscrowAppliesTo(tx.Height))
                     {
                         if (!WriteWithdrawalEscrowDebit(input.SCUID, requesterAddress, input.Amount))
                             ErrorLogUtility.LogError($"RequestVBTCV2WithdrawalMulti: escrow debit could not be written for {input.SCUID} (contract state missing)", "StateData.RequestVBTCV2WithdrawalMulti()");

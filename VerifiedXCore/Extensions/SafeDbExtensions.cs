@@ -129,6 +129,18 @@ namespace VerifiedXCore.Extensions
             return Command(col, () => col.Update(entity));
         }
 
+        /// <summary>
+        /// As <see cref="UpdateSafe{T}(ILiteCollection{T}, T)"/> (the collection's lock held), but a failure is thrown, not
+        /// logged and dropped: for consensus writes whose loss would leave state other than the chain says.
+        /// </summary>
+        public static bool UpdateOrThrow<T>(this ILiteCollection<T> col, T entity)
+        {
+            var slim = col.GetSlim();
+            slim.Wait();
+            try { return col.Update(entity); }
+            finally { try { slim.Release(); } catch { } }
+        }
+
         //
         // Summary:
         //     Update a document in this collection. Returns false if not found document in

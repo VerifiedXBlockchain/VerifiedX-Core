@@ -103,6 +103,10 @@ namespace VerifiedXCore.Extensions
         public static bool UpdateSafe(this ILiteCollection<SmartContractStateTrei> col, SmartContractStateTrei entity)
             => DbExtensions.UpdateSafe<SmartContractStateTrei>(col, Stamp(entity));
 
+        /// <summary>Stamped like <see cref="UpdateSafe(ILiteCollection{SmartContractStateTrei}, SmartContractStateTrei)"/>; a failure is thrown.</summary>
+        public static bool UpdateOrThrow(this ILiteCollection<SmartContractStateTrei> col, SmartContractStateTrei entity)
+            => DbExtensions.UpdateOrThrow<SmartContractStateTrei>(col, Stamp(entity));
+
         public static int UpdateSafe(this ILiteCollection<SmartContractStateTrei> col, IEnumerable<SmartContractStateTrei> entities)
             => DbExtensions.UpdateSafe<SmartContractStateTrei>(col, Stamp(entities));
 
