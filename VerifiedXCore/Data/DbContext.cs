@@ -230,6 +230,10 @@ namespace VerifiedXCore.Data
 
             var scTrei = DbContext.DB_SmartContractStateTrei.GetCollection<SmartContractStateTrei>(DbContext.RSRV_SCSTATE_TREI);
             scTrei.EnsureIndexSafe(x => x.LastModifiedHeight, false); //snapshot diff-copy queries
+            // Every contract lookup is by its UID: without an index each one read every contract's document, a watched
+            // vault's ledger (up to about 10 MB) among them (fourth review, round 7). Not unique: older states may hold a
+            // UID twice, and lookups have always taken the first.
+            scTrei.EnsureIndexSafe(x => x.SmartContractUID, false);
 
             //var peers = DbContext.DB_Peers.GetCollection<Peers>(DbContext.RSRV_PEERS);
             //peers.EnsureIndex(x => x.PeerIP, true);
