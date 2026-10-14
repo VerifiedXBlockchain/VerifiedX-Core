@@ -141,5 +141,28 @@ namespace VerifiedXCore.Bitcoin.Services
                     FeeRate = r.FeeRate,
                 };
             }).ToList();
+
+        /// <summary>
+        /// The contract's withdrawals that were closed without being paid: cancelled, expired before a Bitcoin
+        /// transaction was fixed, made void by another spend of their coins, or released by their requester. Each was
+        /// refunded in vBTC. The history above lists payments only, so these were shown nowhere once closed.
+        /// </summary>
+        public static List<object> WithdrawalsClosedWithoutPayment(string scUID) =>
+            MinedWithdrawals(scUID).Where(r => r.IsCompleted && r.Status != VBTCWithdrawalStatus.Completed).Select(r =>
+            {
+                var attested = Attestation.BtcAttestStore.Withdrawal(Attestation.BtcWithdrawals.RefOf(r.TransactionHash, scUID));
+                return (object)new
+                {
+                    RequestHash = r.TransactionHash,
+                    r.Amount,
+                    r.BTCDestination,
+                    RequestTime = r.Timestamp,
+                    r.RequestBlockHeight,
+                    r.FeeRate,
+                    Outcome = attested != null ? attested.State.ToString() : r.Status.ToString(),
+                    Why = attested?.WaitingReason,
+                    ClosedAtBlock = attested?.ClosedAtVfxHeight,
+                };
+            }).ToList();
     }
 }

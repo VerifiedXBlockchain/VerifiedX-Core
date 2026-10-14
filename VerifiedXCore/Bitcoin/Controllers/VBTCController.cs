@@ -3343,6 +3343,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     r.BTCDestination,
                     r.FeeRate,
                     r.IsCompleted,
+                    // IsCompleted says the share is closed. Paid says Bitcoin was sent; Refunded that it was closed
+                    // without payment and its vBTC returned (cancelled, expired, void, released).
+                    Paid = r.IsCompleted && r.Status == VBTCWithdrawalStatus.Completed,
+                    Refunded = r.IsCompleted && r.Status != VBTCWithdrawalStatus.Completed,
                     Status = r.Status.ToString(),
                     r.BTCTxHash,
                     r.RequestBlockHeight,
@@ -3360,6 +3364,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     ShareCount = rows.Count,
                     CompletedCount = rows.Count(r => r.IsCompleted),
                     AllComplete = rows.All(r => r.IsCompleted),
+                    // "Complete" above means closed, whichever way. These say which way.
+                    PaidCount = rows.Count(r => r.IsCompleted && r.Status == VBTCWithdrawalStatus.Completed),
+                    RefundedCount = rows.Count(r => r.IsCompleted && r.Status != VBTCWithdrawalStatus.Completed),
+                    AllPaid = rows.All(r => r.IsCompleted && r.Status == VBTCWithdrawalStatus.Completed),
                     Shares = shares
                 });
             }
@@ -4733,7 +4741,9 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Success = true,
                     Message = "Withdrawal history retrieved",
                     SmartContractUID = scUID,
-                    WithdrawalHistory = Services.VBTCChainView.WithdrawalHistory(scUID, VBTCContractV2.GetContract(scUID))
+                    WithdrawalHistory = Services.VBTCChainView.WithdrawalHistory(scUID, VBTCContractV2.GetContract(scUID)),
+                    // Closed without payment and refunded in vBTC (WithdrawalHistory lists payments only).
+                    Refunded = Services.VBTCChainView.WithdrawalsClosedWithoutPayment(scUID)
                 });
             }
             catch (Exception ex)

@@ -421,6 +421,26 @@ namespace VerifiedXCore.Tests
             // No vote record was made, and the pinned request is untouched.
             Assert.Null(VBTCWithdrawalCancellation.GetCancellationByWithdrawalHash(waiting.Hash, vault.Uid));
             Assert.Equal(VaultWithdrawalState.Pinned, Row(pinned, vault.Uid).State);
+
+            // The API says what became of it: closed, and refunded, not paid. (The history listed payments only and
+            // the shares route called every closed share complete.)
+            var api = new VerifiedXCore.Bitcoin.Controllers.VBTCController();
+            var history = Newtonsoft.Json.Linq.JObject.Parse(await api.GetWithdrawalHistory(vault.Uid));
+            Assert.Empty((Newtonsoft.Json.Linq.JArray)history["WithdrawalHistory"]!);
+            var refunded = Assert.Single((Newtonsoft.Json.Linq.JArray)history["Refunded"]!);
+            Assert.Equal(waiting.Hash, (string)refunded["RequestHash"]!);
+            Assert.Equal("Cancelled", (string)refunded["Outcome"]!);
+            Assert.Equal(0.0003M, (decimal)refunded["Amount"]!);
+            var shares = Newtonsoft.Json.Linq.JObject.Parse(api.GetWithdrawalRequestShares(waiting.Hash));
+            Assert.Equal(1, (int)shares["CompletedCount"]!);
+            Assert.Equal(0, (int)shares["PaidCount"]!);
+            Assert.Equal(1, (int)shares["RefundedCount"]!);
+            Assert.False((bool)shares["AllPaid"]!);
+            Assert.True((bool)shares["Shares"]![0]!["Refunded"]!);
+            Assert.False((bool)shares["Shares"]![0]!["Paid"]!);
+            var open = Newtonsoft.Json.Linq.JObject.Parse(api.GetWithdrawalRequestShares(pinned.Hash));
+            Assert.Equal(0, (int)open["PaidCount"]!);
+            Assert.Equal(0, (int)open["RefundedCount"]!);
         }
 
         [Fact]
