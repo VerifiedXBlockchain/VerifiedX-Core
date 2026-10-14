@@ -1321,7 +1321,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // NEW-19: seal every package (it carries the recipient's secret share in plaintext) to the
                             // recipient's registered validator key; the coordinator only ever relays ciphertext.
                             var idToAddress = BuildAddressToIdentifierMap(session.ParticipantAddresses).ToDictionary(kv => kv.Value, kv => kv.Key);
-                            var sealedShares = FrostShareCrypto.SealAll(sharesJson, sessionId, idToAddress, FrostShareCrypto.VerifiedPublicKey, out var sealError);
+                            var sealEphemerals = new Dictionary<string, string>(StringComparer.Ordinal);
+                            var sealedShares = FrostShareCrypto.SealAll(sharesJson, sessionId, idToAddress, FrostShareCrypto.VerifiedPublicKey, out var sealError, sealEphemerals);
                             if (sealedShares == null)
                             {
                                 ErrorLogUtility.LogError($"FROST DKG Round 2: shares not released for session {sessionId}: {sealError}", "FrostStartup.DKGRound2");
@@ -1337,6 +1338,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                     session.Round1Commitments.TryAdd(kvp.Key, kvp.Value);
                             session.Round2Secret = round2Secret;
                             session.GeneratedSharesJson = sealedShares;
+                            foreach (var (identifier, ephemeral) in sealEphemerals) session.SealEphemerals[identifier] = ephemeral;
                             FrostSessionStorage.MarkDkgStage(session, FrostSessionStorage.DkgStage.Round2);
 
                             LogUtility.Log($"[FROST] DKG Round 2 shares generated via native library for session {sessionId}", "FrostStartup.DKGRound2");
@@ -1702,7 +1704,10 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 RequiredShares = totalOtherParticipants,
                                 DKGFinalized = dkgFinalized,
                                 TaprootAddress = session.TaprootAddress ?? "",
-                                Accusations = accusations
+                                Accusations = accusations,
+                                // Each report signed, so the dealer reveals that share's key for it and for nothing else (round 9).
+                                AccusationSignatures = accusations.Keys.ToDictionary(accused => accused,
+                                    accused => SignatureService.AddressSignature(myAddress, FrostDkgBlame.AccusationMessage(sessionId, myAddress, accused)))
                             }, Formatting.Indented));
                         }
                     }
@@ -2023,6 +2028,65 @@ namespace VerifiedXCore.Bitcoin.FROST
                         ErrorLogUtility.LogError($"DKG abort error: {ex.Message}", "FrostStartup.DKGAbort");
                         context.Response.StatusCode = StatusCodes.Status500InternalServerError;
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }));
+                    }
+                });
+
+                /// <summary>
+                /// POST /frost/dkg/reveal/{sessionId} - the one-time key this validator sealed its share for one recipient
+                /// with, against that recipient's signed report that the share was bad. The coordinator opens the share
+                /// it relayed and checks it against this validator's commitment, which settles the report (fourth review,
+                /// round 9). Only for the reporting recipient's own share: it holds that share already.
+                /// </summary>
+                endpoints.MapPost("/frost/dkg/reveal/{sessionId}", async context =>
+                {
+                    try
+                    {
+                        var sessionId = context.Request.RouteValues["sessionId"] as string;
+                        string body;
+                        using (var reader = new StreamReader(context.Request.Body))
+                        {
+                            var buffer = new char[4097];
+                            var read = await reader.ReadBlockAsync(buffer, 0, buffer.Length);
+                            if (read > 4096)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+                                return;
+                            }
+                            body = new string(buffer, 0, read);
+                        }
+                        var request = Newtonsoft.Json.Linq.JObject.Parse(body);
+                        var accuser = request["Accuser"]?.Type == Newtonsoft.Json.Linq.JTokenType.String ? (string)request["Accuser"]! : null;
+                        var signature = request["Signature"]?.Type == Newtonsoft.Json.Linq.JTokenType.String ? (string)request["Signature"]! : null;
+                        var myAddress = Globals.ValidatorAddress;
+                        if (string.IsNullOrEmpty(sessionId) || string.IsNullOrEmpty(accuser) || string.IsNullOrEmpty(signature) || string.IsNullOrEmpty(myAddress)
+                            || !FrostSessionStorage.DKGSessions.TryGetValue(sessionId, out var session)
+                            || session.ParticipantAddresses == null || !session.ParticipantAddresses.Contains(accuser) || accuser == myAddress)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status404NotFound;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "No such share" }));
+                            return;
+                        }
+                        if (!SignatureService.VerifySignature(accuser, FrostDkgBlame.AccusationMessage(sessionId, accuser, myAddress), signature))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Not a signed report of this share's recipient" }));
+                            return;
+                        }
+                        if (!BuildAddressToIdentifierMap(session.ParticipantAddresses).TryGetValue(accuser, out var identifier)
+                            || !session.SealEphemerals.TryGetValue(identifier, out var ephemeral))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status404NotFound;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "No such share" }));
+                            return;
+                        }
+                        context.Response.StatusCode = StatusCodes.Status200OK;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = true, EphemeralKey = ephemeral }));
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"DKG reveal error: {ex.Message}", "FrostStartup.DKGReveal");
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Unreadable request" }));
                     }
                 });
 

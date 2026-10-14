@@ -3,7 +3,10 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Hosting;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using VerifiedXCore.Utilities;
 using VerifiedXCore.Bitcoin.FROST;
 using VerifiedXCore.Bitcoin.FROST.Models;
 using VerifiedXCore.Bitcoin.Models;
@@ -182,34 +185,101 @@ namespace VerifiedXCore.Tests
 
         // ── Resolving recipients' reports ────────────────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Reports were weighed by count, so two colluding validators could name one honest dealer and have only it
+        /// dropped, attempt after attempt. A report is now settled by the share: the dealer reveals the one-time key it
+        /// sealed the share with, the relayed ciphertext opens, and the share is checked against the dealer's commitment
+        /// (fourth review, round 9). Real library, real sealing.
+        /// </summary>
         [Fact]
-        public void ADealerReportedByManyRecipients_IsTheOneDropped()
+        public void AReportedShare_IsShownGoodOrBad_ByTheKeyItWasSealedWith()
         {
-            var reports = new[] { "A", "B", "C", "E" }.Select(r => (r, "D"));
-            Assert.Equal(new[] { "D" }, FrostDkgBlame.ResolveAccusations(reports));
+            var (commitments, shares) = RealDkg(4, 3);
+            using var recipientKey = new NBitcoin.Key();
+            var recipientPub = Convert.ToHexString(recipientKey.PubKey.ToBytes()).ToLowerInvariant();
+            const string sid = "session";
+
+            // An honest dealer's share, reported as bad: the revealed key opens it and it matches (the report was false).
+            var good = FrostShareCrypto.Seal(shares[1][Id(2)]!.ToString(), recipientPub, sid, Id(2), out var goodKey);
+            Assert.True(FrostDkgBlame.DisputedShareIsGood(good, goodKey, recipientPub, sid, Id(2), commitments[1]));
+
+            // A dealer that sealed another recipient's share, or a tampered one: shown bad.
+            var wrongPoint = FrostShareCrypto.Seal(shares[1][Id(3)]!.ToString(), recipientPub, sid, Id(2), out var wrongPointKey);
+            Assert.False(FrostDkgBlame.DisputedShareIsGood(wrongPoint, wrongPointKey, recipientPub, sid, Id(2), commitments[1]));
+            var tampered = (JObject)shares[1][Id(2)]!.DeepClone();
+            var hex = (string)tampered["signing_share"]!;
+            tampered["signing_share"] = (hex[0] == '0' ? "1" : "0") + hex.Substring(1);
+            var bad = FrostShareCrypto.Seal(tampered.ToString(), recipientPub, sid, Id(2), out var badKey);
+            Assert.False(FrostDkgBlame.DisputedShareIsGood(bad, badKey, recipientPub, sid, Id(2), commitments[1]));
+
+            // A dealer that gives no key, or a key that is not the share's: shown bad (the dealer is dropped).
+            Assert.False(FrostDkgBlame.DisputedShareIsGood(good, null, recipientPub, sid, Id(2), commitments[1]));
+            Assert.False(FrostDkgBlame.DisputedShareIsGood(good, wrongPointKey, recipientPub, sid, Id(2), commitments[1]));
+            // Sealed for another session or identifier: it does not open as this one.
+            Assert.False(FrostDkgBlame.DisputedShareIsGood(good, goodKey, recipientPub, "other", Id(2), commitments[1]));
+
+            // The recipient opens the same ciphertext with its own key, as it always did.
+            Assert.True(FrostShareCrypto.TryOpen(good, recipientKey.ToBytes(), sid, Id(2), out var opened));
+            Assert.Equal(shares[1][Id(2)]!.ToString(), opened);
         }
 
+        /// <summary>
+        /// The dealer reveals a share's key only against its recipient's signed report about that share: the share is
+        /// the reporting recipient's own, which it holds already. Nobody else (a coordinator collecting shares) gets one.
+        /// </summary>
         [Fact]
-        public void ARecipientReportingManyDealers_IsTheOneDropped()
+        public async Task TheRevealRoute_AnswersOnlyTheRecipientsSignedReport()
         {
-            // E.g. a node whose own key is unavailable: it cannot open anyone's share.
-            var reports = new[] { "A", "B", "C", "D" }.Select(d => ("R", d));
-            Assert.Equal(new[] { "R" }, FrostDkgBlame.ResolveAccusations(reports));
-        }
+            var dealer = new EllipticCurve.PrivateKey("secp256k1");
+            var dealerPub = "04" + Convert.ToHexString(dealer.publicKey().toString()).ToLowerInvariant();
+            var dealerAddress = VerifiedXCore.Data.AccountData.GetHumanAddress(dealerPub);
+            var recipient = new EllipticCurve.PrivateKey("secp256k1");
+            var recipientPub = "04" + Convert.ToHexString(recipient.publicKey().toString()).ToLowerInvariant();
+            var recipientAddress = VerifiedXCore.Data.AccountData.GetHumanAddress(recipientPub);
+            var other = new EllipticCurve.PrivateKey("secp256k1");
+            var otherPub = "04" + Convert.ToHexString(other.publicKey().toString()).ToLowerInvariant();
+            var otherAddress = VerifiedXCore.Data.AccountData.GetHumanAddress(otherPub);
+            var participants = new List<string> { dealerAddress, recipientAddress, otherAddress };
+            var ids = FrostStartup.BuildAddressToIdentifierMap(participants);
+            var session = new DKGSession { SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc", LeaderAddress = otherAddress, ParticipantAddresses = participants,
+                StartTimestamp = TimeUtil.GetTime(), LastProgressTimestamp = TimeUtil.GetTime() };
+            session.SealEphemerals[ids[recipientAddress]] = "ab".PadLeft(64, '0');
+            session.SealEphemerals[ids[otherAddress]] = "cd".PadLeft(64, '0');
+            Assert.True(FrostSessionStorage.DKGSessions.TryAdd(session.SessionId, session));
+            var priorValidator = Globals.ValidatorAddress;
+            Globals.ValidatorAddress = dealerAddress;
+            try
+            {
+                using var server = new Microsoft.AspNetCore.TestHost.TestServer(new Microsoft.AspNetCore.Hosting.WebHostBuilder().UseStartup<FrostStartup>());
+                var client = server.CreateClient();
+                async Task<(System.Net.HttpStatusCode Code, string Body)> Reveal(string accuser, string signature)
+                {
+                    var response = await client.PostAsync($"/frost/dkg/reveal/{session.SessionId}",
+                        new System.Net.Http.StringContent(JsonConvert.SerializeObject(new { Accuser = accuser, Signature = signature }), System.Text.Encoding.UTF8, "application/json"));
+                    return (response.StatusCode, await response.Content.ReadAsStringAsync());
+                }
+                string Sign(EllipticCurve.PrivateKey key, string pub, string message) => VerifiedXCore.Services.SignatureService.CreateSignature(message, key, pub);
 
-        [Fact]
-        public void AOneToOneReport_DropsBothSides()
-        {
-            // Unprovable either way: an accuser can only remove an honest dealer by losing itself.
-            Assert.Equal(new[] { "H", "L" }, FrostDkgBlame.ResolveAccusations(new[] { ("L", "H") }).OrderBy(x => x));
-        }
-
-        [Fact]
-        public void MixedReports_DropTheCulpritAndOnlyThePairedLiar()
-        {
-            var reports = new[] { "A", "B", "C" }.Select(r => (r, "D")).Append(("L", "H"));
-            Assert.Equal(new[] { "D", "H", "L" }, FrostDkgBlame.ResolveAccusations(reports).OrderBy(x => x));
-            Assert.Empty(FrostDkgBlame.ResolveAccusations(Array.Empty<(string, string)>()));
+                // The recipient's own signed report: its share's key.
+                var (code, body) = await Reveal(recipientAddress, Sign(recipient, recipientPub, FrostDkgBlame.AccusationMessage(session.SessionId, recipientAddress, dealerAddress)));
+                Assert.Equal(System.Net.HttpStatusCode.OK, code);
+                Assert.Equal("ab".PadLeft(64, '0'), (string)JObject.Parse(body)["EphemeralKey"]!);
+                // Somebody else's signature on that recipient's behalf, or a report about another dealer: nothing.
+                (code, _) = await Reveal(recipientAddress, Sign(other, otherPub, FrostDkgBlame.AccusationMessage(session.SessionId, recipientAddress, dealerAddress)));
+                Assert.Equal(System.Net.HttpStatusCode.Forbidden, code);
+                (code, _) = await Reveal(recipientAddress, Sign(recipient, recipientPub, FrostDkgBlame.AccusationMessage(session.SessionId, recipientAddress, otherAddress)));
+                Assert.Equal(System.Net.HttpStatusCode.Forbidden, code);
+                // Not a participant, or the dealer itself: nothing.
+                (code, _) = await Reveal("xStranger", "sig");
+                Assert.Equal(System.Net.HttpStatusCode.NotFound, code);
+                (code, _) = await Reveal(dealerAddress, Sign(dealer, dealerPub, FrostDkgBlame.AccusationMessage(session.SessionId, dealerAddress, dealerAddress)));
+                Assert.Equal(System.Net.HttpStatusCode.NotFound, code);
+            }
+            finally
+            {
+                Globals.ValidatorAddress = priorValidator;
+                FrostSessionStorage.DKGSessions.TryRemove(session.SessionId, out _);
+            }
         }
 
         // ── The coordinator's attempt loop ───────────────────────────────────────────────────────────────────────

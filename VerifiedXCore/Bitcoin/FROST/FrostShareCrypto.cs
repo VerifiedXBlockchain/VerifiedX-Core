@@ -36,10 +36,19 @@ namespace VerifiedXCore.Bitcoin.FROST
         }
 
         /// <summary>Seals one round-2 package for the holder of <paramref name="recipientPublicKeyHex"/>.</summary>
-        public static string Seal(string packageJson, string recipientPublicKeyHex, string sessionId, string recipientIdentifier)
+        public static string Seal(string packageJson, string recipientPublicKeyHex, string sessionId, string recipientIdentifier) =>
+            Seal(packageJson, recipientPublicKeyHex, sessionId, recipientIdentifier, out _);
+
+        /// <summary>
+        /// Seals one round-2 package and gives the one-time key it was sealed with: with it, and only for this package,
+        /// anyone holding the ciphertext can open it (<see cref="OpenWithEphemeral"/>). A dealer keeps it to settle a
+        /// recipient's report that the share was bad (fourth review, round 9).
+        /// </summary>
+        public static string Seal(string packageJson, string recipientPublicKeyHex, string sessionId, string recipientIdentifier, out string ephemeralPrivateHex)
         {
             var recipient = new NBitcoin.PubKey(Convert.FromHexString(recipientPublicKeyHex));
             using var ephemeralKey = new NBitcoin.Key();
+            ephemeralPrivateHex = Convert.ToHexString(ephemeralKey.ToBytes()).ToLowerInvariant();
             var ephemeral = ephemeralKey.PubKey.Compress();
             var key = DeriveKey(recipient.GetSharedPubkey(ephemeralKey), ephemeral, recipient);
 
@@ -78,11 +87,41 @@ namespace VerifiedXCore.Bitcoin.FROST
         }
 
         /// <summary>
+        /// Opens a sealed package with the one-time key it was sealed with, for the holder of
+        /// <paramref name="recipientPublicKeyHex"/>. False when the key is not the package's, or the package does not open.
+        /// </summary>
+        public static bool OpenWithEphemeral(string? sealedPackage, string? ephemeralPrivateHex, string recipientPublicKeyHex, string sessionId,
+            string recipientIdentifier, out string packageJson)
+        {
+            packageJson = "";
+            if (string.IsNullOrEmpty(sealedPackage) || !sealedPackage.StartsWith(Prefix, StringComparison.Ordinal) || string.IsNullOrEmpty(ephemeralPrivateHex))
+                return false;
+            try
+            {
+                var blob = Convert.FromBase64String(sealedPackage.Substring(Prefix.Length));
+                if (blob.Length < 33 + 12 + 16 + 1) return false;
+                var ephemeral = new NBitcoin.PubKey(blob.AsSpan(0, 33).ToArray());
+                var nonce = blob.AsSpan(33, 12).ToArray();
+                var tag = blob.AsSpan(45, 16).ToArray();
+                var ciphertext = blob.AsSpan(61).ToArray();
+                using var ephemeralKey = new NBitcoin.Key(Convert.FromHexString(ephemeralPrivateHex));
+                if (!ephemeralKey.PubKey.Compress().ToBytes().SequenceEqual(ephemeral.Compress().ToBytes())) return false;
+                var recipient = new NBitcoin.PubKey(Convert.FromHexString(recipientPublicKeyHex));
+                var key = DeriveKey(recipient.GetSharedPubkey(ephemeralKey), ephemeral, recipient);
+                var plaintext = new byte[ciphertext.Length];
+                VerifiedXCore.Privacy.CrossPlatformAesGcm.Decrypt(key, nonce, ciphertext, tag, plaintext, Aad(sessionId, recipientIdentifier));
+                packageJson = Encoding.UTF8.GetString(plaintext);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
         /// Seals every package of a native round-2 output (identifier -> package) to its recipient. Null (with the reason)
         /// when a recipient has no usable registered public key - the dealer then refuses to release its shares.
         /// </summary>
         public static string? SealAll(string sharesJson, string sessionId, IReadOnlyDictionary<string, string> identifierToAddress,
-            Func<string, string?> publicKeyOfAddress, out string? error)
+            Func<string, string?> publicKeyOfAddress, out string? error, IDictionary<string, string>? ephemeralsByIdentifier = null)
         {
             error = null;
             var packages = JObject.Parse(sharesJson);
@@ -100,7 +139,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                     error = $"No verified public key for participant {address}.";
                     return null;
                 }
-                sealedMap[p.Name] = Seal(p.Value.ToString(Newtonsoft.Json.Formatting.None), pub, sessionId, p.Name);
+                sealedMap[p.Name] = Seal(p.Value.ToString(Newtonsoft.Json.Formatting.None), pub, sessionId, p.Name, out var ephemeralPrivateHex);
+                if (ephemeralsByIdentifier != null) ephemeralsByIdentifier[p.Name] = ephemeralPrivateHex;
             }
             return sealedMap.ToString(Newtonsoft.Json.Formatting.None);
         }

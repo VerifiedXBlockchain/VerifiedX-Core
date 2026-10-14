@@ -31,6 +31,9 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public string? Round1SecretPackage { get; set; }       // Secret from DKGRound1Generate (kept private)
         public string? Round2Secret { get; set; }              // Secret from DKGRound2GenerateShares (kept private)
         public string? GeneratedSharesJson { get; set; }       // Shares this validator created for others
+        /// <summary>The one-time key each of this validator's shares was sealed with, by recipient identifier (revealed only to settle that recipient's signed report).</summary>
+        [Newtonsoft.Json.JsonIgnore]
+        public ConcurrentDictionary<string, string> SealEphemerals { get; set; } = new();
         
         // Round 1: Commitments (from all validators)
         public ConcurrentDictionary<string, string> Round1Commitments { get; set; } = new();

@@ -156,36 +156,25 @@ namespace VerifiedXCore.Bitcoin.FROST
 
         private static string ParticipantIdentifier(int index) => index.ToString("x").PadLeft(64, '0');
 
+        /// <summary>What a recipient signs to report a dealer's share (the dealer reveals that share's key only against it).</summary>
+        public static string AccusationMessage(string sessionId, string accuser, string accused) => $"DKG-ACCUSE|{sessionId}|{accuser}|{accused}";
+
         /// <summary>
-        /// Who to exclude, given recipients' reports that a sender's share would not open or did not match its commitment.
-        /// A report cannot be proven to a third party (the share is sealed to the recipient), so the rule bounds the damage
-        /// instead: repeatedly drop whoever is involved in the most open reports - a sender accused by many recipients, or
-        /// a recipient accusing many senders (e.g. one that cannot open any share because its own key is unavailable).
-        /// When the remaining reports are one-to-one, both sides are dropped: an honest participant can then only be
-        /// removed together with a participant that lied, so an attacker loses one node for every honest one it removes.
+        /// A recipient's report that a dealer's share would not open or did not match its commitment, settled by the share
+        /// itself: the dealer reveals the one-time key it sealed that share with, which opens the ciphertext the
+        /// coordinator relayed, and the share is checked against the dealer's Round 1 commitment. True when the share
+        /// opens and matches (the report was false: the recipient is dropped); false otherwise, or when the dealer gives no
+        /// key that opens it (the dealer is dropped). Reports were weighed by count before, which let two colluding
+        /// validators name the same honest one and have only it dropped, attempt after attempt (fourth review, round 9).
+        /// The revealed share is the reporting recipient's own, which it holds already; an honest recipient reports only a
+        /// share that is bad.
         /// </summary>
-        public static HashSet<string> ResolveAccusations(IEnumerable<(string Accuser, string Accused)> accusations)
+        public static bool DisputedShareIsGood(string? sealedPackage, string? ephemeralPrivateHex, string? recipientPublicKeyHex, string sessionId,
+            string recipientIdentifier, string? dealerCommitment)
         {
-            var open = accusations.Where(a => a.Accuser != a.Accused).Distinct().ToList();
-            var excluded = new HashSet<string>(StringComparer.Ordinal);
-            while (open.Count > 0)
-            {
-                var degree = open.SelectMany(a => new[] { a.Accuser, a.Accused })
-                    .GroupBy(n => n, StringComparer.Ordinal)
-                    .Select(g => (Node: g.Key, Count: g.Count()))
-                    .OrderByDescending(n => n.Count).ThenBy(n => n.Node, StringComparer.Ordinal)
-                    .ToList();
-                if (degree[0].Count > 1)
-                {
-                    excluded.Add(degree[0].Node);
-                }
-                else
-                {
-                    foreach (var a in open) { excluded.Add(a.Accuser); excluded.Add(a.Accused); }
-                }
-                open = open.Where(a => !excluded.Contains(a.Accuser) && !excluded.Contains(a.Accused)).ToList();
-            }
-            return excluded;
+            if (string.IsNullOrEmpty(recipientPublicKeyHex) || string.IsNullOrEmpty(dealerCommitment)) return false;
+            return FrostShareCrypto.OpenWithEphemeral(sealedPackage, ephemeralPrivateHex, recipientPublicKeyHex, sessionId, recipientIdentifier, out var package)
+                && ShareMatchesCommitment(package, dealerCommitment, recipientIdentifier);
         }
     }
 }

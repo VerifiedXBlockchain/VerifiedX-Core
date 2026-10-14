@@ -595,8 +595,8 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>
         /// Round 2: each validator generates its shares from all Round 1 commitments, and each recipient is sent the shares
         /// addressed to it. Validators that produce no shares or do not accept theirs are added to <paramref name="failed"/>;
-        /// recipients' reports of a share that would not open or did not match its sender's commitment are resolved by
-        /// FrostDkgBlame.ResolveAccusations (validators from this build report them; older ones just do not finish).
+        /// recipients' signed reports of a share that would not open or did not match its sender's commitment are settled by
+        /// the share itself (FrostDkgBlame.DisputedShareIsGood; older validators' unsigned reports drop nobody).
         /// </summary>
         private static async Task CoordinateShareDistribution(
             string sessionId,
@@ -689,7 +689,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
             var participantSet = validators.Select(v => v.ValidatorAddress).ToHashSet(StringComparer.Ordinal);
             var deliveryFailures = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.Ordinal);
-            var accusations = new System.Collections.Concurrent.ConcurrentBag<(string Accuser, string Accused)>();
+            var accusations = new System.Collections.Concurrent.ConcurrentBag<(string Accuser, string Accused, string? Signature)>();
             var distributeTasks = validators.Select(async validator =>
             {
                 try
@@ -715,11 +715,13 @@ namespace VerifiedXCore.Bitcoin.Services
                     try
                     {
                         var json = JObject.Parse(await response.Content.ReadAsStringAsync());
+                        var signatures = json["AccusationSignatures"] as JObject;
                         if (json["Accusations"] is JObject reported)
                             foreach (var p in reported.Properties())
                                 if (participantSet.Contains(p.Name))
                                 {
-                                    accusations.Add((validator.ValidatorAddress, p.Name));
+                                    var signature = signatures?[p.Name]?.Type == JTokenType.String ? (string?)signatures[p.Name] : null;
+                                    accusations.Add((validator.ValidatorAddress, p.Name, signature));
                                     LogUtility.Log($"[FROST MPC] {validator.ValidatorAddress} reports the share from {p.Name}: {p.Value}",
                                         "FrostMPCService.CoordinateShareDistribution");
                                 }
@@ -739,8 +741,47 @@ namespace VerifiedXCore.Bitcoin.Services
                 (accusations.IsEmpty ? "" : $", {accusations.Count} share report(s)"), "FrostMPCService.CoordinateShareDistribution");
 
             foreach (var (address, reason) in deliveryFailures) failed[address] = reason;
-            foreach (var address in FrostDkgBlame.ResolveAccusations(accusations))
-                failed.TryAdd(address, "Round 2 share dispute (a share that would not open or did not match its commitment)");
+
+            // Each signed report is settled by the share itself (FrostDkgBlame.DisputedShareIsGood): its dealer reveals the
+            // key it sealed it with, and whoever was wrong is dropped. A report without a valid signature drops nobody
+            // (its sender then simply does not finish). Weighing reports by count let two colluding validators name one
+            // honest validator and have only it dropped, attempt after attempt (fourth review, round 9).
+            var idByAddress = FrostStartup.BuildAddressToIdentifierMap(validators.Select(v => v.ValidatorAddress).ToList());
+            var byAddress = validators.ToDictionary(v => v.ValidatorAddress, StringComparer.Ordinal);
+            var disputes = accusations
+                .Where(a => !string.IsNullOrEmpty(a.Signature) && a.Accuser != a.Accused
+                    && VerifiedXCore.Services.SignatureService.VerifySignature(a.Accuser, FrostDkgBlame.AccusationMessage(sessionId, a.Accuser, a.Accused), a.Signature!))
+                .GroupBy(a => (a.Accuser, a.Accused)).Select(g => g.First()).ToList();
+            foreach (var unsigned in accusations.Where(a => !disputes.Any(d => d.Accuser == a.Accuser && d.Accused == a.Accused)))
+                LogUtility.Log($"[FROST MPC] Report by {unsigned.Accuser} against {unsigned.Accused} carries no valid signature; nobody is dropped for it.", "FrostMPCService.CoordinateShareDistribution");
+            var verdicts = await Task.WhenAll(disputes.Select(async d =>
+            {
+                var good = false;
+                try
+                {
+                    string? sealedShare = null;
+                    if (sharesByRecipient.TryGetValue(d.Accuser, out var batch) && batch.TryGetValue(d.Accused, out var dealerMap) && idByAddress.TryGetValue(d.Accuser, out var accuserId))
+                    {
+                        try { sealedShare = JObject.Parse(dealerMap)[accuserId]?.ToString(); } catch { }
+                        var url = $"http://{byAddress[d.Accused].IPAddress}:{Globals.FrostValidatorPort}/frost/dkg/reveal/{sessionId}";
+                        var content = new StringContent(JsonConvert.SerializeObject(new { Accuser = d.Accuser, Signature = d.Signature }), Encoding.UTF8, "application/json");
+                        var response = await _ceremonyHttpClient.PostAsync(url, content);
+                        var ephemeral = response.IsSuccessStatusCode ? JObject.Parse(await response.Content.ReadAsStringAsync())["EphemeralKey"]?.ToString() : null;
+                        commitments.TryGetValue(d.Accused, out var dealerCommitment);
+                        good = FrostDkgBlame.DisputedShareIsGood(sealedShare, ephemeral, FrostShareCrypto.VerifiedPublicKey(d.Accuser), sessionId, accuserId, dealerCommitment);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogUtility.Log($"[FROST MPC] Settling the report by {d.Accuser} against {d.Accused}: {ex.Message}", "FrostMPCService.CoordinateShareDistribution");
+                }
+                return (d.Accuser, d.Accused, Good: good);
+            }));
+            foreach (var (accuser, accused, good) in verdicts)
+            {
+                if (good) failed.TryAdd(accuser, $"reported a good share from {accused} as bad (shown by the share)");
+                else failed.TryAdd(accused, $"sent {accuser} a share that would not open or did not match its commitment (shown by the share)");
+            }
         }
 
         /// <summary>
