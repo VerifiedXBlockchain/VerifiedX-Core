@@ -722,6 +722,20 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "A re-key's start is signed in full by its leader (and a signature given must be valid)." }));
                                 return;
                             }
+                            // A UID the chain fixed for a due key's successor is used only by that vault's re-key, signed in full
+                            // by its leader: a copy stripped of both was taken as an unsigned creation under the re-key's
+                            // session id, and the leader's own start was then refused (fourth review, round 6).
+                            var dueVaultOfUid = VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.DueKeyClaiming(request.SmartContractUID);
+                            if (dueVaultOfUid != null && (!string.Equals(request.RekeyOf, dueVaultOfUid, StringComparison.Ordinal) || !leaderSignedStart))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"This UID is the one fixed for vault {dueVaultOfUid}'s next key: only that vault's re-key, signed by its leader, runs under it." }));
+                                return;
+                            }
+                            // The leader's signed start replaces a session a copy with other content opened first, if nothing
+                            // has been done in it yet.
+                            if (leaderSignedStart) FrostSessionStorage.MakeWayForSignedStart(request.SessionId, startBodyHash);
+
                             // The same start sent again (by anyone who received it) is answered as accepted: refusing it made
                             // the leader's own copy fail when another copy arrived first.
                             if (FrostSessionStorage.DKGSessions.TryGetValue(request.SessionId, out var alreadyOpen) && alreadyOpen.StartBodyHash == startBodyHash
@@ -889,6 +903,18 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                             if (!FrostSessionStorage.NoteDkgStart(request.SessionId, dkgNow) || !FrostSessionStorage.DKGSessions.TryAdd(request.SessionId, session))
                             {
+                                // A copy with other content, unsigned, that got here a moment earlier: the signed start takes its place.
+                                if (leaderSignedStart && FrostSessionStorage.MakeWayForSignedStart(request.SessionId, startBodyHash)
+                                    && FrostSessionStorage.NoteDkgStart(request.SessionId, dkgNow) && FrostSessionStorage.DKGSessions.TryAdd(request.SessionId, session))
+                                {
+                                    context.Response.StatusCode = StatusCodes.Status200OK;
+                                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                    {
+                                        Success = true, Message = "DKG ceremony started with FROST Round 1 commitment generated", SessionId = request.SessionId,
+                                        SmartContractUID = request.SmartContractUID, ParticipantCount = request.ParticipantAddresses.Count, Threshold = request.RequiredThreshold, CommitmentGenerated = true
+                                    }, Formatting.Indented));
+                                    return;
+                                }
                                 // The same start, a copy of which got here a moment earlier: answered as accepted.
                                 if (FrostSessionStorage.DKGSessions.TryGetValue(request.SessionId, out var raced) && raced.StartBodyHash == startBodyHash && !raced.IsAborted)
                                 {

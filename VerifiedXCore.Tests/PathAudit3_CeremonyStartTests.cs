@@ -400,6 +400,34 @@ namespace VerifiedXCore.Tests
             finally { foreach (var s in new[] { idle, given, working }) FrostSessionStorage.DKGSessions.TryRemove(s.SessionId, out _); }
         }
 
+        /// <summary>
+        /// A copy without the leader's full signature, with other content, opened a validator's session first and the
+        /// leader's own start was refused. The signed start takes the place of such a session while nothing has been done
+        /// in it, never of a signed one or one under way (fourth review, round 6).
+        /// </summary>
+        [Fact]
+        public void TheLeadersSignedStart_TakesThePlaceOfAnUnsignedCopy_ThatHasDoneNothing()
+        {
+            var copy = new DKGSession { SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc", LeaderAddress = "xL", StartTimestamp = _now, LastProgressTimestamp = _now, StartBodyHash = "other" };
+            Assert.True(FrostSessionStorage.NoteDkgStart(copy.SessionId, _now));
+            Assert.True(FrostSessionStorage.DKGSessions.TryAdd(copy.SessionId, copy));
+            try
+            {
+                Assert.False(FrostSessionStorage.MakeWayForSignedStart(copy.SessionId, "other"));    // the same start: nothing to replace
+                copy.Stage = 1;
+                Assert.False(FrostSessionStorage.MakeWayForSignedStart(copy.SessionId, "signed"));   // under way
+                copy.Stage = 0; copy.LeaderSigned = true;
+                Assert.False(FrostSessionStorage.MakeWayForSignedStart(copy.SessionId, "signed"));   // signed already
+                copy.LeaderSigned = false;
+                Assert.True(FrostSessionStorage.MakeWayForSignedStart(copy.SessionId, "signed"));
+                Assert.False(FrostSessionStorage.DKGSessions.ContainsKey(copy.SessionId));
+                Assert.True(copy.IsAborted);
+                Assert.False(FrostSessionStorage.DkgStartWasSeen(copy.SessionId));                    // the signed start can open it
+                Assert.True(FrostSessionStorage.MakeWayForSignedStart(Guid.NewGuid().ToString(), "x")); // nothing there: nothing in the way
+            }
+            finally { FrostSessionStorage.DKGSessions.TryRemove(copy.SessionId, out _); }
+        }
+
         [Fact]
         public async Task TheRoute_RefusesAnOldStart()
         {

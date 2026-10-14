@@ -15,6 +15,7 @@ using VerifiedXCore.Extensions;
 using VerifiedXCore.Models;
 using VerifiedXCore.Services;
 using VerifiedXCore.Utilities;
+using Microsoft.AspNetCore.Hosting;
 using Xunit;
 using BtcTx = NBitcoin.Transaction;
 using VfxBlock = VerifiedXCore.Models.Block;
@@ -835,6 +836,37 @@ namespace VerifiedXCore.Tests
                 BtcVaultLedger.MaxHoldersOverride = null;
                 VBTCBridgeLockState.GetCollection().Delete(lockId);
             }
+        }
+
+        /// <summary>
+        /// A UID the chain fixed for a due key's successor is that vault's re-key's only: an unsigned creation copied
+        /// under the leader's session id and UID was opened first, and the leader's own start was then refused (fourth
+        /// review, round 6).
+        /// </summary>
+        [Fact]
+        public async Task ACeremonyUnderTheUidFixedForADueKey_IsOnlyThatVaultsSignedReKey()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 100_000);
+            var stillHere = Signers.Take(3).ToList();
+            await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
+            var fixedUid = BtcVaultKeys.NewKeyUid(BtcAttestStore.ScriptRowForVault(vault.Uid)!);
+            using var server = new Microsoft.AspNetCore.TestHost.TestServer(new Microsoft.AspNetCore.Hosting.WebHostBuilder().UseStartup<FrostStartup>());
+            var body = JsonConvert.SerializeObject(new FrostDKGStartRequest
+            {
+                SessionId = Guid.NewGuid().ToString(), SmartContractUID = fixedUid, LeaderAddress = Signers[0].Address, LeaderSignature = "sig", Timestamp = TimeUtil.GetTime(),
+                ParticipantAddresses = stillHere.Select(s => s.Address).ToList(), RequiredThreshold = 67,
+            });
+            var priorSynced = Globals.IsChainSynced;
+            Globals.IsChainSynced = true; // the route reads the active validators of a node at the tip
+            try
+            {
+                var response = await server.CreateClient().PostAsync("/frost/dkg/start", new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json"));
+                Assert.Equal(System.Net.HttpStatusCode.Forbidden, response.StatusCode);
+                Assert.Contains("fixed for vault", await response.Content.ReadAsStringAsync());
+            }
+            finally { Globals.IsChainSynced = priorSynced; }
         }
 
         /// <summary>
