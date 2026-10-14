@@ -267,9 +267,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var result = new List<Transaction>();
             foreach (var tx in approved)
             {
-                if (!string.IsNullOrEmpty(tx.FromAddress) && blockedSenders.Contains(tx.FromAddress)) continue;
+                // Reports, rewinds and re-keys share one system name and carry no nonce: one held back says nothing of the others.
+                var hasSender = !string.IsNullOrEmpty(tx.FromAddress) && !BtcAttestTx.IsAttestationType(tx.TransactionType);
+                if (hasSender && blockedSenders.Contains(tx.FromAddress)) continue;
                 if (TryRegister(tx, state).Ok) result.Add(tx);
-                else if (!string.IsNullOrEmpty(tx.FromAddress)) blockedSenders.Add(tx.FromAddress);
+                else if (hasSender) blockedSenders.Add(tx.FromAddress);
             }
             return result;
         }

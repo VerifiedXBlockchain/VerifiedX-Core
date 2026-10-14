@@ -495,6 +495,9 @@ namespace VerifiedXCore.Tests
 
             // Block building (TransactionData.ProcessTxPool): the first stays, the rest wait for the next block.
             Assert.Equal(new[] { "c", "a", "c" }, BtcAttestBlockRules.KeepOnePerBlock(new List<VfxTx> { plain, first, second, plain }).Select(t => t.Hash));
+            // A re-key after the report held back is kept: attestation transactions share a system name, not a sender (fourth review, round 3).
+            var rekey = BtcAttestTxValidator.Create(TransactionType.VBTC_V2_VAULT_REKEY, new BtcRekey { ContractUID = "00000000000000000000000000000000:1", DKGProof = "" }.ToCanonicalJson());
+            Assert.Equal(new[] { "a", rekey.Hash }, BtcAttestBlockRules.KeepOnePerBlock(new List<VfxTx> { first, second, rekey }).Select(t => t.Hash));
         }
 
         // ── Proofs ──────────────────────────────────────────────────────────────────────────────────────────
