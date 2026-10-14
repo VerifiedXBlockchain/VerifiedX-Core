@@ -24,6 +24,17 @@ namespace VerifiedXCore.Bitcoin.FROST
         private static readonly BigInteger Order = BigInteger.Parse("0FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", System.Globalization.NumberStyles.HexNumber);
 
         /// <summary>
+        /// Whether a Round 1 package's commitment has exactly <paramref name="coefficients"/> coefficients, the key's
+        /// threshold: a dealer's polynomial of higher degree makes a key that needs more signers than were attested
+        /// (fourth review, round 6).
+        /// </summary>
+        public static bool CommitmentHasCoefficients(string? round1PackageJson, int coefficients)
+        {
+            try { return JObject.Parse(round1PackageJson ?? "")["commitment"] is JArray c && c.Count == coefficients; }
+            catch { return false; }
+        }
+
+        /// <summary>
         /// Feldman check of one Round 2 share: signing_share·G == Σ_k x^k·C_k, where C_k are the sender's Round 1
         /// commitment coefficients and x is the recipient's identifier (the same check FROST part3 makes, which the native
         /// library reports without naming the sender). False when the share or commitment cannot be read.
@@ -93,6 +104,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                     try
                     {
                         if (!idByAddress.ContainsKey(address)) { invalid.Add(address); continue; }
+                        // Exactly the threshold's number of coefficients (a higher degree needs more signers than attested).
+                        if (minSigners >= 2 && !CommitmentHasCoefficients(package, minSigners)) { invalid.Add(address); continue; }
                         parsed[address] = JToken.Parse(package);
                     }
                     catch { invalid.Add(address); }

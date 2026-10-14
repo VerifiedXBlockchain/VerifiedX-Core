@@ -428,6 +428,22 @@ namespace VerifiedXCore.Tests
             finally { FrostSessionStorage.DKGSessions.TryRemove(copy.SessionId, out _); }
         }
 
+        /// <summary>
+        /// A dealer's commitment of higher degree than the threshold makes a key that needs more signers than were
+        /// attested. Its package is named invalid, and Round 2 refuses it (fourth review, round 6).
+        /// </summary>
+        [Fact]
+        public void ACommitmentOfAnotherDegree_IsNamedInvalid()
+        {
+            var (two, _, e1) = FrostNative.DKGRound1Generate(1, 3, 2);
+            var (three, _, e2) = FrostNative.DKGRound1Generate(2, 3, 3);
+            Assert.Equal(FrostNative.SUCCESS, e1);
+            Assert.Equal(FrostNative.SUCCESS, e2);
+            Assert.True(FrostDkgBlame.CommitmentHasCoefficients(two, 2));
+            Assert.False(FrostDkgBlame.CommitmentHasCoefficients(three, 2));
+            Assert.False(FrostDkgBlame.CommitmentHasCoefficients("not json", 2));
+        }
+
         [Fact]
         public async Task TheRoute_RefusesAnOldStart()
         {

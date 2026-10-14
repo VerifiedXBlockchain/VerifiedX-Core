@@ -1269,6 +1269,18 @@ namespace VerifiedXCore.Bitcoin.FROST
                             var remappedCommitments = btreeMap.ToString(Newtonsoft.Json.Formatting.None);
                             LogUtility.Log($"[FROST] Round 2 BTreeMap built with {btreeMap.Count} entries for session {sessionId}", "FrostStartup.DKGRound2");
 
+                            // Every dealer's commitment has exactly as many coefficients as the key's threshold: a higher-degree
+                            // polynomial would make a key that needs more signers than attested (fourth review, round 6).
+                            var expectedCoefficients = FrostDkgAttestation.CeremonyThreshold(session.ParticipantAddresses.Count, session.RequiredThreshold, session.RekeyOf);
+                            var wrongDegree = (addressCommitments ?? new Dictionary<string, string>())
+                                .Where(kvp => !FrostDkgBlame.CommitmentHasCoefficients(kvp.Value, expectedCoefficients)).Select(kvp => kvp.Key).ToList();
+                            if (wrongDegree.Count > 0)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Round 1 commitments with other than {expectedCoefficients} coefficients: {string.Join(", ", wrongDegree)}" }));
+                                return;
+                            }
+
                             // Pre-validate: FROST part2() requires exactly (maxSigners - 1) other participants' commitments.
                             // If the count doesn't match, the FFI will return opaque error -4. Catch it early with a clear message.
                             var expectedCommitmentCount = session.ParticipantAddresses.Count - 1; // maxSigners minus self
