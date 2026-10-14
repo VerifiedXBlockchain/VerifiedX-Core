@@ -259,10 +259,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         // field apply ignores must not hide the one it credits (an empty "Inputs" on a single transfer did,
                         // fourth review, round 7).
                         if (named != null) credits.Add((named, tx.ToAddress));
+                        // The inputs as validation and apply read them: the typed reader matches "scuid" too, and takes the
+                        // last of two spellings, so an exact "SCUID" read let any holder past the limit (fifth review, round 16).
                         if (obj["Inputs"] is JArray inputs)
-                            foreach (var input in inputs.OfType<JObject>())
-                                if (input["SCUID"]?.Type == JTokenType.String)
-                                    credits.Add(((string)input["SCUID"]!, tx.ToAddress));
+                            foreach (var input in inputs.ToObject<List<VerifiedXCore.Bitcoin.Models.VBTCV2MultiTransferInput>>() ?? new())
+                                if (!string.IsNullOrEmpty(input?.SCUID))
+                                    credits.Add((input.SCUID, tx.ToAddress));
                         break;
                     }
                 }

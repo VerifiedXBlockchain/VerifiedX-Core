@@ -848,6 +848,13 @@ namespace VerifiedXCore.Tests
                 var stranger = NewKey().Address;
                 await Refused(SignedBy(holder, stranger, TransactionType.VBTC_V2_TRANSFER,
                     new { Function = "TransferVBTCV2()", ContractUID = vault.Uid, FromAddress = holder.Address, ToAddress = stranger, Amount = 0.00001M, Inputs = new object[0] }), "the most a vault holds");
+                // A multi-transfer naming the vault under another spelling of the input key: apply reads it (round 16).
+                foreach (var key in new[] { "SCUID", "scuid", "Scuid" })
+                {
+                    var input = new JObject { [key] = vault.Uid, ["Amount"] = 0.00001M };
+                    var multi = new JObject { ["Function"] = "TransferVBTCMultiV2()", ["FromAddress"] = holder.Address, ["ToAddress"] = stranger, ["Inputs"] = new JArray(input) };
+                    Assert.Contains("the most a vault holds", BtcVaultLedger.HolderLimitRefusal(SignedBy(holder, stranger, TransactionType.VBTC_V2_TRANSFER, multi)));
+                }
                 // A full vault changes hands only to an address its ledger names: each owner a chain of owners left behind
                 // was one holder more (round 7).
                 VfxTx HandOver(string to) => SignedBy(Minter, to, TransactionType.TKNZ_TX, new[] { new { Function = "Transfer()", ContractUID = vault.Uid, ToAddress = to, Data = "x", MD5List = "NA" } });
