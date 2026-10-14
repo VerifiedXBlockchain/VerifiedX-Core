@@ -381,6 +381,20 @@ namespace VerifiedXCore.Bitcoin.Attestation
             };
         }
 
+        /// <summary>
+        /// POST /frost/btcreport/headers: the Bitcoin headers this validator follows, after the newest hash of the
+        /// request's locator that it holds (see <see cref="BtcValidatorSource"/>). Public data, and nothing the asker
+        /// has to believe: it checks every header itself.
+        /// </summary>
+        public static object HandleHeaders(BtcHeadersRequest? request)
+        {
+            var chain = BtcLightClient.Current?.Chain;
+            if (chain == null) return new { Success = false, Message = "this node does not follow Bitcoin", Headers = new List<string>() };
+            if (request?.Locator == null || request.Locator.Count == 0 || request.Locator.Count > BtcValidatorSource.MaxLocatorHashes)
+                return new { Success = false, Message = "a header request carries a locator", Headers = new List<string>() };
+            return new { Success = true, Message = "", Headers = chain.HexesAfter(request.Locator, BtcValidatorSource.MaxHeadersPerAnswer) };
+        }
+
         private sealed class SignatureAnswer
         {
             public bool Success { get; set; }

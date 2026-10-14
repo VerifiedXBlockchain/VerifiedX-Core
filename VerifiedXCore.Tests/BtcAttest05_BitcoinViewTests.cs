@@ -217,6 +217,7 @@ namespace VerifiedXCore.Tests
             public bool IsAlive { get; set; } = true;
             public Func<long, BtcBlock, BtcBlock?>? Tamper;
             public int BlockRequests;
+            public int HeaderRequests;
             public bool Silent;
 
             public Source(string name, Func<Btc> chain)
@@ -227,6 +228,7 @@ namespace VerifiedXCore.Tests
 
             public Task<List<BtcHeader>?> GetHeadersAsync(IReadOnlyList<string> locator, CancellationToken ct)
             {
+                HeaderRequests++;
                 if (Silent) return Task.FromResult<List<BtcHeader>?>(null);
                 var chain = _chain();
                 foreach (var hash in locator)
@@ -254,13 +256,119 @@ namespace VerifiedXCore.Tests
             public void Dispose() { IsAlive = false; }
         }
 
-        private BtcLightClient NewClient(IReadOnlyList<Source> peers, List<IBtcSource>? fallbacks = null)
+        private BtcLightClient NewClient(IReadOnlyList<Source> peers, List<IBtcSource>? fallbacks = null, Func<List<IBtcSource>>? validators = null)
         {
             var endpoints = peers.Select((_, i) => new IPEndPoint(IPAddress.Parse($"10.9.0.{i + 1}"), 8333)).ToList();
             return new BtcLightClient(Network.Main, NewChain(), _blockDir,
                 connect: (_, endpoint) => peers[endpoints.FindIndex(e => e.Equals(endpoint))],
                 discover: _ => Task.FromResult(endpoints.ToList()),
-                fallbacks: fallbacks ?? new List<IBtcSource>());
+                fallbacks: fallbacks ?? new List<IBtcSource>(),
+                validators: validators);
+        }
+
+        // ── Other validators as a source of headers ─────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// A validator whose every Bitcoin peer is in one party's hands sees the chain that party shows it. Shown to
+        /// two thirds of the signers, that chain is the one reported. Validators therefore ask each other for the
+        /// headers they follow; headers prove their own work, and the branch with the most is followed.
+        /// </summary>
+        [Fact]
+        public async Task AValidatorCutOffFromBitcoin_LearnsTheHeaviestChain_FromAnotherValidator()
+        {
+            _btc.MineEmpty(2);
+            // What the validator's only peer shows it: a branch of its own making, shorter than Bitcoin's.
+            var shown = _btc.ForkAfter(_btc.Tip);
+            var fake = shown.Mine(Pay(ScriptOf(NewTaprootAddress()), 900_000_000));
+            shown.MineEmpty(3);
+            _btc.MineEmpty(6); // Bitcoin went on meanwhile
+            var onlyPeer = new Source("10.9.0.1:8333", () => shown);
+
+            // Alone with that peer, the validator follows what it is shown.
+            using (var alone = NewClient(new[] { onlyPeer }))
+            {
+                await alone.RunOnceAsync(CancellationToken.None);
+                Assert.Equal(shown.Header(fake).Hash, alone.HeaderAt(fake)!.Hash);
+            }
+
+            // Asking one other validator is enough: the heavier chain is followed, and the block made for it is on
+            // no chain this validator offers its signature for.
+            var other = new Source("validator-b", () => _btc);
+            using var client = NewClient(new[] { new Source("10.9.0.1:8333", () => shown) }, validators: () => new List<IBtcSource> { other });
+            await client.RunOnceAsync(CancellationToken.None);
+            Assert.Equal(_btc.Tip, client.TipHeight);
+            Assert.Equal(_btc.Header(fake).Hash, client.HeaderAt(fake)!.Hash);
+            Assert.NotEqual(shown.Header(fake).Hash, client.HeaderAt(fake)!.Hash);
+            Assert.Equal(1, client.PeerCount); // the peer is kept: a weaker branch is not an offence
+            // The validator serves no blocks, and the peer does not have this one: it is waited for, not guessed.
+            Assert.Null(client.BlockAt(fake));
+            await client.RunOnceAsync(CancellationToken.None);
+            Assert.Null(client.BlockAt(fake));
+            Assert.Equal(0, other.BlockRequests);
+        }
+
+        [Fact]
+        public async Task AValidatorServingHeadersThatAreNotBitcoin_ChangesNothing_AndIsLeftAloneForAWhile()
+        {
+            _btc.MineEmpty(4);
+            var elsewhere = new Btc(Checkpoint - 11, time: 1_770_000_000);
+            elsewhere.MineEmpty(40);
+            var liar = new Source("validator-liar", () => elsewhere);
+            // A branch with less work than Bitcoin's, from a validator: not followed, and no offence.
+            var weak = _btc.ForkAfter(_btc.Tip - 3);
+            weak.MineEmpty(1);
+            var behind = new Source("validator-behind", () => weak);
+            var peer = new Source("10.9.0.1:8333", () => _btc);
+            using var client = NewClient(new[] { peer }, validators: () => new List<IBtcSource> { liar, behind });
+            client.ValidatorRound = TimeSpan.Zero;
+
+            await client.RunOnceAsync(CancellationToken.None);
+            Assert.Equal(_btc.Tip, client.TipHeight);
+            Assert.Equal(_btc.Tip.ToString(), client.Chain.HeightOf(_btc.Header(_btc.Tip).Hash)!.Value.ToString());
+            Assert.Equal(1, client.PeerCount);
+            Assert.Equal(1, liar.HeaderRequests);
+
+            await client.RunOnceAsync(CancellationToken.None);
+            Assert.Equal(1, liar.HeaderRequests);          // not asked again this hour
+            Assert.True(behind.HeaderRequests >= 2);       // being behind is not a reason to stop asking
+            Assert.Equal(_btc.Tip, client.TipHeight);
+        }
+
+        [Fact]
+        public void WhatAValidatorServes_IsItsBestChainAfterTheNewestHashItIsGiven()
+        {
+            _btc.MineEmpty(10);
+            var chain = NewChain();
+            Assert.Equal(BtcHeaderAdd.Extended, chain.Add(Headers(_btc, First, _btc.Tip), out _));
+
+            Assert.Equal(_btc.HeaderHexes(First + 3, _btc.Tip), chain.HexesAfter(new[] { "00", _btc.Header(First + 2).Hash, _btc.Header(First).Hash }, 500));
+            Assert.Equal(_btc.HeaderHexes(First + 1, First + 4), chain.HexesAfter(new[] { _btc.Header(First).Hash }, 4));
+            Assert.Empty(chain.HexesAfter(new[] { _btc.Header(_btc.Tip).Hash }, 500));
+            Assert.Empty(chain.HexesAfter(new[] { new string('0', 64) }, 500));
+            Assert.Empty(chain.HexesAfter(null, 500));
+        }
+
+        [Fact]
+        public async Task Peers_AreTakenFromDifferentNetworks_WhileThereAreSuchToTake()
+        {
+            Assert.Equal("10.9", BtcLightClient.NetworkGroup("10.9.0.7:8333 /Satoshi:27.0.0/"));
+            Assert.Equal("10.9", BtcLightClient.NetworkGroup("10.9.200.1:8333"));
+            Assert.NotEqual(BtcLightClient.NetworkGroup("10.9.0.7:8333"), BtcLightClient.NetworkGroup("10.10.0.7:8333"));
+
+            _btc.MineEmpty(1);
+            // Thirty addresses in one provider's network, and seven elsewhere.
+            var endpoints = Enumerable.Range(1, 30).Select(i => new IPEndPoint(IPAddress.Parse($"10.9.0.{i}"), 8333))
+                .Concat(Enumerable.Range(1, 7).Select(i => new IPEndPoint(IPAddress.Parse($"10.{20 + i}.0.1"), 8333))).ToList();
+            var connected = new List<string>();
+            using var client = new BtcLightClient(Network.Main, NewChain(), _blockDir,
+                connect: (_, endpoint) => { lock (connected) connected.Add(endpoint.ToString()); return new Source(endpoint.ToString(), () => _btc); },
+                discover: _ => Task.FromResult(endpoints.ToList()),
+                fallbacks: new List<IBtcSource>());
+            await client.RunOnceAsync(CancellationToken.None);
+
+            Assert.Equal(BtcLightClient.TargetPeers, client.PeerCount);
+            // All seven of the other networks, and one peer of the large one.
+            Assert.Equal(8, connected.Select(BtcLightClient.NetworkGroup).Distinct().Count());
         }
 
         [Fact]

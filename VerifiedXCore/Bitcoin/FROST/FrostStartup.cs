@@ -171,6 +171,41 @@ namespace VerifiedXCore.Bitcoin.FROST
                 });
 
                 /// <summary>
+                /// POST /frost/btcreport/headers - the Bitcoin headers this validator follows, after the newest hash of
+                /// the request's locator it holds. Validators ask each other so that one cut off from Bitcoin still
+                /// learns of the heaviest chain; the asker checks every header itself, so the route needs no
+                /// authentication and nothing it serves has to be believed.
+                /// </summary>
+                endpoints.MapPost("/frost/btcreport/headers", async context =>
+                {
+                    try
+                    {
+                        if (context.Request.ContentLength > 8192)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+                            return;
+                        }
+                        var buffer = new char[8193];
+                        int read;
+                        using (var reader = new StreamReader(context.Request.Body))
+                            read = await reader.ReadBlockAsync(buffer, 0, buffer.Length);
+                        if (read > 8192)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+                            return;
+                        }
+                        var request = JsonConvert.DeserializeObject<VerifiedXCore.Bitcoin.Attestation.Net.BtcHeadersRequest>(new string(buffer, 0, read));
+                        context.Response.StatusCode = StatusCodes.Status200OK;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(VerifiedXCore.Bitcoin.Attestation.BtcReportService.HandleHeaders(request)));
+                    }
+                    catch
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "The request is not a header request." }));
+                    }
+                });
+
+                /// <summary>
                 /// GET /frost/btcreport/status - what this validator's Bitcoin reporting is doing: its Bitcoin tip and
                 /// peers, the tip the chain has attested, the reports it is offering to sign with their signature counts,
                 /// and what it is waiting for. Operators compare the Bitcoin tip between validators. Loopback only.

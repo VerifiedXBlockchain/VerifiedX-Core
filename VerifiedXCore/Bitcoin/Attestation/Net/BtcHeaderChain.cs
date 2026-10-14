@@ -77,6 +77,28 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
         }
 
         /// <summary>
+        /// What this node answers to another validator's header request: the headers of its best chain that follow
+        /// the newest hash of <paramref name="locator"/> it holds, at most <paramref name="max"/>. Empty when it holds
+        /// none of them.
+        /// </summary>
+        public List<string> HexesAfter(IReadOnlyList<string>? locator, int max)
+        {
+            var result = new List<string>();
+            if (locator == null) return result;
+            lock (_lock)
+            {
+                foreach (var hash in locator)
+                {
+                    if (hash == null || !_heightByHash.TryGetValue(hash, out var height)) continue;
+                    var index = (int)(height - _firstHeight) + 1;
+                    for (; index < _headers.Count && result.Count < max; index++) result.Add(_headers[index].Hex);
+                    break;
+                }
+            }
+            return result;
+        }
+
+        /// <summary>
         /// Block hashes a peer is asked to continue from: the tip, then back in growing steps to the checkpoint, so a
         /// peer on another branch still finds the last block it shares with this node.
         /// </summary>

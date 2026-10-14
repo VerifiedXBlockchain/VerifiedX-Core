@@ -16,8 +16,26 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
     /// </summary>
     public sealed class BtcLightClient : IBtcChainView, IDisposable
     {
-        /// <summary>Peers kept connected. Each one is a few kilobytes a minute; four independent peers make withholding short-lived.</summary>
-        public const int TargetPeers = 4;
+        /// <summary>
+        /// Peers kept connected, as many as a Bitcoin node keeps outbound. Each one is a few kilobytes a minute, and
+        /// one honest peer among them is enough to learn of the heaviest chain. Peers are taken from different
+        /// networks (the first two bytes of the address) while there are such to take, so that one hosting provider
+        /// is not all of them.
+        /// </summary>
+        public const int TargetPeers = 8;
+        /// <summary>Other validators asked for their headers in one round (see <see cref="BtcValidatorSource"/>).</summary>
+        public const int ValidatorsAskedPerRound = 3;
+        /// <summary>Seconds between rounds of asking other validators.</summary>
+        public const int ValidatorRoundSeconds = 30;
+        /// <summary>
+        /// This long without a new header is not what Bitcoin looks like (ninety minutes without a block happens a
+        /// few times a year): the explorers are then asked as well, as one more source to be checked like the others.
+        /// </summary>
+        public const int StaleTipSeconds = 90 * 60;
+        /// <summary>Tests shorten these.</summary>
+        internal TimeSpan StaleAfter = TimeSpan.FromSeconds(StaleTipSeconds);
+        internal TimeSpan ValidatorRound = TimeSpan.FromSeconds(ValidatorRoundSeconds);
+        private readonly DateTime _createdAt = DateTime.UtcNow;
         /// <summary>
         /// Blocks kept on disk below the tip: two quiet ranges, which is everything report building can ask for again
         /// (the unreported range and the look-back of a newly created vault), plus a margin. About 300 MB on mainnet.
@@ -39,6 +57,9 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
         private readonly Func<Network, IPEndPoint, IBtcSource?> _connect;
         private readonly Func<CancellationToken, Task<List<IPEndPoint>>> _discover;
         private readonly List<IBtcSource> _fallbacks;
+        private readonly Func<List<IBtcSource>> _validators;
+        private DateTime _validatorsAskedAt = DateTime.MinValue;
+        private DateTime _fallbacksAskedAt = DateTime.MinValue;
         private readonly List<IBtcSource> _peers = new();
         private readonly object _peerLock = new();
         private readonly ConcurrentDictionary<string, DateTime> _avoidUntil = new();
@@ -58,10 +79,12 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
         /// <param name="connect">How a peer is reached (tests supply their own); the Bitcoin peer protocol by default.</param>
         /// <param name="discover">Where peer addresses come from; the DNS seeds by default.</param>
         /// <param name="fallbacks">Sources asked when no peer delivers; the public explorers by default.</param>
+        /// <param name="validators">The other validators asked for their headers this round; a few of the active ones, at random, by default.</param>
         public BtcLightClient(Network network, BtcHeaderChain chain, string blockDir,
             Func<Network, IPEndPoint, IBtcSource?>? connect = null, Func<CancellationToken, Task<List<IPEndPoint>>>? discover = null,
-            List<IBtcSource>? fallbacks = null)
+            List<IBtcSource>? fallbacks = null, Func<List<IBtcSource>>? validators = null)
         {
+            _validators = validators ?? (connect == null ? SomeActiveValidators : () => new List<IBtcSource>());
             _network = network;
             _chain = chain;
             _blockDir = blockDir;
@@ -74,6 +97,34 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
         private bool IsPeer(IBtcSource source)
         {
             lock (_peerLock) return _peers.Contains(source);
+        }
+
+        /// <summary>A few of the active validators other than this one, chosen anew every round.</summary>
+        private static List<IBtcSource> SomeActiveValidators()
+        {
+            try
+            {
+                var tip = Globals.LastBlock?.Height ?? 0;
+                var random = new Random();
+                return VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidatorsAt(tip)
+                    .Where(v => !string.IsNullOrEmpty(v.IPAddress) && v.ValidatorAddress != Globals.ValidatorAddress)
+                    .OrderBy(_ => random.Next())
+                    .Take(ValidatorsAskedPerRound)
+                    .Select(v => (IBtcSource)new BtcValidatorSource(v.ValidatorAddress, v.IPAddress, Globals.FrostValidatorPort))
+                    .ToList();
+            }
+            catch { return new List<IBtcSource>(); }
+        }
+
+        /// <summary>The network an address is in, as far as peer choice goes: its first two bytes.</summary>
+        internal static string NetworkGroup(string endpoint)
+        {
+            var host = endpoint.Split(' ')[0];
+            var colon = host.LastIndexOf(':');
+            if (colon > 0) host = host.Substring(0, colon);
+            return IPAddress.TryParse(host, out var ip) && ip.AddressFamily == AddressFamily.InterNetwork
+                ? string.Join(".", ip.GetAddressBytes().Take(2))
+                : host;
         }
 
         private async Task<List<IPEndPoint>> DiscoverFromSeedsAsync(CancellationToken ct)
@@ -193,8 +244,13 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
             var attempts = 0;
             while (LivePeers().Count < TargetPeers && _candidates.Count > 0 && attempts < 12 && !ct.IsCancellationRequested)
             {
-                var endpoint = _candidates[0];
-                _candidates.RemoveAt(0);
+                // A candidate from a network none of the connected peers is in, while there is one.
+                HashSet<string> groups;
+                lock (_peerLock) groups = new HashSet<string>(_peers.Select(p => NetworkGroup(p.Name)), StringComparer.Ordinal);
+                var pick = _candidates.FindIndex(c => !groups.Contains(NetworkGroup(c.ToString())));
+                if (pick < 0) pick = 0;
+                var endpoint = _candidates[pick];
+                _candidates.RemoveAt(pick);
                 if (_avoidUntil.TryGetValue(endpoint.ToString(), out var until) && until > DateTime.UtcNow) continue;
                 lock (_peerLock)
                     if (_peers.Any(p => p.Name.StartsWith(endpoint.ToString() + " ", StringComparison.Ordinal))) continue;
@@ -212,8 +268,30 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
         private async Task SyncHeadersAsync(CancellationToken ct)
         {
             var sources = LivePeers();
-            // No peer at all: an explorer keeps the header chain moving, a few headers at a time.
+            // No peer at all: an explorer keeps the header chain moving, a few headers at a time. And when the tip is
+            // older than Bitcoin leaves it, the explorers are asked as well, now and then.
             if (sources.Count == 0) sources = _fallbacks.ToList();
+            else if (DateTime.UtcNow - (LastHeaderAtUtc > _createdAt ? LastHeaderAtUtc : _createdAt) > StaleAfter && DateTime.UtcNow - _fallbacksAskedAt > TimeSpan.FromMinutes(10))
+            {
+                _fallbacksAskedAt = DateTime.UtcNow;
+                sources.AddRange(_fallbacks);
+            }
+            // The other validators, a few each round: what they follow is checked like what a peer serves, and the
+            // branch with the most work is followed wherever it came from.
+            var fromValidators = new HashSet<IBtcSource>();
+            if (DateTime.UtcNow - _validatorsAskedAt >= ValidatorRound)
+            {
+                _validatorsAskedAt = DateTime.UtcNow;
+                try
+                {
+                    foreach (var validator in _validators().Where(v => !_avoidUntil.TryGetValue(v.Name, out var until) || until <= DateTime.UtcNow))
+                    {
+                        fromValidators.Add(validator);
+                        sources.Add(validator);
+                    }
+                }
+                catch { }
+            }
 
             foreach (var source in sources)
             {
@@ -238,8 +316,10 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
                     }
                     else if (outcome == BtcHeaderAdd.Invalid || outcome == BtcHeaderAdd.Unconnected)
                     {
-                        // Headers that are not Bitcoin, or another chain altogether: this peer is of no use.
+                        // Headers that are not Bitcoin, or another chain altogether: this peer is of no use. A
+                        // validator that serves such is not asked again for an hour.
                         if (IsPeer(source)) Drop(source, reason ?? outcome.ToString(), TimeSpan.FromHours(6));
+                        else if (fromValidators.Contains(source)) _avoidUntil[source.Name] = DateTime.UtcNow + TimeSpan.FromHours(1);
                         break;
                     }
                     if (outcome != BtcHeaderAdd.Extended || headers.Count < 2000) break;
