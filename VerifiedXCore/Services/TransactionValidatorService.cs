@@ -2746,11 +2746,18 @@ namespace VerifiedXCore.Services
                                             if (rTx.FromAddress != txRequest.FromAddress)
                                                 return (txResult, "From address does not match the reserve tx from address. Cannot call back.");
 
-                                            // In a block (from the height) the status above is the whole rule: a row
-                                            // is finalized by the first block timed after its unlock time, on every
-                                            // node alike, and until that block it can be called back. The clock is
-                                            // read only at admission, so that a call-back past its time is not sent.
-                                            if (blockTime == null && Globals.BlocksDownloadSlim.CurrentCount != 0 && Globals.BlocksDownloadV2Slim.CurrentCount != 0)
+                                            // In a block (from the height) the row is finalized by the first block
+                                            // timed after its unlock time, on every node alike, and the block's own
+                                            // timestamp must be before the unlock time (with the margin): after a halt
+                                            // across the unlock time, the first block would otherwise still carry a
+                                            // call-back of a payment whose time had passed. The clock is read only at
+                                            // admission, so that a call-back past its time is not sent.
+                                            if (blockTime != null)
+                                            {
+                                                if (rTx.ConfirmTimestamp <= LedgerIntegrityRules.NowForAgeRules(blockTime))
+                                                    return (txResult, "This TX had passed by its block's time and can no longer be called back.");
+                                            }
+                                            else if (Globals.BlocksDownloadSlim.CurrentCount != 0 && Globals.BlocksDownloadV2Slim.CurrentCount != 0)
                                             {
                                                 if (rTx.ConfirmTimestamp <= currentTime)
                                                     return (txResult, "This TX has already passed and can no longer be called back.");

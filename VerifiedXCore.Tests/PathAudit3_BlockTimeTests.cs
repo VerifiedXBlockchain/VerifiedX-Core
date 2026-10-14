@@ -234,6 +234,16 @@ namespace VerifiedXCore.Tests
             // The mempool still goes by the clock, so a call-back past its time is not sent around.
             Assert.False((await AtAdmission(CallBack(send, _now))).Ok);
 
+            // The chain halted across the unlock time: the first block after it is timed three hours past it and has
+            // not yet finalized the transfer. It cannot carry the call-back (third pass review). Within the margin of
+            // the unlock time it still can.
+            var afterHalt = CallBack(send, t0 + Day + 3 * Hour);
+            var (haltOk, haltWhy) = await InBlock(afterHalt, t0 + Day + 3 * Hour);
+            Assert.False(haltOk);
+            Assert.Contains("passed by its block's time", haltWhy);
+            Assert.False((await InBlock(afterHalt, t0 + Day + 3 * Hour, download: true)).Ok);
+            Assert.True((await InBlock(CallBack(send, t0 + Day - 60), t0 + Day + LedgerIntegrityRules.BlockTimeMarginSeconds - 1)).Ok);
+
             // A block timed after the unlock time finalizes the transfer; from then on a call-back is refused by the
             // row's status, which is chain state.
             await Mine(t0 + Day + 10);
