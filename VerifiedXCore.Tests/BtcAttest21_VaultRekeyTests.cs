@@ -633,6 +633,33 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// An exception the transaction's own data causes is thrown on every node alike: the step is a no-op everywhere,
+        /// and flagging it let anyone leave every node's state marked failed with one cheap request (an unreadable
+        /// OriginalRequestTime, a field validation never reads), stopping snapshots and failing every later rebuild
+        /// (fourth review, round 4). Only a fault of the node's own storage flags the block.
+        /// </summary>
+        [Fact]
+        public async Task ARequestWithAnUnreadableField_DoesNotFlagAnyBlock()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 200_000);
+            var prior = StateData.BlockStartFailedAtHeight;
+            try
+            {
+                StateData.BlockStartFailedAtHeight = -1;
+                await Mine(SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                    new { Function = "VBTCWithdrawalRequest()", ContractUID = vault.Uid, BTCAddress = BtcDest, Amount = 0.0005M, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N"), OriginalRequestTime = "not a number" }));
+                Assert.Equal(-1, StateData.BlockStartFailedAtHeight);
+                Assert.False(StateData.IsNodeLocalFault(new FormatException()));
+                Assert.False(StateData.IsNodeLocalFault(new Newtonsoft.Json.JsonReaderException()));
+                Assert.True(StateData.IsNodeLocalFault(new System.IO.IOException()));
+                Assert.True(StateData.IsNodeLocalFault(new InvalidOperationException("wrapped", new ObjectDisposedException("db"))));
+            }
+            finally { StateData.BlockStartFailedAtHeight = prior; }
+        }
+
+        /// <summary>
         /// A step inside a transaction's apply (recording a withdrawal, settling after a report, a cancel, a fee raise, a
         /// bridge exit) caught its own error and only logged it: a store fault on one node left it debited with no
         /// withdrawal row, unlike its peers, and nothing flagged it. It now marks the block (fourth review).
@@ -775,17 +802,32 @@ namespace VerifiedXCore.Tests
             await Start();
             Assert.Equal(BtcWithdrawals.SweepFeeRate, BtcWithdrawals.SweepRateAt(Tip + 1));
             var vault = await CreateVault(H1 + 1, keyHolders: Signers);
-            await Deposit(vault.Script, 900_000);
-            foreach (var rate in new[] { 30, 60, 90 })
+            await Deposit(vault.Script, 2_000_000);
+
+            // One requester, however many paid withdrawals at a high rate: one sample (fourth review, round 4).
+            foreach (var rate in new[] { 900, 950, 1000 })
             {
-                var request = await Mine(Request(vault.Uid, 0.001M, rate));
+                var request = await Mine(Request(vault.Uid, 0.002M, rate));
                 // Requested and pinned, not paid: it says nothing of what Bitcoin accepts (and could be given up).
-                var before = BtcWithdrawals.SweepRateAt(Tip + 1);
+                Assert.Equal(BtcWithdrawals.SweepFeeRate, BtcWithdrawals.SweepRateAt(Tip + 1));
                 await SignAndConfirm(Row(request, vault.Uid).Pins.Last(p => !p.Dead));
                 Assert.Equal(VaultWithdrawalState.Settled, Row(request, vault.Uid).State);
-                if (rate == 30) Assert.Equal(BtcWithdrawals.SweepFeeRate, before);
             }
-            Assert.Equal(60, BtcWithdrawals.SweepRateAt(Tip + 1));
+            Assert.Equal(BtcWithdrawals.SweepFeeRate, BtcWithdrawals.SweepRateAt(Tip + 1));
+
+            // Five requesters' paid withdrawals: the lower quartile of their rates (the owner's latest is 1000).
+            var rates = new[] { 30, 60, 90, 120 };
+            foreach (var rate in rates)
+            {
+                var holder = NewKey();
+                StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = holder.Address, Balance = 100M, Nonce = 0 });
+                await Mine(SignedBy(Minter, holder.Address, TransactionType.VBTC_V2_TRANSFER,
+                    new { Function = "TransferVBTCV2()", ContractUID = vault.Uid, FromAddress = Minter.Address, ToAddress = holder.Address, Amount = 0.002M }));
+                var request = await Mine(SignedBy(holder, holder.Address, TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                    new { Function = "VBTCWithdrawalRequest()", ContractUID = vault.Uid, BTCAddress = BtcDest, Amount = 0.002M, FeeRate = rate, UniqueId = Guid.NewGuid().ToString("N") }));
+                await SignAndConfirm(Row(request, vault.Uid).Pins.Last(p => !p.Dead));
+            }
+            Assert.Equal(60, BtcWithdrawals.SweepRateAt(Tip + 1)); // 30, 60, 90, 120, 1000: the second of five
             Assert.Equal(BtcWithdrawals.SweepFeeRate, BtcWithdrawals.SweepRateAt(Tip + 2_000));
         }
 

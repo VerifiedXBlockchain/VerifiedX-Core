@@ -35,6 +35,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <summary>The highest fee rate a sweep is first fixed at, and the highest it is raised to, sat/vB.</summary>
         public const long SweepMaxFeeRate = 1_000;
 
+        /// <summary>Requesters whose paid withdrawals a sweep's rate needs; with fewer it starts at <see cref="SweepFeeRate"/> and is raised by rule.</summary>
+        public const int SweepRateSamples = 5;
+
         /// <summary>VFX blocks a sweep's newest transaction may wait unconfirmed before its fee is doubled (about 72 minutes, some seven Bitcoin blocks).</summary>
         public const int SweepStuckBlocks = 360;
 
@@ -53,10 +56,14 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var since = vfxHeight - 1_000;
             var rates = (db ?? BtcAttestStore.Db).GetCollection<VaultWithdrawalRow>(BtcAttestStore.Withdrawals).Find(x => x.RequestVfxHeight > since)
                 .Where(w => w.State == VaultWithdrawalState.Settled && !w.IsSweep && !w.IsBridgeExit)
+                // One sample a requester (its most recent), and at least five of them, read at the lower quartile: one
+                // paid withdrawal at a high rate set every sweep's rate while it was the only one (fourth review, round 4).
+                .GroupBy(w => w.Requester ?? "", StringComparer.Ordinal)
+                .Select(g => g.OrderByDescending(w => w.RequestVfxHeight).ThenBy(w => w.Ref, StringComparer.Ordinal).First())
                 .Select(w => w.Pins.FirstOrDefault(p => p.Txid == w.SettledTxid)?.FeeRate is > 0 and var r ? r : w.FeeRate)
                 .OrderBy(r => r).ToList();
-            var middle = rates.Count == 0 ? SweepFeeRate : rates[rates.Count / 2];
-            return Math.Clamp(middle, SweepFeeRate, SweepMaxFeeRate);
+            var quartile = rates.Count < SweepRateSamples ? SweepFeeRate : rates[(rates.Count - 1) / 4];
+            return Math.Clamp(quartile, SweepFeeRate, SweepMaxFeeRate);
         }
 
         /// <summary>
