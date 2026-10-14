@@ -87,6 +87,18 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// <summary>The FROST signing threshold the validators use for n participants at a threshold percentage.</summary>
         public static int ThresholdFor(int participants, int thresholdPercent) => (int)Math.Ceiling(participants * (thresholdPercent / 100.0));
 
+        /// <summary>
+        /// How many of a new key's <paramref name="participants"/> sign together after a re-key: 67%, but never every one of
+        /// them (and never fewer than a majority). At three participants 67% is all three: such a key has no holder to
+        /// spare, is due for replacement at once, and was re-keyed and swept again and again (fourth review).
+        /// </summary>
+        public static int RekeyThreshold(int participants) =>
+            Math.Max(Required(participants), Math.Min(ThresholdFor(participants, RekeyThresholdPercent), participants - 1));
+
+        /// <summary>A ceremony's signing threshold: a re-key's by <see cref="RekeyThreshold"/>, a creation's by its percentage.</summary>
+        public static int CeremonyThreshold(int participants, int thresholdPercent, string? rekeyOf) =>
+            string.IsNullOrEmpty(rekeyOf) ? ThresholdFor(participants, thresholdPercent) : RekeyThreshold(participants);
+
         /// <summary>A new vBTC V2 contract UID. The DKG runs under this id so the attestations name the contract.</summary>
         public static string NewContractUid() => Guid.NewGuid().ToString("N") + ":" + VerifiedXCore.Utilities.TimeUtil.GetTime().ToString();
 
@@ -262,8 +274,8 @@ namespace VerifiedXCore.Bitcoin.FROST
             var n = canonical.Count;
             if (proof.Threshold < Required(n) || proof.Threshold > n)
                 return $"vBTC V2 contract signing threshold {proof.Threshold} is not a majority of its {n} participants.";
-            if (rekeyOf != null && proof.Threshold != ThresholdFor(n, RekeyThresholdPercent))
-                return $"A vault's new key signs with {ThresholdFor(n, RekeyThresholdPercent)} of its {n} holders ({RekeyThresholdPercent}%); this one names {proof.Threshold}.";
+            if (rekeyOf != null && proof.Threshold != RekeyThreshold(n))
+                return $"A vault's new key signs with {RekeyThreshold(n)} of its {n} holders ({RekeyThresholdPercent}%, never all); this one names {proof.Threshold}.";
 
             // Every participant: an active validator of the contract's class that holds the validator balance.
             var eligible = new HashSet<string>(activeAtPreviousBlock().Where(v => v != null && v.IsActive && v.IsS3C == feature.IsS3C && !string.IsNullOrEmpty(v.ValidatorAddress))

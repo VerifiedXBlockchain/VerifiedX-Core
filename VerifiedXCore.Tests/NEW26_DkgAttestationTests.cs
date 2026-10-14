@@ -560,7 +560,7 @@ namespace VerifiedXCore.Tests
             Assert.Contains("var dkgProof = FrostDkgAttestation.BuildProof(contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, attestations);", mpc);
             var startup = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "FROST", "FrostStartup.cs"));
             Assert.Contains("FrostDkgAttestation.SignLocal(session.SmartContractUID, session.GroupPublicKey, session.TaprootAddress,", startup);
-            Assert.Contains("session.LeaderAddress, FrostDkgAttestation.ThresholdFor(session.ParticipantAddresses?.Count ?? 0, session.RequiredThreshold),", startup);
+            Assert.Contains("session.LeaderAddress, FrostDkgAttestation.CeremonyThreshold(session.ParticipantAddresses?.Count ?? 0, session.RequiredThreshold, session.RekeyOf),", startup);
         }
 
         private static int CountOf(string text, string needle)

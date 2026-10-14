@@ -367,7 +367,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     attempt.Failed[v.ValidatorAddress] = "did not provide a Round 1 commitment";
                 if (attempt.Failed.Count == 0)
                 {
-                    var minSigners = FrostDkgAttestation.ThresholdFor(validators.Count, threshold);
+                    var minSigners = FrostDkgAttestation.CeremonyThreshold(validators.Count, threshold, rekeyOf);
                     var invalid = FrostDkgBlame.InvalidRound1Packages(commitments, validators.Select(v => v.ValidatorAddress).ToList(), minSigners);
                     if (invalid == null)
                         LogUtility.Log("[FROST MPC] Round 1 commitment check unavailable (native library); continuing without it.", "FrostMPCService.RunDkgAttempt");
@@ -843,7 +843,7 @@ namespace VerifiedXCore.Bitcoin.Services
             // NEW-26 (follow-up): participants, threshold and owner are the ceremony's own (the validators sign them from
             // their sessions); consensus requires one valid attestation from every participant, by that participant.
             var participants = FrostDkgAttestation.Canonical(validators.Select(v => v.ValidatorAddress));
-            var signingThreshold = FrostDkgAttestation.ThresholdFor(participants.Count, threshold);
+            var signingThreshold = FrostDkgAttestation.CeremonyThreshold(participants.Count, threshold, rekeyOf);
             var attestations = new List<FrostDkgAttestation.Attestation>();
             foreach (var r in results.Where(r => !failed.ContainsKey(r.Key)))
             {

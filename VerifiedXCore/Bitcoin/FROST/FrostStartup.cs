@@ -789,7 +789,7 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                             ushort myParticipantId = (ushort)(participantIndex + 1); // FROST uses 1-based IDs
                             ushort maxSigners = (ushort)request.ParticipantAddresses.Count;
-                            ushort minSigners = (ushort)Math.Ceiling(maxSigners * (request.RequiredThreshold / 100.0));
+                            ushort minSigners = (ushort)FrostDkgAttestation.CeremonyThreshold(maxSigners, request.RequiredThreshold, request.RekeyOf);
 
                             // FIND-024 Fix: Call FROST native library for DKG Round 1
                             var (commitment, secretPackage, errorCode) = FrostNative.DKGRound1Generate(
@@ -1923,7 +1923,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         // NEW-26 (follow-up): the attestation also binds the owner (the authenticated leader), the signing
                         // threshold and the participant list of this validator's own session.
                         var attestation = FrostDkgAttestation.SignLocal(session.SmartContractUID, session.GroupPublicKey, session.TaprootAddress,
-                            session.LeaderAddress, FrostDkgAttestation.ThresholdFor(session.ParticipantAddresses?.Count ?? 0, session.RequiredThreshold),
+                            session.LeaderAddress, FrostDkgAttestation.CeremonyThreshold(session.ParticipantAddresses?.Count ?? 0, session.RequiredThreshold, session.RekeyOf),
                             session.ParticipantAddresses, session.RekeyOf);
 
                         // Return final result
