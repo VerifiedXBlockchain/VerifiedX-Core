@@ -831,6 +831,45 @@ namespace VerifiedXCore.Tests
             await Accepted(next, height);
         }
 
+        /// <summary>
+        /// The tree was built again for every event and each part serialised again after every event: a Bitcoin block with
+        /// a few thousand small payments to a vault took longer to plan than a VFX block lasts, and the plan was dropped
+        /// each time the VFX tip moved, so reporting stopped (fourth review, round 9). The tree is built once, a part's
+        /// length is a running sum, and the planner builds only the part it signs. The parts are the same as before.
+        /// </summary>
+        [Fact]
+        public async Task ABlockWithThousandsOfEvents_IsPlannedQuickly_InTheSameParts()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var at = _btc.Mine(Enumerable.Range(0, 3_000).Select(i => Pay(vault.Script, 330 + i)).ToArray());
+            _btc.MineEmpty(3);
+            var headers = _btc.HeaderHexes(Meta.TipHeight + 1, _btc.Tip);
+
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var first = Assert.Single(BtcBlockScanner.BuildForward(_btc.Block(at), at, headers, 0, maxParts: 1));
+            var planned = clock.Elapsed;
+            Assert.True(planned < TimeSpan.FromSeconds(4), $"planning the first part took {planned.TotalSeconds:N1} s");
+            Assert.False(first.Final);
+
+            var parts = BtcBlockScanner.BuildForward(_btc.Block(at), at, headers, 0);
+            Assert.Equal(3_000, parts.Sum(p => p.Events.Count));
+            Assert.Equal(parts[0].ToCanonicalJson(), first.ToCanonicalJson());
+            // The split the old way: every part but the last is full (the next event would pass the budget or the count).
+            var slow = BtcBlockScanner.SplitSlowly(parts.SelectMany(p => p.Events).ToList(), isFirst =>
+            {
+                var template = isFirst ? parts[0] : parts[1];
+                return new BtcReport
+                {
+                    Scope = template.Scope, BlockHeight = template.BlockHeight, BlockHash = template.BlockHash, Headers = template.Headers.ToList(),
+                    CoinbaseBranch = template.CoinbaseBranch, SignerEpoch = template.SignerEpoch, CoinbaseTxHex = template.CoinbaseTxHex,
+                    CoinbaseState = template.CoinbaseState, CoinbaseTailHex = template.CoinbaseTailHex, CoinbaseBytes = template.CoinbaseBytes,
+                };
+            });
+            Assert.Equal(parts.Select(p => p.Events.Count), slow.Select(p => p.Events.Count));
+            Assert.All(parts, p => Assert.True(p.ToCanonicalJson().Length <= BtcAttestRules.PartTextBudget));
+        }
+
         [Fact]
         public async Task AVaultCreatedBetweenTheParts_IsInTheRest_AndWhatCameBeforeIsABackfill()
         {

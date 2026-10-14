@@ -132,7 +132,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     plan.Waiting = $"Bitcoin block {meta.PendingPartBlockHeight} is not fetched yet";
                     return plan;
                 }
-                var rest = BtcBlockScanner.BuildForwardRest(block, meta.PendingPartBlockHeight, meta.PendingLastPosition, meta.PendingNextPart, epoch, db);
+                var rest = BtcBlockScanner.BuildForwardRest(block, meta.PendingPartBlockHeight, meta.PendingLastPosition, meta.PendingNextPart, epoch, db, maxParts: 1);
                 return plan.With(BtcPlannedReport.Part, rest[0]);
             }
 
@@ -188,7 +188,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     plan.Waiting = $"the headers through {buriedAt.Value} are not held";
                     return plan;
                 }
-                var parts = BtcBlockScanner.BuildForward(block, h, headers, epoch, db);
+                var parts = BtcBlockScanner.BuildForward(block, h, headers, epoch, db, maxParts: 1);
                 if (parts.Count > 0) return plan.With(BtcPlannedReport.Forward, parts[0]);
                 _empty[h] = (header.Hash, scripts, coins);
             }

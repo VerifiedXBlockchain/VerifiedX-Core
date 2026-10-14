@@ -51,19 +51,44 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public static List<string>? BranchFor(IReadOnlyList<string> txids, int position)
         {
             if (txids == null || position < 0 || position >= txids.Count) return null;
+            var levels = Levels(txids);
+            return levels == null ? null : BranchFrom(levels, position);
+        }
+
+        /// <summary>
+        /// Every level of a block's tree, leaves first; null when an id does not read. Built once, every branch of the
+        /// block is read from it (<see cref="BranchFrom"/>): the tree was built again for each event, and a Bitcoin block
+        /// with a few thousand small payments to a vault took longer to plan than a VFX block lasts (fourth review, round 9).
+        /// </summary>
+        public static List<List<byte[]>>? Levels(IReadOnlyList<string> txids)
+        {
+            if (txids == null || txids.Count == 0) return null;
             var level = new List<byte[]>(txids.Count);
             foreach (var id in txids)
             {
                 if (!TryInternal(id, out var leaf)) return null;
                 level.Add(leaf);
             }
-            var branch = new List<string>();
-            var index = position;
+            var levels = new List<List<byte[]>> { level };
             while (level.Count > 1)
             {
+                level = NextLevel(level);
+                levels.Add(level);
+            }
+            return levels;
+        }
+
+        /// <summary>The branch of the transaction at <paramref name="position"/>, read from a block's levels; the same as <see cref="BranchFor"/>.</summary>
+        public static List<string>? BranchFrom(List<List<byte[]>> levels, int position)
+        {
+            if (levels == null || levels.Count == 0 || position < 0 || position >= levels[0].Count) return null;
+            var branch = new List<string>();
+            var index = position;
+            for (var l = 0; l < levels.Count - 1; l++)
+            {
+                var level = levels[l];
                 var sibling = (index ^ 1) < level.Count ? level[index ^ 1] : level[index]; // odd level: paired with itself
                 branch.Add(Display(sibling));
-                level = NextLevel(level);
                 index >>= 1;
             }
             return branch;

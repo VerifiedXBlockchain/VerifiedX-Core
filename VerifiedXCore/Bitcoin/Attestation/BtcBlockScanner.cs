@@ -19,16 +19,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// no vault event. <paramref name="headers"/> are the headers from the attested tip + 1 that the first part
         /// carries (enough to bury the block). The parts are unsigned.
         /// </summary>
-        public static List<BtcReport> BuildForward(Block block, long blockHeight, IReadOnlyList<string> headers, long signerEpoch, LiteDatabase? db = null) =>
-            Build(block, blockHeight, BtcReport.ScopeAll, headers, signerEpoch, db, afterPosition: -1, firstPart: 1);
+        public static List<BtcReport> BuildForward(Block block, long blockHeight, IReadOnlyList<string> headers, long signerEpoch, LiteDatabase? db = null, int maxParts = int.MaxValue) =>
+            Build(block, blockHeight, BtcReport.ScopeAll, headers, signerEpoch, db, afterPosition: -1, firstPart: 1, maxParts);
 
         /// <summary>
         /// The rest of a block's report once some of its parts are mined: built from the state those parts left, the
         /// events after <paramref name="afterPosition"/> only, numbered from <paramref name="nextPart"/>. Never empty:
         /// when nothing is left, one part with no events closes the block.
         /// </summary>
-        public static List<BtcReport> BuildForwardRest(Block block, long blockHeight, long afterPosition, int nextPart, long signerEpoch, LiteDatabase? db = null) =>
-            Build(block, blockHeight, BtcReport.ScopeAll, Array.Empty<string>(), signerEpoch, db, afterPosition, nextPart);
+        public static List<BtcReport> BuildForwardRest(Block block, long blockHeight, long afterPosition, int nextPart, long signerEpoch, LiteDatabase? db = null, int maxParts = int.MaxValue) =>
+            Build(block, blockHeight, BtcReport.ScopeAll, Array.Empty<string>(), signerEpoch, db, afterPosition, nextPart, maxParts);
 
         /// <summary>The backfill report for one vault in one already-reported block; empty when the block holds nothing new for it.</summary>
         /// <remarks>
@@ -39,7 +39,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// </remarks>
         public static List<BtcReport> BuildBackfill(Block block, long blockHeight, string scUID, long signerEpoch, LiteDatabase? db = null)
         {
-            var parts = Build(block, blockHeight, scUID, Array.Empty<string>(), signerEpoch, db, afterPosition: -1, firstPart: 1);
+            var parts = Build(block, blockHeight, scUID, Array.Empty<string>(), signerEpoch, db, afterPosition: -1, firstPart: 1, maxParts: 1);
             if (parts.Count == 0) return parts;
             var first = parts[0];
             first.Part = 1;
@@ -84,13 +84,14 @@ namespace VerifiedXCore.Bitcoin.Attestation
         private static bool CannotBeProven(Transaction tx, int position) => TooLargeToProve(tx);
 
         private static List<BtcReport> Build(Block block, long blockHeight, string scope, IReadOnlyList<string> headers, long signerEpoch, LiteDatabase? db,
-            long afterPosition, int firstPart)
+            long afterPosition, int firstPart, int maxParts = int.MaxValue)
         {
             var result = new List<BtcReport>();
             if (block == null || block.Transactions.Count == 0) return result;
             var scopedVault = scope == BtcReport.ScopeAll ? null : scope;
 
             var txids = block.Transactions.Select(t => t.GetHash().ToString()).ToList();
+            var levels = BtcMerkle.Levels(txids); // the tree once; every branch is read from it (round 9)
             var blockHash = block.GetHash().ToString();
             // Every proof in a block rests on the block's coinbase transaction, which fixes the depth of its tree. Each
             // part carries it, or, when it is too large for that (a miner paying out to thousands of addresses), its
@@ -113,7 +114,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
                 if (BtcReportVerifier.DeriveEffects(txids[position], isCoinbase, spends, outputs, blockHeight, scopedVault, overlay, effects, db) == 0)
                     continue;
-                events.Add(new BtcReportEvent { Position = position, TxHex = BtcTxInclusion.ToStrippedHex(tx), Branch = BtcMerkle.BranchFor(txids, position) });
+                events.Add(new BtcReportEvent { Position = position, TxHex = BtcTxInclusion.ToStrippedHex(tx), Branch = levels == null ? null : BtcMerkle.BranchFrom(levels, position) });
             }
             if (events.Count == 0)
             {
@@ -122,7 +123,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 return result;
             }
 
-            var coinbaseBranch = BtcMerkle.BranchFor(txids, 0)!;
+            var coinbaseBranch = (levels == null ? null : BtcMerkle.BranchFrom(levels, 0))!;
 
             BtcReport NewPart(bool first)
             {
@@ -143,8 +144,54 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 return part;
             }
 
-            // Greedy split in block order: a part takes events until the next one would pass the budget.
+            // Greedy split in block order: a part takes events until the next one would pass the budget. The part's length
+            // is kept as a running sum (its text without events, each event's text, a comma between two): the whole part
+            // was serialised again after every event, about 40 MB of text for one full part (fourth review, round 9).
+            // Only the first maxParts parts are built: the planner signs the first, and the rest wait for it to be mined.
             var current = NewPart(first: true);
+            var length = current.ToCanonicalJson().Length;
+            var lengths = new List<int>();
+            var stoppedEarly = false;
+            foreach (var ev in events)
+            {
+                var eventLength = BtcReport.CanonicalLength(ev);
+                var withIt = length + eventLength + (current.Events.Count > 0 ? 1 : 0);
+                if (current.Events.Count > 0 && (withIt > BtcAttestRules.PartTextBudget || current.Events.Count + 1 > BtcAttestRules.MaxEventsPerReport))
+                {
+                    result.Add(current);
+                    lengths.Add(length);
+                    if (result.Count >= maxParts) { stoppedEarly = true; break; }
+                    current = NewPart(first: false);
+                    length = current.ToCanonicalJson().Length;
+                    withIt = length + eventLength;
+                }
+                current.Events.Add(ev);
+                length = withIt;
+            }
+            if (!stoppedEarly) { result.Add(current); lengths.Add(length); }
+            // The running sum is the text's length exactly; checked once a part. Should it ever not be, the parts are made
+            // the slow way, which every validator also gets (never a refusal to plan: that would stop reporting).
+            if (result.Where((part, i) => part.ToCanonicalJson().Length != lengths[i]).Any())
+            {
+                VerifiedXCore.Utilities.ErrorLogUtility.LogError($"Report parts of block {blockHeight}: the running length was not exact; split the slow way.", "BtcBlockScanner.Build");
+                result = SplitSlowly(events, NewPart);
+                stoppedEarly = result.Count > maxParts;
+                if (stoppedEarly) result = result.Take(maxParts).ToList();
+            }
+
+            for (var i = 0; i < result.Count; i++)
+            {
+                result[i].Part = firstPart + i;
+                result[i].Final = i == result.Count - 1 && !stoppedEarly;
+            }
+            return result;
+        }
+
+        /// <summary>The greedy split as it was first written: the part serialised again after every event.</summary>
+        internal static List<BtcReport> SplitSlowly(List<BtcReportEvent> events, Func<bool, BtcReport> newPart)
+        {
+            var result = new List<BtcReport>();
+            var current = newPart(true);
             foreach (var ev in events)
             {
                 current.Events.Add(ev);
@@ -152,17 +199,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 {
                     current.Events.RemoveAt(current.Events.Count - 1);
                     result.Add(current);
-                    current = NewPart(first: false);
+                    current = newPart(false);
                     current.Events.Add(ev);
                 }
             }
             result.Add(current);
-
-            for (var i = 0; i < result.Count; i++)
-            {
-                result[i].Part = firstPart + i;
-                result[i].Final = i == result.Count - 1;
-            }
             return result;
         }
 
