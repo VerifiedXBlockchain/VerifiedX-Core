@@ -338,6 +338,10 @@ namespace VerifiedXCore.Bitcoin.Services
             return run;
         }
 
+        /// <summary>The participants no share can be sealed to: no registered key, or one that does not derive the address.</summary>
+        internal static List<string> UnsealableParticipants(IEnumerable<VBTCValidator> validators, Func<string, string?> verifiedKeyOf) =>
+            validators.Select(v => v.ValidatorAddress).Where(a => string.IsNullOrEmpty(verifiedKeyOf(a))).Distinct(StringComparer.Ordinal).ToList();
+
         /// <summary>One ceremony over exactly these participants; on failure, the participants that caused it.</summary>
         private static async Task<DkgAttempt> RunDkgAttempt(
             string contractUid,
@@ -352,6 +356,22 @@ namespace VerifiedXCore.Bitcoin.Services
             var attempt = new DkgAttempt();
             try
             {
+                // A participant whose registered key does not derive its address can be sent no share: every honest
+                // dealer refused Round 2 over it and was dropped, while it stayed in (fifth review, round 13). It is left
+                // out before the start. When nobody's key can be used, this node's registry is not ready: nobody is blamed.
+                var unsealable = UnsealableParticipants(validators, FrostShareCrypto.VerifiedPublicKey);
+                if (unsealable.Count == validators.Count && validators.Count > 0)
+                {
+                    attempt.Error = "This node cannot see the validators' registered keys yet (registry not synced).";
+                    return attempt;
+                }
+                if (unsealable.Count > 0)
+                {
+                    foreach (var address in unsealable) attempt.Failed[address] = "its registered key does not derive its address (no share can be sealed to it)";
+                    attempt.Error = $"{unsealable.Count} of {validators.Count} validators have no usable registered key.";
+                    return attempt;
+                }
+
                 // Start: FROST DKG needs every participant from here on.
                 await BroadcastDKGStart(sessionId, contractUid, leaderAddress, validators, threshold, preSignedAuth, attempt.Failed, rekeyOf, attempt.Busy, attempt);
                 if (attempt.Failed.Count > 0)

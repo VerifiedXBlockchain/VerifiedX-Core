@@ -454,6 +454,54 @@ namespace VerifiedXCore.Tests
             Assert.True(ok, message);
         }
 
+        /// <summary>
+        /// A validator registered with a key that is not its own could be sent no share: every honest dealer refused Round 2
+        /// and was dropped and remembered as failing, while it stayed in, so every ceremony including it failed (fifth
+        /// review, round 13). It is left out before the start; a coordinator that sees nobody's key blames nobody.
+        /// </summary>
+        [Fact]
+        public async Task NEW26_AParticipantWhoseRegisteredKeyIsNotItsOwn_IsLeftOut_NotTheHonestDealers()
+        {
+            var bad = NewKey();
+            BlockchainData.GetBlocks().InsertSafe(new Block
+            {
+                Height = 40, Hash = $"h40-{Guid.NewGuid():N}",
+                Transactions = new List<Transaction>
+                {
+                    new Transaction
+                    {
+                        TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = bad.Address, ToAddress = bad.Address, Hash = "r40",
+                        Data = JsonConvert.SerializeObject(new { ValidatorAddress = bad.Address, IPAddress = "10.0.0.1", FrostPublicKey = _minter.Pub, IsS3C = false }),
+                    },
+                },
+            });
+            Globals.IsChainSynced = true;
+            VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.InvalidateCache();
+            var validators = VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidators();
+            Assert.Contains(validators, v => v.ValidatorAddress == bad.Address);
+            Assert.Equal(_public.Count + _s3c.Count + 1, validators.Count);
+            var oneAttempt = new[] { new PreSignedLeaderAuth { SessionId = FrostDkgLeaderAuth.NewSessionId(_minter.Address) } };
+            try
+            {
+                var run = await VerifiedXCore.Bitcoin.Services.FrostMPCService.CoordinateDKGCeremony(NewUid(), _minter.Address, validators, 51, preSignedAuths: oneAttempt);
+                Assert.Equal(new[] { bad.Address }, run.Excluded.Keys.ToArray());
+                Assert.Contains("does not derive its address", run.Excluded[bad.Address]);
+
+                // A coordinator whose registry is not ready sees no key at all: nobody is dropped or remembered.
+                VerifiedXCore.Bitcoin.Services.FrostMPCService.RecentDkgFailures.TryRemove(bad.Address, out _);
+                Globals.IsChainSynced = false;
+                var unready = await VerifiedXCore.Bitcoin.Services.FrostMPCService.CoordinateDKGCeremony(NewUid(), _minter.Address, validators, 51,
+                    preSignedAuths: new[] { new PreSignedLeaderAuth { SessionId = FrostDkgLeaderAuth.NewSessionId(_minter.Address) } });
+                Assert.Empty(unready.Excluded);
+                Assert.Contains("registry not synced", unready.Error);
+                Assert.False(VerifiedXCore.Bitcoin.Services.FrostMPCService.RecentDkgFailures.ContainsKey(_public[0].Address));
+            }
+            finally
+            {
+                VerifiedXCore.Bitcoin.Services.FrostMPCService.RecentDkgFailures.TryRemove(bad.Address, out _);
+            }
+        }
+
         // ── Registry, cache, decompile ─────────────────────────────────────────────────────
 
         [Fact]
