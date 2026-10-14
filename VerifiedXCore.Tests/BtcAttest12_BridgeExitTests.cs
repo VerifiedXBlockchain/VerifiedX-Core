@@ -245,6 +245,11 @@ namespace VerifiedXCore.Tests
                 Amount = 0.002M, AmountSats = 200_000L, BtcDestination = BtcDest, BaseBurnTxHash = NewBurn(),
             }, free: true);
             await RefusedInBlock(older, "carries its allocations");
+            // Allocations that add up to one satoshi more than the burn: refused (they took it from the pool; round 14).
+            var over = JObject.Parse(Exit(NewBurn(), BtcDest, (lockId, vault.Uid, 0.002M)).Data);
+            over["TotalAmount"] = 0.00199999M;
+            over["TotalAmountSats"] = 199_999L;
+            await RefusedInBlock(SignedBy(Caster, Caster.Address, TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC, over, free: true), "add up to");
         }
 
         /// <summary>

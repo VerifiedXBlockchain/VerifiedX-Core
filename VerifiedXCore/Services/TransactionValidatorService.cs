@@ -4419,7 +4419,7 @@ namespace VerifiedXCore.Services
                     return (false, $"lock {a.LockId} has {rec.RemainingAmount} remaining, allocation asks {a.UnlockAmount}");
                 sum += a.UnlockAmount;
             }
-            if (Math.Abs(sum - totalAmount) > 0.00000001M) return (false, $"allocation sum {sum} != total {totalAmount}");
+            if (Math.Abs(sum - totalAmount) > (exact ? 0M : 0.00000001M)) return (false, $"allocation sum {sum} != total {totalAmount}"); // exact from the path-audit rules (round 14)
             return (true, "");
         }
 

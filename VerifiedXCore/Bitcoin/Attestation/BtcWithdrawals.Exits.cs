@@ -154,6 +154,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
                             if (allocation.UnlockAmount <= 0M || allocation.UnlockAmount > held.RemainingAmount)
                                 return $"The exit asks lock {held.LockId} for {allocation.UnlockAmount}; it holds {held.RemainingAmount}.";
                         }
+                        // The allocations are the burn's amount exactly: a satoshi over was taken from the pool (round 14).
+                        var total = data["TotalAmount"]?.ToObject<decimal?>();
+                        var drawn = allocations.Where(a => a != null).Sum(a => a.UnlockAmount);
+                        if (total == null || drawn != total.Value)
+                            return $"The exit's allocations add up to {drawn}, not its total {total}.";
                         var destination = data["BtcDestination"]?.ToObject<string?>();
                         if (!BtcCanonicalWithdrawal.TryDestinationScript(destination, out var script))
                             return $"The exit's Bitcoin destination is not an address on this network: {destination}";
