@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using NBitcoin;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using VerifiedXCore.Bitcoin.Attestation;
 using VerifiedXCore.Bitcoin.FROST;
 using VerifiedXCore.Bitcoin.FROST.Models;
@@ -236,6 +237,48 @@ namespace VerifiedXCore.Tests
                 Amount = 0.002M, AmountSats = 200_000L, BtcDestination = BtcDest, BaseBurnTxHash = NewBurn(),
             }, free: true);
             await RefusedInBlock(numeric, "carries its allocations");
+        }
+
+        /// <summary>
+        /// The block guard keyed an exit to Bitcoin on ExitBurnTxHash, a field the exit never reads: one committee caster
+        /// gave two copies of an exit their own made-up ExitBurnTxHash and spelled the burn differently, both passed in one
+        /// block, and the second drew its locks, found the burn's record taken and was never paid or restored (fifth
+        /// review, round 13). The guard keys the exit on the burn it redeems, and apply draws nothing for a burn that has
+        /// an exit already.
+        /// </summary>
+        [Fact]
+        public async Task TwoCopiesOfOneBurnsExit_InOneBlock_TheSecondIsRefused_AndDrawsNothingIfApplied()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            var first = await Lock(vault.Uid, 0.002M);
+            var second = await Lock(vault.Uid, 0.002M);
+            var burn = NewBurn();
+            VfxTx Copy(string spelling, string lockId)
+            {
+                var data = JObject.Parse(Exit(spelling, BtcDest, (lockId, vault.Uid, 0.002M)).Data);
+                data["ExitBurnTxHash"] = NewBurn();
+                return SignedBy(Caster, Caster.Address, TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC, data, free: true);
+            }
+            var one = Copy(burn, first);
+            var two = Copy("0x" + burn[2..].ToUpperInvariant(), second);
+            // Each passes on the chain's stored state; the block's guard takes the first and refuses the second.
+            Assert.True((await Verify(one, Tip + 1)).Ok);
+            Assert.True((await Verify(two, Tip + 1)).Ok);
+            var guard = new BridgeIntraBlockGuard.State();
+            Assert.True(BridgeIntraBlockGuard.TryRegister(one, guard, Tip + 1).Ok);
+            var (ok, why) = BridgeIntraBlockGuard.TryRegister(two, guard, Tip + 1);
+            Assert.False(ok);
+            Assert.Contains("Duplicate Base burn", why);
+
+            // Applied anyway (as an older node would have): the second copy draws nothing.
+            await Apply(Tip + 1, one, two);
+            Assert.True(VBTCBridgeLockState.GetByLockId(first)!.IsUnlocked);
+            var untouched = VBTCBridgeLockState.GetByLockId(second)!;
+            Assert.False(untouched.IsUnlocked);
+            Assert.Equal(200_000, untouched.RemainingAmountSats);
+            Assert.Equal(one.Hash, Record(burn).ExitTxHash);
         }
 
         /// <summary>

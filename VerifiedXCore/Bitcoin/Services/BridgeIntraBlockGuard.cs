@@ -28,7 +28,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// reason) when the block has already claimed any of them. Non-bridge transactions and
         /// unparseable data pass through untouched.
         /// </summary>
-        public static (bool Ok, string Reason) TryRegister(Transaction tx, State state)
+        public static (bool Ok, string Reason) TryRegister(Transaction tx, State state, long? height = null)
         {
             if (tx == null || state == null || !AppliesTo(tx.TransactionType)) return (true, "");
             if (string.IsNullOrWhiteSpace(tx.Data)) return (true, "");
@@ -37,7 +37,7 @@ namespace VerifiedXCore.Bitcoin.Services
             try { jobj = JObject.Parse(tx.Data); }
             catch { return (true, ""); }
 
-            var burn = NormalizeBurn(jobj["ExitBurnTxHash"]?.ToString() ?? jobj["BaseBurnTxHash"]?.ToString());
+            var burn = NormalizeBurn(RedeemedBurn(tx.TransactionType, jobj, height ?? ((Globals.LastBlock?.Height ?? -1) + 1)));
             var lockIds = ExtractLockIds(jobj);
 
             // Check everything first, then register, so a rejected tx leaves the state untouched.
@@ -50,6 +50,19 @@ namespace VerifiedXCore.Bitcoin.Services
             if (burn.Length > 0) state.BurnHashes.Add(burn);
             foreach (var id in lockIds) state.LockIds.Add(id);
             return (true, "");
+        }
+
+        /// <summary>
+        /// The burn a bridge transaction redeems. An exit to Bitcoin redeems BaseBurnTxHash; before the path-audit rules
+        /// the guard took ExitBurnTxHash first, a field the exit never reads, so one committee caster could give each copy
+        /// of an exit its own made-up ExitBurnTxHash and spell BaseBurnTxHash differently: every copy passed, each drew its
+        /// own locks, and only the first was recorded and paid (fifth review, round 13).
+        /// </summary>
+        public static string? RedeemedBurn(TransactionType type, JObject jobj, long height)
+        {
+            if (type == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC && height >= Globals.PathAuditRulesHeight)
+                return jobj["BaseBurnTxHash"]?.ToString();
+            return jobj["ExitBurnTxHash"]?.ToString() ?? jobj["BaseBurnTxHash"]?.ToString();
         }
 
         public static string NormalizeBurn(string? hash)

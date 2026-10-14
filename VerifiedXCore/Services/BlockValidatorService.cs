@@ -1038,7 +1038,7 @@ namespace VerifiedXCore.Services
                                 if (effectiveTxResult.Item1 && block.Height >= Globals.BridgeIntraBlockGuardHeight
                                     && Bitcoin.Services.BridgeIntraBlockGuard.AppliesTo(blkTransaction.TransactionType))
                                 {
-                                    var (bridgeOk, bridgeReason) = Bitcoin.Services.BridgeIntraBlockGuard.TryRegister(blkTransaction, blockBridgeState);
+                                    var (bridgeOk, bridgeReason) = Bitcoin.Services.BridgeIntraBlockGuard.TryRegister(blkTransaction, blockBridgeState, block.Height);
                                     if (!bridgeOk) effectiveTxResult = (false, bridgeReason);
                                 }
 
@@ -2034,7 +2034,7 @@ namespace VerifiedXCore.Services
                         if (effectiveTxResult.Item1 && block.Height >= Globals.BridgeIntraBlockGuardHeight
                             && Bitcoin.Services.BridgeIntraBlockGuard.AppliesTo(transaction.TransactionType))
                         {
-                            var (bridgeOk, bridgeReason) = Bitcoin.Services.BridgeIntraBlockGuard.TryRegister(transaction, blockBridgeStateTask);
+                            var (bridgeOk, bridgeReason) = Bitcoin.Services.BridgeIntraBlockGuard.TryRegister(transaction, blockBridgeStateTask, block.Height);
                             if (!bridgeOk) effectiveTxResult = (false, bridgeReason);
                         }
                         if (effectiveTxResult.Item1)

@@ -3786,6 +3786,17 @@ namespace VerifiedXCore.Data
                     return;
                 }
 
+                // The exit's record first: when the burn already has one, nothing is drawn (fifth review, round 13: a
+                // second copy in the same block drew its locks, found the record taken, and was never paid or restored).
+                var recordFirst = VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(tx.Height);
+                if (recordFirst && tx.Height >= Globals.BridgeIntraBlockGuardHeight)
+                    VBTCBridgeBtcExitState.DeleteFailedRecord(baseBurnTxHash.Trim());
+                if (recordFirst && VBTCBridgeBtcExitState.GetByBurnHash(baseBurnTxHash.Trim()) != null)
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTC: burn {baseBurnTxHash} already has an exit; no lock drawn", "StateData.ApplyVBTCBridgeExitToBTC()");
+                    return;
+                }
+
                 // Process each allocation: apply partial unlock to each lock
                 foreach (var alloc in allocations)
                 {
