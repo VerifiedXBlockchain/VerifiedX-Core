@@ -2515,6 +2515,16 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // A session id is opened once: an open one is not touched, and one this validator opened before
+                            // (since finished, aborted or cleaned up) is not opened again under a signature still in date
+                            // (fifth review, round 17).
+                            if (FrostSessionStorage.SigningSessions.ContainsKey(request.SessionId) || FrostSessionStorage.SigningStartSeen(request.SessionId))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Signing session already exists" }));
+                                return;
+                            }
+
                             var leaderMessage = $"{request.SessionId}.{request.LeaderAddress}.{request.Timestamp}";
                             var leaderSigValid = SignatureService.VerifySignature(request.LeaderAddress, leaderMessage, request.LeaderSignature);
                             if (!leaderSigValid)
@@ -2726,13 +2736,9 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                             if (!FrostSessionStorage.SigningSessions.TryAdd(request.SessionId, signingSession))
                             {
-                                // FIND-028: Record failed if we can't create session (conflict)
-                                if (!string.IsNullOrEmpty(request.WithdrawalRequestHash))
-                                {
-                                    VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                                        .RecordSigningFailed(request.SmartContractUID, request.WithdrawalRequestHash, request.SessionId, request.InputIndex,
-                                            FrostSigningAuthorization.SigningScope(request.SmartContractUID, request.BtcTxId));
-                                }
+                                // The session is someone else's (the leader's own, a copy of its start sent again): nothing of
+                                // it is touched. Recording a failure here under its id dropped the leader's open session from
+                                // the tracker, and its Round 2 was refused (fifth review, round 17).
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                                 {
@@ -2741,6 +2747,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 }));
                                 return;
                             }
+
+                            FrostSessionStorage.NoteSigningStart(request.SessionId);
 
                             // FIND-028: Record signing started for withdrawal dedup.
                             // Fund-loss audit item 7: check and record under one lock. The check at the top of this

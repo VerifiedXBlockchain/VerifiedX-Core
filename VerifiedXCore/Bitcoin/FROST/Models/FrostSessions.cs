@@ -413,6 +413,22 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public const int MAX_SIGNING_SESSIONS_PER_LEADER_AND_HASH = 2;
 
         /// <summary>How far a signing start's timestamp may be from this validator's clock, in seconds: an old start cannot be sent again to use up its leader's room.</summary>
+        private static readonly ConcurrentDictionary<string, long> _signingStartsSeen = new(StringComparer.Ordinal);
+
+        /// <summary>Notes a signing session id this validator opened (kept twice the longest a start's signature is in date).</summary>
+        public static void NoteSigningStart(string sessionId)
+        {
+            var now = TimeUtil.GetTime();
+            _signingStartsSeen[sessionId] = now;
+            if (_signingStartsSeen.Count > 10_000)
+                foreach (var old in _signingStartsSeen.Where(kv => now - kv.Value > 2 * SIGNING_START_MAX_AGE_SECONDS).Select(kv => kv.Key).ToList())
+                    _signingStartsSeen.TryRemove(old, out _);
+        }
+
+        /// <summary>Whether this validator opened a signing session under this id within twice a start's signature's life.</summary>
+        public static bool SigningStartSeen(string sessionId) =>
+            _signingStartsSeen.TryGetValue(sessionId, out var at) && TimeUtil.GetTime() - at <= 2 * SIGNING_START_MAX_AGE_SECONDS;
+
         public const int SIGNING_START_MAX_AGE_SECONDS = 1800; // wide enough for a wallet that signs its start, then asks for the ceremony a while later
 
         /// <summary>
