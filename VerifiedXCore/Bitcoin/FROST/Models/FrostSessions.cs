@@ -409,6 +409,9 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// </summary>
         public const int MAX_SIGNING_SESSIONS = 500;
 
+        /// <summary>Signing sessions kept here at all, finished ones included (a finished session holds no place, but is kept for its ten minutes).</summary>
+        public const int MAX_SIGNING_SESSIONS_HELD = 2_000;
+
         /// <summary>A signing session is dropped this long after it was started; a ceremony takes seconds.</summary>
         public const int SIGNING_SESSION_SECONDS = 600;
 
@@ -488,7 +491,13 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// </summary>
         public static string? SigningStartRefusal(IEnumerable<SigningSession> open, string? leaderAddress, string? messageHash, bool ledByRequester = false)
         {
-            var sessions = open as ICollection<SigningSession> ?? open.ToList();
+            var held = open as ICollection<SigningSession> ?? open.ToList();
+            if (held.Count >= MAX_SIGNING_SESSIONS_HELD)
+                return "Maximum concurrent signing sessions reached. Try again later.";
+            // A session whose share this validator has given is done here: it no longer holds a place. It held one for
+            // its full ten minutes, and a leader that had signed one 50-input transaction was refused for the next
+            // (fifth review, round 25). The finished ones are still kept (above) for their own ten minutes.
+            var sessions = held.Where(x => !x.NonceConsumed).ToList();
             if (sessions.Count >= MAX_SIGNING_SESSIONS)
                 return "Maximum concurrent signing sessions reached. Try again later.";
             if (string.IsNullOrEmpty(leaderAddress)) return null;

@@ -70,6 +70,23 @@ namespace VerifiedXCore.Tests
             Assert.True(FrostSessionStorage.MAX_SIGNING_SESSIONS - FrostSessionStorage.MAX_REQUESTER_LED_SIGNING_SESSIONS >= 300);
         }
 
+        /// <summary>A session whose share was given holds no place: a leader that just signed a 50-input transaction was refused for the next (round 25).</summary>
+        [Fact]
+        public void AFinishedSession_HoldsNoPlace_ButSessionsKeptAreBounded()
+        {
+            var open = new List<SigningSession>();
+            for (var i = 0; i < FrostSessionStorage.MAX_SIGNING_SESSIONS_PER_LEADER; i++)
+            {
+                var s = Session("leaderA", "tx" + i, 0, hash: "h" + i);
+                s.NonceSecret = "secret";
+                Assert.True(s.TryConsumeNonceSecret(out _));
+                open.Add(s);
+            }
+            Assert.Null(FrostSessionStorage.SigningStartRefusal(open, "leaderA", "next"));
+            var many = Enumerable.Range(0, FrostSessionStorage.MAX_SIGNING_SESSIONS_HELD).Select(i => { var s = Session("l" + i, "t" + i, 0); s.NonceSecret = "x"; s.TryConsumeNonceSecret(out _); return s; }).ToList();
+            Assert.Contains("Maximum concurrent", FrostSessionStorage.SigningStartRefusal(many, "new", "new"));
+        }
+
         [Fact]
         public void TheValidatorAsAWholeHasALimitToo()
         {
