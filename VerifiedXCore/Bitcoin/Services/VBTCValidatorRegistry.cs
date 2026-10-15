@@ -173,6 +173,55 @@ namespace VerifiedXCore.Bitcoin.Services
         /// be read is then an error to its caller, not an empty answer. A node that read "no validators" where its
         /// peers read forty held other state than they did and nothing said so.
         /// </param>
+        /// <summary>A block's validator transactions, with the hashes that place it in the chain.</summary>
+        private sealed record BlockSummary(string? Hash, string? PrevHash, List<Transaction> Transactions);
+
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, BlockSummary> _summaries = new();
+        [ThreadStatic] private static long _blocksReadOnThisThread;
+
+        /// <summary>Blocks this thread read from the store to scan (tests).</summary>
+        internal static long BlocksReadOnThisThread => _blocksReadOnThisThread;
+
+        private static bool IsValidatorTx(Transaction tx) =>
+            tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER
+            || tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT
+            || tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_EXIT;
+
+        /// <summary>
+        /// The window's blocks, oldest first, as their validator transactions. Every scan read every block of the window
+        /// whole (up to 1,000; tens of seconds when they are full, and full blocks cost a few VFX), and a scan ran for each
+        /// new height asked (fifth review, round 33). A block's summary is kept and reused while the block above it names
+        /// its hash as its previous one; the top block, and any whose hash does not follow, is read from the store.
+        /// </summary>
+        private static List<BlockSummary?> WindowOf(long scanFrom, long currentHeight)
+        {
+            var window = new List<BlockSummary?>();
+            string? expected = null;
+            for (long h = currentHeight; h >= scanFrom; h--)
+            {
+                BlockSummary? summary;
+                if (expected != null && _summaries.TryGetValue(h, out var known) && known.Hash == expected)
+                    summary = known;
+                else
+                {
+                    var block = BlockchainData.GetBlockByHeight(h);
+                    _blocksReadOnThisThread++;
+                    summary = block == null ? null : new BlockSummary(block.Hash, block.PrevHash,
+                        block.Transactions?.Where(IsValidatorTx).ToList() ?? new List<Transaction>());
+                    if (summary != null && !string.IsNullOrEmpty(summary.Hash))
+                        _summaries[h] = summary;
+                    else
+                        _summaries.TryRemove(h, out _);
+                }
+                window.Add(summary);
+                expected = string.IsNullOrEmpty(summary?.PrevHash) ? null : summary!.PrevHash;
+            }
+            foreach (var old in _summaries.Keys.Where(k => k < scanFrom - SCAN_WINDOW || k > currentHeight + SCAN_WINDOW).ToList())
+                _summaries.TryRemove(old, out _);
+            window.Reverse();
+            return window;
+        }
+
         private static List<VBTCValidator> ScanBlocks(long currentHeight, bool consensus = false)
         {
             var scanFrom = Math.Max(0, currentHeight - SCAN_WINDOW);
@@ -180,13 +229,14 @@ namespace VerifiedXCore.Bitcoin.Services
 
             try
             {
+                var window = WindowOf(scanFrom, currentHeight);
                 for (long h = scanFrom; h <= currentHeight; h++)
                 {
-                    var block = BlockchainData.GetBlockByHeight(h);
-                    if (block?.Transactions == null || !block.Transactions.Any())
+                    var summary = window[(int)(h - scanFrom)];
+                    if (summary == null || summary.Transactions.Count == 0)
                         continue;
 
-                    foreach (var tx in block.Transactions)
+                    foreach (var tx in summary.Transactions)
                     {
                         if (tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER)
                             ProcessRegister(tx, h, validatorMap);
