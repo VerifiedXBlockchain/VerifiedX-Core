@@ -16,6 +16,19 @@ namespace VerifiedXCore.Privacy
         /// Derives viewing-only key material (encryption private key) from the wallet's stored viewing key.
         /// Does NOT require the spending key password — suitable for scanning / note decryption.
         /// </summary>
+        /// <summary>
+        /// Whether a mined private transaction spends this wallet note: its own nullifier is among the transaction's. The
+        /// spent commitments and tree positions a payload lists are not proven: any private transaction could list other
+        /// people's notes and have every node's wallet mark them spent (fifth review, round 21).
+        /// </summary>
+        internal static bool SpendsWalletNote(PrivateTxPayload payload, UnspentCommitment note, ShieldedKeyMaterial keys, long blockHeight)
+        {
+            var nullifier = VfxPrivateTransactionBuilder.NullifierOf(note, keys, PrivacyEpoch.ProofRulesActive(blockHeight));
+            if (string.IsNullOrEmpty(nullifier)) return false;
+            return (payload.NullsB64 != null && payload.NullsB64.Contains(nullifier, StringComparer.Ordinal))
+                || string.Equals(payload.FeeInputNullifierB64, nullifier, StringComparison.Ordinal);
+        }
+
         public static bool TryGetViewingKeyMaterial(ShieldedWallet w, [NotNullWhen(true)] out ShieldedKeyMaterial? keys, out string? error)
         {
             keys = null;
@@ -270,37 +283,20 @@ namespace VerifiedXCore.Privacy
                     if (payload == null)
                         continue;
 
-                    // --- Mark wallet notes consumed by this tx's spent positions ---
-                    if (payload.SpentCommitmentTreePositions != null && payload.SpentCommitmentTreePositions.Count > 0)
+                    // --- Mark wallet notes consumed by this tx's nullifiers (each note's own; round 21) ---
+                    if ((payload.NullsB64 != null && payload.NullsB64.Count > 0) || !string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64))
                     {
-                        HashSet<string> spentCommitmentStrings;
-                        if (payload.SpentCommitmentB64s != null && payload.SpentCommitmentB64s.Count > 0)
+                        foreach (var uc in w.UnspentCommitments)
                         {
-                            // v1.1+ TX: commitment strings stored directly in payload
-                            spentCommitmentStrings = new HashSet<string>(payload.SpentCommitmentB64s, StringComparer.Ordinal);
-                        }
-                        else
-                        {
-                            // Legacy TX: look up by tree position (may fail for corrupted positions)
-                            spentCommitmentStrings = LookupCommitmentStringsByTreePositions(
-                                payload.SpentCommitmentTreePositions, payload.Asset);
-                        }
-
-                        if (spentCommitmentStrings.Count > 0)
-                        {
-                            foreach (var uc in w.UnspentCommitments)
-                            {
-                                if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
-                                    continue;
-                                if (spentCommitmentStrings.Contains(uc.Commitment))
-                                {
-                                    uc.IsSpent = true;
-                                    result.NotesMarkedSpent++;
-                                    var assetKey = uc.AssetType ?? "";
-                                    if (w.ShieldedBalances.ContainsKey(assetKey))
-                                        w.ShieldedBalances[assetKey] -= uc.Amount;
-                                }
-                            }
+                            if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
+                                continue;
+                            if (!SpendsWalletNote(payload, uc, keys, block.Height))
+                                continue;
+                            uc.IsSpent = true;
+                            result.NotesMarkedSpent++;
+                            var assetKey = uc.AssetType ?? "";
+                            if (w.ShieldedBalances.ContainsKey(assetKey))
+                                w.ShieldedBalances[assetKey] -= uc.Amount;
                         }
                     }
 

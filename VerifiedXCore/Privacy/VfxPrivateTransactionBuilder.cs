@@ -532,6 +532,19 @@ namespace VerifiedXCore.Privacy
         // ─── Shared helpers ────────────────────────────────────────────
 
         /// <summary>An unspent note as a circuit input (canonical randomness, scaled amount).</summary>
+        /// <summary>The nullifier spending <paramref name="note"/> exposes, as this wallet's builder makes it; null when it cannot be made.</summary>
+        internal static string? NullifierOf(UnspentCommitment note, ShieldedKeyMaterial keys, bool epoch)
+        {
+            try
+            {
+                if (epoch)
+                    return TryEpochNote(note, out var spent, out _) ? Convert.ToBase64String(PrivateTxProverV1.NullifierFor(spent!, keys.NullifierKey32)) : null;
+                DeriveNullifierFromInput(note, keys.ViewingKey32, out var b64, out _);
+                return b64;
+            }
+            catch { return null; }
+        }
+
         private static bool TryEpochNote(UnspentCommitment inp, out PrivateTxProverV1.SpentNote? note, out string? error)
         {
             note = null;

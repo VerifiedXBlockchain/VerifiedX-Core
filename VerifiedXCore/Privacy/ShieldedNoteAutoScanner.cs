@@ -100,74 +100,26 @@ namespace VerifiedXCore.Privacy
                     continue;
 
                 // --- Mark wallet notes consumed by this tx's nullifiers ---
-                // Prefer SpentCommitmentB64s (v1.1+) for direct matching; fall back to tree-position lookup.
-                if (payload.SpentCommitmentTreePositions != null && payload.SpentCommitmentTreePositions.Count > 0)
+                // By each note's own nullifier, which the transaction's proof exposes: the spent commitments and tree
+                // positions a payload lists are not proven, and any private transaction could list other people's notes
+                // (fifth review, round 21). Covers the vBTC fee leg's VFX note too (FeeInputNullifierB64).
+                if ((payload.NullsB64 != null && payload.NullsB64.Count > 0) || !string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64))
                 {
-                    HashSet<string> spentCommitmentStrings;
-                    if (payload.SpentCommitmentB64s != null && payload.SpentCommitmentB64s.Count > 0)
+                    foreach (var (w, keys) in walletKeys)
                     {
-                        // New TX format: commitment strings stored directly in payload
-                        spentCommitmentStrings = new HashSet<string>(payload.SpentCommitmentB64s, StringComparer.Ordinal);
-                    }
-                    else
-                    {
-                        // Legacy TX: look up by tree position (may fail for corrupted positions)
-                        spentCommitmentStrings = LookupCommitmentStringsByTreePositions(
-                            payload.SpentCommitmentTreePositions, payload.Asset);
-                    }
-
-                    if (spentCommitmentStrings.Count > 0)
-                    {
-                        foreach (var (w, _) in walletKeys)
+                        if (w.UnspentCommitments == null || w.UnspentCommitments.Count == 0)
+                            continue;
+                        foreach (var uc in w.UnspentCommitments)
                         {
-                            if (w.UnspentCommitments == null || w.UnspentCommitments.Count == 0)
+                            if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
                                 continue;
-
-                            foreach (var uc in w.UnspentCommitments)
-                            {
-                                if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
-                                    continue;
-
-                                if (spentCommitmentStrings.Contains(uc.Commitment))
-                                {
-                                    uc.IsSpent = true;
-                                    var assetKey = uc.AssetType ?? "";
-                                    if (w.ShieldedBalances.ContainsKey(assetKey))
-                                        w.ShieldedBalances[assetKey] -= uc.Amount;
-                                    modifiedWallets.Add(w.ShieldedAddress);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Also check the fee input spent tree position (vBTC fee leg)
-                if (payload.FeeInputSpentTreePosition.HasValue)
-                {
-                    var feeSpentStrings = LookupCommitmentStringsByTreePositions(
-                        new List<long> { payload.FeeInputSpentTreePosition.Value }, "VFX");
-
-                    if (feeSpentStrings.Count > 0)
-                    {
-                        foreach (var (w, _) in walletKeys)
-                        {
-                            if (w.UnspentCommitments == null || w.UnspentCommitments.Count == 0)
+                            if (!PrivacyApiHelper.SpendsWalletNote(payload, uc, keys, block.Height))
                                 continue;
-
-                            foreach (var uc in w.UnspentCommitments)
-                            {
-                                if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
-                                    continue;
-
-                                if (feeSpentStrings.Contains(uc.Commitment))
-                                {
-                                    uc.IsSpent = true;
-                                    var assetKey = uc.AssetType ?? "";
-                                    if (w.ShieldedBalances.ContainsKey(assetKey))
-                                        w.ShieldedBalances[assetKey] -= uc.Amount;
-                                    modifiedWallets.Add(w.ShieldedAddress);
-                                }
-                            }
+                            uc.IsSpent = true;
+                            var assetKey = uc.AssetType ?? "";
+                            if (w.ShieldedBalances.ContainsKey(assetKey))
+                                w.ShieldedBalances[assetKey] -= uc.Amount;
+                            modifiedWallets.Add(w.ShieldedAddress);
                         }
                     }
                 }

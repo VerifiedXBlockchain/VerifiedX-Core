@@ -244,6 +244,31 @@ namespace VerifiedXCore.Tests
             Assert.True(Consensus(again!, Height + 3).ok, Consensus(again!, Height + 3).message);
         }
 
+        /// <summary>
+        /// A wallet marked its notes spent from the commitments and tree positions a mined payload lists, which no proof
+        /// covers: any private transaction listing other people's notes had every node's wallet mark them spent (fifth
+        /// review, round 21). A note is spent by a transaction exposing its own nullifier.
+        /// </summary>
+        [Fact]
+        public async Task AWalletNoteIsSpent_OnlyByATransactionExposingItsNullifier()
+        {
+            if (!ParamsLoaded()) return;
+            var shield = ShieldFor(_alice, 5M);
+            await Apply(shield, Height + 1);
+            var note = NoteOf(shield, 0, _alice);
+
+            Assert.True(VfxPrivateTransactionBuilder.TryBuildUnshield(new[] { note }, 3M, NewAddress(), _alice, 1_700_000_001, out var unshield, out var err, Db, Height + 2), err);
+            PrivateTxPayloadCodec.TryDecode(unshield!.Data, out var real, out _);
+            Assert.True(PrivacyApiHelper.SpendsWalletNote(real!, note, _alice, Height + 2));
+
+            var listing = new PrivateTxPayload
+            {
+                Asset = "VFX", Kind = "unshield", NullsB64 = { Convert.ToBase64String(PrivacyField.RandomCanonical()) },
+                SpentCommitmentB64s = new List<string> { note.Commitment }, SpentCommitmentTreePositions = { note.TreePosition },
+            };
+            Assert.False(PrivacyApiHelper.SpendsWalletNote(listing, note, _alice, Height + 2));
+        }
+
         [Fact]
         public async Task UnshieldTwoNotes_ProvesAndVerifies()
         {
