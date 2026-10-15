@@ -62,27 +62,76 @@ namespace VerifiedXCore.Privacy
         /// <summary>
         /// Replays leaves from <see cref="CommitmentRecord"/> ordered by <see cref="CommitmentRecord.TreePosition"/>.
         /// Uses <see cref="CommitmentRecord.NoteHash"/> when available (v2); falls back to legacy G1 Poseidon digest.
+        /// <para>
+        /// Every private transaction applied loaded its pool's every leaf (about 0.12 s a transaction at 10,000 leaves,
+        /// on every node; fifth review, round 32). The leaves read last are kept per database and pool and reused when
+        /// the row at their last position is still the same row (rows leave a pool only from its end, by rollback, or
+        /// all at once, by a reset or rebuild, and a row put back is a new row); only the rows after it are read.
+        /// Anything else is read in full, as before.
+        /// </para>
         /// </summary>
         public void LoadLeavesFromCommitments()
         {
             var col = Commitments();
-            var rows = col.Query().Where(x => x.AssetType == _assetType).OrderBy(x => x.TreePosition).ToList();
-            _leafDigests.Clear();
-            foreach (var r in rows)
+            var cache = _leafCaches.GetOrCreateValue(_db).GetOrAdd(_assetType, _ => new LeafCache());
+            lock (cache)
             {
-                if (!string.IsNullOrEmpty(r.NoteHash))
+                if (!TryExtend(col, cache))
                 {
-                    var nh = Convert.FromBase64String(r.NoteHash);
-                    _leafDigests.Add(CommitmentMerkleTree.LeafDigest(nh));
+                    _fullLeafLoadsOnThisThread++;
+                    var rows = col.Query().Where(x => x.AssetType == _assetType).OrderBy(x => x.TreePosition).ToList();
+                    cache.Digests = rows.Select(DigestOf).ToList();
+                    cache.LastId = rows.Count > 0 ? rows[^1].Id : null;
+                    cache.LastPosition = rows.Count > 0 ? rows[^1].TreePosition : -1;
+                    cache.Valid = rows.Select((r, i) => r.TreePosition == i).All(x => x);
                 }
-                else
-                {
-                    // Legacy: Poseidon of G1 bytes
-                    var g1 = Convert.FromBase64String(r.Commitment);
-                    _leafDigests.Add(CommitmentMerkleTree.LeafDigestLegacy(g1));
-                }
+                _leafDigests.Clear();
+                _leafDigests.AddRange(cache.Digests);
             }
         }
+
+        private static byte[] DigestOf(CommitmentRecord r) =>
+            !string.IsNullOrEmpty(r.NoteHash)
+                ? CommitmentMerkleTree.LeafDigest(Convert.FromBase64String(r.NoteHash))
+                : CommitmentMerkleTree.LeafDigestLegacy(Convert.FromBase64String(r.Commitment)); // legacy: Poseidon of G1 bytes
+
+        /// <summary>The cached leaves brought up to date by reading only the rows after them; false when they cannot be.</summary>
+        private bool TryExtend(ILiteCollection<CommitmentRecord> col, LeafCache cache)
+        {
+            if (!cache.Valid || cache.LastId == null || cache.Digests.Count == 0 || cache.LastPosition != cache.Digests.Count - 1)
+                return false;
+            var last = col.Find(x => x.TreePosition == cache.LastPosition).Where(x => x.AssetType == _assetType).ToList();
+            if (last.Count != 1 || !last[0].Id.Equals(cache.LastId))
+                return false;
+            var newer = col.Find(x => x.TreePosition > cache.LastPosition).Where(x => x.AssetType == _assetType)
+                .OrderBy(x => x.TreePosition).ToList();
+            for (var i = 0; i < newer.Count; i++)
+                if (newer[i].TreePosition != cache.LastPosition + 1 + i)
+                    return false;
+            foreach (var r in newer)
+                cache.Digests.Add(DigestOf(r));
+            if (newer.Count > 0)
+            {
+                cache.LastId = newer[^1].Id;
+                cache.LastPosition = newer[^1].TreePosition;
+            }
+            return true;
+        }
+
+        private sealed class LeafCache
+        {
+            public List<byte[]> Digests = new();
+            public ObjectId? LastId;
+            public long LastPosition = -1;
+            public bool Valid;
+        }
+
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<LiteDatabase, System.Collections.Concurrent.ConcurrentDictionary<string, LeafCache>> _leafCaches = new();
+
+        [ThreadStatic] private static long _fullLeafLoadsOnThisThread;
+
+        /// <summary>Leaf loads this thread read in full (tests).</summary>
+        internal static long FullLeafLoadsOnThisThread => _fullLeafLoadsOnThisThread;
 
         /// <summary>
         /// Appends a commitment with its Poseidon note hash as the Merkle leaf.

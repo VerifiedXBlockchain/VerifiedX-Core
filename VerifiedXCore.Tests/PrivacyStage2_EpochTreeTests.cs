@@ -167,6 +167,60 @@ namespace VerifiedXCore.Tests
             Assert.InRange(ParentHashCache.ComputedOnThisThread - before, 1, 2 * 10);
         }
 
+        /// <summary>
+        /// A store reads only the rows after the leaves it read last, while the row at their end is the same row: every
+        /// private transaction applied read its pool's every leaf (round 32). A tail rolled back, or replaced by a replay
+        /// ending on the same note at the same position, is read in full; the leaves always equal the rows.
+        /// </summary>
+        [Fact]
+        public void APoolsLeaves_AreReadAfterTheLastRead_AndInFullAfterARollback()
+        {
+            var commitments = Db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS);
+            List<string> Rows() => commitments.Query().Where(x => x.AssetType == "VFX").OrderBy(x => x.TreePosition).ToList().Select(x => x.NoteHash).ToList();
+            List<string> Loaded()
+            {
+                var s = new ShieldedMerkleStore("VFX", Db, fixedDepth: true);
+                s.LoadLeavesFromCommitments();
+                return s.LeafDigests.Select(Convert.ToBase64String).ToList();
+            }
+            var writer = new ShieldedMerkleStore("VFX", Db, fixedDepth: true);
+            writer.LoadLeavesFromCommitments();
+            for (var i = 0; i < 40; i++)
+            {
+                var n = Note((ulong)(i + 1));
+                writer.AppendCommitment(n.G1, n.NoteHash, Height + 1 + i / 10, 1);
+            }
+            Assert.Equal(Rows(), Loaded());
+
+            // More leaves: only they are read.
+            var more = new ShieldedMerkleStore("VFX", Db, fixedDepth: true);
+            more.LoadLeavesFromCommitments();
+            var added = Note(500);
+            more.AppendCommitment(added.G1, added.NoteHash, Height + 5, 1);
+            var full = ShieldedMerkleStore.FullLeafLoadsOnThisThread;
+            Assert.Equal(Rows(), Loaded());
+            Assert.Equal(full, ShieldedMerkleStore.FullLeafLoadsOnThisThread);
+
+            // A rollback takes the last block's rows: read in full.
+            commitments.DeleteMany(x => x.AssetType == "VFX" && x.BlockHeight == Height + 5);
+            Assert.Equal(Rows(), Loaded());
+            Assert.Equal(full + 1, ShieldedMerkleStore.FullLeafLoadsOnThisThread);
+
+            // A replay ending on the same note at the same position, other notes before it, written under the cached
+            // leaves: read in full.
+            Assert.Equal(Rows(), Loaded());
+            var tail = commitments.Find(x => x.AssetType == "VFX" && x.BlockHeight == Height + 4).OrderBy(x => x.TreePosition).ToList();
+            commitments.DeleteMany(x => x.AssetType == "VFX" && x.BlockHeight == Height + 4);
+            foreach (var r in tail)
+            {
+                var replaced = r.TreePosition == tail[^1].TreePosition ? r.NoteHash : Convert.ToBase64String(Note((ulong)(700 + r.TreePosition)).NoteHash);
+                commitments.Insert(new CommitmentRecord { Commitment = r.Commitment, NoteHash = replaced, AssetType = "VFX", TreePosition = r.TreePosition, BlockHeight = Height + 4, Timestamp = 2 });
+            }
+            full = ShieldedMerkleStore.FullLeafLoadsOnThisThread;
+            Assert.Equal(Rows(), Loaded());
+            Assert.Equal(full + 1, ShieldedMerkleStore.FullLeafLoadsOnThisThread);
+        }
+
         [Fact]
         public void AtTheHeight_OnlyTheVfxPoolIsReset_VbtcPoolRowsStay()
         {
