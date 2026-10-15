@@ -31,6 +31,8 @@ namespace VerifiedXCore.Bitcoin.FROST
     {
         public const string BtcExitPrefix = "btcexit_";
 
+        internal const string NonCanonicalReference = "WithdrawalRequestHash must be written exactly as the chain records the payment";
+
         public static (bool Ok, string Reason) Authorize(FrostSigningStartRequest request)
         {
             try
@@ -128,13 +130,18 @@ namespace VerifiedXCore.Bitcoin.FROST
                 bool pinnedRelease = false;
                 string? pinnedDestinationScriptHex = null; // a watched vault: the script state holds for the pinned payment
 
-                var wrh = request.WithdrawalRequestHash.Trim();
+                // The tracker, the durable evidence, the session and the pins all key on this string as sent, so it
+                // must be the one spelling the chain names the payment by: one payment, one key.
+                var wrh = request.WithdrawalRequestHash;
+                if (wrh != wrh.Trim()) return (false, NonCanonicalReference);
                 if (wrh.StartsWith(BtcExitPrefix, StringComparison.OrdinalIgnoreCase))
                 {
                     isBridgeExit = true;
                     var (exit, capSats, exitReason) = ResolveBtcExitForContract(wrh, vaultUid);
                     if (exit == null) return (false, exitReason);
                     if (exit.IsComplete) return (false, "Bridge exit already completed");
+                    if (!string.Equals(wrh, Attestation.BtcWithdrawals.ExitSigningReference(exit.BaseBurnTxHash, vaultUid), StringComparison.Ordinal))
+                        return (false, NonCanonicalReference);
                     destination = exit.BtcDestination;
                     // Cap at THIS contract's share of the exit, never the whole exit amount.
                     maxDestinationSats = capSats;
@@ -158,6 +165,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     var (pinned, pinReason) = Attestation.BtcWithdrawals.MaySignSweep(wrh, vaultUid, txId);
                     if (!pinned) return (false, pinReason);
                     var sweep = Attestation.BtcAttestStore.Withdrawal(wrh)!;
+                    if (!string.Equals(wrh, sweep.Ref, StringComparison.Ordinal)) return (false, NonCanonicalReference);
                     pinnedDestinationScriptHex = sweep.DestinationScriptHex;
                     destination = Attestation.BtcAttestStore.ScriptRow(sweep.DestinationScriptHex)?.DepositAddress ?? "";
                     maxDestinationSats = sweep.AmountSats;
@@ -176,7 +184,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                         wrh, VerifiedXCore.Utilities.TimeUtil.GetTime(), vaultUid);
                     var (signable, signableReason) = IsWithdrawalSignable(wr, vaultUid, pendingCancellation);
                     if (!signable) return (false, signableReason);
-                    destination = wr!.BTCDestination;
+                    if (!string.Equals(wrh, wr!.TransactionHash, StringComparison.Ordinal)) return (false, NonCanonicalReference);
+                    destination = wr.BTCDestination;
                     maxDestinationSats = (long)(wr.Amount * 100_000_000M);
                     leaderIsOwner = string.Equals(wr.RequestorAddress, request.LeaderAddress, StringComparison.Ordinal);
 
