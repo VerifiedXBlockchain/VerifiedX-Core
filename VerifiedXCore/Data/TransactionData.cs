@@ -1084,6 +1084,7 @@ namespace VerifiedXCore.Data
                                                 {
                                                     approvedMemPoolList.Remove(existingTx);
                                                     await collection.DeleteManySafeAsync(x => x.Hash == existingTx.Hash);
+                                                    ReleasePrivateMempoolNullifiersForTx(existingTx.Hash); // its nullifier claims go with it (round 20)
 
                                                     // Mark old TX as replaced locally
                                                     var localTxDb = TransactionData.GetAll();
@@ -1108,6 +1109,7 @@ namespace VerifiedXCore.Data
                                                 {
                                                     // Keep existing (higher fee), reject this one
                                                     await collection.DeleteManySafeAsync(x => x.Hash == tx.Hash);
+                                                    ReleasePrivateMempoolNullifiersForTx(tx.Hash); // its nullifier claims go with it (round 20)
                                                 }
                                             }
                                             else if (tx.Nonce == expectedNonce)
@@ -1149,6 +1151,7 @@ namespace VerifiedXCore.Data
                                             try
                                             {
                                                 await collection.DeleteManySafeAsync(x => x.Hash == txToDelete.Hash);
+                                                ReleasePrivateMempoolNullifiersForTx(txToDelete.Hash); // its nullifier claims go with it (round 20)
                                             }
                                             catch (Exception ex)
                                             {
@@ -1165,6 +1168,7 @@ namespace VerifiedXCore.Data
                                         try
                                         {
                                             await collection.DeleteManySafeAsync(x => x.Hash == txToDelete.Hash);
+                                            ReleasePrivateMempoolNullifiersForTx(txToDelete.Hash); // its nullifier claims go with it (round 20)
                                         }
                                         catch (Exception ex)
                                         {
@@ -1181,6 +1185,7 @@ namespace VerifiedXCore.Data
                                     try
                                     {
                                         await collection.DeleteManySafeAsync(x => x.Hash == txToDelete.Hash);
+                                        ReleasePrivateMempoolNullifiersForTx(txToDelete.Hash); // its nullifier claims go with it (round 20)
                                     }
                                     catch (Exception ex)
                                     {
@@ -1198,6 +1203,7 @@ namespace VerifiedXCore.Data
                             try
                             {
                                 await collection.DeleteManySafeAsync(x => x.Hash == txToDelete.Hash);
+                                ReleasePrivateMempoolNullifiersForTx(txToDelete.Hash); // its nullifier claims go with it (round 20)
                             }
                             catch (Exception ex2)
                             {

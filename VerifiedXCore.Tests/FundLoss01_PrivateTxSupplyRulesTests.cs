@@ -200,6 +200,26 @@ namespace VerifiedXCore.Tests
             Assert.Contains("twice", why);
         }
 
+        /// <summary>
+        /// The block builder deleted a private transaction that no longer passed (its root went stale with any private
+        /// transaction mined) without releasing its nullifier claims: the owner's rebuilt transaction was refused on that
+        /// validator until it restarted (fifth review, round 20).
+        /// </summary>
+        [Fact]
+        public async Task ABuilderDroppingAPrivateTransaction_ReleasesItsNullifierClaims()
+        {
+            TipBelowGate();
+            var dropped = Unshield(NewAddress(), 1M);
+            dropped.ToAddress = NewAddress();                                        // will not pass: its recipient is not its payload's
+            var nullifier = PrivateTxPayloadCodec.TryDecode(dropped.Data, out var p, out _) ? p!.NullsB64[0] : throw new InvalidOperationException();
+            Assert.True(MempoolNullifierTracker.TryRegisterForMempool(dropped.Hash, "VFX", new List<string> { nullifier }, out _));
+            dropped.TransactionRating = TransactionRating.A;                          // rated, as admission does
+            TransactionData.GetPool().Insert(dropped);
+            await TransactionData.ProcessTxPool();
+            Assert.Null(TransactionData.GetPool().FindOne(x => x.Hash == dropped.Hash));
+            Assert.True(MempoolNullifierTracker.TryRegisterForMempool("rebuilt-" + Guid.NewGuid().ToString("N"), "VFX", new List<string> { nullifier }, out var why), why);
+        }
+
         [Fact]
         public async Task ForgedUnshield_NoNoteNoRoot_AnyAmount_IsAcceptedBelowGate_AndRefusedAtGate()
         {
