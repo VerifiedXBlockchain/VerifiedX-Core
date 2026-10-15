@@ -218,6 +218,10 @@ namespace VerifiedXCore.Data
 
             var rsrvTransactions = DB_Reserve.GetCollection<ReserveTransactions>(RSRV_RESERVE_TRANSACTIONS);
             rsrvTransactions.EnsureIndexSafe(x => x.Hash);
+            // Settlement reads the pending rows every block, Recover() and the pending vBTC total a sender's: both scanned
+            // every row ever written (fifth review, round 28).
+            rsrvTransactions.EnsureIndexSafe(x => x.ReserveTransactionStatus);
+            rsrvTransactions.EnsureIndexSafe(x => x.FromAddress);
 
             var transactions = DbContext.DB_Wallet.GetCollection<Transaction>(DbContext.RSRV_TRANSACTIONS);
             transactions.EnsureIndexSafe(x => x.Hash, false);
