@@ -132,11 +132,12 @@ namespace VerifiedXCore.Tests
 
         /// <summary>
         /// An unshield's outer recipient and amount are not in its hash: below the gate, whoever served blocks to a
-        /// syncing node could change them and have it credit someone else (fifth review, round 18). They must equal the
-        /// payload's at every height (history holds no unshield that differs).
+        /// syncing node could change them and have it credit someone else (fifth review, round 18). For a downloaded
+        /// block of scanned history they must equal the payload's; a live block below the gate is judged as 8.x
+        /// producers judge it, or the upgrade splits (round 19).
         /// </summary>
         [Fact]
-        public async Task AnUnshieldsOuterFields_AreItsPayloads_AtEveryHeight()
+        public async Task AnUnshieldsOuterFields_AreItsPayloads_InDownloadedScannedHistory()
         {
             var to = NewAddress();
             TipBelowGate();
@@ -144,12 +145,14 @@ namespace VerifiedXCore.Tests
             var hash = redirected.Hash;
             redirected.ToAddress = NewAddress();                      // the hash does not change
             Assert.Equal(hash, redirected.BuildPrivate());
-            var (ok, msg) = await TransactionValidatorService.VerifyTX(redirected);
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(redirected, blockDownloads: true);
             Assert.False(ok);
             Assert.Contains("transparent_output", msg);
             var resized = Unshield(to, 1M, withNullifier: false, withRoot: false);
             resized.Amount = 2M;
-            Assert.Contains("transparent_amount", (await TransactionValidatorService.VerifyTX(resized)).Item2);
+            Assert.Contains("transparent_amount", (await TransactionValidatorService.VerifyTX(resized, blockDownloads: true)).Item2);
+            // Live, below the gate: as before (the binding starts at the gate there).
+            Assert.DoesNotContain("transparent_output", (await TransactionValidatorService.VerifyTX(redirected)).Item2 ?? "");
         }
 
         [Fact]

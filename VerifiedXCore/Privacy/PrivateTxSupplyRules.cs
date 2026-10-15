@@ -54,11 +54,18 @@ namespace VerifiedXCore.Privacy
         }
 
         /// <summary>
-        /// An unshield's outer recipient and amount, which its hash does not cover, are its payload's. Applied at every
-        /// height: below the fund-loss height whoever served blocks to a syncing node could change them and have it
-        /// credit someone else (fifth review, round 18). History holds no unshield that differs (scanned: mainnet to
-        /// block 7,410,629, 7 unshields; testnet to 1,025,066, 1; FundLossHistoryScanHarness.UnshieldBindingScan, to be
-        /// run again on current databases before release).
+        /// The highest block of each network's history scanned for unshields whose outer fields differ from their payload
+        /// (FundLossHistoryScanHarness.UnshieldBindingScan: mainnet 7 unshields, testnet 1, none differs). Raise it with a
+        /// new scan at the release cut.
+        /// </summary>
+        public static long UnshieldBindingScannedThrough => Globals.IsTestNet ? 1_025_066L : 7_410_629L;
+
+        /// <summary>
+        /// An unshield's outer recipient and amount, which its hash does not cover, are its payload's. From the fund-loss
+        /// height for every block (StructureError). Below it, only for a block being downloaded at or below the scanned
+        /// height: whoever served blocks to a syncing node could change them and have it credit someone else (fifth
+        /// review, round 18), and history up to there holds no unshield that differs. Not for live blocks below the gate:
+        /// 8.x producers accept a relayed copy with another recipient, and refusing it split the upgrade (round 19).
         /// </summary>
         public static string? OuterFieldsError(Transaction tx, PrivateTxPayload payload)
         {
@@ -102,8 +109,6 @@ namespace VerifiedXCore.Privacy
         /// <summary>All rules of this stage for one transaction at <paramref name="height"/>; (true, "") when inert or passing.</summary>
         public static (bool ok, string message) Check(Transaction tx, PrivateTxPayload payload, long height)
         {
-            if (tx != null && OuterFieldsError(tx, payload) is { } outer)
-                return (false, outer);
             if (!AppliesTo(tx, height))
                 return (true, "");
             var structure = StructureError(tx, payload);
