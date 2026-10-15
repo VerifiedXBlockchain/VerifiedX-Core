@@ -186,6 +186,10 @@ namespace VerifiedXCore.Tests
             }
             var exact = new Transaction { FromAddress = _holder.Address, TransactionType = TransactionType.TX, Data = "{\"ContractUID\":\"" + V2 + "\"}" };
             Assert.Null(LedgerIntegrityRules.ContractUids(exact, Globals.PathAuditRulesHeight));
+            // Round 27: the format's "$" let a created UID end in a line break; refused from the path-audit rules.
+            var created = new Transaction { FromAddress = _owner.Address, TransactionType = TransactionType.NFT_MINT,
+                Data = JsonConvert.SerializeObject(new[] { new { Function = "Mint()", ContractUID = "abc:123\n", Data = "x" } }) };
+            Assert.NotNull(LedgerIntegrityRules.ContractUids(created, Globals.PathAuditRulesHeight));
         }
 
         [Theory]

@@ -222,7 +222,8 @@ namespace VerifiedXCore.Tests
                     {
                         if (tx == null) continue;
                         txs++;
-                        var why = LedgerIntegrityRules.IdentifiersArePlainAscii(tx, long.MaxValue) ?? LedgerIntegrityRules.VbtcDataKeysAreDistinct(tx, long.MaxValue);
+                        var why = LedgerIntegrityRules.IdentifiersArePlainAscii(tx, long.MaxValue) ?? LedgerIntegrityRules.VbtcDataKeysAreDistinct(tx, long.MaxValue)
+                            ?? (LedgerIntegrityRules.ContractUids(tx, long.MaxValue) is { } uidWhy && uidWhy.Contains("plain ASCII") || LedgerIntegrityRules.CreatedContractUid(tx)?.EndsWith('\n') == true ? "contract UID: " + (LedgerIntegrityRules.ContractUids(tx, long.MaxValue) ?? "created with a final line break") : null);
                         if (why == null) continue;
                         refused++;
                         var key = tx.TransactionType.ToString();

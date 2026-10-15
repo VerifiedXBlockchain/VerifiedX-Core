@@ -1026,11 +1026,15 @@ namespace VerifiedXCore.Services
             var created = CreatedContractUid(tx);
             if (created != null && !CreationUidFormat.IsMatch(created))
                 return $"Contract UID '{created}' must be lowercase hex, ':' and digits.";
+            var asciiFromHere = (height ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.PathAuditRulesHeight;
+            // The format's "$" also matches before a final line break: "abc:1\n" was created, and from the rule below
+            // every transaction naming it was refused, freezing what it held (fifth review, round 27).
+            if (created != null && asciiFromHere && created.EndsWith('\n'))
+                return $"Contract UID '{created}' must be lowercase hex, ':' and digits.";
 
             // From the path-audit rules a named UID is printable ASCII: whether the collation finds a stored record for one
             // with other characters (case pairs, characters it ignores) follows each machine's ICU or NLS tables, so the
             // refusal below differed by platform (fifth review, round 26).
-            var asciiFromHere = (height ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.PathAuditRulesHeight;
             foreach (var uid in ReferencedContractUids(tx))
             {
                 if (asciiFromHere && !uid.All(c => c >= 0x20 && c <= 0x7E))
