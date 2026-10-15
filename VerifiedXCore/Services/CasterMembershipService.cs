@@ -342,14 +342,9 @@ namespace VerifiedXCore.Services
             if (isRemoval)
             {
                 var target = candidate!.ChangedAddress;
+                // Only this node's own evidence lifts the refusal. An answer at the member's listed address is not
+                // evidence: nothing proves the member gave it.
                 var refusal = CasterSeatService.RemovalRefusal(candidate.ChangeType, target, head!, TimeUtil.GetTime());
-                if (refusal != null && candidate.ChangeType == "Demotion")
-                {
-                    var ip = head!.Casters.FirstOrDefault(c => c.Address == target)?.PeerIP;
-                    if (!string.IsNullOrEmpty(ip)
-                        && (await CasterDiscoveryService.CheckCandidateVersionDetailed(ip.Replace("::ffff:", ""), target)).Status == CasterDiscoveryService.VersionCheckResult.Outdated)
-                        refusal = null;
-                }
                 if (refusal != null)
                 {
                     CasterLogUtility.Log($"MEMBERSHIP: REFUSED to sign {candidate.ChangeType} of {target} at seq {candidate.RecordSeq} — {refusal}. Proposer={request!.ProposerAddress}", "MEMBERSHIP");

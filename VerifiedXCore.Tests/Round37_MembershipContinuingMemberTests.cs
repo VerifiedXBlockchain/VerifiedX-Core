@@ -122,5 +122,64 @@ namespace VerifiedXCore.Tests
                 Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"));
             Assert.NotNull(CasterMembershipService.HandleSignRequest(new MembershipSignRequest { Candidate = demote, ProposerAddress = "xProposer" }));
         }
+        /// <summary>
+        /// A demotion this node has no evidence for is refused even when the member's listed address answers as an old
+        /// binary would (404 on the version route): nothing proves the member gave that answer. The node's own evidence
+        /// (here, an outdated version it saw itself) still lets it sign.
+        /// </summary>
+        [Fact]
+        public async Task ADemotion_IsNotSignedOnAnAnswerAtTheMembersAddress_OnlyOnThisNodesOwnEvidence()
+        {
+            var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            listener.Start();
+            var stop = new System.Threading.CancellationTokenSource();
+            _ = Task.Run(async () =>
+            {
+                while (!stop.IsCancellationRequested)
+                {
+                    try
+                    {
+                        using var client = await listener.AcceptTcpClientAsync(stop.Token);
+                        var stream = client.GetStream();
+                        await stream.ReadAsync(new byte[4096]);
+                        var reply = System.Text.Encoding.ASCII.GetBytes("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                        await stream.WriteAsync(reply);
+                    }
+                    catch { return; }
+                }
+            });
+            var priorPort = Globals.ValAPIPort;
+            var priorFactory = Globals.HttpClientFactory;
+            Globals.ValAPIPort = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+            Globals.HttpClientFactory = new PlainHttpClientFactory();
+            try
+            {
+                // The head lists C at the address that answers 404.
+                var e = Wallet();
+                var head = Record(_head.RecordSeq + 1, _head.EffectiveFromHeight + 50, _head.RecordHash, "Promotion", e.Address,
+                    Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"), Member(e, "127.0.0.1"));
+                DbContext.DB_Config.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Insert(head.RecordSeq, head);
+                CasterMembershipStore.InvalidateCache();
+
+                var demote = Record(head.RecordSeq + 1, head.EffectiveFromHeight + 100, head.RecordHash, "Demotion", e.Address,
+                    Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"));
+                Assert.Null(await Sign(demote));
+
+                CasterSeatService.NoteOutdated(e.Address);
+                Assert.NotNull(await Sign(demote));
+            }
+            finally
+            {
+                stop.Cancel();
+                listener.Stop();
+                Globals.ValAPIPort = priorPort;
+                Globals.HttpClientFactory = priorFactory;
+            }
+        }
+
+        private sealed class PlainHttpClientFactory : System.Net.Http.IHttpClientFactory
+        {
+            public System.Net.Http.HttpClient CreateClient(string name) => new();
+        }
     }
 }
