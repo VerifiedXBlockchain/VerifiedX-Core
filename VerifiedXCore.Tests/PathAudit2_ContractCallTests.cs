@@ -307,6 +307,8 @@ namespace VerifiedXCore.Tests
             Assert.NotNull(LedgerIntegrityRules.IdentifiersArePlainAscii(Typed(TransactionType.VOTE, "{\"Function\":\"TopicVote()\",\"Vote\":{\"TopicUID\":\"\uA7C0\"}}"), Rule));
             Assert.NotNull(LedgerIntegrityRules.IdentifiersArePlainAscii(Typed(TransactionType.DSTR, "{\"Function\":\"DecShopUpdate()\",\"DecShop\":{\"UniqueId\":\"\uA7C1\"}}"), Rule));
             Assert.NotNull(LedgerIntegrityRules.IdentifiersArePlainAscii(Typed(TransactionType.TX, null!, "\uA7C0name.vfx"), Rule));
+            // Round 28: a field that cannot be read does not leave the others unchecked.
+            Assert.NotNull(LedgerIntegrityRules.IdentifiersArePlainAscii(Typed(TransactionType.FTKN_TX, "{\"Function\":\"TokenTransfer()\",\"TokenVoteTopic\":\"x\",\"ToAddress\":\"x\uA7C0\"}", "Token_Base"), Rule));
             Assert.Null(LedgerIntegrityRules.IdentifiersArePlainAscii(Typed(TransactionType.DSTR, "{\"Function\":\"DecShopUpdate()\",\"DecShop\":{\"UniqueId\":\"abc\",\"Name\":\"Caf\u00e9\"}}"), Rule)); // free text stays free
             // A transaction that is not a contract call is not this rule's business.
             Assert.Null(LedgerIntegrityRules.ContractCallIsReadable(new Transaction { TransactionType = TransactionType.TX, Data = "[{\"Function\":\"Burn()\",\"MD5List\":{}}]" }, Rule));

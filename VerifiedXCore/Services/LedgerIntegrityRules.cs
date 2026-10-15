@@ -222,50 +222,42 @@ namespace VerifiedXCore.Services
             if (!Ascii(tx.ToAddress) || !Ascii(tx.FromAddress))
                 return "A transaction's addresses are plain ASCII.";
             if (string.IsNullOrEmpty(tx.Data)) return null;
-            try
+            JObject j;
+            try { j = JObject.Parse(tx.Data); }
+            catch { return null; } // not an object: the type's own rules judge it
+            // Each field on its own: one that cannot be read (a typed object given as a string) left the rest unchecked
+            // when the whole switch shared one catch (fifth review, round 28).
+            static string? Read(Func<string?> field) { try { return field(); } catch { return null; } }
+            var fields = new List<string?>();
+            switch (tx.TransactionType)
             {
-                var fields = new List<string?>();
-                switch (tx.TransactionType)
-                {
-                    case TransactionType.ADNR:
-                    {
-                        var j = JObject.Parse(tx.Data);
-                        foreach (var key in new[] { "Name", "BTCAddress", "BTCToAddress", "BTCFromAddress" })
-                            fields.Add(j[key]?.ToString());
-                        break;
-                    }
-                    case TransactionType.VOTE_TOPIC:
-                        fields.Add(JObject.Parse(tx.Data)["Topic"]?.ToObject<TopicTrei>()?.TopicUID);
-                        break;
-                    case TransactionType.VOTE:
-                        fields.Add(JObject.Parse(tx.Data)["Vote"]?.ToObject<Vote>()?.TopicUID);
-                        break;
-                    case TransactionType.DSTR:
-                    {
-                        var j = JObject.Parse(tx.Data);
-                        fields.Add(j["UniqueId"]?.ToString());
-                        var shop = j["DecShop"]?.ToObject<DecShop>();
-                        fields.Add(shop?.UniqueId);
-                        fields.Add(shop?.DecShopURL);
-                        break;
-                    }
-                    case TransactionType.FTKN_TX:
-                    {
-                        // Token votes and transfers (round 27): a topic id is checked against votes through the collation,
-                        // and a transfer's own recipient and sender are looked up through it.
-                        var j = JObject.Parse(tx.Data);
-                        fields.Add(j["TopicUID"]?.ToString());
-                        fields.Add(j["TokenVoteTopic"]?.ToObject<TokenVoteTopic>()?.TopicUID);
-                        fields.Add(j["ToAddress"]?.ToString());
-                        fields.Add(j["FromAddress"]?.ToString());
-                        break;
-                    }
-                    default:
-                        return null;
-                }
-                return fields.All(Ascii) ? null : "This transaction names a name, address or id in characters other than plain ASCII.";
+                case TransactionType.ADNR:
+                    foreach (var key in new[] { "Name", "BTCAddress", "BTCToAddress", "BTCFromAddress" })
+                        fields.Add(Read(() => j[key]?.ToString()));
+                    break;
+                case TransactionType.VOTE_TOPIC:
+                    fields.Add(Read(() => j["Topic"]?.ToObject<TopicTrei>()?.TopicUID));
+                    break;
+                case TransactionType.VOTE:
+                    fields.Add(Read(() => j["Vote"]?.ToObject<Vote>()?.TopicUID));
+                    break;
+                case TransactionType.DSTR:
+                    fields.Add(Read(() => j["UniqueId"]?.ToString()));
+                    fields.Add(Read(() => j["DecShop"]?.ToObject<DecShop>()?.UniqueId));
+                    fields.Add(Read(() => j["DecShop"]?.ToObject<DecShop>()?.DecShopURL));
+                    break;
+                case TransactionType.FTKN_TX:
+                    // Token votes and transfers (round 27): a topic id is checked against votes through the collation,
+                    // and a transfer's own recipient and sender are looked up through it.
+                    fields.Add(Read(() => j["TopicUID"]?.ToString()));
+                    fields.Add(Read(() => j["TokenVoteTopic"]?.ToObject<TokenVoteTopic>()?.TopicUID));
+                    fields.Add(Read(() => j["ToAddress"]?.ToString()));
+                    fields.Add(Read(() => j["FromAddress"]?.ToString()));
+                    break;
+                default:
+                    return null;
             }
-            catch { return null; } // unreadable: the type's own rules judge it
+            return fields.All(Ascii) ? null : "This transaction names a name, address or id in characters other than plain ASCII.";
         }
 
         public static string? ContractCallIsReadable(Transaction tx, long height)
