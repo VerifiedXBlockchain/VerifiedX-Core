@@ -71,8 +71,12 @@ namespace VerifiedXCore.Tests
             Assert.Equal(n1, n2);
         }
 
+        /// <summary>
+        /// An appended leaf writes the commitment and, with the pool state, the root; not the tree's node rows, which
+        /// nothing reads and which made every leaf cost the whole tree (round 32).
+        /// </summary>
         [Fact]
-        public void ShieldedMerkleStore_PersistsNodesAndPoolState()
+        public void ShieldedMerkleStore_PersistsPoolState_NotNodeRows()
         {
             var store = new ShieldedMerkleStore("VFX", _db);
             var r = new byte[32];
@@ -85,7 +89,8 @@ namespace VerifiedXCore.Tests
             store.UpdatePoolStateRoot(1, 100m, 1);
 
             var nodes = _db.GetCollection<MerkleTreeNodeRecord>(PrivacyDbContext.PRIV_MERKLE_NODES);
-            Assert.True(nodes.Count() >= 1);
+            Assert.Equal(0, nodes.Count());
+            Assert.Equal(1, _db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS).Count());
             var pool = _db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE);
             var st = pool.FindOne(x => x.AssetType == "VFX");
             Assert.NotNull(st);

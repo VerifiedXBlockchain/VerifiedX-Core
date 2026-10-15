@@ -108,7 +108,6 @@ namespace VerifiedXCore.Privacy
             };
             Commitments().InsertSafe(rec);
             _leafDigests.Add(CommitmentMerkleTree.LeafDigest(noteHash32));
-            RebuildAndPersistMerkleNodes();
             return pos;
         }
 
@@ -133,7 +132,6 @@ namespace VerifiedXCore.Privacy
             };
             Commitments().InsertSafe(rec);
             _leafDigests.Add(CommitmentMerkleTree.LeafDigestLegacy(g1Compressed));
-            RebuildAndPersistMerkleNodes();
             return pos;
         }
 
@@ -184,40 +182,14 @@ namespace VerifiedXCore.Privacy
             return level[0];
         }
 
-        public void RebuildAndPersistMerkleNodes()
-        {
-            var merkle = MerkleNodes();
-            merkle.DeleteManySafe(x => x.AssetType == _assetType);
-            if (_leafDigests.Count == 0)
-                return;
-            var level = new List<byte[]>(_leafDigests);
-            var lvl = 0;
-            while (true)
-            {
-                for (var i = 0; i < level.Count; i++)
-                {
-                    var node = new MerkleTreeNodeRecord
-                    {
-                        AssetType = _assetType,
-                        Level = lvl,
-                        Index = i,
-                        NodeHash = Convert.ToBase64String(level[i])
-                    };
-                    merkle.InsertSafe(node);
-                }
-                if (_fixedDepth ? lvl >= FixedDepthMerkleTree.Depth : level.Count <= 1)
-                    break;
-                var next = new List<byte[]>();
-                for (var i = 0; i < level.Count; i += 2)
-                {
-                    var left = level[i];
-                    var right = i + 1 < level.Count ? level[i + 1] : (_fixedDepth ? PoseidonV1.MerkleZero(lvl) : left);
-                    next.Add(_fixedDepth ? PoseidonV1.Hash2(left, right) : CommitmentMerkleTree.Combine(left, right));
-                }
-                level = next;
-                lvl++;
-            }
-        }
+        /// <summary>
+        /// Clears this asset's stored tree-node rows. Nothing reads them (roots and paths come from the leaves), and they
+        /// were written again whole on every appended leaf, one row at a time: each output cost the whole tree, on every
+        /// node applying the block (about 0.15 s at 250 leaves and growing with the pool; fifth review, round 32). They
+        /// are no longer written; rows an earlier build left are removed here.
+        /// </summary>
+        public void RebuildAndPersistMerkleNodes() =>
+            MerkleNodes().DeleteManySafe(x => x.AssetType == _assetType);
 
         public void UpdatePoolStateRoot(long blockHeight, decimal totalShieldedSupply, long totalCommitments)
         {
