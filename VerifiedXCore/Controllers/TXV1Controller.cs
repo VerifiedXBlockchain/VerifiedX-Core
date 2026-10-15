@@ -1011,10 +1011,19 @@ namespace VerifiedXCore.Controllers
                     var result = !twSkipVerify ? await TransactionValidatorService.VerifyTX(transaction) : await TransactionValidatorService.VerifyTX(transaction, false, false, true);
                     if (result.Item1 == true)
                     {
-                        if (transaction.TransactionRating == null)
+                        // The node rates the transaction itself; a rating supplied by the caller is ignored.
+                        transaction.TransactionRating = await TransactionRatingService.GetTransactionRating(transaction);
+                        if (transaction.TransactionRating == TransactionRating.F)
                         {
-                            var rating = await TransactionRatingService.GetTransactionRating(transaction);
-                            transaction.TransactionRating = rating;
+                            VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // refused: claims nothing
+                            return JsonConvert.SerializeObject(new { Result = "Fail", Message = "Transaction was rated F and cannot be added to the mempool." });
+                        }
+
+                        var admission = MempoolEvictionUtility.CheckAdmissionBounds(transaction);
+                        if (!admission.admit)
+                        {
+                            VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // refused: claims nothing
+                            return JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Transaction was not admitted to the mempool: {admission.reason}" });
                         }
 
                         // What every peer checks on receipt: with this sender's transactions already waiting it must not overspend.

@@ -284,7 +284,8 @@ namespace VerifiedXCore.P2P
                                                 var rating = await TransactionRatingService.GetTransactionRating(transaction);
                                                 transaction.TransactionRating = rating;
 
-                                                if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
+                                                if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
+                                    && MempoolEvictionUtility.CheckAdmissionBounds(transaction).admit)
                                                 {
                                                     mempool.InsertSafe(transaction);
                                                     var txOutput = "";
@@ -357,7 +358,8 @@ namespace VerifiedXCore.P2P
                                             var rating = await TransactionRatingService.GetTransactionRating(transaction);
                                             transaction.TransactionRating = rating;
 
-                                            if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
+                                            if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
+                                    && MempoolEvictionUtility.CheckAdmissionBounds(transaction).admit)
                                             {
                                                 mempool.InsertSafe(transaction);
                                                 var txOutput = "";

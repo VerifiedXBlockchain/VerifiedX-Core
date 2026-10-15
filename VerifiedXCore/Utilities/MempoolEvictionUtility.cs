@@ -33,6 +33,32 @@ namespace VerifiedXCore.Utilities
         }
 
         /// <summary>
+        /// The admission bounds every path that inserts a received or submitted transaction into the mempool applies
+        /// first: the fee floor, then the global entry and size caps, evicting lower-priority entries to make room.
+        /// </summary>
+        public static (bool admit, string reason) CheckAdmissionBounds(Transaction tx)
+        {
+            var feeValidation = ValidateMinimumFee(tx);
+            if (!feeValidation.isValid)
+                return (false, feeValidation.reason);
+
+            var stats = GetMempoolStats();
+            var canAdd = CanAddToMempool(tx, stats.count, stats.sizeBytes);
+            if (!canAdd.canAdd)
+            {
+                EvictLowestPriority(
+                    targetCount: (int)(Globals.MaxMempoolEntries * 0.95),
+                    targetSize: (long)(Globals.MaxMempoolSizeBytes * 0.95)
+                );
+
+                stats = GetMempoolStats();
+                canAdd = CanAddToMempool(tx, stats.count, stats.sizeBytes);
+            }
+
+            return (canAdd.canAdd, canAdd.reason);
+        }
+
+        /// <summary>
         /// Calculate transaction size in bytes
         /// </summary>
         public static long CalculateTransactionSize(Transaction tx)
