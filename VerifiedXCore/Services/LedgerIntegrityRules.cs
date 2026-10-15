@@ -249,6 +249,17 @@ namespace VerifiedXCore.Services
                         fields.Add(shop?.DecShopURL);
                         break;
                     }
+                    case TransactionType.FTKN_TX:
+                    {
+                        // Token votes and transfers (round 27): a topic id is checked against votes through the collation,
+                        // and a transfer's own recipient and sender are looked up through it.
+                        var j = JObject.Parse(tx.Data);
+                        fields.Add(j["TopicUID"]?.ToString());
+                        fields.Add(j["TokenVoteTopic"]?.ToObject<TokenVoteTopic>()?.TopicUID);
+                        fields.Add(j["ToAddress"]?.ToString());
+                        fields.Add(j["FromAddress"]?.ToString());
+                        break;
+                    }
                     default:
                         return null;
                 }
