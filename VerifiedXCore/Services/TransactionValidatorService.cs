@@ -306,7 +306,9 @@ namespace VerifiedXCore.Services
                 // addresses resolve names too.
                 ?? LedgerIntegrityRules.IdentifiersArePlainAscii(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                 // VFX goes to an address somebody can sign for (round 27).
-                ?? LedgerIntegrityRules.VfxRecipientCanHoldIt(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+                ?? LedgerIntegrityRules.VfxRecipientCanHoldIt(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // What a token transaction adds to a document read whole later is bounded (round 33).
+                ?? LedgerIntegrityRules.TokenDocumentLimits(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
             if (vaultInTransitError != null)
                 return (false, vaultInTransitError);
 

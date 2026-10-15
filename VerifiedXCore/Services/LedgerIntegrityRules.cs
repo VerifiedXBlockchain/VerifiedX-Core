@@ -264,6 +264,49 @@ namespace VerifiedXCore.Services
             return fields.All(Ascii) ? null : "This transaction names a name, address or id in characters other than plain ASCII.";
         }
 
+        /// <summary>Lifetime vote topics a token may hold (its document is read whole by every transaction on the token).</summary>
+        public const int MaxTokenTopics = 500;
+        public const int MaxTopicNameLength = 128;
+        public const int MaxTopicDescriptionLength = 1600;
+        public const int MaxTopicIdLength = 128;
+
+        /// <summary>
+        /// From Globals.PathAuditRulesHeight, what a token transaction adds to a document read whole by later transactions
+        /// is bounded. A token's vote topics were taken as sent, any number and up to the 30 KB transaction cap each: about
+        /// 550 topics (about 0.3 VFX) made the token's document about 16 MB, and every transfer of the token (one fee)
+        /// then read it four times on every node (fifth review, round 33). Null when the rule passes.
+        /// </summary>
+        public static string? TokenDocumentLimits(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.PathAuditRulesHeight || tx.TransactionType != TransactionType.FTKN_TX || string.IsNullOrEmpty(tx.Data))
+                return null;
+            JObject j;
+            try { j = JObject.Parse(tx.Data); }
+            catch { return null; } // not an object: the type's own rules judge it
+            static T? Read<T>(Func<T?> field) where T : class { try { return field(); } catch { return null; } }
+            var function = Read(() => j["Function"]?.ToString());
+            var scUID = Read(() => j["ContractUID"]?.ToString());
+            switch (function)
+            {
+                case "TokenVoteTopicCreate()":
+                {
+                    var topic = Read(() => j["TokenVoteTopic"]?.ToObject<TokenVoteTopic>());
+                    if (topic == null) return null;
+                    if ((topic.TopicName?.Length ?? 0) > MaxTopicNameLength
+                        || (topic.TopicDescription?.Length ?? 0) > MaxTopicDescriptionLength
+                        || (topic.TopicUID?.Length ?? 0) > MaxTopicIdLength
+                        || (topic.SmartContractUID?.Length ?? 0) > MaxTopicIdLength)
+                        return $"A token vote topic's name is at most {MaxTopicNameLength} characters, its description {MaxTopicDescriptionLength}, and its ids {MaxTopicIdLength}.";
+                    var token = string.IsNullOrEmpty(scUID) ? null : SmartContractStateTrei.GetSmartContractState(scUID);
+                    if ((token?.TokenDetails?.TokenTopicList?.Count ?? 0) >= MaxTokenTopics)
+                        return $"A token holds at most {MaxTokenTopics} vote topics.";
+                    return null;
+                }
+                default:
+                    return null;
+            }
+        }
+
         public static string? ContractCallIsReadable(Transaction tx, long height)
         {
             if (tx?.Data == null || height < Globals.PathAuditRulesHeight) return null;
