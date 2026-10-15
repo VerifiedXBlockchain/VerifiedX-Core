@@ -193,6 +193,16 @@ namespace VerifiedXCore.Tests
                 var stale = await Post(older);
                 Assert.Equal(System.Net.HttpStatusCode.Conflict, stale.Code);
                 Assert.Contains("newer start", stale.Body);
+                // ... and once a newer start was verified here, older ones stay given up whether or not its session is still
+                // open (round 20); a newer start frees the places its leader's older sessions for the input held.
+                Assert.True(FrostSessionStorage.TakeStartOrder(leader.Address, vault.Uid, request.Hash, 7, held.Timestamp));
+                Assert.False(FrostSessionStorage.TakeStartOrder(leader.Address, vault.Uid, request.Hash, 7, held.Timestamp - 1));
+                Assert.True(FrostSessionStorage.TakeStartOrder(leader.Address, vault.Uid, request.Hash, 7, held.Timestamp));
+                FrostSessionStorage.SigningSessions.TryAdd("old-" + held.SessionId, new SigningSession { SessionId = "old-" + held.SessionId, LeaderAddress = leader.Address,
+                    SmartContractUID = vault.Uid, WithdrawalRequestHash = request.Hash, InputIndex = 7, LeaderStartTimestamp = held.Timestamp - 1, StartTimestamp = TimeUtil.GetTime() });
+                FrostSessionStorage.DropSupersededSigningSessions(leader.Address, vault.Uid, request.Hash, 7, held.Timestamp);
+                Assert.False(FrostSessionStorage.SigningSessions.ContainsKey("old-" + held.SessionId));
+                Assert.True(FrostSessionStorage.SigningSessions.ContainsKey(held.SessionId));     // another input's session is left
                 async Task<(System.Net.HttpStatusCode Code, string Body)> Round2(string body, string? bodySignature)
                 {
                     var req = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, $"/frost/sign/round2/{held.SessionId}")

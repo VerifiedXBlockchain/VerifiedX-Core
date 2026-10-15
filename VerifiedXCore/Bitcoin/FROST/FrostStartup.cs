@@ -2569,14 +2569,18 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // An older start of the leader's does not take the place of a newer one open here for the same
                             // input: a copy of an attempt this validator missed, sent while the leader's retry was under way,
                             // was recorded as the leader's session and the retry's Round 2 refused (round 19).
-                            if (VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(request.SmartContractUID) != null
-                                && FrostSessionStorage.SigningSessions.Values.Any(s => s.LeaderAddress == request.LeaderAddress
-                                    && s.SmartContractUID == request.SmartContractUID && s.WithdrawalRequestHash == request.WithdrawalRequestHash
-                                    && s.InputIndex == request.InputIndex && s.LeaderStartTimestamp > request.Timestamp))
+                            // And the newest start verified here for the input is remembered, so starts the leader gave up are
+                            // refused even once the newer session has gone, and the older sessions it gave up free their
+                            // places (round 20).
+                            if (VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(request.SmartContractUID) != null)
                             {
-                                context.Response.StatusCode = StatusCodes.Status409Conflict;
-                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "A newer start of this leader holds this input here." }));
-                                return;
+                                if (!FrostSessionStorage.TakeStartOrder(request.LeaderAddress, request.SmartContractUID, request.WithdrawalRequestHash, request.InputIndex, request.Timestamp))
+                                {
+                                    context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "A newer start of this leader holds this input here." }));
+                                    return;
+                                }
+                                FrostSessionStorage.DropSupersededSigningSessions(request.LeaderAddress, request.SmartContractUID, request.WithdrawalRequestHash, request.InputIndex, request.Timestamp);
                             }
 
                             // The leader is who it says: its room here, and a start that is not an old one sent again.

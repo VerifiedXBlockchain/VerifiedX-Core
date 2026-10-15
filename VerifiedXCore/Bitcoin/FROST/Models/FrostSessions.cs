@@ -422,6 +422,38 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
 
         /// <summary>How far a signing start's timestamp may be from this validator's clock, in seconds: an old start cannot be sent again to use up its leader's room.</summary>
         private static readonly ConcurrentDictionary<string, long> _signingStartsSeen = new(StringComparer.Ordinal);
+        private static readonly Dictionary<string, (long Timestamp, long SeenAt)> _newestStart = new(StringComparer.Ordinal);
+        private static readonly object _newestStartLock = new();
+
+        /// <summary>
+        /// A watched vault's verified start for (leader, vault, request, input): false when a newer start of the leader's for
+        /// the same input was verified here before. Otherwise it becomes the newest, whatever happens to it after (refused
+        /// for room or clock, or opened). Starts the leader gave up stay given up: a signer holding them could open them one
+        /// after another as each place came free and keep a recovered validator out of the leader's signing (round 20).
+        /// </summary>
+        public static bool TakeStartOrder(string leader, string? scUID, string? requestHash, int inputIndex, long timestamp)
+        {
+            var key = $"{leader}|{scUID}|{requestHash}|{inputIndex}";
+            var now = TimeUtil.GetTime();
+            lock (_newestStartLock)
+            {
+                if (_newestStart.TryGetValue(key, out var newest) && timestamp < newest.Timestamp)
+                    return false;
+                _newestStart[key] = (Math.Max(timestamp, newest.Timestamp), now);
+                if (_newestStart.Count > 10_000)
+                    foreach (var old in _newestStart.Where(kv => now - kv.Value.SeenAt > 2 * SIGNING_START_MAX_AGE_SECONDS).Select(kv => kv.Key).ToList())
+                        _newestStart.Remove(old);
+                return true;
+            }
+        }
+
+        /// <summary>The leader's sessions here for one input opened by starts older than <paramref name="timestamp"/>: given up by a newer start.</summary>
+        public static void DropSupersededSigningSessions(string leader, string? scUID, string? requestHash, int inputIndex, long timestamp)
+        {
+            foreach (var (id, s) in SigningSessions.Where(kv => kv.Value.LeaderAddress == leader && kv.Value.SmartContractUID == scUID
+                         && kv.Value.WithdrawalRequestHash == requestHash && kv.Value.InputIndex == inputIndex && kv.Value.LeaderStartTimestamp < timestamp).ToList())
+                SigningSessions.TryRemove(id, out _);
+        }
 
         /// <summary>Notes a signing session id this validator opened (kept twice the longest a start's signature is in date).</summary>
         public static void NoteSigningStart(string sessionId)
