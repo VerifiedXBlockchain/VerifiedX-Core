@@ -88,6 +88,10 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void WalletTransactions_AreIndexedByStatus() =>
+            Assert.Contains("$.TransactionStatus", IndexedFields(DbContext.DB_Wallet, DbContext.RSRV_TRANSACTIONS));
+
+        [Fact]
         public void BridgeLocks_AreNotIndexedByVault_AndStillFoundByIt()
         {
             var col = VBTCBridgeLockState.GetCollection();

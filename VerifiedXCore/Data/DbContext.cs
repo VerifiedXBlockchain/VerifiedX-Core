@@ -262,6 +262,9 @@ namespace VerifiedXCore.Data
             transactions.EnsureIndexSafe(x => x.Hash, false);
             transactions.EnsureIndexSafe(x => x.FromAddress, false);
             transactions.EnsureIndexSafe(x => x.ToAddress, false);
+            // Every block reads the wallet's pending transactions; every transaction to a local address adds a row (a
+            // validator's address is public, and a zero-amount transaction costs one fee): read whole each block (round 34).
+            transactions.EnsureIndexSafe(x => x.TransactionStatus, false);
 
             var aTrei = DbContext.DB_AccountStateTrei.GetCollection<AccountStateTrei>(DbContext.RSRV_ASTATE_TREI);
             aTrei.EnsureIndexSafe(x => x.Key, false);
