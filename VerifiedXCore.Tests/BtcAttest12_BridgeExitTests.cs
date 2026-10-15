@@ -303,6 +303,20 @@ namespace VerifiedXCore.Tests
             Assert.Equal(one.Hash, Record(burn).ExitTxHash);
         }
 
+        /// <summary>A bridge lock whose id is blank or has spaces around it is refused: it was debited and stored where no look-up finds it (round 17).</summary>
+        [Fact]
+        public async Task ABridgeLockId_IsNotBlank_AndHasNoSpacesAroundIt()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            VfxTx LockAs(string id) => SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_BRIDGE_LOCK,
+                new { Function = "VBTCBridgeLock()", ContractUID = vault.Uid, LockId = id, Amount = 0.001M, AmountSats = 100_000L, EvmDestination = "0x" + new string('a', 40) });
+            foreach (var id in new[] { " ", "   ", " abc", "abc " })
+                await RefusedInBlock(LockAs(id), "not blank");
+            Assert.True((await Verify(LockAs("abc"), Tip + 1)).Ok);
+        }
+
         /// <summary>
         /// A validator signed a Base mint over the lock id the caller gave, after finding the lock by a look-up that trims
         /// and ignores case; Base refuses a repeat only by the exact bytes of that id, so "abc", "ABC" and "abc " each

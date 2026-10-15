@@ -3851,6 +3851,11 @@ namespace VerifiedXCore.Services
 
                     if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(lockId))
                         return (txResult, "ContractUID and LockId are required for bridge lock.");
+                    // The lock is stored under its id trimmed: one of spaces only was debited and stored where no look-up
+                    // finds it, and one with spaces around it is not the id it is found by (fifth review, round 17).
+                    if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.PathAuditRulesHeight
+                        && (string.IsNullOrWhiteSpace(lockId) || lockId != lockId.Trim()))
+                        return (txResult, "A bridge LockId is not blank and has no spaces around it.");
 
                     // Reserve-held vBTC is locked: bridge locks from a reserve address are denied.
                     if (txRequest.FromAddress.StartsWith("xRBX"))
