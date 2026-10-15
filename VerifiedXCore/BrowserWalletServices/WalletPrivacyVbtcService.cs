@@ -250,7 +250,10 @@ namespace VerifiedXCore.BrowserWalletServices
             return new { success = broadcastOk, hash = tx!.Hash, type = "VBTC_PRIVATE_TRANSFER", amount, fromZfxAddress, toZfxAddress, scUID, detail = json };
         }
 
-        public static object ScanShieldedVBTC(string zfxAddress, string scUID, string? password, long? fromBlock, long? toBlock)
+        public static object ScanShieldedVBTC(string zfxAddress, string scUID, string? password, long? fromBlock, long? toBlock) =>
+            ShieldedWalletLock.Holding(zfxAddress, () => ScanShieldedVBTCCore(zfxAddress, scUID, password, fromBlock, toBlock)); // the wallet's lock: a scan wrote over the auto-scanner's changes made meanwhile (round 25)
+
+        private static object ScanShieldedVBTCCore(string zfxAddress, string scUID, string? password, long? fromBlock, long? toBlock)
         {
             if (string.IsNullOrWhiteSpace(zfxAddress) || !zfxAddress.StartsWith("zfx_"))
                 return new { success = false, message = "Invalid zfx_ address." };

@@ -470,7 +470,10 @@ namespace VerifiedXCore.Controllers
 
         /// <summary>Scan blocks for notes decryptable with wallet encryption key; updates local wallet row.</summary>
         [HttpPost("ScanShielded")]
-        public Task<string> ScanShielded([FromBody] ScanShieldedRequest req)
+        public Task<string> ScanShielded([FromBody] ScanShieldedRequest req) =>
+            ShieldedWalletLock.Holding(req?.ZfxAddress, () => ScanShieldedCore(req!)); // the wallet's lock: a scan wrote over the auto-scanner's changes made meanwhile (round 25)
+
+        private Task<string> ScanShieldedCore(ScanShieldedRequest req)
         {
             try
             {
@@ -1257,7 +1260,10 @@ namespace VerifiedXCore.Controllers
 
         /// <summary>Scan blocks for vBTC notes decryptable with wallet encryption key; updates local wallet row. Scoped to a specific vBTC contract UID.</summary>
         [HttpPost("ScanShieldedVBTC")]
-        public Task<string> ScanShieldedVBTC([FromBody] ScanShieldedVbtcRequest req)
+        public Task<string> ScanShieldedVBTC([FromBody] ScanShieldedVbtcRequest req) =>
+            ShieldedWalletLock.Holding(req?.ZfxAddress, () => ScanShieldedVBTCCore(req!)); // the wallet's lock: a scan wrote over the auto-scanner's changes made meanwhile (round 25)
+
+        private Task<string> ScanShieldedVBTCCore(ScanShieldedVbtcRequest req)
         {
             try
             {
@@ -1429,7 +1435,10 @@ namespace VerifiedXCore.Controllers
         /// <paramref name="req"/>.FromHeight to rebuild from scratch.
         /// </summary>
         [HttpPost("ResyncShieldedVBTC")]
-        public Task<string> ResyncShieldedVBTC([FromBody] ResyncShieldedVbtcRequest req)
+        public Task<string> ResyncShieldedVBTC([FromBody] ResyncShieldedVbtcRequest req) =>
+            ShieldedWalletLock.Holding(req?.ZfxAddress, () => ResyncShieldedVBTCCore(req!)); // the wallet's lock: a scan wrote over the auto-scanner's changes made meanwhile (round 25)
+
+        private Task<string> ResyncShieldedVBTCCore(ResyncShieldedVbtcRequest req)
         {
             try
             {
@@ -1462,7 +1471,7 @@ namespace VerifiedXCore.Controllers
                     FromHeight = fromHeight,
                     ToHeight = toHeight
                 };
-                return ScanShieldedVBTC(scanReq);
+                return ScanShieldedVBTCCore(scanReq); // under the lock this resync holds
             }
             catch (Exception ex)
             {

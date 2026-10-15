@@ -207,7 +207,10 @@ namespace VerifiedXCore.BrowserWalletServices
             return new { success = broadcastOk, hash = tx!.Hash, type = "VFX_PRIVATE_TRANSFER", amount, fromZfxAddress, toZfxAddress, detail = json };
         }
 
-        public static object ScanShieldedVFX(string zfxAddress, string? password, long? fromBlock, long? toBlock)
+        public static object ScanShieldedVFX(string zfxAddress, string? password, long? fromBlock, long? toBlock) =>
+            ShieldedWalletLock.Holding(zfxAddress, () => ScanShieldedVFXCore(zfxAddress, password, fromBlock, toBlock)); // the wallet's lock: a scan wrote over the auto-scanner's changes made meanwhile (round 25)
+
+        private static object ScanShieldedVFXCore(string zfxAddress, string? password, long? fromBlock, long? toBlock)
         {
             if (string.IsNullOrWhiteSpace(zfxAddress) || !zfxAddress.StartsWith("zfx_"))
                 return new { success = false, message = "Invalid zfx_ address." };

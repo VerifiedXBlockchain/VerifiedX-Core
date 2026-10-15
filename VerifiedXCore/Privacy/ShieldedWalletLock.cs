@@ -11,9 +11,29 @@ namespace VerifiedXCore.Privacy
     {
         private static readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new(StringComparer.Ordinal);
 
-        /// <summary>Returns (or creates) the per-address semaphore.</summary>
+        /// <summary>
+        /// Returns (or creates) the semaphore of the wallet row the address names. A row is found by either spelling of
+        /// its address (v1 or v2) and the auto-scanner locks the stored one: a caller locking the other spelling took
+        /// another semaphore and wrote over the scanner's changes (round 25).
+        /// </summary>
         public static SemaphoreSlim For(string zfxAddress) =>
-            _locks.GetOrAdd(zfxAddress, _ => new SemaphoreSlim(1, 1));
+            _locks.GetOrAdd(KeyOf(zfxAddress), _ => new SemaphoreSlim(1, 1));
+
+        private static string KeyOf(string zfxAddress)
+        {
+            try { return ShieldedWalletService.FindByZfxAddress(zfxAddress)?.ShieldedAddress ?? zfxAddress; }
+            catch { return zfxAddress; }
+        }
+
+        /// <summary>Runs <paramref name="body"/> holding the lock of the wallet row the address names.</summary>
+        public static T Holding<T>(string? zfxAddress, Func<T> body)
+        {
+            if (string.IsNullOrWhiteSpace(zfxAddress)) return body();
+            var sem = For(zfxAddress);
+            sem.Wait();
+            try { return body(); }
+            finally { try { sem.Release(); } catch (SemaphoreFullException) { } }
+        }
 
         /// <summary>Acquire the lock synchronously (auto-scanner path).</summary>
         public static void Wait(string zfxAddress) =>
@@ -22,7 +42,7 @@ namespace VerifiedXCore.Privacy
         /// <summary>Release the lock.</summary>
         public static void Release(string zfxAddress)
         {
-            if (_locks.TryGetValue(zfxAddress, out var sem))
+            if (_locks.TryGetValue(KeyOf(zfxAddress), out var sem))
                 try { sem.Release(); } catch (SemaphoreFullException) { }
         }
 
