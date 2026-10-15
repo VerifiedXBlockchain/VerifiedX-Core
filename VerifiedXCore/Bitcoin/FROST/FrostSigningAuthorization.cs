@@ -486,7 +486,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         {
             if (Globals.BootstrapCasterAddresses.Contains(address)) return true;
             if (Globals.BlockCasters.Any(p => string.Equals(p.ValidatorAddress, address, StringComparison.Ordinal))) return true;
-            lock (Globals.KnownCasters)
+            lock (Globals.KnownCastersLock) // the lock the list is rebuilt under (round 25)
             {
                 return Globals.KnownCasters.Any(c => string.Equals(c.Address, address, StringComparison.Ordinal));
             }
