@@ -507,14 +507,18 @@ namespace VerifiedXCore.Bitcoin.Services
         /// that had cleared them, blocked every later winner, and a winner who did nothing kept the burn unpaid (fifth
         /// review, round 24). Both carry the caster's signature over the handler, so a newer one cannot be forged.
         /// </summary>
-        internal static bool KeepNewestConfirmation(ConcurrentDictionary<string, BurnExitConfirmation> held, BurnExitConfirmation confirmation)
+        internal static bool KeepNewestConfirmation(ConcurrentDictionary<string, BurnExitConfirmation> held, BurnExitConfirmation confirmation) =>
+            KeepNewest(held, confirmation.ConfirmingCasterAddress, confirmation, c => c.Timestamp);
+
+        /// <summary>Holds <paramref name="item"/> under <paramref name="key"/> unless a newer or equally new one is held.</summary>
+        internal static bool KeepNewest<T>(ConcurrentDictionary<string, T> held, string key, T item, Func<T, long> timestamp) where T : class
         {
             while (true)
             {
-                if (held.TryAdd(confirmation.ConfirmingCasterAddress, confirmation)) return true;
-                if (!held.TryGetValue(confirmation.ConfirmingCasterAddress, out var current)) continue;
-                if (confirmation.Timestamp <= current.Timestamp) return false;
-                if (held.TryUpdate(confirmation.ConfirmingCasterAddress, confirmation, current)) return true;
+                if (held.TryAdd(key, item)) return true;
+                if (!held.TryGetValue(key, out var current)) continue;
+                if (timestamp(item) <= timestamp(current)) return false;
+                if (held.TryUpdate(key, item, current)) return true;
             }
         }
 
@@ -545,7 +549,10 @@ namespace VerifiedXCore.Bitcoin.Services
             }
 
             var dict = _proposals.GetOrAdd(proposal.BaseBurnTxHash, _ => new ConcurrentDictionary<string, BurnExitProposal>());
-            dict[proposal.ProposerCasterAddress] = proposal;
+            // The newest of a proposer's proposals is held: a peer's older one replayed across a window boundary gave
+            // receivers different hashes for one proposer and split the election (round 25).
+            if (!KeepNewest(dict, proposal.ProposerCasterAddress, proposal, p => p.Timestamp))
+                return;
             LogUtility.Log($"[BurnExitConsensus] Proposal from {proposal.ProposerCasterAddress} for {proposal.BaseBurnTxHash}", "BurnExitConsensusService");
         }
 
