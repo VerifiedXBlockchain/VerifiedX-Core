@@ -261,8 +261,12 @@ namespace VerifiedXCore.Bitcoin.Services
         /// (BTC exit) event from the bridge contract. Returns the burned amount and destination so
         /// the consensus validator can bind the unlock to what was actually burned.
         /// </summary>
+        /// <summary>Tests only: answers burn look-ups in place of Base.</summary>
+        internal static Func<string, bool, (bool Ok, BurnEventInfo? Info, string Reason)>? BurnEventsForTests;
+
         public static async Task<(bool Ok, BurnEventInfo? Info, string Reason)> TryGetBurnEventAsync(string txHash, bool vfxExit)
         {
+            if (BurnEventsForTests != null) return BurnEventsForTests(txHash, vfxExit);
             if (!IsBridgeConfigured) return (false, null, "Bridge not configured");
             if (string.IsNullOrWhiteSpace(txHash)) return (false, null, "Empty tx hash");
             var h = NormalizeTxHash(txHash);

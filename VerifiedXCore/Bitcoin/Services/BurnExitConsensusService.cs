@@ -1336,9 +1336,9 @@ namespace VerifiedXCore.Bitcoin.Services
             else record.BtcDestination = evidence.Destination ?? "";
         }
 
-        private static async Task<(bool Ok, bool Transient, string Reason, BaseBridgeService.BurnEventInfo? Evidence)> VerifyBurnEvidenceAsync(ProcessedBurnRecord record)
+        internal static async Task<(bool Ok, bool Transient, string Reason, BaseBridgeService.BurnEventInfo? Evidence)> VerifyBurnEvidenceAsync(ProcessedBurnRecord record)
         {
-            if (!BaseBridgeService.IsEnabled)
+            if (!BaseBridgeService.IsEnabled && BaseBridgeService.BurnEventsForTests == null)
                 return (false, true, "Base bridge RPC/contract not configured on this caster; cannot verify the burn", null);
 
             var expectedSats = (long)(record.Amount * 100_000_000M);
@@ -1351,6 +1351,17 @@ namespace VerifiedXCore.Bitcoin.Services
                 // are answers: the alert pointed at something that is not a burn of this type.
                 var transient = reason.StartsWith("Could not read", StringComparison.OrdinalIgnoreCase)
                                 || reason.IndexOf("receipt not found", StringComparison.OrdinalIgnoreCase) >= 0;
+                // The type comes from Base too, like the amount and destination: a committee caster's alert naming the
+                // other type had every caster that took it fail the burn and skip it for good (fifth review, round 21).
+                if (!transient)
+                {
+                    var (otherOk, otherInfo, _) = await BaseBridgeService.TryGetBurnEventAsync(record.BaseBurnTxHash, vfxExit: record.ExitType != BurnExitType.VfxPoolUnlock);
+                    if (otherOk && otherInfo != null)
+                    {
+                        record.ExitType = record.ExitType == BurnExitType.VfxPoolUnlock ? BurnExitType.BtcExit : BurnExitType.VfxPoolUnlock;
+                        return (false, false, "burn evidence: the burn is of the other type; the record takes Base's", otherInfo);
+                    }
+                }
                 return (false, transient, $"burn evidence unavailable: {reason}", null);
             }
 

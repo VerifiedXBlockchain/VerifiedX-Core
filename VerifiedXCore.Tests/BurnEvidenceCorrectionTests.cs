@@ -43,6 +43,32 @@ namespace VerifiedXCore.Tests
             Assert.Equal("tb1qreal", rec.BtcDestination);
         }
 
+        /// <summary>
+        /// A committee caster's alert naming the other burn type had every caster that took it find no event of that type,
+        /// fail the burn and skip it for good (fifth review, round 21). The type is taken from Base like the amount.
+        /// </summary>
+        [Fact]
+        public async System.Threading.Tasks.Task AnAlertOfTheWrongType_IsCorrectedFromBase()
+        {
+            BaseBridgeService.BurnEventsForTests = (hash, vfxExit) => vfxExit
+                ? (true, new BaseBridgeService.BurnEventInfo { AmountSats = 50_000, Destination = "RRealDestination" }, "")
+                : (false, null, "No matching burn event in receipt");
+            try
+            {
+                var rec = new BurnExitConsensusService.ProcessedBurnRecord
+                {
+                    BaseBurnTxHash = "0xburn", ExitType = BurnExitConsensusService.BurnExitType.BtcExit, Amount = 0.0005M, BtcDestination = "tb1qwrong",
+                };
+                var (ok, transient, _, evidence) = await BurnExitConsensusService.VerifyBurnEvidenceAsync(rec);
+                Assert.False(transient);
+                Assert.NotNull(evidence);                                   // the caller corrects the record and goes on
+                Assert.Equal(BurnExitConsensusService.BurnExitType.VfxPoolUnlock, rec.ExitType);
+                BurnExitConsensusService.ApplyEvidenceCorrection(rec, evidence);
+                Assert.Equal("RRealDestination", rec.VfxDestinationAddress);
+            }
+            finally { BaseBridgeService.BurnEventsForTests = null; }
+        }
+
         [Fact]
         public void NullEvidence_LeavesRecordUntouched()
         {
