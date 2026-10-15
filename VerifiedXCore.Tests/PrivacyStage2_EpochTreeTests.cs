@@ -283,6 +283,25 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        /// <summary>A spent note is marked by its position and pool, as the database compares the pool (round 34: through the position index).</summary>
+        [Fact]
+        public void ASpentNote_IsMarkedByItsPositionAndPool()
+        {
+            var col = Db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS);
+            for (var i = 0; i < 10; i++) col.Insert(new CommitmentRecord { AssetType = "VFX", TreePosition = i, NoteHash = "n" + i });
+            col.Insert(new CommitmentRecord { AssetType = "VBTC:x", TreePosition = 5, NoteHash = "other" });
+            col.Insert(new CommitmentRecord { AssetType = "vfx", TreePosition = 7, NoteHash = "variant" });
+
+            CommitmentSpendService.TryMarkSpent("VFX", 5, Db);
+            Assert.True(col.FindOne(x => x.NoteHash == "n5").IsSpent);
+            Assert.False(col.FindOne(x => x.NoteHash == "other").IsSpent);
+            CommitmentSpendService.TryMarkSpent("VFX", 999, Db);                 // past the end: nothing
+            Assert.Equal(1, col.Find(x => x.IsSpent).Count());
+            CommitmentSpendService.TryMarkSpent("VFX", 7, Db);                   // two rows the collation matches: the earlier
+            Assert.True(col.FindOne(x => x.NoteHash == "n7").IsSpent);
+            Assert.False(col.FindOne(x => x.NoteHash == "variant").IsSpent);
+        }
+
         [Fact]
         public void AtTheHeight_OnlyTheVfxPoolIsReset_VbtcPoolRowsStay()
         {

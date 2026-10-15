@@ -14,7 +14,13 @@ namespace VerifiedXCore.Privacy
             if (string.IsNullOrWhiteSpace(assetType) || treePosition < 0)
                 return;
             var col = db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS);
-            var rec = col.FindOne(x => x.AssetType == assetType && x.TreePosition == treePosition);
+            // Through the position index: the query on asset and position took the asset index and read the whole pool for
+            // each note spent, and a spend names any position, past the end too (fifth review, round 34). The asset is
+            // compared as the database compares it; the first of several is the earliest row, as before.
+            var rec = col.Find(x => x.TreePosition == treePosition)
+                .Where(x => x.AssetType != null && db.Collation.Compare(x.AssetType, assetType) == 0)
+                .OrderBy(x => x.Id)
+                .FirstOrDefault();
             if (rec == null)
                 return;
             rec.IsSpent = true;
