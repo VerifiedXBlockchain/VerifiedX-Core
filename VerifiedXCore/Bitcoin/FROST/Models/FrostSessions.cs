@@ -485,6 +485,21 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public const int SIGNING_START_MAX_AGE_SECONDS = 1800; // wide enough for a wallet that signs its start, then asks for the ceremony a while later
 
         /// <summary>
+        /// Makes room under <see cref="MAX_SIGNING_SESSIONS_HELD"/> by dropping the oldest finished sessions (their share
+        /// given). Finished sessions are kept ten minutes and counted against the validator's total, though no per-leader
+        /// cap counts them: one leader starting, finishing and starting again (the same start may be sent again) filled
+        /// the total and every start here, the vault's holders' and the casters' included, was refused (fifth review,
+        /// round 35). Open sessions are never dropped.
+        /// </summary>
+        public static void DropFinishedForRoom()
+        {
+            var over = SigningSessions.Count - MAX_SIGNING_SESSIONS_HELD + 1;
+            if (over <= 0) return;
+            foreach (var finished in SigningSessions.Where(kv => kv.Value.NonceConsumed).OrderBy(kv => kv.Value.StartTimestamp).Take(over).Select(kv => kv.Key).ToList())
+                SigningSessions.TryRemove(finished, out _);
+        }
+
+        /// <summary>
         /// Why a new signing session is refused for want of room; null when there is room. Counted over the sessions
         /// given (the open ones), so the rule can be tested without the store. With no leader given only the
         /// validator's total is judged (before the leader's signature has been checked).

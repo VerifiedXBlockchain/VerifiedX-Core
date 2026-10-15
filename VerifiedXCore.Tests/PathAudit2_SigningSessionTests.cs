@@ -21,6 +21,38 @@ namespace VerifiedXCore.Tests
             StartTimestamp = TimeUtil.GetTime() - startedSecondsAgo, SignerAddresses = new List<string>(),
         };
 
+        /// <summary>
+        /// Finished sessions make way for a new start when the validator's total is reached: one leader starting and
+        /// finishing over and over filled the total and every start was refused (round 35). Open sessions stay.
+        /// </summary>
+        [Fact]
+        public void FinishedSessions_MakeWayAtTheTotal_OpenOnesStay()
+        {
+            var tag = "r35-" + Guid.NewGuid().ToString("N");
+            try
+            {
+                for (var i = 0; i < FrostSessionStorage.MAX_SIGNING_SESSIONS_HELD; i++)
+                {
+                    var done = new SigningSession { SessionId = $"{tag}-done-{i}", LeaderAddress = "flooder", NonceSecret = "n", StartTimestamp = 1_000 + i };
+                    Assert.True(done.TryConsumeNonceSecret(out _));                                       // its share given
+                    FrostSessionStorage.SigningSessions[$"{tag}-done-{i}"] = done;
+                }
+                FrostSessionStorage.SigningSessions[$"{tag}-open"] = new SigningSession { SessionId = $"{tag}-open", LeaderAddress = "holder", NonceSecret = "n", StartTimestamp = 500 };
+                Assert.NotNull(FrostSessionStorage.SigningStartRefusal(FrostSessionStorage.SigningSessions.Values.ToList(), null, null));
+
+                FrostSessionStorage.DropFinishedForRoom();
+                Assert.Null(FrostSessionStorage.SigningStartRefusal(FrostSessionStorage.SigningSessions.Values.ToList(), "holder", "next"));
+                Assert.True(FrostSessionStorage.SigningSessions.ContainsKey($"{tag}-open"));
+                Assert.False(FrostSessionStorage.SigningSessions.ContainsKey($"{tag}-done-0"));          // the oldest finished went
+                Assert.True(FrostSessionStorage.SigningSessions.ContainsKey($"{tag}-done-{FrostSessionStorage.MAX_SIGNING_SESSIONS_HELD - 1}"));
+            }
+            finally
+            {
+                foreach (var key in FrostSessionStorage.SigningSessions.Keys.Where(k => k.StartsWith(tag)).ToList())
+                    FrostSessionStorage.SigningSessions.TryRemove(key, out _);
+            }
+        }
+
         [Fact]
         public void OneLeader_CannotTakeAllTheRoom_NorKeepAnotherLeaderOffAnInput()
         {

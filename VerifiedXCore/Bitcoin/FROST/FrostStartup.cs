@@ -2376,6 +2376,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                             }
 
                             // FIND-0013 Fix: Enforce maximum concurrent session cap (in all, per leader, per input)
+                            FrostSessionStorage.DropFinishedForRoom(); // finished sessions make way (round 35)
                             var noRoom = FrostSessionStorage.SigningStartRefusal(FrostSessionStorage.SigningSessions.Values.ToList(), null, null); // the total; the leader's own room once it is known to be the leader
                             if (noRoom != null)
                             {
@@ -2591,6 +2592,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
                             var ledByRequester = FrostSigningAuthorization.LedByRequester(request.LeaderAddress, request.SmartContractUID);
+                            FrostSessionStorage.DropFinishedForRoom();
                             var noRoomForLeader = FrostSessionStorage.SigningStartRefusal(FrostSessionStorage.SigningSessions.Values.ToList(), request.LeaderAddress, request.MessageHash, ledByRequester);
                             if (noRoomForLeader != null)
                             {
