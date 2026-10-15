@@ -88,6 +88,18 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void TheMempool_IsIndexedWhereItLives()
+        {
+            var fields = IndexedFields(DbContext.DB_Mempool, DbContext.RSRV_TRANSACTION_POOL);
+            Assert.Contains("$.Hash", fields);
+            Assert.Contains("$.FromAddress", fields);
+            Assert.Contains("$.TransactionType", fields);
+            Assert.Equal(DbContext.RSRV_TRANSACTION_POOL, TransactionData.GetPool().Name);
+            var plan = string.Join(" ", DbContext.DB_Mempool.Execute($"EXPLAIN SELECT $ FROM {DbContext.RSRV_TRANSACTION_POOL} WHERE $.Hash = 'h'").ToEnumerable().Select(d => d.ToString()));
+            Assert.Contains("INDEX SEEK", plan);
+        }
+
+        [Fact]
         public void WalletTransactions_AreIndexedByStatus() =>
             Assert.Contains("$.TransactionStatus", IndexedFields(DbContext.DB_Wallet, DbContext.RSRV_TRANSACTIONS));
 

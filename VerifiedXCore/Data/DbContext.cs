@@ -145,6 +145,20 @@ namespace VerifiedXCore.Data
         public const string RSRV_VOTE = "rsrv_vote";
         public const string RSRV_TOKEN_VOTE = "rsrv_token_vote";
 
+        /// <summary>
+        /// Indexes the mempool where it lives (DB_Mempool). Its indexes were made on a collection of the same name in the main
+        /// database, which nothing uses: every look-up in the mempool read all of it, on every node, after each block once per
+        /// block transaction, on each admission and in each proposal (fifth review, round 35). Only bounded values: a
+        /// transaction's hash (checked against its content) and sender (its signer), and its type.
+        /// </summary>
+        private static void EnsureMempoolIndexes()
+        {
+            var pool = DB_Mempool.GetCollection<Transaction>(RSRV_TRANSACTION_POOL);
+            pool.EnsureIndexSafe(x => x.Hash, false);
+            pool.EnsureIndexSafe(x => x.FromAddress, false);
+            pool.EnsureIndexSafe(x => x.TransactionType, false);
+        }
+
         /// <summary>Drops <paramref name="collection"/>'s index on <paramref name="expression"/>, if it has one (round 34).</summary>
         private static void DropIndexOn(LiteDatabase db, string collection, string expression)
         {
@@ -189,6 +203,7 @@ namespace VerifiedXCore.Data
 
             DB = new LiteDatabase(new ConnectionString{Filename = path + RSRV_DB_NAME,Connection = ConnectionType.Direct,ReadOnly = false}, mapper);
             DB_Mempool = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_MEMPOOL, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
+            EnsureMempoolIndexes();
             DB_Assets = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_ASSETS, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_AssetQueue = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_ASSET_QUEUE, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_WorldStateTrei = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_WSTATE_TREI, Connection = ConnectionType.Direct, ReadOnly = false });
@@ -224,10 +239,7 @@ namespace VerifiedXCore.Data
             var blocks = DB.GetCollection<Block>(RSRV_BLOCKS);
             blocks.EnsureIndexSafe(x => x.Height);
 
-            var transactionPool = DbContext.DB.GetCollection<Transaction>(DbContext.RSRV_TRANSACTION_POOL);
-            transactionPool.EnsureIndexSafe(x => x.Hash, false);
-            transactionPool.EnsureIndexSafe(x => x.FromAddress, false);
-            transactionPool.EnsureIndexSafe(x => x.ToAddress, false);
+            EnsureMempoolIndexes();
 
             var rsrvTransactions = DB_Reserve.GetCollection<ReserveTransactions>(RSRV_RESERVE_TRANSACTIONS);
             rsrvTransactions.EnsureIndexSafe(x => x.Hash);
@@ -566,6 +578,7 @@ namespace VerifiedXCore.Data
             //recreate DBs
             DB = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_NAME, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
             DB_Mempool = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_MEMPOOL, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
+            EnsureMempoolIndexes();
             DB_Assets = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_ASSETS, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_AssetQueue = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_ASSET_QUEUE, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_WorldStateTrei = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_WSTATE_TREI, Connection = ConnectionType.Direct, ReadOnly = false });
