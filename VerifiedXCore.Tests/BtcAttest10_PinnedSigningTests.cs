@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using NBitcoin;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
 using Newtonsoft.Json;
 using VerifiedXCore.Bitcoin.Attestation;
 using VerifiedXCore.Bitcoin.FROST;
@@ -101,6 +103,61 @@ namespace VerifiedXCore.Tests
                 MessageHash = sighashes[0], InputIndex = 0, InputCount = tx.Inputs.Count, AllInputSighashes = sighashes,
                 UnsignedTxHex = tx.ToHex(), Prevouts = prevouts, Timestamp = TimeUtil.GetTime(),
             };
+        }
+
+        /// <summary>
+        /// A signing start was authorized by "{session}.{leader}.{timestamp}" alone, which names no content: a key holder
+        /// holding one of the leader's could open a session under it with content of its own (round 17 (2)). And a start
+        /// whose session was already open recorded a failure under that id, dropping the leader's own open session
+        /// (round 17 (1)). A watched vault's start is signed in full; an id is opened once and a copy changes nothing.
+        /// </summary>
+        [Fact]
+        public async Task AWatchedVaultsSigningStart_IsSignedInFull_AndAnIdIsOpenedOnce()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Report(_btc.Mine(Pay(vault.Script, 150_000)));
+            var request = await Request(vault.Uid, 0.001M);
+            var pinned = BtcTx.Parse(Assert.Single(BtcAttestStore.Withdrawal(BtcWithdrawals.RefOf(request.Hash, vault.Uid))!.Pins).TxHex, Network.Main);
+            var leader = Signers[2];
+            using var server = new TestServer(new WebHostBuilder().UseStartup<FrostStartup>());
+            var client = server.CreateClient();
+            async Task<(System.Net.HttpStatusCode Code, string Body)> Post(FrostSigningStartRequest start)
+            {
+                var r = await client.PostAsync("/frost/sign/start", new System.Net.Http.StringContent(JsonConvert.SerializeObject(start), System.Text.Encoding.UTF8, "application/json"));
+                return (r.StatusCode, await r.Content.ReadAsStringAsync());
+            }
+            FrostSigningStartRequest Start2(bool full)
+            {
+                var start = Announce(vault.Uid, vault.Script, request.Hash, pinned, leader.Address);
+                start.SignerAddresses = Signers.Select(s => s.Address).ToList();
+                start.RequiredThreshold = 51;
+                start.LeaderSignature = VerifiedXCore.Services.SignatureService.CreateSignature($"{start.SessionId}.{leader.Address}.{start.Timestamp}", leader.Key, leader.Pub);
+                if (full) start.ContentSignature = VerifiedXCore.Services.SignatureService.CreateSignature(FrostDkgLeaderAuth.SigningStartMessage(start), leader.Key, leader.Pub);
+                return start;
+            }
+
+            var bare = await Post(Start2(full: false));
+            Assert.Equal(System.Net.HttpStatusCode.Forbidden, bare.Code);
+            Assert.Contains("signed in full", bare.Body);
+            var changed = Start2(full: true);
+            changed.RequiredThreshold = 52;                                                   // content not what was signed
+            Assert.Contains("signed in full", (await Post(changed)).Body);
+            Assert.DoesNotContain("signed in full", (await Post(Start2(full: true))).Body);   // passes this check
+
+            // An id already open, or opened here before: refused up front, nothing touched.
+            var open = Start2(full: true);
+            FrostSessionStorage.SigningSessions.TryAdd(open.SessionId, new SigningSession { SessionId = open.SessionId, LeaderAddress = leader.Address, StartTimestamp = TimeUtil.GetTime(), LeaderStartTimestamp = open.Timestamp });
+            try
+            {
+                var copy = await Post(open);
+                Assert.True(copy.Code == System.Net.HttpStatusCode.Conflict, copy.Body);
+                Assert.True(FrostSessionStorage.SigningSessions.ContainsKey(open.SessionId));
+            }
+            finally { FrostSessionStorage.SigningSessions.TryRemove(open.SessionId, out _); }
+            var used = Start2(full: true);
+            FrostSessionStorage.NoteSigningStart(used.SessionId);
+            Assert.Equal(System.Net.HttpStatusCode.Conflict, (await Post(used)).Code);
         }
 
         [Fact]

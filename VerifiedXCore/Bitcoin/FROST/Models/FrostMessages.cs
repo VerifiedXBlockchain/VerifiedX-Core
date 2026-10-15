@@ -57,13 +57,16 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// </summary>
         public static string NewSessionId(string leaderAddress) => $"{LeaderTag(leaderAddress)}:{Guid.NewGuid()}";
 
-        /// <summary>Everything a signing start says, as its leader signs it.</summary>
+        /// <summary>
+        /// Everything a signing start says, as its leader signs it. The transaction's id and outpoints are not in it: the
+        /// signer derives them from the unsigned transaction, which is.
+        /// </summary>
         public static string SigningStartMessage(FrostSigningStartRequest r) =>
             "SIGN-START|" + Sha256Hex(string.Join("|", new[]
             {
                 r.SessionId, r.SmartContractUID, r.CeremonyId, r.LeaderAddress, r.Timestamp.ToString(), r.MessageHash, r.WithdrawalRequestHash,
-                r.InputIndex.ToString(), r.InputCount.ToString(), r.BtcTxId, r.UnsignedTxHex, r.RequiredThreshold.ToString(),
-                string.Join(",", r.AllInputSighashes ?? new List<string>()), string.Join(",", r.TxInputOutpoints ?? new List<string>()),
+                r.InputIndex.ToString(), r.InputCount.ToString(), r.UnsignedTxHex, r.RequiredThreshold.ToString(),
+                string.Join(",", r.AllInputSighashes ?? new List<string>()),
                 string.Join(",", r.SignerAddresses ?? new List<string>()),
                 string.Join(",", (r.Prevouts ?? new()).Select(p => $"{p.TxId}:{p.Vout}:{p.ValueSats}:{p.ScriptPubKeyHex}")),
             }.Select(x => x ?? "")));
