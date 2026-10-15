@@ -84,5 +84,29 @@ namespace VerifiedXCore.Tests
             Assert.False(MempoolNullifierTracker.TryRegisterForMempool("taker", "VFX", new[] { a }, out _));
             Assert.Equal("fresh", Globals.MempoolNullifiers[MempoolNullifierTracker.MakeKey("VFX", a)]);
         }
+
+        [Fact]
+        public void IsClaimedByPendingTx_IgnoresAStaleClaim_ButNotALiveOne()
+        {
+            MempoolNullifierTracker.StaleClaimGrace = TimeSpan.Zero;
+            var gone = MempoolNullifierTracker.MakeKey("VFX", Nullifier(5));
+            var live = MempoolNullifierTracker.MakeKey("VFX", Nullifier(6));
+            Assert.True(MempoolNullifierTracker.TryRegisterForMempool("held", "VFX", new[] { Nullifier(5) }, out var e1), e1);
+            Assert.True(MempoolNullifierTracker.TryRegisterForMempool("pending", "VFX", new[] { Nullifier(6) }, out var e2), e2);
+            PutInMempool("pending");
+
+            // "held" left the mempool without releasing its claim: its note is not being spent.
+            Assert.False(MempoolNullifierTracker.IsClaimedByPendingTx(gone));
+            Assert.True(MempoolNullifierTracker.IsClaimedByPendingTx(live));
+            Assert.False(MempoolNullifierTracker.IsClaimedByPendingTx(MempoolNullifierTracker.MakeKey("VFX", Nullifier(7))));
+        }
+
+        [Fact]
+        public void IsClaimedByPendingTx_CountsAFreshClaimNotYetInTheMempool()
+        {
+            MempoolNullifierTracker.StaleClaimGrace = TimeSpan.FromMinutes(5);
+            Assert.True(MempoolNullifierTracker.TryRegisterForMempool("fresh", "VFX", new[] { Nullifier(8) }, out var e1), e1);
+            Assert.True(MempoolNullifierTracker.IsClaimedByPendingTx(MempoolNullifierTracker.MakeKey("VFX", Nullifier(8))));
+        }
     }
 }

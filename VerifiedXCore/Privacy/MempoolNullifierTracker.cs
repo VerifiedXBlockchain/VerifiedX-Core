@@ -78,6 +78,13 @@ namespace VerifiedXCore.Privacy
             }
         }
 
+        /// <summary>
+        /// Whether a pending transaction holds <paramref name="key"/>. A stale claim (its holder has left the mempool) does
+        /// not count, so readers that ask whether a note is being spent agree with what admission would accept.
+        /// </summary>
+        public static bool IsClaimedByPendingTx(string key) =>
+            Globals.MempoolNullifiers.TryGetValue(key, out var holder) && !IsStaleClaim(holder);
+
         /// <summary>Registers payload nullifiers for a TX that passed validation and is being (or was) admitted to the mempool.</summary>
         public static bool TryRegisterForMempool(string txHash, string assetType, IReadOnlyList<string> nullifiersB64, out string? error, long? height = null)
         {
