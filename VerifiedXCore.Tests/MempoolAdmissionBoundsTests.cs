@@ -279,5 +279,30 @@ namespace VerifiedXCore.Tests
             Assert.Equal(TransactionRating.F, rating);
             Assert.All(TransactionData.GetPool().Find(x => x.FromAddress == _sender.Address), x => Assert.Equal(TransactionRating.E, x.TransactionRating));
         }
+
+        [Fact]
+        public void AnInsertThatFails_EvictsNothing()
+        {
+            var pool = TransactionData.GetPool();
+            pool.InsertBulk(Enumerable.Range(0, Globals.MaxMempoolEntries).Select(i => new Transaction
+            {
+                Hash = $"d{i}", FromAddress = "x", ToAddress = "y", Amount = 1M, Fee = 1M, Timestamp = i,
+                TransactionType = TransactionType.TX, TransactionRating = TransactionRating.D,
+            }));
+            MempoolEvictionUtility.InvalidateAdmissionStats();
+
+            var tx = Send(1M);
+            tx.TransactionRating = TransactionRating.A;     // outranks every pooled entry, so room would be made for it
+            tx.Id = pool.FindAll().First().Id;              // an id already in the pool: the insert fails
+
+            Assert.False(MempoolEvictionUtility.TryAdmitAndInsert(tx, pool, out var reason));
+            Assert.Contains("insert failed", reason);
+            Assert.Equal(Globals.MaxMempoolEntries, PoolCount());
+
+            tx.Id = null;                                   // the same transaction with a fresh id is admitted, making room
+            Assert.True(MempoolEvictionUtility.TryAdmitAndInsert(tx, pool, out var e2), e2);
+            Assert.True(PoolCount() < Globals.MaxMempoolEntries);
+            Assert.NotNull(pool.FindOne(x => x.Hash == tx.Hash));
+        }
     }
 }

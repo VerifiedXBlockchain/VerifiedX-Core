@@ -40,53 +40,70 @@ namespace VerifiedXCore.Utilities
         /// </summary>
         public static (bool admit, string reason) CheckAdmissionBounds(Transaction tx)
         {
+            var plan = PlanAdmission(tx);
+            if (plan.admit)
+                Evict(plan.victims);
+            return (plan.admit, plan.reason);
+        }
+
+        /// <summary>
+        /// Decides whether <paramref name="tx"/> can enter the pool, and which lower-rated entries must go to make room for
+        /// it. Deletes nothing: the caller evicts the returned entries once the transaction is in.
+        /// </summary>
+        private static (bool admit, string reason, List<Transaction> victims) PlanAdmission(Transaction tx)
+        {
+            var none = new List<Transaction>();
             var feeValidation = ValidateMinimumFee(tx);
             if (!feeValidation.isValid)
-                return (false, feeValidation.reason);
+                return (false, feeValidation.reason, none);
 
             var rating = tx.TransactionRating ?? TransactionRating.F;
             var stats = GetAdmissionStats();
             var canAdd = CanAddToMempool(tx, stats.count, stats.sizeBytes);
-            if (!canAdd.canAdd)
+            if (canAdd.canAdd)
+                return (true, canAdd.reason, none);
+
+            // A full pool that just had nothing to give up for this rating (or a better one) refuses at once:
+            // otherwise every refused submission would pay for a whole-pool scan.
+            lock (AdmissionStatsLock)
             {
-                // A full pool that just had nothing to give up for this rating (or a better one) refuses at once:
-                // otherwise every refused submission would pay for a whole-pool scan.
-                lock (AdmissionStatsLock)
-                {
-                    if (_noRoomForRatingUntilUtc > DateTime.UtcNow && rating >= _noRoomForRating)
-                        return canAdd;
-                }
-
-                var evicted = EvictLowestPriority(
-                    targetCount: (int)(Globals.MaxMempoolEntries * 0.95),
-                    targetSize: (long)(Globals.MaxMempoolSizeBytes * 0.95),
-                    onlyRatedBelow: rating,
-                    knownTotalSize: stats.sizeBytes,
-                    freedBytes: out var freed,
-                    mustFitBytes: SizeOf(tx));
-
-                stats = (stats.count - evicted.Count, stats.sizeBytes - freed);
-                lock (AdmissionStatsLock)
-                {
-                    _cachedSizeBytes = Math.Max(0, _cachedSizeBytes - freed);
-                    if (evicted.Count == 0)
-                    {
-                        _noRoomForRating = rating;
-                        _noRoomForRatingUntilUtc = DateTime.UtcNow + AdmissionSizeCacheTtl;
-                    }
-                }
-                canAdd = CanAddToMempool(tx, stats.count, stats.sizeBytes);
+                if (_noRoomForRatingUntilUtc > DateTime.UtcNow && rating >= _noRoomForRating)
+                    return (false, canAdd.reason, none);
             }
 
-            return (canAdd.canAdd, canAdd.reason);
+            var victims = PlanEviction(
+                targetCount: (int)(Globals.MaxMempoolEntries * 0.95),
+                targetSize: (long)(Globals.MaxMempoolSizeBytes * 0.95),
+                onlyRatedBelow: rating,
+                knownTotalSize: stats.sizeBytes,
+                mustFitBytes: SizeOf(tx));
+            if (victims == null || victims.Count == 0)
+            {
+                lock (AdmissionStatsLock)
+                {
+                    _noRoomForRating = rating;
+                    _noRoomForRatingUntilUtc = DateTime.UtcNow + AdmissionSizeCacheTtl;
+                }
+                return (false, canAdd.reason, none);
+            }
+
+            var after = CanAddToMempool(tx, stats.count - victims.Count, stats.sizeBytes - victims.Sum(SizeOf));
+            return (after.canAdd, after.reason, after.canAdd ? victims : none);
+        }
+
+        private static void Evict(List<Transaction> victims)
+        {
+            if (victims.Count == 0) return;
+            ExecuteEviction(TransactionData.GetPool(), victims, out var freed);
+            lock (AdmissionStatsLock) _cachedSizeBytes = Math.Max(0, _cachedSizeBytes - freed);
         }
 
         /// <summary>Serialises admissions, so a capacity decision and the insert it allows cannot interleave with another.</summary>
         private static readonly object AdmitLock = new();
 
         /// <summary>
-        /// Applies <see cref="CheckAdmissionBounds"/> and, if it admits, inserts <paramref name="tx"/> into
-        /// <paramref name="mempool"/> in the same locked section, then counts its bytes. Concurrent admissions therefore
+        /// Applies the admission bounds and, if they admit, inserts <paramref name="tx"/> into <paramref name="mempool"/> in
+        /// the same locked section, then counts its bytes and evicts what was planned to make room for it. Concurrent admissions therefore
         /// cannot together pass the entry or byte cap, and nothing is counted for a transaction that was not inserted.
         /// </summary>
         public static bool TryAdmitAndInsert(Transaction tx, LiteDB.ILiteCollection<Transaction> mempool) =>
@@ -97,16 +114,18 @@ namespace VerifiedXCore.Utilities
         {
             lock (AdmitLock)
             {
-                var bounds = CheckAdmissionBounds(tx);
-                reason = bounds.reason;
-                if (!bounds.admit)
+                var plan = PlanAdmission(tx);
+                reason = plan.reason;
+                if (!plan.admit)
                     return false;
+                // Inserted before anything is evicted for it: an insert that fails leaves the pool as it was.
                 if (mempool.InsertSafe(tx) == null)
                 {
                     reason = "The mempool insert failed.";
                     return false;
                 }
                 NoteInserted(tx);
+                Evict(plan.victims);
                 return true;
             }
         }
@@ -251,13 +270,21 @@ namespace VerifiedXCore.Utilities
         /// leaves room for it under both caps, so honest entries are never removed for a transaction that is then refused.</param>
         internal static List<string> EvictLowestPriority(int targetCount, long targetSize, TransactionRating? onlyRatedBelow, long? knownTotalSize, out long freedBytes, long? mustFitBytes = null)
         {
-            freedBytes = 0;
-            var evictedHashes = new List<string>();
+            var victims = PlanEviction(targetCount, targetSize, onlyRatedBelow, knownTotalSize, mustFitBytes);
+            return ExecuteEviction(TransactionData.GetPool(), victims ?? new List<Transaction>(), out freedBytes);
+        }
+
+        /// <summary>
+        /// The entries an eviction would remove, lowest rating first: null when nothing needs to go, or when
+        /// <paramref name="mustFitBytes"/> is given and removing them would not leave room for it. Deletes nothing.
+        /// </summary>
+        private static List<Transaction>? PlanEviction(int targetCount, long targetSize, TransactionRating? onlyRatedBelow, long? knownTotalSize, long? mustFitBytes)
+        {
             var mempool = TransactionData.GetPool();
             var allTxs = mempool.FindAll().ToList();
 
             if (allTxs.Count == 0)
-                return evictedHashes;
+                return null;
 
             // Determine how many to evict
             int countToEvict = 0;
@@ -278,7 +305,7 @@ namespace VerifiedXCore.Utilities
             }
 
             if (countToEvict == 0 && sizeToEvict == 0)
-                return evictedHashes;
+                return null;
 
             // Lowest rating first (F is the highest enum value). Within a rating the latest to arrive here go first: a burst
             // of new entries makes room by evicting itself, not the transactions that were already waiting. A row with no
@@ -307,9 +334,17 @@ namespace VerifiedXCore.Utilities
                 var fits = allTxs.Count - victims.Count < Globals.MaxMempoolEntries
                     && total - plannedBytes + mustFitBytes.Value <= Globals.MaxMempoolSizeBytes;
                 if (!fits)
-                    return evictedHashes;
+                    return null;
             }
 
+            return victims;
+        }
+
+        /// <summary>Removes <paramref name="victims"/> from the pool and returns the hashes actually removed.</summary>
+        private static List<string> ExecuteEviction(LiteDB.ILiteCollection<Transaction> mempool, List<Transaction> victims, out long freedBytes)
+        {
+            freedBytes = 0;
+            var evictedHashes = new List<string>();
             long evictedSize = 0;
             int evictedCount = 0;
 
