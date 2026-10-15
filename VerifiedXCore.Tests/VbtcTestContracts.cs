@@ -77,7 +77,7 @@ namespace VerifiedXCore.Tests
             }, name: "vBTC");
 
         /// <summary>A fungible-token deploy body (Token feature) with the given embedded identity and supply.</summary>
-        public static string TokenContractData(string embeddedUid, string embeddedMinter, long supply, int decimals = 2)
+        public static string TokenContractData(string embeddedUid, string embeddedMinter, long supply, int decimals = 2, string tokenName = "Fixture Token")
             => BuildContractData(embeddedUid, embeddedMinter, new List<SmartContractFeatures>
             {
                 new SmartContractFeatures
@@ -85,7 +85,7 @@ namespace VerifiedXCore.Tests
                     FeatureName = FeatureName.Token,
                     FeatureFeatures = Newtonsoft.Json.Linq.JObject.FromObject(new TokenFeature
                     {
-                        TokenName = "Fixture Token",
+                        TokenName = tokenName,
                         TokenTicker = "FXT",
                         TokenDecimalPlaces = decimals,
                         TokenSupply = supply,

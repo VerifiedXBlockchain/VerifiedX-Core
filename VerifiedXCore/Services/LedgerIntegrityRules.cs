@@ -269,6 +269,25 @@ namespace VerifiedXCore.Services
         public const int MaxTopicNameLength = 128;
         public const int MaxTopicDescriptionLength = 1600;
         public const int MaxTopicIdLength = 128;
+        /// <summary>Token accounts one address may hold, and the name and ticker lengths a token deploy may declare.</summary>
+        public const int MaxTokenAccounts = 1000;
+        public const int MaxTokenNameLength = 64;
+        public const int MaxTokenTickerLength = 16;
+
+        /// <summary>
+        /// Why crediting <paramref name="scUID"/> to <paramref name="address"/> would add a token account the address has
+        /// no room for; null when it has the token already or room for it. An address's token accounts sit in its account
+        /// document, read whole by every transaction from or to it: anyone could add one with each token deployed and
+        /// sent to it (round 33). The apply finds a holder's account by exact UID, as here.
+        /// </summary>
+        public static string? TokenAccountRoom(string? address, string? scUID)
+        {
+            if (string.IsNullOrEmpty(address) || string.IsNullOrEmpty(scUID)) return null;
+            var accounts = VerifiedXCore.Data.StateData.GetSpecificAccountStateTrei(address)?.TokenAccounts;
+            if (accounts == null || accounts.Count < MaxTokenAccounts || accounts.Any(x => x.SmartContractUID == scUID)) return null;
+            return $"An address holds at most {MaxTokenAccounts} tokens; {address} holds no more.";
+        }
+
         /// <summary>Addresses a token may ban, and the length of one.</summary>
         public const int MaxTokenBans = 5000;
         public const int MaxBanAddressLength = 64;
@@ -305,6 +324,10 @@ namespace VerifiedXCore.Services
                         return $"A token holds at most {MaxTokenTopics} vote topics.";
                     return null;
                 }
+                case "TokenTransfer()":
+                    return TokenAccountRoom(Read(() => j["ToAddress"]?.ToString()), scUID);
+                case "TokenMint()":
+                    return TokenAccountRoom(Read(() => j["FromAddress"]?.ToString()), scUID);
                 case "TokenBanAddress()":
                 {
                     // A ban was any string, up to the transaction cap, and any number of them (round 33).

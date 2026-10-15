@@ -731,9 +731,23 @@ namespace VerifiedXCore.Services
                                             // credited an attacker-chosen supply of an EXISTING token), and the
                                             // supply / decimals must be within documented bounds.
                                             var deployBody = SmartContractDeployBinding.ReadPayload(txData).Data;
-                                            var deployBindingError = SmartContractDeployBinding.Validate(deployBody, scUID, txRequest.FromAddress, isTokenDeploy: true, out _);
+                                            var deployBindingError = SmartContractDeployBinding.Validate(deployBody, scUID, txRequest.FromAddress, isTokenDeploy: true, out var deployed);
                                             if (deployBindingError != null)
                                                 return (txResult, deployBindingError);
+
+                                            // From the path-audit height: the name and ticker are copied into every holder's account
+                                            // document, and the deployer is credited a token account it must have room for (round 33).
+                                            if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.PathAuditRulesHeight)
+                                            {
+                                                var deployedToken = deployed?.Features?.Where(f => f != null && f.FeatureName == FeatureName.Token)
+                                                    .Select(f => f.FeatureFeatures).OfType<TokenFeature>().FirstOrDefault();
+                                                if (deployedToken != null
+                                                    && ((deployedToken.TokenName?.Length ?? 0) > LedgerIntegrityRules.MaxTokenNameLength
+                                                        || (deployedToken.TokenTicker?.Length ?? 0) > LedgerIntegrityRules.MaxTokenTickerLength))
+                                                    return (txResult, $"A token's name is at most {LedgerIntegrityRules.MaxTokenNameLength} characters and its ticker {LedgerIntegrityRules.MaxTokenTickerLength}.");
+                                                if (deployedToken?.TokenSupply > 0 && LedgerIntegrityRules.TokenAccountRoom(txRequest.FromAddress, scUID) is { } noRoom)
+                                                    return (txResult, noRoom);
+                                            }
 
                                             break;
                                         }
