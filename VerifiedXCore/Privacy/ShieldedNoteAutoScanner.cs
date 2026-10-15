@@ -12,6 +12,34 @@ namespace VerifiedXCore.Privacy
     /// </summary>
     public static class ShieldedNoteAutoScanner
     {
+        private static readonly System.Threading.Channels.Channel<Block> _queue =
+            System.Threading.Channels.Channel.CreateUnbounded<Block>(new System.Threading.Channels.UnboundedChannelOptions { SingleReader = true });
+        private static int _workerStarted;
+
+        /// <summary>
+        /// Hands an accepted block to the wallet scanner, which works through blocks in order on its own thread. Block
+        /// processing called the scanner directly and waited on every local wallet's lock: a manual scan or resync of a
+        /// long range, or a lock left held, stopped this node's block processing (fifth review, round 26). Wallets are
+        /// local; nothing the chain decides waits on them.
+        /// </summary>
+        public static void Enqueue(Block block)
+        {
+            if (block?.Transactions == null || !block.Transactions.Any(t => t != null && PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)))
+                return;
+            if (Interlocked.Exchange(ref _workerStarted, 1) == 0)
+                _ = Task.Run(Worker);
+            _queue.Writer.TryWrite(block);
+        }
+
+        private static async Task Worker()
+        {
+            await foreach (var block in _queue.Reader.ReadAllAsync())
+            {
+                try { ProcessBlockForLocalWallets(block); }
+                catch (Exception ex) { ErrorLogUtility.LogError($"Shielded auto-scan error at block {block.Height}: {ex.Message}", "ShieldedNoteAutoScanner.Worker()"); }
+            }
+        }
+
         /// <summary>
         /// Scans a newly accepted block for shielded notes belonging to any local
         /// shielded wallet. Detects both incoming notes (via trial decryption) and
@@ -68,11 +96,13 @@ namespace VerifiedXCore.Privacy
             var incomingPrivacyTxRecords = new List<(Transaction tx, string receiverTransparentAddress, string senderAddress, decimal noteAmount, long blockHeight)>();
 
             // Acquire per-wallet locks to prevent concurrent API writes from clobbering state
-            var lockedAddresses = new List<string>(walletKeys.Count);
+            var heldLocks = new List<SemaphoreSlim>(walletKeys.Count);
             foreach (var (w, _) in walletKeys)
             {
-                ShieldedWalletLock.Wait(w.ShieldedAddress);
-                lockedAddresses.Add(w.ShieldedAddress);
+                var sem = ShieldedWalletLock.For(w.ShieldedAddress);
+                if (heldLocks.Contains(sem)) continue; // two rows of one wallet: one lock
+                sem.Wait();
+                heldLocks.Add(sem);
             }
 
             // Reload wallets inside the lock to get the freshest DB state
@@ -299,8 +329,8 @@ namespace VerifiedXCore.Privacy
             finally
             {
                 // Release all per-wallet locks
-                foreach (var addr in lockedAddresses)
-                    ShieldedWalletLock.Release(addr);
+                foreach (var sem in heldLocks)
+                    ShieldedWalletLock.Release(sem);
             }
 
             // Save incoming privacy TX records for receivers (outside of wallet locks)

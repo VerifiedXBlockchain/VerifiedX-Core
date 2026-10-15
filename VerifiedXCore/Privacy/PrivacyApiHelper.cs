@@ -203,7 +203,7 @@ namespace VerifiedXCore.Privacy
             if (string.IsNullOrEmpty(zfxAddress) || spentInputs == null || spentInputs.Count == 0)
                 return;
 
-            ShieldedWalletLock.Wait(zfxAddress);
+            var walletLock = ShieldedWalletLock.Acquire(zfxAddress);
             try
             {
                 // Reload fresh from DB to pick up any changes made by the auto-scanner
@@ -231,7 +231,7 @@ namespace VerifiedXCore.Privacy
             }
             finally
             {
-                ShieldedWalletLock.Release(zfxAddress);
+                ShieldedWalletLock.Release(walletLock);
             }
         }
 
@@ -244,7 +244,7 @@ namespace VerifiedXCore.Privacy
             if (string.IsNullOrEmpty(zfxAddress) || spentInputs == null || spentInputs.Count == 0)
                 return;
 
-            ShieldedWalletLock.Wait(zfxAddress);
+            var walletLock = ShieldedWalletLock.Acquire(zfxAddress);
             try
             {
                 var fresh = ShieldedWalletService.FindByZfxAddress(zfxAddress);
@@ -271,7 +271,7 @@ namespace VerifiedXCore.Privacy
             }
             finally
             {
-                ShieldedWalletLock.Release(zfxAddress);
+                ShieldedWalletLock.Release(walletLock);
             }
         }
 
@@ -341,7 +341,7 @@ namespace VerifiedXCore.Privacy
             // Track incoming privacy TXs to create local TX records for the receiver
             var incomingPrivacyTxRecords = new List<(Transaction tx, string senderAddress, decimal noteAmount, long blockHeight)>();
 
-            ShieldedWalletLock.Wait(zfxAddress);
+            var walletLock = ShieldedWalletLock.Acquire(zfxAddress);
             try
             {
             // Re-fetch inside lock for freshest state
@@ -502,7 +502,7 @@ namespace VerifiedXCore.Privacy
             } // end try
             finally
             {
-                ShieldedWalletLock.Release(zfxAddress);
+                ShieldedWalletLock.Release(walletLock);
             }
 
             // Save incoming privacy TX records for the receiver (outside of wallet lock)

@@ -35,15 +35,22 @@ namespace VerifiedXCore.Privacy
             finally { try { sem.Release(); } catch (SemaphoreFullException) { } }
         }
 
-        /// <summary>Acquire the lock synchronously (auto-scanner path).</summary>
-        public static void Wait(string zfxAddress) =>
-            For(zfxAddress).Wait();
-
-        /// <summary>Release the lock.</summary>
-        public static void Release(string zfxAddress)
+        /// <summary>
+        /// Takes the lock of the wallet row the address names and returns the semaphore taken: the caller releases that
+        /// one. Resolving the address again at release could name another row (one created meanwhile under the other
+        /// spelling), leaving this lock held for good and the auto scanner waiting on it (round 26).
+        /// </summary>
+        public static SemaphoreSlim Acquire(string zfxAddress)
         {
-            if (_locks.TryGetValue(KeyOf(zfxAddress), out var sem))
-                try { sem.Release(); } catch (SemaphoreFullException) { }
+            var sem = For(zfxAddress);
+            sem.Wait();
+            return sem;
+        }
+
+        /// <summary>Releases a semaphore <see cref="Acquire"/> returned.</summary>
+        public static void Release(SemaphoreSlim held)
+        {
+            try { held.Release(); } catch (SemaphoreFullException) { }
         }
 
         /// <summary>Acquire the lock asynchronously.</summary>

@@ -1861,7 +1861,7 @@ namespace VerifiedXCore.Services
                     // Auto-detect shielded notes for local wallets in real-time
                     try
                     {
-                        ShieldedNoteAutoScanner.ProcessBlockForLocalWallets(block);
+                        ShieldedNoteAutoScanner.Enqueue(block); // on the scanner's own thread: never waits on a wallet (round 26)
                     }
                     catch (Exception ex)
                     {

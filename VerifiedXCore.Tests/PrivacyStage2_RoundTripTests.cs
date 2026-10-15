@@ -385,6 +385,32 @@ namespace VerifiedXCore.Tests
             Assert.Equal(own.TreePosition, position); // the first leaf with the commitment is either, as LiteDB returns them
         }
 
+        /// <summary>
+        /// Block processing called the wallet scanner directly and waited on every local wallet's lock: a long manual
+        /// scan, or a lock left held, stopped the node's block processing (fifth review, round 26). The scanner takes
+        /// blocks on its own thread.
+        /// </summary>
+        [Fact]
+        public async Task BlockProcessing_DoesNotWaitOnAWalletsLock()
+        {
+            if (!ParamsLoaded()) return;
+            var shield = ShieldFor(_alice, 5M);
+            await Apply(shield, Height + 1);
+            ShieldedWalletService.Upsert(new ShieldedWallet { ShieldedAddress = _alice.ZfxAddress, ViewingKey = _alice.ViewingKey32, IsViewOnly = true });
+            var block = new Block { Height = Height + 1, StateRoot = "root", Timestamp = 1_700_000_000 + Height + 1, Hash = "auto", Transactions = new List<Transaction> { shield } };
+
+            var held = ShieldedWalletLock.Acquire(_alice.ZfxAddress);   // a long scan holds the wallet
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            ShieldedNoteAutoScanner.Enqueue(block);
+            Assert.True(watch.ElapsedMilliseconds < 1_000, "block processing waited on the wallet's lock");
+            Assert.Empty(ShieldedWalletService.FindByZfxAddress(_alice.ZfxAddress)!.UnspentCommitments);
+            ShieldedWalletLock.Release(held);
+
+            for (var i = 0; i < 100 && ShieldedWalletService.FindByZfxAddress(_alice.ZfxAddress)!.UnspentCommitments.Count == 0; i++)
+                await Task.Delay(100);
+            Assert.Equal(5M, Assert.Single(ShieldedWalletService.FindByZfxAddress(_alice.ZfxAddress)!.UnspentCommitments).Amount);
+        }
+
         [Fact]
         public async Task UnshieldTwoNotes_ProvesAndVerifies()
         {
