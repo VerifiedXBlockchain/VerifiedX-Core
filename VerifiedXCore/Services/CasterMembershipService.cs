@@ -415,6 +415,18 @@ namespace VerifiedXCore.Services
             };
             if (!validChange) return null;
 
+            // Every continuing member keeps its entry exactly: a rotation adds or removes one member and changes no one
+            // else's PeerIP or PublicKey (ProposeRotationAsync copies them from the head).
+            foreach (var c in candidate.Casters)
+            {
+                var h = head.Casters.FirstOrDefault(x => string.Equals(x.Address, c.Address, StringComparison.Ordinal));
+                if (h != null && (!string.Equals(c.PeerIP, h.PeerIP, StringComparison.Ordinal) || !string.Equals(c.PublicKey, h.PublicKey, StringComparison.Ordinal)))
+                {
+                    CasterLogUtility.Log($"MEMBERSHIP: REFUSED to sign seq {candidate.RecordSeq} — it changes continuing member {c.Address}'s entry. Proposer={request.ProposerAddress}", "MEMBERSHIP");
+                    return null;
+                }
+            }
+
             // We must be a member of the PREVIOUS set to be an eligible signer.
             var account = AccountData.GetLocalValidator();
             if (account?.GetPrivKey == null || string.IsNullOrEmpty(Globals.ValidatorAddress)) return null;
