@@ -45,7 +45,7 @@ namespace VerifiedXCore.Models
             }
             else
             {
-                var voteRecData = votes.FindOne(x => x.TopicUID == vote.TopicUID && x.Address == vote.Address);
+                var voteRecData = votes.Query().Where(x => x.TopicUID == vote.TopicUID && x.Address == vote.Address).ToList().OrderBy(x => x.Id).FirstOrDefault();
                 if (voteRecData != null)
                 {
                     return false;
@@ -66,7 +66,7 @@ namespace VerifiedXCore.Models
             var votes = GetTokenVoteDB();
             if (votes != null)
             {
-                var vote = votes.Query().Where(x => x.TopicUID == tUID).FirstOrDefault();
+                var vote = votes.Query().Where(x => x.TopicUID == tUID).ToList().OrderBy(x => x.Id).FirstOrDefault();
                 if (vote != null)
                 {
                     return vote;
@@ -82,7 +82,7 @@ namespace VerifiedXCore.Models
             var votes = GetTokenVoteDB();
             if (votes != null)
             {
-                var vote = votes.Query().Where(x => x.SmartContractUID == scUID).FirstOrDefault();
+                var vote = votes.Query().Where(x => x.SmartContractUID == scUID).ToList().OrderBy(x => x.Id).FirstOrDefault();
                 if (vote != null)
                 {
                     return vote;
@@ -98,7 +98,7 @@ namespace VerifiedXCore.Models
             var votes = GetTokenVoteDB();
             if (votes != null)
             {
-                var vote = votes.Query().Where(x => x.Address == address && x.TopicUID == topicUID).FirstOrDefault();
+                var vote = votes.Query().Where(x => x.Address == address && x.TopicUID == topicUID).ToList().OrderBy(x => x.Id).FirstOrDefault();
                 if (vote != null)
                 {
                     return true;
@@ -114,7 +114,7 @@ namespace VerifiedXCore.Models
             var votes = GetTokenVoteDB();
             if (votes != null)
             {
-                var voteList = votes.Query().Where(x => x.Address == address).ToEnumerable();
+                var voteList = votes.Query().Where(x => x.Address == address).ToList().OrderBy(x => x.Id);
                 if (voteList?.Count() > 0)
                 {
                     return voteList;
@@ -130,7 +130,7 @@ namespace VerifiedXCore.Models
             var votes = GetTokenVoteDB();
             if (votes != null)
             {
-                var voteList = votes.Query().Where(x => x.TopicUID == tUID).ToEnumerable();
+                var voteList = votes.Query().Where(x => x.TopicUID == tUID).ToList().OrderBy(x => x.Id);
                 if (voteList?.Count() > 0)
                 {
                     return voteList;

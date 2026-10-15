@@ -229,6 +229,12 @@ namespace VerifiedXCore.Data
             vbtcWithdrawalRequests.EnsureIndexSafe(x => x.TransactionHash);
             vbtcWithdrawalRequests.EnsureIndexSafe(x => x.SmartContractUID);
             vbtcWithdrawalRequests.EnsureIndexSafe(x => x.RequestorAddress);
+            // Token votes likewise: each vote cast read every vote ever cast in validation and again in apply, and a vote
+            // costs one fee (round 33).
+            var tokenVotes = DB_Wallet.GetCollection<TokenVote>(RSRV_TOKEN_VOTE);
+            tokenVotes.EnsureIndexSafe(x => x.TopicUID);
+            tokenVotes.EnsureIndexSafe(x => x.Address);
+            tokenVotes.EnsureIndexSafe(x => x.SmartContractUID);
 
             var transactions = DbContext.DB_Wallet.GetCollection<Transaction>(DbContext.RSRV_TRANSACTIONS);
             transactions.EnsureIndexSafe(x => x.Hash, false);

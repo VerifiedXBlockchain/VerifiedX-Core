@@ -38,6 +38,15 @@ namespace VerifiedXCore.Tests
             db.GetCollection("$indexes").Find(Query.EQ("collection", collection)).Select(d => d["expression"].AsString).ToArray();
 
         [Fact]
+        public void TokenVotes_AreIndexed()
+        {
+            var fields = IndexedFields(DbContext.DB_Wallet, DbContext.RSRV_TOKEN_VOTE);
+            Assert.Contains("$.TopicUID", fields);
+            Assert.Contains("$.Address", fields);
+            Assert.Contains("$.SmartContractUID", fields);
+        }
+
+        [Fact]
         public void BridgeLocks_AreIndexedByVault()
         {
             var col = VBTCBridgeLockState.GetCollection();
