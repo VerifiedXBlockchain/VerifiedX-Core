@@ -588,6 +588,13 @@ namespace VerifiedXCore.Services
 
             }
 
+            // The signature before any rule that parses or runs carried contract code: every transaction that reaches this
+            // point must pass the same check at the end of VerifyTX, so only the order of refusals changes, and a
+            // transaction nobody signed never reaches the parser or the interpreter (fifth review, round 36).
+            var earlySignatureError = SignatureError(txRequest);
+            if (earlySignatureError != null)
+                return (txResult, earlySignatureError);
+
             // The rules below read the contract call the dispatcher runs, or the transaction is refused.
             var contractCallError = LedgerIntegrityRules.ContractCallIsReadable(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                 ?? LedgerIntegrityRules.VbtcDataKeysAreDistinct(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));

@@ -90,6 +90,24 @@ namespace VerifiedXCore.Tests
             Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint, false, true, false, null, false, 1001));
         }
 
+        /// <summary>
+        /// A transaction nobody signed is refused before any rule parses or runs the code it carries (round 36): the
+        /// signature is checked first, so only its owner's own transactions reach the parser.
+        /// </summary>
+        [Theory]
+        [InlineData("Mint()", TransactionType.NFT_MINT)]
+        [InlineData("Transfer()", TransactionType.NFT_TX)]
+        [InlineData("Update()", TransactionType.NFT_MINT)]
+        public async Task AnUnsignedTransaction_IsRefusedBeforeItsBodyIsParsed(string function, TransactionType type)
+        {
+            var unsigned = Tx(function, With(DoWhile), type);
+            unsigned.Signature = null;
+            Assert.Equal((false, "Signature cannot be null."), await TransactionValidatorService.VerifyTX(unsigned));
+            var forged = Tx(function, With(DoWhile), type);
+            forged.Signature = Tx(function, With(CallsRand), type).Signature;
+            Assert.Equal((false, "Signature Failed to verify."), await TransactionValidatorService.VerifyTX(forged));
+        }
+
         [Theory]
         [InlineData("Transfer()", TransactionType.NFT_TX)]
         [InlineData("Update()", TransactionType.NFT_MINT)]
