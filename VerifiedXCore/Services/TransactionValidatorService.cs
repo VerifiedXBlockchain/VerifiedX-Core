@@ -2376,6 +2376,12 @@ namespace VerifiedXCore.Services
                             {
                                 var function = (string)jobj["Function"];
                                 TopicTrei topic = jobj["Topic"].ToObject<TopicTrei>();//review this to ensure deserialization works.
+                                // From the height a topic's end of voting names its instant: a date with no offset is read in
+                                // each node's own time zone when it is stored, so nodes would hold different instants. Checked
+                                // for every function, since the apply stores the topic whatever the function. Refused at admission at every height.
+                                if (topic != null && topic.VotingEndDate.Kind == DateTimeKind.Unspecified
+                                    && (blockHeight == null || blockHeight.Value >= Globals.PathAuditRulesHeight))
+                                    return (txResult, VotingEndDateNeedsOffsetReason);
                                 if (function == "TopicAdd()")
                                 {
                                     if (topic == null)
@@ -4454,6 +4460,7 @@ namespace VerifiedXCore.Services
         }
 
         internal const string NegativeFeeReason = "A transaction's fee cannot be negative.";
+        internal const string VotingEndDateNeedsOffsetReason = "A topic's voting end date must carry a UTC offset.";
 
         /// <summary>The transaction signature check (over the carried Hash); null when it passes.</summary>
         private static string? SignatureError(Transaction txRequest)
