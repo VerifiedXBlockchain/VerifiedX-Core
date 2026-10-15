@@ -409,6 +409,10 @@ namespace VerifiedXCore.Tests
             for (var i = 0; i < 100 && ShieldedWalletService.FindByZfxAddress(_alice.ZfxAddress)!.UnspentCommitments.Count == 0; i++)
                 await Task.Delay(100);
             Assert.Equal(5M, Assert.Single(ShieldedWalletService.FindByZfxAddress(_alice.ZfxAddress)!.UnspentCommitments).Amount);
+            // The scanner records how far it has scanned, to catch up after a restart (round 27).
+            for (var i = 0; i < 50 && ShieldedNoteAutoScanner.ProcessedThrough() < block.Height; i++)
+                await Task.Delay(100);
+            Assert.True(ShieldedNoteAutoScanner.ProcessedThrough() >= block.Height);
         }
 
         [Fact]

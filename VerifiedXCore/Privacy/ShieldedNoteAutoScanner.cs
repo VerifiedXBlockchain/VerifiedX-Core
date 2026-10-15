@@ -33,11 +33,63 @@ namespace VerifiedXCore.Privacy
 
         private static async Task Worker()
         {
+            var caughtUp = false;
             await foreach (var block in _queue.Reader.ReadAllAsync())
             {
-                try { ProcessBlockForLocalWallets(block); }
-                catch (Exception ex) { ErrorLogUtility.LogError($"Shielded auto-scan error at block {block.Height}: {ex.Message}", "ShieldedNoteAutoScanner.Worker()"); }
+                if (!caughtUp)
+                {
+                    caughtUp = true;
+                    CatchUp(block.Height);
+                }
+                Process(block);
             }
+        }
+
+        private static void Process(Block block)
+        {
+            try { ProcessBlockForLocalWallets(block); }
+            catch (Exception ex) { ErrorLogUtility.LogError($"Shielded auto-scan error at block {block.Height}: {ex.Message}", "ShieldedNoteAutoScanner.Worker()"); }
+            NoteProcessed(block.Height);
+        }
+
+        /// <summary>
+        /// Blocks queued when the node stopped were never scanned, and wallets' LastScannedBlock moved on past them with
+        /// later blocks (round 26 moved the scan off the block thread; round 27). After a restart the blocks between the
+        /// last one scanned and the first one queued are scanned first.
+        /// </summary>
+        private static void CatchUp(long firstQueued)
+        {
+            var from = ProcessedThrough();
+            if (from < 0) return; // first run of this scanner: nothing recorded to catch up from
+            for (var h = from + 1; h < firstQueued; h++)
+            {
+                Block? block;
+                try { block = BlockchainData.GetBlockByHeight(h); } catch { block = null; }
+                if (block?.Transactions != null && block.Transactions.Any(t => t != null && PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)))
+                    Process(block);
+            }
+        }
+
+        private const string StateCollection = "priv_scanner_state";
+        private sealed class ScannerState { public int Id { get; set; } = 1; public long Height { get; set; } }
+
+        internal static long ProcessedThrough()
+        {
+            try { return PrivacyDbContext.GetPrivacyDb().GetCollection<ScannerState>(StateCollection).FindById(1)?.Height ?? -1; }
+            catch { return -1; }
+        }
+
+        private static void NoteProcessed(long height)
+        {
+            try
+            {
+                var col = PrivacyDbContext.GetPrivacyDb().GetCollection<ScannerState>(StateCollection);
+                var state = col.FindById(1) ?? new ScannerState { Height = -1 };
+                if (height <= state.Height) return;
+                state.Height = height;
+                col.Upsert(state);
+            }
+            catch { }
         }
 
         /// <summary>
