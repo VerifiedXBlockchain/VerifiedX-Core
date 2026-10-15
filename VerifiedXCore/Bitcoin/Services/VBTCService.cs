@@ -162,6 +162,17 @@ namespace VerifiedXCore.Bitcoin.Services
         /// From Globals.PathAuditRulesHeight the code must also be plain (LedgerIntegrityRules.VaultCodeIsPlain): the
         /// feature alone, and nothing that reads the clock, so the answer cannot differ between nodes or change later.
         /// </summary>
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _decompileFailures = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Whether a decompile that threw is now taken as its answer (and cached): only on the third failure for the same
+        /// code. A failure was cached at once, so a passing fault (memory pressure, a race in the decompiler) made one node
+        /// treat a real vault as none until it restarted, and refuse the blocks the network took (fifth review, round 28).
+        /// Code that always throws is still decompiled only three times.
+        /// </summary>
+        internal static bool DecompileFailureSettled(string key) =>
+            _decompileFailures.AddOrUpdate(key, 1, (_, n) => n + 1) >= 3;
+
         public static bool IsVbtcV2Contract(SmartContractStateTrei? scState)
         {
             if (scState == null || string.IsNullOrEmpty(scState.SmartContractUID) || string.IsNullOrEmpty(scState.ContractData))
@@ -191,6 +202,8 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 ErrorLogUtility.LogError($"IsVbtcV2Contract: contract {scState.SmartContractUID} could not be decompiled: {ex.Message}",
                     "VBTCService.IsVbtcV2Contract()");
+                if (!DecompileFailureSettled("v2|" + scState.SmartContractUID + "|" + digest))
+                    return false; // not cached: asked again next time
                 isV2 = false;
             }
 
@@ -220,7 +233,12 @@ namespace VerifiedXCore.Bitcoin.Services
 
             bool isV1;
             try { isV1 = DeclaresVbtcV1(SmartContractMain.GenerateSmartContractInMemory(scState.ContractData)); }
-            catch { isV1 = false; }
+            catch
+            {
+                if (!DecompileFailureSettled("v1|" + scState.SmartContractUID + "|" + digest))
+                    return false; // not cached: asked again next time (round 28)
+                isV1 = false;
+            }
 
             _vbtcV1ContractCache[scState.SmartContractUID] = (digest, isV1);
             return isV1;

@@ -54,7 +54,12 @@ namespace VerifiedXCore.Bitcoin.Services
                     name = sc?.Name ?? "";
                     description = sc?.Description ?? "";
                 }
-                catch { feature = null; }
+                catch
+                {
+                    if (!VBTCService.DecompileFailureSettled("view|" + state.SmartContractUID + "|" + digest))
+                        return null; // not cached: asked again next time (round 28)
+                    feature = null;
+                }
                 entry = (digest, feature, name, description);
                 _cache[state.SmartContractUID] = entry;
             }
