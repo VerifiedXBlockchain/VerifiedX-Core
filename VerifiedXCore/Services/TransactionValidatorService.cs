@@ -3897,6 +3897,11 @@ namespace VerifiedXCore.Services
                         return (txResult, "A bridge LockId is not blank and has no spaces around it.");
                     // ... and at most 64 characters: every plan names its locks in one transaction under the size cap, and
                     // long ids filled it so every burn reaching them was refused (fifth review, round 27).
+                    // ... of letters, digits, '-' and '_': a quote or backslash takes four bytes where a plan's size is
+                    // measured, and long ids of them pushed plans over the cap (round 29).
+                    if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.PathAuditRulesHeight
+                        && !lockId.All(c => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_'))
+                        return (txResult, "A bridge LockId is made of letters, digits, '-' and '_'.");
                     if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.PathAuditRulesHeight
                         && lockId.Length > VerifiedXCore.Bitcoin.Services.BridgePoolUnlockService.MaxLockIdLength)
                         return (txResult, $"A bridge LockId is at most {VerifiedXCore.Bitcoin.Services.BridgePoolUnlockService.MaxLockIdLength} characters.");
