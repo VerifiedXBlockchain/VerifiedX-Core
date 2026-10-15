@@ -32,9 +32,26 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <param name="excludeContractUIDs">Optional set of contract UIDs to skip during allocation
         /// (e.g. blacklisted or known-broken FROST contracts).</param>
         internal static bool Nameable(string? id) =>
-            !string.IsNullOrWhiteSpace(id) && id == id.Trim() && id.All(c => c >= 0x20 && c <= 0x7E);
+            !string.IsNullOrWhiteSpace(id) && id == id.Trim() && id.Length <= MaxLockIdLength && id.All(c => c >= 0x20 && c <= 0x7E);
 
-        public static List<PoolUnlockAllocation>? ComputeAllocationPlan(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs = null)
+        /// <summary>A bridge lock's id at most (from the path-audit rules; older longer ones are left out of plans).</summary>
+        public const int MaxLockIdLength = 64;
+
+        /// <summary>
+        /// Locks one plan names at most: a plan is one transaction under the size cap (about 150 bytes a lock). A plan over
+        /// many tiny locks (made at the front of the queue on purpose, or honest dust) was refused, and every burn
+        /// reaching them went unpaid (fifth review, round 27).
+        /// </summary>
+        public const int MaxPlanAllocations = 100;
+
+        /// <summary>Locks below this are passed over first, and used only when no plan can be made without them.</summary>
+        public const decimal PlanDustBtc = 0.0001M;
+
+        public static List<PoolUnlockAllocation>? ComputeAllocationPlan(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs = null) =>
+            ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: true)
+            ?? ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: false);
+
+        private static List<PoolUnlockAllocation>? ComputeAllocationPlan(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs, bool passOverDust)
         {
             var available = VBTCBridgeLockState.GetAvailableLocksFIFO();
             if (available == null || available.Count == 0)
@@ -56,6 +73,10 @@ namespace VerifiedXCore.Bitcoin.Services
                 // id refused every plan that reached it, freezing all unlocks and exits until H2 (fifth review, round 26).
                 if (!Nameable(lockRec.LockId) || !Nameable(lockRec.SmartContractUID))
                     continue;
+                if (passOverDust && lockRec.RemainingAmount < PlanDustBtc)
+                    continue;
+                if (allocations.Count >= MaxPlanAllocations)
+                    return null; // more locks than one transaction can name
 
                 // Whole satoshis, as consensus takes them from the path-audit rules: a lock made before amounts were held
                 // to 8 places (VX-01) is drawn down to its last whole satoshi (round 16).

@@ -3860,6 +3860,11 @@ namespace VerifiedXCore.Services
                     if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.PathAuditRulesHeight
                         && (string.IsNullOrWhiteSpace(lockId) || lockId != lockId.Trim()))
                         return (txResult, "A bridge LockId is not blank and has no spaces around it.");
+                    // ... and at most 64 characters: every plan names its locks in one transaction under the size cap, and
+                    // long ids filled it so every burn reaching them was refused (fifth review, round 27).
+                    if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.PathAuditRulesHeight
+                        && lockId.Length > VerifiedXCore.Bitcoin.Services.BridgePoolUnlockService.MaxLockIdLength)
+                        return (txResult, $"A bridge LockId is at most {VerifiedXCore.Bitcoin.Services.BridgePoolUnlockService.MaxLockIdLength} characters.");
 
                     // Reserve-held vBTC is locked: bridge locks from a reserve address are denied.
                     if (txRequest.FromAddress.StartsWith("xRBX"))

@@ -823,6 +823,23 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A plan is one transaction under the size cap: tiny locks at the front of the queue made every plan reaching
+        /// them too large, and those burns went unpaid (round 27). Dust is passed over first; a plan names 100 locks at most.
+        /// </summary>
+        [Fact]
+        public async Task TinyLocksAtTheFront_DoNotMakeEveryPlanTooLarge()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 2_000_000);
+            for (var i = 0; i < 5; i++) await Lock(vault.Uid, 0.00001M);
+            var big = await Lock(vault.Uid, 0.01M);
+            Assert.Equal(big, Assert.Single(BridgePoolUnlockService.ComputeAllocationPlan(0.005M)!).LockId);   // dust passed over
+            Assert.Equal(6, BridgePoolUnlockService.ComputeAllocationPlan(0.01005M)!.Count);                  // needed: used
+            Assert.False(BridgePoolUnlockService.Nameable(new string('a', BridgePoolUnlockService.MaxLockIdLength + 1)));
+        }
+
+        /// <summary>
         /// Locks made before amounts were held to 8 places (VX-01) can hold a fraction of a satoshi; the plan drew it, and
         /// consensus, which takes whole satoshis from the path-audit rules (round 15), refused every plan that reached it
         /// (fifth review, round 16). A lock is drawn down to its last whole satoshi.
