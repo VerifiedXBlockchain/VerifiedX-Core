@@ -1215,6 +1215,11 @@ namespace VerifiedXCore.Data
                                         await rDb.UpdateSafeAsync(rLocalAccount);
                                 }
                             }
+                            // Read again from the path-audit rules: the sender's write above may be this same account (a
+                            // reserve calling back its payment to itself, on testnet), and the copy read before it overwrote
+                            // the refund (fifth review, round 28).
+                            if (stateTreiTo != null && height >= Globals.PathAuditRulesHeight)
+                                stateTreiTo = GetSpecificAccountStateTrei(rTX.ToAddress) ?? stateTreiTo;
                             if (stateTreiTo != null)
                             {
                                 //remove amount from locked To address
@@ -1447,6 +1452,11 @@ namespace VerifiedXCore.Data
                                 }
                             }
 
+                            // Read again from the path-audit rules: a payment to the reserve's own recovery address was
+                            // credited to it just above, and the copy read before that overwrote the credit - the payment left
+                            // the supply (fifth review, round 28).
+                            if (stateTreiTo != null && height >= Globals.PathAuditRulesHeight)
+                                stateTreiTo = GetSpecificAccountStateTrei(rTX.ToAddress) ?? stateTreiTo;
                             if (stateTreiTo != null)
                             {
                                 // HAL-070 Fix: Lower-bound check on LockedBalance

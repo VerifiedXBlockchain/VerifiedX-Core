@@ -90,6 +90,36 @@ namespace VerifiedXCore.Tests
         private static void TipBelowGate() => Globals.LastBlock = new Block { Height = Gate - 2 };
         private static void TipAtGate() => Globals.LastBlock = new Block { Height = Gate - 1 };
 
+        /// <summary>
+        /// A reserve's pending payment to its own recovery address: Recover() credited the recovery account, then wrote a
+        /// copy of it read before that credit, and the payment left the supply (fifth review, round 28).
+        /// </summary>
+        [Fact]
+        public async Task Recover_OfAPaymentToTheRecoveryAddressItself_KeepsTheAmount()
+        {
+            var accounts = StateData.GetAccountStateTrei();
+            var reserve = accounts.FindOne(x => x.Key == _reserve);
+            reserve.Balance = 900M; reserve.LockedBalance = 100M;
+            accounts.UpdateSafe(reserve);
+            accounts.InsertSafe(new AccountStateTrei { Key = _recoveryAddress, Balance = 0M, LockedBalance = 100M, Nonce = 0 });
+            ReserveTransactions.GetReserveTransactionsDb()!.Insert(new ReserveTransactions
+            {
+                Id = Guid.NewGuid(), Hash = new string('a', 64), FromAddress = _reserve, ToAddress = _recoveryAddress, Amount = 100M,
+                TransactionType = TransactionType.TX, ReserveTransactionStatus = ReserveTransactionStatus.Pending,
+                ConfirmTimestamp = TimeUtil.GetTime() + 86_400, UnlockTime = TimeUtil.GetTime() + 86_400, Signature = "s", Height = 1,
+            });
+            var sigTime = TimeUtil.GetTime();
+            var recover = Recover(new { Function = "Recover()", RecoveryAddress = _recoveryAddress, RecoverySigScript = RecoverySig(sigTime, _recoveryAddress), SignatureTime = sigTime });
+            var height = Math.Max(Globals.PathAuditRulesHeight, Gate);
+            recover.Height = height;
+            var applied = await StateData.UpdateTreis(new Block { Height = height, StateRoot = "root", Transactions = new List<Transaction> { recover } });
+
+            var after = accounts.FindOne(x => x.Key == _recoveryAddress);
+            var left = accounts.FindOne(x => x.Key == _reserve);
+            Assert.True(1000M - recover.Fee == after.Balance + left.Balance + left.LockedBalance, $"applied {applied}; recovery {after.Balance}/{after.LockedBalance}; reserve {left.Balance}/{left.LockedBalance}"); // nothing left the supply but the fee
+            Assert.Equal(0M, after.LockedBalance);
+        }
+
         [Fact]
         public async Task EmptyRecoverySigScript_PassesBelowGate_RefusedAtGate()
         {
