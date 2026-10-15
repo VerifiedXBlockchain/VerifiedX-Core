@@ -135,6 +135,22 @@ namespace VerifiedXCore.P2P
         // NEW-20: reporters per reported address (a peer counts once), and a bound on how many addresses are tracked.
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, System.Collections.Concurrent.ConcurrentDictionary<string, byte>> _ipReporters = new();
         private const int MaxTrackedReportedIPs = 256;
+        // A peer sees one address for this node, so it holds one vote: a new report moves it. Every dial selector skips
+        // ReportedIPs, so without this one peer could fill the table with addresses this node would then never dial.
+        private static readonly Dictionary<string, string> _reporterVote = new();
+        private const int MaxTrackedReporters = 1024;
+        private static readonly object _reportedIpLock = new();
+        // Program.cs and Config.cs seed a manually configured address with this weight; peer votes never remove it.
+        private const int ManualReportWeight = 99999;
+
+        internal static void ResetReportedIPTracking()
+        {
+            lock (_reportedIpLock)
+            {
+                _ipReporters.Clear();
+                _reporterVote.Clear();
+            }
+        }
 
         /// <summary>
         /// NEW-20: records a peer's report of this node's public address. The value was any string (up to ~1.15 MB), was
@@ -149,12 +165,41 @@ namespace VerifiedXCore.P2P
                 return;
             var ip = VerifiedXCore.Utilities.RemoteIp.Text(parsed)!;
             var who = string.IsNullOrEmpty(reporter) ? "?" : reporter;
-            if (!_ipReporters.ContainsKey(ip) && _ipReporters.Count >= MaxTrackedReportedIPs)
-                return;
-            var set = _ipReporters.GetOrAdd(ip, _ => new System.Collections.Concurrent.ConcurrentDictionary<string, byte>());
-            if (set.Count < 64) set.TryAdd(who, 0);
-            Globals.ReportedIPs.AddOrUpdate(ip, set.Count, (_, existing) => Math.Max(existing, set.Count));
+            lock (_reportedIpLock)
+            {
+                _reporterVote.TryGetValue(who, out var previous);
+                if (previous == ip)
+                    return;
+                if (previous == null && _reporterVote.Count >= MaxTrackedReporters)
+                    return;
+                if (_ipReporters.TryGetValue(ip, out var existingSet) ? existingSet.Count >= 64 : _ipReporters.Count >= MaxTrackedReportedIPs)
+                    return;
+                if (previous != null)
+                    WithdrawReport(previous, who);
+
+                var set = _ipReporters.GetOrAdd(ip, _ => new System.Collections.Concurrent.ConcurrentDictionary<string, byte>());
+                set.TryAdd(who, 0);
+                _reporterVote[who] = ip;
+                Globals.ReportedIPs.AddOrUpdate(ip, set.Count, (_, existing) => Math.Max(existing, set.Count));
+            }
             TryAutoUpdateReportedIP();
+        }
+
+        private static void WithdrawReport(string ip, string reporter)
+        {
+            _reporterVote.Remove(reporter);
+            if (!_ipReporters.TryGetValue(ip, out var set))
+                return;
+            set.TryRemove(reporter, out _);
+            var remaining = set.Count;
+            if (remaining == 0)
+                _ipReporters.TryRemove(ip, out _);
+            if (Globals.ReportedIPs.TryGetValue(ip, out var current) && current >= ManualReportWeight)
+                return;
+            if (remaining == 0)
+                Globals.ReportedIPs.TryRemove(ip, out _);
+            else
+                Globals.ReportedIPs[ip] = remaining;
         }
 
         public static void TryAutoUpdateReportedIP()
