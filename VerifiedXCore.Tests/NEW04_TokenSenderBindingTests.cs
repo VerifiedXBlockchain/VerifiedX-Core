@@ -222,6 +222,26 @@ namespace VerifiedXCore.Tests
             Assert.Equal(15M, TokenBalanceOf(_attacker.Address));
         }
 
+        /// <summary>
+        /// Two transfers of one sender's ADNR in one block both pass validation (each read against the state before the
+        /// block); the second found no name at apply and looped for good, and once NEW-12 awaited it every node stopped
+        /// on that block (fifth review, round 26).
+        /// </summary>
+        [Fact]
+        public async Task TwoTransfersOfOneAdnr_InOneBlock_DoNotStopTheBlock()
+        {
+            Adnr.GetAdnr()!.InsertSafe(new Adnr { Address = _victim.Address, Name = "victimname.vfx", TxHash = "h", Timestamp = 1 });
+            VerifiedXCore.Models.Transaction Move(string to, long nonce) => new()
+            {
+                FromAddress = _victim.Address, ToAddress = to, Amount = 0M, Fee = 0M, Nonce = nonce, Timestamp = 1_700_000_000,
+                TransactionType = TransactionType.ADNR, Data = "{\"Function\":\"AdnrTransfer()\"}", Hash = "adnr" + nonce, Height = 101,
+            };
+            var block = new Block { Height = 101, StateRoot = "root", Transactions = new List<VerifiedXCore.Models.Transaction> { Move(_attacker.Address, 0), Move(_victim.Address + "x", 1) } };
+            var apply = StateData.UpdateTreis(block);
+            Assert.Same(apply, await Task.WhenAny(apply, Task.Delay(10_000)));
+            Assert.Equal(_attacker.Address, Adnr.GetAdnr()!.FindOne(x => x.Name == "victimname.vfx").Address);
+        }
+
         [Theory]
         [InlineData("upper")]
         [InlineData("softhyphen")]

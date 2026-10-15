@@ -1729,41 +1729,33 @@ namespace VerifiedXCore.Data
             }
         }
 
+        /// <summary>
+        /// Moves a BTC ADNR. It looped until the name was found: a second transfer (or a delete, then a transfer) of one
+        /// sender's name in one block passes validation, which reads the state before the block, and found nothing at
+        /// apply, so every node spun on that block for good (fifth review, round 26). A name that is not there is left.
+        /// </summary>
         private static async Task TransferBTCAdnr(Transaction tx)
         {
-            bool complete = false;
             try
             {
-                while (!complete)
-                {
-                    if (tx.Data != null)
-                    {
-                        var jobj = JObject.Parse(tx.Data);
-                        var BTCToAddress = (string?)jobj["BTCToAddress"];
-                        var BTCFromAddress = (string?)jobj["BTCFromAddress"];
+                if (tx.Data == null) return;
+                var jobj = JObject.Parse(tx.Data);
+                var BTCToAddress = (string?)jobj["BTCToAddress"];
+                var BTCFromAddress = (string?)jobj["BTCFromAddress"];
 
-                        var adnrs = BitcoinAdnr.GetBitcoinAdnr();
-                        if (adnrs != null)
-                        {
-                            var adnr = adnrs.FindOne(x => x.BTCAddress == BTCFromAddress);
-                            if (adnr != null)
-                            {
-                                adnr.BTCAddress = BTCToAddress;
-                                adnr.RBXAddress = tx.ToAddress;
-                                adnr.TxHash = tx.Hash;
-                                await adnrs.UpdateSafeAsync(adnr);
-                                complete = true;
-                            }
-                        }
-                    }
-                    else
-                    {
-                        complete = true;
-                    }
-                    
+                var adnrs = BitcoinAdnr.GetBitcoinAdnr();
+                var adnr = adnrs?.FindOne(x => x.BTCAddress == BTCFromAddress);
+                if (adnr == null)
+                {
+                    ErrorLogUtility.LogError($"BTC ADNR transfer {tx.Hash}: no name for {BTCFromAddress} (moved or deleted earlier in the block); nothing applied.", "StateData.TransferBTCAdnr()");
+                    return;
                 }
+                adnr.BTCAddress = BTCToAddress;
+                adnr.RBXAddress = tx.ToAddress;
+                adnr.TxHash = tx.Hash;
+                await adnrs!.UpdateSafeAsync(adnr);
             }
-            catch { complete = true; }
+            catch { }
         }
 
         private static void DeleteBTCAdnr(Transaction tx)
@@ -1805,25 +1797,19 @@ namespace VerifiedXCore.Data
                 ErrorLogUtility.LogError("Failed to add ADNR at state level!", "StateData.AddNewAdnr()");
             }
         }
+        /// <summary>Moves an ADNR; as <see cref="TransferBTCAdnr"/>, a name that is not there is left (it looped for good; round 26).</summary>
         private static async Task TransferAdnr(Transaction tx)
         {
-            bool complete = false;
-            while(!complete)
+            var adnrs = Adnr.GetAdnr();
+            var adnr = adnrs?.FindOne(x => x.Address == tx.FromAddress);
+            if (adnr == null)
             {
-                var adnrs = Adnr.GetAdnr();
-                if (adnrs != null)
-                {
-                    var adnr = adnrs.FindOne(x => x.Address == tx.FromAddress);
-                    if (adnr != null)
-                    {
-                        adnr.Address = tx.ToAddress;
-                        adnr.TxHash = tx.Hash;
-                        await adnrs.UpdateSafeAsync(adnr);
-                        complete = true;
-                    }
-                }
+                ErrorLogUtility.LogError($"ADNR transfer {tx.Hash}: no name for {tx.FromAddress} (moved or deleted earlier in the block); nothing applied.", "StateData.TransferAdnr()");
+                return;
             }
-            
+            adnr.Address = tx.ToAddress;
+            adnr.TxHash = tx.Hash;
+            await adnrs!.UpdateSafeAsync(adnr);
         }
 
         private static void DeleteAdnr(Transaction tx)
