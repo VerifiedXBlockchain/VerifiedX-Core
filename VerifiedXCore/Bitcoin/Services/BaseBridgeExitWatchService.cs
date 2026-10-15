@@ -25,6 +25,10 @@ namespace VerifiedXCore.Bitcoin.Services
         private static int _span = MaxBlockSpan;
         private static int _singleBlockFailures;
         private const int SingleBlockFailuresBeforeSkip = 20;
+
+        /// <summary>Base blocks read again after a restart: about two hours (round 23).</summary>
+        internal const long RestartRewindBlocks = 3_600;
+        private static bool _rewoundAfterStart;
         private static long? _startBlockOverride;
 
         /// <summary>V3 contract event: burnForVfxExit(amount, vfxDestinationAddress)</summary>
@@ -156,7 +160,24 @@ namespace VerifiedXCore.Bitcoin.Services
                     BridgeExitSyncState.Save(state);
                     LogUtility.Log($"[BaseBridgeExit] Initialized scan cursor at block {state.LastScannedBlock} (only new burns after this are processed).",
                         "BaseBridgeExitWatchService.PollOnceInternal");
+                    _rewoundAfterStart = true;
                     return (0, latest, "Initialized cursor; no backlog scan on first run");
+                }
+            }
+
+            // The burns a caster had in hand when it stopped (detected, in consensus, sent but not mined) were only in its
+            // memory, and the saved cursor is past them: once the committee had restarted, nothing took them up again
+            // (fifth review, round 23). The last stretch is read again; burns the chain has redeemed are passed over.
+            if (!_rewoundAfterStart)
+            {
+                _rewoundAfterStart = true;
+                var back = Math.Max(0, state.LastScannedBlock - RestartRewindBlocks);
+                if (back < state.LastScannedBlock)
+                {
+                    LogUtility.Log($"[BaseBridgeExit] Restarted: reading Base again from block {back + 1} (cursor was {state.LastScannedBlock}).",
+                        "BaseBridgeExitWatchService.PollOnceInternal");
+                    state.LastScannedBlock = back;
+                    BridgeExitSyncState.Save(state);
                 }
             }
 

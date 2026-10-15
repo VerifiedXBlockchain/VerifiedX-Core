@@ -187,12 +187,61 @@ namespace VerifiedXCore.Bitcoin.Services
                     }
                 }
                 LogUtility.Log($"[BurnExitConsensus] Catch-up sync complete. Marked {syncedCount} burns as processed.", "BurnExitConsensusService");
+                var reloaded = ReloadUnfinishedWatchedExits(currentHeight);
+                if (reloaded > 0)
+                    LogUtility.Log($"[BurnExitConsensus] Took up {reloaded} exit(s) on watched vaults the chain holds open or has failed.", "BurnExitConsensusService");
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"[BurnExitConsensus] Catch-up sync error: {ex.Message}", "BurnExitConsensusService");
             }
             await Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// The exits on watched vaults the chain holds open or has failed, taken up again after a restart. Following an
+        /// open exit, and making a failed one again, rested on this caster's memory: the catch-up above marks every
+        /// bridge transaction of its last 500 blocks complete and reads nothing older, so once the committee had
+        /// restarted (a rolling upgrade) an exit failed by rule afterwards was never made again and its burn stayed
+        /// unpaid (fifth review, round 23). Each is looked at again by the stuck-exit check: followed while the chain
+        /// holds it open, made again once failed.
+        /// </summary>
+        internal static int ReloadUnfinishedWatchedExits(long currentHeight)
+        {
+            var reloaded = 0;
+            List<VBTCBridgeBtcExitState> exits;
+            try { exits = VBTCBridgeBtcExitState.GetCollection().FindAll().ToList(); }
+            catch { return 0; }
+            foreach (var exit in exits)
+            {
+                if ((exit.IsComplete && !exit.IsFailedRecord) || string.IsNullOrEmpty(exit.BaseBurnTxHash) || !Attestation.BtcWithdrawals.IsWatchedExit(exit)) continue; // a failed exit is closed too
+                _processedBurns[exit.BaseBurnTxHash] = new ProcessedBurnRecord
+                {
+                    BaseBurnTxHash = exit.BaseBurnTxHash,
+                    ExitType = BurnExitType.BtcExit,
+                    BtcDestination = exit.BtcDestination,
+                    Amount = exit.Amount,
+                    Status = BurnExitStatus.VfxTxCreated,
+                    CompletionVfxTxHash = exit.IsFailedRecord ? "" : exit.ExitTxHash,
+                    AllocationsJson = exit.AllocationsJson ?? "",
+                    DetectedAtBlock = currentHeight,
+                };
+                reloaded++;
+            }
+            return reloaded;
+        }
+
+        internal static ProcessedBurnRecord? ProcessedBurnForTests(string baseBurnTxHash) =>
+            _processedBurns.TryGetValue(baseBurnTxHash, out var r) ? r : null;
+
+        /// <summary>
+        /// Whether the chain has redeemed this burn or holds an exit for it. After a restart the watcher reads back over
+        /// a stretch of Base (round 23); burns already paid there are passed over, not voted on again.
+        /// </summary>
+        private static bool ChainHasTheBurn(string baseBurnTxHash)
+        {
+            try { return VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(baseBurnTxHash); }
+            catch { return false; }
         }
 
         /// <summary>Process pending burns that haven't entered consensus yet.</summary>
@@ -231,6 +280,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 LogUtility.Log($"[BurnExitConsensus] Skipping already-tracked burn: {baseBurnTxHash}", "BurnExitConsensusService");
                 return;
             }
+            if (ChainHasTheBurn(baseBurnTxHash))
+                return;
 
             var record = new ProcessedBurnRecord
             {
@@ -275,7 +326,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Handle BurnAlert from another caster via HTTP.</summary>
         public static async Task HandleBurnAlert(BurnAlert alert)
         {
-            if (alert == null || string.IsNullOrEmpty(alert.BaseBurnTxHash) || _processedBurns.ContainsKey(alert.BaseBurnTxHash))
+            if (alert == null || string.IsNullOrEmpty(alert.BaseBurnTxHash) || _processedBurns.ContainsKey(alert.BaseBurnTxHash) || ChainHasTheBurn(alert.BaseBurnTxHash))
                 return;
 
             // SECURITY: only a committee caster's signed, fresh alert enters the consensus queue.

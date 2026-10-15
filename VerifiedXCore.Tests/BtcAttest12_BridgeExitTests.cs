@@ -565,6 +565,44 @@ namespace VerifiedXCore.Tests
             Assert.Equal(0.005M, BtcAttestBalance.DepositBtc(vault.Uid));
         }
 
+        /// <summary>
+        /// Following an open watched exit, and making it again once failed, rested on a caster's memory: after a restart
+        /// the catch-up marked recent bridge transactions complete and read nothing older, and an exit failed by rule
+        /// afterwards was never made again (fifth review, round 23). A restarted caster takes them up from the chain.
+        /// </summary>
+        [Fact]
+        public async Task ARestartedCaster_TakesUpTheWatchedExitsTheChainHoldsOpenOrHasFailed()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.004M);
+            await Mine(Request(vault.Uid, 0.001M));   // holds the vault's only coin: the exit cannot be pinned
+            var burn = NewBurn();
+            var exit = await Mine(Exit(burn, BtcDest, (lockId, vault.Uid, 0.004M)));
+            var mined = Tip;
+
+            Assert.Equal(1, BurnExitConsensusService.ReloadUnfinishedWatchedExits(Tip));
+            var open = BurnExitConsensusService.ProcessedBurnForTests(burn)!;
+            Assert.Equal(BurnExitConsensusService.BurnExitStatus.VfxTxCreated, open.Status);   // followed by the stuck-exit check
+            Assert.Equal(exit.Hash, open.CompletionVfxTxHash);
+            Assert.Equal(BtcDest, open.BtcDestination);
+            Assert.Equal(0.004M, open.Amount);
+
+            await Apply(mined + VBTCWithdrawalRequest.EXPIRY_BLOCKS + 1);
+            Assert.True(Record(burn).IsFailedRecord);
+            Assert.Equal(1, BurnExitConsensusService.ReloadUnfinishedWatchedExits(Tip));
+            var failed = BurnExitConsensusService.ProcessedBurnForTests(burn)!;
+            Assert.Equal(BurnExitConsensusService.BurnExitStatus.VfxTxCreated, failed.Status); // made again by the stuck-exit check
+            Assert.Equal("", failed.CompletionVfxTxHash);
+
+            // Paid: nothing to take up.
+            var record = Record(burn);
+            record.IsComplete = true; record.BtcTxHash = "aa";
+            VBTCBridgeBtcExitState.Update(record);
+            Assert.Equal(0, BurnExitConsensusService.ReloadUnfinishedWatchedExits(Tip));
+        }
+
         [Fact]
         public async Task APinnedExitCoinSpentByAnotherTransaction_VoidsThePart_AndTheExitCanBeMadeFromOtherLocks()
         {
