@@ -34,6 +34,16 @@ namespace VerifiedXCore.Privacy
 
             lock (MempoolRegisterLock)
             {
+                // One transaction naming one nullifier twice is refused by every block that holds it ("Duplicate nullifier
+                // within block"): admitted, it was proposed block after block and every producer stopped (fifth review,
+                // round 19). Not a change to any block's verdict.
+                var own = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var n in nullifiersB64)
+                    if (!string.IsNullOrWhiteSpace(n) && !PrivacyEpoch.IsDummyNullifier(n) && !own.Add(n))
+                    {
+                        error = "This transaction spends one nullifier twice.";
+                        return false;
+                    }
                 foreach (var n in nullifiersB64)
                 {
                     if (string.IsNullOrWhiteSpace(n))
