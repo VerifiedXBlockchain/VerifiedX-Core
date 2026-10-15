@@ -1571,6 +1571,27 @@ namespace VerifiedXCore.Data
                         await Written(stDb.InsertSafeAsync(acctStateTreiTo), "acctStateTreiTo");
                 }
 
+                // From the path-audit rules a reserve moves no token (round 9's rule), so its token balances go with the
+                // recovery too, or they were frozen for good (fifth review, round 28).
+                if (height >= Globals.PathAuditRulesHeight && rsrvAccount.TokenAccounts?.Count > 0)
+                {
+                    var recoveryRow = GetSpecificAccountStateTrei(_recoveryAddress);
+                    if (recoveryRow != null)
+                    {
+                        recoveryRow.TokenAccounts ??= new List<TokenAccount>();
+                        foreach (var token in rsrvAccount.TokenAccounts.Where(t => t != null && t.Balance > 0M))
+                        {
+                            var held = recoveryRow.TokenAccounts.FirstOrDefault(t => t.SmartContractUID == token.SmartContractUID);
+                            if (held == null)
+                                recoveryRow.TokenAccounts.Add(TokenAccount.CreateTokenAccount(token.SmartContractUID, token.TokenName, token.TokenTicker, token.Balance, token.DecimalPlaces));
+                            else
+                                held.Balance += token.Balance;
+                            token.Balance = 0M;
+                        }
+                        await Written(stDb.UpdateSafeAsync(recoveryRow), "recoveryRow tokens");
+                    }
+                }
+
                 rsrvAccount.Balance = 0.0M;
                 rsrvAccount.LockedBalance = 0.0M;
 
@@ -1590,6 +1611,17 @@ namespace VerifiedXCore.Data
                             sc.NextOwner = null;
                             sc.IsLocked = false;
                             await WriteContractStateAsync(_scDb, sc);
+                        }
+                    }
+
+                    // ... and a token contract it owns: from the path-audit rules a reserve cannot pause, mint or hand it
+                    // on, and its owner powers (a pause in force) were stuck for good (round 28).
+                    if (height >= Globals.PathAuditRulesHeight && _recoveryAddress != null)
+                    {
+                        foreach (var token in _scDb.Query().Where(x => x.TokenDetails != null && x.TokenDetails.ContractOwner == _fromAddress).ToList())
+                        {
+                            token.TokenDetails!.ContractOwner = _recoveryAddress;
+                            await WriteContractStateAsync(_scDb, token);
                         }
                     }
 

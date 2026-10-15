@@ -120,6 +120,34 @@ namespace VerifiedXCore.Tests
             Assert.Equal(0M, after.LockedBalance);
         }
 
+        /// <summary>
+        /// From the path-audit rules a reserve moves no token, and Recover() did not move them either: a reserve's token
+        /// balances, and its token contracts' owner powers, were frozen for good (round 28). They go to the recovery address.
+        /// </summary>
+        [Fact]
+        public async Task Recover_MovesTheReservesTokensAndTokenContracts()
+        {
+            var accounts = StateData.GetAccountStateTrei();
+            var reserve = accounts.FindOne(x => x.Key == _reserve);
+            reserve.TokenAccounts = new List<TokenAccount> { TokenAccount.CreateTokenAccount("tok:1", "T", "T", 50M, 2) };
+            accounts.UpdateSafe(reserve);
+            accounts.InsertSafe(new AccountStateTrei { Key = _recoveryAddress, Balance = 0M, Nonce = 0 });
+            SmartContractStateTrei.GetSCST()!.InsertSafe(new SmartContractStateTrei
+            {
+                SmartContractUID = "tok:1", OwnerAddress = "someoneelse", ContractData = "x", Nonce = 0,
+                TokenDetails = new VerifiedXCore.Models.SmartContracts.TokenDetails { TokenName = "T", TokenTicker = "T", ContractOwner = _reserve, IsPaused = true },
+            });
+            var sigTime = TimeUtil.GetTime();
+            var recover = Recover(new { Function = "Recover()", RecoveryAddress = _recoveryAddress, RecoverySigScript = RecoverySig(sigTime, _recoveryAddress), SignatureTime = sigTime });
+            var height = Math.Max(Globals.PathAuditRulesHeight, Gate);
+            recover.Height = height;
+            await StateData.UpdateTreis(new Block { Height = height, StateRoot = "root", Transactions = new List<Transaction> { recover } });
+
+            Assert.Equal(50M, accounts.FindOne(x => x.Key == _recoveryAddress).TokenAccounts!.Single(t => t.SmartContractUID == "tok:1").Balance);
+            Assert.Equal(0M, accounts.FindOne(x => x.Key == _reserve).TokenAccounts!.Single().Balance);
+            Assert.Equal(_recoveryAddress, SmartContractStateTrei.GetSmartContractState("tok:1")!.TokenDetails!.ContractOwner);
+        }
+
         [Fact]
         public async Task EmptyRecoverySigScript_PassesBelowGate_RefusedAtGate()
         {
