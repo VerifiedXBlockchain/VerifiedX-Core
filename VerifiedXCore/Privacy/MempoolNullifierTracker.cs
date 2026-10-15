@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using VerifiedXCore.Data;
 using VerifiedXCore.Models;
 
 namespace VerifiedXCore.Privacy
@@ -8,6 +10,22 @@ namespace VerifiedXCore.Privacy
     public static class MempoolNullifierTracker
     {
         private static readonly object MempoolRegisterLock = new();
+
+        /// <summary>When each holder last claimed its nullifiers (UTC), keyed by TX hash.</summary>
+        private static readonly ConcurrentDictionary<string, DateTime> ClaimedAtUtc = new();
+
+        /// <summary>
+        /// A claim whose holder is no longer in the mempool is stale once it is older than this. The grace covers the
+        /// gap between VerifyTX registering a claim and the TX being inserted into the mempool.
+        /// </summary>
+        internal static TimeSpan StaleClaimGrace = TimeSpan.FromSeconds(60);
+
+        /// <summary>Whether <c>txHash</c> is still in the local mempool; true when the mempool cannot be read.</summary>
+        private static bool IsInMempool(string txHash)
+        {
+            var pool = TransactionData.GetPool();
+            return pool == null || pool.Exists(x => x.Hash == txHash);
+        }
 
         public static string MakeKey(string assetType, string nullifierBase64) =>
             $"{assetType}\u001d{nullifierBase64}";
@@ -39,6 +57,25 @@ namespace VerifiedXCore.Privacy
                 .ToList();
             foreach (var k in toRemove)
                 Globals.MempoolNullifiers.TryRemove(k, out _);
+            ClaimedAtUtc.TryRemove(txHash, out _);
+        }
+
+        /// <summary>
+        /// A TX can leave the mempool (dropped at proposal, aged out, refused after VerifyTX) on paths that do not
+        /// release its claims. Such a claim must not keep the notes unspendable, so a conflicting spend may take it over.
+        /// </summary>
+        private static bool IsStaleClaim(string holder)
+        {
+            if (ClaimedAtUtc.TryGetValue(holder, out var claimedAt) && DateTime.UtcNow - claimedAt < StaleClaimGrace)
+                return false;
+            try
+            {
+                return !IsInMempool(holder);
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         /// <summary>Registers payload nullifiers for a TX that passed validation and is being (or was) admitted to the mempool.</summary>
@@ -77,8 +114,12 @@ namespace VerifiedXCore.Privacy
                     var key = MakeKey(assetType, n);
                     if (Globals.MempoolNullifiers.TryGetValue(key, out var holder) && holder != txHash)
                     {
-                        error = "A pending transaction already spends this nullifier.";
-                        return false;
+                        if (!IsStaleClaim(holder))
+                        {
+                            error = "A pending transaction already spends this nullifier.";
+                            return false;
+                        }
+                        ReleaseClaimsForTxHash(holder);
                     }
                 }
 
@@ -89,6 +130,7 @@ namespace VerifiedXCore.Privacy
                     var key = MakeKey(assetType, n);
                     Globals.MempoolNullifiers[key] = txHash;
                 }
+                ClaimedAtUtc[txHash] = DateTime.UtcNow;
             }
 
             return true;
