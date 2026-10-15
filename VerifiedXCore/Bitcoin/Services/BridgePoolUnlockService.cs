@@ -32,7 +32,11 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <param name="excludeContractUIDs">Optional set of contract UIDs to skip during allocation
         /// (e.g. blacklisted or known-broken FROST contracts).</param>
         internal static bool Nameable(string? id) =>
-            !string.IsNullOrWhiteSpace(id) && id == id.Trim() && id.Length <= MaxLockIdLength && id.All(c => c >= 0x20 && c <= 0x7E);
+            NameableText(id) && id!.Length <= MaxLockIdLength;
+
+        /// <summary>A vault UID a plan can name: printable ASCII, not padded. Not held to the lock id's 64 (a created UID may run to 85; round 28).</summary>
+        internal static bool NameableText(string? id) =>
+            !string.IsNullOrWhiteSpace(id) && id == id.Trim() && id.All(c => c >= 0x20 && c <= 0x7E);
 
         /// <summary>A bridge lock's id at most (from the path-audit rules; older longer ones are left out of plans).</summary>
         public const int MaxLockIdLength = 64;
@@ -76,7 +80,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 // A lock whose id or vault cannot be named in a transaction consensus takes (from the path-audit rules:
                 // printable ASCII, no spaces around, not blank) is left out: a lock made before those rules with such an
                 // id refused every plan that reached it, freezing all unlocks and exits until H2 (fifth review, round 26).
-                if (!Nameable(lockRec.LockId) || !Nameable(lockRec.SmartContractUID))
+                if (!Nameable(lockRec.LockId) || !NameableText(lockRec.SmartContractUID))
                     continue;
                 if (passOverDust && lockRec.RemainingAmount < PlanDustBtc)
                     continue;
