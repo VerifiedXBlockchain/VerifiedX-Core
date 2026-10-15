@@ -614,14 +614,15 @@ namespace VerifiedXCore.Tests
             Assert.Null(BtcWithdrawals.ExitRefusal(ExitComplete(burn, new string('b', 64))));
             Assert.True((await Verify(ExitComplete(burn, new string('b', 64)), Tip + 1)).Ok);
 
-            // A caster fails an older-vault exit (it may already have paid it in Bitcoin; nothing on chain says): the burn
-            // is exited again only from older vaults, never from a watched vault's locks (round 14).
+            // The caster fails an older-vault exit whose vault could not sign, and makes the exit again from what is left:
+            // watched vaults' locks too (the handler's own retry; round 14's rule against it stranded honest burns and was
+            // withdrawn in round 15).
             var failedBurn = NewBurn();
             var failedExit = await Mine(Exit(failedBurn, BtcDest, (olderLock, older.Uid, 0.0005M)));
             await Mine(ExitFail(failedBurn, failedExit, (olderLock, older.Uid, 0.0005M)));
             Assert.True(Record(failedBurn).IsFailedRecord);
-            await RefusedInBlock(Exit(failedBurn, BtcDest, (watchedLock, watched.Uid, 0.0005M)), "only from older vaults");
-            Assert.True((await Verify(Exit(failedBurn, BtcDest, (olderLock, older.Uid, 0.0005M)), Tip + 1)).Ok);
+            var (retryOk, retryWhy) = await Verify(Exit(failedBurn, BtcDest, (watchedLock, watched.Uid, 0.0005M)), Tip + 1);
+            Assert.True(retryOk, retryWhy);
         }
 
         /// <summary>
