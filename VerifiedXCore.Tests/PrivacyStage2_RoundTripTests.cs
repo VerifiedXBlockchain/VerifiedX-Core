@@ -362,6 +362,30 @@ namespace VerifiedXCore.Tests
             Assert.Empty(wallet.ShieldedBalances);
         }
 
+        /// <summary>
+        /// Wallets took a note's tree position from the first leaf with its commitment: a copy applied before it gave the
+        /// note a position it cannot be spent from, and the browser scans took 0 (fifth review, round 25). The matched
+        /// leaf's position is taken.
+        /// </summary>
+        [Fact]
+        public async Task AWalletNote_TakesItsOwnLeafsPosition_NotACopysBeforeIt()
+        {
+            if (!ParamsLoaded()) return;
+            var shield = ShieldFor(_alice, 5M);
+            var copy = Tampered(shield, (p, _) => p.Outs[0].NoteHashB64 = Convert.ToBase64String(PrivacyField.RandomCanonical()));
+            await Apply(copy, Height + 1);
+            await Apply(shield, Height + 1);
+            PrivateTxPayloadCodec.TryDecode(shield.Data, out var payload, out _);
+            var output = payload!.Outs[0];
+            Assert.True(ShieldedNoteEncryption.TryOpen(Convert.FromBase64String(output.EncryptedNoteB64!), _alice.EncryptionPrivateKey32, out var plain, out _));
+            Assert.True(ShieldedPlainNoteCodec.TryDeserializeUtf8(plain!, out var note, out _));
+            var own = Db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS).Find(x => x.Commitment == output.CommitmentB64).Single(r => r.NoteHash == output.NoteHashB64);
+
+            Assert.True(PrivacyApiHelper.NoteMatchesOutput(output, 5M, Convert.FromBase64String(note!.RandomnessB64), _alice, "VFX", out var position));
+            Assert.Equal(own.TreePosition, position);
+            Assert.NotEqual(PrivacyApiHelper.LookupTreePositionByCommitment(output.CommitmentB64, "VFX"), position); // the copy's, first
+        }
+
         [Fact]
         public async Task UnshieldTwoNotes_ProvesAndVerifies()
         {

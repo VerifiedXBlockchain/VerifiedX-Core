@@ -140,7 +140,7 @@ namespace VerifiedXCore.Privacy
                                 continue;
                             if (!ShieldedPlainNoteCodec.TryDeserializeUtf8(feePlain, out var feeNote, out _) || feeNote == null)
                                 continue;
-                            if (!PrivacyApiHelper.FeeNoteMatchesLeg(tx, payload, feeNote, keys))
+                            if (!PrivacyApiHelper.FeeNoteMatchesLeg(tx, payload, feeNote, keys, out var feeMatchedPos))
                                 continue; // the leaf the ledger appended for this fee leg (round 23)
 
                             var feeC = payload.FeeOutputCommitmentB64;
@@ -164,7 +164,7 @@ namespace VerifiedXCore.Privacy
                                 catch { /* ignore */ }
                             }
 
-                            long feeTreePos = LookupTreePositionByCommitment(feeC, feeNote.AssetType ?? "VFX");
+                            long feeTreePos = feeMatchedPos; // the matched leaf's (round 25)
 
                             w.UnspentCommitments.Add(new UnspentCommitment
                             {
@@ -241,23 +241,14 @@ namespace VerifiedXCore.Privacy
                             catch { /* ignore */ }
                         }
 
-                        // Look up the actual tree position from the global CommitmentRecord
-                        long treePos = LookupTreePositionByCommitment(c, note.AssetType ?? "");
-                        if (treePos == 0)
-                        {
-                            // Retry once — the ledger service may not have flushed yet
-                            Thread.Sleep(50);
-                            treePos = LookupTreePositionByCommitment(c, note.AssetType ?? "");
-                        }
-
-                        if (!PrivacyApiHelper.NoteMatchesOutput(o, note.Amount, r32, keys, note.AssetType)) continue; // the note is the output it came with (round 22)
+                        if (!PrivacyApiHelper.NoteMatchesOutput(o, note.Amount, r32, keys, note.AssetType, out var matchedPos)) continue; // the note is the output it came with (round 22)
                         w.UnspentCommitments.Add(new UnspentCommitment
                         {
                             Commitment = c,
                             AssetType = note.AssetType ?? "",
                             Amount = note.Amount,
                             Randomness = r32,
-                            TreePosition = treePos,
+                            TreePosition = matchedPos, // the matched leaf's (round 25)
                             BlockHeight = block.Height,
                             IsSpent = false
                         });

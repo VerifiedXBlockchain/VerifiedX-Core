@@ -25,16 +25,30 @@ namespace VerifiedXCore.Privacy
         /// sealed as vBTC showed vBTC that was never sent (fifth review, round 23). Every leaf with the commitment is
         /// looked at, so a copy of an output's commitment applied before it does not hide the honest one.
         /// </summary>
-        internal static bool NoteMatchesOutput(PrivateShieldedOutput? o, decimal amount, byte[]? r32, ShieldedKeyMaterial keys, string? asset)
+        internal static bool NoteMatchesOutput(PrivateShieldedOutput? o, decimal amount, byte[]? r32, ShieldedKeyMaterial keys, string? asset) =>
+            NoteMatchesOutput(o, amount, r32, keys, asset, out _);
+
+        /// <summary>
+        /// As above, with the tree position of the leaf that matched: the note's own leaf. The first leaf with the
+        /// commitment (LookupTreePositionByCommitment) could be a copy applied before it, whose position the note cannot
+        /// be spent from; the browser scans took position 0 (fifth review, round 25).
+        /// </summary>
+        internal static bool NoteMatchesOutput(PrivateShieldedOutput? o, decimal amount, byte[]? r32, ShieldedKeyMaterial keys, string? asset, out long treePosition)
         {
+            treePosition = 0;
             try
             {
                 if (o == null || string.IsNullOrEmpty(o.CommitmentB64) || string.IsNullOrEmpty(asset)) return false;
                 var c = o.CommitmentB64;
-                return PrivacyDbContext.GetPrivacyDb().GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS)
+                var leaf = PrivacyDbContext.GetPrivacyDb().GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS)
                     .Find(x => x.Commitment == c).ToList()
-                    .Any(rec => string.Equals(rec.Commitment, c, StringComparison.Ordinal) && string.Equals(rec.AssetType, asset, StringComparison.Ordinal)
-                        && NoteMatchesRecord(rec, amount, r32, keys));
+                    .Where(rec => string.Equals(rec.Commitment, c, StringComparison.Ordinal) && string.Equals(rec.AssetType, asset, StringComparison.Ordinal)
+                        && NoteMatchesRecord(rec, amount, r32, keys))
+                    .OrderBy(rec => rec.TreePosition)
+                    .FirstOrDefault();
+                if (leaf == null) return false;
+                treePosition = leaf.TreePosition;
+                return true;
             }
             catch { return false; }
         }
@@ -88,12 +102,16 @@ namespace VerifiedXCore.Privacy
             && payload.FeeInputSpentTreePosition.HasValue;
 
         /// <summary>Whether a decrypted fee change note is the VFX leaf the ledger appended for this transaction's fee leg.</summary>
-        internal static bool FeeNoteMatchesLeg(Transaction tx, PrivateTxPayload payload, ShieldedPlainNote note, ShieldedKeyMaterial keys)
+        internal static bool FeeNoteMatchesLeg(Transaction tx, PrivateTxPayload payload, ShieldedPlainNote note, ShieldedKeyMaterial keys) =>
+            FeeNoteMatchesLeg(tx, payload, note, keys, out _);
+
+        internal static bool FeeNoteMatchesLeg(Transaction tx, PrivateTxPayload payload, ShieldedPlainNote note, ShieldedKeyMaterial keys, out long treePosition)
         {
+            treePosition = 0;
             if (!HasFeeLeg(tx, payload) || !string.Equals(note.AssetType ?? "VFX", "VFX", StringComparison.Ordinal)) return false;
             byte[]? r32;
             try { r32 = Convert.FromBase64String(note.RandomnessB64 ?? ""); } catch { return false; }
-            return NoteMatchesOutput(new PrivateShieldedOutput { CommitmentB64 = payload.FeeOutputCommitmentB64 ?? "" }, note.Amount, r32, keys, "VFX");
+            return NoteMatchesOutput(new PrivateShieldedOutput { CommitmentB64 = payload.FeeOutputCommitmentB64 ?? "" }, note.Amount, r32, keys, "VFX", out treePosition);
         }
 
         public static bool TryGetViewingKeyMaterial(ShieldedWallet w, [NotNullWhen(true)] out ShieldedKeyMaterial? keys, out string? error)
@@ -379,7 +397,7 @@ namespace VerifiedXCore.Privacy
                             && ShieldedNoteEncryption.TryOpen(feeEnc, keys.EncryptionPrivateKey32, out var feePlain, out _)
                             && ShieldedPlainNoteCodec.TryDeserializeUtf8(feePlain, out var feeNote, out _)
                             && feeNote != null
-                            && FeeNoteMatchesLeg(tx, payload, feeNote, keys)) // the leaf the ledger appended (round 23)
+                            && FeeNoteMatchesLeg(tx, payload, feeNote, keys, out var feeMatchedPos)) // the leaf the ledger appended (round 23)
                         {
                             var feeC = payload.FeeOutputCommitmentB64;
                             if (!string.IsNullOrEmpty(feeC) && !merged.Contains(feeC))
@@ -394,7 +412,7 @@ namespace VerifiedXCore.Privacy
                                     catch { /* ignore */ }
                                 }
 
-                                long feeTreePos = LookupTreePositionByCommitment(feeC, feeNote.AssetType ?? "VFX");
+                                long feeTreePos = feeMatchedPos; // the matched leaf's (round 25)
 
                                 w.UnspentCommitments.Add(new UnspentCommitment
                                 {
@@ -443,9 +461,8 @@ namespace VerifiedXCore.Privacy
                             catch { /* ignore */ }
                         }
 
-                        long treePos = LookupTreePositionByCommitment(c, note.AssetType ?? "");
 
-                        if (!NoteMatchesOutput(o, note.Amount, r32, keys, note.AssetType)) continue; // the note is the output it came with (round 22)
+                        if (!NoteMatchesOutput(o, note.Amount, r32, keys, note.AssetType, out var matchedPos)) continue; // the note is the output it came with (round 22)
                         merged.Add(c); // seen once it matched: a copy that does not match hid the real output (round 24)
                         result.NotesFound++;
                         w.UnspentCommitments.Add(new UnspentCommitment
@@ -454,7 +471,7 @@ namespace VerifiedXCore.Privacy
                             AssetType = note.AssetType ?? "",
                             Amount = note.Amount,
                             Randomness = r32,
-                            TreePosition = treePos,
+                            TreePosition = matchedPos, // the matched leaf's (round 25)
                             BlockHeight = block.Height,
                             IsSpent = false
                         });

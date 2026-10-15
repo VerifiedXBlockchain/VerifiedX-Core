@@ -312,7 +312,7 @@ namespace VerifiedXCore.BrowserWalletServices
                             catch { /* ignore */ }
                         }
                         w.UnspentCommitments ??= new List<UnspentCommitment>();
-                        if (!PrivacyApiHelper.NoteMatchesOutput(o, note.Amount, r32, keys, note.AssetType)) continue; // the note is the output it came with (round 22)
+                        if (!PrivacyApiHelper.NoteMatchesOutput(o, note.Amount, r32, keys, note.AssetType, out var matchedPos)) continue; // the note is the output it came with (round 22)
                         merged.Add(c); // seen once it matched: a copy that does not match hid the real output (round 24)
                         newNotes++;
                         w.UnspentCommitments.Add(new UnspentCommitment
@@ -321,7 +321,7 @@ namespace VerifiedXCore.BrowserWalletServices
                             AssetType = note.AssetType ?? "",
                             Amount = note.Amount,
                             Randomness = r32,
-                            TreePosition = 0,
+                            TreePosition = matchedPos, // the matched leaf's, not 0 (round 25)
                             BlockHeight = block.Height,
                             IsSpent = false
                         });
