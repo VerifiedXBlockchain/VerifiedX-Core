@@ -200,7 +200,7 @@ namespace VerifiedXCore.Services
         /// to the seller (current owner) and - only when the contract has a royalty feature - to its royalty payee; the
         /// data's Royalty flag must match the contract, and together they cover the price (existing 1 VFX tolerance).
         /// </summary>
-        internal static string? SalePaymentError(Transaction txRequest, bool? royaltyFlag, SmartContractStateTrei sc, SmartContractMain scMain)
+        internal static string? SalePaymentError(Transaction txRequest, bool? royaltyFlag, SmartContractStateTrei sc, SmartContractMain scMain, long? height = null)
         {
             var royaltyFeat = scMain.Features?.FirstOrDefault(x => x.FeatureName == FeatureName.Royalty);
             var contractRoyalty = royaltyFeat != null;
@@ -218,6 +218,12 @@ namespace VerifiedXCore.Services
                 return "Sale payments are missing.";
 
             var royaltyPayTo = contractRoyalty ? ((RoyaltyFeature)royaltyFeat!.FeatureFeatures).RoyaltyPayToAddress : null;
+            // The royalty is credited to the account this text names, looked up through the collation: an alias of a
+            // real address (a character one platform's tables ignore) was that account on some nodes and a new one on
+            // others. From the path-audit rules it is a VFX address (round 27).
+            if (contractRoyalty && (height ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.PathAuditRulesHeight
+                && (string.IsNullOrEmpty(royaltyPayTo) || !AddressValidateUtility.ValidateRBXAddress(royaltyPayTo)))
+                return "The contract's royalty address is not a VFX address.";
             foreach (var (p, toPayee) in paid)
             {
                 if (p.FromAddress != sc.NextOwner)
@@ -1954,7 +1960,7 @@ namespace VerifiedXCore.Services
 
                                     // NEW-17: every payment the apply makes is bound here, on every branch (the royalty-less
                                     // featured branch had no checks; the others were one-sided bounds).
-                                    var salePaymentError = SalePaymentError(txRequest, royalty, scStateTreiRec, scMain);
+                                    var salePaymentError = SalePaymentError(txRequest, royalty, scStateTreiRec, scMain, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
                                     if (salePaymentError != null)
                                         return (txResult, salePaymentError);
 
