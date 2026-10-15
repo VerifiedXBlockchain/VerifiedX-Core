@@ -155,6 +155,34 @@ namespace VerifiedXCore.Tests
             Assert.DoesNotContain("transparent_output", (await TransactionValidatorService.VerifyTX(redirected)).Item2 ?? "");
         }
 
+        /// <summary>
+        /// Spent nullifiers are compared as text while proofs read their bytes: Base64 decoding ignores spaces and the last
+        /// character's unused bits, so one nullifier spelled again spent one note twice, in one transaction or in later
+        /// ones; and a fraction of a satoshi was credited but not proven (fifth review, round 19). From the path-audit
+        /// rules each such field has its one spelling, a transaction's nullifiers are distinct and amounts are whole
+        /// satoshis. One nullifier twice in a transaction is refused at admission at every height (every block refuses it).
+        /// </summary>
+        [Fact]
+        public void APrivateTransactionsNullifiers_HaveOneSpelling_AndAreSpentOnce()
+        {
+            var n = RandomScalar();
+            var respelled = n.Insert(4, " ");
+            Assert.Equal(Convert.FromBase64String(n), Convert.FromBase64String(respelled));          // the same bytes
+            PrivateTxPayload Payload(params string[] nulls) => new PrivateTxPayload { Version = 1, Kind = "transfer", Asset = "VFX", NullsB64 = nulls.ToList(), MerkleRootB64 = _root };
+            var tx = new Transaction { TransactionType = TransactionType.VFX_PRIVATE_TRANSFER, Amount = 0M };
+            string? Refusal(PrivateTxPayload p) => VerifiedXCore.Privacy.PrivateTransactionValidatorService.EncodingRefusal(tx, p);
+
+            Assert.Null(Refusal(Payload(n, RandomScalar())));
+            Assert.Contains("one Base64 spelling", Refusal(Payload(n, respelled)));
+            Assert.Contains("each note once", Refusal(Payload(n, n)));
+            var unshield = new Transaction { TransactionType = TransactionType.VFX_UNSHIELD, Amount = 0.000000011M };
+            Assert.Contains("whole satoshis", VerifiedXCore.Privacy.PrivateTransactionValidatorService.EncodingRefusal(unshield, Payload(n)));
+
+            // Admission refuses one nullifier twice in a transaction, at every height.
+            Assert.False(MempoolNullifierTracker.TryRegisterForMempool("dup-" + Guid.NewGuid().ToString("N"), "VFX", new List<string> { n, n }, out var why));
+            Assert.Contains("twice", why);
+        }
+
         [Fact]
         public async Task ForgedUnshield_NoNoteNoRoot_AnyAmount_IsAcceptedBelowGate_AndRefusedAtGate()
         {

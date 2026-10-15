@@ -67,6 +67,8 @@ namespace VerifiedXCore.Privacy
             var proofShapeError = PrivateTxProofRules.Check(txRequest, payload, proofRulesHeight);
             if (proofShapeError != null)
                 return (false, proofShapeError);
+            if (proofRulesHeight >= Globals.PathAuditRulesHeight && EncodingRefusal(txRequest, payload) is { } encoding)
+                return (false, encoding);
 
             if (payload.NullsB64.Count > 0)
             {
@@ -436,6 +438,36 @@ namespace VerifiedXCore.Privacy
             }
 
             return (true, "");
+        }
+
+        /// <summary>
+        /// From the path-audit rules: every nullifier, root, commitment and note hash in its one Base64 spelling, a
+        /// transaction's nullifiers distinct (the public dummy apart), and amounts in whole satoshis. Spent nullifiers are
+        /// compared as text while proofs read their bytes: a nullifier spelled again (a space inside, the last character's
+        /// unused bits) spent one note twice, in one transaction or in later ones; a fraction of a satoshi was credited but
+        /// not proven (fifth review, round 19).
+        /// </summary>
+        internal static string? EncodingRefusal(Transaction tx, PrivateTxPayload payload)
+        {
+            static bool Canonical(string? s)
+            {
+                if (string.IsNullOrEmpty(s)) return true;
+                try { return Convert.ToBase64String(Convert.FromBase64String(s)) == s; } catch { return false; }
+            }
+            var fields = new List<string?>(payload.NullsB64 ?? new List<string>())
+            {
+                payload.FeeInputNullifierB64, payload.MerkleRootB64, payload.FeeTreeMerkleRoot, payload.FeeOutputNoteHashB64,
+            };
+            foreach (var o in payload.Outs ?? new List<PrivateShieldedOutput>()) { fields.Add(o.CommitmentB64); fields.Add(o.NoteHashB64); }
+            if (fields.Any(f => !Canonical(f)))
+                return "A private transaction's nullifiers, roots, commitments and note hashes are each in their one Base64 spelling.";
+            var spent = (payload.NullsB64 ?? new List<string>()).Where(n => !PrivacyEpoch.IsDummyNullifier(n)).ToList();
+            if (spent.Count != spent.Distinct(StringComparer.Ordinal).Count())
+                return "A private transaction spends each note once.";
+            foreach (var amount in new decimal?[] { tx.Amount, payload.TransparentAmount, payload.VbtcTransparentAmount, payload.Fee })
+                if (amount is { } a && a != Math.Round(a, 8))
+                    return "A private transaction's amounts are whole satoshis (8 decimal places).";
+            return null;
         }
 
         private static bool VerifyPrivateHash(Transaction txRequest, long height)
