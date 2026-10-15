@@ -182,6 +182,17 @@ namespace VerifiedXCore.Tests
                 var leadersOwn = await Post(held);
                 Assert.True(leadersOwn.Code == System.Net.HttpStatusCode.OK, leadersOwn.Body);
 
+                // An older start of the leader's for the same input does not take the place of the open, newer one (round 19).
+                var older = Announce(vault.Uid, vault.Script, request.Hash, pinned, leader.Address);
+                older.Timestamp = held.Timestamp - 60;
+                older.SignerAddresses = Signers.Select(s => s.Address).ToList();
+                older.RequiredThreshold = 51;
+                older.LeaderSignature = VerifiedXCore.Services.SignatureService.CreateSignature($"{older.SessionId}.{leader.Address}.{older.Timestamp}", leader.Key, leader.Pub);
+                older.ContentSignature = VerifiedXCore.Services.SignatureService.CreateSignature(FrostDkgLeaderAuth.SigningStartMessage(older), leader.Key, leader.Pub);
+                FrostSessionStorage.SigningSessions[held.SessionId].WithdrawalRequestHash = request.Hash;
+                var stale = await Post(older);
+                Assert.Equal(System.Net.HttpStatusCode.Conflict, stale.Code);
+                Assert.Contains("newer start", stale.Body);
                 async Task<(System.Net.HttpStatusCode Code, string Body)> Round2(string body, string? bodySignature)
                 {
                     var req = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, $"/frost/sign/round2/{held.SessionId}")
