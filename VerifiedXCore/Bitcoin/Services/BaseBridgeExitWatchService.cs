@@ -28,7 +28,9 @@ namespace VerifiedXCore.Bitcoin.Services
 
         /// <summary>Base blocks read again after a restart: about two hours (round 23).</summary>
         internal const long RestartRewindBlocks = 3_600;
-        private static bool _rewoundAfterStart;
+        private static bool _started;
+        /// <summary>The cursor when this node last was not handling burns (at start, or when it stopped being a synced caster); null while it handles them.</summary>
+        private static long? _cursorWhenNotHandling;
         private static long? _startBlockOverride;
 
         /// <summary>V3 contract event: burnForVfxExit(amount, vfxDestinationAddress)</summary>
@@ -136,6 +138,36 @@ namespace VerifiedXCore.Bitcoin.Services
             catch { return false; }
         }
 
+        /// <summary>Moves the cursor back when this node has just begun handling burns; see the call in PollOnceInternal.</summary>
+        internal static void ConsumeRewind(BridgeExitSyncState state, bool handling)
+        {
+            if (!_started)
+            {
+                _started = true;
+                _cursorWhenNotHandling = state.LastScannedBlock;
+            }
+            if (!handling)
+            {
+                _cursorWhenNotHandling ??= state.LastScannedBlock;
+                return;
+            }
+            if (_cursorWhenNotHandling is not { } since) return;
+            _cursorWhenNotHandling = null;
+            var back = Math.Max(0, Math.Min(since, state.LastScannedBlock) - RestartRewindBlocks);
+            if (back >= state.LastScannedBlock) return;
+            LogUtility.Log($"[BaseBridgeExit] Now handling burns: reading Base again from block {back + 1} (cursor was {state.LastScannedBlock}).",
+                "BaseBridgeExitWatchService.PollOnceInternal");
+            state.LastScannedBlock = back;
+            BridgeExitSyncState.Save(state);
+        }
+
+        /// <summary>Test seam: forget the start and handling history.</summary>
+        internal static void ResetRewindForTests()
+        {
+            _started = false;
+            _cursorWhenNotHandling = null;
+        }
+
         private static async Task<(int Processed, long ScannedToBlock, string Message)> PollOnceInternal()
         {
             var web3 = new Web3(BaseBridgeService.BaseRpcUrl);
@@ -160,7 +192,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     BridgeExitSyncState.Save(state);
                     LogUtility.Log($"[BaseBridgeExit] Initialized scan cursor at block {state.LastScannedBlock} (only new burns after this are processed).",
                         "BaseBridgeExitWatchService.PollOnceInternal");
-                    _rewoundAfterStart = true;
+                    _started = true;
                     return (0, latest, "Initialized cursor; no backlog scan on first run");
                 }
             }
@@ -168,18 +200,11 @@ namespace VerifiedXCore.Bitcoin.Services
             // The burns a caster had in hand when it stopped (detected, in consensus, sent but not mined) were only in its
             // memory, and the saved cursor is past them: once the committee had restarted, nothing took them up again
             // (fifth review, round 23). The last stretch is read again; burns the chain has redeemed are passed over.
-            if (!_rewoundAfterStart)
-            {
-                _rewoundAfterStart = true;
-                var back = Math.Max(0, state.LastScannedBlock - RestartRewindBlocks);
-                if (back < state.LastScannedBlock)
-                {
-                    LogUtility.Log($"[BaseBridgeExit] Restarted: reading Base again from block {back + 1} (cursor was {state.LastScannedBlock}).",
-                        "BaseBridgeExitWatchService.PollOnceInternal");
-                    state.LastScannedBlock = back;
-                    BridgeExitSyncState.Save(state);
-                }
-            }
+            // Only once this node handles burns (a synced caster): the watcher starts before the node knows it is a
+            // caster, and a first poll read the whole stretch then, handed nothing on and moved past it (round 24). The
+            // stretch is counted from where the cursor stood when the node last did not handle burns, so burns passed
+            // over while it was not a caster (at start, or after losing its place) are read again too.
+            ConsumeRewind(state, Globals.IsBlockCaster && Globals.IsChainSynced);
 
             var from = state.LastScannedBlock + 1;
             if (from > latest)

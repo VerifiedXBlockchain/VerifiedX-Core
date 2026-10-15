@@ -603,6 +603,35 @@ namespace VerifiedXCore.Tests
             Assert.Equal(0, BurnExitConsensusService.ReloadUnfinishedWatchedExits(Tip));
         }
 
+        /// <summary>
+        /// The watcher starts before the node knows it is a caster: round 23's read-back ran on the first poll, handed no
+        /// burn on, and moved past them (fifth review, round 24). It runs once the node handles burns, from where the
+        /// cursor stood when it last did not.
+        /// </summary>
+        [Fact]
+        public async Task TheWatcher_ReadsBaseAgain_OnceTheNodeHandlesBurns()
+        {
+            await Start();
+            BaseBridgeExitWatchService.ResetRewindForTests();
+            var state = new BridgeExitSyncState { LastScannedBlock = 10_000 };
+            BaseBridgeExitWatchService.ConsumeRewind(state, handling: false);   // started, not yet a caster
+            state.LastScannedBlock = 10_050;                                       // polls move on meanwhile
+            BaseBridgeExitWatchService.ConsumeRewind(state, handling: false);
+            Assert.Equal(10_050, state.LastScannedBlock);
+            BaseBridgeExitWatchService.ConsumeRewind(state, handling: true);
+            Assert.Equal(10_000 - BaseBridgeExitWatchService.RestartRewindBlocks, state.LastScannedBlock);
+            BaseBridgeExitWatchService.ConsumeRewind(state, handling: true);    // once
+            Assert.Equal(10_000 - BaseBridgeExitWatchService.RestartRewindBlocks, state.LastScannedBlock);
+
+            // A caster that loses its place and gets it back reads again from where it stopped handling burns.
+            state.LastScannedBlock = 12_000;
+            BaseBridgeExitWatchService.ConsumeRewind(state, handling: false);
+            state.LastScannedBlock = 12_400;
+            BaseBridgeExitWatchService.ConsumeRewind(state, handling: true);
+            Assert.Equal(12_000 - BaseBridgeExitWatchService.RestartRewindBlocks, state.LastScannedBlock);
+            BaseBridgeExitWatchService.ResetRewindForTests();
+        }
+
         [Fact]
         public async Task APinnedExitCoinSpentByAnotherTransaction_VoidsThePart_AndTheExitCanBeMadeFromOtherLocks()
         {
