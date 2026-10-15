@@ -967,7 +967,28 @@ namespace VerifiedXCore.Bitcoin.Services
         /// single — that matches how pre-gate nodes validate/apply it, and post-gate the
         /// validator rejects the hybrid shape outright. Empty list on parse failure.
         /// </summary>
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string ScUid, decimal Amount)[]> _outflowsByData = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// A vBTC transfer's outflows, read from its data (a pure function of it, remembered by the data's text: bounded,
+        /// cleared at 50,000). Admission, proposal and block validation read every pending or approved same-sender
+        /// transfer again for each one (vBTC types escape the per-sender cap): about 15 million parses for a proposal of
+        /// 1,400 transfers over a full mempool (fifth review, round 35). A new list each call.
+        /// </summary>
         public static List<(string ScUid, decimal Amount)> GetVbtcV2TransferOutflows(Transaction tx)
+        {
+            if (tx == null || tx.TransactionType != TransactionType.VBTC_V2_TRANSFER || string.IsNullOrEmpty(tx.Data))
+                return new List<(string, decimal)>();
+            if (_outflowsByData.TryGetValue(tx.Data, out var known))
+                return known.ToList();
+            var read = ReadVbtcV2TransferOutflows(tx);
+            if (_outflowsByData.Count >= 50_000)
+                _outflowsByData.Clear();
+            _outflowsByData[tx.Data] = read.ToArray();
+            return read;
+        }
+
+        private static List<(string ScUid, decimal Amount)> ReadVbtcV2TransferOutflows(Transaction tx)
         {
             var outflows = new List<(string, decimal)>();
             try
