@@ -71,6 +71,15 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
                 string.Join(",", (r.Prevouts ?? new()).Select(p => $"{p.TxId}:{p.Vout}:{p.ValueSats}:{p.ScriptPubKeyHex}")),
             }.Select(x => x ?? "")));
 
+        /// <summary>A watched vault's signing Round 2, as its leader signs it: the session and the nonce set it sends.</summary>
+        public static string SigningRound2Message(string sessionId, string body) => $"SIGN-ROUND2|{sessionId}|{Sha256Hex(body ?? "")}";
+
+        /// <summary>A watched vault's signing abort, as its leader signs it.</summary>
+        public static string SigningAbortMessage(string sessionId) => $"SIGN-ABORT|{sessionId}";
+
+        /// <summary>The header a leader's own signature over a round message travels in.</summary>
+        public const string SigningContentHeader = "X-Frost-Content-Signature";
+
         /// <summary>Whether a session id has a leader's tag (16 hex digits and a colon): only key ceremonies' ids do.</summary>
         public static bool IsTagged(string? sessionId) =>
             sessionId != null && sessionId.Length > 17 && sessionId[16] == ':' && sessionId.Take(16).All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
@@ -242,6 +251,8 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
     /// </summary>
     public class FrostSigningAbortRequest
     {
+        /// <summary>The leader's signature over <see cref="FrostDkgLeaderAuth.SigningAbortMessage"/> (a watched vault's session; round 18).</summary>
+        public string? ContentSignature { get; set; }
         public string SessionId { get; set; } = "";
         public string LeaderAddress { get; set; } = "";
         /// <summary>The timestamp from the ORIGINAL start message.</summary>

@@ -1187,7 +1187,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     SessionId = sessionId,
                     LeaderAddress = leaderAddress,
                     Timestamp = timestamp,
-                    LeaderSignature = leaderSignature
+                    LeaderSignature = leaderSignature,
+                    ContentSignature = LocalLeaderSignature(leaderAddress, FrostDkgLeaderAuth.SigningAbortMessage(sessionId)),
                 };
 
                 var tasks = validators.Select(async validator =>
@@ -1216,6 +1217,17 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Round messages prove leadership by replaying the session's start signature
         /// (validators check it against the session they created at sign/start).
         /// </summary>
+        /// <summary>The leader's signature over a message when its key is on this node (a validator leading); null otherwise.</summary>
+        private static string? LocalLeaderSignature(string leaderAddress, string message)
+        {
+            try
+            {
+                var signature = VerifiedXCore.Services.SignatureService.AddressSignature(leaderAddress, message);
+                return string.IsNullOrEmpty(signature) || signature == "F" || signature == "ERROR" ? null : signature;
+            }
+            catch { return null; }
+        }
+
         private static void AddLeaderAuthHeaders(HttpRequestMessage req, string leaderAddress, long startTimestamp, string startSignature)
         {
             req.Headers.TryAddWithoutValidation("X-Frost-Leader", leaderAddress);
@@ -1427,6 +1439,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 // Broadcast aggregated nonces to all validators, extract signature shares
                 // directly from POST responses (the endpoint returns the share inline)
                 var noncePayload = JsonConvert.SerializeObject(nonces);
+                var round2BodySignature = LocalLeaderSignature(leaderAddress, FrostDkgLeaderAuth.SigningRound2Message(sessionId, noncePayload));
                 var postSuccessCount = 0;
                 var postTasks = validators.Select(async validator =>
                 {
@@ -1436,6 +1449,8 @@ namespace VerifiedXCore.Bitcoin.Services
                         var content = new StringContent(noncePayload, Encoding.UTF8, "application/json");
                         using var round2Req = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
                         AddLeaderAuthHeaders(round2Req, leaderAddress, startTimestamp, startSignature);
+                        // A watched vault's session takes Round 2 on the leader's signature over the nonce set (round 18).
+                        if (round2BodySignature != null) round2Req.Headers.TryAddWithoutValidation(FrostDkgLeaderAuth.SigningContentHeader, round2BodySignature);
                         var response = await _httpClient.SendAsync(round2Req);
                         
                         if (response.IsSuccessStatusCode)

@@ -326,7 +326,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// Verifies a round message carries the session leader's replayed start signature.
         /// Reads X-Frost-Leader / X-Frost-Timestamp / X-Frost-Signature headers.
         /// </summary>
-        public static bool VerifyLeaderHeaders(Microsoft.AspNetCore.Http.HttpContext context, SigningSession session, out string reason)
+        public static bool VerifyLeaderHeaders(Microsoft.AspNetCore.Http.HttpContext context, SigningSession session, out string reason, string? round2Body = null)
         {
             reason = "";
             var leader = context.Request.Headers["X-Frost-Leader"].ToString();
@@ -341,6 +341,16 @@ namespace VerifiedXCore.Bitcoin.FROST
 
             var msg = $"{session.SessionId}.{leader}.{ts}";
             if (!VerifiedXCore.Services.SignatureService.VerifySignature(leader, msg, sig)) { reason = "Invalid leader signature"; return false; }
+            if (!string.IsNullOrEmpty(session.StartContentSignature))
+            {
+                // A watched vault's session: from any address, but Round 2 carries the leader's signature over its own body
+                // (the nonce set it commits this signer's share to). Reading shares changes nothing.
+                if (round2Body == null) return true;
+                var bodySig = context.Request.Headers[FrostDkgLeaderAuth.SigningContentHeader].ToString();
+                if (string.IsNullOrEmpty(bodySig) || !VerifiedXCore.Services.SignatureService.VerifySignature(leader, FrostDkgLeaderAuth.SigningRound2Message(session.SessionId, round2Body), bodySig))
+                { reason = "This session's Round 2 is signed by its leader"; return false; }
+                return true;
+            }
             if (!SameLeaderEndpoint(session.LeaderRemoteIp, NormalizeRemoteIp(context.Connection.RemoteIpAddress)))
             { reason = "Round message did not come from the endpoint that started the session"; return false; }
             return true;

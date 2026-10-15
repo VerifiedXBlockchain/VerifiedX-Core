@@ -158,6 +158,50 @@ namespace VerifiedXCore.Tests
             var used = Start2(full: true);
             FrostSessionStorage.NoteSigningStart(used.SessionId);
             Assert.Equal(System.Net.HttpStatusCode.Conflict, (await Post(used)).Code);
+
+            // A watched vault's session, opened by a copy of the leader's start sent from elsewhere (round 18): the
+            // leader's own start is answered as the same session, and its rounds and abort are proven by its
+            // signatures, not by the address that opened the session.
+            var held = Start2(full: true);
+            FrostSessionStorage.SigningSessions.TryAdd(held.SessionId, new SigningSession
+            {
+                SessionId = held.SessionId, LeaderAddress = leader.Address, StartTimestamp = TimeUtil.GetTime(), LeaderStartTimestamp = held.Timestamp,
+                MessageHash = held.MessageHash, SmartContractUID = vault.Uid, StartContentSignature = held.ContentSignature, LeaderRemoteIp = "203.0.113.9",
+            });
+            try
+            {
+                var again = await Post(held);
+                Assert.True(again.Code == System.Net.HttpStatusCode.OK, again.Body);
+                async Task<(System.Net.HttpStatusCode Code, string Body)> Round2(string body, string? bodySignature)
+                {
+                    var req = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, $"/frost/sign/round2/{held.SessionId}")
+                    { Content = new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json") };
+                    req.Headers.TryAddWithoutValidation("X-Frost-Leader", leader.Address);
+                    req.Headers.TryAddWithoutValidation("X-Frost-Timestamp", held.Timestamp.ToString());
+                    req.Headers.TryAddWithoutValidation("X-Frost-Signature", held.LeaderSignature);
+                    if (bodySignature != null) req.Headers.TryAddWithoutValidation(FrostDkgLeaderAuth.SigningContentHeader, bodySignature);
+                    var r = await client.SendAsync(req);
+                    return (r.StatusCode, await r.Content.ReadAsStringAsync());
+                }
+                var nonces = "{}";
+                Assert.Contains("signed by its leader", (await Round2(nonces, null)).Body);
+                var otherBody = VerifiedXCore.Services.SignatureService.CreateSignature(FrostDkgLeaderAuth.SigningRound2Message(held.SessionId, "{\"x\":1}"), leader.Key, leader.Pub);
+                Assert.Contains("signed by its leader", (await Round2(nonces, otherBody)).Body);
+                var signedBody = VerifiedXCore.Services.SignatureService.CreateSignature(FrostDkgLeaderAuth.SigningRound2Message(held.SessionId, nonces), leader.Key, leader.Pub);
+                var passed = await Round2(nonces, signedBody);
+                Assert.DoesNotContain("Leader auth failed", passed.Body);                    // from an address that did not open it
+
+                async Task<System.Net.HttpStatusCode> Abort(string? contentSignature) =>
+                    (await client.PostAsync("/frost/sign/abort", new System.Net.Http.StringContent(JsonConvert.SerializeObject(new FrostSigningAbortRequest
+                    {
+                        SessionId = held.SessionId, LeaderAddress = leader.Address, Timestamp = held.Timestamp, LeaderSignature = held.LeaderSignature, ContentSignature = contentSignature,
+                    }), System.Text.Encoding.UTF8, "application/json"))).StatusCode;
+                Assert.Equal(System.Net.HttpStatusCode.Forbidden, await Abort(null));
+                Assert.True(FrostSessionStorage.SigningSessions.ContainsKey(held.SessionId));
+                await Abort(VerifiedXCore.Services.SignatureService.CreateSignature(FrostDkgLeaderAuth.SigningAbortMessage(held.SessionId), leader.Key, leader.Pub));
+                Assert.False(FrostSessionStorage.SigningSessions.ContainsKey(held.SessionId));
+            }
+            finally { FrostSessionStorage.SigningSessions.TryRemove(held.SessionId, out _); }
         }
 
         [Fact]

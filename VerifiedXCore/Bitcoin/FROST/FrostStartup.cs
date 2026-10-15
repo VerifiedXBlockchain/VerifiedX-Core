@@ -2518,6 +2518,15 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // A session id is opened once: an open one is not touched, and one this validator opened before
                             // (since finished, aborted or cleaned up) is not opened again under a signature still in date
                             // (fifth review, round 17).
+                            if (FrostSessionStorage.SigningSessions.TryGetValue(request.SessionId, out var openSession)
+                                && !string.IsNullOrEmpty(openSession.StartContentSignature)
+                                && string.Equals(openSession.StartContentSignature, request.ContentSignature, StringComparison.Ordinal))
+                            {
+                                // The leader's own start, arriving after a copy of it opened the session: the same session (round 18).
+                                context.Response.StatusCode = StatusCodes.Status200OK;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = true, Message = "Signing ceremony already started", SessionId = request.SessionId, MessageHash = openSession.MessageHash, NonceGenerated = true }));
+                                return;
+                            }
                             if (FrostSessionStorage.SigningSessions.ContainsKey(request.SessionId) || FrostSessionStorage.SigningStartSeen(request.SessionId))
                             {
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
@@ -2732,6 +2741,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 LeaderStartTimestamp = request.Timestamp,
                                 LeaderStartSignature = request.LeaderSignature,
                                 LeaderRemoteIp = FrostSigningAuthorization.NormalizeRemoteIp(context.Connection.RemoteIpAddress),
+                                StartContentSignature = VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(request.SmartContractUID) != null ? request.ContentSignature : null,
                                 WithdrawalRequestHash = request.WithdrawalRequestHash,  // FIND-028
                                 SignerAddresses = request.SignerAddresses,
                                 RequiredThreshold = request.RequiredThreshold,
@@ -2883,7 +2893,10 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                         // Only the session leader (proven by replaying the start signature) may
                         // trigger share generation — this is the step that commits our key share.
-                        if (!FrostSigningAuthorization.VerifyLeaderHeaders(context, session, out var r2AuthReason))
+                        // The body is read first: a watched vault's leader signs it (round 18).
+                        string round2Body;
+                        using (var round2Reader = new StreamReader(context.Request.Body)) round2Body = await round2Reader.ReadToEndAsync();
+                        if (!FrostSigningAuthorization.VerifyLeaderHeaders(context, session, out var r2AuthReason, round2Body))
                         {
                             context.Response.StatusCode = StatusCodes.Status403Forbidden;
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Leader auth failed: {r2AuthReason}" }));
@@ -2892,7 +2905,7 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                         using (var reader = new StreamReader(context.Request.Body))
                         {
-                            var body = await reader.ReadToEndAsync();
+                            var body = round2Body; // read before the leader check (round 18)
                             
                             var myAddr = Globals.ValidatorAddress ?? "";
 
@@ -3256,8 +3269,19 @@ namespace VerifiedXCore.Bitcoin.FROST
                             }
 
                             // The start signature is known to every signer; only the endpoint that started
-                            // the session may abort it (a peer signer could otherwise kill every ceremony).
-                            if (!FrostSigningAuthorization.SameLeaderEndpoint(session.LeaderRemoteIp, FrostSigningAuthorization.NormalizeRemoteIp(context.Connection.RemoteIpAddress)))
+                            // the session may abort it (a peer signer could otherwise kill every ceremony). A watched
+                            // vault's session is aborted by its leader's own signature instead, from any address (round 18).
+                            if (!string.IsNullOrEmpty(session.StartContentSignature))
+                            {
+                                if (string.IsNullOrEmpty(request.ContentSignature)
+                                    || !SignatureService.VerifySignature(session.LeaderAddress, FrostDkgLeaderAuth.SigningAbortMessage(request.SessionId), request.ContentSignature))
+                                {
+                                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This session is aborted by its leader's signature" }));
+                                    return;
+                                }
+                            }
+                            else if (!FrostSigningAuthorization.SameLeaderEndpoint(session.LeaderRemoteIp, FrostSigningAuthorization.NormalizeRemoteIp(context.Connection.RemoteIpAddress)))
                             {
                                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Abort must come from the endpoint that started the session" }));

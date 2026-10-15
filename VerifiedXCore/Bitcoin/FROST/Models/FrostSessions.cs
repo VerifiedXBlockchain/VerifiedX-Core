@@ -116,6 +116,12 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
 
         /// <summary>Timestamp from the leader's start message (the value the leader signed over).</summary>
         public long LeaderStartTimestamp { get; set; }
+        /// <summary>
+        /// The leader's signature over the whole start, when the session is a watched vault's (round 17). Such a session's
+        /// rounds and abort are proven by the leader's own signatures, not by the address that opened it: a signer that
+        /// sent the leader's exact start first held the session there, and the leader's rounds were refused (round 18).
+        /// </summary>
+        public string? StartContentSignature { get; set; }
         /// <summary>Leader's start signature — round messages must replay it to prove leadership.</summary>
         public string? LeaderStartSignature { get; set; }
         /// <summary>
