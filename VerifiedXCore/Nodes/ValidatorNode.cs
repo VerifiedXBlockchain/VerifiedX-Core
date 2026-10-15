@@ -1065,7 +1065,7 @@ namespace VerifiedXCore.Nodes
             var SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
             .Union(Globals.BannedIPs.Keys)
             .Union(Globals.SkipValPeers.Keys)
-            .Union(Globals.ReportedIPs.Keys));
+            .Union(P2PClient.OwnAddressesToSkip()));
 
             if (!skipConnectedNodes)
             {
@@ -1094,7 +1094,7 @@ namespace VerifiedXCore.Nodes
                 SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
                 .Union(Globals.BannedIPs.Keys)
                 .Union(Globals.SkipValPeers.Keys)
-                .Union(Globals.ReportedIPs.Keys));
+                .Union(P2PClient.OwnAddressesToSkip()));
 
                 peerList = peerDB.Find(x => x.IsValidator).ToArray()
                 .Where(x => !SkipIPs.Contains(x.PeerIP))

@@ -94,5 +94,37 @@ namespace VerifiedXCore.Tests
             }
             finally { Reset(); Globals.ReportedIP = ip; Globals.ReportedIPManuallySet = manual; }
         }
+
+        [Fact]
+        public void DialsSkipOnlyTheConfirmedOwnAddress_NotEveryReportedCandidate()
+        {
+            var (ip, manual) = (Globals.ReportedIP, Globals.ReportedIPManuallySet);
+            try
+            {
+                Reset();
+                P2PClient.RecordReportedIP("198.51.100.20", "203.0.113.1"); // one peer's candidate, a real peer's address
+                P2PClient.RecordReportedIP("198.51.100.21", "203.0.113.2");
+                Assert.Empty(P2PClient.OwnAddressesToSkip());
+
+                P2PClient.RecordReportedIP("198.51.100.21", "203.0.113.3"); // a second peer confirms our address
+                Assert.Equal(new[] { "198.51.100.21" }, P2PClient.OwnAddressesToSkip());
+                Assert.Contains("198.51.100.20", Globals.ReportedIPs.Keys); // still a candidate, but no longer skipped
+            }
+            finally { Reset(); Globals.ReportedIP = ip; Globals.ReportedIPManuallySet = manual; }
+        }
+
+        [Fact]
+        public void TwoSpellingsOfOneReporterAddress_CastOneVote()
+        {
+            var (ip, manual) = (Globals.ReportedIP, Globals.ReportedIPManuallySet);
+            try
+            {
+                Reset();
+                P2PClient.RecordReportedIP("198.51.100.30", "203.0.113.9");
+                P2PClient.RecordReportedIP("198.51.100.30", "::ffff:203.0.113.9");
+                Assert.True(string.IsNullOrEmpty(Globals.ReportedIP), "one endpoint must not confirm an address on its own");
+            }
+            finally { Reset(); Globals.ReportedIP = ip; Globals.ReportedIPManuallySet = manual; }
+        }
     }
 }

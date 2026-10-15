@@ -164,7 +164,10 @@ namespace VerifiedXCore.P2P
             if (string.IsNullOrWhiteSpace(reported) || reported.Length > 45 || !System.Net.IPAddress.TryParse(reported.Trim(), out var parsed))
                 return;
             var ip = VerifiedXCore.Utilities.RemoteIp.Text(parsed)!;
-            var who = string.IsNullOrEmpty(reporter) ? "?" : reporter;
+            // One endpoint, one vote: the reporter's address is canonicalised so other spellings of it are the same key.
+            var who = !string.IsNullOrEmpty(reporter) && System.Net.IPAddress.TryParse(reporter.Trim(), out var reporterIp)
+                ? VerifiedXCore.Utilities.RemoteIp.Text(reporterIp)!
+                : string.IsNullOrEmpty(reporter) ? "?" : reporter;
             lock (_reportedIpLock)
             {
                 _reporterVote.TryGetValue(who, out var previous);
@@ -201,6 +204,14 @@ namespace VerifiedXCore.P2P
             else
                 Globals.ReportedIPs[ip] = remaining;
         }
+
+        /// <summary>
+        /// The addresses an outbound dial skips as this node's own: only the confirmed <see cref="Globals.ReportedIP"/>.
+        /// ReportedIPs holds every candidate peers have reported, so skipping all of them let peers keep this node from
+        /// dialing addresses of their choosing.
+        /// </summary>
+        public static IEnumerable<string> OwnAddressesToSkip() =>
+            string.IsNullOrWhiteSpace(Globals.ReportedIP) ? Array.Empty<string>() : new[] { Globals.ReportedIP };
 
         public static void TryAutoUpdateReportedIP()
         {
@@ -489,17 +500,13 @@ namespace VerifiedXCore.P2P
 
             await DropDisconnectedPeers();            
 
-            // FIX: Removed Globals.ReportedIPs from skip set — ReportedIPs contains external IPs
-            // that peers report back to us (our own IP as seen by them). Including them in the
-            // skip set was incorrectly preventing connections to legitimate peers whose IP happened
-            // to match an entry in ReportedIPs.
             // CHURN-FIX: peers evicted for lagging (or under connect-failure backoff) are excluded in
             // BOTH passes below, so a node dropped by the height check is not re-dialed 10s later.
             var cooldownIPs = PeerConnectionBackoff.BlockedIPs();
 
             var SkipIPs = new HashSet<string>(Globals.Nodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
                 .Union(Globals.BannedIPs.Keys)
-                .Union(Globals.ReportedIPs.Keys)
+                .Union(OwnAddressesToSkip())
                 .Union(Globals.SkipPeers.Keys)
                 .Union(cooldownIPs));
 
@@ -556,7 +563,7 @@ namespace VerifiedXCore.P2P
 
                 var fortisOnlyIPs = new HashSet<string>(fortisList.Select(x => x))
                     .Union(Globals.BannedIPs.Keys)
-                    .Union(Globals.ReportedIPs.Keys);
+                    .Union(OwnAddressesToSkip());
 
                 Random rnd = new Random();
                 var newPeers = peerDB.Find(x => x.IsOutgoing == true).ToArray()
