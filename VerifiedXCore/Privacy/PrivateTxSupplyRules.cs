@@ -50,6 +50,18 @@ namespace VerifiedXCore.Privacy
             if (string.IsNullOrWhiteSpace(payload.MerkleRootB64))
                 return "A private transaction must carry the shielded pool Merkle root it spends against.";
 
+            return OuterFieldsError(tx, payload);
+        }
+
+        /// <summary>
+        /// An unshield's outer recipient and amount, which its hash does not cover, are its payload's. Applied at every
+        /// height: below the fund-loss height whoever served blocks to a syncing node could change them and have it
+        /// credit someone else (fifth review, round 18). History holds no unshield that differs (scanned: mainnet to
+        /// block 7,410,629, 7 unshields; testnet to 1,025,066, 1; FundLossHistoryScanHarness.UnshieldBindingScan, to be
+        /// run again on current databases before release).
+        /// </summary>
+        public static string? OuterFieldsError(Transaction tx, PrivateTxPayload payload)
+        {
             if (tx.TransactionType == TransactionType.VFX_UNSHIELD || tx.TransactionType == TransactionType.VBTC_V2_UNSHIELD)
             {
                 if (string.IsNullOrWhiteSpace(payload.TransparentOutput) || !string.Equals(payload.TransparentOutput, tx.ToAddress, StringComparison.Ordinal))
@@ -90,6 +102,8 @@ namespace VerifiedXCore.Privacy
         /// <summary>All rules of this stage for one transaction at <paramref name="height"/>; (true, "") when inert or passing.</summary>
         public static (bool ok, string message) Check(Transaction tx, PrivateTxPayload payload, long height)
         {
+            if (tx != null && OuterFieldsError(tx, payload) is { } outer)
+                return (false, outer);
             if (!AppliesTo(tx, height))
                 return (true, "");
             var structure = StructureError(tx, payload);

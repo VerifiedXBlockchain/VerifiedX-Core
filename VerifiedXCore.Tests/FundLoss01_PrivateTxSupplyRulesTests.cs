@@ -130,6 +130,28 @@ namespace VerifiedXCore.Tests
 
         // ── The audit's forged unshield ───────────────────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// An unshield's outer recipient and amount are not in its hash: below the gate, whoever served blocks to a
+        /// syncing node could change them and have it credit someone else (fifth review, round 18). They must equal the
+        /// payload's at every height (history holds no unshield that differs).
+        /// </summary>
+        [Fact]
+        public async Task AnUnshieldsOuterFields_AreItsPayloads_AtEveryHeight()
+        {
+            var to = NewAddress();
+            TipBelowGate();
+            var redirected = Unshield(to, 1M, withNullifier: false, withRoot: false);
+            var hash = redirected.Hash;
+            redirected.ToAddress = NewAddress();                      // the hash does not change
+            Assert.Equal(hash, redirected.BuildPrivate());
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(redirected);
+            Assert.False(ok);
+            Assert.Contains("transparent_output", msg);
+            var resized = Unshield(to, 1M, withNullifier: false, withRoot: false);
+            resized.Amount = 2M;
+            Assert.Contains("transparent_amount", (await TransactionValidatorService.VerifyTX(resized)).Item2);
+        }
+
         [Fact]
         public async Task ForgedUnshield_NoNoteNoRoot_AnyAmount_IsAcceptedBelowGate_AndRefusedAtGate()
         {

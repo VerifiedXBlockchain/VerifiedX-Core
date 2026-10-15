@@ -175,6 +175,65 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// Unshields mined in history whose outer recipient or amount differ from their payload's transparent output and
+        /// amount (fifth review, round 18): the outer fields are not in an unshield's hash, and the rule binding them
+        /// (PrivateTxSupplyRules.StructureError) starts at the fund-loss height, so whoever serves blocks to a syncing node
+        /// can change them below it. If history holds none, the binding can be required at every height. Inert unless
+        /// UNSHIELD_SCAN_DB names the database folder; the block database is opened read-only, in place.
+        /// </summary>
+        [Fact]
+        public void UnshieldBindingScan()
+        {
+            var dbDir = Environment.GetEnvironmentVariable("UNSHIELD_SCAN_DB");
+            if (string.IsNullOrWhiteSpace(dbDir)) return;
+            var outDir = Environment.GetEnvironmentVariable("FUNDLOSS_SCAN_OUT");
+            if (string.IsNullOrWhiteSpace(outDir)) outDir = dbDir;
+            Directory.CreateDirectory(outDir);
+            var dbPath = Path.Combine(dbDir, DbContext.RSRV_DB_NAME);
+            Assert.True(File.Exists(dbPath), $"Block database not found: {dbPath}");
+            var mapper = new BsonMapper(null, LegacyTypeNameBinder.Instance);
+            mapper.RegisterType<DateTime>(
+                value => value.ToString("o", CultureInfo.InvariantCulture),
+                bson => DateTime.ParseExact(bson, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+            mapper.RegisterType<DateTimeOffset>(
+                value => value.ToString("o", CultureInfo.InvariantCulture),
+                bson => DateTimeOffset.ParseExact(bson, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+            var db = new LiteDatabase(new ConnectionString { Filename = dbPath, Connection = ConnectionType.Direct, ReadOnly = true }, mapper);
+            var blocks = db.GetCollection<Block>(DbContext.RSRV_BLOCKS);
+            var network = dbDir.Contains("TestNet", StringComparison.OrdinalIgnoreCase) ? "testnet" : "mainnet";
+            var lines = new System.Collections.Generic.List<string>();
+            long scanned = 0, lastHeight = -1, unshields = 0, unreadable = 0, mismatched = 0, noOutput = 0;
+            string? stopped = null;
+            try
+            {
+                foreach (var block in blocks.Query().Where(b => b.Height >= 0).OrderBy(b => b.Height).ToEnumerable())
+                {
+                    lastHeight = block.Height;
+                    scanned++;
+                    foreach (var tx in block.Transactions ?? new System.Collections.Generic.List<Transaction>())
+                    {
+                        if (tx == null || (tx.TransactionType != TransactionType.VFX_UNSHIELD && tx.TransactionType != TransactionType.VBTC_V2_UNSHIELD)) continue;
+                        unshields++;
+                        if (!VerifiedXCore.Privacy.PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out var err) || payload == null)
+                        { unreadable++; lines.Add($"UNREADABLE {block.Height} {tx.Hash} {tx.TransactionType}: {err}"); continue; }
+                        var outputMatches = !string.IsNullOrWhiteSpace(payload.TransparentOutput) && string.Equals(payload.TransparentOutput, tx.ToAddress, StringComparison.Ordinal);
+                        var amountMatches = tx.TransactionType != TransactionType.VFX_UNSHIELD || (payload.TransparentAmount != null && payload.TransparentAmount.Value == tx.Amount);
+                        if (string.IsNullOrWhiteSpace(payload.TransparentOutput)) noOutput++;
+                        if (!outputMatches || !amountMatches)
+                        {
+                            mismatched++;
+                            lines.Add($"MISMATCH {block.Height} {tx.Hash} {tx.TransactionType}: to {tx.ToAddress} / payload {payload.TransparentOutput}; amount {tx.Amount} / payload {payload.TransparentAmount}");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { stopped = ex.ToString(); }
+            if (stopped != null) lines.Insert(0, $"STOPPED after height {lastHeight}: {stopped}");
+            lines.Insert(0, $"{network}: {scanned} blocks to height {lastHeight}, {unshields} unshields, {mismatched} with outer fields unlike the payload ({noOutput} without a transparent output), {unreadable} unreadable");
+            File.WriteAllLines(Path.Combine(outDir, $"unshield-scan-{network}.txt"), lines);
+        }
+
+        /// <summary>
         /// Delayed owner changes of one contract made by reserve accounts (fourth review, round 8): reserve rows falling due
         /// together are now settled in (ConfirmTimestamp, Height, Hash) order, where nodes used their own random row ids.
         /// Before the path-audit gate a delayed Transfer() or TokenContractOwnerChange() is applied without a "still stands"
