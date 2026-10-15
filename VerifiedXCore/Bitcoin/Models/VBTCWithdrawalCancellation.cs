@@ -72,6 +72,42 @@ namespace VerifiedXCore.Bitcoin.Models
             c?.CancellationUID?.StartsWith(OnChainUidPrefix, StringComparison.Ordinal) == true;
 
         #region Database Methods
+        /// <summary>
+        /// Index on the cancelled request's hash, kept only up to 200 characters (others indexed as null): it is taken from
+        /// the cancel's data and found through the collation, so its length is not bounded before the path-audit rules,
+        /// and LiteDB loses a write whose key is over 1,023 bytes (round 34). The store had no index: every cancel and
+        /// every vote read every cancellation ever recorded, about two fees a row (fifth review, round 35).
+        /// </summary>
+        internal const string ShortRequestHashIndexExpression = "IIF(LENGTH($.WithdrawalRequestHash) <= 200, $.WithdrawalRequestHash, null)";
+        internal const string ShortRequestHashIndexName = "WithdrawalRequestHashShort";
+
+        /// <summary>The cancellations of <paramref name="withdrawalRequestHash"/> as the database compares it, in the scan's order.</summary>
+        public static List<VBTCWithdrawalCancellation> RowsForRequest(ILiteCollection<VBTCWithdrawalCancellation> col, string? withdrawalRequestHash)
+        {
+            if (withdrawalRequestHash == null) return new List<VBTCWithdrawalCancellation>();
+            var collation = DbContext.DB_vBTC.Collation;
+            var candidates = withdrawalRequestHash.Length <= 200
+                ? col.Find(Query.EQ(ShortRequestHashIndexExpression, withdrawalRequestHash)).Concat(col.Find(Query.EQ(ShortRequestHashIndexExpression, BsonValue.Null)))
+                : col.FindAll();
+            return candidates
+                .Where(x => x.WithdrawalRequestHash != null && collation.Compare(x.WithdrawalRequestHash, withdrawalRequestHash) == 0)
+                .GroupBy(x => x.Id).Select(g => g.First())
+                .OrderBy(x => x.Id)
+                .ToList();
+        }
+
+        /// <summary>Indexes the store (at start; round 35): the cancellation UID ("CANCEL_" and a transaction hash) and the request hash, bounded.</summary>
+        internal static void EnsureIndexes(LiteDatabase db)
+        {
+            try
+            {
+                var col = db.GetCollection<VBTCWithdrawalCancellation>(DbContext.RSRV_VBTC_V2_CANCELLATIONS);
+                col.EnsureIndex(x => x.CancellationUID, false);
+                col.EnsureIndex(ShortRequestHashIndexName, ShortRequestHashIndexExpression);
+            }
+            catch (Exception ex) { ErrorLogUtility.LogError($"Cancellation indexes: {ex.Message}", "VBTCWithdrawalCancellation.EnsureIndexes()"); }
+        }
+
         public static ILiteCollection<VBTCWithdrawalCancellation> GetDb()
         {
             var db = DbContext.DB_vBTC.GetCollection<VBTCWithdrawalCancellation>(DbContext.RSRV_VBTC_V2_CANCELLATIONS);
@@ -132,7 +168,7 @@ namespace VerifiedXCore.Bitcoin.Models
                 // A record stamped with its mined height is pending for exactly its vote window (block height, the
                 // same clock the votes are judged by - a stalled chain must not reopen signing while an approval
                 // can still land). Older records keep the wall-clock bound.
-                return db.Find(x => x.WithdrawalRequestHash == withdrawalRequestHash)
+                return RowsForRequest(db, withdrawalRequestHash)
                          .Where(x => string.IsNullOrEmpty(scUID) || x.SmartContractUID == scUID)
                          .Where(IsOnChainRecord)
                          .Any(x => x.RequestBlockHeight > 0
@@ -152,7 +188,7 @@ namespace VerifiedXCore.Bitcoin.Models
             if (string.IsNullOrWhiteSpace(withdrawalRequestHash)) return null;
             var db = GetDb();
             if (db == null) return null;
-            return db.Find(x => x.WithdrawalRequestHash == withdrawalRequestHash)
+            return RowsForRequest(db, withdrawalRequestHash)
                 .Where(IsOnChainRecord)
                 .Where(x => string.IsNullOrEmpty(scUID) || x.SmartContractUID == scUID)
                 .Where(x => IsVoteWindowOpen(x, height))
@@ -165,7 +201,7 @@ namespace VerifiedXCore.Bitcoin.Models
         {
             var db = GetDb();
             if (db == null || string.IsNullOrWhiteSpace(withdrawalRequestHash)) return new List<VBTCWithdrawalCancellation>();
-            return db.Find(x => x.WithdrawalRequestHash == withdrawalRequestHash)
+            return RowsForRequest(db, withdrawalRequestHash)
                 .Where(IsOnChainRecord)
                 .Where(x => string.IsNullOrEmpty(scUID) || x.SmartContractUID == scUID)
                 .OrderByDescending(x => x.RequestBlockHeight).ThenByDescending(x => x.RequestTime)
@@ -190,7 +226,7 @@ namespace VerifiedXCore.Bitcoin.Models
             // On-chain records only. This backs the consensus duplicate-cancel rule (VerifyTX, StateData): a
             // node-local leftover here made that node refuse the real cancel — at block validation too — while
             // every other node accepted it.
-            return cancellations.Find(x => x.WithdrawalRequestHash == withdrawalRequestHash)
+            return RowsForRequest(cancellations, withdrawalRequestHash)
                 .Where(IsOnChainRecord)
                 .FirstOrDefault(x => string.IsNullOrEmpty(scUID) || x.SmartContractUID == scUID);
         }

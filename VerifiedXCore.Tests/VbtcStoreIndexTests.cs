@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using LiteDB;
@@ -85,6 +86,27 @@ namespace VerifiedXCore.Tests
             Assert.Equal(10, ReserveTransactions.DueRows(col, 1_200).Count);       // 1,000..1,190: the 20 rows, half pending
             var plan = string.Join(" ", DbContext.DB_Reserve.Execute($"EXPLAIN SELECT $ FROM {DbContext.RSRV_RESERVE_TRANSACTIONS} WHERE {ReserveTransactions.DueIndexExpression} < 1200").ToEnumerable().Select(d => d.ToString()));
             Assert.Contains(ReserveTransactions.DueIndexName, plan);
+        }
+
+        /// <summary>Cancellations are indexed (UID; request hash up to 200 characters) and found as the database compares (round 35).</summary>
+        [Fact]
+        public void Cancellations_AreIndexed_AndFoundAsTheCollationMatches()
+        {
+            var col = VBTCWithdrawalCancellation.GetDb();
+            var fields = IndexedFields(DbContext.DB_vBTC, DbContext.RSRV_VBTC_V2_CANCELLATIONS);
+            Assert.Contains("$.CancellationUID", fields);
+            Assert.DoesNotContain("$.WithdrawalRequestHash", fields);
+            var padded = "abcd" + new string('​', 1100);
+            col.Insert(new VBTCWithdrawalCancellation { CancellationUID = "CANCEL_1", WithdrawalRequestHash = "ABCD", SmartContractUID = "v" });
+            col.Insert(new VBTCWithdrawalCancellation { CancellationUID = "CANCEL_2", WithdrawalRequestHash = "other", SmartContractUID = "v" });
+            col.Insert(new VBTCWithdrawalCancellation { CancellationUID = "CANCEL_3", WithdrawalRequestHash = padded, SmartContractUID = "v" });
+            col.Insert(new VBTCWithdrawalCancellation { CancellationUID = "CANCEL_4", WithdrawalRequestHash = "abcd", SmartContractUID = "v" });
+            Assert.Equal(4, col.Count());
+            List<string> Scan(string h) => col.Query().ToList().OrderBy(x => x.Id)
+                .Where(x => x.WithdrawalRequestHash != null && DbContext.DB_vBTC.Collation.Compare(x.WithdrawalRequestHash, h) == 0)
+                .Select(x => x.CancellationUID).ToList();
+            foreach (var h in new[] { "abcd", "ABCD", "other", "none", padded })
+                Assert.Equal(Scan(h), VBTCWithdrawalCancellation.RowsForRequest(col, h).Select(x => x.CancellationUID).ToList());
         }
 
         [Fact]

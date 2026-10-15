@@ -228,6 +228,7 @@ namespace VerifiedXCore.Data
             DB_TokenizedWithdrawals = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_TOKENIZED_WITHDRAWALS, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_VBTCWithdrawalRequests = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC_WITHDRAWAL_REQUESTS, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_vBTC = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC, Connection = ConnectionType.Direct, ReadOnly = false });
+            VerifiedXCore.Bitcoin.Models.VBTCWithdrawalCancellation.EnsureIndexes(DB_vBTC);
             DB_Shares = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SHARES, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Privacy = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_PRIVACY, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
             DB_BtcAttest = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_BTC_ATTEST, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
@@ -603,6 +604,7 @@ namespace VerifiedXCore.Data
             DB_TokenizedWithdrawals = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_TOKENIZED_WITHDRAWALS, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_VBTCWithdrawalRequests = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC_WITHDRAWAL_REQUESTS, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_vBTC = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC, Connection = ConnectionType.Direct, ReadOnly = false });
+            VerifiedXCore.Bitcoin.Models.VBTCWithdrawalCancellation.EnsureIndexes(DB_vBTC);
             DB_Shares = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SHARES, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Privacy = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_PRIVACY, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
             DB_BtcAttest = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_BTC_ATTEST, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
