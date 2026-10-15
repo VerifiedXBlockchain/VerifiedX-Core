@@ -2810,6 +2810,9 @@ namespace VerifiedXCore.Data
                                 await accStTrei.UpdateSafeAsync(toSeller);
                             }
 
+                            // Read again from the path-audit rules: the payee written just above may be the buyer itself (a creator buying
+                            // back under its own royalty, a self-sale), and the copy read before overwrote the credit (round 30).
+                            if (block.Height >= Globals.PathAuditRulesHeight) from = GetSpecificAccountStateTrei(tx.FromAddress) ?? from;
                             from.Nonce += 1;
                             from.StateRoot = block.StateRoot;
                             from.Balance -= (txToSeller.Amount + txToSeller.Fee);
@@ -2840,6 +2843,9 @@ namespace VerifiedXCore.Data
                                 await accStTrei.UpdateSafeAsync(toRoyalty);
                             }
 
+                            // Read again from the path-audit rules: the payee written just above may be the buyer itself (a creator buying
+                            // back under its own royalty, a self-sale), and the copy read before overwrote the credit (round 30).
+                            if (block.Height >= Globals.PathAuditRulesHeight) from = GetSpecificAccountStateTrei(tx.FromAddress) ?? from;
                             from.Nonce += 1;
                             from.StateRoot = block.StateRoot;
                             from.Balance -= (txToRoyaltyPayee.Amount + txToRoyaltyPayee.Fee);
@@ -2878,6 +2884,9 @@ namespace VerifiedXCore.Data
                                 await accStTrei.UpdateSafeAsync(toSeller);
                             }
 
+                            // Read again from the path-audit rules: the payee written just above may be the buyer itself (a creator buying
+                            // back under its own royalty, a self-sale), and the copy read before overwrote the credit (round 30).
+                            if (block.Height >= Globals.PathAuditRulesHeight) from = GetSpecificAccountStateTrei(tx.FromAddress) ?? from;
                             from.Nonce += 1;
                             from.StateRoot = block.StateRoot;
                             from.Balance -= (txToSeller.Amount + txToSeller.Fee);
@@ -2917,6 +2926,9 @@ namespace VerifiedXCore.Data
                             await accStTrei.UpdateSafeAsync(toSeller);
                         }
 
+                        // Read again from the path-audit rules: the payee written just above may be the buyer itself (a creator buying
+                        // back under its own royalty, a self-sale), and the copy read before overwrote the credit (round 30).
+                        if (block.Height >= Globals.PathAuditRulesHeight) from = GetSpecificAccountStateTrei(tx.FromAddress) ?? from;
                         from.Nonce += 1;
                         from.StateRoot = block.StateRoot;
                         from.Balance -= (txToSeller.Amount + txToSeller.Fee);

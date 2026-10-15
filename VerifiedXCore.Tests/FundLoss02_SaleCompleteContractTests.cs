@@ -147,6 +147,27 @@ namespace VerifiedXCore.Tests
             Assert.Contains("positive amount", msg);
         }
 
+        /// <summary>
+        /// A completion whose payee is the buyer itself (a self-sale; a creator buying back under its own royalty): the
+        /// payee's credit was overwritten by the buyer's copy read before it, and the price left the supply (round 30).
+        /// </summary>
+        [Fact]
+        public async Task ASaleWhoseBuyerIsAlsoThePayee_KeepsThePrice()
+        {
+            var uid = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
+            {
+                SmartContractUID = uid, ContractData = VbtcTestContracts.PlainNftContractData, MinterAddress = _buyer.Address,
+                OwnerAddress = _buyer.Address, NextOwner = _buyer.Address, IsLocked = true, PurchaseAmount = 10M, Nonce = 0,
+            });
+            var sale = SaleComplete(uid, _buyer.Address, 10M);
+            var height = Math.Max(Globals.PathAuditRulesHeight, Gate);
+            sale.Height = height;
+            await StateData.UpdateTreis(new Block { Height = height, StateRoot = "root", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction> { sale } });
+            var balance = StateData.GetSpecificAccountStateTrei(_buyer.Address)!.Balance;
+            Assert.True(balance > 999.99M, $"the buyer has {balance}: the price it paid itself is gone");
+        }
+
         [Fact]
         public async Task HonestSale_PassesAtGate()
         {
