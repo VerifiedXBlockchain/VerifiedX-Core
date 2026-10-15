@@ -284,6 +284,8 @@ namespace VerifiedXCore.Tests
             // Round 25: names outside plain ASCII are refused on every platform alike (their case pairs follow ICU).
             Assert.Contains("plain ASCII", LedgerIntegrityRules.VbtcDataKeysAreDistinct(Vbtc(clean.Replace("\"Amount\":5", "\"Amount\":5,\"Ꟁ\":1,\"ꟁ\":1")), Rule));
             Assert.Contains("plain ASCII", LedgerIntegrityRules.VbtcDataKeysAreDistinct(Vbtc(clean.Replace("\"Amount\":5", "\"Amount\":5,\"é\":1")), Rule));
+            Assert.Contains("plain ASCII", LedgerIntegrityRules.VbtcDataKeysAreDistinct(Vbtc(clean.Replace("\"ToAddress\":\"x\"", "\"ToAddress\":\"xİ\"")), Rule));   // a value
+            Assert.Null(LedgerIntegrityRules.VbtcDataKeysAreDistinct(Vbtc(clean.Replace("\"ToAddress\":\"x\"", "\"ToAddress\":\"x\",\"Memo\":null,\"N\":[1,true]")), Rule));
             // A transaction that is not a contract call is not this rule's business.
             Assert.Null(LedgerIntegrityRules.ContractCallIsReadable(new Transaction { TransactionType = TransactionType.TX, Data = "[{\"Function\":\"Burn()\",\"MD5List\":{}}]" }, Rule));
             // The honest transfer of a vault, resending its code unchanged, passes as before.
