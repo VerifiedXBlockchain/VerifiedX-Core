@@ -240,8 +240,12 @@ namespace VerifiedXCore.Data
             // order they read rows in before (by Id) wherever more than one can match.
             var vbtcWithdrawalRequests = DB_VBTCWithdrawalRequests.GetCollection<VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest>(RSRV_VBTC_WITHDRAWAL_REQUESTS);
             vbtcWithdrawalRequests.EnsureIndexSafe(x => x.TransactionHash);
-            vbtcWithdrawalRequests.EnsureIndexSafe(x => x.SmartContractUID);
             vbtcWithdrawalRequests.EnsureIndexSafe(x => x.RequestorAddress);
+            // The contract UID as a request's transaction spelled it has no length before the path-audit rules: indexed
+            // only up to 200 characters (round 34; a plain index made by round 33 is dropped).
+            DropIndexOn(DB_VBTCWithdrawalRequests, RSRV_VBTC_WITHDRAWAL_REQUESTS, "$.SmartContractUID");
+            try { vbtcWithdrawalRequests.EnsureIndex(VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.ShortUidIndexName, VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.ShortUidIndexExpression); }
+            catch (Exception ex) { ErrorLogUtility.LogError($"Withdrawal request contract index: {ex.Message}", "DbContext.Initialize()"); }
             // Token votes likewise: each vote cast read every vote ever cast in validation and again in apply, and a vote
             // costs one fee (round 33). Only fields whose every value is bounded are indexed: LiteDB refuses an index key
             // over 1,023 bytes and the write is lost, so a node with the index dropped a row a node without it kept (a

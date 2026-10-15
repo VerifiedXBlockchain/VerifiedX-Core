@@ -86,6 +86,34 @@ namespace VerifiedXCore.Bitcoin.Models
             return currentTime - request.Timestamp <= EXPIRY_SECONDS;
         }
 
+        /// <summary>
+        /// The index on a request's contract UID, kept only for UIDs of at most 200 characters (others are indexed as null):
+        /// a request keeps the UID as its transaction spelled it, found through the collation, and before the path-audit
+        /// rules that spelling had no length; LiteDB refuses a key over 1,023 bytes and the write is lost on a node with a
+        /// plain index (round 34).
+        /// </summary>
+        internal const string ShortUidIndexExpression = "IIF(LENGTH($.SmartContractUID) <= 200, $.SmartContractUID, null)";
+        internal const string ShortUidIndexName = "SmartContractUIDShort";
+
+        /// <summary>
+        /// The rows whose contract UID equals <paramref name="scUID"/> as the database compares it, in the order a full scan
+        /// reads them: those the index finds under the UID, those indexed as null (long UIDs) checked one by one; a long
+        /// UID asked for is looked for in every row.
+        /// </summary>
+        public static List<VBTCWithdrawalRequest> RowsOfContract(LiteDB.ILiteCollection<VBTCWithdrawalRequest> col, string? scUID)
+        {
+            if (scUID == null) return new List<VBTCWithdrawalRequest>();
+            var collation = DbContext.DB_VBTCWithdrawalRequests.Collation;
+            var candidates = scUID.Length <= 200
+                ? col.Find(LiteDB.Query.EQ(ShortUidIndexExpression, scUID)).Concat(col.Find(LiteDB.Query.EQ(ShortUidIndexExpression, LiteDB.BsonValue.Null)))
+                : col.FindAll();
+            return candidates
+                .Where(x => x.SmartContractUID != null && collation.Compare(x.SmartContractUID, scUID) == 0)
+                .GroupBy(x => x.Id).Select(g => g.First())
+                .OrderBy(x => x.Id)
+                .ToList();
+        }
+
         #region Get DB
         public static LiteDB.ILiteCollection<VBTCWithdrawalRequest>? GetVBTCWithdrawalRequestDb()
         {
@@ -209,11 +237,7 @@ namespace VerifiedXCore.Bitcoin.Models
                 return false;
             }
 
-            var incompleteRequests = vwrDb.Query()
-                .Where(x => x.SmartContractUID == scUID && !x.IsCompleted)
-                .ToList()
-                .OrderBy(x => x.Id)
-                .ToList();
+            var incompleteRequests = RowsOfContract(vwrDb, scUID).Where(x => !x.IsCompleted).ToList();
 
             var fixActive = currentHeight >= Globals.V2WithdrawalExpiryFixHeight;
 
@@ -414,12 +438,8 @@ namespace VerifiedXCore.Bitcoin.Models
             // (StateData.VoteOnVBTCV2Cancellation), Cancel(), and the cleanup janitor all set
             // IsCompleted=true WITHOUT writing the offsetting burn row this add-back exists to
             // cancel out. Counting those would credit the owner vBTC that no BTC backs.
-            var completedWithdrawals = vwrDb.Query()
-                .Where(x => x.SmartContractUID == scUID &&
-                            x.IsCompleted &&
-                            x.Status == VBTCWithdrawalStatus.Completed)
-                .ToList()
-                .OrderBy(x => x.Id)
+            var completedWithdrawals = RowsOfContract(vwrDb, scUID)
+                .Where(x => x.IsCompleted && x.Status == VBTCWithdrawalStatus.Completed)
                 .ToList();
 
             var fixActive = currentHeight >= Globals.V2WithdrawalOwnerAddBackFixHeight;
@@ -711,10 +731,7 @@ namespace VerifiedXCore.Bitcoin.Models
             if (vwrDb == null)
                 return null;
 
-            return vwrDb.Query()
-                .Where(x => x.SmartContractUID == scUID)
-                .ToList()
-                .OrderBy(x => x.Id)
+            return RowsOfContract(vwrDb, scUID)
                 .Where(x => !string.IsNullOrEmpty(x.PinnedCoinsJson))
                 .OrderByDescending(x => x.Timestamp)
                 .FirstOrDefault();

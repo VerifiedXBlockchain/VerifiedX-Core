@@ -513,7 +513,8 @@ namespace VerifiedXCore.Services
             const string again = VaultCreatedBefore;
             if (height < Globals.VaultBurnRuleHeight) return null;
 
-            if (VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()?.Exists(x => x.SmartContractUID == uid && x.TransactionHash != null && x.TransactionHash != "") == true)
+            if (VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb() is { } requests
+                && VBTCWithdrawalRequest.RowsOfContract(requests, uid).Any(x => x.TransactionHash != null && x.TransactionHash != ""))
                 return again;
             if (VBTCBridgeLockState.GetCollection().Exists(x => x.SmartContractUID == uid))
                 return again;

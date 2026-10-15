@@ -2174,10 +2174,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (hasActive)
                 {
                     // Local gate — free to be helpful: name the blocking request and when it releases.
-                    var blocking = VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()?.Query()
-                        .Where(x => x.SmartContractUID == payload.SmartContractUID && !x.IsCompleted)
-                        .ToList()
-                        .OrderBy(x => x.Id)
+                    var blocking = (VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb() is { } requests ? VBTCWithdrawalRequest.RowsOfContract(requests, payload.SmartContractUID) : new List<VBTCWithdrawalRequest>())
+                        .Where(x => !x.IsCompleted)
                         .OrderByDescending(x => x.RequestBlockHeight)
                         .FirstOrDefault();
                     var releaseHeight = blocking != null && blocking.RequestBlockHeight > 0

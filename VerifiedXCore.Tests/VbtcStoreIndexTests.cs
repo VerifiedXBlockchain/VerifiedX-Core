@@ -77,12 +77,36 @@ namespace VerifiedXCore.Tests
             Assert.Equal(new[] { "xA" }, VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.OpenClaimants("vault").ToArray());
         }
 
+        /// <summary>
+        /// A request's contract UID is indexed only up to 200 characters: a longer one is written (a plain index lost the
+        /// write) and still found; a contract's rows are those the collation matches, in the scan's order (round 34).
+        /// </summary>
+        [Fact]
+        public void WithdrawalRequests_ByContract_AreTheRowsTheCollationMatches_LongOnesIncluded()
+        {
+            var col = VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()!;
+            var padded = "vault" + new string('\u200B', 1100);
+            col.Insert(new VBTCWithdrawalRequest { TransactionHash = "t1", SmartContractUID = "VAULT", RequestorAddress = "x1" });
+            col.Insert(new VBTCWithdrawalRequest { TransactionHash = "t2", SmartContractUID = "other", RequestorAddress = "x2" });
+            col.Insert(new VBTCWithdrawalRequest { TransactionHash = "t3", SmartContractUID = new string('v', 1100), RequestorAddress = "x3" });
+            col.Insert(new VBTCWithdrawalRequest { TransactionHash = "t4", SmartContractUID = "vault", RequestorAddress = "x4" });
+            col.Insert(new VBTCWithdrawalRequest { TransactionHash = "t5", SmartContractUID = null, RequestorAddress = "x5" });
+            Assert.Equal(5, col.Count());                                          // the 1,100-character UID was written
+
+            List<string> Scan(string uid) => col.Query().ToList().OrderBy(x => x.Id)
+                .Where(x => x.SmartContractUID != null && DbContext.DB_VBTCWithdrawalRequests.Collation.Compare(x.SmartContractUID, uid) == 0)
+                .Select(x => x.TransactionHash).ToList();
+            foreach (var uid in new[] { "vault", "Vault", "other", new string('v', 1100), new string('V', 1100), "none", padded })
+                Assert.Equal(Scan(uid), VBTCWithdrawalRequest.RowsOfContract(col, uid).Select(x => x.TransactionHash).ToList());
+            Assert.Equal(new[] { "t1", "t4" }, VBTCWithdrawalRequest.RowsOfContract(col, "vault").Select(x => x.TransactionHash).ToArray());
+        }
+
         [Fact]
         public void WithdrawalRequests_AreIndexed_AndTheFirstOfSeveralIsStillTheEarliestRow()
         {
             var fields = IndexedFields(DbContext.DB_VBTCWithdrawalRequests, DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS);
             Assert.Contains("$.TransactionHash", fields);
-            Assert.Contains("$.SmartContractUID", fields);
+            Assert.DoesNotContain("$.SmartContractUID", fields);                   // unbounded before the path-audit rules (round 34)
             Assert.Contains("$.RequestorAddress", fields);
 
             var col = VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()!;
