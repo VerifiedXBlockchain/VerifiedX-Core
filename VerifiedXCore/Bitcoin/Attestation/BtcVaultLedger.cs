@@ -261,10 +261,17 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         if (named != null) credits.Add((named, tx.ToAddress));
                         // The inputs as validation and apply read them: the typed reader matches "scuid" too, and takes the
                         // last of two spellings, so an exact "SCUID" read let any holder past the limit (fifth review, round 16).
+                        // Inputs apply cannot read credit nothing: they never cancel the check of the vault already named
+                        // (an unreadable "Inputs" on a single transfer threw here and skipped it; round 17).
                         if (obj["Inputs"] is JArray inputs)
-                            foreach (var input in inputs.ToObject<List<VerifiedXCore.Bitcoin.Models.VBTCV2MultiTransferInput>>() ?? new())
+                        {
+                            List<VerifiedXCore.Bitcoin.Models.VBTCV2MultiTransferInput>? read = null;
+                            try { read = inputs.ToObject<List<VerifiedXCore.Bitcoin.Models.VBTCV2MultiTransferInput>>(); }
+                            catch (Exception ex) when (ex is Newtonsoft.Json.JsonException or ArgumentException or FormatException or InvalidCastException) { }
+                            foreach (var input in read ?? new())
                                 if (!string.IsNullOrEmpty(input?.SCUID))
                                     credits.Add((input.SCUID, tx.ToAddress));
+                        }
                         break;
                     }
                 }

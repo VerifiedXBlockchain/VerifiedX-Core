@@ -848,6 +848,12 @@ namespace VerifiedXCore.Tests
                 var stranger = NewKey().Address;
                 await Refused(SignedBy(holder, stranger, TransactionType.VBTC_V2_TRANSFER,
                     new { Function = "TransferVBTCV2()", ContractUID = vault.Uid, FromAddress = holder.Address, ToAddress = stranger, Amount = 0.00001M, Inputs = new object[0] }), "the most a vault holds");
+                // A single transfer carrying "Inputs" the typed reader cannot read: the vault it names is still checked (round 17).
+                foreach (var junk in new[] { "[{\"Amount\":\"x\"}]", "[1]", "[{\"Amount\":null}]" })
+                {
+                    var single = new JObject { ["Function"] = "TransferVBTCV2()", ["ContractUID"] = vault.Uid, ["FromAddress"] = holder.Address, ["ToAddress"] = stranger, ["Amount"] = 0.00000001M, ["Inputs"] = JArray.Parse(junk) };
+                    Assert.Contains("the most a vault holds", BtcVaultLedger.HolderLimitRefusal(SignedBy(holder, stranger, TransactionType.VBTC_V2_TRANSFER, single)));
+                }
                 // A multi-transfer naming the vault under another spelling of the input key: apply reads it (round 16).
                 foreach (var key in new[] { "SCUID", "scuid", "Scuid" })
                 {
