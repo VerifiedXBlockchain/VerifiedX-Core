@@ -475,7 +475,7 @@ namespace VerifiedXCore.Privacy
             }
 
             w.LastScannedBlock = Math.Max(w.LastScannedBlock, toHeight);
-            ShieldedWalletService.Upsert(w);
+            ShieldedWalletService.Upsert(w, notesAsGiven: true); // what the chain shows, even nothing (round 25)
 
             result.Success = true;
             result.LastScannedBlock = w.LastScannedBlock;

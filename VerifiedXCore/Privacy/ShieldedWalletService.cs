@@ -8,8 +8,12 @@ namespace VerifiedXCore.Privacy
     /// </summary>
     public static class ShieldedWalletService
     {
-        /// <summary>Insert or replace by <see cref="ShieldedWallet.ShieldedAddress"/>.</summary>
-        public static void Upsert(ShieldedWallet wallet, LiteDatabase? db = null)
+        /// <summary>
+        /// Insert or replace by <see cref="ShieldedWallet.ShieldedAddress"/>. With <paramref name="notesAsGiven"/> (a resync)
+        /// the notes and balances are saved as given even when empty: an empty rebuild took the stored ones back, so a
+        /// resync that found no note matching the chain kept the forged ones it was run to clear (fifth review, round 25).
+        /// </summary>
+        public static void Upsert(ShieldedWallet wallet, LiteDatabase? db = null, bool notesAsGiven = false)
         {
             var target = db ?? PrivacyDbContext.GetPrivacyDb();
             var col = target.GetCollection<ShieldedWallet>(PrivacyDbContext.PRIV_WALLETS);
@@ -23,11 +27,11 @@ namespace VerifiedXCore.Privacy
                 if (wallet.LastScannedBlock == 0 && existing.LastScannedBlock > 0)
                     wallet.LastScannedBlock = existing.LastScannedBlock;
 
-                if ((wallet.UnspentCommitments == null || wallet.UnspentCommitments.Count == 0)
+                if (!notesAsGiven && (wallet.UnspentCommitments == null || wallet.UnspentCommitments.Count == 0)
                     && existing.UnspentCommitments != null && existing.UnspentCommitments.Count > 0)
                     wallet.UnspentCommitments = existing.UnspentCommitments;
 
-                if ((wallet.ShieldedBalances == null || wallet.ShieldedBalances.Count == 0)
+                if (!notesAsGiven && (wallet.ShieldedBalances == null || wallet.ShieldedBalances.Count == 0)
                     && existing.ShieldedBalances != null && existing.ShieldedBalances.Count > 0)
                     wallet.ShieldedBalances = existing.ShieldedBalances;
 

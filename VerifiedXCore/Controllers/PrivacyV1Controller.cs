@@ -1455,7 +1455,7 @@ namespace VerifiedXCore.Controllers
                     w.UnspentCommitments.RemoveAll(c => string.Equals(c.AssetType, asset, StringComparison.Ordinal));
                 if (w.ShieldedBalances.ContainsKey(asset))
                     w.ShieldedBalances.Remove(asset);
-                ShieldedWalletService.Upsert(w);
+                ShieldedWalletService.Upsert(w, notesAsGiven: true); // the wipe stands even when nothing else is left (round 25)
 
                 // Now rescan using the ScanShieldedVBTC logic
                 var scanReq = new ScanShieldedVbtcRequest

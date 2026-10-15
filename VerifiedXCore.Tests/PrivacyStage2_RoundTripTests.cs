@@ -350,6 +350,16 @@ namespace VerifiedXCore.Tests
             var wallet = ShieldedWalletService.FindByZfxAddress(_alice.ZfxAddress)!;
             Assert.Equal(5M, Assert.Single(wallet.UnspentCommitments).Amount);
             Assert.Equal(5M, wallet.ShieldedBalances["VFX"]);
+
+            // A resync over blocks where nothing matches leaves nothing: an empty rebuild took the stored notes back
+            // (round 25), so a forged note survived the resync run to clear it.
+            wallet.UnspentCommitments[0].Amount = 500M; wallet.ShieldedBalances["VFX"] = 500M;
+            ShieldedWalletService.Upsert(wallet);
+            result = PrivacyApiHelper.ResyncShieldedWallet(_alice.ZfxAddress, Height + 2, Height + 2);
+            Assert.True(string.IsNullOrEmpty(result.Error), result.Error);
+            wallet = ShieldedWalletService.FindByZfxAddress(_alice.ZfxAddress)!;
+            Assert.Empty(wallet.UnspentCommitments);
+            Assert.Empty(wallet.ShieldedBalances);
         }
 
         [Fact]
