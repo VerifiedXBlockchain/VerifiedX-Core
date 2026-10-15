@@ -2699,6 +2699,12 @@ namespace VerifiedXCore.Services
 
                                         string reserveAddress = txRequest.FromAddress;
                                         string recoveryAddress = jobj["RecoveryAddress"].ToObject<string>();
+                                        // Not the reserve itself: Recover() reads the reserve and its recovery account as two
+                                        // copies and wrote the reserve's emptied copy last, destroying its balance (fifth
+                                        // review, round 30). From the path-audit rules.
+                                        if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.PathAuditRulesHeight
+                                            && string.Equals(recoveryAddress, reserveAddress, StringComparison.OrdinalIgnoreCase))
+                                            return (txResult, "A reserve account's recovery address is another address.");
                                         if(!string.IsNullOrEmpty(reserveAddress) && !string.IsNullOrEmpty(recoveryAddress))
                                         {
                                             var stateRec = StateData.GetSpecificAccountStateTrei(reserveAddress);

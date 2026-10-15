@@ -183,6 +183,23 @@ namespace VerifiedXCore.Tests
             Assert.Equal(ReserveTransactionStatus.Recovered, ReserveTransactions.GetTransactions(older.Hash)!.ReserveTransactionStatus);
         }
 
+        /// <summary>A reserve registered as its own recovery address lost its balance at Recover() (round 30): refused.</summary>
+        [Fact]
+        public async Task ARegisterNamingTheReserveItselfForRecovery_IsRefused()
+        {
+            var tx = new Transaction
+            {
+                FromAddress = _reserve, ToAddress = "Reserve_Base", Amount = Globals.RSRVAccountRegisterRBX, Fee = 0.00000100M, Nonce = 0,
+                Timestamp = TimeUtil.GetTime(), TransactionType = TransactionType.RESERVE,
+                Data = JsonConvert.SerializeObject(new { Function = "Register()", RecoveryAddress = _reserve }),
+            };
+            tx.Build();
+            tx.Signature = SignatureService.CreateSignature(tx.Hash, _vault.Key, _vault.Pub);
+            var (ok, why) = await TransactionValidatorService.VerifyTX(tx, blockVerify: true, blockHeight: Math.Max(Globals.PathAuditRulesHeight, Gate));
+            Assert.False(ok);
+            Assert.Contains("recovery address is another address", why);
+        }
+
         [Fact]
         public async Task EmptyRecoverySigScript_PassesBelowGate_RefusedAtGate()
         {
