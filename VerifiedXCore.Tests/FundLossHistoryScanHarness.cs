@@ -222,8 +222,8 @@ namespace VerifiedXCore.Tests
                     {
                         if (tx == null) continue;
                         txs++;
-                        var why = LedgerIntegrityRules.IdentifiersArePlainAscii(tx, long.MaxValue) ?? LedgerIntegrityRules.VbtcDataKeysAreDistinct(tx, long.MaxValue)
-                            ?? (LedgerIntegrityRules.ContractUids(tx, long.MaxValue) is { } uidWhy && uidWhy.Contains("plain ASCII") || LedgerIntegrityRules.CreatedContractUid(tx)?.EndsWith('\n') == true ? "contract UID: " + (LedgerIntegrityRules.ContractUids(tx, long.MaxValue) ?? "created with a final line break") : null);
+                        var why = CallBackHashRefusal(tx) ?? LedgerIntegrityRules.IdentifiersArePlainAscii(tx, long.MaxValue) ?? LedgerIntegrityRules.VbtcDataKeysAreDistinct(tx, long.MaxValue)
+                            ?? UidTextRefusal(tx);
                         if (why == null) continue;
                         refused++;
                         var key = tx.TransactionType.ToString();
@@ -237,6 +237,31 @@ namespace VerifiedXCore.Tests
             if (stopped != null) lines.Insert(0, $"STOPPED after height {lastHeight}: {stopped}");
             lines.Insert(0, $"{network}: {scanned} blocks to height {lastHeight}, {txs} transactions, {refused} the rules would refuse ({string.Join(", ", byType.Select(kv => kv.Key + " " + kv.Value))})");
             File.WriteAllLines(Path.Combine(outDir, $"ascii-scan-{network}.txt"), lines);
+        }
+
+        /// <summary>A reserve CallBack() whose Hash is not plain hex (round 27: a respelled hash made a second pending row).</summary>
+        private static string? CallBackHashRefusal(Transaction tx)
+        {
+            if (tx.TransactionType != TransactionType.RESERVE || tx.Data == null || !tx.Data.Contains("CallBack()")) return null;
+            try
+            {
+                var hash = Newtonsoft.Json.Linq.JObject.Parse(tx.Data)["Hash"]?.ToString() ?? "";
+                return hash.Length > 0 && hash.All(Uri.IsHexDigit) ? null : "CallBack() hash not plain hex: [" + hash + "]";
+            }
+            catch { return null; }
+        }
+
+        /// <summary>The contract-UID text the path-audit rules refuse, read from the transaction alone (no state look-up).</summary>
+        private static string? UidTextRefusal(Transaction tx)
+        {
+            try
+            {
+                if (LedgerIntegrityRules.CreatedContractUid(tx)?.EndsWith('\n') == true) return "contract UID created with a final line break";
+                foreach (var uid in LedgerIntegrityRules.ReferencedContractUids(tx))
+                    if (!uid.All(c => c >= 0x20 && c <= 0x7E)) return "named contract UID not plain ASCII: " + uid;
+            }
+            catch { }
+            return null;
         }
 
         [Fact]
