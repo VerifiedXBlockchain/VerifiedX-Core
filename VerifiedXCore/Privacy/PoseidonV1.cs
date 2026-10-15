@@ -47,7 +47,7 @@ namespace VerifiedXCore.Privacy
         {
             RequireCanonical(left, nameof(left));
             RequireCanonical(right, nameof(right));
-            return Call(o => PlonkNative.poseidon_hash_2(left, right, o), "poseidon_hash_2");
+            return ParentHashCache.Get('2', left, right, () => Call(o => PlonkNative.poseidon_hash_2(left, right, o), "poseidon_hash_2"));
         }
 
         /// <summary><c>Poseidon(a, b, c)</c> (chained from zero): the nullifier hash.</summary>

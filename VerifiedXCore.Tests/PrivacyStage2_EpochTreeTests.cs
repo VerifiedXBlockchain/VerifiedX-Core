@@ -130,6 +130,43 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>Re-audit (9 Oct 2026): the reset is the VFX pool's; a vBTC pool (privacy refused since VbtcPrivacyDisableHeight) is left as history.</summary>
+        /// <summary>
+        /// A pool's root after one more leaf costs that leaf's path, not the whole tree again: the root was recomputed from
+        /// every leaf for each private transaction applied (round 32). The root is still the tree's (checked against the
+        /// native path verifier).
+        /// </summary>
+        [Fact]
+        public void APoolsRoot_AfterAnAppend_HashesOnlyTheNewLeafsPath()
+        {
+            var store = new ShieldedMerkleStore("VFX", Db, fixedDepth: true);
+            byte[] last = Array.Empty<byte>();
+            for (var i = 0; i < 300; i++)
+            {
+                var n = Note((ulong)(i + 1));
+                store.AppendCommitment(n.G1, n.NoteHash, Height + 1, 1);
+                last = n.NoteHash;
+            }
+            store.GetRootBytes();
+            var next = Note(999);
+            store.AppendCommitment(next.G1, next.NoteHash, Height + 1, 1);
+            var before = ParentHashCache.ComputedOnThisThread;
+            var root = store.GetRootBytes()!;
+            Assert.InRange(ParentHashCache.ComputedOnThisThread - before, 1, FixedDepthMerkleTree.Depth);
+            Assert.True(store.TryGetInclusionProof(300, out var path, out var pathRoot));
+            Assert.Equal(root, pathRoot);
+            Assert.Equal(root, PoseidonV1.RootFromPath(next.NoteHash, 300, path));     // the native verifier agrees
+
+            // The pre-epoch tree too.
+            var legacy = new ShieldedMerkleStore("VBTC:cache-test", Db, fixedDepth: false);
+            for (var i = 0; i < 300; i++)
+                legacy.AppendG1Commitment(Note((ulong)(i + 1)).G1, Height - 5, 1);
+            legacy.GetRootBytes();
+            legacy.AppendG1Commitment(Note(999).G1, Height - 5, 1);
+            before = ParentHashCache.ComputedOnThisThread;
+            Assert.NotNull(legacy.GetRootBytes());
+            Assert.InRange(ParentHashCache.ComputedOnThisThread - before, 1, 2 * 10);
+        }
+
         [Fact]
         public void AtTheHeight_OnlyTheVfxPoolIsReset_VbtcPoolRowsStay()
         {

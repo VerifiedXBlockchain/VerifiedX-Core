@@ -42,6 +42,13 @@ namespace VerifiedXCore.Privacy
         {
             if (left32.Length != PlonkNative.ScalarSize || right32.Length != PlonkNative.ScalarSize)
                 throw new ArgumentException("Expected 32-byte child digests.");
+            var l = left32.ToArray();
+            var r = right32.ToArray();
+            return ParentHashCache.Get('c', l, r, () => CombineNative(l, r));
+        }
+
+        private static byte[] CombineNative(ReadOnlySpan<byte> left32, ReadOnlySpan<byte> right32)
+        {
             var combined = new byte[64];
             left32.CopyTo(combined);
             right32.CopyTo(combined.AsSpan(32));
