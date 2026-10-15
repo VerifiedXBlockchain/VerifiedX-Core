@@ -611,6 +611,37 @@ namespace VerifiedXCore.Tests
             Assert.True(ok, why);
         }
 
+        /// <summary>
+        /// The same, with the owner's withdrawal placed after the vault's transfer in one block: judged as the owner (the
+        /// state before the block), its debt was written on an address that was no longer the owner and was not carried
+        /// with the vault, so the refund went to the new owner's balance (round 29). It is carried at the end of the block.
+        /// </summary>
+        [Fact]
+        public async Task AnOwnerWhoHandsTheVaultOn_AndWithdrawsInTheSameBlock_StillGetsItsWithdrawalBack()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 150_000);
+            var transfer = TransferVault(vault.Uid, _holder);
+            var request = Request(vault.Uid, 0.001M);
+            foreach (var tx in new[] { transfer, request })
+            {
+                var (ok, why) = await Verify(tx, Tip + 1);
+                Assert.True(ok, why);
+            }
+            await Apply(Tip + 1, transfer, request);                                       // the transfer first
+            Assert.Equal(_holder.Address, SmartContractStateTrei.GetSmartContractState(vault.Uid)!.OwnerAddress);
+            Assert.Equal(0M, await Spendable(vault.Uid, Minter));
+            Assert.Equal(0.0005M, await Spendable(vault.Uid, _holder));
+
+            await Mine(Release(vault.Uid, request.Hash, 20));
+            await Confirm(Row(request, vault.Uid).Pins[1]);
+            Assert.Equal(VaultWithdrawalState.Released, Row(request, vault.Uid).State);
+            Assert.Equal(0.001M - 154 * 20 / 100_000_000M, await Spendable(vault.Uid, Minter));
+            Assert.Equal(0.0005M, await Spendable(vault.Uid, _holder));
+            await AssertBacked(vault.Uid, _holder);
+        }
+
         /// <summary>While a vault is marked for a new owner, its owner moves no vBTC out of it; holders are not touched.</summary>
         [Fact]
         public async Task AVaultBeingSoldOrTransferred_KeepsItsOwnersBalance()

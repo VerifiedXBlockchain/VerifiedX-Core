@@ -185,6 +185,7 @@ namespace VerifiedXCore.Data
         {
             Globals.TreisUpdating = true;
             _applyStepFailed = false;
+            lock (_ownerChangesThisBlock) _ownerChangesThisBlock.Clear();
             StateWriteContext.SetHeight(block.Height); //stamp LastModifiedHeight on state writes for snapshot diffing
             LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13: every apply path uses the block's height
             using var contractClock = ContractClock.ForBlock(block.Timestamp, block.Height); // contract code is read as of this block
@@ -839,6 +840,9 @@ namespace VerifiedXCore.Data
                 var txFailListJson = JsonConvert.SerializeObject(txFailList);
                 ErrorLogUtility.LogError($"TX Success Count Failed to match tx Count. TX Fail List: {txFailListJson}", "StateData.UpdateTreis() - Part 3");
             }
+
+            try { CarryDebtsLeftInTheBlock(block.Height); }
+            catch (Exception ex) { NoteApplyStepFailed(block.Height, ex); }
 
             try
             {
@@ -3342,6 +3346,9 @@ namespace VerifiedXCore.Data
         internal static void CarryOwnerPosition(SmartContractStateTrei? contract, string? newOwner)
         {
             var oldOwner = contract?.OwnerAddress;
+            if (contract != null && !string.IsNullOrEmpty(oldOwner) && !string.IsNullOrEmpty(newOwner) && oldOwner != newOwner
+                && VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(contract.SmartContractUID))
+                lock (_ownerChangesThisBlock) _ownerChangesThisBlock.Add((contract.SmartContractUID, oldOwner));
             var rows = contract?.SCStateTreiTokenizationTXes;
             if (rows == null || rows.Count == 0 || string.IsNullOrEmpty(oldOwner) || string.IsNullOrEmpty(newOwner) || oldOwner == newOwner) return;
             if (!VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(contract!.SmartContractUID)) return;
@@ -3350,6 +3357,35 @@ namespace VerifiedXCore.Data
             rows.Add(new SmartContractStateTreiTokenizationTX { Amount = -position, FromAddress = "+", ToAddress = oldOwner });
             rows.Add(new SmartContractStateTreiTokenizationTX { Amount = position, FromAddress = newOwner, ToAddress = "-" });
             SCLogUtility.Log($"vBTC vault {contract.SmartContractUID}: owner changes from {oldOwner} to {newOwner}; the {-position} vBTC the outgoing owner had sent out as owner is carried to the incoming owner.", "StateData.CarryOwnerPosition()");
+        }
+
+        /// <summary>The watched vaults whose owner changed in the block being applied, with the outgoing owner.</summary>
+        private static readonly List<(string Uid, string OldOwner)> _ownerChangesThisBlock = new();
+
+        /// <summary>
+        /// At the end of a block: an outgoing owner left with a debt by an owner debit placed after the change in the same
+        /// block (judged as the owner, since validation reads the state before the block) has it carried to the owner of
+        /// the end of the block, as at the change itself. Left on the outgoing owner, a refund of that debit (a withdrawal
+        /// cancelled, expired or released) only cancelled it and the new owner's balance rose by it (fifth review, round
+        /// 29). A holder that never owned the vault cannot go below zero, so only such debts are moved.
+        /// </summary>
+        private static void CarryDebtsLeftInTheBlock(long height)
+        {
+            List<(string Uid, string OldOwner)> changes;
+            lock (_ownerChangesThisBlock) { changes = _ownerChangesThisBlock.ToList(); _ownerChangesThisBlock.Clear(); }
+            if (height < Globals.PathAuditRulesHeight) return;
+            foreach (var (uid, oldOwner) in changes.Distinct())
+            {
+                var contract = SmartContractStateTrei.GetSmartContractState(uid);
+                var rows = contract?.SCStateTreiTokenizationTXes;
+                if (contract == null || rows == null || contract.OwnerAddress == oldOwner || string.IsNullOrEmpty(contract.OwnerAddress)) continue;
+                var position = rows.Where(x => x.FromAddress == oldOwner || x.ToAddress == oldOwner).Sum(x => x.Amount);
+                if (position >= 0M) continue;
+                rows.Add(new SmartContractStateTreiTokenizationTX { Amount = -position, FromAddress = "+", ToAddress = oldOwner });
+                rows.Add(new SmartContractStateTreiTokenizationTX { Amount = position, FromAddress = contract.OwnerAddress, ToAddress = "-" });
+                SmartContractStateTrei.UpdateSmartContract(contract);
+                SCLogUtility.Log($"vBTC vault {uid}: {-position} vBTC sent out by {oldOwner} as owner after the vault changed hands in block {height} is carried to {contract.OwnerAddress}.", "StateData.CarryDebtsLeftInTheBlock()");
+            }
         }
 
         private static void ApplyVBTCV2LedgerPair(string scUID, string fromAddress, string toAddress, decimal amount, string txHash)
