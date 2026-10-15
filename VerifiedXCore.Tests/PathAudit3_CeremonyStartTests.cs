@@ -522,6 +522,7 @@ namespace VerifiedXCore.Tests
             };
             var reporting = Open(completed: false);
             var finished = Open(completed: true);
+            var Unopenable = new JObject { [FrostStartup.BuildAddressToIdentifierMap(reporting.ParticipantAddresses)["xV1"]] = FrostShareCrypto.Prefix + "AAAA" }.ToString(Formatting.None);
             Assert.True(FrostSessionStorage.DKGSessions.TryAdd(reporting.SessionId, reporting));
             Assert.True(FrostSessionStorage.DKGSessions.TryAdd(finished.SessionId, finished));
             try
@@ -532,13 +533,14 @@ namespace VerifiedXCore.Tests
                     {
                         LeaderAddress = leaderAddress, Timestamp = _now,
                         LeaderSignature = VerifiedXCore.Services.SignatureService.CreateSignature($"{session.SessionId}.{leaderAddress}.{_now}", leader, pub),
-                        AllGeneratedShares = new { xV2 = "", xV3 = "" },
+                        // Shares for this validator that will not open (a batch with none for it is refused unread; round 15).
+                        AllGeneratedShares = new { xV2 = Unopenable, xV3 = Unopenable },
                     });
                     var response = await client.PostAsync($"/frost/dkg/shares/{session.SessionId}", new StringContent(body, Encoding.UTF8, "application/json"));
                     return (response.StatusCode, await response.Content.ReadAsStringAsync());
                 }
 
-                // Empty entries: this validator reports both dealers, and that session is done for good.
+                // Shares that will not open: this validator reports both dealers, and that session is done for good.
                 var (code, text) = await Batch(reporting);
                 Assert.Equal(HttpStatusCode.OK, code);
                 Assert.NotNull(JObject.Parse(text)["Accusations"]?["xV2"]);
