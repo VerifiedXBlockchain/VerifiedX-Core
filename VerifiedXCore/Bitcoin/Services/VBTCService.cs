@@ -173,10 +173,6 @@ namespace VerifiedXCore.Bitcoin.Services
         internal static bool DecompileFailureSettled(string key) =>
             _decompileFailures.AddOrUpdate(key, 1, (_, n) => n + 1) >= 3;
 
-        /// <summary>Whether a decompile of this contract failed and was not yet taken as its answer (a passing fault, perhaps).</summary>
-        internal static bool DecompileFailedUnsettled(string scUID) =>
-            _decompileFailures.Any(kv => kv.Value < 3 && kv.Key.Split('|') is { Length: 3 } parts && parts[1] == scUID);
-
         public static bool IsVbtcV2Contract(SmartContractStateTrei? scState)
         {
             if (scState == null || string.IsNullOrEmpty(scState.SmartContractUID) || string.IsNullOrEmpty(scState.ContractData))

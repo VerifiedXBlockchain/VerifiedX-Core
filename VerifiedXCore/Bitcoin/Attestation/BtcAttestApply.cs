@@ -110,14 +110,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             try
             {
                 var vault = VBTCChainView.GetVault(scUID);
-                if (vault == null)
-                {
-                    // Not a vault - unless its code failed to decompile and that was not yet taken as its answer: then this
-                    // node would never watch a vault every other node watches. Passed on, so the block is flagged (round 31).
-                    if (VerifiedXCore.Bitcoin.Services.VBTCService.DecompileFailedUnsettled(scUID))
-                        throw new InvalidOperationException($"Contract {scUID} could not be decompiled when its creation was applied; it is not registered for watching on this node.");
-                    return;
-                }
+                if (vault == null) return;
                 var address = vault.Feature.DepositAddress;
                 if (string.IsNullOrWhiteSpace(address)) return;
 
