@@ -115,6 +115,23 @@ namespace VerifiedXCore.Bitcoin.Services
             return await PollOnceInternal();
         }
 
+        private static async Task<bool> CanReadLogs(Web3 web3, string? contract, long block, long latest)
+        {
+            if (block > latest || string.IsNullOrEmpty(contract)) return false;
+            try
+            {
+                var probe = new Nethereum.RPC.Eth.DTOs.NewFilterInput
+                {
+                    FromBlock = new BlockParameter(new HexBigInteger(block)),
+                    ToBlock = new BlockParameter(new HexBigInteger(block)),
+                    Address = new[] { contract },
+                };
+                await web3.Eth.Filters.GetLogs.SendRequestAsync(probe);
+                return true;
+            }
+            catch { return false; }
+        }
+
         private static async Task<(int Processed, long ScannedToBlock, string Message)> PollOnceInternal()
         {
             var web3 = new Web3(BaseBridgeService.BaseRpcUrl);
@@ -283,6 +300,13 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
                 if (++_singleBlockFailures < SingleBlockFailuresBeforeSkip)
                     return (processed, state.LastScannedBlock, "Base log query failed for one block; read again next poll");
+                // Passed over only when the provider reads the next block: during an outage nothing is skipped, the
+                // watcher waits (round 22).
+                if (!await CanReadLogs(web3, contract, from + 1, latest))
+                {
+                    _singleBlockFailures = SingleBlockFailuresBeforeSkip - 1;
+                    return (processed, state.LastScannedBlock, "Base log queries are failing; waiting for the provider");
+                }
                 ErrorLogUtility.LogError($"[BaseBridgeExit] Base block {from} could not be read {SingleBlockFailuresBeforeSkip} times; passed over. Rescan it (RescanExitBurns/{from}) once the provider answers.",
                     "BaseBridgeExitWatchService.PollOnceInternal");
             }
