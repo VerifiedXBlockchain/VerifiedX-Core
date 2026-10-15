@@ -24,7 +24,7 @@ namespace VerifiedXCore.Services
             if (dataFrom != txFrom) return "Token transfer FromAddress must be the transaction signer.";
             // From the path-audit rules the older shape is refused: to a recipient with no account yet, the apply credited
             // the tokens to an account keyed "Token_Base", and the recipient never had them (fifth review, round 30).
-            if (height != null && height.Value >= Globals.PathAuditRulesHeight && txTo == LegacyTokenTransferToAddress)
+            if (height != null && height.Value >= Globals.PathAuditRulesHeight && string.Equals(txTo, LegacyTokenTransferToAddress, StringComparison.OrdinalIgnoreCase))
                 return "A token transfer is addressed to its recipient (ToAddress), not to Token_Base.";
             // Older wallets addressed token transfers to "Token_Base" with the recipient only in the data; that shape is in
             // the chain history (found by the replay scan: 193 testnet transactions) and must keep replaying. The holder

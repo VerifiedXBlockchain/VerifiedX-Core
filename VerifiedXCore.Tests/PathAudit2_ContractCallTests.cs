@@ -293,6 +293,7 @@ namespace VerifiedXCore.Tests
             // Round 30: the older token-transfer shape (to Token_Base, recipient in the data only) is refused from the rules.
             var holder = _other.Address;
             Assert.NotNull(LedgerIntegrityRules.TokenTransfer(holder, "Token_Base", holder, "Rrecipient", 1M, Rule));
+            Assert.NotNull(LedgerIntegrityRules.TokenTransfer(holder, "token_base", holder, "Rrecipient", 1M, Rule)); // any case
             Assert.Null(LedgerIntegrityRules.TokenTransfer(holder, "Token_Base", holder, "Rrecipient", 1M, Rule - 1));
             Assert.Null(LedgerIntegrityRules.TokenTransfer(holder, "Rrecipient", holder, "Rrecipient", 1M, Rule));
             // Round 27: VFX goes to an address somebody can sign for.
