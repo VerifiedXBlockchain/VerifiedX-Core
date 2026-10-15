@@ -2719,6 +2719,13 @@ namespace VerifiedXCore.Services
                                         string hash = jobj["Hash"].ToObject<string>();
                                         if(!string.IsNullOrEmpty(hash))
                                         {
+                                            // The hash is a transaction's, in hex. The block path below looked a row up by the
+                                            // text, then searched the chain with the spaces taken out and saved a new pending
+                                            // row under the text as given: a call-back naming a reserve transaction's hash with
+                                            // a space in it refunded it a second time (fifth review, round 27). No transaction
+                                            // in mainnet or testnet history has such a call-back.
+                                            if (!hash.All(Uri.IsHexDigit))
+                                                return (txResult, "A call-back names a transaction hash in hex.");
                                             var currentTime = TimeUtil.GetTime();
 
                                             var rTx = ReserveTransactions.GetTransactions(hash);
@@ -2728,6 +2735,9 @@ namespace VerifiedXCore.Services
                                                     return (txResult, "Could not find a reserve transaction with that hash.");
 
                                                 var txSearchResult = await TransactionData.GetNetworkTXByHash(hash, 0, false, true);
+
+                                                if (txSearchResult != null && !string.Equals(txSearchResult.Hash, hash, StringComparison.Ordinal))
+                                                    txSearchResult = null; // found only under another spelling
 
                                                 if(txSearchResult != null)
                                                 {

@@ -392,6 +392,25 @@ namespace VerifiedXCore.Tests
             Assert.Equal(_reserve.Address, Vault.OwnerAddress);
         }
 
+        /// <summary>
+        /// A call-back naming a pending transaction's hash with a space in it found no row, then (in a block) the chain
+        /// search took the spaces out, found the transaction and saved a second pending row under the spaced text: the
+        /// payment was refunded twice (fifth review, round 27).
+        /// </summary>
+        [Fact]
+        public async Task ACallBackNamingAHashRespelled_IsRefused_AndSavesNoRow()
+        {
+            var transfer = TransferVault(_firstBuyer.Address, 25);
+            await Mine(0, transfer);
+            var spaced = transfer.Hash.Insert(10, " ");
+            var respelled = FromReserve(TransactionType.RESERVE, "Reserve_Base", new { Function = "CallBack()", Hash = spaced }, null);
+            var (ok, why) = await TransactionValidatorService.VerifyTX(respelled, false, true, false, null, false, _height + 1);
+            Assert.False(ok);
+            Assert.Contains("hex", why);
+            Assert.Null(ReserveTransactions.GetTransactions(spaced));
+            Assert.Equal(ReserveTransactionStatus.Pending, StatusOf(transfer));
+        }
+
         [Fact]
         public async Task ALeftoverTransferRow_DoesNotMoveAContractThatHasMovedOn()
         {
