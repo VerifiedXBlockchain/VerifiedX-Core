@@ -31,6 +31,9 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <param name="exitAmountBtc">Amount of BTC to allocate.</param>
         /// <param name="excludeContractUIDs">Optional set of contract UIDs to skip during allocation
         /// (e.g. blacklisted or known-broken FROST contracts).</param>
+        internal static bool Nameable(string? id) =>
+            !string.IsNullOrWhiteSpace(id) && id == id.Trim() && id.All(c => c >= 0x20 && c <= 0x7E);
+
         public static List<PoolUnlockAllocation>? ComputeAllocationPlan(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs = null)
         {
             var available = VBTCBridgeLockState.GetAvailableLocksFIFO();
@@ -46,6 +49,12 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 // Skip locks belonging to excluded contracts
                 if (excludeContractUIDs != null && excludeContractUIDs.Contains(lockRec.SmartContractUID))
+                    continue;
+
+                // A lock whose id or vault cannot be named in a transaction consensus takes (from the path-audit rules:
+                // printable ASCII, no spaces around, not blank) is left out: a lock made before those rules with such an
+                // id refused every plan that reached it, freezing all unlocks and exits until H2 (fifth review, round 26).
+                if (!Nameable(lockRec.LockId) || !Nameable(lockRec.SmartContractUID))
                     continue;
 
                 // Whole satoshis, as consensus takes them from the path-audit rules: a lock made before amounts were held

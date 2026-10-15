@@ -800,6 +800,29 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A lock made before the path-audit rules could carry an id consensus no longer takes in a transaction (not
+        /// printable ASCII, spaces around): every plan reaching it was refused, freezing unlocks and exits (round 26).
+        /// </summary>
+        [Fact]
+        public async Task ALockWhoseIdCannotBeNamed_IsLeftOutOfThePlan()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            var odd = await Lock(vault.Uid, 0.002M);
+            var next = await Lock(vault.Uid, 0.005M);
+            foreach (var id in new[] { "été", " padded " })
+            {
+                var record = VBTCBridgeLockState.GetByLockId(odd)!;
+                VBTCBridgeLockState.GetCollection().Delete(record.LockId);
+                record.LockId = id; odd = id;
+                VBTCBridgeLockState.GetCollection().Insert(record);
+                var plan = BridgePoolUnlockService.ComputeAllocationPlan(0.003M)!;
+                Assert.Equal(next, Assert.Single(plan).LockId);
+            }
+        }
+
+        /// <summary>
         /// Locks made before amounts were held to 8 places (VX-01) can hold a fraction of a satoshi; the plan drew it, and
         /// consensus, which takes whole satoshis from the path-audit rules (round 15), refused every plan that reached it
         /// (fifth review, round 16). A lock is drawn down to its last whole satoshi.
