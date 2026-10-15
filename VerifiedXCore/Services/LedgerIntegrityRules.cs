@@ -205,6 +205,56 @@ namespace VerifiedXCore.Services
             return Respelled(root) ? "This vBTC transaction's Data names a key in two spellings." : null;
         }
 
+        /// <summary>
+        /// From Globals.PathAuditRulesHeight a transaction's addresses, and the identifiers consensus looks up by text —
+        /// ADNR and BTC ADNR names and Bitcoin addresses, DecShop ids and URLs, vote topic ids — are printable ASCII.
+        /// Those look-ups go through LiteDB's case-insensitive culture collation and culture lowercasing, which for other
+        /// characters follow each machine's ICU or NLS tables: a name registered as U+A7C1 and taken again as U+A7C0
+        /// was "already taken" on one platform and free on another, splitting the chain (fifth review, round 26). The
+        /// fields are read as the rules read them. Null when the rule passes.
+        /// </summary>
+        public static string? IdentifiersArePlainAscii(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.PathAuditRulesHeight) return null;
+            static bool Ascii(string? s) => s == null || s.All(c => c >= 0x20 && c <= 0x7E);
+            if (!Ascii(tx.ToAddress) || !Ascii(tx.FromAddress))
+                return "A transaction's addresses are plain ASCII.";
+            if (string.IsNullOrEmpty(tx.Data)) return null;
+            try
+            {
+                var fields = new List<string?>();
+                switch (tx.TransactionType)
+                {
+                    case TransactionType.ADNR:
+                    {
+                        var j = JObject.Parse(tx.Data);
+                        foreach (var key in new[] { "Name", "BTCAddress", "BTCToAddress", "BTCFromAddress" })
+                            fields.Add(j[key]?.ToString());
+                        break;
+                    }
+                    case TransactionType.VOTE_TOPIC:
+                        fields.Add(JObject.Parse(tx.Data)["Topic"]?.ToObject<TopicTrei>()?.TopicUID);
+                        break;
+                    case TransactionType.VOTE:
+                        fields.Add(JObject.Parse(tx.Data)["Vote"]?.ToObject<Vote>()?.TopicUID);
+                        break;
+                    case TransactionType.DSTR:
+                    {
+                        var j = JObject.Parse(tx.Data);
+                        fields.Add(j["UniqueId"]?.ToString());
+                        var shop = j["DecShop"]?.ToObject<DecShop>();
+                        fields.Add(shop?.UniqueId);
+                        fields.Add(shop?.DecShopURL);
+                        break;
+                    }
+                    default:
+                        return null;
+                }
+                return fields.All(Ascii) ? null : "This transaction names a name, address or id in characters other than plain ASCII.";
+            }
+            catch { return null; } // unreadable: the type's own rules judge it
+        }
+
         public static string? ContractCallIsReadable(Transaction tx, long height)
         {
             if (tx?.Data == null || height < Globals.PathAuditRulesHeight) return null;

@@ -286,6 +286,16 @@ namespace VerifiedXCore.Tests
             Assert.Contains("plain ASCII", LedgerIntegrityRules.VbtcDataKeysAreDistinct(Vbtc(clean.Replace("\"Amount\":5", "\"Amount\":5,\"é\":1")), Rule));
             Assert.Contains("plain ASCII", LedgerIntegrityRules.VbtcDataKeysAreDistinct(Vbtc(clean.Replace("\"ToAddress\":\"x\"", "\"ToAddress\":\"xİ\"")), Rule));   // a value
             Assert.Null(LedgerIntegrityRules.VbtcDataKeysAreDistinct(Vbtc(clean.Replace("\"ToAddress\":\"x\"", "\"ToAddress\":\"x\",\"Memo\":null,\"N\":[1,true]")), Rule));
+            // Round 26: names, addresses and ids consensus looks up by text are plain ASCII.
+            Transaction Typed(TransactionType type, string data, string to = "Base") => new() { TransactionType = type, Data = data, ToAddress = to, FromAddress = "xA" };
+            Assert.Null(LedgerIntegrityRules.IdentifiersArePlainAscii(Typed(TransactionType.ADNR, "{\"Function\":\"AdnrCreate()\",\"Name\":\"plain\"}"), Rule));
+            Assert.NotNull(LedgerIntegrityRules.IdentifiersArePlainAscii(Typed(TransactionType.ADNR, "{\"Function\":\"AdnrCreate()\",\"Name\":\"\uA7C0\"}"), Rule));
+            Assert.Null(LedgerIntegrityRules.IdentifiersArePlainAscii(Typed(TransactionType.ADNR, "{\"Function\":\"AdnrCreate()\",\"Name\":\"\uA7C0\"}"), Rule - 1));
+            Assert.NotNull(LedgerIntegrityRules.IdentifiersArePlainAscii(Typed(TransactionType.ADNR, "{\"Function\":\"BTCAdnrTransfer()\",\"BTCFromAddress\":\"bc1\u0171\"}"), Rule));
+            Assert.NotNull(LedgerIntegrityRules.IdentifiersArePlainAscii(Typed(TransactionType.VOTE, "{\"Function\":\"TopicVote()\",\"Vote\":{\"TopicUID\":\"\uA7C0\"}}"), Rule));
+            Assert.NotNull(LedgerIntegrityRules.IdentifiersArePlainAscii(Typed(TransactionType.DSTR, "{\"Function\":\"DecShopUpdate()\",\"DecShop\":{\"UniqueId\":\"\uA7C1\"}}"), Rule));
+            Assert.NotNull(LedgerIntegrityRules.IdentifiersArePlainAscii(Typed(TransactionType.TX, null!, "\uA7C0name.vfx"), Rule));
+            Assert.Null(LedgerIntegrityRules.IdentifiersArePlainAscii(Typed(TransactionType.DSTR, "{\"Function\":\"DecShopUpdate()\",\"DecShop\":{\"UniqueId\":\"abc\",\"Name\":\"Caf\u00e9\"}}"), Rule)); // free text stays free
             // A transaction that is not a contract call is not this rule's business.
             Assert.Null(LedgerIntegrityRules.ContractCallIsReadable(new Transaction { TransactionType = TransactionType.TX, Data = "[{\"Function\":\"Burn()\",\"MD5List\":{}}]" }, Rule));
             // The honest transfer of a vault, resending its code unchanged, passes as before.
