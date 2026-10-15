@@ -349,6 +349,15 @@ namespace VerifiedXCore
         public static long PathAuditRulesHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// From this height no transaction's ToAddress may be a registered name (".vfx" or ".rbx"): validation resolved
+        /// the name through the node's own name table and accepted it, but every apply credits or assigns the ToAddress as
+        /// written, so the VFX, token, NFT or name went to the literal string and nobody could use it, and the verdict
+        /// depended on the local table. PathAuditRulesHeight already refuses it for VFX sends and unshields; this covers
+        /// every other type. Not active yet.
+        /// </summary>
+        public static long RecipientIsAddressHeight = 999_999_999_999;
+
+        /// <summary>
         /// The validator stake is bonded from this height (Services.ValidatorBond; owner decision 2026-10-13): a
         /// registered validator cannot send its 5,000 VFX until 1,200 blocks after its exit is mined, and counts for a
         /// vault's key ceremony only once that stake has been locked for two days. Validators active at this height

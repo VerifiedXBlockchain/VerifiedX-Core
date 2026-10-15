@@ -308,7 +308,9 @@ namespace VerifiedXCore.Services
                 // VFX goes to an address somebody can sign for (round 27).
                 ?? LedgerIntegrityRules.VfxRecipientCanHoldIt(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                 // What a token transaction adds to a document read whole later is bounded (round 33).
-                ?? LedgerIntegrityRules.TokenDocumentLimits(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+                ?? LedgerIntegrityRules.TokenDocumentLimits(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // Nothing is addressed to a name: the applies credit the ToAddress as written.
+                ?? LedgerIntegrityRules.RecipientIsNotAName(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
             if (vaultInTransitError != null)
                 return (false, vaultInTransitError);
 
