@@ -289,7 +289,20 @@ namespace VerifiedXCore.BrowserWalletServices
                     txsScanned++;
                     if (tx?.Data == null || !PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType) || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
                         continue;
-                    if (payload?.Outs == null)
+                    if (payload == null)
+                        continue;
+                    // Notes this transaction spends, each by its own nullifier, as the node scans mark them: the browser
+                    // scans only added notes, so one received and spent within the range showed as unspent for good (round 26).
+                    foreach (var uc in w.UnspentCommitments ?? new List<UnspentCommitment>())
+                    {
+                        if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment)) continue;
+                        if (!PrivacyApiHelper.SpendsWalletNote(tx, payload, uc, keys, block.Height)) continue;
+                        uc.IsSpent = true;
+                        var spentAsset = uc.AssetType ?? "";
+                        if (w.ShieldedBalances.ContainsKey(spentAsset))
+                            w.ShieldedBalances[spentAsset] -= uc.Amount;
+                    }
+                    if (payload.Outs == null)
                         continue;
                     foreach (var o in payload.Outs)
                     {
