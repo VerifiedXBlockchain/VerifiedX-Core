@@ -52,9 +52,5 @@ namespace VerifiedXCore.Privacy
         {
             try { held.Release(); } catch (SemaphoreFullException) { }
         }
-
-        /// <summary>Acquire the lock asynchronously.</summary>
-        public static Task WaitAsync(string zfxAddress, CancellationToken ct = default) =>
-            For(zfxAddress).WaitAsync(ct);
     }
 }
