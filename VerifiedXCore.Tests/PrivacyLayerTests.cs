@@ -211,8 +211,12 @@ namespace VerifiedXCore.Tests
             Assert.True(pi.Length > 32);
         }
 
+        /// <summary>
+        /// A node's own setting does not change a verdict: before the proof-rules height a proofless private transfer
+        /// passes on every node, the flag set or not (round 32). From the height every node requires the proof.
+        /// </summary>
         [Fact]
-        public void PlonkProofVerifier_EnforcePlonkProofsForZk_RequiresProof()
+        public void PlonkProofVerifier_EnforcePlonkProofsForZk_DoesNotChangeAVerdict()
         {
             var prev = Globals.EnforcePlonkProofsForZk;
             try
@@ -220,8 +224,8 @@ namespace VerifiedXCore.Tests
                 Globals.EnforcePlonkProofsForZk = true;
                 var payload = new PrivateTxPayload { Asset = "VFX", Fee = Globals.PrivateTxFixedFee };
                 var tx = new Transaction { TransactionType = TransactionType.VFX_PRIVATE_TRANSFER };
-                var r = PlonkProofVerifier.TryValidatePrivateProofs(tx, payload, blockDownloads: false);
-                Assert.False(r.ok);
+                var r = PlonkProofVerifier.TryValidatePrivateProofs(tx, payload, blockDownloads: false, height: Globals.PrivateTxProofRulesHeight - 1);
+                Assert.True(r.ok, r.message);
             }
             finally
             {
