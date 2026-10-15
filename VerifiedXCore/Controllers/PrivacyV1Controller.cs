@@ -138,7 +138,7 @@ namespace VerifiedXCore.Controllers
 
                 var fee = Globals.PrivateTxFixedFee;
                 if (!CommitmentSelectionService.TrySelectInputs(
-                        w.UnspentCommitments,
+                        (w.UnspentCommitments ?? new List<UnspentCommitment>()).Where(c => c != null && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)).ToList(), // VFX notes only (round 25)
                         req.TransparentAmount + fee,
                         out var inputs,
                         out _,
@@ -202,7 +202,7 @@ namespace VerifiedXCore.Controllers
 
                 var fee = Globals.PrivateTxFixedFee;
                 if (!CommitmentSelectionService.TrySelectInputs(
-                        w.UnspentCommitments,
+                        (w.UnspentCommitments ?? new List<UnspentCommitment>()).Where(c => c != null && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)).ToList(), // VFX notes only (round 25)
                         req.PaymentAmount + fee,
                         out var inputs,
                         out _,

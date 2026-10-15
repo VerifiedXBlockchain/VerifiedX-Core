@@ -132,7 +132,7 @@ namespace VerifiedXCore.BrowserWalletServices
 
             var fee = Globals.PrivateTxFixedFee;
             if (!CommitmentSelectionService.TrySelectInputs(
-                    w.UnspentCommitments ?? (IReadOnlyList<UnspentCommitment>)Array.Empty<UnspentCommitment>(),
+                    (w.UnspentCommitments ?? new List<UnspentCommitment>()).Where(c => c != null && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)).ToList(), // VFX notes only (round 25)
                     amount + fee,
                     out var inputs,
                     out _,
@@ -176,7 +176,7 @@ namespace VerifiedXCore.BrowserWalletServices
 
             var fee = Globals.PrivateTxFixedFee;
             if (!CommitmentSelectionService.TrySelectInputs(
-                    w.UnspentCommitments ?? (IReadOnlyList<UnspentCommitment>)Array.Empty<UnspentCommitment>(),
+                    (w.UnspentCommitments ?? new List<UnspentCommitment>()).Where(c => c != null && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)).ToList(), // VFX notes only (round 25)
                     amount + fee,
                     out var inputs,
                     out _,
