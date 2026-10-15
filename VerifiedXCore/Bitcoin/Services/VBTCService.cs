@@ -959,26 +959,35 @@ namespace VerifiedXCore.Bitcoin.Services
         /// </summary>
         public const int MaxMultiTransferInputs = 25;
 
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string ScUid, decimal Amount)[]> _outflowsByData = new(StringComparer.Ordinal);
+
+        /// <summary>Data longer than this is read each time, not remembered (an honest 25-input transfer is about 3 KB).</summary>
+        internal const int MaxRememberedOutflowData = 4096;
+
+        internal static bool RemembersOutflowsOf(string data) => _outflowsByData.ContainsKey(data);
+
         /// <summary>
+        /// A vBTC transfer's outflows, read from its data (a pure function of it, remembered by the data's text: bounded,
+        /// cleared at 50,000). Admission, proposal and block validation read every pending or approved same-sender
+        /// transfer again for each one (vBTC types escape the per-sender cap): about 15 million parses for a proposal of
+        /// 1,400 transfers over a full mempool (fifth review, round 35). A new list each call. Only data up to
+        /// <see cref="MaxRememberedOutflowData"/> is remembered: a transfer refused after this read (an overspend) left its
+        /// data here, and padded to the transaction cap 50,000 of them held about 3 GB (round 36).
+        /// <para>
         /// Per-contract vBTC outflows of a committed/candidate VBTC_V2_TRANSFER, for overspend
         /// accounting: multi-shaped Data (multi Function, no top-level ContractUID) yields one
         /// entry per input; anything else yields the single-shape (ContractUID, Amount) pair.
         /// A hybrid Data (multi Function PLUS top-level ContractUID) deliberately parses as
         /// single — that matches how pre-gate nodes validate/apply it, and post-gate the
         /// validator rejects the hybrid shape outright. Empty list on parse failure.
-        /// </summary>
-        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string ScUid, decimal Amount)[]> _outflowsByData = new(StringComparer.Ordinal);
-
-        /// <summary>
-        /// A vBTC transfer's outflows, read from its data (a pure function of it, remembered by the data's text: bounded,
-        /// cleared at 50,000). Admission, proposal and block validation read every pending or approved same-sender
-        /// transfer again for each one (vBTC types escape the per-sender cap): about 15 million parses for a proposal of
-        /// 1,400 transfers over a full mempool (fifth review, round 35). A new list each call.
+        /// </para>
         /// </summary>
         public static List<(string ScUid, decimal Amount)> GetVbtcV2TransferOutflows(Transaction tx)
         {
             if (tx == null || tx.TransactionType != TransactionType.VBTC_V2_TRANSFER || string.IsNullOrEmpty(tx.Data))
                 return new List<(string, decimal)>();
+            if (tx.Data.Length > MaxRememberedOutflowData)
+                return ReadVbtcV2TransferOutflows(tx);
             if (_outflowsByData.TryGetValue(tx.Data, out var known))
                 return known.ToList();
             var read = ReadVbtcV2TransferOutflows(tx);
