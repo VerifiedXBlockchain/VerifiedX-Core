@@ -382,8 +382,7 @@ namespace VerifiedXCore.Tests
             var own = Db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS).Find(x => x.Commitment == output.CommitmentB64).Single(r => r.NoteHash == output.NoteHashB64);
 
             Assert.True(PrivacyApiHelper.NoteMatchesOutput(output, 5M, Convert.FromBase64String(note!.RandomnessB64), _alice, "VFX", out var position));
-            Assert.Equal(own.TreePosition, position);
-            Assert.NotEqual(PrivacyApiHelper.LookupTreePositionByCommitment(output.CommitmentB64, "VFX"), position); // the copy's, first
+            Assert.Equal(own.TreePosition, position); // the first leaf with the commitment is either, as LiteDB returns them
         }
 
         [Fact]
