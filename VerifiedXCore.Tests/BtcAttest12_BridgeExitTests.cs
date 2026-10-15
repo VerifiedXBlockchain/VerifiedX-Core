@@ -839,6 +839,30 @@ namespace VerifiedXCore.Tests
             Assert.False(BridgePoolUnlockService.Nameable(new string('a', BridgePoolUnlockService.MaxLockIdLength + 1)));
         }
 
+        /// <summary>More locks at the front than one plan names: the largest are taken, and the burn is paid (round 28).</summary>
+        [Fact]
+        public async Task MoreSmallLocksAtTheFrontThanOnePlanNames_TheLargestArePlanned()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 5_000_000);
+            var small = VBTCBridgeLockState.GetByLockId(await Lock(vault.Uid, 0.0001M))!;   // just above the dust line
+            for (var i = 0; i < BridgePoolUnlockService.MaxPlanAllocations; i++)
+            {
+                small.LockId = Guid.NewGuid().ToString("N");
+                VBTCBridgeLockState.GetCollection().Insert(small);                               // as many again at the front
+            }
+            var big = await Lock(vault.Uid, 0.03M);
+            var bigRecord = VBTCBridgeLockState.GetByLockId(big)!;
+            bigRecord.LockTimestamp = small.LockTimestamp + 1_000;                              // behind every small lock
+            VBTCBridgeLockState.GetCollection().Update(bigRecord);
+            var plan = BridgePoolUnlockService.ComputeAllocationPlan(0.02M);
+            Assert.NotNull(plan);                                                  // paid (the cap returned no plan)
+            Assert.Equal(0.02M, plan!.Sum(a => a.UnlockAmount));
+            Assert.True(plan.Count <= BridgePoolUnlockService.MaxPlanAllocations);
+            Assert.Contains(plan, a => a.LockId == big);
+        }
+
         /// <summary>
         /// Locks made before amounts were held to 8 places (VX-01) can hold a fraction of a satoshi; the plan drew it, and
         /// consensus, which takes whole satoshis from the path-audit rules (round 15), refused every plan that reached it

@@ -48,12 +48,17 @@ namespace VerifiedXCore.Bitcoin.Services
         public const decimal PlanDustBtc = 0.0001M;
 
         public static List<PoolUnlockAllocation>? ComputeAllocationPlan(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs = null) =>
-            ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: true)
-            ?? ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: false);
+            ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: true, largestFirst: false)
+            ?? ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: false, largestFirst: false)
+            // More locks at the front than one plan names (each just above the dust line, say): the largest first, so a
+            // payable burn is paid (round 28: the cap returned no plan where about 200 locks would have fitted).
+            ?? ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: false, largestFirst: true);
 
-        private static List<PoolUnlockAllocation>? ComputeAllocationPlan(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs, bool passOverDust)
+        private static List<PoolUnlockAllocation>? ComputeAllocationPlan(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs, bool passOverDust, bool largestFirst)
         {
             var available = VBTCBridgeLockState.GetAvailableLocksFIFO();
+            if (available != null && largestFirst)
+                available = available.OrderByDescending(l => l.RemainingAmount).ToList();
             if (available == null || available.Count == 0)
                 return null;
 
