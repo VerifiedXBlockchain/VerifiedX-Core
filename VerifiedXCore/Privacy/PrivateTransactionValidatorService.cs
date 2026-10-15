@@ -451,6 +451,14 @@ namespace VerifiedXCore.Privacy
         /// </summary>
         internal static string? EncodingRefusal(Transaction tx, PrivateTxPayload payload)
         {
+            // A VFX private transaction names the VFX pool exactly. The proof does not cover the asset and the privacy
+            // store ignores case, while every duplicate guard compares the text: "vfx", "Vfx"... spent one note once per
+            // spelling in a block; and one naming a vBTC pool was judged against that pool's supply and paid in VFX
+            // (fifth review, round 20).
+            if ((tx.TransactionType == TransactionType.VFX_SHIELD || tx.TransactionType == TransactionType.VFX_UNSHIELD
+                    || tx.TransactionType == TransactionType.VFX_PRIVATE_TRANSFER)
+                && !string.Equals(payload.Asset, "VFX", StringComparison.Ordinal))
+                return "A VFX private transaction's asset is \"VFX\".";
             static bool Canonical(string? s)
             {
                 if (string.IsNullOrEmpty(s)) return true;

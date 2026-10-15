@@ -187,6 +187,14 @@ namespace VerifiedXCore.Tests
             var unshield = new Transaction { TransactionType = TransactionType.VFX_UNSHIELD, Amount = 0.000000011M };
             Assert.Contains("whole satoshis", VerifiedXCore.Privacy.PrivateTransactionValidatorService.EncodingRefusal(unshield, Payload(n)));
 
+            // A VFX private transaction names the pool "VFX" exactly (round 20): the store ignores case, the guards do not.
+            foreach (var asset in new[] { "vfx", "Vfx", "VFX​", "VBTC:abc:1" })
+            {
+                var other = Payload(n);
+                other.Asset = asset;
+                Assert.Contains("is \"VFX\"", Refusal(other));
+            }
+
             // Admission refuses one nullifier twice in a transaction, at every height.
             Assert.False(MempoolNullifierTracker.TryRegisterForMempool("dup-" + Guid.NewGuid().ToString("N"), "VFX", new List<string> { n, n }, out var why));
             Assert.Contains("twice", why);
