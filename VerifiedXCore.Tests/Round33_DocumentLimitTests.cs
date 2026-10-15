@@ -93,6 +93,26 @@ namespace VerifiedXCore.Tests
                 TokenVoteTopic = new TokenVoteTopic { SmartContractUID = TokenX, TopicUID = "T" + Guid.NewGuid().ToString("N")[..12], TopicName = name, TopicDescription = description, VotingEndDate = TimeUtil.GetTime() + 86_400 },
             });
 
+        private Transaction Ban(string address) =>
+            TokenTx(_owner, "Token_Base", new { Function = "TokenBanAddress()", ContractUID = TokenX, FromAddress = _owner.Address, BanAddress = address });
+
+        [Fact]
+        public async Task ATokensBans_AreBoundedInSizeAndNumber()
+        {
+            var (ok, why) = await TransactionValidatorService.VerifyTX(Ban(NewKey().Item3));
+            Assert.True(ok, why);
+            var (longOk, longWhy) = await TransactionValidatorService.VerifyTX(Ban(new string('R', LedgerIntegrityRules.MaxBanAddressLength + 1)));
+            Assert.False(longOk);
+            Assert.Contains("at most", longWhy);
+
+            var token = SmartContractStateTrei.GetSmartContractState(TokenX)!;
+            token.TokenDetails!.AddressBlackList = Enumerable.Range(0, LedgerIntegrityRules.MaxTokenBans).Select(i => "Rbanned" + i).ToList();
+            SmartContractStateTrei.UpdateSmartContract(token);
+            var (fullOk, fullWhy) = await TransactionValidatorService.VerifyTX(Ban(NewKey().Item3));
+            Assert.False(fullOk);
+            Assert.Contains($"at most {LedgerIntegrityRules.MaxTokenBans} addresses", fullWhy);
+        }
+
         [Fact]
         public async Task ATokensVoteTopics_AreBoundedInSizeAndNumber()
         {

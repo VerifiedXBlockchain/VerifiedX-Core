@@ -269,6 +269,9 @@ namespace VerifiedXCore.Services
         public const int MaxTopicNameLength = 128;
         public const int MaxTopicDescriptionLength = 1600;
         public const int MaxTopicIdLength = 128;
+        /// <summary>Addresses a token may ban, and the length of one.</summary>
+        public const int MaxTokenBans = 5000;
+        public const int MaxBanAddressLength = 64;
 
         /// <summary>
         /// From Globals.PathAuditRulesHeight, what a token transaction adds to a document read whole by later transactions
@@ -300,6 +303,18 @@ namespace VerifiedXCore.Services
                     var token = string.IsNullOrEmpty(scUID) ? null : SmartContractStateTrei.GetSmartContractState(scUID);
                     if ((token?.TokenDetails?.TokenTopicList?.Count ?? 0) >= MaxTokenTopics)
                         return $"A token holds at most {MaxTokenTopics} vote topics.";
+                    return null;
+                }
+                case "TokenBanAddress()":
+                {
+                    // A ban was any string, up to the transaction cap, and any number of them (round 33).
+                    var ban = Read(() => j["BanAddress"]?.ToString());
+                    if ((ban?.Length ?? 0) > MaxBanAddressLength)
+                        return $"A banned address is at most {MaxBanAddressLength} characters.";
+                    var token = string.IsNullOrEmpty(scUID) ? null : SmartContractStateTrei.GetSmartContractState(scUID);
+                    var bans = token?.TokenDetails?.AddressBlackList;
+                    if (bans != null && bans.Count >= MaxTokenBans && !bans.Contains(ban ?? ""))
+                        return $"A token bans at most {MaxTokenBans} addresses.";
                     return null;
                 }
                 default:
