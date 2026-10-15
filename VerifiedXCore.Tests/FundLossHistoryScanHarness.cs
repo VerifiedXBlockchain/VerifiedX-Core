@@ -222,7 +222,7 @@ namespace VerifiedXCore.Tests
                     {
                         if (tx == null) continue;
                         txs++;
-                        var why = CallBackHashRefusal(tx) ?? LedgerIntegrityRules.IdentifiersArePlainAscii(tx, long.MaxValue) ?? LedgerIntegrityRules.VbtcDataKeysAreDistinct(tx, long.MaxValue)
+                        var why = CallBackHashRefusal(tx) ?? LockIdRefusal(tx) ?? LedgerIntegrityRules.IdentifiersArePlainAscii(tx, long.MaxValue) ?? LedgerIntegrityRules.VbtcDataKeysAreDistinct(tx, long.MaxValue)
                             ?? UidTextRefusal(tx);
                         if (why == null) continue;
                         refused++;
@@ -237,6 +237,18 @@ namespace VerifiedXCore.Tests
             if (stopped != null) lines.Insert(0, $"STOPPED after height {lastHeight}: {stopped}");
             lines.Insert(0, $"{network}: {scanned} blocks to height {lastHeight}, {txs} transactions, {refused} the rules would refuse ({string.Join(", ", byType.Select(kv => kv.Key + " " + kv.Value))})");
             File.WriteAllLines(Path.Combine(outDir, $"ascii-scan-{network}.txt"), lines);
+        }
+
+        /// <summary>A bridge lock whose id a plan cannot name (round 27: over 64 characters, padded or not plain ASCII; left out of plans).</summary>
+        private static string? LockIdRefusal(Transaction tx)
+        {
+            if (tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_LOCK || tx.Data == null) return null;
+            try
+            {
+                var id = Newtonsoft.Json.Linq.JObject.Parse(tx.Data)["LockId"]?.ToString();
+                return VerifiedXCore.Bitcoin.Services.BridgePoolUnlockService.Nameable(id) ? null : "bridge lock id a plan cannot name: [" + id + "]";
+            }
+            catch { return null; }
         }
 
         /// <summary>A reserve CallBack() whose Hash is not plain hex (round 27: a respelled hash made a second pending row).</summary>
