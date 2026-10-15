@@ -38,6 +38,16 @@ namespace VerifiedXCore.Tests
             db.GetCollection("$indexes").Find(Query.EQ("collection", collection)).Select(d => d["expression"].AsString).ToArray();
 
         [Fact]
+        public void BridgeLocks_AreIndexedByVault()
+        {
+            var col = VBTCBridgeLockState.GetCollection();
+            Assert.Contains("$.SmartContractUID", IndexedFields(DbContext.DB_VBTCWithdrawalRequests, VBTCBridgeLockState.CollectionName));
+            col.Insert(new VBTCBridgeLockState { LockId = "a", SmartContractUID = "vault", OwnerAddress = "xA" });
+            col.Insert(new VBTCBridgeLockState { LockId = "b", SmartContractUID = "other", OwnerAddress = "xB" });
+            Assert.Equal(new[] { "xA" }, VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.OpenClaimants("vault").ToArray());
+        }
+
+        [Fact]
         public void WithdrawalRequests_AreIndexed_AndTheFirstOfSeveralIsStillTheEarliestRow()
         {
             var fields = IndexedFields(DbContext.DB_VBTCWithdrawalRequests, DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS);

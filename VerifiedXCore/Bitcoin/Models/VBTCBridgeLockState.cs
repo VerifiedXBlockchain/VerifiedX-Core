@@ -65,6 +65,9 @@ namespace VerifiedXCore.Bitcoin.Models
         {
             var c = DbContext.DB_VBTCWithdrawalRequests.GetCollection<VBTCBridgeLockState>(CollectionName);
             c.EnsureIndex(x => x.OwnerAddress, false);
+            // A vault's locks are read on every holder check of its ledger and at every vault creation; a lock may be one
+            // satoshi, so the store can be grown cheaply and was read whole each time (fifth review, round 33).
+            c.EnsureIndex(x => x.SmartContractUID, false);
             return c;
         }
 
