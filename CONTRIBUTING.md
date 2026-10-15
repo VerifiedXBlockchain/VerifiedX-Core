@@ -18,7 +18,7 @@ All changes go through pull requests. This repository is public: anything in a c
    ```
 4. A bug fix comes with a test that fails before the fix and passes after it, plus a test that the legitimate behaviour still works.
 
-On macOS the `FrostKeyBackupTests` that use `AesGcm` fail, because .NET 6 has no `AesGcm` on Apple platforms. They pass in CI; that is the only expected local failure.
+On macOS 5 `FrostKeyBackupTests` that use `AesGcm` fail, because .NET 6 has no `AesGcm` on Apple platforms. They pass in CI; that is the only expected local failure.
 
 ## Changes that need extra care
 
