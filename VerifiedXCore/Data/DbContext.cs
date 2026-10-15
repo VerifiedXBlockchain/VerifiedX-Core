@@ -144,6 +144,19 @@ namespace VerifiedXCore.Data
         public const string RSRV_TOPIC_TREI = "rsrv_topic_trei";
         public const string RSRV_VOTE = "rsrv_vote";
         public const string RSRV_TOKEN_VOTE = "rsrv_token_vote";
+
+        /// <summary>Drops <paramref name="collection"/>'s index on <paramref name="expression"/>, if it has one (round 34).</summary>
+        private static void DropIndexOn(LiteDatabase db, string collection, string expression)
+        {
+            try
+            {
+                var names = db.GetCollection("$indexes").Find(LiteDB.Query.EQ("collection", collection))
+                    .Where(d => d["expression"].AsString == expression).Select(d => d["name"].AsString).ToList();
+                foreach (var name in names)
+                    db.GetCollection(collection).DropIndex(name);
+            }
+            catch (Exception ex) { ErrorLogUtility.LogError($"Dropping index {expression} on {collection}: {ex.Message}", "DbContext.DropIndexOn()"); }
+        }
         public const string RSRV_SETTINGS = "rsrv_settings";
         public const string RSRV_MOTHER = "rsrv_mother";
         public const string RSRV_ADJ_BENCH = "rsrv_adj_bench";
@@ -230,9 +243,12 @@ namespace VerifiedXCore.Data
             vbtcWithdrawalRequests.EnsureIndexSafe(x => x.SmartContractUID);
             vbtcWithdrawalRequests.EnsureIndexSafe(x => x.RequestorAddress);
             // Token votes likewise: each vote cast read every vote ever cast in validation and again in apply, and a vote
-            // costs one fee (round 33).
+            // costs one fee (round 33). Only fields whose every value is bounded are indexed: LiteDB refuses an index key
+            // over 1,023 bytes and the write is lost, so a node with the index dropped a row a node without it kept (a
+            // topic id had no length before the path-audit rules; round 34). The voter is the signer (NEW-04) and the
+            // contract one that exists.
             var tokenVotes = DB_Wallet.GetCollection<TokenVote>(RSRV_TOKEN_VOTE);
-            tokenVotes.EnsureIndexSafe(x => x.TopicUID);
+            DropIndexOn(DB_Wallet, RSRV_TOKEN_VOTE, "$.TopicUID");
             tokenVotes.EnsureIndexSafe(x => x.Address);
             tokenVotes.EnsureIndexSafe(x => x.SmartContractUID);
 
@@ -251,10 +267,11 @@ namespace VerifiedXCore.Data
             // vault's ledger (up to about 10 MB) among them (fourth review, round 7). Not unique: older states may hold a
             // UID twice; lookups take the oldest (lowest Id), as the scan did.
             scTrei.EnsureIndexSafe(x => x.SmartContractUID, false);
-            // Recover() looks a reserve's contracts up by owner and by token owner, and a reserve may recover every block:
-            // each read every contract (round 33).
-            scTrei.EnsureIndexSafe(x => x.OwnerAddress, false);
-            scTrei.EnsureIndexSafe(x => x.TokenDetails.ContractOwner, false);
+            // Not indexed by owner or token owner: an owner change writes the text a transaction names (TokenContractOwnerChange
+            // takes any string), LiteDB refuses an index key over 1,023 bytes and the write was lost on a node with the
+            // index and kept on one without it (round 33 added them, round 34 drops them where a node built them).
+            DropIndexOn(DbContext.DB_SmartContractStateTrei, RSRV_SCSTATE_TREI, "$.OwnerAddress");
+            DropIndexOn(DbContext.DB_SmartContractStateTrei, RSRV_SCSTATE_TREI, "$.TokenDetails.ContractOwner");
 
             //var peers = DbContext.DB_Peers.GetCollection<Peers>(DbContext.RSRV_PEERS);
             //peers.EnsureIndex(x => x.PeerIP, true);

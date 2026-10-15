@@ -4,6 +4,8 @@ using System.Linq;
 using LiteDB;
 using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Data;
+using VerifiedXCore.Models;
+using VerifiedXCore.Models.SmartContracts;
 using Xunit;
 
 namespace VerifiedXCore.Tests
@@ -37,21 +39,32 @@ namespace VerifiedXCore.Tests
         private static string[] IndexedFields(LiteDatabase db, string collection) =>
             db.GetCollection("$indexes").Find(Query.EQ("collection", collection)).Select(d => d["expression"].AsString).ToArray();
 
+        /// <summary>
+        /// Free text a transaction names is not indexed: LiteDB refuses an index key over 1,023 bytes and the write is lost
+        /// where the index exists (round 34). Indexes an earlier build made on such fields are dropped at start.
+        /// </summary>
         [Fact]
-        public void ContractState_IsIndexedByOwnerAndTokenOwner()
+        public void FreeTextFields_AreNotIndexed_AndALongValueIsWritten()
         {
-            var fields = IndexedFields(DbContext.DB_SmartContractStateTrei, DbContext.RSRV_SCSTATE_TREI);
-            Assert.Contains("$.OwnerAddress", fields);
-            Assert.Contains("$.TokenDetails.ContractOwner", fields);
-        }
+            DbContext.DB_SmartContractStateTrei.GetCollection<SmartContractStateTrei>(DbContext.RSRV_SCSTATE_TREI).EnsureIndex(x => x.OwnerAddress);
+            DbContext.DB_Wallet.GetCollection<TokenVote>(DbContext.RSRV_TOKEN_VOTE).EnsureIndex(x => x.TopicUID);
+            DbContext.CloseDB();
+            DbContext.Initialize();                                                              // a node that ran round 33
+            var contractFields = IndexedFields(DbContext.DB_SmartContractStateTrei, DbContext.RSRV_SCSTATE_TREI);
+            Assert.DoesNotContain("$.OwnerAddress", contractFields);
+            Assert.DoesNotContain("$.TokenDetails.ContractOwner", contractFields);
+            var voteFields = IndexedFields(DbContext.DB_Wallet, DbContext.RSRV_TOKEN_VOTE);
+            Assert.DoesNotContain("$.TopicUID", voteFields);
+            Assert.Contains("$.Address", voteFields);
 
-        [Fact]
-        public void TokenVotes_AreIndexed()
-        {
-            var fields = IndexedFields(DbContext.DB_Wallet, DbContext.RSRV_TOKEN_VOTE);
-            Assert.Contains("$.TopicUID", fields);
-            Assert.Contains("$.Address", fields);
-            Assert.Contains("$.SmartContractUID", fields);
+            var longText = new string('A', 1100);
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei { SmartContractUID = "long-owner", OwnerAddress = "xA", TokenDetails = new TokenDetails { ContractOwner = "xA" } });
+            var contract = SmartContractStateTrei.GetSmartContractState("long-owner")!;
+            contract.OwnerAddress = longText; contract.TokenDetails!.ContractOwner = longText;
+            SmartContractStateTrei.UpdateSmartContract(contract);
+            Assert.Equal(longText, SmartContractStateTrei.GetSmartContractState("long-owner")!.OwnerAddress);
+            DbContext.DB_Wallet.GetCollection<TokenVote>(DbContext.RSRV_TOKEN_VOTE).Insert(new TokenVote { TopicUID = longText, Address = "xA", SmartContractUID = "long-owner" });
+            Assert.Equal(1, DbContext.DB_Wallet.GetCollection<TokenVote>(DbContext.RSRV_TOKEN_VOTE).Count());
         }
 
         [Fact]
