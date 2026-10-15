@@ -103,6 +103,80 @@ namespace VerifiedXCore.Tests
             Assert.Equal(HttpStatusCode.Forbidden, r.StatusCode);
         }
 
+        // Only UnlockWallet itself may run while the API-password window is closed. V1 also routes
+        // api/V1/{somePassword}/{action}, so a first segment that reads "unlockwallet" must not open it.
+        [Theory]
+        [InlineData("/api/V1/unlockwallet/SendTransaction/xFrom/xTo/1")]
+        [InlineData("/api/V1/UnlockWallet/GetPrivateKey/xAddr")]
+        [InlineData("/api/V1/UnlockWallet/GetDecryptWallet//")]
+        [InlineData("/api/V1/UnlockWallet/GetEncryptedPassword//")]
+        [InlineData("/api/V1/UnlockWallet/ValidateAddress//")]
+        [InlineData("/api/V1/UnlockWallet//")]
+        public async Task VX03_ApiPasswordWindowClosed_OtherV1Actions_Refused(string path)
+        {
+            Startup.APIEnabled = true;
+            Globals.APIUnlockTime = DateTime.UtcNow.AddMinutes(-1);
+            using var server = NewServer();
+
+            var r = await server.CreateClient().GetAsync(path);
+
+            Assert.Equal(HttpStatusCode.Forbidden, r.StatusCode);
+        }
+
+        [Theory]
+        [InlineData("/api/V1/UnlockWallet/StartMother")]
+        [InlineData("/api/V1/UnlockWallet/JoinMother")]
+        public async Task VX03_ApiPasswordWindowClosed_V1PostActions_Refused(string path)
+        {
+            Startup.APIEnabled = true;
+            Globals.APIUnlockTime = DateTime.UtcNow.AddMinutes(-1);
+            using var server = NewServer();
+
+            var r = await server.CreateClient().SendAsync(Post(path, "{}"));
+
+            Assert.Equal(HttpStatusCode.Forbidden, r.StatusCode);
+        }
+
+        [Theory]
+        [InlineData("/api/V1/UnlockWallet/some-password")]
+        [InlineData("/api/v1/unlockwallet/some-password/")]
+        [InlineData("/api/V1/UnlockWallet/GetWalletInfo")] // the literal UnlockWallet route wins: "GetWalletInfo" is the password
+        public async Task VX03_ApiPasswordWindowClosed_UnlockWallet_StillReachable(string path)
+        {
+            Startup.APIEnabled = true;
+            Globals.APIUnlockTime = DateTime.UtcNow.AddMinutes(-1);
+            using var server = NewServer();
+
+            var r = await server.CreateClient().GetAsync(path);
+
+            Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+            Assert.Contains("No password has been configured.", await r.Content.ReadAsStringAsync());
+        }
+
+        [Fact]
+        public async Task VX03_ApiPasswordWindowClosed_HeadOnUnlockWallet_Refused()
+        {
+            Startup.APIEnabled = true;
+            Globals.APIUnlockTime = DateTime.UtcNow.AddMinutes(-1);
+            using var server = NewServer();
+
+            var r = await server.CreateClient().SendAsync(new HttpRequestMessage(HttpMethod.Head, "/api/V1/UnlockWallet/some-password"));
+
+            Assert.Equal(HttpStatusCode.Forbidden, r.StatusCode);
+        }
+
+        [Fact]
+        public async Task VX03_Control_ApiPasswordWindowOpen_V1ActionReachable()
+        {
+            Startup.APIEnabled = true;
+            Globals.APIUnlockTime = DateTime.UtcNow.AddMinutes(5);
+            using var server = NewServer();
+
+            var r = await server.CreateClient().GetAsync("/api/V1/GetWalletInfo");
+
+            Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+        }
+
         [Fact]
         public async Task VX03_Control_SendVfx_WithToken_ReachesController()
         {
