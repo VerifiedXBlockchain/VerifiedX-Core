@@ -186,9 +186,11 @@ namespace VerifiedXCore.Services
             // Values too: lock ids, burn hashes and other identifiers are looked up through LiteDB's case-insensitive
             // collation and lowercased by consensus, both of which follow the same platform tables for other characters.
             static bool Ascii(string s) => s.All(c => c >= 0x20 && c <= 0x7E);
+            // A contract call's body ("Data": the contract's code) is free text that nothing looks up; a web wallet sends it
+            // as raw code with line breaks (mainnet block 6,544,281), not base64. Its key is still checked (round 27).
             static bool PlainAscii(JToken t) => t switch
             {
-                JObject o => o.Properties().All(p => Ascii(p.Name) && PlainAscii(p.Value)),
+                JObject o => o.Properties().All(p => Ascii(p.Name) && (p.Name == "Data" && p.Value.Type == JTokenType.String || PlainAscii(p.Value))),
                 JArray a => a.All(PlainAscii),
                 JValue { Type: JTokenType.String } v => Ascii((string)v.Value!),
                 _ => true,

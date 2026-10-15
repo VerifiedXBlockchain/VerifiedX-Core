@@ -286,6 +286,10 @@ namespace VerifiedXCore.Tests
             Assert.Contains("plain ASCII", LedgerIntegrityRules.VbtcDataKeysAreDistinct(Vbtc(clean.Replace("\"Amount\":5", "\"Amount\":5,\"é\":1")), Rule));
             Assert.Contains("plain ASCII", LedgerIntegrityRules.VbtcDataKeysAreDistinct(Vbtc(clean.Replace("\"ToAddress\":\"x\"", "\"ToAddress\":\"xİ\"")), Rule));   // a value
             Assert.Null(LedgerIntegrityRules.VbtcDataKeysAreDistinct(Vbtc(clean.Replace("\"ToAddress\":\"x\"", "\"ToAddress\":\"x\",\"Memo\":null,\"N\":[1,true]")), Rule));
+            // Round 27: a contract call's body may hold line breaks and any text (a web wallet's raw code; mainnet 6,544,281).
+            var rawBody = new Transaction { TransactionType = TransactionType.VBTC_V2_CONTRACT_CREATE, Data = $"[{{\"Function\":\"Mint()\",\"ContractUID\":\"{uid}\",\"Data\":\"let AssetName = \\\"Café\\\"\nlet X = 1\",\"MD5List\":\"NA\"}}]" };
+            Assert.Null(LedgerIntegrityRules.VbtcDataKeysAreDistinct(rawBody, Rule));
+            Assert.Contains("plain ASCII", LedgerIntegrityRules.VbtcDataKeysAreDistinct(new Transaction { TransactionType = TransactionType.VBTC_V2_CONTRACT_CREATE, Data = rawBody.Data.Replace("\"MD5List\":\"NA\"", "\"MD5List\":\"N\nA\"") }, Rule));
             // Round 26: names, addresses and ids consensus looks up by text are plain ASCII.
             Transaction Typed(TransactionType type, string data, string to = "Base") => new() { TransactionType = type, Data = data, ToAddress = to, FromAddress = "xA" };
             Assert.Null(LedgerIntegrityRules.IdentifiersArePlainAscii(Typed(TransactionType.ADNR, "{\"Function\":\"AdnrCreate()\",\"Name\":\"plain\"}"), Rule));
