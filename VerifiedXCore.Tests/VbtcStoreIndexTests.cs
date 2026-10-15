@@ -68,10 +68,10 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public void BridgeLocks_AreIndexedByVault()
+        public void BridgeLocks_AreNotIndexedByVault_AndStillFoundByIt()
         {
             var col = VBTCBridgeLockState.GetCollection();
-            Assert.Contains("$.SmartContractUID", IndexedFields(DbContext.DB_VBTCWithdrawalRequests, VBTCBridgeLockState.CollectionName));
+            Assert.DoesNotContain("$.SmartContractUID", IndexedFields(DbContext.DB_VBTCWithdrawalRequests, VBTCBridgeLockState.CollectionName));
             col.Insert(new VBTCBridgeLockState { LockId = "a", SmartContractUID = "vault", OwnerAddress = "xA" });
             col.Insert(new VBTCBridgeLockState { LockId = "b", SmartContractUID = "other", OwnerAddress = "xB" });
             Assert.Equal(new[] { "xA" }, VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.OpenClaimants("vault").ToArray());

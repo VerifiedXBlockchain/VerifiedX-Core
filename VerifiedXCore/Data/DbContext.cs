@@ -272,6 +272,11 @@ namespace VerifiedXCore.Data
             // index and kept on one without it (round 33 added them, round 34 drops them where a node built them).
             DropIndexOn(DbContext.DB_SmartContractStateTrei, RSRV_SCSTATE_TREI, "$.OwnerAddress");
             DropIndexOn(DbContext.DB_SmartContractStateTrei, RSRV_SCSTATE_TREI, "$.TokenDetails.ContractOwner");
+            // Nor bridge locks by vault: before the path-audit rules a lock keeps the vault UID as its transaction spelled it
+            // (found through the collation), so its length is not bounded, and the index was made on every read of the
+            // store, which would then throw for good (round 33 added it; round 34). It was read only at a ledger's
+            // compaction and a vault's creation.
+            DropIndexOn(DB_VBTCWithdrawalRequests, VerifiedXCore.Bitcoin.Models.VBTCBridgeLockState.CollectionName, "$.SmartContractUID");
 
             //var peers = DbContext.DB_Peers.GetCollection<Peers>(DbContext.RSRV_PEERS);
             //peers.EnsureIndex(x => x.PeerIP, true);
