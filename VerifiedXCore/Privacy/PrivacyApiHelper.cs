@@ -254,10 +254,17 @@ namespace VerifiedXCore.Privacy
                 var commitmentSet = new HashSet<string>(
                     spentInputs.Select(i => i.Commitment).Where(c => !string.IsNullOrEmpty(c)),
                     StringComparer.Ordinal);
+                TryGetViewingKeyMaterial(fresh, out var keys, out _);
+                var epoch = PrivacyEpoch.ProofRulesActive((Globals.LastBlock?.Height ?? 0) + 1);
 
                 foreach (var uc in fresh.UnspentCommitments ?? new List<UnspentCommitment>())
                 {
                     if (uc == null || !uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
+                        continue;
+                    // Not a note the chain has spent meanwhile (another request's spend of it mined while this one was
+                    // being built): restoring it showed a balance that was gone (round 26).
+                    if (keys != null && VfxPrivateTransactionBuilder.NullifierOf(uc, keys, epoch) is { } nullifier
+                        && NullifierService.IsNullifierSpentInDb(nullifier, uc.AssetType ?? assetType))
                         continue;
                     if (commitmentSet.Contains(uc.Commitment))
                     {
