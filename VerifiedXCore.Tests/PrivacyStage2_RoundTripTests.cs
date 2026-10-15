@@ -447,6 +447,57 @@ namespace VerifiedXCore.Tests
             Assert.True(ShieldedNoteAutoScanner.ProcessedThrough() >= block.Height);
         }
 
+        /// <summary>
+        /// A wallet marks a spend's notes spent when it sends it; one never mined (its root went stale, it was dropped)
+        /// left them spent until a manual resync (fifth review, round 32). The scanner restores them once the nullifier
+        /// is not spent on chain, nothing in the mempool claims it and enough blocks have passed; a mined one stays spent.
+        /// </summary>
+        [Fact]
+        public async Task ANoteMarkedSpentForASpendNeverMined_IsRestored()
+        {
+            if (!ParamsLoaded()) return;
+            var shield = ShieldFor(_alice, 5M);
+            await Apply(shield, Height + 1);
+            BlockchainData.GetBlocks().InsertSafe(new Block { Height = Height + 1, StateRoot = "root", Timestamp = 1_700_000_000 + Height + 1, Hash = "unmined", Transactions = new List<Transaction> { shield } });
+            ShieldedWalletService.Upsert(new ShieldedWallet { ShieldedAddress = _alice.ZfxAddress, ViewingKey = _alice.ViewingKey32, IsViewOnly = true });
+            Assert.True(string.IsNullOrEmpty(PrivacyApiHelper.ResyncShieldedWallet(_alice.ZfxAddress, Height + 1, Height + 1).Error));
+            UnspentCommitment Note() => Assert.Single(ShieldedWalletService.FindByZfxAddress(_alice.ZfxAddress)!.UnspentCommitments);
+            decimal Balance() => ShieldedWalletService.FindByZfxAddress(_alice.ZfxAddress)!.ShieldedBalances["VFX"];
+            async Task Scanned(long height)
+            {
+                ShieldedNoteAutoScanner.Enqueue(new Block { Height = height, Transactions = new List<Transaction>() });
+                for (var i = 0; i < 100 && ShieldedNoteAutoScanner.ProcessedThrough() < height; i++)
+                    await Task.Delay(100);
+                Assert.True(ShieldedNoteAutoScanner.ProcessedThrough() >= height);
+            }
+
+            Globals.LastBlock = new Block { Height = Height + 1 };
+            PrivacyApiHelper.MarkInputsSpentLocally(_alice.ZfxAddress, new[] { Note() }, "VFX");   // as a spend route does
+            Assert.True(Note().IsSpent);
+            Assert.Equal(0M, Balance());
+            var nullifier = VfxPrivateTransactionBuilder.NullifierOf(Note(), _alice, PrivacyEpoch.ProofRulesActive(Height + 2))!;
+            var claim = MempoolNullifierTracker.MakeKey("VFX", nullifier);
+
+            await Scanned(Height + 10);                                           // too soon
+            Assert.True(Note().IsSpent);
+            Globals.MempoolNullifiers[claim] = "still-pooled";
+            await Scanned(Height + 1 + PrivacyApiHelper.UnminedSpendBlocks + 5);  // still claimed by a pooled spend
+            Assert.True(Note().IsSpent);
+            Globals.MempoolNullifiers.TryRemove(claim, out _);
+            await Scanned(Height + 1 + PrivacyApiHelper.UnminedSpendBlocks + 6);  // never mined: restored
+            Assert.False(Note().IsSpent);
+            Assert.Null(Note().SpendPendingSince);
+            Assert.Equal(5M, Balance());
+
+            // Mined: stays spent, and is settled.
+            PrivacyApiHelper.MarkInputsSpentLocally(_alice.ZfxAddress, new[] { Note() }, "VFX");
+            Assert.True(NullifierService.TryRecordNullifier(nullifier, "VFX", Height + 2, 1_700_000_000 + Height + 2));
+            await Scanned(Height + 1 + PrivacyApiHelper.UnminedSpendBlocks + 60);
+            Assert.True(Note().IsSpent);
+            Assert.Null(Note().SpendPendingSince);
+            Assert.Equal(0M, Balance());
+        }
+
         [Fact]
         public async Task UnshieldTwoNotes_ProvesAndVerifies()
         {

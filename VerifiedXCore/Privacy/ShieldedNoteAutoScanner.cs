@@ -56,6 +56,9 @@ namespace VerifiedXCore.Privacy
         {
             try { ProcessBlockForLocalWallets(block); }
             catch (Exception ex) { ErrorLogUtility.LogError($"Shielded auto-scan error at block {block.Height}: {ex.Message}", "ShieldedNoteAutoScanner.Worker()"); }
+            // Notes left marked spent by a spend never mined are restored (round 32).
+            try { PrivacyApiHelper.RestoreUnminedSpends(block.Height); }
+            catch (Exception ex) { ErrorLogUtility.LogError($"Restoring unmined spends at block {block.Height}: {ex.Message}", "ShieldedNoteAutoScanner.Worker()"); }
             NoteProcessed(block.Height);
         }
 

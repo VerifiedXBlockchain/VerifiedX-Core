@@ -246,6 +246,7 @@ namespace VerifiedXCore.Privacy
                     if (spentCommitments.Contains(NoteIdentity(uc)))
                     {
                         uc.IsSpent = true;
+                        uc.SpendPendingSince = Globals.LastBlock?.Height ?? 0;
                         if (fresh.ShieldedBalances.ContainsKey(assetType))
                             fresh.ShieldedBalances[assetType] -= uc.Amount;
                     }
@@ -256,6 +257,71 @@ namespace VerifiedXCore.Privacy
             finally
             {
                 ShieldedWalletLock.Release(walletLock);
+            }
+        }
+
+        /// <summary>Blocks after which a note this wallet marked spent, for a spend neither mined nor pending here, is restored.</summary>
+        internal const int UnminedSpendBlocks = 30;
+
+        /// <summary>
+        /// Notes a wallet marked spent for a transaction it sent are restored when that transaction was never mined: its
+        /// nullifier is not spent on chain, no transaction in this node's mempool claims it, and
+        /// <see cref="UnminedSpendBlocks"/> blocks have passed. A spend that missed its block (its Merkle root went stale
+        /// as soon as another private transaction was mined) was dropped from the mempool and its notes stayed spent until
+        /// a manual resync (fifth review, round 32). A note the chain spent is settled as spent.
+        /// </summary>
+        public static void RestoreUnminedSpends(long tipHeight)
+        {
+            List<ShieldedWallet> wallets;
+            try { wallets = ShieldedWalletService.GetAll(); }
+            catch { return; }
+            foreach (var listed in wallets ?? new List<ShieldedWallet>())
+            {
+                if (listed?.UnspentCommitments == null || !listed.UnspentCommitments.Any(n => n != null && n.IsSpent && n.SpendPendingSince != null))
+                    continue;
+                var walletLock = ShieldedWalletLock.Acquire(listed.ShieldedAddress);
+                try
+                {
+                    var w = ShieldedWalletService.FindByZfxAddress(listed.ShieldedAddress);
+                    if (w?.UnspentCommitments == null || !TryGetViewingKeyMaterial(w, out var keys, out _) || keys == null)
+                        continue;
+                    var epoch = PrivacyEpoch.ProofRulesActive(tipHeight + 1);
+                    var changed = false;
+                    foreach (var uc in w.UnspentCommitments)
+                    {
+                        if (uc == null || !uc.IsSpent || uc.SpendPendingSince is not { } since)
+                            continue;
+                        var asset = uc.AssetType ?? "";
+                        var nullifier = VfxPrivateTransactionBuilder.NullifierOf(uc, keys, epoch);
+                        if (nullifier == null)
+                            continue;
+                        if (NullifierService.IsNullifierSpentInDb(nullifier, asset))
+                        {
+                            uc.SpendPendingSince = null; // mined: spent for good
+                            changed = true;
+                            continue;
+                        }
+                        if (tipHeight - since < UnminedSpendBlocks
+                            || Globals.MempoolNullifiers.ContainsKey(MempoolNullifierTracker.MakeKey(asset, nullifier)))
+                            continue;
+                        uc.IsSpent = false;
+                        uc.SpendPendingSince = null;
+                        w.ShieldedBalances ??= new Dictionary<string, decimal>();
+                        w.ShieldedBalances[asset] = (w.ShieldedBalances.TryGetValue(asset, out var b) ? b : 0M) + uc.Amount;
+                        changed = true;
+                        LogUtility.Log($"Shielded wallet {w.ShieldedAddress}: a {uc.Amount} {asset} note marked spent at block {since} by a transaction never mined is spendable again.", "PrivacyApiHelper.RestoreUnminedSpends()");
+                    }
+                    if (changed)
+                        ShieldedWalletService.Upsert(w);
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Restoring unmined spends of {listed.ShieldedAddress}: {ex.Message}", "PrivacyApiHelper.RestoreUnminedSpends()");
+                }
+                finally
+                {
+                    ShieldedWalletLock.Release(walletLock);
+                }
             }
         }
 
@@ -293,6 +359,7 @@ namespace VerifiedXCore.Privacy
                     if (commitmentSet.Contains(NoteIdentity(uc)))
                     {
                         uc.IsSpent = false;
+                        uc.SpendPendingSince = null;
                         if (fresh.ShieldedBalances.ContainsKey(assetType))
                             fresh.ShieldedBalances[assetType] += uc.Amount;
                     }
