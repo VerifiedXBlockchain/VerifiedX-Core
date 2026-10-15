@@ -143,6 +143,7 @@ namespace VerifiedXCore.Bitcoin.Services
             var contract = BaseBridgeService.VBTCbContractAddress;
 
             var processed = 0;
+            var scanFailed = false;
 
             // --- VfxExitBurned events (V3 burnForVfxExit → pool-based unlock) ---
             try
@@ -198,6 +199,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch (Exception v3Ex)
             {
+                scanFailed = true;
                 LogUtility.Log($"[BaseBridgeExit] VfxExitBurned scan error: {v3Ex.Message}",
                     "BaseBridgeExitWatchService.PollOnceInternal");
             }
@@ -256,9 +258,16 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch (Exception btcEx)
             {
+                scanFailed = true;
                 LogUtility.Log($"[BaseBridgeExit] BTCExitBurned scan error: {btcEx.Message}",
                     "BaseBridgeExitWatchService.PollOnceInternal");
             }
+
+            // A range whose logs could not be read is read again next time: moving past it lost any burn in it on this
+            // caster, and on every caster whose reads failed alike (fifth review, round 20). Burns already handled are
+            // skipped on the second read.
+            if (scanFailed)
+                return (processed, state.LastScannedBlock, "Base log query failed; the range is read again next poll");
 
             state.LastScannedBlock = to;
             BridgeExitSyncState.Save(state);
