@@ -467,9 +467,7 @@ namespace VerifiedXCore.Bitcoin.Services
             // Step 6: Wait for confirmations
             await Task.Delay(CONFIRMATION_WAIT_MS);
 
-            var confirmations = confirmDict.Values
-                .Where(c => c.AgreedHandlerAddress == winner.ProposerCasterAddress)
-                .ToList();
+            var confirmations = ConfirmationsOfThisRound(confirmDict.Values, winner.ProposerCasterAddress, proposalTimestamp);
 
             if (confirmations.Count < RequiredCasterSignatures)
             {
@@ -498,6 +496,27 @@ namespace VerifiedXCore.Bitcoin.Services
             _proposals.TryRemove(baseBurnTxHash, out _);
             _confirmations.TryRemove(baseBurnTxHash, out _);
         }
+
+        /// <summary>
+        /// A caster's confirmation is held until a newer one of its own arrives. The first was kept for good: once the
+        /// election drew again in each window (round 23), a round's confirmations naming its winner, replayed to casters
+        /// that had cleared them, blocked every later winner, and a winner who did nothing kept the burn unpaid (fifth
+        /// review, round 24). Both carry the caster's signature over the handler, so a newer one cannot be forged.
+        /// </summary>
+        internal static bool KeepNewestConfirmation(ConcurrentDictionary<string, BurnExitConfirmation> held, BurnExitConfirmation confirmation)
+        {
+            while (true)
+            {
+                if (held.TryAdd(confirmation.ConfirmingCasterAddress, confirmation)) return true;
+                if (!held.TryGetValue(confirmation.ConfirmingCasterAddress, out var current)) continue;
+                if (confirmation.Timestamp <= current.Timestamp) return false;
+                if (held.TryUpdate(confirmation.ConfirmingCasterAddress, confirmation, current)) return true;
+            }
+        }
+
+        /// <summary>The confirmations for this round's winner made in this round (from its proposal on, within the proposal skew).</summary>
+        internal static List<BurnExitConfirmation> ConfirmationsOfThisRound(IEnumerable<BurnExitConfirmation> held, string winner, long roundStartedAt) =>
+            held.Where(c => c.AgreedHandlerAddress == winner && c.Timestamp >= roundStartedAt - BridgeCasterConsensus.PROPOSAL_MAX_SKEW_SECONDS).ToList();
 
         /// <summary>Handle proposal from another caster.</summary>
         public static void HandleBurnExitProposal(BurnExitProposal proposal)
@@ -562,9 +581,9 @@ namespace VerifiedXCore.Bitcoin.Services
             }
 
             var dict = _confirmations.GetOrAdd(confirmation.BaseBurnTxHash, _ => new ConcurrentDictionary<string, BurnExitConfirmation>());
-            if (!dict.TryAdd(confirmation.ConfirmingCasterAddress, confirmation))
+            if (!KeepNewestConfirmation(dict, confirmation))
             {
-                LogUtility.Log($"[BurnExitConsensus] Ignoring duplicate confirmation for {confirmation.BaseBurnTxHash} from {confirmation.ConfirmingCasterAddress} (first one kept)", "BurnExitConsensusService");
+                LogUtility.Log($"[BurnExitConsensus] Ignoring confirmation for {confirmation.BaseBurnTxHash} from {confirmation.ConfirmingCasterAddress}: not newer than the one held", "BurnExitConsensusService");
                 return;
             }
             LogUtility.Log($"[BurnExitConsensus] Confirmation from {confirmation.ConfirmingCasterAddress} for {confirmation.BaseBurnTxHash}", "BurnExitConsensusService");

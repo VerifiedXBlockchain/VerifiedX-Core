@@ -61,6 +61,25 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Winner(t), Winner(t + 1));   // one round agrees on its winner
         }
 
+        /// <summary>
+        /// A caster's first confirmation for a burn was kept for good: a round's confirmations replayed after it blocked
+        /// every later winner (fifth review, round 24). The newest is held, and a round counts only its own.
+        /// </summary>
+        [Fact]
+        public void Confirmations_TheNewestIsHeld_AndARoundCountsOnlyItsOwn()
+        {
+            var held = new System.Collections.Concurrent.ConcurrentDictionary<string, BurnExitConsensusService.BurnExitConfirmation>();
+            BurnExitConsensusService.BurnExitConfirmation Conf(string handler, long at) =>
+                new() { BaseBurnTxHash = Burn, ConfirmingCasterAddress = "xB", AgreedHandlerAddress = handler, Timestamp = at };
+            const long t = 1_700_000_000;
+            Assert.True(BurnExitConsensusService.KeepNewestConfirmation(held, Conf("xM", t)));
+            Assert.True(BurnExitConsensusService.KeepNewestConfirmation(held, Conf("xW", t + 900)));   // the next round's
+            Assert.False(BurnExitConsensusService.KeepNewestConfirmation(held, Conf("xM", t)));        // the old one replayed
+            Assert.Equal("xW", held["xB"].AgreedHandlerAddress);
+            Assert.Single(BurnExitConsensusService.ConfirmationsOfThisRound(held.Values, "xW", t + 890));
+            Assert.Empty(BurnExitConsensusService.ConfirmationsOfThisRound(held.Values, "xW", t + 900 + 3 * BridgeCasterConsensus.PROPOSAL_MAX_SKEW_SECONDS));
+        }
+
         [Fact]
         public void Proposal_ForAnotherWindow_Refused()
         {
