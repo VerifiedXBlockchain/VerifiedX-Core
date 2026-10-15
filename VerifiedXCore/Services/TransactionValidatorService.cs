@@ -400,6 +400,13 @@ namespace VerifiedXCore.Services
             if(txRequest.TransactionType == TransactionType.TKNZ_WD_ARB && txRequest.Amount > 0.00M)
                 return (txResult, "This transaction type cannot have a send amount.");
 
+            // A fee is never negative. The fee-exempt types below skip the "more than zero" rule, and nothing else bounded
+            // the fee from below: apply takes Amount + Fee from the sender, so a negative fee credited it (fifth review,
+            // round 36). Refused at admission at every height; in blocks from the path-audit height (a mainnet hotfix sets
+            // its own).
+            if (txRequest.Fee < 0M && (blockHeight == null || blockHeight.Value >= Globals.PathAuditRulesHeight))
+                return (txResult, NegativeFeeReason);
+
             // FIND-004 FIX: Exempt vBTC V2 validator transactions from fee requirements (they must be free)
             if (txRequest.Fee <= 0 
                 && txRequest.TransactionType != TransactionType.TKNZ_WD_ARB
@@ -4434,6 +4441,8 @@ namespace VerifiedXCore.Services
             return (txResult, "Transaction has been verified.");
 
         }
+
+        internal const string NegativeFeeReason = "A transaction's fee cannot be negative.";
 
         /// <summary>The transaction signature check (over the carried Hash); null when it passes.</summary>
         private static string? SignatureError(Transaction txRequest)
