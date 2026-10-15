@@ -869,18 +869,26 @@ namespace VerifiedXCore.Bitcoin.Services
         /// transaction. A mempool spend is not enough: it can be evicted or replaced, and the signed transaction can
         /// then still confirm. (Treating "missing from listunspent" as dead let a withholder get a second transaction
         /// signed for the same withdrawal while the first could still be broadcast: two payouts.)
+        /// Nor is an outpoint that never existed: a transaction that creates it can still be broadcast, and the signed
+        /// transaction confirm after it. A missing outpoint is spent by a confirmed transaction only when a confirmed
+        /// transaction created it.
         /// Pure: <paramref name="unspent"/> is the address's unspent set, <paramref name="mempoolSpent"/> the
-        /// outpoints its mempool transactions spend (null when that could not be read).
+        /// outpoints its mempool transactions spend (null when that could not be read), <paramref name="createdOnChain"/>
+        /// the outpoints a confirmed transaction created at the address (null when that could not be read).
         /// </summary>
-        public static OutpointSpendVerdict ClassifyOutpointSpends(IEnumerable<string> outpoints, ISet<string> unspent, ISet<string>? mempoolSpent)
+        public static OutpointSpendVerdict ClassifyOutpointSpends(IEnumerable<string> outpoints, ISet<string> unspent, ISet<string>? mempoolSpent, ISet<string>? createdOnChain)
         {
             var missing = outpoints.Where(o => !unspent.Contains(o)).ToList();
             if (missing.Count == 0)
                 return OutpointSpendVerdict.NotSpentByConfirmed;
-            if (mempoolSpent == null)
+            if (mempoolSpent == null || createdOnChain == null)
                 return OutpointSpendVerdict.Inconclusive;
-            return missing.Any(o => !mempoolSpent.Contains(o)) ? OutpointSpendVerdict.SpentByConfirmed : OutpointSpendVerdict.NotSpentByConfirmed;
+            return missing.Any(o => !mempoolSpent.Contains(o) && createdOnChain.Contains(o)) ? OutpointSpendVerdict.SpentByConfirmed : OutpointSpendVerdict.NotSpentByConfirmed;
         }
+
+        /// <summary>The same without knowing which outpoints a confirmed transaction created: a missing outpoint is then Inconclusive.</summary>
+        public static OutpointSpendVerdict ClassifyOutpointSpends(IEnumerable<string> outpoints, ISet<string> unspent, ISet<string>? mempoolSpent) =>
+            ClassifyOutpointSpends(outpoints, unspent, mempoolSpent, null);
 
         /// <summary>Most unconfirmed deposit-address transactions read to tell mempool spends from confirmed ones.</summary>
         public const int MaxUnconfirmedHistoryScan = 50;
@@ -928,7 +936,24 @@ namespace VerifiedXCore.Bitcoin.Services
                         mempoolSpent.Add($"{input.PrevOut.Hash}:{input.PrevOut.N}".ToLowerInvariant());
                 }
 
-                var verdict = ClassifyOutpointSpends(ops, unspent, mempoolSpent);
+                // Which missing outpoints a confirmed transaction created at this address (its output N pays it).
+                var confirmed = history.Where(h => h.Height > 0).Select(h => h.TxHash.ToLowerInvariant()).ToHashSet();
+                var depositScript = BitcoinAddress.Create(depositAddress, Globals.BTCNetwork).ScriptPubKey;
+                var createdOnChain = new HashSet<string>();
+                foreach (var o in ops.Where(o => !unspent.Contains(o) && !mempoolSpent.Contains(o)))
+                {
+                    var colon = o.LastIndexOf(':');
+                    if (colon <= 0 || !uint.TryParse(o[(colon + 1)..], out var n) || !confirmed.Contains(o[..colon]))
+                        continue;
+                    var funding = await client.GetRawTx(o[..colon]);
+                    if (funding?.RawTx == null)
+                        return (OutpointSpendVerdict.Inconclusive, $"funding tx {o[..colon]} unavailable");
+                    var outputs = NBitcoin.Transaction.Parse(funding.RawTx, Globals.BTCNetwork).Outputs;
+                    if (n < outputs.Count && outputs[(int)n].ScriptPubKey == depositScript)
+                        createdOnChain.Add(o);
+                }
+
+                var verdict = ClassifyOutpointSpends(ops, unspent, mempoolSpent, createdOnChain);
                 var missing = ops.Count(o => !unspent.Contains(o));
                 return (verdict, $"{missing}/{ops.Count} spent, {ops.Count(o => mempoolSpent.Contains(o))} of them by mempool txs");
             }
