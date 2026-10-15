@@ -48,6 +48,7 @@ namespace VerifiedXCore.Tests
         public void FreeTextFields_AreNotIndexed_AndALongValueIsWritten()
         {
             DbContext.DB_SmartContractStateTrei.GetCollection<SmartContractStateTrei>(DbContext.RSRV_SCSTATE_TREI).EnsureIndex(x => x.OwnerAddress);
+            DbContext.DB_SmartContractStateTrei.GetCollection<SmartContractStateTrei>(DbContext.RSRV_SCSTATE_TREI).EnsureIndex(x => x.TokenDetails.ContractOwner);
             DbContext.DB_Wallet.GetCollection<TokenVote>(DbContext.RSRV_TOKEN_VOTE).EnsureIndex(x => x.TopicUID);
             DbContext.CloseDB();
             DbContext.Initialize();                                                              // a node that ran round 33
@@ -96,7 +97,7 @@ namespace VerifiedXCore.Tests
             var fields = IndexedFields(DbContext.DB_vBTC, DbContext.RSRV_VBTC_V2_CANCELLATIONS);
             Assert.Contains("$.CancellationUID", fields);
             Assert.DoesNotContain("$.WithdrawalRequestHash", fields);
-            var padded = "abcd" + new string('​', 1100);
+            var padded = "abcd" + new string('\u200B', 1100);
             col.Insert(new VBTCWithdrawalCancellation { CancellationUID = "CANCEL_1", WithdrawalRequestHash = "ABCD", SmartContractUID = "v" });
             col.Insert(new VBTCWithdrawalCancellation { CancellationUID = "CANCEL_2", WithdrawalRequestHash = "other", SmartContractUID = "v" });
             col.Insert(new VBTCWithdrawalCancellation { CancellationUID = "CANCEL_3", WithdrawalRequestHash = padded, SmartContractUID = "v" });

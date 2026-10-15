@@ -1614,7 +1614,7 @@ namespace VerifiedXCore.Data
 
                 if(_scDb != null)
                 {
-                    var scList = _scDb.Query().Where(x => x.OwnerAddress == _fromAddress).ToList().OrderBy(x => x.Id).ToList(); // indexed (round 33); in the scan's order
+                    var scList = _scDb.Query().Where(x => x.OwnerAddress == _fromAddress).ToList().OrderBy(x => x.Id).ToList(); // in the scan's order (not indexed: owners are free text, round 34)
                     if(scList?.Count > 0 )
                     {
                         foreach(var sc in scList)
