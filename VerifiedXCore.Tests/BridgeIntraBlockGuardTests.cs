@@ -70,6 +70,9 @@ namespace VerifiedXCore.Tests
             Assert.True(BridgeTxRules.IsBtcTxIdList(a + "," + b, h));
             Assert.False(BridgeTxRules.IsBtcTxIdList(a + ",xyz", h));
             Assert.False(BridgeTxRules.IsBtcTxIdList(a + ",", h));
+            // ... at most one per vault the exit draws on (round 22).
+            Assert.Equal(2, BridgeTxRules.VaultsInPlan("[{\"LockId\":\"L1\",\"SmartContractUID\":\"A\",\"UnlockAmount\":0.1},{\"LockId\":\"L2\",\"SmartContractUID\":\"B\",\"UnlockAmount\":0.1},{\"LockId\":\"L3\",\"SmartContractUID\":\"A\",\"UnlockAmount\":0.1}]", null));
+            Assert.Equal(1, BridgeTxRules.VaultsInPlan(null, "A"));
         }
 
         [Fact]

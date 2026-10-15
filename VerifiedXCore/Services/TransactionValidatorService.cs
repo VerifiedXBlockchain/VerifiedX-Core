@@ -4296,6 +4296,12 @@ namespace VerifiedXCore.Services
                         {
                             if (!BridgeTxRules.IsBtcTxIdList(jobj["BtcTxHash"]?.ToObject<string>(), closeGateHeight))
                                 return (txResult, "BtcTxHash must be a 32-byte hex transaction id (or, from the path-audit rules, a comma-separated list of them).");
+                            // At most one per vault the exit draws on: the txids a completion names are taken as the exit's
+                            // payments elsewhere, and a list of other users' withdrawals' txids froze their owners' add-backs
+                            // (fifth review, round 22).
+                            if (closeGateHeight >= Globals.PathAuditRulesHeight
+                                && (jobj["BtcTxHash"]?.ToObject<string>() ?? "").Split(',').Length > BridgeTxRules.VaultsInPlan(st.AllocationsJson, st.SmartContractUID))
+                                return (txResult, "A completion names at most one Bitcoin transaction per vault the exit draws on.");
                         }
                         else
                         {
