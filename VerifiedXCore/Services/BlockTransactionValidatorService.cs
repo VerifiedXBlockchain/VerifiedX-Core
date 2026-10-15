@@ -156,7 +156,13 @@ namespace VerifiedXCore.Services
                             // Fund-loss audit item 5: only a sale this wallet actually bid on is completed from its balance.
                             // A Sale_Start that got past the bid signature (the "manual" bypass, or a bid signature replayed
                             // from another listing) names this wallet as the buyer; without a matching local bid it is ignored.
-                            if (amountSoldFor.HasValue && Bid.HasLocalSentBid(toAddress ?? account.Address, keySign, amountSoldFor.Value, scUID))
+                            if (amountSoldFor.HasValue && Bid.HasLocalSentBid(toAddress ?? account.Address, keySign, amountSoldFor.Value, scUID)
+                                && Bid.VaultShrankSinceBid(toAddress ?? account.Address, keySign, scUID) is { } shrank)
+                            {
+                                // A watched vault whose owner balance fell since the bid (round 30): not paid for automatically.
+                                SCLogUtility.Log($"Incoming Sale_Start for {scUID}: {shrank}", "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            }
+                            else if (amountSoldFor.HasValue && Bid.HasLocalSentBid(toAddress ?? account.Address, keySign, amountSoldFor.Value, scUID))
                             {
                                 //if you have a bid or buy now this should auto start the process.
                                 _ = SmartContractService.CompleteSaleSmartContractTX(scUID, tx.FromAddress, amountSoldFor.Value, keySign);

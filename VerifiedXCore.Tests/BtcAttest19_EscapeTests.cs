@@ -642,6 +642,31 @@ namespace VerifiedXCore.Tests
             await AssertBacked(vault.Uid, _holder);
         }
 
+        /// <summary>
+        /// A buyer's wallet completed a sale it bid on as soon as the seller started it, and the seller could empty the
+        /// vault's owner balance first: the buyer paid in full for an empty vault (round 30). The wallet records the owner's
+        /// balance at the bid and does not complete automatically once it has fallen.
+        /// </summary>
+        [Fact]
+        public async Task ABuyersWallet_DoesNotPayForAVaultEmptiedSinceItsBid()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 150_000);
+            var bidder = _other.Address;
+            var key = Guid.NewGuid().ToString("N");
+            VerifiedXCore.Models.DST.Bid.SaveBid(new VerifiedXCore.Models.DST.Bid
+            {
+                Id = Guid.NewGuid(), BidAddress = bidder, PurchaseKey = key, BidAmount = 10M, MaxBidAmount = 10M, SmartContractUID = vault.Uid,
+                BidSendReceive = VerifiedXCore.Models.DST.BidSendReceive.Sent, VaultOwnerBalanceAtBid = VerifiedXCore.Models.DST.Bid.VaultOwnerFigure(vault.Uid),
+            });
+            Assert.Null(VerifiedXCore.Models.DST.Bid.VaultShrankSinceBid(bidder, key, vault.Uid));
+
+            await Mine(Transfer(vault.Uid, 0.001M, to: _holder));                         // the seller moves its vBTC out
+            Assert.Contains("fell", VerifiedXCore.Models.DST.Bid.VaultShrankSinceBid(bidder, key, vault.Uid) ?? "");
+            Assert.NotNull(VerifiedXCore.Models.DST.Bid.VaultShrankSinceBid(bidder, "no-such-bid", vault.Uid));
+        }
+
         /// <summary>While a vault is marked for a new owner, its owner moves no vBTC out of it; holders are not touched.</summary>
         [Fact]
         public async Task AVaultBeingSoldOrTransferred_KeepsItsOwnersBalance()

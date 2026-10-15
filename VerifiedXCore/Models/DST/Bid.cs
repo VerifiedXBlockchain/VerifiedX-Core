@@ -34,6 +34,45 @@ namespace VerifiedXCore.Models.DST
         /// </summary>
         public string? SmartContractUID { get; set; }
 
+        /// <summary>
+        /// For a vBTC vault the chain watches: the owner's spendable vBTC when the bid was made. A sale is completed from
+        /// this wallet's balance automatically when the seller starts it, and the seller could empty the vault's owner
+        /// balance before (or with) its Sale_Start: the buyer paid in full for an empty vault (fifth review, round 30).
+        /// </summary>
+        public decimal? VaultOwnerBalanceAtBid { get; set; }
+
+        /// <summary>The owner's spendable vBTC on <paramref name="smartContractUID"/> now, when it is a watched vault; else null.</summary>
+        internal static decimal? VaultOwnerFigure(string? smartContractUID)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(smartContractUID) || !VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(smartContractUID)) return null;
+                var state = SmartContractStateTrei.GetSmartContractState(smartContractUID);
+                if (state == null || string.IsNullOrEmpty(state.OwnerAddress)) return null;
+                return VerifiedXCore.Bitcoin.Services.VBTCService.AttestedOwnerSpendable(state, state.OwnerAddress, (Globals.LastBlock?.Height ?? 0) + 1);
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// Why a sale of a watched vault is not completed automatically for this bid: the owner's spendable vBTC is less
+        /// than when the bid was made (or was not recorded). Null when the vault is not watched or kept what was bid for.
+        /// </summary>
+        public static string? VaultShrankSinceBid(string? bidderAddress, string? purchaseKey, string? smartContractUID)
+        {
+            var now = VaultOwnerFigure(smartContractUID);
+            if (now == null) return null;
+            var bid = GetAllBids(BidSendReceive.Sent)?.FirstOrDefault(b => b != null
+                && string.Equals(b.BidAddress, bidderAddress, StringComparison.Ordinal)
+                && string.Equals(b.PurchaseKey, purchaseKey, StringComparison.Ordinal)
+                && string.Equals(b.SmartContractUID, smartContractUID, StringComparison.Ordinal));
+            if (bid?.VaultOwnerBalanceAtBid == null)
+                return $"The vault's owner balance at the time of the bid was not recorded; complete the sale by hand after checking the vault (it holds {now} vBTC for its owner now).";
+            return now.Value < bid.VaultOwnerBalanceAtBid.Value
+                ? $"The vault's owner balance fell from {bid.VaultOwnerBalanceAtBid} to {now} vBTC since the bid; the sale is not completed."
+                : null;
+        }
+
         public bool Build(bool thirdParty = false)
         {
             if (BidAmount < Globals.BidMinimum)
@@ -50,6 +89,7 @@ namespace VerifiedXCore.Models.DST
             BidSendReceive = BidSendReceive.Sent;
             if (string.IsNullOrWhiteSpace(SmartContractUID))
                 SmartContractUID = ListingContractFor(ListingId, PurchaseKey);
+            VaultOwnerBalanceAtBid = VaultOwnerFigure(SmartContractUID);
 
             var bidModifier = (BidAmount * Globals.BidModifier);
             var bidAmount = Convert.ToInt64(bidModifier);
