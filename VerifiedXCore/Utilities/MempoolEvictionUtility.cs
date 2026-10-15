@@ -101,7 +101,11 @@ namespace VerifiedXCore.Utilities
                 reason = bounds.reason;
                 if (!bounds.admit)
                     return false;
-                mempool.InsertSafe(tx);
+                if (mempool.InsertSafe(tx) == null)
+                {
+                    reason = "The mempool insert failed.";
+                    return false;
+                }
                 NoteInserted(tx);
                 return true;
             }
@@ -285,19 +289,22 @@ namespace VerifiedXCore.Utilities
                 .ThenByDescending(x => x.Hash != null && ArrivedAtUtc.TryGetValue(x.Hash, out var at) ? at : DateTime.MinValue)
                 .ToList();
 
+            // The entries to evict, chosen once: until both targets are met. The loop below removes exactly these, so what
+            // is evicted is what was checked.
+            var victims = new List<Transaction>();
+            long plannedBytes = 0;
+            foreach (var t in sortedTxs)
+            {
+                if ((countToEvict == 0 || victims.Count >= countToEvict) && (sizeToEvict == 0 || plannedBytes >= sizeToEvict))
+                    break;
+                victims.Add(t);
+                plannedBytes += SizeOf(t);
+            }
+
             if (mustFitBytes != null)
             {
                 var total = knownTotalSize ?? allTxs.Sum(SizeOf);
-                int plannedCount = 0;
-                long plannedBytes = 0;
-                foreach (var t in sortedTxs)
-                {
-                    if ((countToEvict == 0 || plannedCount >= countToEvict) && (sizeToEvict == 0 || plannedBytes >= sizeToEvict))
-                        break;
-                    plannedCount++;
-                    plannedBytes += SizeOf(t);
-                }
-                var fits = allTxs.Count - plannedCount < Globals.MaxMempoolEntries
+                var fits = allTxs.Count - victims.Count < Globals.MaxMempoolEntries
                     && total - plannedBytes + mustFitBytes.Value <= Globals.MaxMempoolSizeBytes;
                 if (!fits)
                     return evictedHashes;
@@ -306,18 +313,13 @@ namespace VerifiedXCore.Utilities
             long evictedSize = 0;
             int evictedCount = 0;
 
-            foreach (var tx in sortedTxs)
+            foreach (var tx in victims)
             {
-                // Stop if we've met targets
-                if (countToEvict > 0 && evictedCount >= countToEvict)
-                    break;
-                if (sizeToEvict > 0 && evictedSize >= sizeToEvict)
-                    break;
-
                 // Evict this transaction
                 try
                 {
-                    mempool.DeleteManySafe(x => x.Hash == tx.Hash);
+                    if (mempool.DeleteManySafe(x => x.Hash == tx.Hash) == 0)
+                        continue; // not removed: neither counted nor reported as evicted
                     TransactionData.ReleasePrivateMempoolNullifiersForTx(tx.Hash);
                     evictedHashes.Add(tx.Hash);
                     evictedSize += SizeOf(tx);

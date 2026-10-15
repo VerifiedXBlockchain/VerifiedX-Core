@@ -254,5 +254,30 @@ namespace VerifiedXCore.Tests
         {
             Assert.True(MempoolEvictionUtility.ValidateMinimumFee(OfType(type, 0M)).isValid);
         }
+
+        [Fact]
+        public void Eviction_RemovesUntilBothTargetsAreMet_AsPlanned()
+        {
+            // Three entries; the count target alone is met after one eviction, the size target only after all three.
+            Pool("c1", TransactionRating.C, 1);
+            Pool("c2", TransactionRating.C, 2);
+            Pool("c3", TransactionRating.C, 3);
+            var total = TransactionData.GetPool().FindAll().Sum(MempoolEvictionUtility.CalculateTransactionSize);
+
+            var evicted = MempoolEvictionUtility.EvictLowestPriority(targetCount: 2, targetSize: 1);
+            Assert.Equal(3, evicted.Count);
+            Assert.Equal(0, PoolCount());
+            Assert.True(total > 1);
+        }
+
+        [Fact]
+        public void TransferRating_ReadsTheSendersRowsFromThePool_AndStillFailsAFlood()
+        {
+            for (var i = 0; i < 60; i++)
+                TransactionData.GetPool().Insert(new Transaction { Hash = $"f{i}", FromAddress = _sender.Address, ToAddress = "y", Amount = 1M, Fee = 1M, Timestamp = i, TransactionType = TransactionType.TX, TransactionRating = TransactionRating.A });
+            var rating = TransactionRatingService.GetTransactionRating(Send(1M)).GetAwaiter().GetResult();
+            Assert.Equal(TransactionRating.F, rating);
+            Assert.All(TransactionData.GetPool().Find(x => x.FromAddress == _sender.Address), x => Assert.Equal(TransactionRating.E, x.TransactionRating));
+        }
     }
 }
