@@ -588,7 +588,7 @@ namespace VerifiedXCore.Controllers
                             long treePos = PrivacyApiHelper.LookupTreePositionByCommitment(c, note.AssetType ?? "");
 
                             w.UnspentCommitments ??= new List<UnspentCommitment>();
-                            if (!PrivacyApiHelper.NoteMatchesOutput(o, note.Amount, r32, keys)) continue; // the note is the output it came with (round 22)
+                            if (!PrivacyApiHelper.NoteMatchesOutput(o, note.Amount, r32, keys, note.AssetType)) continue; // the note is the output it came with (round 22)
                             w.UnspentCommitments.Add(new UnspentCommitment
                             {
                                 Commitment = c,
@@ -1382,7 +1382,7 @@ namespace VerifiedXCore.Controllers
                             long treePos = PrivacyApiHelper.LookupTreePositionByCommitment(c, note.AssetType ?? "");
 
                             w.UnspentCommitments ??= new List<UnspentCommitment>();
-                            if (!PrivacyApiHelper.NoteMatchesOutput(o, note.Amount, r32, keys)) continue; // the note is the output it came with (round 22)
+                            if (!PrivacyApiHelper.NoteMatchesOutput(o, note.Amount, r32, keys, note.AssetType)) continue; // the note is the output it came with (round 22)
                             w.UnspentCommitments.Add(new UnspentCommitment
                             {
                                 Commitment = c,

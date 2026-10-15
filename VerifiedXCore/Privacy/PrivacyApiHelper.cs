@@ -21,16 +21,31 @@ namespace VerifiedXCore.Privacy
         /// stored note hash (owner-bound in the epoch) or, for older leaves, its Pedersen commitment is made from the
         /// note's amount and randomness. A sealed note's amount and asset are what its sender wrote: wallets credited them
         /// as written, from any transaction, and a fake note showed a balance that did not exist (fifth review, round 22).
+        /// The leaf is in the pool of the note's <paramref name="asset"/>: no note hash covers the asset, and a VFX note
+        /// sealed as vBTC showed vBTC that was never sent (fifth review, round 23). Every leaf with the commitment is
+        /// looked at, so a copy of an output's commitment applied before it does not hide the honest one.
         /// </summary>
-        internal static bool NoteMatchesOutput(PrivateShieldedOutput? o, decimal amount, byte[]? r32, ShieldedKeyMaterial keys)
+        internal static bool NoteMatchesOutput(PrivateShieldedOutput? o, decimal amount, byte[]? r32, ShieldedKeyMaterial keys, string? asset)
         {
             try
             {
-                if (o == null || string.IsNullOrEmpty(o.CommitmentB64) || r32 == null || r32.Length != PlonkNative.ScalarSize) return false;
+                if (o == null || string.IsNullOrEmpty(o.CommitmentB64) || string.IsNullOrEmpty(asset)) return false;
+                var c = o.CommitmentB64;
+                return PrivacyDbContext.GetPrivacyDb().GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS)
+                    .Find(x => x.Commitment == c).ToList()
+                    .Any(rec => string.Equals(rec.Commitment, c, StringComparison.Ordinal) && string.Equals(rec.AssetType, asset, StringComparison.Ordinal)
+                        && NoteMatchesRecord(rec, amount, r32, keys));
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Whether a leaf's note hash (owner-bound or V1) or, for older leaves, its Pedersen commitment is made from this amount and randomness.</summary>
+        internal static bool NoteMatchesRecord(CommitmentRecord rec, decimal amount, byte[]? r32, ShieldedKeyMaterial keys)
+        {
+            try
+            {
+                if (r32 == null || r32.Length != PlonkNative.ScalarSize) return false;
                 if (!PrivacyPedersenAmount.TryToScaledU64(amount, out var scaled, out _)) return false;
-                var rec = PrivacyDbContext.GetPrivacyDb().GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS)
-                    .FindOne(x => x.Commitment == o.CommitmentB64);
-                if (rec == null || !string.Equals(rec.Commitment, o.CommitmentB64, StringComparison.Ordinal)) return false;
                 if (!string.IsNullOrEmpty(rec.NoteHash))
                 {
                     if (PoseidonV1.IsAvailable && keys.OwnerPk32 is { Length: 32 } ownerPk
@@ -409,7 +424,7 @@ namespace VerifiedXCore.Privacy
 
                         long treePos = LookupTreePositionByCommitment(c, note.AssetType ?? "");
 
-                        if (!NoteMatchesOutput(o, note.Amount, r32, keys)) continue; // the note is the output it came with (round 22)
+                        if (!NoteMatchesOutput(o, note.Amount, r32, keys, note.AssetType)) continue; // the note is the output it came with (round 22)
                         w.UnspentCommitments.Add(new UnspentCommitment
                         {
                             Commitment = c,

@@ -282,11 +282,14 @@ namespace VerifiedXCore.Tests
             var note = NoteOf(shield, 0, _alice);
             PrivateTxPayloadCodec.TryDecode(shield.Data, out var payload, out _);
             var output = payload!.Outs[0];
-            Assert.True(PrivacyApiHelper.NoteMatchesOutput(output, 5M, note.Randomness, _alice));
-            Assert.False(PrivacyApiHelper.NoteMatchesOutput(output, 500M, note.Randomness, _alice));           // a claimed amount
-            Assert.False(PrivacyApiHelper.NoteMatchesOutput(output, 5M, note.Randomness, _bob));               // someone else's key
+            Assert.True(PrivacyApiHelper.NoteMatchesOutput(output, 5M, note.Randomness, _alice, "VFX"));
+            Assert.False(PrivacyApiHelper.NoteMatchesOutput(output, 500M, note.Randomness, _alice, "VFX"));    // a claimed amount
+            Assert.False(PrivacyApiHelper.NoteMatchesOutput(output, 5M, note.Randomness, _bob, "VFX"));        // someone else's key
             var unapplied = new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(PrivacyField.RandomCanonical()) };
-            Assert.False(PrivacyApiHelper.NoteMatchesOutput(unapplied, 5M, note.Randomness, _alice));          // not a leaf of the chain
+            Assert.False(PrivacyApiHelper.NoteMatchesOutput(unapplied, 5M, note.Randomness, _alice, "VFX"));   // not a leaf of the chain
+            // A VFX note sealed as vBTC (round 23): no note hash covers the asset; the leaf's pool does.
+            Assert.False(PrivacyApiHelper.NoteMatchesOutput(output, 5M, note.Randomness, _alice, "VBTC:" + Guid.NewGuid().ToString("N")));
+            Assert.False(PrivacyApiHelper.NoteMatchesOutput(output, 5M, note.Randomness, _alice, "vfx"));
         }
 
         [Fact]
