@@ -482,7 +482,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         }
 
 
-        private static bool IsKnownCaster(string address)
+        internal static bool IsKnownCaster(string address)
         {
             if (Globals.BootstrapCasterAddresses.Contains(address)) return true;
             if (Globals.BlockCasters.Any(p => string.Equals(p.ValidatorAddress, address, StringComparison.Ordinal))) return true;
@@ -491,5 +491,11 @@ namespace VerifiedXCore.Bitcoin.FROST
                 return Globals.KnownCasters.Any(c => string.Equals(c.Address, address, StringComparison.Ordinal));
             }
         }
+
+        /// <summary>Whether a signing ceremony's leader is neither a holder of the key it signs with nor a caster: a withdrawal's requester.</summary>
+        internal static bool LedByRequester(string? leaderAddress, string? keyUid) =>
+            !string.IsNullOrEmpty(leaderAddress)
+            && !(keyUid != null && Attestation.BtcWithdrawalSigner.SignersOf(keyUid).Contains(leaderAddress, StringComparer.Ordinal))
+            && !IsKnownCaster(leaderAddress);
     }
 }

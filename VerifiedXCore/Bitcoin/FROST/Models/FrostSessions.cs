@@ -106,6 +106,8 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public string MessageHash { get; set; }
         public string SmartContractUID { get; set; }
         public string LeaderAddress { get; set; }
+        /// <summary>Led by an address that holds no share of the vault's key and is no caster (a withdrawal's requester): counted in their shared room.</summary>
+        public bool LedByRequester { get; set; }
         /// <summary>
         /// FIND-028: VFX withdrawal request TX hash for dedup tracking. Null for non-withdrawal signings.
         /// </summary>
@@ -414,6 +416,14 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public const int MAX_SIGNING_SESSIONS_PER_LEADER = 60;
 
         /// <summary>
+        /// Signing sessions all requester-led ceremonies together may have open here; the rest of the room is kept for
+        /// the key's holders and casters, who lead the signing of every pinned transaction. Counted per leader only, nine
+        /// requester addresses with pinned withdrawals filled every validator's room and every payout stalled (fifth
+        /// review, round 24).
+        /// </summary>
+        public const int MAX_REQUESTER_LED_SIGNING_SESSIONS = 200;
+
+        /// <summary>
         /// Signing sessions one leader may have open here for the same thing to sign (one input of one transaction): a
         /// retry. Counted per leader: a limit across leaders let one leader's three sessions refuse every other leader
         /// of that input for as long as it renewed them.
@@ -476,12 +486,14 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// given (the open ones), so the rule can be tested without the store. With no leader given only the
         /// validator's total is judged (before the leader's signature has been checked).
         /// </summary>
-        public static string? SigningStartRefusal(IEnumerable<SigningSession> open, string? leaderAddress, string? messageHash)
+        public static string? SigningStartRefusal(IEnumerable<SigningSession> open, string? leaderAddress, string? messageHash, bool ledByRequester = false)
         {
             var sessions = open as ICollection<SigningSession> ?? open.ToList();
             if (sessions.Count >= MAX_SIGNING_SESSIONS)
                 return "Maximum concurrent signing sessions reached. Try again later.";
             if (string.IsNullOrEmpty(leaderAddress)) return null;
+            if (ledByRequester && sessions.Count(x => x.LedByRequester) >= MAX_REQUESTER_LED_SIGNING_SESSIONS)
+                return $"{MAX_REQUESTER_LED_SIGNING_SESSIONS} requester-led signing sessions are open here. Try again later; the vault's signers sign pinned transactions without you.";
             if (sessions.Count(x => x.LeaderAddress == leaderAddress) >= MAX_SIGNING_SESSIONS_PER_LEADER)
                 return $"This leader already has {MAX_SIGNING_SESSIONS_PER_LEADER} signing sessions open here. Try again later.";
             if (!string.IsNullOrEmpty(messageHash)

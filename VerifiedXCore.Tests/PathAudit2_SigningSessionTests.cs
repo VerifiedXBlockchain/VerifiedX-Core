@@ -48,6 +48,28 @@ namespace VerifiedXCore.Tests
             Assert.Null(FrostSessionStorage.SigningStartRefusal(open, null, null));
         }
 
+        /// <summary>
+        /// Counted per leader only, nine requester addresses with pinned withdrawals filled every validator's room and
+        /// every payout stalled (fifth review, round 24). Requester-led ceremonies share a part of the room; the rest is
+        /// kept for the key's holders.
+        /// </summary>
+        [Fact]
+        public void RequesterLedCeremonies_ShareAPartOfTheRoom_TheRestIsKeptForTheKeysHolders()
+        {
+            var open = new List<SigningSession>();
+            for (var r = 0; open.Count < FrostSessionStorage.MAX_REQUESTER_LED_SIGNING_SESSIONS; r++)
+                for (var i = 0; i < FrostSessionStorage.MAX_SIGNING_SESSIONS_PER_LEADER && open.Count < FrostSessionStorage.MAX_REQUESTER_LED_SIGNING_SESSIONS; i++)
+                {
+                    Assert.Null(FrostSessionStorage.SigningStartRefusal(open, "requester" + r, "h" + r + ":" + i, ledByRequester: true));
+                    var s = Session("requester" + r, "tx" + r + i, 0, hash: "h" + r + ":" + i);
+                    s.LedByRequester = true;
+                    open.Add(s);
+                }
+            Assert.Contains("requester-led", FrostSessionStorage.SigningStartRefusal(open, "fresh-requester", "x", ledByRequester: true));
+            Assert.Null(FrostSessionStorage.SigningStartRefusal(open, "signer1", "x"));
+            Assert.True(FrostSessionStorage.MAX_SIGNING_SESSIONS - FrostSessionStorage.MAX_REQUESTER_LED_SIGNING_SESSIONS >= 300);
+        }
+
         [Fact]
         public void TheValidatorAsAWholeHasALimitToo()
         {

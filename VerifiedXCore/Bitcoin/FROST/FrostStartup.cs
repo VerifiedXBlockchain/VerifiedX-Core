@@ -2590,7 +2590,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "The signing start's timestamp is too far from this validator's clock." }));
                                 return;
                             }
-                            var noRoomForLeader = FrostSessionStorage.SigningStartRefusal(FrostSessionStorage.SigningSessions.Values.ToList(), request.LeaderAddress, request.MessageHash);
+                            var ledByRequester = FrostSigningAuthorization.LedByRequester(request.LeaderAddress, request.SmartContractUID);
+                            var noRoomForLeader = FrostSessionStorage.SigningStartRefusal(FrostSessionStorage.SigningSessions.Values.ToList(), request.LeaderAddress, request.MessageHash, ledByRequester);
                             if (noRoomForLeader != null)
                             {
                                 context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
@@ -2760,6 +2761,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 MessageHash = request.MessageHash,
                                 SmartContractUID = request.SmartContractUID,
                                 LeaderAddress = request.LeaderAddress,
+                                LedByRequester = ledByRequester,
                                 LeaderStartTimestamp = request.Timestamp,
                                 LeaderStartSignature = request.LeaderSignature,
                                 LeaderRemoteIp = FrostSigningAuthorization.NormalizeRemoteIp(context.Connection.RemoteIpAddress),
