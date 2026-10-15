@@ -113,7 +113,7 @@ namespace VerifiedXCore.Privacy
                         {
                             if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
                                 continue;
-                            if (!PrivacyApiHelper.SpendsWalletNote(payload, uc, keys, block.Height))
+                            if (!PrivacyApiHelper.SpendsWalletNote(tx, payload, uc, keys, block.Height))
                                 continue;
                             uc.IsSpent = true;
                             var assetKey = uc.AssetType ?? "";
@@ -140,6 +140,8 @@ namespace VerifiedXCore.Privacy
                                 continue;
                             if (!ShieldedPlainNoteCodec.TryDeserializeUtf8(feePlain, out var feeNote, out _) || feeNote == null)
                                 continue;
+                            if (!PrivacyApiHelper.FeeNoteMatchesLeg(tx, payload, feeNote, keys))
+                                continue; // the leaf the ledger appended for this fee leg (round 23)
 
                             var feeC = payload.FeeOutputCommitmentB64;
                             if (string.IsNullOrEmpty(feeC))

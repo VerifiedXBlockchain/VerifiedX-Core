@@ -259,14 +259,48 @@ namespace VerifiedXCore.Tests
 
             Assert.True(VfxPrivateTransactionBuilder.TryBuildUnshield(new[] { note }, 3M, NewAddress(), _alice, 1_700_000_001, out var unshield, out var err, Db, Height + 2), err);
             PrivateTxPayloadCodec.TryDecode(unshield!.Data, out var real, out _);
-            Assert.True(PrivacyApiHelper.SpendsWalletNote(real!, note, _alice, Height + 2));
+            Assert.True(PrivacyApiHelper.SpendsWalletNote(unshield, real!, note, _alice, Height + 2));
 
             var listing = new PrivateTxPayload
             {
                 Asset = "VFX", Kind = "unshield", NullsB64 = { Convert.ToBase64String(PrivacyField.RandomCanonical()) },
                 SpentCommitmentB64s = new List<string> { note.Commitment }, SpentCommitmentTreePositions = { note.TreePosition },
             };
-            Assert.False(PrivacyApiHelper.SpendsWalletNote(listing, note, _alice, Height + 2));
+            Assert.False(PrivacyApiHelper.SpendsWalletNote(unshield, listing, note, _alice, Height + 2));
+        }
+
+        /// <summary>
+        /// Wallets credited the fee change note and honoured the fee nullifier of any private transaction, while the ledger
+        /// applies a fee leg only for a vBTC unshield or private transfer carrying all of it: a VFX shield carrying a fee
+        /// note sealed to a victim showed a balance that did not exist (fifth review, round 23).
+        /// </summary>
+        [Fact]
+        public async Task AFeeLeg_CountsInAWallet_OnlyWhereTheLedgerAppliesIt()
+        {
+            if (!ParamsLoaded()) return;
+            var shield = ShieldFor(_alice, 5M);
+            await Apply(shield, Height + 1);
+            var note = NoteOf(shield, 0, _alice);
+            PrivateTxPayloadCodec.TryDecode(shield.Data, out var real, out _);
+            var nullifier = VfxPrivateTransactionBuilder.NullifierOf(note, _alice, true)!;
+            var plain = new ShieldedPlainNote { Version = 1, Amount = 5M, RandomnessB64 = Convert.ToBase64String(note.Randomness), AssetType = "VFX" };
+
+            // The fee fields on a VFX shield: applied by nothing.
+            var carried = new PrivateTxPayload
+            {
+                Asset = "VFX", Kind = "shield", FeeOutputCommitmentB64 = real!.Outs[0].CommitmentB64, FeeInputNullifierB64 = nullifier,
+                FeeTreeMerkleRoot = Convert.ToBase64String(PrivacyField.RandomCanonical()), FeeInputSpentTreePosition = 0, Fee = Globals.PrivateTxFixedFee,
+            };
+            var vfxShield = new Transaction { TransactionType = TransactionType.VFX_SHIELD };
+            Assert.False(PrivacyApiHelper.FeeNoteMatchesLeg(vfxShield, carried, plain, _alice));
+            Assert.False(PrivacyApiHelper.SpendsWalletNote(vfxShield, carried, note, _alice, Height + 2));
+
+            // The same fields on a vBTC private transfer: its fee leg, whose change note is checked against its leaf.
+            var vbtcTransfer = new Transaction { TransactionType = TransactionType.VBTC_V2_PRIVATE_TRANSFER };
+            Assert.True(PrivacyApiHelper.FeeNoteMatchesLeg(vbtcTransfer, carried, plain, _alice));
+            Assert.True(PrivacyApiHelper.SpendsWalletNote(vbtcTransfer, carried, note, _alice, Height + 2));
+            plain.Amount = 500M;
+            Assert.False(PrivacyApiHelper.FeeNoteMatchesLeg(vbtcTransfer, carried, plain, _alice));   // a claimed amount
         }
 
         /// <summary>

@@ -66,12 +66,34 @@ namespace VerifiedXCore.Privacy
         /// spent commitments and tree positions a payload lists are not proven: any private transaction could list other
         /// people's notes and have every node's wallet mark them spent (fifth review, round 21).
         /// </summary>
-        internal static bool SpendsWalletNote(PrivateTxPayload payload, UnspentCommitment note, ShieldedKeyMaterial keys, long blockHeight)
+        internal static bool SpendsWalletNote(Transaction tx, PrivateTxPayload payload, UnspentCommitment note, ShieldedKeyMaterial keys, long blockHeight)
         {
             var nullifier = VfxPrivateTransactionBuilder.NullifierOf(note, keys, PrivacyEpoch.ProofRulesActive(blockHeight));
             if (string.IsNullOrEmpty(nullifier)) return false;
             return (payload.NullsB64 != null && payload.NullsB64.Contains(nullifier, StringComparer.Ordinal))
-                || string.Equals(payload.FeeInputNullifierB64, nullifier, StringComparison.Ordinal);
+                || (HasFeeLeg(tx, payload) && string.Equals(payload.FeeInputNullifierB64, nullifier, StringComparison.Ordinal));
+        }
+
+        /// <summary>
+        /// Whether the ledger applies this transaction's VFX fee leg (spends its fee nullifier, appends its fee change leaf):
+        /// a vBTC unshield or private transfer carrying the whole leg. Any other transaction's fee fields are applied by
+        /// nothing, and wallets credited the fee change note they carried and marked spent the note their fee nullifier
+        /// named (fifth review, round 23).
+        /// </summary>
+        internal static bool HasFeeLeg(Transaction tx, PrivateTxPayload payload) =>
+            (tx.TransactionType == TransactionType.VBTC_V2_UNSHIELD || tx.TransactionType == TransactionType.VBTC_V2_PRIVATE_TRANSFER)
+            && (payload.Fee ?? Globals.PrivateTxFixedFee) > 0
+            && !string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64)
+            && !string.IsNullOrWhiteSpace(payload.FeeTreeMerkleRoot)
+            && payload.FeeInputSpentTreePosition.HasValue;
+
+        /// <summary>Whether a decrypted fee change note is the VFX leaf the ledger appended for this transaction's fee leg.</summary>
+        internal static bool FeeNoteMatchesLeg(Transaction tx, PrivateTxPayload payload, ShieldedPlainNote note, ShieldedKeyMaterial keys)
+        {
+            if (!HasFeeLeg(tx, payload) || !string.Equals(note.AssetType ?? "VFX", "VFX", StringComparison.Ordinal)) return false;
+            byte[]? r32;
+            try { r32 = Convert.FromBase64String(note.RandomnessB64 ?? ""); } catch { return false; }
+            return NoteMatchesOutput(new PrivateShieldedOutput { CommitmentB64 = payload.FeeOutputCommitmentB64 ?? "" }, note.Amount, r32, keys, "VFX");
         }
 
         public static bool TryGetViewingKeyMaterial(ShieldedWallet w, [NotNullWhen(true)] out ShieldedKeyMaterial? keys, out string? error)
@@ -335,7 +357,7 @@ namespace VerifiedXCore.Privacy
                         {
                             if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
                                 continue;
-                            if (!SpendsWalletNote(payload, uc, keys, block.Height))
+                            if (!SpendsWalletNote(tx, payload, uc, keys, block.Height))
                                 continue;
                             uc.IsSpent = true;
                             result.NotesMarkedSpent++;
@@ -356,7 +378,8 @@ namespace VerifiedXCore.Privacy
                         if (feeEnc != null
                             && ShieldedNoteEncryption.TryOpen(feeEnc, keys.EncryptionPrivateKey32, out var feePlain, out _)
                             && ShieldedPlainNoteCodec.TryDeserializeUtf8(feePlain, out var feeNote, out _)
-                            && feeNote != null)
+                            && feeNote != null
+                            && FeeNoteMatchesLeg(tx, payload, feeNote, keys)) // the leaf the ledger appended (round 23)
                         {
                             var feeC = payload.FeeOutputCommitmentB64;
                             if (!string.IsNullOrEmpty(feeC) && !merged.Contains(feeC))

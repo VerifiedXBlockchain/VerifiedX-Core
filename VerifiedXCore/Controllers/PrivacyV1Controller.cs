@@ -540,7 +540,7 @@ namespace VerifiedXCore.Controllers
                         {
                             if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
                                 continue;
-                            if (!PrivacyApiHelper.SpendsWalletNote(payload, uc, keys, block.Height))
+                            if (!PrivacyApiHelper.SpendsWalletNote(tx, payload, uc, keys, block.Height))
                                 continue;
                             uc.IsSpent = true;
                             notesMarkedSpent++;
@@ -1332,7 +1332,7 @@ namespace VerifiedXCore.Controllers
                                 continue;
                             if (!string.Equals(uc.AssetType, asset, StringComparison.Ordinal))
                                 continue;
-                            if (!PrivacyApiHelper.SpendsWalletNote(payload, uc, keys, block.Height))
+                            if (!PrivacyApiHelper.SpendsWalletNote(tx, payload, uc, keys, block.Height))
                                 continue;
                             uc.IsSpent = true;
                             notesMarkedSpent++;
