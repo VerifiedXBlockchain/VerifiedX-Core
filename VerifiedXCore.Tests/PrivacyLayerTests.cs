@@ -495,6 +495,42 @@ namespace VerifiedXCore.Tests
             Assert.Equal("VFX", p2!.Asset);
         }
 
+        /// <summary>
+        /// The rebuild replayed a block's private transactions sorted by sender while application takes the block's order:
+        /// outputs took other tree positions, the rebuilt root differed from every live node's, and the rebuilt node
+        /// refused every later private spend (fifth review, round 21).
+        /// </summary>
+        [Fact]
+        public async Task PrivacyDbRebuild_ReplaysABlockInItsOwnOrder()
+        {
+            Transaction Shield(string from, byte seed)
+            {
+                var r = new byte[32];
+                Array.Fill(r, seed);
+                var g = new byte[PlonkNative.G1CompressedSize];
+                Assert.Equal(PlonkNative.Success, PlonkNative.pedersen_commit(seed, r, g));
+                var tx = new Transaction
+                {
+                    Timestamp = 99, FromAddress = from, ToAddress = PrivacyConstants.ShieldedPoolAddress, Amount = 1.0m, Fee = 0.000003m, Nonce = 0,
+                    TransactionType = TransactionType.VFX_SHIELD, Signature = "sig",
+                    Data = JsonConvert.SerializeObject(new PrivateTxPayload { Asset = "VFX", Kind = "t2z", Outs = { new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(g) } } }),
+                };
+                tx.BuildPrivate();
+                return tx;
+            }
+            var later = Shield("VFX_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ", 3);   // first in the block, last by sender
+            var earlier = Shield("VFX_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 4);
+            var (ok, msg) = await PrivacyDbRebuildService.TryReplayPrivateBlocksAsync(new[] { new Block { Height = 2, Transactions = new List<Transaction> { later, earlier } } }, _db);
+            Assert.True(ok, msg);
+            var commitments = _db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS);
+            string Out(Transaction t) => PrivateTxPayloadCodec.TryDecode(t.Data, out var p, out _) ? p!.Outs[0].CommitmentB64 : "";
+            var laterOut = Out(later);
+            var earlierOut = Out(earlier);
+            var first = commitments.FindOne(c => c.Commitment == laterOut);
+            var second = commitments.FindOne(c => c.Commitment == earlierOut);
+            Assert.True(first.TreePosition < second.TreePosition);
+        }
+
         [Fact]
         public async Task PrivacyDbRebuildService_ReplayFromSyntheticBlocks_Works()
         {

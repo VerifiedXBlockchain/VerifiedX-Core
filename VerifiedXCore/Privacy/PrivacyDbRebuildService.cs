@@ -65,7 +65,7 @@ namespace VerifiedXCore.Privacy
         /// </summary>
         /// <remarks>v3 (fourth review): the v2 rebuild read the tip from Globals.LastBlock at startup (-1), so on a node past the
         /// proof height it could finish without resetting the pool; every node rebuilds once more with the stored tip.</remarks>
-        public const string RebuiltMarkerFileName = "DB_Privacy.rebuilt-v3";
+        public const string RebuiltMarkerFileName = "DB_Privacy.rebuilt-v4"; // v4: replayed in block order (round 21)
 
         /// <summary>
         /// Fund-loss audit item 1 (stage 1): the shielded pool supply becomes consensus state at
@@ -166,7 +166,11 @@ namespace VerifiedXCore.Privacy
                     if (block.Height > maxHeight)
                         maxHeight = block.Height;
 
-                    var ordered = PrivateTransactionTypes.OrderTransactionsForReplay(block.Transactions);
+                    // In the block's own order, as block application applies them: outputs take tree positions in that
+                    // order. Sorted by sender, the rebuilt tree's root differed from every live node's whenever a block
+                    // held two private transactions out of that order, and the rebuilt node refused every later private
+                    // spend (fifth review, round 21).
+                    var ordered = block.Transactions;
                     foreach (var tx in ordered)
                     {
                         if (!PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType))
