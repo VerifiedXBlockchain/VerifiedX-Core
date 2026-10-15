@@ -264,7 +264,7 @@ namespace VerifiedXCore.Services
             if (tx == null || !TransactionRulesActive(height) || string.IsNullOrEmpty(tx.FromAddress)) return null;
             var row = Row(tx.FromAddress);
             if (!Holds(row, height)) return null;
-            var spend = SameBlockDebitGuard.GetDebits(tx).Where(d => d.Key.Kind == SameBlockDebitGuard.LedgerKind.Native).Sum(d => d.Amount);
+            var spend = SameBlockDebitGuard.GetDebits(tx, height).Where(d => d.Key.Kind == SameBlockDebitGuard.LedgerKind.Native).Sum(d => d.Amount);
             if (spend <= 0M) return null;
             var account = StateData.GetSpecificAccountStateTrei(tx.FromAddress);
             if (account == null || account.Balance - Stake >= spend) return null;

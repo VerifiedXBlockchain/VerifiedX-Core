@@ -249,10 +249,11 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void SameBlock_PoolDebitIsNotCountedBelowGate()
         {
-            var a = Unshield(NewAddress(), 0.3M); a.Height = Gate - 1;
-            Assert.DoesNotContain(SameBlockDebitGuard.GetDebits(a), d => d.Key.Kind == SameBlockDebitGuard.LedgerKind.ShieldedPool);
-            a.Height = Gate;
-            var debit = Assert.Single(SameBlockDebitGuard.GetDebits(a));
+            // Judged at the height given, whatever the transaction's own Height field says (round 17).
+            var a = Unshield(NewAddress(), 0.3M); a.Height = Gate;
+            Assert.DoesNotContain(SameBlockDebitGuard.GetDebits(a, Gate - 1), d => d.Key.Kind == SameBlockDebitGuard.LedgerKind.ShieldedPool);
+            a.Height = 1;
+            var debit = Assert.Single(SameBlockDebitGuard.GetDebits(a, Gate));
             Assert.Equal(SameBlockDebitGuard.LedgerKind.ShieldedPool, debit.Key.Kind);
             Assert.Equal("VFX", debit.Key.ContractUid);
             Assert.Equal(0.3M + Globals.PrivateTxFixedFee, debit.Amount);

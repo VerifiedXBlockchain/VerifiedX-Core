@@ -230,6 +230,25 @@ namespace VerifiedXCore.Tests
             Assert.False(Block(a, b).Ok);
         }
 
+        /// <summary>
+        /// The guard took a withdrawal request's escrow height from the transaction's own Height field, which its sender
+        /// sets and only block validation overwrites: two requests over the balance, each carrying "Height": 1 (below the
+        /// escrow height), passed admission and the block builder, whose own check of the block it built then refused it,
+        /// and every producer stopped (fifth review, round 17). The guard judges at the height it is given.
+        /// </summary>
+        [Fact]
+        public void NEW07_AWithdrawalsOwnHeightField_DoesNotDecideItsDebit()
+        {
+            Globals.WithdrawalEscrowHeight = 500;
+            var a = V2Withdrawal(0.6M, 0);
+            var b = V2Withdrawal(0.6M, 1);
+            a.Height = 1;
+            b.Height = 1;
+            Assert.False(BlockAt(null, a, b).Ok);     // admission and the builder (tip + 1)
+            Assert.False(BlockAt(1002, a, b).Ok);     // block validation
+            Assert.True(BlockAt(100, a, b).Ok);       // a block below the escrow height: requests did not debit then
+        }
+
         [Fact]
         public void NEW07_Control_V2DebitsWithinTheBalance_Accepted()
         {
@@ -348,12 +367,11 @@ namespace VerifiedXCore.Tests
             try
             {
                 Globals.WithdrawalEscrowHeight = 5_000;
-                var wd = V2Withdrawal(1.0M, 1); wd.Height = 4_000;
-                var tr = V2FunctionTransfer(1.0M, 0); tr.Height = 4_000;
-                Assert.DoesNotContain(SameBlockDebitGuard.GetDebits(wd), d => d.Key.Kind == SameBlockDebitGuard.LedgerKind.VbtcV2);
-                Assert.True(Block(tr, wd).Ok);
-                wd.Height = 5_000;                                   // control: escrowed request is a debit
-                Assert.False(Block(tr, wd).Ok);
+                var wd = V2Withdrawal(1.0M, 1);
+                var tr = V2FunctionTransfer(1.0M, 0);
+                Assert.DoesNotContain(SameBlockDebitGuard.GetDebits(wd, 4_000), d => d.Key.Kind == SameBlockDebitGuard.LedgerKind.VbtcV2);
+                Assert.True(BlockAt(4_000, tr, wd).Ok);
+                Assert.False(BlockAt(5_000, tr, wd).Ok);             // control: escrowed request is a debit
             }
             finally { Globals.WithdrawalEscrowHeight = prior; }
         }
@@ -464,12 +482,13 @@ namespace VerifiedXCore.Tests
                 var hash = wd.Hash;
                 wd.Height = 1;
                 Assert.Equal(hash, wd.GetHash());                                                   // hash unchanged
-                Assert.DoesNotContain(SameBlockDebitGuard.GetDebits(wd), d => d.Key.Kind == SameBlockDebitGuard.LedgerKind.VbtcV2);
+                // ... and the guard no longer reads it: judged at the block's height, the escrow debit counts (round 17).
+                Assert.Contains(SameBlockDebitGuard.GetDebits(wd, 5_000), d => d.Key.Kind == SameBlockDebitGuard.LedgerKind.VbtcV2);
 
                 var block = new Block { Height = 5_000, Transactions = new List<Transaction> { V2FunctionTransfer(1.0M, 0), wd } };
                 LedgerIntegrityRules.NormalizeTransactionHeights(block);                             // what validation/apply now do
                 Assert.Equal(5_000, wd.Height);
-                Assert.False(Block(block.Transactions.ToArray()).Ok);                               // escrow debit counted again
+                Assert.False(BlockAt(block.Height, block.Transactions.ToArray()).Ok);              // escrow debit counted
 
                 // Mainnet history has non-coinbase transactions with Height 0: normalising (not refusing) keeps them replayable.
                 var legacy = new Block { Height = 2_684_414, Transactions = new List<Transaction> { new Transaction { Height = 0, Hash = "legacy" } } };

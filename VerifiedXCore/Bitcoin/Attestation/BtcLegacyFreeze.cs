@@ -51,7 +51,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     return $"Bridge exit completion transactions are no longer accepted (from block {Globals.BitcoinAttestationHeight}): an exit is completed when Bitcoin shows its transaction.";
             }
 
-            foreach (var (key, _) in SameBlockDebitGuard.GetDebits(tx))
+            foreach (var (key, _) in SameBlockDebitGuard.GetDebits(tx, height))
                 if (key.Kind == SameBlockDebitGuard.LedgerKind.VbtcV2 && IsLegacyVault(key.ContractUid))
                     return Frozen(key.ContractUid);
 

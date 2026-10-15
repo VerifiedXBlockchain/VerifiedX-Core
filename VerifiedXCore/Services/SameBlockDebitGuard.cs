@@ -47,8 +47,13 @@ namespace VerifiedXCore.Services
         /// The ledger debits a transaction's apply writes, parsed the way StateData parses them. Unparseable data yields
         /// no debits (apply writes none either).
         /// </summary>
-        public static List<(DebitKey Key, decimal Amount)> GetDebits(Transaction tx)
+        public static List<(DebitKey Key, decimal Amount)> GetDebits(Transaction tx, long? height = null)
         {
+            // The height the transaction is judged at, never its own Height field: a sender sets that, and only block
+            // validation overwrites it. A withdrawal request carrying "Height": 1 was counted as no debit at admission and
+            // in the block builder, which then built blocks its own check refused; two such requests stopped every
+            // producer (fifth review, round 17). In block validation the field is the block's height, which is passed.
+            var judged = height ?? ((Globals.LastBlock?.Height ?? 0) + 1);
             var debits = new List<(DebitKey, decimal)>();
             if (tx == null || string.IsNullOrEmpty(tx.FromAddress))
                 return debits;
@@ -69,11 +74,11 @@ namespace VerifiedXCore.Services
             }
 
             // Fund-loss audit item 1: an unshield / private transfer debits its shielded pool's supply. The per-transaction
-            // supply floor reads committed state, so two in one block each passed against the same supply. Same height
-            // source as the escrow case below; before PrivateTxSupplyRulesHeight the pool was never judged.
+            // supply floor reads committed state, so two in one block each passed against the same supply. Judged at
+            // the height the guard is given (round 17); before PrivateTxSupplyRulesHeight the pool was never judged.
             if (Privacy.PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType))
             {
-                var zkHeight = tx.Height > 0 ? tx.Height : (Globals.LastBlock?.Height ?? 0) + 1;
+                var zkHeight = judged;
                 if (zkHeight >= Globals.PrivateTxSupplyRulesHeight && !string.IsNullOrEmpty(tx.Data)
                     && PrivateTxPayloadCodec.TryDecode(tx.Data, out var zkPayload, out _))
                 {
@@ -101,10 +106,9 @@ namespace VerifiedXCore.Services
                     case TransactionType.VBTC_V2_WITHDRAWAL_REQUEST:
                     {
                         // The request debits (escrow) only from WithdrawalEscrowHeight on; earlier requests were burned
-                        // at COMPLETE, so counting them here would refuse historical blocks the apply accepts. Same height
-                        // source as the apply (tx.Height, set when the transaction is crafted into its block).
-                        var height = tx.Height > 0 ? tx.Height : (Globals.LastBlock?.Height ?? 0) + 1;
-                        if (!Bitcoin.Models.VBTCWithdrawalRequest.EscrowAppliesTo(height))
+                        // at COMPLETE, so counting them here would refuse historical blocks the apply accepts. Judged at
+                        // the height the guard is given, never the transaction's own Height field (round 17).
+                        if (!Bitcoin.Models.VBTCWithdrawalRequest.EscrowAppliesTo(judged))
                             return debits;
                         foreach (var (uid, amt) in Bitcoin.Services.VBTCService.GetVbtcV2WithdrawalOutflows(tx))
                             debits.Add((new DebitKey(LedgerKind.VbtcV2, uid, tx.FromAddress), amt));
@@ -392,7 +396,7 @@ namespace VerifiedXCore.Services
                 state.BondStarting.Add(sender);
             }
 
-            var debits = GetDebits(tx);
+            var debits = GetDebits(tx, state.BlockHeight);
             if (debits.Count == 0)
             {
                 state.Senders.Add(sender);
@@ -502,7 +506,7 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static (bool Ok, string Reason) CheckAgainstPending(Transaction tx, IEnumerable<Transaction> pendingFromSameSender)
         {
-            var debits = GetDebits(tx);
+            var debits = GetDebits(tx); // admission: judged at the tip + 1
             if (debits.Count == 0)
                 return (true, "");
             var state = State.ForPolicy();
@@ -511,7 +515,7 @@ namespace VerifiedXCore.Services
             {
                 if (p.Hash == tx.Hash)
                     continue;
-                if (!GetDebits(p).Any(d => keys.Contains(Canonical(d.Key, state.CanonicalUids))))
+                if (!GetDebits(p, state.BlockHeight).Any(d => keys.Contains(Canonical(d.Key, state.CanonicalUids))))
                     continue;
                 // A pending transaction that itself no longer fits is left for the proposal to drop.
                 TryRegister(p, state);

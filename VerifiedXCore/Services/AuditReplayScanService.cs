@@ -340,7 +340,7 @@ namespace VerifiedXCore.Services
                             if (!sweepOk)
                                 hits.Add(new Hit(block.Height, tx.Hash ?? "", tx.TransactionType, "NEW-07/24 block rule (Recover() alone, no repeated transaction)", sweepReason));
                         }
-                        foreach (var (rawKey, amount) in SameBlockDebitGuard.GetDebits(tx))
+                        foreach (var (rawKey, amount) in SameBlockDebitGuard.GetDebits(tx, block.Height))
                         {
                             var key = SameBlockDebitGuard.Canonical(rawKey, canonicalUids);
                             debitsInBlock.TryGetValue(key, out var d);
