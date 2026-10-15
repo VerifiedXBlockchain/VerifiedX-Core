@@ -295,6 +295,9 @@ namespace VerifiedXCore.Tests
             await Confirm(Row(request, vault.Uid).Pins[1]);
             Assert.Equal(VaultWithdrawalState.Released, Row(request, vault.Uid).State);
             Assert.Equal(150_000 - 154 * 20, BtcAttestStore.Total(vault.Uid).HeldSats);
+            // The closed-unpaid list shows what was refunded: the amount less the release's Bitcoin fee (round 18).
+            var listed = Newtonsoft.Json.Linq.JObject.FromObject(Assert.Single(VerifiedXCore.Bitcoin.Services.VBTCChainView.WithdrawalsClosedWithoutPayment(vault.Uid)));
+            Assert.Equal(0.001M - 154 * 20 / 100_000_000M, (decimal)listed["Refunded"]!);
             Assert.Equal((150_000 - 154 * 20) / 100_000_000M, await Spendable(vault.Uid, Minter));
             await AssertBacked(vault.Uid);
         }
