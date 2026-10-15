@@ -17,6 +17,14 @@ namespace VerifiedXCore.Bitcoin.Services
     public static class BaseBridgeExitWatchService
     {
         private const int MaxBlockSpan = 4000;
+
+        // The span read at once shrinks while reads of a range fail and grows back as they succeed: a range kept for a
+        // failed read and asked whole every time (a provider refusing wide spans, or a log cap filled with dust burns) held
+        // up every later burn on this caster (fifth review, round 21). A single block that fails this many times in a
+        // row is passed over and logged for an operator's rescan.
+        private static int _span = MaxBlockSpan;
+        private static int _singleBlockFailures;
+        private const int SingleBlockFailuresBeforeSkip = 20;
         private static long? _startBlockOverride;
 
         /// <summary>V3 contract event: burnForVfxExit(amount, vfxDestinationAddress)</summary>
@@ -139,7 +147,7 @@ namespace VerifiedXCore.Bitcoin.Services
             if (from > latest)
                 return (0, state.LastScannedBlock, "No new blocks");
 
-            var to = Math.Min(from + MaxBlockSpan - 1, latest);
+            var to = Math.Min(from + _span - 1, latest);
             var contract = BaseBridgeService.VBTCbContractAddress;
 
             var processed = 0;
@@ -267,7 +275,22 @@ namespace VerifiedXCore.Bitcoin.Services
             // caster, and on every caster whose reads failed alike (fifth review, round 20). Burns already handled are
             // skipped on the second read.
             if (scanFailed)
-                return (processed, state.LastScannedBlock, "Base log query failed; the range is read again next poll");
+            {
+                if (_span > 1)
+                {
+                    _span = Math.Max(1, _span / 4);
+                    return (processed, state.LastScannedBlock, $"Base log query failed; the range is read again next poll, {_span} block(s) at a time");
+                }
+                if (++_singleBlockFailures < SingleBlockFailuresBeforeSkip)
+                    return (processed, state.LastScannedBlock, "Base log query failed for one block; read again next poll");
+                ErrorLogUtility.LogError($"[BaseBridgeExit] Base block {from} could not be read {SingleBlockFailuresBeforeSkip} times; passed over. Rescan it (RescanExitBurns/{from}) once the provider answers.",
+                    "BaseBridgeExitWatchService.PollOnceInternal");
+            }
+            else
+            {
+                _span = Math.Min(MaxBlockSpan, _span * 2);
+            }
+            _singleBlockFailures = 0;
 
             state.LastScannedBlock = to;
             BridgeExitSyncState.Save(state);
