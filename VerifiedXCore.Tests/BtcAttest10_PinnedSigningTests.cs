@@ -343,6 +343,13 @@ namespace VerifiedXCore.Tests
             (ok, why) = FrostSigningAuthorization.Authorize(Announce(legacy.Uid, legacy.Script, tx.Hash, built, Signers[0].Address));
             Assert.False(ok);
             Assert.Contains("led by the withdrawal owner", why);
+
+            // Its owner is its only leader: not counted in the requester-led share of signing room (round 25), as a
+            // requester of a watched vault is (round 24).
+            Assert.False(FrostSigningAuthorization.LedByRequester(Minter.Address, legacy.Uid));
+            var watched = await CreateVault(Tip + 1, keyHolders: Signers);
+            Assert.True(FrostSigningAuthorization.LedByRequester(Minter.Address, watched.Uid));
+            Assert.False(FrostSigningAuthorization.LedByRequester(Signers[0].Address, watched.Uid));
         }
 
         /// <summary>
