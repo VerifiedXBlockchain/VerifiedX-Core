@@ -182,6 +182,34 @@ namespace VerifiedXCore.Utilities
         }
 
         /// <summary>
+        /// Types the per-KB floor does not apply to, because the protocol prices them another way: the fee-free types
+        /// VerifyTX exempts from its minimum fee (keep the two lists in step), the types that pay a fixed VFX cost in their
+        /// amount (ADNR, voting topics, DecShop), the private types (a flat fee in the payload) and the sender-less
+        /// Bitcoin attestation types. Every other type pays at least <see cref="Globals.MinFeePerKB"/> per KB.
+        /// </summary>
+        private static readonly HashSet<TransactionType> FeeFloorExempt = new()
+        {
+            TransactionType.TKNZ_WD_ARB,
+            TransactionType.VBTC_V2_VALIDATOR_REGISTER,
+            TransactionType.VBTC_V2_VALIDATOR_EXIT,
+            TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT,
+            TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE,
+            TransactionType.VBTC_V2_BRIDGE_UNLOCK,
+            TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK,
+            TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC,
+            TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE,
+            TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL,
+            TransactionType.ADNR,
+            TransactionType.VOTE_TOPIC,
+            TransactionType.DSTR,
+        };
+
+        internal static bool PaysOwnFixedFee(TransactionType type) =>
+            FeeFloorExempt.Contains(type)
+            || VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(type)
+            || VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(type);
+
+        /// <summary>
         /// Validate transaction meets minimum fee requirements (HAL-071 fee floor)
         /// </summary>
         public static (bool isValid, string reason) ValidateMinimumFee(Transaction tx)
@@ -193,18 +221,8 @@ namespace VerifiedXCore.Utilities
             // Calculate minimum required fee
             var minRequiredFee = txSizeKB * Globals.MinFeePerKB;
 
-            // For regular TX type, check fee vs amount
-            if (tx.TransactionType == TransactionType.TX)
-            {
-                if (tx.Fee < minRequiredFee)
-                {
-                    return (false, $"Transaction fee {tx.Fee} below minimum {minRequiredFee:F8} RBX");
-                }
-            }
-
-            // For other transaction types, the required RBX acts as the fee
-            // (e.g., ADNR requires 5 RBX, DecShop requires 10 RBX)
-            // These are already validated elsewhere, so we allow them
+            if (!PaysOwnFixedFee(tx.TransactionType) && tx.Fee < minRequiredFee)
+                return (false, $"Transaction fee {tx.Fee} below minimum {minRequiredFee:F8} RBX");
 
             return (true, string.Empty);
         }

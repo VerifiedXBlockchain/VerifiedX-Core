@@ -221,5 +221,38 @@ namespace VerifiedXCore.Tests
             MempoolEvictionUtility.InvalidateAdmissionStats();
             Assert.Equal(MempoolEvictionUtility.GetMempoolStats(), MempoolEvictionUtility.GetAdmissionStats());
         }
+
+        private static Transaction OfType(TransactionType type, decimal fee) => new Transaction
+        {
+            Hash = Guid.NewGuid().ToString("N"), FromAddress = "x", ToAddress = "y", Amount = 0M, Fee = fee, Timestamp = 1,
+            TransactionType = type, Data = JsonConvert.SerializeObject(new[] { new string('d', 4096) }),
+        };
+
+        [Theory]
+        [InlineData(TransactionType.FTKN_TX)]
+        [InlineData(TransactionType.NFT_TX)]
+        [InlineData(TransactionType.SC_MINT)]
+        [InlineData(TransactionType.VBTC_V2_TRANSFER)]
+        public void TheFeeFloor_AppliesToTypesWithoutAFixedFeeOfTheirOwn(TransactionType type)
+        {
+            Assert.False(MempoolEvictionUtility.ValidateMinimumFee(OfType(type, 0.000003M)).isValid);
+            var paid = OfType(type, 0M);
+            paid.Fee = FeeCalcService.CalculateTXFee(paid);
+            Assert.True(MempoolEvictionUtility.ValidateMinimumFee(paid).isValid);
+        }
+
+        [Theory]
+        [InlineData(TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT)]
+        [InlineData(TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC)]
+        [InlineData(TransactionType.TKNZ_WD_ARB)]
+        [InlineData(TransactionType.ADNR)]
+        [InlineData(TransactionType.VOTE_TOPIC)]
+        [InlineData(TransactionType.DSTR)]
+        [InlineData(TransactionType.VFX_PRIVATE_TRANSFER)]
+        [InlineData(TransactionType.VBTC_V2_BTC_REPORT)]
+        public void TheFeeFloor_LeavesFeeFreeAndFixedFeeTypesAlone(TransactionType type)
+        {
+            Assert.True(MempoolEvictionUtility.ValidateMinimumFee(OfType(type, 0M)).isValid);
+        }
     }
 }
