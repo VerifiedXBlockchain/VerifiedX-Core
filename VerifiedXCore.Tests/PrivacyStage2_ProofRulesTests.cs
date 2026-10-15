@@ -227,6 +227,26 @@ namespace VerifiedXCore.Tests
             Assert.True(PlonkProofVerifier.TryValidatePrivateProofs(shield, sp!, false, Height - 1).ok);
         }
 
+        /// <summary>
+        /// The public dummy's nullifier recorded before the epoch (a pre-epoch transaction carried it) does not refuse the
+        /// epoch's single-note spends, which all spend the dummy (round 32): the spend is judged on, here up to its proof.
+        /// </summary>
+        [Fact]
+        public async Task InTheEpoch_TheDummyNullifierRecordedBeforeIt_DoesNotRefuseSpends()
+        {
+            Assert.True(NullifierService.TryRecordNullifier(PrivacyEpoch.DummyNullifierB64, "VFX", Height - 5, TimeUtil.GetTime()));
+            TipInEpoch();
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(1M));
+            Assert.False(ok);
+            Assert.Contains("must carry a PLONK proof", msg);
+            // A real nullifier recorded is still refused.
+            var spent = RealNullifier();
+            Assert.True(NullifierService.TryRecordNullifier(Convert.ToBase64String(spent), "VFX", Height - 5, TimeUtil.GetTime()));
+            var (okSpent, msgSpent) = await TransactionValidatorService.VerifyTX(Unshield(1M, new[] { spent, PrivacyEpoch.DummyNullifier }));
+            Assert.False(okSpent);
+            Assert.Contains("already spent", msgSpent);
+        }
+
         [Fact]
         public async Task InTheEpoch_ANodeThatCannotVerify_FailsClosed()
         {

@@ -76,6 +76,11 @@ namespace VerifiedXCore.Privacy
                 {
                     if (string.IsNullOrWhiteSpace(n))
                         return (false, "Nullifier entry is empty.");
+                    // In the epoch the public dummy's nullifier is spent by every single-note spend and never recorded; one
+                    // recorded before the epoch (any pre-epoch transaction could carry it) refused every such spend from the
+                    // epoch on (fifth review, round 32).
+                    if (PrivacyEpoch.ProofRulesActive(proofRulesHeight) && PrivacyEpoch.IsDummyNullifier(n))
+                        continue;
                     if (NullifierService.IsNullifierSpentInDb(n, payload.Asset))
                         return (false, "Nullifier already spent on-chain.");
                 }
