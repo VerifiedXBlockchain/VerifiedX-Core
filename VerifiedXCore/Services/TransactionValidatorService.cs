@@ -298,7 +298,9 @@ namespace VerifiedXCore.Services
                 ?? VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.SaleRefusal(txRequest)
                 // Addresses and looked-up identifiers in plain ASCII (round 26); before the private branch, whose
                 // addresses resolve names too.
-                ?? LedgerIntegrityRules.IdentifiersArePlainAscii(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+                ?? LedgerIntegrityRules.IdentifiersArePlainAscii(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // VFX goes to an address somebody can sign for (round 27).
+                ?? LedgerIntegrityRules.VfxRecipientCanHoldIt(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
             if (vaultInTransitError != null)
                 return (false, vaultInTransitError);
 

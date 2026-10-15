@@ -290,6 +290,14 @@ namespace VerifiedXCore.Tests
             var rawBody = new Transaction { TransactionType = TransactionType.VBTC_V2_CONTRACT_CREATE, Data = $"[{{\"Function\":\"Mint()\",\"ContractUID\":\"{uid}\",\"Data\":\"let AssetName = \\\"Café\\\"\nlet X = 1\",\"MD5List\":\"NA\"}}]" };
             Assert.Null(LedgerIntegrityRules.VbtcDataKeysAreDistinct(rawBody, Rule));
             Assert.Contains("plain ASCII", LedgerIntegrityRules.VbtcDataKeysAreDistinct(new Transaction { TransactionType = TransactionType.VBTC_V2_CONTRACT_CREATE, Data = rawBody.Data.Replace("\"MD5List\":\"NA\"", "\"MD5List\":\"N\nA\"") }, Rule));
+            // Round 27: VFX goes to an address somebody can sign for.
+            var signer = _other.Address;
+            Assert.Null(LedgerIntegrityRules.VfxRecipientCanHoldIt(new Transaction { TransactionType = TransactionType.TX, ToAddress = signer }, Rule));
+            Assert.Null(LedgerIntegrityRules.VfxRecipientCanHoldIt(new Transaction { TransactionType = TransactionType.TX, ToAddress = "Token_Base" }, Rule));
+            Assert.NotNull(LedgerIntegrityRules.VfxRecipientCanHoldIt(new Transaction { TransactionType = TransactionType.TX, ToAddress = "alice.vfx" }, Rule));
+            Assert.NotNull(LedgerIntegrityRules.VfxRecipientCanHoldIt(new Transaction { TransactionType = TransactionType.VFX_UNSHIELD, ToAddress = "zfx_" + signer }, Rule));
+            Assert.NotNull(LedgerIntegrityRules.VfxRecipientCanHoldIt(new Transaction { TransactionType = TransactionType.VFX_UNSHIELD, ToAddress = "Token_Base" }, Rule));
+            Assert.Null(LedgerIntegrityRules.VfxRecipientCanHoldIt(new Transaction { TransactionType = TransactionType.TX, ToAddress = "alice.vfx" }, Rule - 1));
             // Round 26: names, addresses and ids consensus looks up by text are plain ASCII.
             Transaction Typed(TransactionType type, string data, string to = "Base") => new() { TransactionType = type, Data = data, ToAddress = to, FromAddress = "xA" };
             Assert.Null(LedgerIntegrityRules.IdentifiersArePlainAscii(Typed(TransactionType.ADNR, "{\"Function\":\"AdnrCreate()\",\"Name\":\"plain\"}"), Rule));

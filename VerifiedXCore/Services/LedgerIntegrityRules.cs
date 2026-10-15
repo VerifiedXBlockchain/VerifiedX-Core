@@ -314,6 +314,28 @@ namespace VerifiedXCore.Services
         /// The ledger credits the transaction's ToAddress as it stands, and a balance under a key nobody holds is lost:
         /// its owner cannot take it back. Null when the rule passes.
         /// </summary>
+        /// <summary>The placeholder recipients consensus never credits (as VerifyTX and the apply list them).</summary>
+        private static readonly HashSet<string> PlaceholderRecipients = new(StringComparer.Ordinal)
+        {
+            "Adnr_Base", "DecShop_Base", "Topic_Base", "Vote_Base", "Reserve_Base", "Token_Base", "TW_Base",
+        };
+
+        /// <summary>
+        /// From Globals.PathAuditRulesHeight VFX is sent (TX) or unshielded (VFX_UNSHIELD) to an address somebody can sign
+        /// for. Both credit the ToAddress as written, and validation took a shielded address or an ADNR name: the VFX sat
+        /// under a key nobody holds (fifth review, round 27; the vBTC rule below is the same). Null when the rule passes.
+        /// </summary>
+        public static string? VfxRecipientCanHoldIt(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.PathAuditRulesHeight) return null;
+            if (tx.TransactionType != TransactionType.TX && tx.TransactionType != TransactionType.VFX_UNSHIELD) return null;
+            var to = tx.ToAddress ?? "";
+            if (tx.TransactionType == TransactionType.TX && PlaceholderRecipients.Contains(to)) return null;
+            return !to.StartsWith(VerifiedXCore.Privacy.ShieldedAddressConstants.Prefix, StringComparison.Ordinal) && AddressValidateUtility.ValidateRBXAddress(to)
+                ? null
+                : "VFX can only be sent to a VFX address (not a shielded address or a name): nobody could spend it there.";
+        }
+
         public static string? VbtcRecipientCanHoldIt(Transaction tx, long height)
         {
             if (tx == null || height < Globals.PathAuditRulesHeight) return null;
