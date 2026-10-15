@@ -269,6 +269,26 @@ namespace VerifiedXCore.Tests
             Assert.False(PrivacyApiHelper.SpendsWalletNote(listing, note, _alice, Height + 2));
         }
 
+        /// <summary>
+        /// A wallet credited the amount a sealed note claims, from any transaction: a fake note showed a balance that did
+        /// not exist (fifth review, round 22). A note is credited only as the leaf the chain applied for its output.
+        /// </summary>
+        [Fact]
+        public async Task AWalletCreditsANote_OnlyAsTheLeafTheChainApplied()
+        {
+            if (!ParamsLoaded()) return;
+            var shield = ShieldFor(_alice, 5M);
+            await Apply(shield, Height + 1);
+            var note = NoteOf(shield, 0, _alice);
+            PrivateTxPayloadCodec.TryDecode(shield.Data, out var payload, out _);
+            var output = payload!.Outs[0];
+            Assert.True(PrivacyApiHelper.NoteMatchesOutput(output, 5M, note.Randomness, _alice));
+            Assert.False(PrivacyApiHelper.NoteMatchesOutput(output, 500M, note.Randomness, _alice));           // a claimed amount
+            Assert.False(PrivacyApiHelper.NoteMatchesOutput(output, 5M, note.Randomness, _bob));               // someone else's key
+            var unapplied = new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(PrivacyField.RandomCanonical()) };
+            Assert.False(PrivacyApiHelper.NoteMatchesOutput(unapplied, 5M, note.Randomness, _alice));          // not a leaf of the chain
+        }
+
         [Fact]
         public async Task UnshieldTwoNotes_ProvesAndVerifies()
         {

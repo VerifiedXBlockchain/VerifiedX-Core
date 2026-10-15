@@ -248,6 +248,7 @@ namespace VerifiedXCore.Privacy
                             treePos = LookupTreePositionByCommitment(c, note.AssetType ?? "");
                         }
 
+                        if (!PrivacyApiHelper.NoteMatchesOutput(o, note.Amount, r32, keys)) continue; // the note is the output it came with (round 22)
                         w.UnspentCommitments.Add(new UnspentCommitment
                         {
                             Commitment = c,

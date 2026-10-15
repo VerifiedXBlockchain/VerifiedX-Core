@@ -17,6 +17,36 @@ namespace VerifiedXCore.Privacy
         /// Does NOT require the spending key password — suitable for scanning / note decryption.
         /// </summary>
         /// <summary>
+        /// Whether a decrypted note is the output it came with: the output's commitment is a leaf the chain applied, and its
+        /// stored note hash (owner-bound in the epoch) or, for older leaves, its Pedersen commitment is made from the
+        /// note's amount and randomness. A sealed note's amount and asset are what its sender wrote: wallets credited them
+        /// as written, from any transaction, and a fake note showed a balance that did not exist (fifth review, round 22).
+        /// </summary>
+        internal static bool NoteMatchesOutput(PrivateShieldedOutput? o, decimal amount, byte[]? r32, ShieldedKeyMaterial keys)
+        {
+            try
+            {
+                if (o == null || string.IsNullOrEmpty(o.CommitmentB64) || r32 == null || r32.Length != PlonkNative.ScalarSize) return false;
+                if (!PrivacyPedersenAmount.TryToScaledU64(amount, out var scaled, out _)) return false;
+                var rec = PrivacyDbContext.GetPrivacyDb().GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS)
+                    .FindOne(x => x.Commitment == o.CommitmentB64);
+                if (rec == null || !string.Equals(rec.Commitment, o.CommitmentB64, StringComparison.Ordinal)) return false;
+                if (!string.IsNullOrEmpty(rec.NoteHash))
+                {
+                    if (PoseidonV1.IsAvailable && keys.OwnerPk32 is { Length: 32 } ownerPk
+                        && string.Equals(rec.NoteHash, Convert.ToBase64String(PoseidonV1.NoteHashV2(scaled, r32, ownerPk)), StringComparison.Ordinal))
+                        return true;
+                    var v1 = NoteHashService.Compute(scaled, r32);
+                    return v1 != null && string.Equals(rec.NoteHash, Convert.ToBase64String(v1), StringComparison.Ordinal);
+                }
+                var g1 = new byte[PlonkNative.G1CompressedSize];
+                return PlonkNative.pedersen_commit(scaled, r32, g1) == PlonkNative.Success
+                    && string.Equals(Convert.ToBase64String(g1), rec.Commitment, StringComparison.Ordinal);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
         /// Whether a mined private transaction spends this wallet note: its own nullifier is among the transaction's. The
         /// spent commitments and tree positions a payload lists are not proven: any private transaction could list other
         /// people's notes and have every node's wallet mark them spent (fifth review, round 21).
@@ -379,6 +409,7 @@ namespace VerifiedXCore.Privacy
 
                         long treePos = LookupTreePositionByCommitment(c, note.AssetType ?? "");
 
+                        if (!NoteMatchesOutput(o, note.Amount, r32, keys)) continue; // the note is the output it came with (round 22)
                         w.UnspentCommitments.Add(new UnspentCommitment
                         {
                             Commitment = c,
