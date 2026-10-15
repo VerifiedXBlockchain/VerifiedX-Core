@@ -48,6 +48,16 @@ namespace VerifiedXCore.Tests
 
         private static long Tip => Globals.LastBlock.Height;
 
+        /// <summary>The browser wallet's amounts: "0,5" was read as 5 (a comma taken as a thousands separator; round 19).</summary>
+        [Fact]
+        public void TheBrowserWalletsAmounts_AreDigitsAndOneDecimalPoint()
+        {
+            Assert.True(VerifiedXCore.Controllers.WalletController.TryParseAmount(" 0.5 ", out var half));
+            Assert.Equal(0.5M, half);
+            foreach (var text in new[] { "0,5", "1,000", "1e3", "-1", "0", "$5" })
+                Assert.False(VerifiedXCore.Controllers.WalletController.TryParseAmount(text, out _), text);
+        }
+
         private async Task<BtcTx> Deposit(NBitcoin.Script vault, long sats)
         {
             var tx = Pay(vault, sats);

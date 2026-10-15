@@ -46,7 +46,7 @@ namespace VerifiedXCore.Controllers
                 if (string.IsNullOrWhiteSpace(req.From) || string.IsNullOrWhiteSpace(req.To) || string.IsNullOrWhiteSpace(req.Amount))
                     return BadRequest(new { success = false, message = "From, To, and Amount are required." });
 
-                if (!decimal.TryParse(req.Amount, System.Globalization.NumberStyles.Any,
+                if (!decimal.TryParse(req.Amount, AmountStyle,
                     System.Globalization.CultureInfo.InvariantCulture, out decimal amount) || amount <= 0)
                     return BadRequest(new { success = false, message = "Invalid amount." });
 
@@ -108,7 +108,7 @@ namespace VerifiedXCore.Controllers
                     string.IsNullOrWhiteSpace(req.BTCAddress) || string.IsNullOrWhiteSpace(req.Amount))
                     return BadRequest(new { success = false, message = "scUID, ownerAddress, btcAddress, and amount are required." });
 
-                if (!decimal.TryParse(req.Amount, System.Globalization.NumberStyles.Any,
+                if (!decimal.TryParse(req.Amount, AmountStyle,
                     System.Globalization.CultureInfo.InvariantCulture, out decimal amount) || amount <= 0)
                     return BadRequest(new { success = false, message = "Invalid amount." });
 
@@ -219,7 +219,7 @@ namespace VerifiedXCore.Controllers
                     string.IsNullOrWhiteSpace(req.ToAddress) || string.IsNullOrWhiteSpace(req.Amount))
                     return BadRequest(new { success = false, message = "scUID, fromAddress, toAddress, and amount are required." });
 
-                if (!decimal.TryParse(req.Amount, System.Globalization.NumberStyles.Any,
+                if (!decimal.TryParse(req.Amount, AmountStyle,
                     System.Globalization.CultureInfo.InvariantCulture, out decimal amount) || amount <= 0)
                     return BadRequest(new { success = false, message = "Invalid amount." });
 
@@ -256,7 +256,7 @@ namespace VerifiedXCore.Controllers
                     string.IsNullOrWhiteSpace(req.Amount) || string.IsNullOrWhiteSpace(req.EvmDestination))
                     return BadRequest(new { success = false, message = "scUID, ownerAddress, amount, and evmDestination are required." });
 
-                if (!decimal.TryParse(req.Amount, System.Globalization.NumberStyles.Any,
+                if (!decimal.TryParse(req.Amount, AmountStyle,
                     System.Globalization.CultureInfo.InvariantCulture, out decimal amount) || amount <= 0)
                     return BadRequest(new { success = false, message = "Invalid amount." });
 
@@ -360,8 +360,15 @@ namespace VerifiedXCore.Controllers
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
-        private static bool TryParseAmount(string? text, out decimal amount) =>
-            decimal.TryParse(text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out amount) && amount > 0;
+        /// <summary>
+        /// An amount as a person types it: digits and one decimal point. NumberStyles.Any took a comma as a thousands
+        /// separator, so "0,5" was sent as 5 (fifth review, round 19).
+        /// </summary>
+        internal const System.Globalization.NumberStyles AmountStyle =
+            System.Globalization.NumberStyles.AllowDecimalPoint | System.Globalization.NumberStyles.AllowLeadingWhite | System.Globalization.NumberStyles.AllowTrailingWhite;
+
+        internal static bool TryParseAmount(string? text, out decimal amount) =>
+            decimal.TryParse(text, AmountStyle, System.Globalization.CultureInfo.InvariantCulture, out amount) && amount > 0;
 
         // VX-03: the shield / unshield / transfer / scan / resync routes below were GET (CSRF-able by
         // any page, passwords in the query string). They sign or mutate, so they are POST with a body.
@@ -459,7 +466,7 @@ namespace VerifiedXCore.Controllers
                     string.IsNullOrWhiteSpace(req.ScUID) || string.IsNullOrWhiteSpace(req.Amount))
                     return BadRequest(new { success = false, message = "fromAddress, zfxAddress, scUID, and amount are required." });
 
-                if (!decimal.TryParse(req.Amount, System.Globalization.NumberStyles.Any,
+                if (!decimal.TryParse(req.Amount, AmountStyle,
                     System.Globalization.CultureInfo.InvariantCulture, out decimal amount) || amount <= 0)
                     return BadRequest(new { success = false, message = "Invalid amount." });
 
@@ -477,7 +484,7 @@ namespace VerifiedXCore.Controllers
                     string.IsNullOrWhiteSpace(req.ScUID) || string.IsNullOrWhiteSpace(req.Amount))
                     return BadRequest(new { success = false, message = "zfxAddress, toAddress, scUID, and amount are required." });
 
-                if (!decimal.TryParse(req.Amount, System.Globalization.NumberStyles.Any,
+                if (!decimal.TryParse(req.Amount, AmountStyle,
                     System.Globalization.CultureInfo.InvariantCulture, out decimal amount) || amount <= 0)
                     return BadRequest(new { success = false, message = "Invalid amount." });
 
@@ -495,7 +502,7 @@ namespace VerifiedXCore.Controllers
                     string.IsNullOrWhiteSpace(req.ScUID) || string.IsNullOrWhiteSpace(req.Amount))
                     return BadRequest(new { success = false, message = "fromZfxAddress, toZfxAddress, scUID, and amount are required." });
 
-                if (!decimal.TryParse(req.Amount, System.Globalization.NumberStyles.Any,
+                if (!decimal.TryParse(req.Amount, AmountStyle,
                     System.Globalization.CultureInfo.InvariantCulture, out decimal amount) || amount <= 0)
                     return BadRequest(new { success = false, message = "Invalid amount." });
 
