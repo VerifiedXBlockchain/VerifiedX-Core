@@ -280,6 +280,40 @@ namespace VerifiedXCore.Tests
 
         // ── Full raw flows (real proofs) ──────────────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// A shield's hash, which its sender signs, did not cover its Fee: the fee is debited and burned, and a relay,
+        /// producer or block server could raise it under the same hash and signature and burn the shielder's whole
+        /// balance (fifth review, round 18). From ShieldFeeSignedHeight the fee is in the hash.
+        /// </summary>
+        [Fact]
+        public async Task AShieldsFee_IsSignedWithIt_FromTheRulesHeight()
+        {
+            if (!ParamsLoaded()) return;
+            var prior = Globals.PathAuditRulesHeight;
+            Globals.PathAuditRulesHeight = Height + 1;
+            try
+            {
+                var build = PrivateRawTxService.BuildShield(_funder.Address, _alice.ZfxAddress, 5M, null, null, Db, Height + 1);
+                Assert.True(build.Success, build.Message);
+                var tx = build.Transaction!;
+                tx.Signature = SignatureService.CreateSignature(tx.Hash, _funder.Key, _funder.Pub);
+                async Task<(bool Ok, string Why)> Judged(Transaction t) => await TransactionValidatorService.VerifyTX(t, false, true, false, null, false, Height + 1);
+                var (ok, why) = await Judged(tx);
+                Assert.True(ok, why);
+
+                var raised = Newtonsoft.Json.JsonConvert.DeserializeObject<Transaction>(Newtonsoft.Json.JsonConvert.SerializeObject(tx))!;
+                raised.Fee = tx.Fee + 900M;                                         // same Hash and Signature
+                Assert.False((await Judged(raised)).Ok);
+                var spelled = Newtonsoft.Json.JsonConvert.DeserializeObject<Transaction>(Newtonsoft.Json.JsonConvert.SerializeObject(tx))!;
+                spelled.Fee = decimal.Parse(tx.Fee.ToString(System.Globalization.CultureInfo.InvariantCulture) + "000", System.Globalization.CultureInfo.InvariantCulture);
+                var (spelledOk, spelledWhy) = await Judged(spelled);
+                Assert.True(spelledOk, spelledWhy);                                // the same fee, written longer
+                // Below the rules' height the fee is not in the hash (history is judged as it was).
+                Assert.NotEqual(tx.Hash, new Transaction { Timestamp = tx.Timestamp, TransactionType = tx.TransactionType, Data = tx.Data, FromAddress = tx.FromAddress, Amount = tx.Amount, Nonce = tx.Nonce, Fee = tx.Fee }.BuildPrivate(Height));
+            }
+            finally { Globals.PathAuditRulesHeight = prior; }
+        }
+
         [Fact]
         public async Task RawShield_BuildSignSubmit_ThenTheViewingKeyFindsTheNote()
         {

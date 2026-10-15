@@ -65,15 +65,25 @@ namespace VerifiedXCore.Models
             return HashingService.GenerateHash(HashingService.GenerateHash(GetHashPreimage()));
         }
 
-        /// <summary>Hash for privacy transaction types; see privacy implementation plan.</summary>
-        public string BuildPrivate()
+        /// <summary>
+        /// Hash for privacy transaction types; see privacy implementation plan. <paramref name="height"/> is the block the
+        /// transaction is judged for (the next block when building one).
+        /// </summary>
+        public string BuildPrivate(long? height = null)
         {
-            var data = GetPrivateHashInput();
+            var data = GetPrivateHashInput(height ?? ((Globals.LastBlock?.Height ?? 0) + 1));
             Hash = HashingService.GenerateHash(HashingService.GenerateHash(data));
             return Hash;
         }
 
-        private string GetPrivateHashInput()
+        /// <summary>
+        /// From this height a shield's hash, which its sender signs, covers its Fee: it did not, the fee is debited and
+        /// burned, and any relay, producer or block server could raise it and burn the shielder's whole balance (fifth
+        /// review, round 18). A release of this fix on its own sets its own height.
+        /// </summary>
+        public static long ShieldFeeSignedHeight => Globals.PathAuditRulesHeight;
+
+        private string GetPrivateHashInput(long height)
         {
             var sb = new StringBuilder();
             sb.Append(Timestamp);
@@ -84,6 +94,8 @@ namespace VerifiedXCore.Models
                 sb.Append(FromAddress);
                 sb.Append(Amount);
                 sb.Append(Nonce);
+                if (height >= ShieldFeeSignedHeight)
+                    sb.Append("|fee:").Append((Fee / 1.000000000000000000000000000000000m).ToString(System.Globalization.CultureInfo.InvariantCulture));
             }
             return sb.ToString();
         }

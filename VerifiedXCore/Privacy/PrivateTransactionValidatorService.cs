@@ -124,7 +124,7 @@ namespace VerifiedXCore.Privacy
                     return (false, plonk.message);
             }
 
-            if (!VerifyPrivateHash(txRequest))
+            if (!VerifyPrivateHash(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)))
                 return (false, "This transactions hash is not equal to the private hash.");
 
             if (PrivateTransactionTypes.IsTransparentShield(txRequest.TransactionType))
@@ -434,7 +434,7 @@ namespace VerifiedXCore.Privacy
             return (true, "");
         }
 
-        private static bool VerifyPrivateHash(Transaction txRequest)
+        private static bool VerifyPrivateHash(Transaction txRequest, long height)
         {
             var probe = new Transaction
             {
@@ -448,7 +448,7 @@ namespace VerifiedXCore.Privacy
                 Data = txRequest.Data,
                 UnlockTime = txRequest.UnlockTime
             };
-            probe.BuildPrivate();
+            probe.BuildPrivate(height); // a shield's fee is in its hash from ShieldFeeSignedHeight (round 18)
             return probe.Hash == txRequest.Hash;
         }
     }
