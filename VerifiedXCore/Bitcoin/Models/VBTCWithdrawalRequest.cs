@@ -521,6 +521,10 @@ namespace VerifiedXCore.Bitcoin.Models
                     existingRequest.Timestamp = request.Timestamp;
                     existingRequest.OriginalRequestTime = request.OriginalRequestTime;
                     existingRequest.OriginalSignature = request.OriginalSignature;
+                    // ... and the contract UID as the mined request spells it: the note kept the caller's spelling (found
+                    // through the collation), and later exact look-ups by UID (completion) missed the row on this node
+                    // only, which then never marked it completed and showed the owner short (fifth review, round 35).
+                    existingRequest.SmartContractUID = request.SmartContractUID;
                 }
 
                 existingRequest.Status = request.Status;

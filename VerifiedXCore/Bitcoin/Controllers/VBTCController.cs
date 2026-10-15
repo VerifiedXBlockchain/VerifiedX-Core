@@ -2246,7 +2246,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     OriginalSignature = payload.VFXSignature,
                     OriginalUniqueId = payload.UniqueId,
                     Timestamp = currentTime,
-                    SmartContractUID = payload.SmartContractUID,
+                    SmartContractUID = scState.SmartContractUID, // the contract's own spelling, not the caller's (round 35)
                     Amount = payload.Amount,
                     BTCDestination = payload.BTCAddress,
                     FeeRate = payload.FeeRate,
