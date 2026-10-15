@@ -636,6 +636,16 @@ namespace VerifiedXCore.Tests
             Assert.Empty(BtcAttestStore.ExitParts(old.Hash, Tip));
             Assert.Null(BtcWithdrawals.ExitRefusal(ExitComplete(burn, new string('b', 64))));
             Assert.True((await Verify(ExitComplete(burn, new string('b', 64)), Tip + 1)).Ok);
+            // Closed only by the caster that made it: another could fail an exit this one had paid (round 20).
+            var otherCaster = Signers[1];
+            var notMine = SignedBy(otherCaster, otherCaster.Address, TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL, new
+            {
+                Function = "VBTCBridgeExitToBTCFail()", BaseBurnTxHash = burn, ExitTxHash = old.Hash, Reason = "test",
+                FailedAllocations = new[] { new PoolUnlockAllocation { LockId = olderLock, SmartContractUID = older.Uid, UnlockAmount = 0.001M } },
+            }, free: true);
+            await RefusedInBlock(notMine, "only by the caster that made it");
+            // From the freeze no failure is taken either.
+            Assert.Contains("no longer accepted", BtcLegacyFreeze.Refusal(notMine, Globals.BitcoinAttestationHeight));
 
             // The caster fails an older-vault exit whose vault could not sign, and makes the exit again from what is left:
             // watched vaults' locks too (the handler's own retry; round 14's rule against it stranded honest burns and was

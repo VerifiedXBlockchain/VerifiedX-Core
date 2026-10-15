@@ -4276,6 +4276,13 @@ namespace VerifiedXCore.Services
                     if (st == null || st.IsComplete)
                         return (txResult, "No pending bridge exit to BTC for this burn hash.");
 
+                    // An exit is closed by the caster that made it, the one that leads its Bitcoin signing: any committee
+                    // caster could fail an exit another had paid, and the burn was exited again and paid twice (fifth
+                    // review, round 20).
+                    if ((blockHeight ?? (Globals.LastBlock.Height + 1)) >= Globals.PathAuditRulesHeight
+                        && !string.Equals(txRequest.FromAddress, st.OwnerAddress, StringComparison.Ordinal))
+                        return (txResult, "A bridge exit is completed or failed only by the caster that made it.");
+
                     // Post-gate hardening: only the handler caster may close an exit, a COMPLETE must
                     // name a real-looking Bitcoin txid, and a FAIL may only restore allocations the exit
                     // actually reserved (BlacklistLock has no undo).

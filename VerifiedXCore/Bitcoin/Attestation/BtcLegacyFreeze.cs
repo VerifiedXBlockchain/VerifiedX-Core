@@ -49,6 +49,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     return $"Cancellation votes are no longer accepted (from block {Globals.BitcoinAttestationHeight}).";
                 case TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE:
                     return $"Bridge exit completion transactions are no longer accepted (from block {Globals.BitcoinAttestationHeight}): an exit is completed when Bitcoin shows its transaction.";
+                // Nor failures: an older vault's exit still open at the freeze may have been paid by its signers, and a
+                // failure freed its burn to be exited again from watched vaults (fifth review, round 20).
+                case TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL:
+                    return $"Bridge exit failure transactions are no longer accepted (from block {Globals.BitcoinAttestationHeight}).";
             }
 
             foreach (var (key, _) in SameBlockDebitGuard.GetDebits(tx, height))
