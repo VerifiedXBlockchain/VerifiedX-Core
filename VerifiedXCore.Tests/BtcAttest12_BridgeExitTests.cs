@@ -766,9 +766,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(secondLock, Assert.Single(plan).LockId);
             var (ok, why) = await Verify(Exit(NewBurn(), firstAddress, plan.Select(a => (a.LockId, a.SmartContractUID, a.UnlockAmount)).ToArray()), Tip + 1);
             Assert.True(ok, why);
-            // Without the destination, the queue takes the first vault, and that exit is refused.
-            var queue = BridgePoolUnlockService.ComputeExitAllocationPlan(0.002M, null, Tip + 1)!;
-            Assert.Equal(firstLock, Assert.Single(queue).LockId);
+            // The first vault's lock (the queue may take it first: both locks can share a second) would be refused.
             Assert.False((await Verify(Exit(NewBurn(), firstAddress, (firstLock, first.Uid, 0.002M)), Tip + 1)).Item1);
         }
 
