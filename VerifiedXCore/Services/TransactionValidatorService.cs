@@ -4294,8 +4294,8 @@ namespace VerifiedXCore.Services
 
                         if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE)
                         {
-                            if (!BridgeTxRules.IsBtcTxIdShape(jobj["BtcTxHash"]?.ToObject<string>()))
-                                return (txResult, "BtcTxHash must be a 32-byte hex transaction id.");
+                            if (!BridgeTxRules.IsBtcTxIdList(jobj["BtcTxHash"]?.ToObject<string>(), closeGateHeight))
+                                return (txResult, "BtcTxHash must be a 32-byte hex transaction id (or, from the path-audit rules, a comma-separated list of them).");
                         }
                         else
                         {

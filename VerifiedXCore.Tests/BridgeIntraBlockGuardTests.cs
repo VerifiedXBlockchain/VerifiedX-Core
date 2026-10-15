@@ -59,6 +59,19 @@ namespace VerifiedXCore.Tests
             Assert.False(BridgeIntraBlockGuard.TryRegister(Spelled("0x03", "lockid", "L1"), st, h).Ok);
         }
 
+        /// <summary>An older exit paid by several vaults completes with their txids joined by commas (round 21).</summary>
+        [Fact]
+        public void ACompletionNamesOneTxidOrAList_FromThePathAuditRules()
+        {
+            var a = new string('a', 64); var b = new string('b', 64);
+            var h = VerifiedXCore.Globals.PathAuditRulesHeight;
+            Assert.True(BridgeTxRules.IsBtcTxIdList(a, h - 1));
+            Assert.False(BridgeTxRules.IsBtcTxIdList(a + "," + b, h - 1));
+            Assert.True(BridgeTxRules.IsBtcTxIdList(a + "," + b, h));
+            Assert.False(BridgeTxRules.IsBtcTxIdList(a + ",xyz", h));
+            Assert.False(BridgeTxRules.IsBtcTxIdList(a + ",", h));
+        }
+
         [Fact]
         public void SameBurnTwiceInBlock_SecondRejected()
         {

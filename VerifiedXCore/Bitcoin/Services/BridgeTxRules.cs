@@ -57,6 +57,19 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>64 hex chars, optional 0x.</summary>
+        /// <summary>
+        /// A completion's Bitcoin transactions: one txid, or (from the path-audit rules) several separated by commas, one per
+        /// vault that paid. The handler joins them so; a list was always refused, and an older exit paid by two or more
+        /// vaults could never be completed (fifth review, round 21).
+        /// </summary>
+        public static bool IsBtcTxIdList(string? txids, long height)
+        {
+            if (IsBtcTxIdShape(txids)) return true;
+            if (height < Globals.PathAuditRulesHeight || string.IsNullOrWhiteSpace(txids)) return false;
+            var parts = txids.Split(',');
+            return parts.Length <= 200 && parts.All(IsBtcTxIdShape);
+        }
+
         public static bool IsBtcTxIdShape(string? txid)
         {
             if (string.IsNullOrWhiteSpace(txid)) return false;
