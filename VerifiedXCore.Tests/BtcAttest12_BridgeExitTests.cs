@@ -867,6 +867,28 @@ namespace VerifiedXCore.Tests
             Assert.Contains(plan, a => a.LockId == b1);
         }
 
+        /// <summary>A plan is measured as it is carried (escapes included) and one over the room is not offered (round 29).</summary>
+        [Fact]
+        public async Task APlanTooLargeToCarry_IsNotOffered()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 5_000_000);
+            var small = VBTCBridgeLockState.GetByLockId(await Lock(vault.Uid, 0.0001M))!;
+            for (var i = 0; i < 90; i++)
+            {
+                small.LockId = new string('"', 60) + i.ToString("D3");                                   // an id that escapes to four bytes a character
+                VBTCBridgeLockState.GetCollection().Insert(small);
+            }
+            var big = await Lock(vault.Uid, 0.03M);
+            var bigRecord = VBTCBridgeLockState.GetByLockId(big)!;
+            bigRecord.LockTimestamp = small.LockTimestamp + 1_000;
+            VBTCBridgeLockState.GetCollection().Update(bigRecord);
+            var plan = BridgePoolUnlockService.ComputeAllocationPlan(0.02M);
+            Assert.NotNull(plan);
+            Assert.True(BridgePoolUnlockService.PlanBytes(plan!) <= BridgePoolUnlockService.MaxPlanBytes);
+        }
+
         /// <summary>More locks at the front than one plan names: the largest are taken, and the burn is paid (round 28).</summary>
         [Fact]
         public async Task MoreSmallLocksAtTheFrontThanOnePlanNames_TheLargestArePlanned()

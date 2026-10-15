@@ -60,10 +60,24 @@ namespace VerifiedXCore.Bitcoin.Services
         /// </summary>
         private static IEnumerable<List<PoolUnlockAllocation>?> PlanCandidates(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs)
         {
-            yield return ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: true, largestFirst: false);
-            yield return ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: false, largestFirst: false);
-            yield return ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: false, largestFirst: true);
+            yield return Fitting(ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: true, largestFirst: false));
+            yield return Fitting(ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: false, largestFirst: false));
+            yield return Fitting(ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: false, largestFirst: true));
         }
+
+        /// <summary>
+        /// The bytes a plan's allocations take in a transaction, measured as they are carried: serialized into Data, and
+        /// Data escaped again where the transaction's size is measured. A lock id of quotes or backslashes takes four bytes
+        /// a character there, and a hundred such locks went over the cap (fifth review, round 29).
+        /// </summary>
+        internal static int PlanBytes(List<PoolUnlockAllocation> plan) =>
+            JsonConvert.SerializeObject(JsonConvert.SerializeObject(plan)).Length;
+
+        /// <summary>Room for allocations in one transaction under the 30 KB cap, after its votes and other fields.</summary>
+        internal const int MaxPlanBytes = 24_000;
+
+        private static List<PoolUnlockAllocation>? Fitting(List<PoolUnlockAllocation>? plan) =>
+            plan != null && PlanBytes(plan) <= MaxPlanBytes ? plan : null;
 
         private static List<PoolUnlockAllocation>? ComputeAllocationPlan(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs, bool passOverDust, bool largestFirst)
         {
