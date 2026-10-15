@@ -343,8 +343,8 @@ namespace VerifiedXCore.Bitcoin.Services
             }
 
             // Step 1: Generate deterministic proposal hash and sign the proposal
-            var proposalHash = BridgeCasterConsensus.ComputeProposalHash(Globals.ValidatorAddress, baseBurnTxHash);
             var proposalTimestamp = TimeUtil.GetTime();
+            var proposalHash = BridgeCasterConsensus.ComputeProposalHash(Globals.ValidatorAddress, baseBurnTxHash, proposalTimestamp);
 
             var myProposal = new BurnExitProposal
             {
@@ -364,8 +364,10 @@ namespace VerifiedXCore.Bitcoin.Services
             // Step 3: Wait for other proposals
             await Task.Delay(PROPOSAL_WAIT_MS);
 
-            // Step 4: Determine lowest hash winner
-            var allProposals = proposalDict.Values.ToList();
+            // Step 4: Determine lowest hash winner, among this round's proposals: one left from an earlier round would hold
+            // that round's draw (round 23).
+            var electedAt = TimeUtil.GetTime();
+            var allProposals = proposalDict.Values.Where(p => Math.Abs(electedAt - p.Timestamp) <= BridgeCasterConsensus.PROPOSAL_MAX_SKEW_SECONDS).ToList();
             if (!allProposals.Any())
             {
                 record.Status = BurnExitStatus.Failed;

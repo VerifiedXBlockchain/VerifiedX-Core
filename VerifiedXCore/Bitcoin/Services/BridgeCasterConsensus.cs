@@ -107,13 +107,24 @@ namespace VerifiedXCore.Bitcoin.Services
             return (true, "");
         }
 
+        /// <summary>The span of time one handler election for a burn holds: a retry in a later span draws again.</summary>
+        public const long ELECTION_WINDOW_SECONDS = 600;
+
         /// <summary>
-        /// Deterministic handler-election hash for a burn: keccak256("{proposer}:{burn}"). Every caster
-        /// can recompute it, so a proposer cannot pick an artificially low hash to win.
+        /// How far a proposal's timestamp may be from the receiver's clock. Tighter than an alert's: the window of the
+        /// timestamp picks the draw, and a proposer may choose among the windows this skew reaches (at most two).
         /// </summary>
-        public static string ComputeProposalHash(string proposerCasterAddress, string baseBurnTxHash)
+        public const long PROPOSAL_MAX_SKEW_SECONDS = 120;
+
+        /// <summary>
+        /// Deterministic handler-election hash for a burn: keccak256("{proposer}:{burn}:{window}"), the window that of
+        /// the proposal's signed timestamp. Every caster can recompute it, so a proposer cannot pick an artificially low
+        /// hash to win. Without the window one caster had the lowest hash for a burn in every retry: elected, it could
+        /// leave the burn unpaid for as long as it sat on the committee (fifth review, round 23).
+        /// </summary>
+        public static string ComputeProposalHash(string proposerCasterAddress, string baseBurnTxHash, long timestamp)
         {
-            var input = System.Text.Encoding.UTF8.GetBytes($"{proposerCasterAddress}:{baseBurnTxHash}");
+            var input = System.Text.Encoding.UTF8.GetBytes($"{proposerCasterAddress}:{baseBurnTxHash}:{Math.Max(0, timestamp) / ELECTION_WINDOW_SECONDS}");
             return Nethereum.Util.Sha3Keccack.Current.CalculateHashFromHex(Convert.ToHexString(input));
         }
 
@@ -131,9 +142,9 @@ namespace VerifiedXCore.Bitcoin.Services
             if (string.IsNullOrWhiteSpace(baseBurnTxHash) || string.IsNullOrWhiteSpace(proposerCasterAddress)) return (false, "burn and proposer required");
             if (string.IsNullOrWhiteSpace(signature)) return (false, "signature required");
             if (committee == null || !committee.Contains(proposerCasterAddress)) return (false, "proposer is not a committee caster");
-            if (!string.Equals(ComputeProposalHash(proposerCasterAddress, baseBurnTxHash), proposerHash, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(ComputeProposalHash(proposerCasterAddress, baseBurnTxHash, timestamp), proposerHash, StringComparison.OrdinalIgnoreCase))
                 return (false, "proposal hash is not the deterministic hash for this proposer and burn");
-            if (Math.Abs(nowSeconds - timestamp) > ALERT_MAX_SKEW_SECONDS) return (false, "proposal timestamp out of range");
+            if (Math.Abs(nowSeconds - timestamp) > PROPOSAL_MAX_SKEW_SECONDS) return (false, "proposal timestamp out of range");
             var msg = BuildProposalMessage(baseBurnTxHash, proposerCasterAddress, proposerHash, timestamp);
             if (!VerifiedXCore.Services.SignatureService.VerifySignature(proposerCasterAddress, msg, signature)) return (false, "invalid proposal signature");
             return (true, "");

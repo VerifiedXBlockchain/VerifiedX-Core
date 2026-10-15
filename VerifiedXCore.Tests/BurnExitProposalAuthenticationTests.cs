@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using VerifiedXCore.Bitcoin.Services;
 using VerifiedXCore.Data;
 using VerifiedXCore.EllipticCurve;
@@ -35,19 +36,45 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void ProposalHash_IsDeterministicAndProposerBound()
         {
-            var h1 = BridgeCasterConsensus.ComputeProposalHash("xA", Burn);
-            var h2 = BridgeCasterConsensus.ComputeProposalHash("xA", Burn);
-            var h3 = BridgeCasterConsensus.ComputeProposalHash("xB", Burn);
+            const long t = 1_700_000_000;
+            var h1 = BridgeCasterConsensus.ComputeProposalHash("xA", Burn, t);
+            var h2 = BridgeCasterConsensus.ComputeProposalHash("xA", Burn, t + 1);
+            var h3 = BridgeCasterConsensus.ComputeProposalHash("xB", Burn, t);
             Assert.Equal(h1, h2);
             Assert.NotEqual(h1, h3);
             Assert.False(string.IsNullOrEmpty(h1));
+        }
+
+        /// <summary>
+        /// One caster had the lowest hash for a burn in every retry: elected, it could leave the burn unpaid for as long
+        /// as it sat on the committee (fifth review, round 23). A retry in a later window draws again.
+        /// </summary>
+        [Fact]
+        public void Election_DrawsAgainInALaterWindow()
+        {
+            var casters = new[] { "xA", "xB", "xC", "xD", "xE" };
+            var committee = new HashSet<string>(casters, StringComparer.Ordinal);
+            string Winner(long at) => BridgeCasterConsensus.SelectHandler(casters.Select(c => (c, BridgeCasterConsensus.ComputeProposalHash(c, Burn, at))), committee)!;
+            const long t = 1_700_000_000;
+            var winners = Enumerable.Range(0, 40).Select(i => Winner(t + i * BridgeCasterConsensus.ELECTION_WINDOW_SECONDS)).ToHashSet();
+            Assert.True(winners.Count > 1, "the same caster won every window");
+            Assert.Equal(Winner(t), Winner(t + 1));   // one round agrees on its winner
+        }
+
+        [Fact]
+        public void Proposal_ForAnotherWindow_Refused()
+        {
+            var c = new Caster(); long now = 1_700_000_000;
+            var other = BridgeCasterConsensus.ComputeProposalHash(c.Address, Burn, now + 5 * BridgeCasterConsensus.ELECTION_WINDOW_SECONDS);
+            var sig = c.Sign(BridgeCasterConsensus.BuildProposalMessage(Burn, c.Address, other, now));
+            Assert.False(BridgeCasterConsensus.VerifyProposal(Burn, c.Address, other, now, sig, Committee(c), now).Ok);
         }
 
         [Fact]
         public void Proposal_FromCommitteeCaster_WithCorrectHashAndSignature_Accepted()
         {
             var c = new Caster(); long now = 1_700_000_000;
-            var hash = BridgeCasterConsensus.ComputeProposalHash(c.Address, Burn);
+            var hash = BridgeCasterConsensus.ComputeProposalHash(c.Address, Burn, now);
             var sig = c.Sign(BridgeCasterConsensus.BuildProposalMessage(Burn, c.Address, hash, now));
             var (ok, reason) = BridgeCasterConsensus.VerifyProposal(Burn, c.Address, hash, now, sig, Committee(c), now + 1);
             Assert.True(ok, reason);
@@ -68,7 +95,7 @@ namespace VerifiedXCore.Tests
         public void Proposal_FromNonCommittee_Refused()
         {
             var outsider = new Caster(); var member = new Caster(); long now = 1_700_000_000;
-            var hash = BridgeCasterConsensus.ComputeProposalHash(outsider.Address, Burn);
+            var hash = BridgeCasterConsensus.ComputeProposalHash(outsider.Address, Burn, now);
             var sig = outsider.Sign(BridgeCasterConsensus.BuildProposalMessage(Burn, outsider.Address, hash, now));
             var (ok, reason) = BridgeCasterConsensus.VerifyProposal(Burn, outsider.Address, hash, now, sig, Committee(member), now);
             Assert.False(ok);
@@ -79,9 +106,9 @@ namespace VerifiedXCore.Tests
         public void Proposal_StaleOrUnsigned_Refused()
         {
             var c = new Caster(); long now = 1_700_000_000;
-            var hash = BridgeCasterConsensus.ComputeProposalHash(c.Address, Burn);
+            var hash = BridgeCasterConsensus.ComputeProposalHash(c.Address, Burn, now);
             var sig = c.Sign(BridgeCasterConsensus.BuildProposalMessage(Burn, c.Address, hash, now));
-            Assert.False(BridgeCasterConsensus.VerifyProposal(Burn, c.Address, hash, now, sig, Committee(c), now + BridgeCasterConsensus.ALERT_MAX_SKEW_SECONDS + 1).Ok);
+            Assert.False(BridgeCasterConsensus.VerifyProposal(Burn, c.Address, hash, now, sig, Committee(c), now + BridgeCasterConsensus.PROPOSAL_MAX_SKEW_SECONDS + 1).Ok);
             Assert.False(BridgeCasterConsensus.VerifyProposal(Burn, c.Address, hash, now, "", Committee(c), now).Ok);
         }
 
