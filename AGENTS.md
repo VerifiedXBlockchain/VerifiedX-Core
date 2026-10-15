@@ -18,13 +18,13 @@ Put personal notes below that line. Folder guides such as [VerifiedXCore.Tests/A
 
 ```bash
 dotnet build                                   # whole solution; must have 0 errors
-dotnet test                                    # full suite; runs serially and takes several minutes
+dotnet test                                    # full suite; runs serially, ~9 min, ~1,930 tests
 dotnet test --filter "FullyQualifiedName~SecretPreservation|FullyQualifiedName~StateSnapshot"   # ship gate: 16 tests, run before every PR
 dotnet test --filter "FullyQualifiedName~<ClassName>"                                           # one class
 dotnet run --project VerifiedXCore -- testnet enableapi                                          # local testnet node, API on 17292
 ```
 
-On macOS some `FrostKeyBackupTests` fail, because .NET 6 has no `AesGcm` on Apple platforms. They pass in CI (Ubuntu and Windows). `Frost/mac/libfrost_ffi.dylib` is arm64 only, so FROST tests need an arm64 `dotnet`, not one running under Rosetta.
+On macOS exactly 5 `FrostKeyBackupTests` (the `AesGcm_*` and `BlobFormat_*` ones) fail, because .NET 6 has no `AesGcm` on Apple platforms. They pass in CI (Ubuntu and Windows). `Frost/mac/libfrost_ffi.dylib` is arm64 only, so FROST tests need an arm64 `dotnet`, not one running under Rosetta.
 
 Command-line args are parsed in `VerifiedXCore/Program.cs` (case-insensitive: `testnet`, `headless`, `enableapi`, `apitoken=`, `rebuildstate`, `revertblock=N`, `warden`, and others). Release builds: `.github/workflows/build-dotnet.yml` (manual dispatch) and [RBXBuildInstructions.md](RBXBuildInstructions.md).
 

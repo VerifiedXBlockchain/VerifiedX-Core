@@ -58,5 +58,5 @@ Test both sides of the height: a block or transaction below the activation heigh
 ## Gates and known failures
 
 - Ship gate, run before every PR: `dotnet test --filter "FullyQualifiedName~SecretPreservation|FullyQualifiedName~StateSnapshot"` (16 tests).
-- On macOS some `FrostKeyBackupTests` fail because .NET 6 has no `AesGcm` on Apple platforms. CI on Ubuntu and Windows is the judge.
+- On macOS exactly 5 `FrostKeyBackupTests` (`AesGcm_*`, `BlobFormat_*`) fail because .NET 6 has no `AesGcm` on Apple platforms. CI on Ubuntu and Windows is the judge.
 - Proof tests for findings in the private tracker stay in that tracker. Never copy them here; write Core's own regression test for the fixed behaviour instead.
