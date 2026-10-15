@@ -360,25 +360,23 @@ namespace VerifiedXCore.Models.DST
 
         /// <summary>
         /// The contract a listing sells, from the shop data this node holds (the connected shop and any multi-shop
-        /// sessions): by purchase key first (random per listing), else by listing id. Null when unknown.
+        /// sessions), by purchase key only, and only when every shop holding that key names one contract. Listing ids
+        /// repeat from shop to shop and a key can be copied: a bid sent to one shop was bound to another shop's contract,
+        /// whose owner could then start a sale of it under the bid's signature (fifth review, round 31). Null when unknown.
         /// </summary>
         public static string? ListingContractFor(int listingId, string? purchaseKey)
         {
             try
             {
+                if (string.IsNullOrEmpty(purchaseKey)) return null;
                 var sources = new List<IEnumerable<Listing>?> { Globals.DecShopData?.Listings };
                 foreach (var shop in Globals.MultiDecShopData.Values)
                     sources.Add(shop?.Listings);
-                foreach (var listings in sources)
-                {
-                    if (listings == null) continue;
-                    var byKey = !string.IsNullOrEmpty(purchaseKey)
-                        ? listings.FirstOrDefault(l => l != null && string.Equals(l.PurchaseKey, purchaseKey, StringComparison.Ordinal))
-                        : null;
-                    var hit = byKey ?? (listingId > 0 ? listings.FirstOrDefault(l => l != null && l.Id == listingId) : null);
-                    if (hit != null && !string.IsNullOrWhiteSpace(hit.SmartContractUID))
-                        return hit.SmartContractUID;
-                }
+                var contracts = sources.Where(s => s != null)
+                    .SelectMany(s => s!.Where(l => l != null && string.Equals(l.PurchaseKey, purchaseKey, StringComparison.Ordinal)))
+                    .Select(l => l.SmartContractUID).Where(uid => !string.IsNullOrWhiteSpace(uid))
+                    .Distinct(StringComparer.Ordinal).ToList();
+                return contracts.Count == 1 ? contracts[0] : null;
             }
             catch { }
             return null;

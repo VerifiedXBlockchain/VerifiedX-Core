@@ -212,6 +212,11 @@ namespace VerifiedXCore.Tests
                 // Build() records the contract on a new bid from the shop listing when the client did not send it.
                 Assert.Equal(nft, Bid.ListingContractFor(10, "key-10"));
                 Assert.Null(Bid.ListingContractFor(11, "key-11"));
+                // Round 31: by purchase key only (listing ids repeat from shop to shop), and not when shops disagree.
+                Assert.Null(Bid.ListingContractFor(10, "another-shops-key"));
+                Globals.MultiDecShopData["copycat"] = new DecShopData { Listings = new System.Collections.Generic.List<Listing> { new Listing { Id = 3, PurchaseKey = "key-10", SmartContractUID = other } } };
+                Assert.Null(Bid.ListingContractFor(10, "key-10"));
+                Globals.MultiDecShopData.TryRemove("copycat", out _);
                 var built = new Bid { BidAddress = _victim.Address, PurchaseKey = "key-10", BidAmount = 500M, ListingId = 10, CollectionId = 1, RawBid = true };
                 Assert.True(built.Build());
                 Assert.Equal(nft, built.SmartContractUID);
