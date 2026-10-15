@@ -1072,6 +1072,10 @@ namespace VerifiedXCore.Bitcoin.Services
                         {
                             LogUtility.Log($"[BurnExitConsensus] Partial FAIL TX broadcast: {partialFailResult.TxHashOrError}. Failed locks will be restored/blacklisted on-chain.",
                                 "BurnExitConsensusService.ExecuteBtcExit()");
+                            // The completion waits for the failure to be mined: mined first, it closed the exit and the
+                            // failure was refused, leaving the failed parts' locks drawn for good (fifth review, round 22).
+                            if (!await WaitForVfxTxConfirmation(partialFailResult.TxHashOrError, 300_000))
+                                LogUtility.Log("[BurnExitConsensus] Partial FAIL TX not confirmed in time; completing anyway.", "BurnExitConsensusService.ExecuteBtcExit()");
                         }
                         else
                         {
