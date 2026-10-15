@@ -1032,6 +1032,7 @@ namespace VerifiedXCore.Controllers
                     }
                     else
                     {
+                        VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // refused: claims nothing (round 28)
                         output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Transaction was not verified." });
                     }
                 }
