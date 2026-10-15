@@ -665,6 +665,10 @@ namespace VerifiedXCore.Tests
             await Mine(Transfer(vault.Uid, 0.001M, to: _holder));                         // the seller moves its vBTC out
             Assert.Contains("fell", VerifiedXCore.Models.DST.Bid.VaultShrankSinceBid(bidder, key, vault.Uid) ?? "");
             Assert.NotNull(VerifiedXCore.Models.DST.Bid.VaultShrankSinceBid(bidder, "no-such-bid", vault.Uid));
+
+            // A vault the chain does not watch is never paid for automatically: nothing holds its owner balance (round 32).
+            var older = await CreateVault(H1 - 50, keyHolders: Signers);
+            Assert.Contains("not watched", VerifiedXCore.Models.DST.Bid.VaultShrankSinceBid(bidder, key, older.Uid) ?? "");
         }
 
         /// <summary>While a vault is marked for a new owner, its owner moves no vBTC out of it; holders are not touched.</summary>

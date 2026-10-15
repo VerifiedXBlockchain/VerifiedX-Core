@@ -61,7 +61,19 @@ namespace VerifiedXCore.Models.DST
         public static string? VaultShrankSinceBid(string? bidderAddress, string? purchaseKey, string? smartContractUID)
         {
             var now = VaultOwnerFigure(smartContractUID);
-            if (now == null) return null;
+            // A vault the chain does not watch (created before attestation) has no attested owner figure, and nothing holds
+            // its owner balance still while it is for sale: it is never paid for automatically (fifth review, round 32).
+            if (now == null)
+            {
+                try
+                {
+                    var state = string.IsNullOrWhiteSpace(smartContractUID) ? null : SmartContractStateTrei.GetSmartContractState(smartContractUID);
+                    if (state != null && VerifiedXCore.Bitcoin.Services.VBTCService.IsVbtcV2Contract(state))
+                        return "The vault is not watched by the chain, so its owner balance is not held while it is for sale; complete the sale by hand after checking it.";
+                }
+                catch { return "The contract could not be checked; complete the sale by hand."; }
+                return null;
+            }
             // Every bid of this buyer on the listing (re-bids share its purchase key): the highest figure recorded, so a
             // later, higher bid made when the vault held more is the one held to (round 31).
             var recorded = (GetAllBids(BidSendReceive.Sent) ?? new List<Bid>()).Where(b => b != null
