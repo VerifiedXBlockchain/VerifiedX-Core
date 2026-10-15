@@ -325,7 +325,26 @@ namespace VerifiedXCore.Utilities
             bool attestationChanged;
             try { attestationChanged = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.ChangedAbove(targetHeight); }
             catch { attestationChanged = true; }
-            return attestationChanged ? $"Bitcoin attestation state was written above block {targetHeight}." : null;
+            if (attestationChanged)
+                return $"Bitcoin attestation state was written above block {targetHeight}.";
+
+            // Delayed reserve payments settle after each block whose time passed their unlock time; a removed block may
+            // have settled some, which undoing its transactions does not reverse (fifth review, round 29).
+            try
+            {
+                var removedTimes = blocksToRemove.Select(b => b.Timestamp).ToList();
+                var targetTime = BlockchainData.GetBlockByHeight(targetHeight)?.Timestamp;
+                if (removedTimes.Count > 0)
+                {
+                    var latest = removedTimes.Max();
+                    var from = targetTime ?? removedTimes.Min() - 3_600; // the target's time, or an hour before the earliest removed block
+                    var rows = ReserveTransactions.GetReserveTransactionsDb();
+                    if (rows != null && rows.Exists(x => x.ConfirmTimestamp >= from && x.ConfirmTimestamp < latest))
+                        return $"A delayed reserve payment fell due above block {targetHeight}.";
+                }
+            }
+            catch { return "Reserve settlements above the target could not be checked."; }
+            return null;
         }
 
         /// <summary>

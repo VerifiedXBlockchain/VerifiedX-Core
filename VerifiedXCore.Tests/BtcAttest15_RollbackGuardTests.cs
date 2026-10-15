@@ -92,6 +92,22 @@ namespace VerifiedXCore.Tests
             return tx;
         }
 
+        /// <summary>
+        /// Delayed reserve payments settle after each block timed past their unlock time; undoing a block's transactions
+        /// does not reverse a settlement it caused (round 29). Such blocks are not undone the fast way.
+        /// </summary>
+        [Fact]
+        public async Task ABlockThatSettledAReservePayment_IsNotUndoneOneTransactionAtATime()
+        {
+            await Apply(H1 - 1);
+            var due = (BlockchainData.GetBlockByHeight(H1 - 2)?.Timestamp ?? 1_700_000_000L) + 500;
+            ReserveTransactions.GetReserveTransactionsDb()!.Insert(new ReserveTransactions { Id = Guid.NewGuid(), Hash = new string('e', 64), FromAddress = "xRBXa", ToAddress = "R",
+                TransactionType = TransactionType.TX, ReserveTransactionStatus = ReserveTransactionStatus.Confirmed, ConfirmTimestamp = due, Signature = "s" });
+            VfxBlock Timed(long height, long time) { var b = PlainBlock(height); b.Timestamp = time; return b; }
+            Assert.Contains("reserve payment", BlockRollbackUtility.WhyNotIncremental(new[] { Timed(H1 - 1, due + 10) }, H1 - 2) ?? "");
+            Assert.DoesNotContain("reserve payment", BlockRollbackUtility.WhyNotIncremental(new[] { Timed(H1 - 1, due - 10) }, H1 - 2) ?? "");
+        }
+
         [Fact]
         public async Task ABlockThatChangedAttestationState_IsNeverUndoneOneTransactionAtATime()
         {
