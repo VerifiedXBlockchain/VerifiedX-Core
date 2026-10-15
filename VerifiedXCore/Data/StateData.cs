@@ -791,7 +791,7 @@ namespace VerifiedXCore.Data
                                                 recoveryAddress = recordedRecovery;
                                             }
                                             await RecoverReserveAccountTx(recoveryAddress, tx.FromAddress, block.StateRoot,
-                                                HistoricalTransactionExceptions.KeepsReversedTransferPending(tx, block.Height), block.Height); // historical, see there
+                                                HistoricalTransactionExceptions.KeepsReversedTransferPending(tx, block.Height), block.Height, block.Timestamp); // historical, see there
                                             break;
                                         default:
                                             break;
@@ -1362,7 +1362,7 @@ namespace VerifiedXCore.Data
         }
         /// <param name="keepTransfersPending">Only for the historical mainnet recovery in HistoricalTransactionExceptions:
         /// redirect as usual but leave the reserve rows Pending, as the network applied it.</param>
-        private static async Task RecoverReserveAccountTx(string? _recoveryAddress, string _fromAddress, string stateRoot, bool keepTransfersPending = false, long height = 0)
+        private static async Task RecoverReserveAccountTx(string? _recoveryAddress, string _fromAddress, string stateRoot, bool keepTransfersPending = false, long height = 0, long blockTimestamp = 0)
         {
             try
             {
@@ -1374,6 +1374,11 @@ namespace VerifiedXCore.Data
                     // HAL-070 Fix: Filter to only Pending transactions for recovery
                     var pendingTXList = rTXList.Where(x => x.ReserveTransactionStatus == ReserveTransactionStatus.Pending)
                         .OrderBy(x => x.ConfirmTimestamp).ThenBy(x => x.Height).ThenBy(x => x.Hash, StringComparer.Ordinal).ToList(); // one order on every node (round 7)
+                    // From the path-audit rules a payment whose unlock time had passed by the block's time (with the margin)
+                    // is left to settle, as a call-back of it is refused: Recover() took it back a block late, or across a
+                    // halt, from a payee that had waited for it (fifth review, round 29).
+                    if (height >= Globals.PathAuditRulesHeight && blockTimestamp > 0)
+                        pendingTXList = pendingTXList.Where(x => x.ConfirmTimestamp > LedgerIntegrityRules.NowForAgeRules(blockTimestamp)).ToList();
                     
                     foreach(var rTX in pendingTXList) 
                     {

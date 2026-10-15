@@ -148,6 +148,30 @@ namespace VerifiedXCore.Tests
             Assert.Equal(_recoveryAddress, SmartContractStateTrei.GetSmartContractState("tok:1")!.TokenDetails!.ContractOwner);
         }
 
+        /// <summary>
+        /// Recover() redirected every pending payment, also one whose unlock time had passed by the block's time (a
+        /// block late, or across a halt), which a call-back may no longer take back (round 29). It is left to settle.
+        /// </summary>
+        [Fact]
+        public async Task Recover_LeavesAPaymentWhoseTimeHasPassed_ToSettle()
+        {
+            var payee = AccountData.GetHumanAddress(NewKey().Pub);
+            var now = TimeUtil.GetTime();
+            var row = new ReserveTransactions
+            {
+                Id = Guid.NewGuid(), Hash = new string('c', 64), FromAddress = _reserve, ToAddress = payee, Amount = 100M,
+                TransactionType = TransactionType.TX, ReserveTransactionStatus = ReserveTransactionStatus.Pending,
+                ConfirmTimestamp = now - 3_600, UnlockTime = now - 3_600, Signature = "s", Height = 1,
+            };
+            ReserveTransactions.GetReserveTransactionsDb()!.Insert(row);
+            var sigTime = now;
+            var recover = Recover(new { Function = "Recover()", RecoveryAddress = _recoveryAddress, RecoverySigScript = RecoverySig(sigTime, _recoveryAddress), SignatureTime = sigTime });
+            var height = Math.Max(Globals.PathAuditRulesHeight, Gate);
+            recover.Height = height;
+            await StateData.UpdateTreis(new Block { Height = height, StateRoot = "root", Timestamp = now, Transactions = new List<Transaction> { recover } });
+            Assert.Equal(ReserveTransactionStatus.Pending, ReserveTransactions.GetTransactions(row.Hash)!.ReserveTransactionStatus);
+        }
+
         [Fact]
         public async Task EmptyRecoverySigScript_PassesBelowGate_RefusedAtGate()
         {
