@@ -942,6 +942,7 @@ namespace VerifiedXCore.P2P
                                 }
                                 else
                                 {
+                                    VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(txReceived.Hash); // verified but not pooled: claims nothing (round 32)
                                     try
                                     {
                                         // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
@@ -1073,6 +1074,7 @@ namespace VerifiedXCore.P2P
                             }
                             else
                             {
+                                VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(txReceived.Hash); // verified but not pooled: claims nothing (round 32)
                                 try
                                 {
                                     // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),

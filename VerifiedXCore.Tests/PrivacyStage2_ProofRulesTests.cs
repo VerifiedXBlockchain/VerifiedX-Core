@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using VerifiedXCore;
 using VerifiedXCore.Data;
 using VerifiedXCore.EllipticCurve;
+using VerifiedXCore.Extensions;
 using VerifiedXCore.Models;
 using VerifiedXCore.Models.Privacy;
 using VerifiedXCore.Privacy;
@@ -261,6 +262,29 @@ namespace VerifiedXCore.Tests
                 PlonkProofVerifier.VerifierAvailable = () => available;
                 Assert.True(PlonkProofVerifier.TryValidatePrivateProofs(tx, payload!, false, Height - 1).ok);
             }
+        }
+
+        /// <summary>
+        /// A peer's private transaction that passes but is not kept (here: the pool's pending debits exceed its balance)
+        /// leaves no nullifier claim behind: one left blocked a rebuilt spend of the same notes until restart (round 32).
+        /// </summary>
+        [Fact]
+        public async Task APeersSpendThatIsNotPooled_LeavesNoClaim()
+        {
+            TipBelow();
+            Globals.MempoolNullifiers.Clear();
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = PrivacyConstants.ShieldedPoolAddress, Balance = 5M, Nonce = 0 });
+            TransactionData.GetPool().InsertSafe(new Transaction { Hash = "pending-pool-debit", FromAddress = PrivacyConstants.ShieldedPoolAddress, ToAddress = NewAddress(), Amount = 10M, Timestamp = TimeUtil.GetTime(), TransactionType = TransactionType.TX });
+            var nullifier = RealNullifier();
+            var tx = Unshield(1M, new[] { nullifier }, Array.Empty<PrivateShieldedOutput>());
+            await VerifiedXCore.Nodes.NodeDataProcessor.ProcessData("7777", Newtonsoft.Json.JsonConvert.SerializeObject(tx), "203.0.113.9");
+            Assert.Null(TransactionData.GetPool().FindOne(x => x.Hash == tx.Hash));
+            Assert.DoesNotContain(Globals.MempoolNullifiers.Values, h => h == tx.Hash);
+            // ... and a spend of the same note is admitted.
+            var again = Unshield(0.5M, new[] { nullifier }, Array.Empty<PrivateShieldedOutput>());
+            TransactionData.GetPool().DeleteManySafe(x => x.Hash == "pending-pool-debit");
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(again);
+            Assert.True(ok, msg);
         }
 
         [Fact]

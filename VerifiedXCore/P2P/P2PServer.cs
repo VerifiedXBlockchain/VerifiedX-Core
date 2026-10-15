@@ -500,6 +500,7 @@ namespace VerifiedXCore.P2P
                                     var feeValidation = MempoolEvictionUtility.ValidateMinimumFee(txReceived);
                                     if (!feeValidation.isValid)
                                     {
+                                        VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(txReceived.Hash); // verified but not pooled: claims nothing (round 32)
                                         return "TFVP"; // Transaction failed - fee below minimum
                                     }
 
@@ -520,6 +521,7 @@ namespace VerifiedXCore.P2P
                                         
                                         if (!canAdd.canAdd)
                                         {
+                                            VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(txReceived.Hash); // verified but not pooled: claims nothing (round 32)
                                             return "TFVP"; // Mempool full, cannot add
                                         }
                                     }
@@ -570,6 +572,7 @@ namespace VerifiedXCore.P2P
                                 }
                                 else
                                 {
+                                    VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(txReceived.Hash); // verified but not pooled: claims nothing (round 32)
                                     try
                                     {
                                         ErrorLogUtility.LogError($"TX Failed From Remote Node. Rating {rating}, DoubleSpend {dblspndChk}, Crafted {isCraftedIntoBlock}", "P2PServer.SendTxToMempool()-1");
@@ -661,6 +664,7 @@ namespace VerifiedXCore.P2P
                                 var feeValidation = MempoolEvictionUtility.ValidateMinimumFee(txReceived);
                                 if (!feeValidation.isValid)
                                 {
+                                    VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(txReceived.Hash); // verified but not pooled: claims nothing (round 32)
                                     return "TFVP"; // Transaction failed - fee below minimum
                                 }
 
@@ -681,6 +685,7 @@ namespace VerifiedXCore.P2P
                                     
                                     if (!canAdd.canAdd)
                                     {
+                                        VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(txReceived.Hash); // verified but not pooled: claims nothing (round 32)
                                         return "TFVP"; // Mempool full, cannot add
                                     }
                                 }
@@ -731,6 +736,7 @@ namespace VerifiedXCore.P2P
                             }
                             else
                             {
+                                VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(txReceived.Hash); // verified but not pooled: claims nothing (round 32)
                                 try
                                 {
                                     ErrorLogUtility.LogError($"TX Failed From Remote Node. Rating {rating}, DoubleSpend {dblspndChk}, Crafted {isCraftedIntoBlock}", "P2PServer.SendTxToMempool()-2");

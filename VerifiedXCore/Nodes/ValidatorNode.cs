@@ -775,6 +775,10 @@ namespace VerifiedXCore.Nodes
                                     }
 
                                 }
+                                else
+                                {
+                                    VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // verified but not pooled: claims nothing (round 32)
+                                }
                             }
 
                         }
@@ -810,6 +814,10 @@ namespace VerifiedXCore.Nodes
                             if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
                             {
                                 mempool.InsertSafe(transaction);
+                            }
+                            else
+                            {
+                                VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // verified but not pooled: claims nothing (round 32)
                             }
                         }
                     }

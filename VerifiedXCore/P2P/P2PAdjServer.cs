@@ -299,6 +299,7 @@ namespace VerifiedXCore.P2P
                                                 }
                                                 else
                                                 {
+                                                    VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // verified but not pooled: claims nothing (round 32)
                                                     Globals.BroadcastedTrxDict.TryRemove(transaction.Hash, out _);
                                                     Globals.ConsensusBroadcastedTrxDict.TryRemove(transaction.Hash, out _);
                                                 }
@@ -371,6 +372,7 @@ namespace VerifiedXCore.P2P
                                             }
                                             else
                                             {
+                                                VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // verified but not pooled: claims nothing (round 32)
                                                 Globals.BroadcastedTrxDict.TryRemove(transaction.Hash, out _);
                                                 Globals.ConsensusBroadcastedTrxDict.TryRemove(transaction.Hash, out _);
                                             }
