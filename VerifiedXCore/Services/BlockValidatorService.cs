@@ -963,6 +963,17 @@ namespace VerifiedXCore.Services
                             .ThenBy(x => x.Nonce)
                             .ToList();
                         
+                        // Each vBTC transfer's outflows read once for the block: the same-sender check below read every sibling's
+                        // data again for each transfer, so one sender's 1,400 transfers were about 2 million parses on every
+                        // node (fifth review, round 34). A pure reading of the transaction's own data.
+                        var vbtcOutflowsOf = new Dictionary<Transaction, List<(string ScUid, decimal Amount)>>(ReferenceEqualityComparer.Instance);
+                        List<(string ScUid, decimal Amount)> VbtcOutflows(Transaction t)
+                        {
+                            if (!vbtcOutflowsOf.TryGetValue(t, out var known))
+                                vbtcOutflowsOf[t] = known = Bitcoin.Services.VBTCService.GetVbtcV2TransferOutflows(t);
+                            return known;
+                        }
+
                         foreach (Transaction blkTransaction in orderedTransactions)
                         {
                             if (blkTransaction.FromAddress != "Coinbase_TrxFees" && blkTransaction.FromAddress != "Coinbase_BlkRwd")
@@ -1291,7 +1302,7 @@ namespace VerifiedXCore.Services
                                 {
                                     try
                                     {
-                                        var vbtcOutflows = Bitcoin.Services.VBTCService.GetVbtcV2TransferOutflows(blkTransaction);
+                                        var vbtcOutflows = VbtcOutflows(blkTransaction);
                                         if (vbtcOutflows.Any())
                                         {
                                             var otherVbtcTxs = block.Transactions
@@ -1310,7 +1321,7 @@ namespace VerifiedXCore.Services
                                                 bool sameContractSibling = false;
                                                 foreach (var otx in otherVbtcTxs)
                                                 {
-                                                    foreach (var (otxScUID, otxAmount) in Bitcoin.Services.VBTCService.GetVbtcV2TransferOutflows(otx))
+                                                    foreach (var (otxScUID, otxAmount) in VbtcOutflows(otx))
                                                     {
                                                         if (otxScUID == vbtcScUID)
                                                         {
