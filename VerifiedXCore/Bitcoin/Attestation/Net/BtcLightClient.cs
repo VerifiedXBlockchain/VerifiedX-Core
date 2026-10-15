@@ -218,6 +218,8 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
             }
         }
 
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<IBtcSource, int> _blockMisses = new();
+
         private void Drop(IBtcSource peer, string why, TimeSpan avoidFor)
         {
             lock (_peerLock) _peers.Remove(peer);
@@ -345,7 +347,18 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
                     using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
                     timeout.CancelAfter(TimeSpan.FromSeconds(60));
                     var candidate = await source.GetBlockAsync(header.Hash, timeout.Token);
-                    if (candidate == null) continue;
+                    if (candidate == null)
+                    {
+                        // A peer that answers headers but never delivers blocks held the report loop a minute a block, a
+                        // peer at a time, and was never replaced (fifth review, round 22): two misses running drop it.
+                        if (IsPeer(source) && _blockMisses.AddOrUpdate(source, 1, (_, n) => n + 1) >= 2)
+                        {
+                            _blockMisses.TryRemove(source, out _);
+                            Drop(source, $"delivered no block twice running (last {height})", TimeSpan.FromHours(1));
+                        }
+                        continue;
+                    }
+                    _blockMisses.TryRemove(source, out _);
                     var problem = BtcBlockCheck.Verify(candidate, header);
                     if (problem != null)
                     {

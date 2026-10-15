@@ -219,6 +219,7 @@ namespace VerifiedXCore.Tests
             public int BlockRequests;
             public int HeaderRequests;
             public bool Silent;
+            public bool NoBlocks;
 
             public Source(string name, Func<Btc> chain)
             {
@@ -242,7 +243,7 @@ namespace VerifiedXCore.Tests
             public Task<BtcBlock?> GetBlockAsync(string hash, CancellationToken ct)
             {
                 BlockRequests++;
-                if (Silent) return Task.FromResult<BtcBlock?>(null);
+                if (Silent || NoBlocks) return Task.FromResult<BtcBlock?>(null);
                 var chain = _chain();
                 for (var h = chain.Tip; h >= Checkpoint - 11; h--)
                     if (chain.Header(h).Hash == hash)
@@ -254,6 +255,30 @@ namespace VerifiedXCore.Tests
             }
 
             public void Dispose() { IsAlive = false; }
+        }
+
+        /// <summary>
+        /// A peer that answers headers but never delivers blocks was never dropped: each wanted block waited on it a
+        /// minute before anyone else was asked, on every pass (fifth review, round 22). Two misses running drop it.
+        /// </summary>
+        [Fact]
+        public async Task APeerThatNeverDeliversBlocks_IsDroppedAfterTwoMisses()
+        {
+            await Start();
+            var vault = ScriptOf(NewTaprootAddress());
+            var first = _btc.Mine(Pay(vault, 5_000));
+            var second = _btc.Mine(Pay(vault, 6_000));
+            _btc.MineEmpty(2);
+            var mute = new Source("10.9.0.1:8333", () => _btc) { NoBlocks = true };
+            var honest = new Source("explorer", () => _btc);
+            using var client = NewClient(new[] { mute }, new List<IBtcSource> { honest });
+            await client.RunOnceAsync(CancellationToken.None);                       // headers
+            Assert.Null(client.BlockAt(first));                                       // wanted
+            Assert.Null(client.BlockAt(second));
+            await client.RunOnceAsync(CancellationToken.None);
+            Assert.NotNull(client.BlockAt(first));                                    // from the explorer behind it
+            Assert.False(mute.IsAlive);
+            Assert.Contains("delivered no block", client.LastProblem ?? "");
         }
 
         private BtcLightClient NewClient(IReadOnlyList<Source> peers, List<IBtcSource>? fallbacks = null, Func<List<IBtcSource>>? validators = null)
