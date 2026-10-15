@@ -410,6 +410,15 @@ namespace VerifiedXCore.Tests
             Assert.Null(ReserveTransactions.GetTransactions(spaced));
             Assert.Equal(ReserveTransactionStatus.Pending, StatusOf(transfer));
 
+            // A row of a RESERVE transaction (only ever written by the old block-path search, on some nodes) counts as no row (round 29).
+            var phantom = new string('d', 64);
+            ReserveTransactions.GetReserveTransactionsDb()!.Insert(new ReserveTransactions { Id = Guid.NewGuid(), Hash = phantom, FromAddress = _reserve.Address, ToAddress = "Reserve_Base",
+                TransactionType = TransactionType.RESERVE, ReserveTransactionStatus = ReserveTransactionStatus.Pending, ConfirmTimestamp = _now + 100 * Hour, UnlockTime = _now + 100 * Hour, Signature = "s" });
+            var ofPhantom = FromReserve(TransactionType.RESERVE, "Reserve_Base", new { Function = "CallBack()", Hash = phantom }, null);
+            var (okPhantom, whyPhantom) = await TransactionValidatorService.VerifyTX(ofPhantom, false, true, false, null, false, Math.Max(_height + 1, Globals.PathAuditRulesHeight));
+            Assert.False(okPhantom);
+            Assert.Contains("Could not find", whyPhantom);
+
             // A call-back of a hash with no row is refused in a block too, without searching the chain (round 28).
             var unknown = FromReserve(TransactionType.RESERVE, "Reserve_Base", new { Function = "CallBack()", Hash = new string('b', 64) }, null);
             var (okUnknown, whyUnknown) = await TransactionValidatorService.VerifyTX(unknown, false, true, false, null, false, Math.Max(_height + 1, Globals.PathAuditRulesHeight));

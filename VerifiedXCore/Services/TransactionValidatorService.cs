@@ -2737,6 +2737,14 @@ namespace VerifiedXCore.Services
                                             var currentTime = TimeUtil.GetTime();
 
                                             var rTx = ReserveTransactions.GetTransactions(hash);
+                                            // A row of a RESERVE transaction (Register, CallBack, Recover) is never written by the
+                                            // apply; only the block-path search below wrote one, on the nodes that validated some
+                                            // block, kept even when that block was refused. From the path-audit rules (no search) a
+                                            // call-back found by such a row on some nodes was refused by the others (fifth review,
+                                            // round 29): it counts as no row.
+                                            if (rTx != null && rTx.TransactionType == TransactionType.RESERVE
+                                                && (blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.PathAuditRulesHeight)
+                                                rTx = null;
                                             if(rTx == null)
                                             {
                                                 if(!blockVerify)
@@ -2778,7 +2786,10 @@ namespace VerifiedXCore.Services
                                                         UnlockTime = txSearchResult.UnlockTime
                                                     };
 
-                                                    ReserveTransactions.SaveReserveTx(rTx);
+                                                    // A RESERVE transaction is not a delayed payment: its row moves nothing, and kept on
+                                                    // some nodes only it made call-backs judged differently (round 29). Not saved.
+                                                    if (txSearchResult.TransactionType != TransactionType.RESERVE)
+                                                        ReserveTransactions.SaveReserveTx(rTx);
                                                 }
                                             }
 
