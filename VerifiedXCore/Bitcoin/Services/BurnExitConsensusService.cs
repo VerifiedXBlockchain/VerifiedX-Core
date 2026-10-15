@@ -326,7 +326,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Handle BurnAlert from another caster via HTTP.</summary>
         public static async Task HandleBurnAlert(BurnAlert alert)
         {
-            if (alert == null || string.IsNullOrEmpty(alert.BaseBurnTxHash) || _processedBurns.ContainsKey(alert.BaseBurnTxHash) || ChainHasTheBurn(alert.BaseBurnTxHash))
+            if (alert == null || string.IsNullOrEmpty(alert.BaseBurnTxHash) || _processedBurns.ContainsKey(alert.BaseBurnTxHash))
                 return;
 
             // SECURITY: only a committee caster's signed, fresh alert enters the consensus queue.
@@ -340,6 +340,10 @@ namespace VerifiedXCore.Bitcoin.Services
                 LogUtility.Log($"[BurnExitConsensus] REJECTED BurnAlert for {alert.BaseBurnTxHash} from {alert.SenderCasterAddress}: {alertReason}", "BurnExitConsensusService");
                 return;
             }
+            // Looked up once the alert is a committee caster's: before, any unsigned alert on the open route cost two full
+            // collection reads (round 25).
+            if (ChainHasTheBurn(alert.BaseBurnTxHash))
+                return;
 
             _processedBurns.TryAdd(alert.BaseBurnTxHash, new ProcessedBurnRecord
             {
