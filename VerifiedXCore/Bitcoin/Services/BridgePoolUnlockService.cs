@@ -52,11 +52,18 @@ namespace VerifiedXCore.Bitcoin.Services
         public const decimal PlanDustBtc = 0.0001M;
 
         public static List<PoolUnlockAllocation>? ComputeAllocationPlan(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs = null) =>
-            ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: true, largestFirst: false)
-            ?? ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: false, largestFirst: false)
-            // More locks at the front than one plan names (each just above the dust line, say): the largest first, so a
-            // payable burn is paid (round 28: the cap returned no plan where about 200 locks would have fitted).
-            ?? ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: false, largestFirst: true);
+            PlanCandidates(exitAmountBtc, excludeContractUIDs).FirstOrDefault(p => p != null);
+
+        /// <summary>
+        /// The plans tried, in order: dust passed over; every lock in order; the largest first (more locks at the front
+        /// than one plan names, each just above the dust line, say: round 28).
+        /// </summary>
+        private static IEnumerable<List<PoolUnlockAllocation>?> PlanCandidates(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs)
+        {
+            yield return ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: true, largestFirst: false);
+            yield return ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: false, largestFirst: false);
+            yield return ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs, passOverDust: false, largestFirst: true);
+        }
 
         private static List<PoolUnlockAllocation>? ComputeAllocationPlan(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs, bool passOverDust, bool largestFirst)
         {
@@ -160,16 +167,23 @@ namespace VerifiedXCore.Bitcoin.Services
             // A vault is never asked for less than a Bitcoin transaction can pay (the exit would be refused). A vault
             // whose share would be that small is left out and the plan made again without it: one small lock at the
             // front of the queue (a remnant, or one made on purpose) used to end the plan for every exit that reached it.
+            // Each kind of plan is tried before a vault is left out: passing over dust could leave a vault's part under the
+            // minimum that its dust would have lifted over it (round 28).
             var leftOut = Without(older);
+            static List<string> TooSmall(List<PoolUnlockAllocation> plan) => plan.GroupBy(a => a.SmartContractUID, StringComparer.Ordinal)
+                .Where(g => (long)(g.Sum(a => a.UnlockAmount) * Attestation.BtcAttestBalance.SatsPerBtc) < Attestation.BtcWithdrawals.MinExitPartSats)
+                .Select(g => g.Key).ToList();
             while (true)
             {
-                var fromWatched = ComputeAllocationPlan(exitAmountBtc, leftOut);
-                if (fromWatched == null) return null;
-                var tooSmall = fromWatched.GroupBy(a => a.SmartContractUID, StringComparer.Ordinal)
-                    .Where(g => (long)(g.Sum(a => a.UnlockAmount) * Attestation.BtcAttestBalance.SatsPerBtc) < Attestation.BtcWithdrawals.MinExitPartSats)
-                    .Select(g => g.Key).ToList();
-                if (tooSmall.Count == 0) return fromWatched;
-                foreach (var vault in tooSmall) leftOut.Add(vault);
+                List<PoolUnlockAllocation>? first = null;
+                foreach (var candidate in PlanCandidates(exitAmountBtc, leftOut))
+                {
+                    if (candidate == null) continue;
+                    first ??= candidate;
+                    if (TooSmall(candidate).Count == 0) return candidate;
+                }
+                if (first == null) return null;
+                foreach (var vault in TooSmall(first)) leftOut.Add(vault);
             }
         }
 

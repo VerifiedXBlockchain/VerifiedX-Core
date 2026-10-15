@@ -839,6 +839,34 @@ namespace VerifiedXCore.Tests
             Assert.False(BridgePoolUnlockService.Nameable(new string('a', BridgePoolUnlockService.MaxLockIdLength + 1)));
         }
 
+        /// <summary>
+        /// Passing over dust could leave a vault's part under the exit minimum that its dust would have lifted over it;
+        /// the vault was then left out and the exit could not be planned (round 28). Each kind of plan is tried first.
+        /// </summary>
+        [Fact]
+        public async Task AVaultsDust_IsDrawnWhenItLiftsTheVaultsPartOverTheMinimum()
+        {
+            await Start();
+            var b = await CreateVault(H1 + 1);
+            var c = await CreateVault(H1 + 2);
+            await Deposit(b.Script, 1_000_000);
+            await Deposit(c.Script, 1_000_000);
+            var b1 = await Lock(b.Uid, 0.00009M);   // dust
+            var b2 = await Lock(b.Uid, 0.0002M);
+            var c1 = await Lock(c.Uid, 0.001M);
+            long t = VBTCBridgeLockState.GetByLockId(b1)!.LockTimestamp;
+            foreach (var (id, at) in new[] { (b1, t), (b2, t + 1), (c1, t + 2) })   // b1, b2, c1 in that order
+            {
+                var rec = VBTCBridgeLockState.GetByLockId(id)!;
+                rec.LockTimestamp = at;
+                VBTCBridgeLockState.GetCollection().Update(rec);
+            }
+            var plan = BridgePoolUnlockService.ComputeExitAllocationPlan(0.0012M, null, Tip + 1);
+            Assert.NotNull(plan);
+            Assert.Equal(0.0012M, plan!.Sum(a => a.UnlockAmount));
+            Assert.Contains(plan, a => a.LockId == b1);
+        }
+
         /// <summary>More locks at the front than one plan names: the largest are taken, and the burn is paid (round 28).</summary>
         [Fact]
         public async Task MoreSmallLocksAtTheFrontThanOnePlanNames_TheLargestArePlanned()
