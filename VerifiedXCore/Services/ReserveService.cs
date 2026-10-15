@@ -18,7 +18,7 @@ namespace VerifiedXCore.Services
                 var rTXDb = ReserveTransactions.GetReserveTransactionsDb();
                 if (rTXDb != null)
                 {
-                    var reserveTxList = rTXDb.Query().Where(x => x.ConfirmTimestamp < latestBlockTime && x.ReserveTransactionStatus == ReserveTransactionStatus.Pending).ToList();
+                    var reserveTxList = ReserveTransactions.DueRows(rTXDb, latestBlockTime); // due rows only (round 34)
                     if (reserveTxList.Count() > 0)
                     {
                         // Awaited so RunLock actually covers the work — a fire-and-forget here let

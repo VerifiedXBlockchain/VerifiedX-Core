@@ -28,6 +28,20 @@ namespace VerifiedXCore.Models
 
 
         #region Get ReserveTransactions DB
+        /// <summary>
+        /// Index key of a row due to settle: its unlock time while it is pending, the largest number otherwise. Settlement
+        /// read every pending row each block through the status index, and a row's unlock time has no upper bound, so rows
+        /// pending for good (one fee each) were read by every block on every node (fifth review, round 34).
+        /// </summary>
+        internal const string DueIndexExpression = "IIF($.ReserveTransactionStatus = 'Pending', $.ConfirmTimestamp, 9223372036854775807)";
+        internal const string DueIndexName = "ReserveDue";
+
+        /// <summary>The pending rows whose unlock time is before <paramref name="before"/> (the order is the caller's).</summary>
+        public static List<ReserveTransactions> DueRows(LiteDB.ILiteCollection<ReserveTransactions> col, long before) =>
+            col.Find(LiteDB.Query.LT(DueIndexExpression, before))
+                .Where(x => x.ConfirmTimestamp < before && x.ReserveTransactionStatus == ReserveTransactionStatus.Pending)
+                .ToList();
+
         public static LiteDB.ILiteCollection<ReserveTransactions>? GetReserveTransactionsDb()
         {
             try

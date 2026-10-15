@@ -235,6 +235,8 @@ namespace VerifiedXCore.Data
             // every row ever written (fifth review, round 28).
             rsrvTransactions.EnsureIndexSafe(x => x.ReserveTransactionStatus);
             rsrvTransactions.EnsureIndexSafe(x => x.FromAddress);
+            try { rsrvTransactions.EnsureIndex(ReserveTransactions.DueIndexName, ReserveTransactions.DueIndexExpression); } // round 34
+            catch (Exception ex) { ErrorLogUtility.LogError($"Reserve due index: {ex.Message}", "DbContext.Initialize()"); }
             // Withdrawal requests had no index: every request, settlement, owner balance and vault creation read every
             // request row ever stored, on every node, and the table only grows (fifth review, round 33). Readers keep the
             // order they read rows in before (by Id) wherever more than one can match.

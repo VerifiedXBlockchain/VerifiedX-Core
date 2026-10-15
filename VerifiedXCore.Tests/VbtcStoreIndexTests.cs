@@ -67,6 +67,26 @@ namespace VerifiedXCore.Tests
             Assert.Equal(1, DbContext.DB_Wallet.GetCollection<TokenVote>(DbContext.RSRV_TOKEN_VOTE).Count());
         }
 
+        /// <summary>Settlement reads the pending rows that are due, and only those, through an index (round 34).</summary>
+        [Fact]
+        public void ReserveRows_DueToSettle_AreTheOldQuerysRows()
+        {
+            var col = ReserveTransactions.GetReserveTransactionsDb()!;
+            var statuses = new[] { ReserveTransactionStatus.Pending, ReserveTransactionStatus.Confirmed, ReserveTransactionStatus.CalledBack, ReserveTransactionStatus.Pending };
+            for (var i = 0; i < 40; i++)
+                col.Insert(new ReserveTransactions { Id = Guid.NewGuid(), Hash = "h" + i, ConfirmTimestamp = 1_000 + i * 10, ReserveTransactionStatus = statuses[i % statuses.Length] });
+            col.Insert(new ReserveTransactions { Id = Guid.NewGuid(), Hash = "far", ConfirmTimestamp = long.MaxValue - 5, ReserveTransactionStatus = ReserveTransactionStatus.Pending });
+            Assert.Contains(ReserveTransactions.DueIndexName, DbContext.DB_Reserve.GetCollection("$indexes").Find(Query.EQ("collection", DbContext.RSRV_RESERVE_TRANSACTIONS)).Select(d => d["name"].AsString));
+            foreach (var before in new[] { 0L, 1_000L, 1_001L, 1_155L, 1_400L, long.MaxValue })
+            {
+                var old = col.Query().Where(x => x.ConfirmTimestamp < before && x.ReserveTransactionStatus == ReserveTransactionStatus.Pending).ToList().Select(x => x.Hash).OrderBy(h => h).ToList();
+                Assert.Equal(old, ReserveTransactions.DueRows(col, before).Select(x => x.Hash).OrderBy(h => h).ToList());
+            }
+            Assert.Equal(10, ReserveTransactions.DueRows(col, 1_200).Count);       // 1,000..1,190: the 20 rows, half pending
+            var plan = string.Join(" ", DbContext.DB_Reserve.Execute($"EXPLAIN SELECT $ FROM {DbContext.RSRV_RESERVE_TRANSACTIONS} WHERE {ReserveTransactions.DueIndexExpression} < 1200").ToEnumerable().Select(d => d.ToString()));
+            Assert.Contains(ReserveTransactions.DueIndexName, plan);
+        }
+
         [Fact]
         public void BridgeLocks_AreNotIndexedByVault_AndStillFoundByIt()
         {
