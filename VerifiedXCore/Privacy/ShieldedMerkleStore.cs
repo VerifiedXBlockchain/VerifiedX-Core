@@ -100,10 +100,13 @@ namespace VerifiedXCore.Privacy
         {
             if (!cache.Valid || cache.LastId == null || cache.Digests.Count == 0 || cache.LastPosition != cache.Digests.Count - 1)
                 return false;
-            var last = col.Find(x => x.TreePosition == cache.LastPosition).Where(x => x.AssetType == _assetType).ToList();
+            // The asset compared as the full load's query compares it (the database's collation, which ignores case): an
+            // exact comparison here dropped a "vfx" row the full load counts, and nodes rooted the pool differently
+            // (fifth review, round 33).
+            var last = col.Find(x => x.TreePosition == cache.LastPosition).Where(SameAsset).ToList();
             if (last.Count != 1 || !last[0].Id.Equals(cache.LastId))
                 return false;
-            var newer = col.Find(x => x.TreePosition > cache.LastPosition).Where(x => x.AssetType == _assetType)
+            var newer = col.Find(x => x.TreePosition > cache.LastPosition).Where(SameAsset)
                 .OrderBy(x => x.TreePosition).ToList();
             for (var i = 0; i < newer.Count; i++)
                 if (newer[i].TreePosition != cache.LastPosition + 1 + i)
@@ -117,6 +120,8 @@ namespace VerifiedXCore.Privacy
             }
             return true;
         }
+
+        private bool SameAsset(CommitmentRecord r) => _db.Collation.Compare(r.AssetType ?? "", _assetType) == 0;
 
         private sealed class LeafCache
         {

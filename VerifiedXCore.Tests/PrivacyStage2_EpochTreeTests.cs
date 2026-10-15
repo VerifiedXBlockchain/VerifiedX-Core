@@ -221,6 +221,29 @@ namespace VerifiedXCore.Tests
             Assert.Equal(full + 1, ShieldedMerkleStore.FullLeafLoadsOnThisThread);
         }
 
+        /// <summary>
+        /// The cached leaves take a row as the full load does, whatever the asset's letter case ("vfx" rows exist in
+        /// history): an exact comparison left a warm cache a leaf short of a node that read in full (round 33).
+        /// </summary>
+        [Fact]
+        public void APoolsCachedLeaves_TakeACaseVariantRow_AsTheFullLoadDoes()
+        {
+            var writer = new ShieldedMerkleStore("VFX", Db, fixedDepth: false);
+            writer.LoadLeavesFromCommitments();
+            for (var i = 0; i < 3; i++)
+                writer.AppendG1Commitment(Note((ulong)(i + 1)).G1, Height - 5, 1);
+            var warm = new ShieldedMerkleStore("VFX", Db, fixedDepth: false);
+            warm.LoadLeavesFromCommitments();                                   // the cache is warm
+            var variant = new ShieldedMerkleStore("vfx", Db, fixedDepth: false);
+            variant.LoadLeavesFromCommitments();
+            variant.AppendG1Commitment(Note(9).G1, Height - 4, 1);              // a "vfx" row after it
+            var full = Db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS).Query().Where(x => x.AssetType == "VFX").Count();
+            var cached = new ShieldedMerkleStore("VFX", Db, fixedDepth: false);
+            cached.LoadLeavesFromCommitments();
+            Assert.Equal(full, cached.LeafDigests.Count);
+            Assert.Equal(variant.LeafDigests.Count, cached.LeafDigests.Count);
+        }
+
         [Fact]
         public void AtTheHeight_OnlyTheVfxPoolIsReset_VbtcPoolRowsStay()
         {
