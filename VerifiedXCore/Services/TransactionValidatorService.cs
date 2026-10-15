@@ -258,7 +258,7 @@ namespace VerifiedXCore.Services
                 return (false, preimageError);
 
             // NEW-10: contract UIDs are exact (creation format; references equal the stored record's UID).
-            var contractUidError = LedgerIntegrityRules.ContractUids(txRequest);
+            var contractUidError = LedgerIntegrityRules.ContractUids(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
             if (contractUidError != null)
                 return (false, contractUidError);
 

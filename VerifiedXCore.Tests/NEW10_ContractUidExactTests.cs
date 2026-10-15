@@ -170,6 +170,24 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        /// <summary>
+        /// Whether the collation finds a stored contract for a UID with characters beyond ASCII (case pairs, characters it
+        /// ignores) follows each machine's ICU or NLS tables, so the exactness refusal differed by platform (round 26).
+        /// From the path-audit rules such a UID is refused outright.
+        /// </summary>
+        [Fact]
+        public void ANamedUidBeyondAscii_IsRefusedOnEveryPlatformAlike()
+        {
+            foreach (var odd in new[] { V2.Insert(3, "­"), V2 + "Ꟁ", "İ" + V2 })
+            {
+                var tx = new Transaction { FromAddress = _holder.Address, TransactionType = TransactionType.TX, Data = "{\"ContractUID\":\"" + odd + "\"}" };
+                Assert.Contains("plain ASCII", LedgerIntegrityRules.ContractUids(tx, Globals.PathAuditRulesHeight));
+                Assert.DoesNotContain("plain ASCII", LedgerIntegrityRules.ContractUids(tx, Globals.PathAuditRulesHeight - 1) ?? "");
+            }
+            var exact = new Transaction { FromAddress = _holder.Address, TransactionType = TransactionType.TX, Data = "{\"ContractUID\":\"" + V2 + "\"}" };
+            Assert.Null(LedgerIntegrityRules.ContractUids(exact, Globals.PathAuditRulesHeight));
+        }
+
         [Theory]
         [InlineData("scuid")]
         [InlineData("Scuid")]

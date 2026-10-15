@@ -1018,15 +1018,21 @@ namespace VerifiedXCore.Services
         /// generator format, which no two distinct values can alias under any collation, and (b) every UID a
         /// transaction names must equal the stored record's UID exactly when such a record exists.
         /// </summary>
-        public static string? ContractUids(Transaction tx)
+        public static string? ContractUids(Transaction tx, long? height = null)
         {
             if (tx == null || string.IsNullOrEmpty(tx.Data)) return null;
             var created = CreatedContractUid(tx);
             if (created != null && !CreationUidFormat.IsMatch(created))
                 return $"Contract UID '{created}' must be lowercase hex, ':' and digits.";
 
+            // From the path-audit rules a named UID is printable ASCII: whether the collation finds a stored record for one
+            // with other characters (case pairs, characters it ignores) follows each machine's ICU or NLS tables, so the
+            // refusal below differed by platform (fifth review, round 26).
+            var asciiFromHere = (height ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.PathAuditRulesHeight;
             foreach (var uid in ReferencedContractUids(tx))
             {
+                if (asciiFromHere && !uid.All(c => c >= 0x20 && c <= 0x7E))
+                    return $"Contract UID '{uid}' must be plain ASCII.";
                 if (uid == created) continue;
                 var error = InexactReference(uid);
                 if (error != null)

@@ -85,7 +85,7 @@ namespace VerifiedXCore.Services
                 if (((LedgerIntegrityRules.IsCoinbase(tx) && height == Globals.SpecialBlockHeight) || height == 0) && LedgerIntegrityRules.ContentMatchesHash(tx) is string contentError) // NEW-25 (correction: genesis and the special block)
                     Add("NEW-25 coinbase/genesis content vs hash", contentError);
 
-                var uidError = LedgerIntegrityRules.ContractUids(tx); // NEW-10
+                var uidError = LedgerIntegrityRules.ContractUids(tx, height); // NEW-10
                 if (uidError != null)
                     Add("NEW-10 contract UID", uidError);
             }
