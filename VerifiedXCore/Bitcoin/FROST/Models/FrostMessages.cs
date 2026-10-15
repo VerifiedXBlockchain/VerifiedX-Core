@@ -57,6 +57,17 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// </summary>
         public static string NewSessionId(string leaderAddress) => $"{LeaderTag(leaderAddress)}:{Guid.NewGuid()}";
 
+        /// <summary>Everything a signing start says, as its leader signs it.</summary>
+        public static string SigningStartMessage(FrostSigningStartRequest r) =>
+            "SIGN-START|" + Sha256Hex(string.Join("|", new[]
+            {
+                r.SessionId, r.SmartContractUID, r.CeremonyId, r.LeaderAddress, r.Timestamp.ToString(), r.MessageHash, r.WithdrawalRequestHash,
+                r.InputIndex.ToString(), r.InputCount.ToString(), r.BtcTxId, r.UnsignedTxHex, r.RequiredThreshold.ToString(),
+                string.Join(",", r.AllInputSighashes ?? new List<string>()), string.Join(",", r.TxInputOutpoints ?? new List<string>()),
+                string.Join(",", r.SignerAddresses ?? new List<string>()),
+                string.Join(",", (r.Prevouts ?? new()).Select(p => $"{p.TxId}:{p.Vout}:{p.ValueSats}:{p.ScriptPubKeyHex}")),
+            }.Select(x => x ?? "")));
+
         /// <summary>Whether a session id has a leader's tag (16 hex digits and a colon): only key ceremonies' ids do.</summary>
         public static bool IsTagged(string? sessionId) =>
             sessionId != null && sessionId.Length > 17 && sessionId[16] == ':' && sessionId.Take(16).All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
@@ -168,6 +179,8 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public string LeaderAddress { get; set; }
         public long Timestamp { get; set; }
         public string LeaderSignature { get; set; }
+        /// <summary>The leader's signature over the whole start (<see cref="FrostDkgLeaderAuth.SigningStartMessage"/>); required for a vault the chain watches (round 17).</summary>
+        public string? ContentSignature { get; set; }
         public List<string> SignerAddresses { get; set; }
         public int RequiredThreshold { get; set; }
         /// <summary>

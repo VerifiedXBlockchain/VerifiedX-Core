@@ -2539,6 +2539,19 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // A vault the chain watches is signed only for a start its leader signed in full: the plain
+                            // signature names no content, and any signer holding one of the leader's could open a session
+                            // under it with content of its own and take the leader's places (fifth review, round 17).
+                            // Such signings are led by validators, which sign their starts on their own nodes.
+                            if (VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(request.SmartContractUID) != null
+                                && (string.IsNullOrEmpty(request.ContentSignature)
+                                    || !SignatureService.VerifySignature(request.LeaderAddress, FrostDkgLeaderAuth.SigningStartMessage(request), request.ContentSignature)))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "A signing start for this vault is signed in full by its leader." }));
+                                return;
+                            }
+
                             // The leader is who it says: its room here, and a start that is not an old one sent again.
                             if (Math.Abs(TimeUtil.GetTime() - request.Timestamp) > FrostSessionStorage.SIGNING_START_MAX_AGE_SECONDS)
                             {

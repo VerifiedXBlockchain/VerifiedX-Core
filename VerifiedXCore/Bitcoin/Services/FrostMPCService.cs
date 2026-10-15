@@ -1291,6 +1291,9 @@ namespace VerifiedXCore.Bitcoin.Services
                     UnsignedTxHex = txContext?.UnsignedTxHex,
                     Prevouts = txContext?.Prevouts
                 };
+                // The whole start, signed on the leader's node (required for a vault the chain watches; round 17).
+                if (preSignedAuth == null || string.IsNullOrEmpty(preSignedAuth.StartSignature))
+                    startRequest.ContentSignature = VerifiedXCore.Services.SignatureService.AddressSignature(leaderAddress, FrostDkgLeaderAuth.SigningStartMessage(startRequest));
 
                 var tasks = validators.Select(async validator =>
                 {
