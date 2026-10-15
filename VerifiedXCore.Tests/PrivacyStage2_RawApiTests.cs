@@ -361,6 +361,24 @@ namespace VerifiedXCore.Tests
             var bob = PrivateRawTxService.ScanNotes(_bob.ZfxAddress, _bob.ViewingKey32, null, null, false, Db);
             Assert.True(bob.Success);
             Assert.Empty(bob.Notes);
+
+            // Round 23: notes sealed to Alice claiming what the chain never applied, ahead of the real one in its block - a
+            // claim of 500 on her commitment, and a fee change note on a VFX shield (no fee leg is applied there).
+            var r = note.RandomnessB64;
+            byte[] Sealed(decimal amount) => ShieldedNoteEncryption.SealPlainNote(new ShieldedPlainNote { Version = 1, Amount = amount, RandomnessB64 = r, AssetType = "VFX" }, _alice.ZfxAddress);
+            var forgedPayload = Newtonsoft.Json.JsonConvert.DeserializeObject<PrivateTxPayload>(Newtonsoft.Json.JsonConvert.SerializeObject(payload))!;
+            forgedPayload.Outs[0].EncryptedNoteB64 = Convert.ToBase64String(Sealed(500M));
+            forgedPayload.FeeOutputCommitmentB64 = Convert.ToBase64String(new byte[48]);
+            forgedPayload.FeeOutputEncryptedNoteB64 = Convert.ToBase64String(Sealed(700M));
+            var forged = new Transaction { TransactionType = TransactionType.VFX_SHIELD, Hash = "forged", Data = Newtonsoft.Json.JsonConvert.SerializeObject(forgedPayload) };
+            var mined = BlockchainData.GetBlockByHeight(Height + 1)!;
+            mined.Transactions.Insert(0, forged);
+            BlockchainData.GetBlocks().DeleteMany(x => x.Height == Height + 1);
+            BlockchainData.GetBlocks().InsertSafe(mined);
+            var after = PrivateRawTxService.ScanNotes(_alice.ZfxAddress, _alice.ViewingKey32, null, null, false, Db);
+            Assert.Equal(5M, Assert.Single(after.Notes).Amount);
+            Assert.Equal(build.Hash, after.Notes[0].TxHash);
+            Assert.Equal(5M, after.UnspentBalance);
         }
 
         [Fact]

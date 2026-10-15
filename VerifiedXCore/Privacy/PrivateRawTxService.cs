@@ -199,10 +199,13 @@ namespace VerifiedXCore.Privacy
             var records = db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS)
                 .Find(x => x.AssetType == AssetVfx && x.BlockHeight >= from && x.BlockHeight <= to)
                 .ToList();
-            var byCommitment = new Dictionary<string, CommitmentRecord>(StringComparer.Ordinal);
+            var byCommitment = new Dictionary<string, List<CommitmentRecord>>(StringComparer.Ordinal);
             foreach (var r in records)
-                if (!string.IsNullOrEmpty(r.Commitment) && !byCommitment.ContainsKey(r.Commitment))
-                    byCommitment[r.Commitment] = r;
+            {
+                if (string.IsNullOrEmpty(r.Commitment)) continue;
+                if (!byCommitment.TryGetValue(r.Commitment, out var list)) byCommitment[r.Commitment] = list = new List<CommitmentRecord>();
+                list.Add(r);
+            }
 
             var seen = new HashSet<string>(StringComparer.Ordinal);
             foreach (var h in records.Select(r => r.BlockHeight).Distinct().OrderBy(x => x))
@@ -220,19 +223,21 @@ namespace VerifiedXCore.Privacy
 
                     foreach (var o in payload.Outs ?? new List<PrivateShieldedOutput>())
                         TryCollect(o.CommitmentB64, o.EncryptedNoteB64, tx.Hash, h);
-                    TryCollect(payload.FeeOutputCommitmentB64, payload.FeeOutputEncryptedNoteB64, tx.Hash, h);
+                    if (PrivacyApiHelper.HasFeeLeg(tx, payload)) // only there does the ledger append a fee change leaf (round 23)
+                        TryCollect(payload.FeeOutputCommitmentB64, payload.FeeOutputEncryptedNoteB64, tx.Hash, h);
                 }
             }
 
             result.Notes = result.Notes.OrderBy(n => n.TreePosition).ToList();
-            result.UnspentBalance = result.Notes.Where(n => !n.Spent && !n.PendingSpend).Sum(n => n.Amount);
+            // A note not in the pool index is listed with its reason; its amount is only what its sender wrote (round 23).
+            result.UnspentBalance = result.Notes.Where(n => !n.Spent && !n.PendingSpend && byCommitment.ContainsKey(n.Commitment)).Sum(n => n.Amount);
             result.SpendableBalance = result.Notes.Where(n => n.Spendable).Sum(n => n.Amount);
             result.Success = true;
             return result;
 
             void TryCollect(string? commitmentB64, string? encryptedNoteB64, string? txHash, long height)
             {
-                if (string.IsNullOrWhiteSpace(commitmentB64) || string.IsNullOrWhiteSpace(encryptedNoteB64) || !seen.Add(commitmentB64))
+                if (string.IsNullOrWhiteSpace(commitmentB64) || string.IsNullOrWhiteSpace(encryptedNoteB64) || seen.Contains(commitmentB64))
                     return;
                 byte[] enc;
                 try { enc = Convert.FromBase64String(encryptedNoteB64); } catch { return; }
@@ -245,6 +250,18 @@ namespace VerifiedXCore.Privacy
                 byte[] r32 = Array.Empty<byte>();
                 try { r32 = Convert.FromBase64String(note.RandomnessB64 ?? ""); } catch { }
 
+                // A note in the pool is listed only as a leaf the chain applied for its amount and randomness: the amount
+                // in a sealed note is what its sender wrote, and a note claiming more on someone's commitment was listed
+                // with the claimed amount (in UnspentBalance) and, coming first, hid the real one (fifth review, round 23).
+                CommitmentRecord? rec = null;
+                if (byCommitment.TryGetValue(commitmentB64, out var recs))
+                {
+                    rec = recs.FirstOrDefault(x => PrivacyApiHelper.NoteMatchesRecord(x, note.Amount, r32, keys!));
+                    if (rec == null)
+                        return;
+                }
+                seen.Add(commitmentB64);
+
                 var raw = new RawNote
                 {
                     Commitment = commitmentB64,
@@ -253,7 +270,7 @@ namespace VerifiedXCore.Privacy
                     BlockHeight = height,
                     TxHash = txHash
                 };
-                if (!byCommitment.TryGetValue(commitmentB64, out var rec))
+                if (rec == null)
                 {
                     raw.Reason = "The note is not in this node's pool index.";
                 }
