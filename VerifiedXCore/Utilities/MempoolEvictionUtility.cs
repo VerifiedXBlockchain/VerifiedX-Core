@@ -34,7 +34,8 @@ namespace VerifiedXCore.Utilities
 
         /// <summary>
         /// The admission bounds every path that inserts a received or submitted transaction into the mempool applies
-        /// first: the fee floor, then the global entry and size caps, evicting lower-priority entries to make room.
+        /// first: the fee floor, then the global entry and size caps. When the pool is full, only entries rated strictly
+        /// below the incoming transaction make room for it; if there are none it is refused.
         /// </summary>
         public static (bool admit, string reason) CheckAdmissionBounds(Transaction tx)
         {
@@ -42,20 +43,55 @@ namespace VerifiedXCore.Utilities
             if (!feeValidation.isValid)
                 return (false, feeValidation.reason);
 
-            var stats = GetMempoolStats();
+            var stats = GetAdmissionStats();
             var canAdd = CanAddToMempool(tx, stats.count, stats.sizeBytes);
             if (!canAdd.canAdd)
             {
                 EvictLowestPriority(
                     targetCount: (int)(Globals.MaxMempoolEntries * 0.95),
-                    targetSize: (long)(Globals.MaxMempoolSizeBytes * 0.95)
+                    targetSize: (long)(Globals.MaxMempoolSizeBytes * 0.95),
+                    onlyRatedBelow: tx.TransactionRating ?? TransactionRating.F
                 );
 
-                stats = GetMempoolStats();
+                InvalidateAdmissionStats();
+                stats = GetAdmissionStats();
                 canAdd = CanAddToMempool(tx, stats.count, stats.sizeBytes);
             }
 
             return (canAdd.canAdd, canAdd.reason);
+        }
+
+        private static readonly object AdmissionStatsLock = new();
+        private static long _cachedSizeBytes;
+        private static DateTime _cachedSizeAtUtc = DateTime.MinValue;
+
+        /// <summary>How long the pool's byte total is reused between admissions; the entry count is always exact.</summary>
+        internal static TimeSpan AdmissionSizeCacheTtl = TimeSpan.FromSeconds(2);
+
+        /// <summary>
+        /// The pool's entry count and byte size for an admission decision. Loading and serialising every pooled
+        /// transaction on each admission made the check cost grow with the pool, so the count is read from the index and
+        /// the byte total is reused for <see cref="AdmissionSizeCacheTtl"/>; the periodic cleanup still enforces the
+        /// size cap exactly.
+        /// </summary>
+        public static (int count, long sizeBytes) GetAdmissionStats()
+        {
+            var mempool = TransactionData.GetPool();
+            var count = mempool.Count();
+            lock (AdmissionStatsLock)
+            {
+                if (DateTime.UtcNow - _cachedSizeAtUtc >= AdmissionSizeCacheTtl)
+                {
+                    _cachedSizeBytes = mempool.FindAll().Sum(t => CalculateTransactionSize(t));
+                    _cachedSizeAtUtc = DateTime.UtcNow;
+                }
+                return (count, _cachedSizeBytes);
+            }
+        }
+
+        internal static void InvalidateAdmissionStats()
+        {
+            lock (AdmissionStatsLock) _cachedSizeAtUtc = DateTime.MinValue;
         }
 
         /// <summary>
@@ -96,10 +132,11 @@ namespace VerifiedXCore.Utilities
         }
 
         /// <summary>
-        /// Evict lowest priority transactions to make room
-        /// Returns list of transaction hashes that were evicted
+        /// Evict lowest priority transactions to make room. With <paramref name="onlyRatedBelow"/> (an incoming
+        /// transaction's rating), only entries rated strictly below it are candidates, so a sender cannot push out
+        /// transactions rated as well as its own. Returns the hashes that were evicted.
         /// </summary>
-        public static List<string> EvictLowestPriority(int targetCount = -1, long targetSize = -1)
+        public static List<string> EvictLowestPriority(int targetCount = -1, long targetSize = -1, TransactionRating? onlyRatedBelow = null)
         {
             var evictedHashes = new List<string>();
             var mempool = TransactionData.GetPool();
@@ -129,12 +166,12 @@ namespace VerifiedXCore.Utilities
             if (countToEvict == 0 && sizeToEvict == 0)
                 return evictedHashes;
 
-            // Sort by priority (lowest first)
-            // Priority order: F (fail) < E < D < C < B < A
-            // Within same rating, oldest (by timestamp) evicted first
+            // Lowest rating first (F is the highest enum value). Within a rating the newest go first: a burst of new
+            // entries makes room by evicting itself, not the transactions that were already waiting.
             var sortedTxs = allTxs
-                .OrderByDescending(x => x.TransactionRating ?? TransactionRating.F) // F is highest enum value, so descending puts it first
-                .ThenBy(x => x.Timestamp)
+                .Where(x => onlyRatedBelow == null || (x.TransactionRating ?? TransactionRating.F) > onlyRatedBelow.Value)
+                .OrderByDescending(x => x.TransactionRating ?? TransactionRating.F)
+                .ThenByDescending(x => x.Timestamp)
                 .ToList();
 
             long evictedSize = 0;

@@ -32,6 +32,7 @@ namespace VerifiedXCore.Tests
             _priorLastBlock = Globals.LastBlock;
             Globals.CustomPath = _tempRoot;
             DbContext.Initialize();
+            MempoolEvictionUtility.InvalidateAdmissionStats();
             Globals.LastBlock = new Block { Height = 100 };
             StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = _sender.Address, Balance = 100M, Nonce = 0 });
         }
@@ -117,6 +118,56 @@ namespace VerifiedXCore.Tests
         {
             Assert.False(MempoolEvictionUtility.CheckAdmissionBounds(UnderFloor()).admit);
             Assert.True(MempoolEvictionUtility.CheckAdmissionBounds(Send(1M)).admit);
+        }
+
+        private static void Pool(string hash, TransactionRating rating, long timestamp) =>
+            TransactionData.GetPool().Insert(new Transaction { Hash = hash, FromAddress = "x", ToAddress = "y", Amount = 1M, Fee = 1M, Timestamp = timestamp, TransactionType = TransactionType.TX, TransactionRating = rating });
+
+        private static string[] Pooled() => TransactionData.GetPool().FindAll().Select(x => x.Hash).OrderBy(x => x).ToArray();
+
+        [Fact]
+        public void EvictingForAnIncomingTx_RemovesOnlyEntriesRatedBelowIt()
+        {
+            Pool("a-old", TransactionRating.A, 1);
+            Pool("c-old", TransactionRating.C, 1);
+            Pool("c-new", TransactionRating.C, 2);
+
+            var evicted = MempoolEvictionUtility.EvictLowestPriority(targetCount: 1, onlyRatedBelow: TransactionRating.B);
+            Assert.Equal(new[] { "c-new", "c-old" }, evicted.OrderBy(x => x).ToArray());
+            Assert.Equal(new[] { "a-old" }, Pooled());
+        }
+
+        [Fact]
+        public void EvictingForAnIncomingTx_NeverRemovesAnEntryRatedAsWell()
+        {
+            Pool("c-old", TransactionRating.C, 1);
+            Pool("c-new", TransactionRating.C, 2);
+
+            Assert.Empty(MempoolEvictionUtility.EvictLowestPriority(targetCount: 1, onlyRatedBelow: TransactionRating.C));
+            Assert.Equal(2, PoolCount());
+        }
+
+        [Fact]
+        public void WithinOneRating_TheNewestEntryIsEvictedFirst()
+        {
+            Pool("c-old", TransactionRating.C, 1);
+            Pool("c-new", TransactionRating.C, 2);
+
+            Assert.Equal(new[] { "c-new" }, MempoolEvictionUtility.EvictLowestPriority(targetCount: 1));
+            Assert.Equal(new[] { "c-old" }, Pooled());
+        }
+
+        [Fact]
+        public void AdmissionStats_CountIsExact_EvenWhileTheSizeIsCached()
+        {
+            var before = MempoolEvictionUtility.GetAdmissionStats();
+            Pool("one", TransactionRating.C, 1);
+            Pool("two", TransactionRating.C, 2);
+            var after = MempoolEvictionUtility.GetAdmissionStats();
+            Assert.Equal(before.count + 2, after.count);
+
+            MempoolEvictionUtility.InvalidateAdmissionStats();
+            Assert.Equal(MempoolEvictionUtility.GetMempoolStats(), MempoolEvictionUtility.GetAdmissionStats());
         }
     }
 }
