@@ -2741,6 +2741,12 @@ namespace VerifiedXCore.Services
                                             {
                                                 if(!blockVerify)
                                                     return (txResult, "Could not find a reserve transaction with that hash.");
+                                                // From the path-audit rules a block's call-back needs the row as admission does: the
+                                                // chain search below read every block of the chain before the signature was checked,
+                                                // once per such call-back, on every validating node (fifth review, round 28). Every
+                                                // delayed transaction leaves a row when it is applied.
+                                                if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.PathAuditRulesHeight)
+                                                    return (txResult, "Could not find a reserve transaction with that hash.");
 
                                                 var txSearchResult = await TransactionData.GetNetworkTXByHash(hash, 0, false, true);
 

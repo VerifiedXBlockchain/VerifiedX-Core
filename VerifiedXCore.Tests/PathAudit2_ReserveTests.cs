@@ -409,6 +409,12 @@ namespace VerifiedXCore.Tests
             Assert.Contains("hex", why);
             Assert.Null(ReserveTransactions.GetTransactions(spaced));
             Assert.Equal(ReserveTransactionStatus.Pending, StatusOf(transfer));
+
+            // A call-back of a hash with no row is refused in a block too, without searching the chain (round 28).
+            var unknown = FromReserve(TransactionType.RESERVE, "Reserve_Base", new { Function = "CallBack()", Hash = new string('b', 64) }, null);
+            var (okUnknown, whyUnknown) = await TransactionValidatorService.VerifyTX(unknown, false, true, false, null, false, Math.Max(_height + 1, Globals.PathAuditRulesHeight));
+            Assert.False(okUnknown);
+            Assert.Contains("Could not find", whyUnknown);
         }
 
         [Fact]
