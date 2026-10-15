@@ -867,6 +867,31 @@ namespace VerifiedXCore.Tests
             Assert.Contains(plan, a => a.LockId == b1);
         }
 
+        /// <summary>
+        /// A vault's part under the exit minimum is lifted by moving the shortfall from another vault that can spare it,
+        /// where the plan was given up (round 29).
+        /// </summary>
+        [Fact]
+        public async Task AVaultsPartUnderTheMinimum_IsLiftedFromAnotherVault()
+        {
+            await Start();
+            var a = await CreateVault(H1 + 1);
+            var b = await CreateVault(H1 + 2);
+            await Deposit(a.Script, 2_000_000);
+            await Deposit(b.Script, 2_000_000);
+            var la = await Lock(a.Uid, 0.01M);
+            var lb = await Lock(b.Uid, 0.01M);
+            var at = VBTCBridgeLockState.GetByLockId(la)!.LockTimestamp;
+            var rb = VBTCBridgeLockState.GetByLockId(lb)!;
+            rb.LockTimestamp = at + 1; VBTCBridgeLockState.GetCollection().Update(rb);                   // a, then b
+            var plan = BridgePoolUnlockService.ComputeExitAllocationPlan(0.0101M, null, Tip + 1)!;
+            Assert.NotNull(plan);
+            Assert.Equal(0.0101M, plan.Sum(x => x.UnlockAmount));
+            Assert.All(plan.GroupBy(x => x.SmartContractUID), g => Assert.True(g.Sum(x => x.UnlockAmount) * 100_000_000M >= BtcWithdrawals.MinExitPartSats));
+            var (ok, why) = await Verify(Exit(NewBurn(), BtcDest, plan.Select(x => (x.LockId, x.SmartContractUID, x.UnlockAmount)).ToArray()), Tip + 1);
+            Assert.True(ok, why);
+        }
+
         /// <summary>A plan is measured as it is carried (escapes included) and one over the room is not offered (round 29).</summary>
         [Fact]
         public async Task APlanTooLargeToCarry_IsNotOffered()

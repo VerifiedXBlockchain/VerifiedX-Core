@@ -195,10 +195,55 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (candidate == null) continue;
                     first ??= candidate;
                     if (TooSmall(candidate).Count == 0) return candidate;
+                    if (Rebalanced(candidate) is { } moved && TooSmall(moved).Count == 0) return moved;
                 }
                 if (first == null) return null;
                 foreach (var vault in TooSmall(first)) leftOut.Add(vault);
             }
+        }
+
+        /// <summary>
+        /// A plan with a vault's part under the exit minimum, made valid by moving the shortfall to that vault from another
+        /// vault whose part stays at or above the minimum (and within the locks already planned). A plan of one vault's
+        /// whole locks and a little of the next was given up although such a split existed (fifth review, round 29).
+        /// Null when no such move is found.
+        /// </summary>
+        private static List<PoolUnlockAllocation>? Rebalanced(List<PoolUnlockAllocation> plan)
+        {
+            var min = Attestation.BtcWithdrawals.MinExitPartSats / Attestation.BtcAttestBalance.SatsPerBtc;
+            var remaining = (VBTCBridgeLockState.GetAvailableLocksFIFO() ?? new List<VBTCBridgeLockState>())
+                .GroupBy(l => l.LockId, StringComparer.Ordinal)
+                .ToDictionary(g => g.Key, g => Math.Round(g.First().RemainingAmount, 8, MidpointRounding.ToZero), StringComparer.Ordinal);
+            var moved = plan.Select(a => new PoolUnlockAllocation { LockId = a.LockId, UnlockAmount = a.UnlockAmount, SmartContractUID = a.SmartContractUID }).ToList();
+            decimal Share(string vault) => moved.Where(a => a.SmartContractUID == vault).Sum(a => a.UnlockAmount);
+            foreach (var small in moved.Select(a => a.SmartContractUID).Distinct(StringComparer.Ordinal).Where(v => Share(v) < min).ToList())
+            {
+                var need = min - Share(small);
+                var room = moved.Where(a => a.SmartContractUID == small).Sum(a => (remaining.TryGetValue(a.LockId, out var r) ? r : a.UnlockAmount) - a.UnlockAmount);
+                if (room < need) return null;
+                var donor = moved.Select(a => a.SmartContractUID).Distinct(StringComparer.Ordinal)
+                    .FirstOrDefault(v => v != small && Share(v) - need >= min);
+                if (donor == null) return null;
+                var take = need;
+                foreach (var a in moved.Where(a => a.SmartContractUID == donor).Reverse())
+                {
+                    var part = Math.Min(take, a.UnlockAmount);
+                    a.UnlockAmount -= part;
+                    take -= part;
+                    if (take == 0M) break;
+                }
+                moved.RemoveAll(a => a.UnlockAmount <= 0M);
+                var give = need;
+                foreach (var a in moved.Where(a => a.SmartContractUID == small))
+                {
+                    var part = Math.Min(give, (remaining.TryGetValue(a.LockId, out var r) ? r : a.UnlockAmount) - a.UnlockAmount);
+                    a.UnlockAmount += part;
+                    give -= part;
+                    if (give == 0M) break;
+                }
+                if (give != 0M) return null;
+            }
+            return moved;
         }
 
         /// <summary>
