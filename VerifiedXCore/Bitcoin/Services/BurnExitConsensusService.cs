@@ -764,8 +764,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 // ----------------------------------------------------------------
                 // First without the vaults whose coins could not pay the last attempt; with them if there is no other way.
                 var allocations = (vaultsThatCouldNotPay.Count == 0 ? null : BridgePoolUnlockService.ComputeExitAllocationPlan(
-                        record.Amount, new HashSet<string>(excludedContracts.Concat(vaultsThatCouldNotPay)), VBTCService.NextBlockHeight))
-                    ?? BridgePoolUnlockService.ComputeExitAllocationPlan(record.Amount, excludedContracts, VBTCService.NextBlockHeight);
+                        record.Amount, new HashSet<string>(excludedContracts.Concat(vaultsThatCouldNotPay)), VBTCService.NextBlockHeight, record.BtcDestination))
+                    ?? BridgePoolUnlockService.ComputeExitAllocationPlan(record.Amount, excludedContracts, VBTCService.NextBlockHeight, record.BtcDestination);
                 if (allocations == null || allocations.Count == 0)
                 {
                     record.Status = BurnExitStatus.Failed;

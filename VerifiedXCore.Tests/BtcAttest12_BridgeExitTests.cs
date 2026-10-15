@@ -747,6 +747,32 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// An exit paying a vault it draws on is refused, and the plan never looked at the destination: a burn to a watched
+        /// vault's deposit address was refused at every attempt and never paid (fifth review, round 23).
+        /// </summary>
+        [Fact]
+        public async Task AnExitToAVaultsOwnDepositAddress_IsPlannedOnOtherVaults()
+        {
+            await Start();
+            var first = await CreateVault(H1 + 1);
+            var second = await CreateVault(H1 + 2);
+            await Deposit(first.Script, 1_000_000);
+            await Deposit(second.Script, 1_000_000);
+            var firstLock = await Lock(first.Uid, 0.005M);
+            var secondLock = await Lock(second.Uid, 0.005M);
+            var firstAddress = BtcAttestStore.ScriptRowsForVault(first.Uid).First().DepositAddress;
+
+            var plan = BridgePoolUnlockService.ComputeExitAllocationPlan(0.002M, null, Tip + 1, firstAddress)!;
+            Assert.Equal(secondLock, Assert.Single(plan).LockId);
+            var (ok, why) = await Verify(Exit(NewBurn(), firstAddress, plan.Select(a => (a.LockId, a.SmartContractUID, a.UnlockAmount)).ToArray()), Tip + 1);
+            Assert.True(ok, why);
+            // Without the destination, the queue takes the first vault, and that exit is refused.
+            var queue = BridgePoolUnlockService.ComputeExitAllocationPlan(0.002M, null, Tip + 1)!;
+            Assert.Equal(firstLock, Assert.Single(queue).LockId);
+            Assert.False((await Verify(Exit(NewBurn(), firstAddress, (firstLock, first.Uid, 0.002M)), Tip + 1)).Item1);
+        }
+
+        /// <summary>
         /// Locks made before amounts were held to 8 places (VX-01) can hold a fraction of a satoshi; the plan drew it, and
         /// consensus, which takes whole satoshis from the path-audit rules (round 15), refused every plan that reached it
         /// (fifth review, round 16). A lock is drawn down to its last whole satoshi.

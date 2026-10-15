@@ -91,9 +91,12 @@ namespace VerifiedXCore.Bitcoin.Services
         /// The allocation plan for an exit that pays Bitcoin. From the recording height an exit draws on one kind of
         /// vault only: older vaults (paid the earlier way, by the handling caster) or vaults the chain watches (paid by
         /// the transaction consensus pins). Older vaults go first while they may still pay, so that they empty before
-        /// they are frozen at the enforcement height; from then on only watched vaults are used.
+        /// they are frozen at the enforcement height; from then on only watched vaults are used. A watched vault whose
+        /// deposit address (of any key) is <paramref name="btcDestination"/> is left out: an exit paying a vault it draws
+        /// on is refused, and a burn to such an address was refused at every attempt and never paid (fifth review,
+        /// round 23).
         /// </summary>
-        public static List<PoolUnlockAllocation>? ComputeExitAllocationPlan(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs, long height)
+        public static List<PoolUnlockAllocation>? ComputeExitAllocationPlan(decimal exitAmountBtc, HashSet<string>? excludeContractUIDs, long height, string? btcDestination = null)
         {
             if (!Attestation.BtcAttestRules.Recording(height))
                 return ComputeAllocationPlan(exitAmountBtc, excludeContractUIDs);
@@ -102,8 +105,13 @@ namespace VerifiedXCore.Bitcoin.Services
                 .Select(l => l.SmartContractUID).Distinct(StringComparer.Ordinal).ToList();
             var watched = contracts.Where(c => Attestation.BtcAttestBalance.IsAttestedVault(c)).ToHashSet(StringComparer.Ordinal);
             var older = contracts.Where(c => !watched.Contains(c)).ToHashSet(StringComparer.Ordinal);
+            var paidTo = new HashSet<string>(StringComparer.Ordinal);
+            if (!string.IsNullOrWhiteSpace(btcDestination) && Attestation.BtcCanonicalWithdrawal.TryDestinationScript(btcDestination, out var script))
+                foreach (var vault in watched)
+                    if (Attestation.BtcAttestStore.ScriptRowsForVault(vault).Any(k => k.ScriptHex == script))
+                        paidTo.Add(vault);
             HashSet<string> Without(HashSet<string> kind) =>
-                new HashSet<string>((excludeContractUIDs ?? new HashSet<string>()).Concat(kind), StringComparer.Ordinal);
+                new HashSet<string>((excludeContractUIDs ?? new HashSet<string>()).Concat(kind).Concat(paidTo), StringComparer.Ordinal);
 
             if (!Attestation.BtcLegacyFreeze.Active(height))
             {
