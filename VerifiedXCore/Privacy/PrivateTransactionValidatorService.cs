@@ -130,6 +130,13 @@ namespace VerifiedXCore.Privacy
             if (!ValidateVbtcPayloadFields(txRequest.TransactionType, payload, out var vbtcErr))
                 return (false, vbtcErr ?? "Invalid vBTC private payload.");
 
+            // Before the proof-rules height blocks do not judge proofs (round 32), but an 8.x node with its parameters loaded
+            // still does and refuses a bad one: this node does not admit a proof it would not judge, so it never proposes a
+            // block those nodes refuse. Wallets attach none before the height.
+            if (blockHeight == null && !PrivacyEpoch.ProofRulesActive(proofRulesHeight)
+                && (!string.IsNullOrWhiteSpace(payload.ProofB64) || !string.IsNullOrWhiteSpace(payload.FeeProofB64)))
+                return (false, PreEpochProofAdmissionReason);
+
             if (!skipPlonkProofVerification)
             {
                 var plonk = PlonkProofVerifier.TryValidatePrivateProofs(txRequest, payload!, blockDownloads, proofRulesHeight);
@@ -169,6 +176,8 @@ namespace VerifiedXCore.Privacy
 
             return (true, "Transaction has been verified.");
         }
+
+        internal const string PreEpochProofAdmissionReason = "Before the proof-rules height a private transaction carries no proof.";
 
         private static bool ValidateVbtcPayloadFields(TransactionType t, PrivateTxPayload payload, out string? err)
         {

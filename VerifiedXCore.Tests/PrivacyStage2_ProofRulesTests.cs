@@ -287,6 +287,22 @@ namespace VerifiedXCore.Tests
             Assert.True(ok, msg);
         }
 
+        /// <summary>
+        /// Below the height this node does not admit a proof (an 8.x node with its parameters loaded still judges one and
+        /// would refuse a block carrying a bad one), while a block carrying one is not judged on it (round 32).
+        /// </summary>
+        [Fact]
+        public async Task BelowTheHeight_AProofIsNotAdmitted_ButABlockCarryingOneIsNotJudgedOnIt()
+        {
+            TipBelow();
+            var withProof = Unshield(1M, new[] { RealNullifier() }, Array.Empty<PrivateShieldedOutput>(), proof: Convert.ToBase64String(new byte[64]));
+            var (admitted, why) = await TransactionValidatorService.VerifyTX(withProof);
+            Assert.False(admitted);
+            Assert.Equal(PrivateTransactionValidatorService.PreEpochProofAdmissionReason, why);
+            var (inBlock, whyBlock) = await TransactionValidatorService.VerifyTX(withProof, blockVerify: true, blockHeight: Height - 1);
+            Assert.True(inBlock, whyBlock);
+        }
+
         [Fact]
         public async Task InTheEpoch_ANodeThatCannotVerify_FailsClosed()
         {
