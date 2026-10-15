@@ -195,9 +195,15 @@ namespace VerifiedXCore.Privacy
                 // Each pool is rooted in its own shape: the epoch's tree for the pools the epoch reset (VFX), the legacy
                 // tree for every other (vBTC pools are history and stay as mined; rooting one as an epoch tree throws on its
                 // legacy leaves and failed the whole rebuild).
-                var assetsToRoot = new HashSet<string>(affected, StringComparer.Ordinal);
+                // One entry per pool as the store keys it (it ignores case): the reset pools' own keys first, then history's
+                // assets with the exact spelling preferred. A "vfx" asset mined before the rules fixed the spelling was a
+                // second entry, rooted last as a legacy tree over the VFX pool's leaves, and overwrote its root (fifth
+                // review, round 22).
+                var assetsToRoot = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 if (epochStarted)
                     foreach (var a in PrivacyEpochService.ResetAssets) assetsToRoot.Add(a);
+                foreach (var a in affected.OrderBy(a => PrivacyEpochService.ResetAssets.Contains(a) ? 0 : 1).ThenBy(a => a, StringComparer.Ordinal))
+                    assetsToRoot.Add(a);
                 bool FixedDepthFor(string asset) => epochStarted && PrivacyEpochService.IsEpochAsset(asset);
 
                 foreach (var a in assetsToRoot)

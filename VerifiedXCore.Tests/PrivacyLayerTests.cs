@@ -531,6 +531,41 @@ namespace VerifiedXCore.Tests
             Assert.True(first.TreePosition < second.TreePosition);
         }
 
+        /// <summary>
+        /// History can hold a VFX shield whose asset is spelled "vfx" (before the rules fixed it): the rebuild rooted it as
+        /// its own legacy pool over the VFX pool's leaves (the store ignores case) and overwrote the VFX root (round 22).
+        /// </summary>
+        [Fact]
+        public async Task PrivacyDbRebuild_RootsEachPoolOnce_WhateverItsSpellingInHistory()
+        {
+            Transaction Shield(string asset, byte seed)
+            {
+                var r = new byte[32];
+                Array.Fill(r, seed);
+                var g = new byte[PlonkNative.G1CompressedSize];
+                Assert.Equal(PlonkNative.Success, PlonkNative.pedersen_commit(seed, r, g));
+                var tx = new Transaction
+                {
+                    Timestamp = 99, FromAddress = "VFX_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", ToAddress = PrivacyConstants.ShieldedPoolAddress, Amount = 1.0m, Fee = 0.000003m, Nonce = 0,
+                    TransactionType = TransactionType.VFX_SHIELD, Signature = "sig",
+                    Data = JsonConvert.SerializeObject(new PrivateTxPayload { Asset = asset, Kind = "t2z", Outs = { new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(g) } } }),
+                };
+                tx.BuildPrivate();
+                return tx;
+            }
+            var blocks = new[] { new Block { Height = 2, Transactions = new List<Transaction> { Shield("VFX", 5) } } };
+            Assert.True((await PrivacyDbRebuildService.TryReplayPrivateBlocksAsync(blocks, _db)).Success);
+            var root = _db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE).FindOne(x => x.AssetType == "VFX")!.CurrentMerkleRoot;
+            var withVariant = new[] { blocks[0], new Block { Height = 3, Transactions = new List<Transaction> { Shield("vfx", 6) } } };
+            Assert.True((await PrivacyDbRebuildService.TryReplayPrivateBlocksAsync(withVariant, _db)).Success);
+            var rows = _db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE).FindAll().Where(x => string.Equals(x.AssetType, "VFX", StringComparison.OrdinalIgnoreCase)).ToList();
+            Assert.Single(rows);
+            Assert.NotEqual(root, rows[0].CurrentMerkleRoot);                                // rooted once, over both leaves, in its own shape
+            var single = new ShieldedMerkleStore("VFX", _db, false);
+            single.LoadLeavesFromCommitments();
+            Assert.Equal(2, single.LeafDigests.Count);
+        }
+
         [Fact]
         public async Task PrivacyDbRebuildService_ReplayFromSyntheticBlocks_Works()
         {
