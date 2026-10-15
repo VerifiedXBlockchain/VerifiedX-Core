@@ -141,86 +141,12 @@ namespace VerifiedXCore.Privacy
 
         // ── Before the height: the original optional-proof behaviour, unchanged ──────────────────────────────
 
-        private static (bool ok, string message) LegacyOptionalProofs(Transaction tx, PrivateTxPayload payload)
-        {
-            if (!PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType)
-                && tx.TransactionType != TransactionType.VFX_SHIELD
-                && tx.TransactionType != TransactionType.VBTC_V2_SHIELD)
-                return (true, "");
-
-            var hasMain = !string.IsNullOrWhiteSpace(payload.ProofB64);
-            var hasFee = !string.IsNullOrWhiteSpace(payload.FeeProofB64);
-
-            if (Globals.EnforcePlonkProofsForZk
-                && PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType)
-                && !hasMain)
-                return (false, "PLONK proof_b64 is required when EnforcePlonkProofsForZk is enabled.");
-
-            if (!hasMain && !hasFee)
-                return (true, "");
-
-            if (!PLONKSetup.IsProofVerificationImplemented)
-            {
-                // Proofs present but native verifier not shipped — allow until plonk_ffi is upgraded.
-                return (true, "");
-            }
-
-            if (hasMain)
-            {
-                byte[] proofBytes;
-                try
-                {
-                    proofBytes = Convert.FromBase64String(payload.ProofB64!);
-                }
-                catch
-                {
-                    return (false, "proof_b64 is not valid Base64.");
-                }
-
-                if (!PlonkPublicInputsV1.TryBuild(tx, payload, out var pubIn, out var err))
-                    return (false, err ?? "Could not build PLONK public inputs.");
-
-                var circuit = PlonkCircuitHelper.GetPrimaryCircuit(tx.TransactionType);
-                var vr = VerifyRaw(circuit, proofBytes, pubIn);
-                if (vr != PlonkVerifyResult.Valid)
-                {
-                    return vr switch
-                    {
-                        PlonkVerifyResult.Invalid => (false, "PLONK proof verification failed (primary circuit)."),
-                        PlonkVerifyResult.NotImplemented => (false, "PLONK verifier is not available (unexpected stub)."),
-                        _ => (false, "PLONK verifier returned an error (primary circuit).")
-                    };
-                }
-            }
-
-            if (hasFee && PlonkCircuitHelper.UsesFeeProof(tx.TransactionType))
-            {
-                byte[] feeProofBytes;
-                try
-                {
-                    feeProofBytes = Convert.FromBase64String(payload.FeeProofB64!);
-                }
-                catch
-                {
-                    return (false, "fee_proof_b64 is not valid Base64.");
-                }
-
-                if (!PlonkPublicInputsV1.TryBuildFeeCircuit(tx, payload, out var feePub, out var err2))
-                    return (false, err2 ?? "Could not build fee circuit public inputs.");
-
-                var vr = VerifyRaw(PlonkCircuitType.Fee, feeProofBytes, feePub);
-                if (vr != PlonkVerifyResult.Valid)
-                {
-                    return vr switch
-                    {
-                        PlonkVerifyResult.Invalid => (false, "PLONK fee proof verification failed."),
-                        PlonkVerifyResult.NotImplemented => (false, "PLONK fee verifier is not available (unexpected stub)."),
-                        _ => (false, "PLONK fee verifier returned an error.")
-                    };
-                }
-            }
-
-            return (true, "");
-        }
+        /// <summary>
+        /// Before the proof-rules height proofs are optional and are not checked: whether a node checked one depended on
+        /// whether it had loaded its proving parameters (a node just started, or without the download, took any proof)
+        /// and on which parameters (9.x's refuse proofs made under 8.x's): nodes judged one block differently (fifth
+        /// review, round 32). The pre-epoch rules do not rely on these proofs.
+        /// </summary>
+        private static (bool ok, string message) LegacyOptionalProofs(Transaction tx, PrivateTxPayload payload) => (true, "");
     }
 }

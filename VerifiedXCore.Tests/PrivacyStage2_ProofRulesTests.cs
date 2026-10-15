@@ -247,6 +247,22 @@ namespace VerifiedXCore.Tests
             Assert.Contains("already spent", msgSpent);
         }
 
+        /// <summary>
+        /// Below the height a proof is not judged, on any node: a node with its parameters loaded refused a proof another
+        /// node (none loaded, or 8.x's) took (round 32). The pre-epoch rules do not rely on proofs; one may be left out.
+        /// </summary>
+        [Fact]
+        public void BelowTheHeight_AProofIsNotJudged_OnAnyNode()
+        {
+            var tx = Unshield(1M, new[] { RealNullifier() }, Array.Empty<PrivateShieldedOutput>(), proof: Convert.ToBase64String(new byte[64]));
+            PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _);
+            foreach (var available in new[] { true, false })
+            {
+                PlonkProofVerifier.VerifierAvailable = () => available;
+                Assert.True(PlonkProofVerifier.TryValidatePrivateProofs(tx, payload!, false, Height - 1).ok);
+            }
+        }
+
         [Fact]
         public async Task InTheEpoch_ANodeThatCannotVerify_FailsClosed()
         {
