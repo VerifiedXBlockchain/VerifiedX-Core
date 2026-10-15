@@ -290,6 +290,11 @@ namespace VerifiedXCore.Tests
             var rawBody = new Transaction { TransactionType = TransactionType.VBTC_V2_CONTRACT_CREATE, Data = $"[{{\"Function\":\"Mint()\",\"ContractUID\":\"{uid}\",\"Data\":\"let AssetName = \\\"Café\\\"\nlet X = 1\",\"MD5List\":\"NA\"}}]" };
             Assert.Null(LedgerIntegrityRules.VbtcDataKeysAreDistinct(rawBody, Rule));
             Assert.Contains("plain ASCII", LedgerIntegrityRules.VbtcDataKeysAreDistinct(new Transaction { TransactionType = TransactionType.VBTC_V2_CONTRACT_CREATE, Data = rawBody.Data.Replace("\"MD5List\":\"NA\"", "\"MD5List\":\"N\nA\"") }, Rule));
+            // Round 30: the older token-transfer shape (to Token_Base, recipient in the data only) is refused from the rules.
+            var holder = _other.Address;
+            Assert.NotNull(LedgerIntegrityRules.TokenTransfer(holder, "Token_Base", holder, "Rrecipient", 1M, Rule));
+            Assert.Null(LedgerIntegrityRules.TokenTransfer(holder, "Token_Base", holder, "Rrecipient", 1M, Rule - 1));
+            Assert.Null(LedgerIntegrityRules.TokenTransfer(holder, "Rrecipient", holder, "Rrecipient", 1M, Rule));
             // Round 27: VFX goes to an address somebody can sign for.
             var signer = _other.Address;
             Assert.Null(LedgerIntegrityRules.VfxRecipientCanHoldIt(new Transaction { TransactionType = TransactionType.TX, ToAddress = signer }, Rule));

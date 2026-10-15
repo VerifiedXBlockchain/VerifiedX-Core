@@ -19,9 +19,13 @@ namespace VerifiedXCore.Services
 
         public const string LegacyTokenTransferToAddress = "Token_Base";
 
-        public static string? TokenTransfer(string txFrom, string txTo, string? dataFrom, string? dataTo, decimal? amount)
+        public static string? TokenTransfer(string txFrom, string txTo, string? dataFrom, string? dataTo, decimal? amount, long? height = null)
         {
             if (dataFrom != txFrom) return "Token transfer FromAddress must be the transaction signer.";
+            // From the path-audit rules the older shape is refused: to a recipient with no account yet, the apply credited
+            // the tokens to an account keyed "Token_Base", and the recipient never had them (fifth review, round 30).
+            if (height != null && height.Value >= Globals.PathAuditRulesHeight && txTo == LegacyTokenTransferToAddress)
+                return "A token transfer is addressed to its recipient (ToAddress), not to Token_Base.";
             // Older wallets addressed token transfers to "Token_Base" with the recipient only in the data; that shape is in
             // the chain history (found by the replay scan: 193 testnet transactions) and must keep replaying. The holder
             // signs the data, so the data recipient is authorised either way; the binding is a consistency rule.
