@@ -535,30 +535,18 @@ namespace VerifiedXCore.Controllers
                         if (payload == null)
                             continue;
 
-                        // --- Mark wallet notes consumed by this tx's nullifiers ---
-                        // Use commitment-string matching: look up CommitmentRecord by tree position
-                        // to get its commitment string, then match against wallet commitment strings.
-                        if (payload.SpentCommitmentTreePositions != null && payload.SpentCommitmentTreePositions.Count > 0)
+                        // --- Mark wallet notes consumed by this tx's nullifiers (each note's own; round 22) ---
+                        foreach (var uc in w.UnspentCommitments ?? new List<UnspentCommitment>())
                         {
-                            var spentCommitmentStrings = PrivacyApiHelper.LookupCommitmentStringsByTreePositions(
-                                payload.SpentCommitmentTreePositions, payload.Asset);
-
-                            if (spentCommitmentStrings.Count > 0)
-                            {
-                                foreach (var uc in w.UnspentCommitments ?? new List<UnspentCommitment>())
-                                {
-                                    if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
-                                        continue;
-                                    if (spentCommitmentStrings.Contains(uc.Commitment))
-                                    {
-                                        uc.IsSpent = true;
-                                        notesMarkedSpent++;
-                                        var assetKey = uc.AssetType ?? "";
-                                        if (w.ShieldedBalances.ContainsKey(assetKey))
-                                            w.ShieldedBalances[assetKey] -= uc.Amount;
-                                    }
-                                }
-                            }
+                            if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
+                                continue;
+                            if (!PrivacyApiHelper.SpendsWalletNote(payload, uc, keys, block.Height))
+                                continue;
+                            uc.IsSpent = true;
+                            notesMarkedSpent++;
+                            var assetKey = uc.AssetType ?? "";
+                            if (w.ShieldedBalances.ContainsKey(assetKey))
+                                w.ShieldedBalances[assetKey] -= uc.Amount;
                         }
 
                         // --- Detect new incoming notes ---
@@ -1337,30 +1325,20 @@ namespace VerifiedXCore.Controllers
                         if (payload == null)
                             continue;
 
-                        // Mark wallet notes consumed by this tx's nullifiers
-                        if (payload.SpentCommitmentTreePositions != null && payload.SpentCommitmentTreePositions.Count > 0)
+                        // Mark wallet notes consumed by this tx's nullifiers (each note's own; round 22)
+                        foreach (var uc in w.UnspentCommitments ?? new List<UnspentCommitment>())
                         {
-                            var spentCommitmentStrings = PrivacyApiHelper.LookupCommitmentStringsByTreePositions(
-                                payload.SpentCommitmentTreePositions, payload.Asset);
-
-                            if (spentCommitmentStrings.Count > 0)
-                            {
-                                foreach (var uc in w.UnspentCommitments ?? new List<UnspentCommitment>())
-                                {
-                                    if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
-                                        continue;
-                                    if (!string.Equals(uc.AssetType, asset, StringComparison.Ordinal))
-                                        continue;
-                                    if (spentCommitmentStrings.Contains(uc.Commitment))
-                                    {
-                                        uc.IsSpent = true;
-                                        notesMarkedSpent++;
-                                        var assetKey = uc.AssetType ?? "";
-                                        if (w.ShieldedBalances.ContainsKey(assetKey))
-                                            w.ShieldedBalances[assetKey] -= uc.Amount;
-                                    }
-                                }
-                            }
+                            if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
+                                continue;
+                            if (!string.Equals(uc.AssetType, asset, StringComparison.Ordinal))
+                                continue;
+                            if (!PrivacyApiHelper.SpendsWalletNote(payload, uc, keys, block.Height))
+                                continue;
+                            uc.IsSpent = true;
+                            notesMarkedSpent++;
+                            var assetKey = uc.AssetType ?? "";
+                            if (w.ShieldedBalances.ContainsKey(assetKey))
+                                w.ShieldedBalances[assetKey] -= uc.Amount;
                         }
 
                         // Detect new incoming vBTC notes
