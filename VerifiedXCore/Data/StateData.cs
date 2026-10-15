@@ -1382,7 +1382,11 @@ namespace VerifiedXCore.Data
                     // is left to settle, as a call-back of it is refused: Recover() took it back a block late, or across a
                     // halt, from a payee that had waited for it (fifth review, round 29).
                     if (height >= Globals.PathAuditRulesHeight && blockTimestamp > 0)
-                        pendingTXList = pendingTXList.Where(x => x.ConfirmTimestamp > LedgerIntegrityRules.NowForAgeRules(blockTimestamp)).ToList();
+                        // Left only when its settlement is judged by the same rules (still covered, still stands): a row that
+                        // fell due just before the activation block, settling under the older rules, was paid to its payee
+                        // after the sweep below had moved the vBTC behind it (round 30).
+                        pendingTXList = pendingTXList.Where(x => x.ConfirmTimestamp > LedgerIntegrityRules.NowForAgeRules(blockTimestamp)
+                            || !PathAuditRulesAtTime(x.ConfirmTimestamp)).ToList();
                     
                     foreach(var rTX in pendingTXList) 
                     {

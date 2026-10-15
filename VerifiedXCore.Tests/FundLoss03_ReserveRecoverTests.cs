@@ -164,12 +164,23 @@ namespace VerifiedXCore.Tests
                 ConfirmTimestamp = now - 3_600, UnlockTime = now - 3_600, Signature = "s", Height = 1,
             };
             ReserveTransactions.GetReserveTransactionsDb()!.Insert(row);
+            // The activation block, before the row fell due: its settlement is judged by the same rules.
+            BlockchainData.GetBlocks().InsertSafe(new Block { Height = Globals.PathAuditRulesHeight, Hash = "gate", StateRoot = "g", Timestamp = now - 7_200, Transactions = new List<Transaction>() });
+            // A row that fell due before the activation block settles under the older rules: it is taken back (round 30).
+            var older = new ReserveTransactions
+            {
+                Id = Guid.NewGuid(), Hash = new string('f', 64), FromAddress = _reserve, ToAddress = payee, Amount = 1M,
+                TransactionType = TransactionType.TX, ReserveTransactionStatus = ReserveTransactionStatus.Pending,
+                ConfirmTimestamp = now - 9_000, UnlockTime = now - 9_000, Signature = "s", Height = 1,
+            };
+            ReserveTransactions.GetReserveTransactionsDb()!.Insert(older);
             var sigTime = now;
             var recover = Recover(new { Function = "Recover()", RecoveryAddress = _recoveryAddress, RecoverySigScript = RecoverySig(sigTime, _recoveryAddress), SignatureTime = sigTime });
             var height = Math.Max(Globals.PathAuditRulesHeight, Gate);
             recover.Height = height;
             await StateData.UpdateTreis(new Block { Height = height, StateRoot = "root", Timestamp = now, Transactions = new List<Transaction> { recover } });
             Assert.Equal(ReserveTransactionStatus.Pending, ReserveTransactions.GetTransactions(row.Hash)!.ReserveTransactionStatus);
+            Assert.Equal(ReserveTransactionStatus.Recovered, ReserveTransactions.GetTransactions(older.Hash)!.ReserveTransactionStatus);
         }
 
         [Fact]
