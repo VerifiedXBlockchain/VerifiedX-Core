@@ -648,6 +648,11 @@ namespace VerifiedXCore.Utilities
                     Console.WriteLine($"[ResetTreis] Warning: Could not wipe Mempool: {ex.Message}");
                 }
 
+                // Every snapshot slot holds the state this rebuild replaces. Replay stamps rows with their
+                // original block heights, so a diff cycle would never copy them into those slots; mark them
+                // Invalid so the next cycles full-copy the rebuilt state and a restore cannot bring the old back.
+                StateSnapshotService.InvalidateAbove(-1);
+
                 WipeChainDerivedState();
 
                 DbContext.DB.Checkpoint();
