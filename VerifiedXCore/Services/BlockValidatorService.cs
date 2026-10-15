@@ -1721,8 +1721,10 @@ namespace VerifiedXCore.Services
 
                                 if (mempool != null)
                                 {
-                                    var mempoolTx = mempool.FindAll().Where(x => x.Hash == localFromTransaction.Hash);
-                                    if (mempoolTx.Count() > 0)
+                                    // Through the hash index: the whole mempool was read for each of the block's transactions
+                                    // (fifth review, round 34). The same exact comparison.
+                                    var mempoolTx = mempool.Find(x => x.Hash == localFromTransaction.Hash).Where(x => x.Hash == localFromTransaction.Hash);
+                                    if (mempoolTx.Any())
                                     {
                                         mempool.DeleteManySafe(x => x.Hash == localFromTransaction.Hash);
                                         TransactionData.ReleasePrivateMempoolNullifiersForTx(localFromTransaction.Hash);
