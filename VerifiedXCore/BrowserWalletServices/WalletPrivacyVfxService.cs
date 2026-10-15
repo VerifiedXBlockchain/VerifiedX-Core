@@ -230,7 +230,7 @@ namespace VerifiedXCore.BrowserWalletServices
             foreach (var u in w.UnspentCommitments ?? new List<UnspentCommitment>())
             {
                 if (!string.IsNullOrEmpty(u.Commitment))
-                    merged.Add(u.Commitment);
+                    merged.Add(PrivacyApiHelper.NoteIdentity(u));
             }
 
             for (long h = scanFrom; h <= scanTo; h++)
@@ -270,7 +270,7 @@ namespace VerifiedXCore.BrowserWalletServices
                         if (!ShieldedPlainNoteCodec.TryDeserializeUtf8(plain, out var note, out _) || note == null)
                             continue;
                         var c = o.CommitmentB64;
-                        if (string.IsNullOrEmpty(c) || merged.Contains(c))
+                        if (string.IsNullOrEmpty(c) || merged.Contains(PrivacyApiHelper.NoteIdentity(c, note.Amount, note.RandomnessB64)))
                             continue;
                         byte[] r32 = Array.Empty<byte>();
                         if (!string.IsNullOrEmpty(note.RandomnessB64))
@@ -280,7 +280,7 @@ namespace VerifiedXCore.BrowserWalletServices
                         }
                         w.UnspentCommitments ??= new List<UnspentCommitment>();
                         if (!PrivacyApiHelper.NoteMatchesOutput(o, note.Amount, r32, keys, note.AssetType, out var matchedPos)) continue; // the note is the output it came with (round 22)
-                        merged.Add(c); // seen once it matched: a copy that does not match hid the real output (round 24)
+                        merged.Add(PrivacyApiHelper.NoteIdentity(c, note.Amount, note.RandomnessB64)); // seen once it matched: a copy that does not match hid the real output (round 24)
                         newNotes++;
                         w.UnspentCommitments.Add(new UnspentCommitment
                         {

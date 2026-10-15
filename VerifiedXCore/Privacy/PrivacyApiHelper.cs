@@ -198,6 +198,30 @@ namespace VerifiedXCore.Privacy
         /// Reloads the wallet fresh from DB to avoid overwriting concurrent auto-scanner changes.
         /// Persists immediately.
         /// </summary>
+        /// <summary>
+        /// A wallet's name for one note: its commitment, amount and randomness. Not the commitment alone: in the epoch no
+        /// proof covers the commitment, and an output carrying the commitment of a note on its way to this wallet, applied
+        /// first, made the real note "already known" to every scan and resync, and marking one spent marked both (fifth
+        /// review, round 32).
+        /// </summary>
+        public static string NoteIdentity(string? commitment, decimal amount, byte[]? randomness) =>
+            $"{commitment}|{amount.ToString("0.############################", System.Globalization.CultureInfo.InvariantCulture)}|{Convert.ToBase64String(randomness ?? Array.Empty<byte>())}";
+
+        /// <summary><see cref="NoteIdentity(string, decimal, byte[])"/> of a sealed note's randomness as carried (Base64).</summary>
+        public static string NoteIdentity(string? commitment, decimal amount, string? randomnessB64)
+        {
+            byte[] r = Array.Empty<byte>();
+            if (!string.IsNullOrEmpty(randomnessB64))
+            {
+                try { r = Convert.FromBase64String(randomnessB64); }
+                catch { /* as the scans take it: none */ }
+            }
+            return NoteIdentity(commitment, amount, r);
+        }
+
+        /// <summary><see cref="NoteIdentity(string, decimal, byte[])"/> of a wallet note.</summary>
+        public static string NoteIdentity(UnspentCommitment note) => NoteIdentity(note.Commitment, note.Amount, note.Randomness);
+
         public static void MarkInputsSpentLocally(string zfxAddress, IReadOnlyList<UnspentCommitment> spentInputs, string assetType)
         {
             if (string.IsNullOrEmpty(zfxAddress) || spentInputs == null || spentInputs.Count == 0)
@@ -212,14 +236,14 @@ namespace VerifiedXCore.Privacy
                     return;
 
                 var spentCommitments = new HashSet<string>(
-                    spentInputs.Select(i => i.Commitment).Where(c => !string.IsNullOrEmpty(c)),
+                    spentInputs.Where(i => i != null && !string.IsNullOrEmpty(i.Commitment)).Select(NoteIdentity),
                     StringComparer.Ordinal);
 
                 foreach (var uc in fresh.UnspentCommitments ?? new List<UnspentCommitment>())
                 {
                     if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
                         continue;
-                    if (spentCommitments.Contains(uc.Commitment))
+                    if (spentCommitments.Contains(NoteIdentity(uc)))
                     {
                         uc.IsSpent = true;
                         if (fresh.ShieldedBalances.ContainsKey(assetType))
@@ -252,7 +276,7 @@ namespace VerifiedXCore.Privacy
                     return;
 
                 var commitmentSet = new HashSet<string>(
-                    spentInputs.Select(i => i.Commitment).Where(c => !string.IsNullOrEmpty(c)),
+                    spentInputs.Where(i => i != null && !string.IsNullOrEmpty(i.Commitment)).Select(NoteIdentity),
                     StringComparer.Ordinal);
                 TryGetViewingKeyMaterial(fresh, out var keys, out _);
                 var epoch = PrivacyEpoch.ProofRulesActive((Globals.LastBlock?.Height ?? 0) + 1);
@@ -266,7 +290,7 @@ namespace VerifiedXCore.Privacy
                     if (keys != null && VfxPrivateTransactionBuilder.NullifierOf(uc, keys, epoch) is { } nullifier
                         && NullifierService.IsNullifierSpentInDb(nullifier, uc.AssetType ?? assetType))
                         continue;
-                    if (commitmentSet.Contains(uc.Commitment))
+                    if (commitmentSet.Contains(NoteIdentity(uc)))
                     {
                         uc.IsSpent = false;
                         if (fresh.ShieldedBalances.ContainsKey(assetType))
@@ -407,9 +431,9 @@ namespace VerifiedXCore.Privacy
                             && FeeNoteMatchesLeg(tx, payload, feeNote, keys, out var feeMatchedPos)) // the leaf the ledger appended (round 23)
                         {
                             var feeC = payload.FeeOutputCommitmentB64;
-                            if (!string.IsNullOrEmpty(feeC) && !merged.Contains(feeC))
+                            if (!string.IsNullOrEmpty(feeC) && !merged.Contains(NoteIdentity(feeC, feeNote.Amount, feeNote.RandomnessB64)))
                             {
-                                merged.Add(feeC);
+                                merged.Add(NoteIdentity(feeC, feeNote.Amount, feeNote.RandomnessB64));
                                 result.NotesFound++;
 
                                 byte[] feeR32 = Array.Empty<byte>();
@@ -458,7 +482,7 @@ namespace VerifiedXCore.Privacy
                             continue;
 
                         var c = o.CommitmentB64;
-                        if (string.IsNullOrEmpty(c) || merged.Contains(c))
+                        if (string.IsNullOrEmpty(c) || merged.Contains(PrivacyApiHelper.NoteIdentity(c, note.Amount, note.RandomnessB64)))
                             continue;
 
                         byte[] r32 = Array.Empty<byte>();
@@ -470,7 +494,7 @@ namespace VerifiedXCore.Privacy
 
 
                         if (!NoteMatchesOutput(o, note.Amount, r32, keys, note.AssetType, out var matchedPos)) continue; // the note is the output it came with (round 22)
-                        merged.Add(c); // seen once it matched: a copy that does not match hid the real output (round 24)
+                        merged.Add(PrivacyApiHelper.NoteIdentity(c, note.Amount, note.RandomnessB64)); // seen once it matched: a copy that does not match hid the real output (round 24)
                         result.NotesFound++;
                         w.UnspentCommitments.Add(new UnspentCommitment
                         {

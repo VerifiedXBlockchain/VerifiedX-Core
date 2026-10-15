@@ -241,7 +241,7 @@ namespace VerifiedXCore.Privacy
                             bool feeAlreadyExists = false;
                             foreach (var existing in w.UnspentCommitments)
                             {
-                                if (existing != null && string.Equals(existing.Commitment, feeC, StringComparison.Ordinal))
+                                if (existing != null && PrivacyApiHelper.NoteIdentity(existing) == PrivacyApiHelper.NoteIdentity(feeC, feeNote.Amount, feeNote.RandomnessB64))
                                 { feeAlreadyExists = true; break; }
                             }
                             if (feeAlreadyExists)
@@ -310,12 +310,12 @@ namespace VerifiedXCore.Privacy
                         if (string.IsNullOrEmpty(c))
                             continue;
 
-                        // Check if we already have this commitment
+                        // Check if we already have this note (not this commitment: round 32)
                         w.UnspentCommitments ??= new List<UnspentCommitment>();
                         bool alreadyExists = false;
                         foreach (var existing in w.UnspentCommitments)
                         {
-                            if (existing != null && string.Equals(existing.Commitment, c, StringComparison.Ordinal))
+                            if (existing != null && PrivacyApiHelper.NoteIdentity(existing) == PrivacyApiHelper.NoteIdentity(c, note.Amount, note.RandomnessB64))
                             {
                                 alreadyExists = true;
                                 break;

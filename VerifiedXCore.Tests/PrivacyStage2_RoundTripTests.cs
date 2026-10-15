@@ -363,6 +363,38 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A real note sent to the wallet, applied first with the commitment of another note on its way to the wallet,
+        /// made that note "already known": every scan and resync skipped it, and marking the first spent marked both
+        /// (fifth review, round 32). Each note is its own (commitment, amount, randomness).
+        /// </summary>
+        [Fact]
+        public async Task ANoteCarryingAnothersCommitment_DoesNotHideIt()
+        {
+            if (!ParamsLoaded()) return;
+            var real = ShieldFor(_alice, 5M);
+            PrivateTxPayloadCodec.TryDecode(real.Data, out var realPayload, out _);
+            var small = ShieldFor(_alice, 1M);
+            var copy = Tampered(small, (p, _) => p.Outs[0].CommitmentB64 = realPayload!.Outs[0].CommitmentB64);
+            await Apply(copy, Height + 1);
+            await Apply(real, Height + 1);
+            var block = new Block { Height = Height + 1, StateRoot = "root", Timestamp = 1_700_000_000 + Height + 1, Hash = "copied-commitment", Transactions = new List<Transaction> { copy, real } };
+            BlockchainData.GetBlocks().InsertSafe(block);
+            ShieldedWalletService.Upsert(new ShieldedWallet { ShieldedAddress = _alice.ZfxAddress, ViewingKey = _alice.ViewingKey32, IsViewOnly = true });
+
+            var result = PrivacyApiHelper.ResyncShieldedWallet(_alice.ZfxAddress, Height + 1, Height + 1);
+            Assert.True(string.IsNullOrEmpty(result.Error), result.Error);
+            var wallet = ShieldedWalletService.FindByZfxAddress(_alice.ZfxAddress)!;
+            Assert.Equal(new[] { 1M, 5M }, wallet.UnspentCommitments.Select(n => n.Amount).OrderBy(a => a));
+            Assert.Equal(6M, wallet.ShieldedBalances["VFX"]);
+
+            // Marking the small note spent leaves the real one.
+            PrivacyApiHelper.MarkInputsSpentLocally(_alice.ZfxAddress, new[] { wallet.UnspentCommitments.Single(n => n.Amount == 1M) }, "VFX");
+            wallet = ShieldedWalletService.FindByZfxAddress(_alice.ZfxAddress)!;
+            Assert.False(wallet.UnspentCommitments.Single(n => n.Amount == 5M).IsSpent);
+            Assert.Equal(5M, wallet.ShieldedBalances["VFX"]);
+        }
+
+        /// <summary>
         /// Wallets took a note's tree position from the first leaf with its commitment: a copy applied before it gave the
         /// note a position it cannot be spent from, and the browser scans took 0 (fifth review, round 25). The matched
         /// leaf's position is taken.

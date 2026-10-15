@@ -237,7 +237,7 @@ namespace VerifiedXCore.Privacy
 
             void TryCollect(string? commitmentB64, string? encryptedNoteB64, string? txHash, long height)
             {
-                if (string.IsNullOrWhiteSpace(commitmentB64) || string.IsNullOrWhiteSpace(encryptedNoteB64) || seen.Contains(commitmentB64))
+                if (string.IsNullOrWhiteSpace(commitmentB64) || string.IsNullOrWhiteSpace(encryptedNoteB64))
                     return;
                 byte[] enc;
                 try { enc = Convert.FromBase64String(encryptedNoteB64); } catch { return; }
@@ -249,6 +249,11 @@ namespace VerifiedXCore.Privacy
                     return;
                 byte[] r32 = Array.Empty<byte>();
                 try { r32 = Convert.FromBase64String(note.RandomnessB64 ?? ""); } catch { }
+                // Seen as this note, not as its commitment: a deposit carrying the commitment of one on its way here,
+                // applied first, hid it from the scan (round 32).
+                var identity = PrivacyApiHelper.NoteIdentity(commitmentB64, note.Amount, r32);
+                if (seen.Contains(identity))
+                    return;
 
                 // A note in the pool is listed only as a leaf the chain applied for its amount and randomness: the amount
                 // in a sealed note is what its sender wrote, and a note claiming more on someone's commitment was listed
@@ -260,7 +265,7 @@ namespace VerifiedXCore.Privacy
                     if (rec == null)
                         return;
                 }
-                seen.Add(commitmentB64);
+                seen.Add(identity);
 
                 var raw = new RawNote
                 {
