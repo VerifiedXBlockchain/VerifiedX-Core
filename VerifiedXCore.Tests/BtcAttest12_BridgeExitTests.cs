@@ -659,6 +659,31 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// The handler fails the part of an older exit some vaults could not sign and completes the rest. A failure marked
+        /// the whole exit failed: a completion mined later was refused, the burn was never consumed, and the burn could be
+        /// exited again, the paid part paid twice (fifth review, round 21). A partial failure leaves the exit open.
+        /// </summary>
+        [Fact]
+        public async Task APartialFailureOfAnOlderExit_LeavesItOpenForItsCompletion()
+        {
+            var older = await CreateVault(H1 - 50);
+            await Start();
+            var first = await Lock(older.Uid, 0.002M);
+            var second = await Lock(older.Uid, 0.002M);
+            var burn = NewBurn();
+            var exit = await Mine(Exit(burn, BtcDest, (first, older.Uid, 0.001M), (second, older.Uid, 0.001M)));
+            await Mine(ExitFail(burn, exit, (second, older.Uid, 0.001M)));
+
+            var record = Record(burn);
+            Assert.False(record.IsFailedRecord);
+            Assert.False(record.IsComplete);
+            Assert.Equal(first, Assert.Single(JsonConvert.DeserializeObject<List<PoolUnlockAllocation>>(record.AllocationsJson!)!).LockId);
+            await RefusedInBlock(Exit(burn, BtcDest, (second, older.Uid, 0.001M)), "Duplicate Base burn");
+            var (ok, why) = await Verify(ExitComplete(burn, new string('c', 64)), Tip + 1);
+            Assert.True(ok, why);
+        }
+
+        /// <summary>
         /// The plan takes the oldest locks first and gave up when a vault's share came out under the smallest part an
         /// exit may have. One small lock at the front of the queue (a remnant of an earlier exit, or one made on purpose)
         /// then ended the plan for every exit that reached it. The vault is left out and the plan made without it.

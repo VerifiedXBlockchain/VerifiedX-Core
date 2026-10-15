@@ -3935,6 +3935,28 @@ namespace VerifiedXCore.Data
 
                 // Mark the BTC exit state as failed (if it exists)
                 var exitState = VBTCBridgeBtcExitState.GetByBurnTxHash(baseBurnTxHash.Trim());
+                // From the recording height a failure of part of an exit (the handler's, when some vaults could not sign
+                // and the rest paid) leaves the exit open for its completion: marked failed, its completion was refused
+                // if mined later, its burn was never consumed, and it could be exited again and the paid part paid
+                // twice (fifth review, round 21). The failed parts leave the exit's plan.
+                if (exitState != null && !exitState.IsComplete && VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(tx.Height))
+                {
+                    var planned = JsonConvert.DeserializeObject<List<PoolUnlockAllocation>>(exitState.AllocationsJson ?? "[]") ?? new List<PoolUnlockAllocation>();
+                    var remaining = new List<PoolUnlockAllocation>(planned);
+                    foreach (var failed in failedAllocations)
+                    {
+                        var match = remaining.FindIndex(a => a.LockId == failed.LockId && a.UnlockAmount == failed.UnlockAmount);
+                        if (match >= 0) remaining.RemoveAt(match);
+                    }
+                    if (remaining.Count > 0 && remaining.Count < planned.Count)
+                    {
+                        exitState.AllocationsJson = JsonConvert.SerializeObject(remaining);
+                        VBTCBridgeBtcExitState.Update(exitState);
+                        SCLogUtility.Log($"ApplyVBTCBridgeExitToBTCFail: part of the exit for burn {baseBurnTxHash} failed ({failedAllocations.Count} allocation(s)); {remaining.Count} still open for completion.",
+                            "StateData.ApplyVBTCBridgeExitToBTCFail()");
+                        return;
+                    }
+                }
                 if (exitState != null && !exitState.IsComplete)
                 {
                     exitState.IsComplete = true; // Mark as "done" so the retry creates a new record
