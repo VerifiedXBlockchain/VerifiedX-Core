@@ -69,6 +69,14 @@ namespace VerifiedXCore.Privacy
                 return (false, proofShapeError);
             if (proofRulesHeight >= Globals.PathAuditRulesHeight && EncodingRefusal(txRequest, payload) is { } encoding)
                 return (false, encoding);
+            // At most two notes spent and two made. Before the proof rules nothing bounded them but the Data cap: a
+            // transfer from the pool (no proof, no sender, its fee paid by the pool) carried about 100 made-up outputs,
+            // fifty a block put about 5,000 leaves a block into the pool at no cost, and every node's work per private
+            // transaction grows with the pool (fifth review, round 33). Admission at every height (wallets make at most
+            // two of each); blocks from the path-audit height.
+            if ((blockHeight == null || proofRulesHeight >= Globals.PathAuditRulesHeight)
+                && (payload.Outs.Count > MaxNotesPerSide || payload.NullsB64.Count > MaxNotesPerSide))
+                return (false, TooManyNotesReason);
 
             if (payload.NullsB64.Count > 0)
             {
@@ -176,6 +184,11 @@ namespace VerifiedXCore.Privacy
 
             return (true, "Transaction has been verified.");
         }
+
+        /// <summary>Notes a private transaction may spend, and make (consensus: not the wallets' configurable limits).</summary>
+        internal const int MaxNotesPerSide = 2;
+
+        internal const string TooManyNotesReason = "A private transaction spends at most two notes and makes at most two.";
 
         internal const string PreEpochProofAdmissionReason = "Before the proof-rules height a private transaction carries no proof.";
 

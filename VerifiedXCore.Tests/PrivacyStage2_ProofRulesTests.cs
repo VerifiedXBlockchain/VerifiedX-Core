@@ -303,6 +303,37 @@ namespace VerifiedXCore.Tests
             Assert.True(inBlock, whyBlock);
         }
 
+        /// <summary>
+        /// At most two notes spent and two made: a pool transfer with a hundred made-up outputs put thousands of leaves a
+        /// block into the pool at no cost (round 33). Refused at admission at every height and in blocks from the
+        /// path-audit height; a block below it is judged as before.
+        /// </summary>
+        [Fact]
+        public async Task APrivateTransactionWithMoreThanTwoNotesASide_IsRefused()
+        {
+            var priorAudit = Globals.PathAuditRulesHeight;
+            try
+            {
+                Globals.PathAuditRulesHeight = Height - 10;
+                TipBelow();
+                var many = Unshield(1M, new[] { RealNullifier() }, new[] { Output(0, 0), Output(1, 0), Output(2, 0) });
+                var (admitted, why) = await TransactionValidatorService.VerifyTX(many);
+                Assert.False(admitted);
+                Assert.Equal(PrivateTransactionValidatorService.TooManyNotesReason, why);
+                var (inBlock, whyBlock) = await TransactionValidatorService.VerifyTX(many, blockVerify: true, blockHeight: Height - 5);
+                Assert.False(inBlock);
+                Assert.Equal(PrivateTransactionValidatorService.TooManyNotesReason, whyBlock);
+                var spends = Unshield(1M, new[] { RealNullifier(), RealNullifier(), RealNullifier() }, Array.Empty<PrivateShieldedOutput>());
+                Assert.Equal(PrivateTransactionValidatorService.TooManyNotesReason, (await TransactionValidatorService.VerifyTX(spends)).Item2);
+
+                // Below the path-audit height a block is judged as before.
+                Globals.PathAuditRulesHeight = Height + 10;
+                var (old, whyOld) = await TransactionValidatorService.VerifyTX(many, blockVerify: true, blockHeight: Height - 1);
+                Assert.True(old, whyOld);
+            }
+            finally { Globals.PathAuditRulesHeight = priorAudit; }
+        }
+
         [Fact]
         public async Task InTheEpoch_ANodeThatCannotVerify_FailsClosed()
         {
