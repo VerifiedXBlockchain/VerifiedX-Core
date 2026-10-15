@@ -244,6 +244,45 @@ namespace VerifiedXCore.Tests
             Assert.Equal(variant.LeafDigests.Count, cached.LeafDigests.Count);
         }
 
+        /// <summary>
+        /// A pool's root from its frontier is the root computed level by level, at every size, for both tree shapes, in
+        /// the store that appends and in one that loads the pool afresh (round 33).
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void APoolsFrontierRoot_IsTheFullRoot_AtEverySize(bool fixedDepth)
+        {
+            var asset = fixedDepth ? "VFX" : "VBTC:frontier-" + Guid.NewGuid().ToString("N");
+            var writer = new ShieldedMerkleStore(asset, Db, fixedDepth);
+            writer.LoadLeavesFromCommitments();
+            Assert.Equal(writer.FullRoot(), writer.GetRootBytes());
+            var random = new Random(7);
+            for (var n = 1; n <= 2100; n++)
+            {
+                if (fixedDepth)
+                    writer.AppendCommitment(new byte[PlonkNative.G1CompressedSize], PrivacyField.RandomCanonical(), Height + 1, 1);
+                else
+                {
+                    var g1 = new byte[PlonkNative.G1CompressedSize];
+                    random.NextBytes(g1);
+                    writer.AppendG1Commitment(g1, Height - 5, 1);
+                }
+                Assert.True(writer.RootFromFrontier);
+                if (n <= 300 || (n >= 510 && n <= 514) || (n >= 1022 && n <= 1026) || n >= 2046 && n <= 2050 || n == 2100)
+                    Assert.Equal(writer.FullRoot(), writer.GetRootBytes());
+                if (n == 1 || n == 2 || n == 3 || n == 64 || n == 777 || n == 2049)
+                {
+                    var reader = new ShieldedMerkleStore(asset, Db, fixedDepth);
+                    reader.LoadLeavesFromCommitments();
+                    Assert.Equal(n, reader.LeafDigests.Count);
+                    Assert.True(reader.RootFromFrontier);
+                    Assert.Equal(reader.FullRoot(), reader.GetRootBytes());
+                    Assert.Equal(writer.FullRoot(), reader.GetRootBytes());
+                }
+            }
+        }
+
         [Fact]
         public void AtTheHeight_OnlyTheVfxPoolIsReset_VbtcPoolRowsStay()
         {

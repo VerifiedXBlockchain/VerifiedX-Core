@@ -22,6 +22,7 @@ namespace VerifiedXCore.Privacy
         private readonly string _assetType;
         private readonly bool _fixedDepth;
         private readonly List<byte[]> _leafDigests = new();
+        private MerkleFrontier? _frontier; // null once it cannot follow the leaves: the root is then computed in full, as before
 
         /// <summary>The tree as the NEXT block will see it (tip + 1). Wallet and API reads only: block application and replay pass the height of the block they apply.</summary>
         public ShieldedMerkleStore(string assetType, LiteDatabase? privacyDb = null)
@@ -35,6 +36,7 @@ namespace VerifiedXCore.Privacy
             _assetType = assetType ?? throw new ArgumentNullException(nameof(assetType));
             _db = privacyDb ?? PrivacyDbContext.GetPrivacyDb();
             _fixedDepth = fixedDepth;
+            _frontier = new MerkleFrontier(fixedDepth);
         }
 
         /// <summary>
@@ -81,12 +83,26 @@ namespace VerifiedXCore.Privacy
                     _fullLeafLoadsOnThisThread++;
                     var rows = col.Query().Where(x => x.AssetType == _assetType).OrderBy(x => x.TreePosition).ToList();
                     cache.Digests = rows.Select(DigestOf).ToList();
+                    cache.Frontiers.Clear();
                     cache.LastId = rows.Count > 0 ? rows[^1].Id : null;
                     cache.LastPosition = rows.Count > 0 ? rows[^1].TreePosition : -1;
                     cache.Valid = rows.Select((r, i) => r.TreePosition == i).All(x => x);
                 }
                 _leafDigests.Clear();
                 _leafDigests.AddRange(cache.Digests);
+                try
+                {
+                    if (!cache.Frontiers.TryGetValue(_fixedDepth, out var frontier) || frontier.Count > cache.Digests.Count)
+                        cache.Frontiers[_fixedDepth] = frontier = new MerkleFrontier(_fixedDepth);
+                    for (var i = (int)frontier.Count; i < cache.Digests.Count; i++)
+                        frontier.Append(cache.Digests[i]);
+                    _frontier = frontier.Clone();
+                }
+                catch
+                {
+                    cache.Frontiers.Remove(_fixedDepth);
+                    _frontier = null; // a leaf the shape cannot hash: the full computation throws where it always did
+                }
             }
         }
 
@@ -126,6 +142,8 @@ namespace VerifiedXCore.Privacy
         private sealed class LeafCache
         {
             public List<byte[]> Digests = new();
+            /// <summary>The digests' frontier for each tree shape built from them (fixed depth or not).</summary>
+            public Dictionary<bool, MerkleFrontier> Frontiers = new();
             public ObjectId? LastId;
             public long LastPosition = -1;
             public bool Valid;
@@ -161,7 +179,9 @@ namespace VerifiedXCore.Privacy
                 IsSpent = false
             };
             Commitments().InsertSafe(rec);
-            _leafDigests.Add(CommitmentMerkleTree.LeafDigest(noteHash32));
+            var digest = CommitmentMerkleTree.LeafDigest(noteHash32);
+            _leafDigests.Add(digest);
+            Track(digest);
             return pos;
         }
 
@@ -185,7 +205,9 @@ namespace VerifiedXCore.Privacy
                 IsSpent = false
             };
             Commitments().InsertSafe(rec);
-            _leafDigests.Add(CommitmentMerkleTree.LeafDigestLegacy(g1Compressed));
+            var digest = CommitmentMerkleTree.LeafDigestLegacy(g1Compressed);
+            _leafDigests.Add(digest);
+            Track(digest);
             return pos;
         }
 
@@ -215,7 +237,21 @@ namespace VerifiedXCore.Privacy
             return true;
         }
 
-        public byte[]? GetRootBytes()
+        private void Track(byte[] digest)
+        {
+            try { _frontier?.Append(digest); }
+            catch { _frontier = null; }
+        }
+
+        /// <summary>Whether the root comes from the frontier (tests).</summary>
+        internal bool RootFromFrontier => _frontier != null && _frontier.Count == _leafDigests.Count;
+
+        /// <summary>The root, from the frontier kept with the leaves (one hash a level; round 33).</summary>
+        public byte[]? GetRootBytes() =>
+            _frontier != null && _frontier.Count == _leafDigests.Count ? _frontier.Root() : FullRoot();
+
+        /// <summary>The root computed level by level from every leaf (the frontier's reference; tests).</summary>
+        internal byte[]? FullRoot()
         {
             if (_fixedDepth)
                 return new FixedDepthMerkleTree(_leafDigests).Root(); // an empty epoch tree still has a root (the depth-32 zero digest)
@@ -272,6 +308,7 @@ namespace VerifiedXCore.Privacy
             MerkleNodes().DeleteManySafe(x => x.AssetType == _assetType);
             PoolState().DeleteManySafe(x => x.AssetType == _assetType);
             _leafDigests.Clear();
+            _frontier = new MerkleFrontier(_fixedDepth);
             AppendCommitment(PrivacyEpoch.DummyCommitment, PrivacyEpoch.DummyNoteHash, blockHeight, timestamp);
             UpdatePoolStateRoot(blockHeight, 0M, 1);
         }
