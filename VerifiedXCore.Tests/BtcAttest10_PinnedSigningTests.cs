@@ -167,11 +167,21 @@ namespace VerifiedXCore.Tests
             {
                 SessionId = held.SessionId, LeaderAddress = leader.Address, StartTimestamp = TimeUtil.GetTime(), LeaderStartTimestamp = held.Timestamp,
                 MessageHash = held.MessageHash, SmartContractUID = vault.Uid, StartContentSignature = held.ContentSignature, LeaderRemoteIp = "203.0.113.9",
+                StartMessage = FrostDkgLeaderAuth.SigningStartMessage(held),
             });
             try
             {
                 var again = await Post(held);
                 Assert.True(again.Code == System.Net.HttpStatusCode.OK, again.Body);
+                // ... also when the session was opened by a copy whose signature is spelled differently: matched on what
+                // was signed (round 19).
+                var respelled = Newtonsoft.Json.JsonConvert.DeserializeObject<FrostSigningStartRequest>(Newtonsoft.Json.JsonConvert.SerializeObject(held))!;
+                respelled.ContentSignature = held.ContentSignature!.Insert(4, " ");
+                Assert.True(VerifiedXCore.Services.SignatureService.VerifySignature(leader.Address, FrostDkgLeaderAuth.SigningStartMessage(held), respelled.ContentSignature));
+                FrostSessionStorage.SigningSessions[held.SessionId].StartContentSignature = respelled.ContentSignature;
+                var leadersOwn = await Post(held);
+                Assert.True(leadersOwn.Code == System.Net.HttpStatusCode.OK, leadersOwn.Body);
+
                 async Task<(System.Net.HttpStatusCode Code, string Body)> Round2(string body, string? bodySignature)
                 {
                     var req = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, $"/frost/sign/round2/{held.SessionId}")

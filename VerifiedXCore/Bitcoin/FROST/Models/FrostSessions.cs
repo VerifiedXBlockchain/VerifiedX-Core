@@ -122,6 +122,8 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// sent the leader's exact start first held the session there, and the leader's rounds were refused (round 18).
         /// </summary>
         public string? StartContentSignature { get; set; }
+        /// <summary>The start's signed message (<see cref="FrostDkgLeaderAuth.SigningStartMessage"/>), for a watched vault's session.</summary>
+        public string? StartMessage { get; set; }
         /// <summary>Leader's start signature — round messages must replay it to prove leadership.</summary>
         public string? LeaderStartSignature { get; set; }
         /// <summary>

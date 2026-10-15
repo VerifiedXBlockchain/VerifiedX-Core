@@ -2518,9 +2518,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // A session id is opened once: an open one is not touched, and one this validator opened before
                             // (since finished, aborted or cleaned up) is not opened again under a signature still in date
                             // (fifth review, round 17).
+                            // Matched on what was signed, not on the signature's spelling: one signature verifies under
+                            // several encodings, and a copy re-encoded by a forwarder made the leader's own start a stranger
+                            // (round 19).
                             if (FrostSessionStorage.SigningSessions.TryGetValue(request.SessionId, out var openSession)
-                                && !string.IsNullOrEmpty(openSession.StartContentSignature)
-                                && string.Equals(openSession.StartContentSignature, request.ContentSignature, StringComparison.Ordinal))
+                                && !string.IsNullOrEmpty(openSession.StartMessage)
+                                && !string.IsNullOrEmpty(request.ContentSignature)
+                                && string.Equals(openSession.StartMessage, FrostDkgLeaderAuth.SigningStartMessage(request), StringComparison.Ordinal)
+                                && SignatureService.VerifySignature(openSession.LeaderAddress, openSession.StartMessage, request.ContentSignature))
                             {
                                 // The leader's own start, arriving after a copy of it opened the session: the same session (round 18).
                                 context.Response.StatusCode = StatusCodes.Status200OK;
@@ -2742,6 +2747,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 LeaderStartSignature = request.LeaderSignature,
                                 LeaderRemoteIp = FrostSigningAuthorization.NormalizeRemoteIp(context.Connection.RemoteIpAddress),
                                 StartContentSignature = VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(request.SmartContractUID) != null ? request.ContentSignature : null,
+                                StartMessage = VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(request.SmartContractUID) != null ? FrostDkgLeaderAuth.SigningStartMessage(request) : null,
                                 WithdrawalRequestHash = request.WithdrawalRequestHash,  // FIND-028
                                 SignerAddresses = request.SignerAddresses,
                                 RequiredThreshold = request.RequiredThreshold,
@@ -2903,7 +2909,6 @@ namespace VerifiedXCore.Bitcoin.FROST
                             return;
                         }
 
-                        using (var reader = new StreamReader(context.Request.Body))
                         {
                             var body = round2Body; // read before the leader check (round 18)
                             
