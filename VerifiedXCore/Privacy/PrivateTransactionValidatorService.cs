@@ -170,7 +170,7 @@ namespace VerifiedXCore.Privacy
 
             if (!blockDownloads && !blockVerify && payload.NullsB64.Count > 0)
             {
-                if (!MempoolNullifierTracker.TryRegisterForMempool(txRequest.Hash, payload.Asset, payload.NullsB64, out var mErr))
+                if (!MempoolNullifierTracker.TryRegisterForMempool(txRequest.Hash, payload.Asset, payload.NullsB64, out var mErr, proofRulesHeight))
                     return (false, mErr ?? "Mempool nullifier conflict.");
             }
 
@@ -178,7 +178,7 @@ namespace VerifiedXCore.Privacy
                 && (txRequest.TransactionType == TransactionType.VBTC_V2_UNSHIELD || txRequest.TransactionType == TransactionType.VBTC_V2_PRIVATE_TRANSFER)
                 && !string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64))
             {
-                if (!MempoolNullifierTracker.TryRegisterForMempool(txRequest.Hash, "VFX", new[] { payload.FeeInputNullifierB64 }, out var feeMempoolErr))
+                if (!MempoolNullifierTracker.TryRegisterForMempool(txRequest.Hash, "VFX", new[] { payload.FeeInputNullifierB64 }, out var feeMempoolErr, proofRulesHeight))
                     return (false, feeMempoolErr ?? "Mempool VFX fee nullifier conflict.");
             }
 

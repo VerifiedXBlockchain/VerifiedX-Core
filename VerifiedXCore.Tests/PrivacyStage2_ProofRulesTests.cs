@@ -377,6 +377,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void NullifierTrackers_IgnoreTheDummy_AndStillCatchRealDoubleSpends()
         {
+            TipInEpoch();
             var real = Convert.ToBase64String(RealNullifier());
             Assert.True(MempoolNullifierTracker.TryRegisterForMempool("tx-a", "VFX", new[] { real, PrivacyEpoch.DummyNullifierB64 }, out var e1), e1);
             Assert.True(MempoolNullifierTracker.TryRegisterForMempool("tx-b", "VFX", new[] { Convert.ToBase64String(RealNullifier()), PrivacyEpoch.DummyNullifierB64 }, out var e2), e2);
@@ -392,6 +393,30 @@ namespace VerifiedXCore.Tests
             Assert.True(MempoolNullifierTracker.TryAddBlockScopedNullifiers(Unshield(1M, new[] { same, PrivacyEpoch.DummyNullifier }), set, out _));
             Assert.False(MempoolNullifierTracker.TryAddBlockScopedNullifiers(Unshield(1M, new[] { same, PrivacyEpoch.DummyNullifier }), set, out var dup));
             Assert.Contains("Duplicate nullifier", dup);
+        }
+
+        /// <summary>
+        /// Before the proof-rules height the dummy is a nullifier like any other, as 8.x judges it: two spends of it in one
+        /// block, or one transaction naming it twice, are refused (round 35); from the height it is shared.
+        /// </summary>
+        [Fact]
+        public void BeforeTheHeight_TheDummyIsANullifierLikeAnyOther()
+        {
+            var set = new HashSet<string>(StringComparer.Ordinal);
+            Assert.True(MempoolNullifierTracker.TryAddBlockScopedNullifiers(Unshield(1M, new[] { PrivacyEpoch.DummyNullifier }), set, out _, Height - 1));
+            Assert.False(MempoolNullifierTracker.TryAddBlockScopedNullifiers(Unshield(1M, new[] { PrivacyEpoch.DummyNullifier }), set, out var dup, Height - 1));
+            Assert.Contains("Duplicate nullifier", dup);
+            var epochSet = new HashSet<string>(StringComparer.Ordinal);
+            Assert.True(MempoolNullifierTracker.TryAddBlockScopedNullifiers(Unshield(1M, new[] { RealNullifier(), PrivacyEpoch.DummyNullifier }), epochSet, out _, Height + 1));
+            Assert.True(MempoolNullifierTracker.TryAddBlockScopedNullifiers(Unshield(1M, new[] { RealNullifier(), PrivacyEpoch.DummyNullifier }), epochSet, out _, Height + 1));
+
+            TipBelow();
+            Assert.False(MempoolNullifierTracker.TryRegisterForMempool("pre-twice", "VFX", new[] { PrivacyEpoch.DummyNullifierB64, PrivacyEpoch.DummyNullifierB64 }, out var twice));
+            Assert.Contains("twice", twice);
+            Assert.True(MempoolNullifierTracker.TryRegisterForMempool("pre-a", "VFX", new[] { PrivacyEpoch.DummyNullifierB64 }, out var a), a);
+            Assert.False(MempoolNullifierTracker.TryRegisterForMempool("pre-b", "VFX", new[] { PrivacyEpoch.DummyNullifierB64 }, out var b));
+            Assert.Contains("already spends", b);
+            MempoolNullifierTracker.ReleaseClaimsForTxHash("pre-a");
         }
     }
 }

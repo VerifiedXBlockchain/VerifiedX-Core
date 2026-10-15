@@ -42,9 +42,13 @@ namespace VerifiedXCore.Privacy
         }
 
         /// <summary>Registers payload nullifiers for a TX that passed validation and is being (or was) admitted to the mempool.</summary>
-        public static bool TryRegisterForMempool(string txHash, string assetType, IReadOnlyList<string> nullifiersB64, out string? error)
+        public static bool TryRegisterForMempool(string txHash, string assetType, IReadOnlyList<string> nullifiersB64, out string? error, long? height = null)
         {
             error = null;
+            // The dummy is passed over only where the proof rules make it the shared placeholder; before them it is a
+            // nullifier like any other, as 8.x nodes judge it (round 35).
+            var dummyShared = PrivacyEpoch.ProofRulesActive(height ?? (Globals.LastBlock?.Height ?? 0) + 1);
+            bool Shared(string n) => dummyShared && PrivacyEpoch.IsDummyNullifier(n);
             if (string.IsNullOrEmpty(txHash) || nullifiersB64 == null || nullifiersB64.Count == 0)
                 return true;
 
@@ -55,7 +59,7 @@ namespace VerifiedXCore.Privacy
                 // round 19). Not a change to any block's verdict.
                 var own = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var n in nullifiersB64)
-                    if (!string.IsNullOrWhiteSpace(n) && !PrivacyEpoch.IsDummyNullifier(n) && !own.Add(n))
+                    if (!string.IsNullOrWhiteSpace(n) && !Shared(n) && !own.Add(n))
                     {
                         error = "This transaction spends one nullifier twice.";
                         return false;
@@ -68,7 +72,7 @@ namespace VerifiedXCore.Privacy
                         return false;
                     }
                     // Stage 2: the public dummy note's nullifier is shared by every single-note spend; it never conflicts.
-                    if (PrivacyEpoch.IsDummyNullifier(n))
+                    if (Shared(n))
                         continue;
                     var key = MakeKey(assetType, n);
                     if (Globals.MempoolNullifiers.TryGetValue(key, out var holder) && holder != txHash)
@@ -80,7 +84,7 @@ namespace VerifiedXCore.Privacy
 
                 foreach (var n in nullifiersB64)
                 {
-                    if (PrivacyEpoch.IsDummyNullifier(n))
+                    if (Shared(n))
                         continue;
                     var key = MakeKey(assetType, n);
                     Globals.MempoolNullifiers[key] = txHash;
@@ -90,10 +94,15 @@ namespace VerifiedXCore.Privacy
             return true;
         }
 
-        /// <summary>Ensures the same nullifier is not spent twice within one block (validation scratch set).</summary>
-        public static bool TryAddBlockScopedNullifiers(Transaction tx, ISet<string> blockNullifierKeys, out string? error)
+        /// <summary>
+        /// Ensures the same nullifier is not spent twice within one block (validation scratch set), the block at
+        /// <paramref name="height"/>. The public dummy is shared only from the proof-rules height: before it 9.x passed two
+        /// spends of it in one block over and 8.x nodes refused the block (fifth review, round 35).
+        /// </summary>
+        public static bool TryAddBlockScopedNullifiers(Transaction tx, ISet<string> blockNullifierKeys, out string? error, long? height = null)
         {
             error = null;
+            var dummyShared = PrivacyEpoch.ProofRulesActive(height ?? (Globals.LastBlock?.Height ?? 0) + 1);
             if (!PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType))
                 return true;
             if (!PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _) || payload == null)
@@ -101,7 +110,7 @@ namespace VerifiedXCore.Privacy
 
             foreach (var n in payload.NullsB64)
             {
-                if (PrivacyEpoch.IsDummyNullifier(n))
+                if (dummyShared && PrivacyEpoch.IsDummyNullifier(n))
                     continue; // stage 2: shared by every single-note spend in the block
                 var key = MakeKey(payload.Asset, n);
                 if (!blockNullifierKeys.Add(key))

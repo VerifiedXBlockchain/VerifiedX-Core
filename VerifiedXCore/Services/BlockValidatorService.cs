@@ -983,7 +983,7 @@ namespace VerifiedXCore.Services
                                 var effectiveTxResult = txResult;
                                 if (txResult.Item1 && PrivateTransactionTypes.IsPrivateTransaction(blkTransaction.TransactionType))
                                 {
-                                    if (!MempoolNullifierTracker.TryAddBlockScopedNullifiers(blkTransaction, blockPrivateNullifierKeys, out var nulErr))
+                                    if (!MempoolNullifierTracker.TryAddBlockScopedNullifiers(blkTransaction, blockPrivateNullifierKeys, out var nulErr, block.Height))
                                         effectiveTxResult = (false, nulErr ?? "Duplicate nullifier within block.");
                                 }
 
@@ -2041,7 +2041,7 @@ namespace VerifiedXCore.Services
                         var effectiveTxResult = txResult;
                         if (txResult.Item1 && PrivateTransactionTypes.IsPrivateTransaction(transaction.TransactionType))
                         {
-                            if (!MempoolNullifierTracker.TryAddBlockScopedNullifiers(transaction, blockPrivateNullifierKeys, out var nulErr))
+                            if (!MempoolNullifierTracker.TryAddBlockScopedNullifiers(transaction, blockPrivateNullifierKeys, out var nulErr, block.Height))
                                 effectiveTxResult = (false, nulErr ?? "Duplicate nullifier within block.");
                         }
                         if (effectiveTxResult.Item1 && block.Height >= Globals.BridgeIntraBlockGuardHeight
