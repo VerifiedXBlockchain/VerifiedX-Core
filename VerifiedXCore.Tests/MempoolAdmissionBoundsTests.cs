@@ -148,13 +148,46 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public void WithinOneRating_TheNewestEntryIsEvictedFirst()
+        public void WithinOneRating_TheLatestArrivalIsEvictedFirst_WhateverItsTimestamp()
         {
-            Pool("c-old", TransactionRating.C, 1);
-            Pool("c-new", TransactionRating.C, 2);
+            Pool("waiting", TransactionRating.C, timestamp: 2000);
+            Pool("backdated", TransactionRating.C, timestamp: 1); // claims to be older than everything
+            MempoolEvictionUtility.RecordArrivalForTests("waiting", DateTime.UtcNow.AddMinutes(-5));
+            MempoolEvictionUtility.RecordArrivalForTests("backdated", DateTime.UtcNow);
 
-            Assert.Equal(new[] { "c-new" }, MempoolEvictionUtility.EvictLowestPriority(targetCount: 1));
-            Assert.Equal(new[] { "c-old" }, Pooled());
+            Assert.Equal(new[] { "backdated" }, MempoolEvictionUtility.EvictLowestPriority(targetCount: 1));
+            Assert.Equal(new[] { "waiting" }, Pooled());
+        }
+
+        [Fact]
+        public void AnAdmittedTransaction_CountsTowardTheByteTotalAtOnce()
+        {
+            var before = MempoolEvictionUtility.GetAdmissionStats().sizeBytes;
+            var tx = Send(1M);
+            Assert.True(MempoolEvictionUtility.CheckAdmissionBounds(tx).admit);
+            // Still inside the cache window, nothing inserted yet: the admitted bytes are already counted.
+            Assert.Equal(before + MempoolEvictionUtility.CalculateTransactionSize(tx), MempoolEvictionUtility.GetAdmissionStats().sizeBytes);
+        }
+
+        [Fact]
+        public void AFullPoolWithNothingRatedBelow_RefusesAndStopsScanningForAWhile()
+        {
+            var pool = TransactionData.GetPool();
+            pool.InsertBulk(Enumerable.Range(0, Globals.MaxMempoolEntries).Select(i => new Transaction
+            {
+                Hash = $"a{i}", FromAddress = "x", ToAddress = "y", Amount = 1M, Fee = 1M, Timestamp = i,
+                TransactionType = TransactionType.TX, TransactionRating = TransactionRating.A,
+            }));
+            MempoolEvictionUtility.InvalidateAdmissionStats();
+            var tx = Send(1M);
+            tx.TransactionRating = TransactionRating.C;
+
+            Assert.False(MempoolEvictionUtility.CheckAdmissionBounds(tx).admit);
+            Assert.Equal(Globals.MaxMempoolEntries, PoolCount()); // nothing rated as well or better was evicted
+            Assert.True(MempoolEvictionUtility.RefusingWithoutScanFor(TransactionRating.C));
+            Assert.True(MempoolEvictionUtility.RefusingWithoutScanFor(TransactionRating.D));
+            Assert.False(MempoolEvictionUtility.RefusingWithoutScanFor(TransactionRating.B)); // a better rating still gets a look
+            Assert.False(MempoolEvictionUtility.CheckAdmissionBounds(tx).admit);
         }
 
         [Fact]

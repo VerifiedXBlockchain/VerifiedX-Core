@@ -43,36 +43,74 @@ namespace VerifiedXCore.Utilities
             if (!feeValidation.isValid)
                 return (false, feeValidation.reason);
 
+            var rating = tx.TransactionRating ?? TransactionRating.F;
             var stats = GetAdmissionStats();
             var canAdd = CanAddToMempool(tx, stats.count, stats.sizeBytes);
             if (!canAdd.canAdd)
             {
-                EvictLowestPriority(
+                // A full pool that just had nothing to give up for this rating (or a better one) refuses at once:
+                // otherwise every refused submission would pay for a whole-pool scan.
+                lock (AdmissionStatsLock)
+                {
+                    if (_noRoomForRatingUntilUtc > DateTime.UtcNow && rating >= _noRoomForRating)
+                        return canAdd;
+                }
+
+                var evicted = EvictLowestPriority(
                     targetCount: (int)(Globals.MaxMempoolEntries * 0.95),
                     targetSize: (long)(Globals.MaxMempoolSizeBytes * 0.95),
-                    onlyRatedBelow: tx.TransactionRating ?? TransactionRating.F
-                );
+                    onlyRatedBelow: rating,
+                    knownTotalSize: stats.sizeBytes,
+                    freedBytes: out var freed);
 
-                InvalidateAdmissionStats();
-                stats = GetAdmissionStats();
+                stats = (stats.count - evicted.Count, stats.sizeBytes - freed);
+                lock (AdmissionStatsLock)
+                {
+                    _cachedSizeBytes = Math.Max(0, _cachedSizeBytes - freed);
+                    if (evicted.Count == 0)
+                    {
+                        _noRoomForRating = rating;
+                        _noRoomForRatingUntilUtc = DateTime.UtcNow + AdmissionSizeCacheTtl;
+                    }
+                }
                 canAdd = CanAddToMempool(tx, stats.count, stats.sizeBytes);
             }
 
+            if (canAdd.canAdd)
+            {
+                // Counted now, so admissions inside the cache window cannot together pass the byte cap.
+                lock (AdmissionStatsLock) _cachedSizeBytes += SizeOf(tx);
+                if (!string.IsNullOrEmpty(tx.Hash))
+                    ArrivedAtUtc[tx.Hash] = DateTime.UtcNow;
+            }
             return (canAdd.canAdd, canAdd.reason);
         }
 
         private static readonly object AdmissionStatsLock = new();
         private static long _cachedSizeBytes;
         private static DateTime _cachedSizeAtUtc = DateTime.MinValue;
+        private static TransactionRating _noRoomForRating;
+        private static DateTime _noRoomForRatingUntilUtc = DateTime.MinValue;
 
-        /// <summary>How long the pool's byte total is reused between admissions; the entry count is always exact.</summary>
-        internal static TimeSpan AdmissionSizeCacheTtl = TimeSpan.FromSeconds(2);
+        /// <summary>Serialized size per pooled hash, so a refresh does not re-serialize rows it has already measured.</summary>
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> SizeByHash = new();
 
         /// <summary>
-        /// The pool's entry count and byte size for an admission decision. Loading and serialising every pooled
-        /// transaction on each admission made the check cost grow with the pool, so the count is read from the index and
-        /// the byte total is reused for <see cref="AdmissionSizeCacheTtl"/>; the periodic cleanup still enforces the
-        /// size cap exactly.
+        /// When this node admitted each hash. Eviction within a rating goes by arrival here, not by the sender-chosen
+        /// Timestamp, which a sender could backdate to look as if it had been waiting longest.
+        /// </summary>
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> ArrivedAtUtc = new();
+
+        /// <summary>How long the pool's byte total is reused between full recounts; the entry count is always exact.</summary>
+        internal static TimeSpan AdmissionSizeCacheTtl = TimeSpan.FromSeconds(2);
+
+        private static long SizeOf(Transaction tx) =>
+            string.IsNullOrEmpty(tx.Hash) ? CalculateTransactionSize(tx) : SizeByHash.GetOrAdd(tx.Hash, _ => CalculateTransactionSize(tx));
+
+        /// <summary>
+        /// The pool's entry count and byte size for an admission decision. The count is read from the index. The byte
+        /// total is recounted at most every <see cref="AdmissionSizeCacheTtl"/>; in between, admissions add to it and
+        /// evictions subtract from it, so it never reads lower than what this check let in.
         /// </summary>
         public static (int count, long sizeBytes) GetAdmissionStats()
         {
@@ -82,16 +120,33 @@ namespace VerifiedXCore.Utilities
             {
                 if (DateTime.UtcNow - _cachedSizeAtUtc >= AdmissionSizeCacheTtl)
                 {
-                    _cachedSizeBytes = mempool.FindAll().Sum(t => CalculateTransactionSize(t));
+                    var rows = mempool.FindAll().ToList();
+                    var live = new HashSet<string>(rows.Where(t => t.Hash != null).Select(t => t.Hash), StringComparer.Ordinal);
+                    foreach (var gone in SizeByHash.Keys.Where(h => !live.Contains(h)).ToList())
+                        SizeByHash.TryRemove(gone, out _);
+                    foreach (var gone in ArrivedAtUtc.Keys.Where(h => !live.Contains(h)).ToList())
+                        ArrivedAtUtc.TryRemove(gone, out _);
+                    _cachedSizeBytes = rows.Sum(SizeOf);
                     _cachedSizeAtUtc = DateTime.UtcNow;
                 }
                 return (count, _cachedSizeBytes);
             }
         }
 
+        internal static void RecordArrivalForTests(string hash, DateTime atUtc) => ArrivedAtUtc[hash] = atUtc;
+
+        internal static bool RefusingWithoutScanFor(TransactionRating rating)
+        {
+            lock (AdmissionStatsLock) return _noRoomForRatingUntilUtc > DateTime.UtcNow && rating >= _noRoomForRating;
+        }
+
         internal static void InvalidateAdmissionStats()
         {
-            lock (AdmissionStatsLock) _cachedSizeAtUtc = DateTime.MinValue;
+            lock (AdmissionStatsLock)
+            {
+                _cachedSizeAtUtc = DateTime.MinValue;
+                _noRoomForRatingUntilUtc = DateTime.MinValue;
+            }
         }
 
         /// <summary>
@@ -136,8 +191,14 @@ namespace VerifiedXCore.Utilities
         /// transaction's rating), only entries rated strictly below it are candidates, so a sender cannot push out
         /// transactions rated as well as its own. Returns the hashes that were evicted.
         /// </summary>
-        public static List<string> EvictLowestPriority(int targetCount = -1, long targetSize = -1, TransactionRating? onlyRatedBelow = null)
+        public static List<string> EvictLowestPriority(int targetCount = -1, long targetSize = -1, TransactionRating? onlyRatedBelow = null) =>
+            EvictLowestPriority(targetCount, targetSize, onlyRatedBelow, null, out _);
+
+        /// <param name="knownTotalSize">The pool's byte total when the caller already has it, so it is not summed again.</param>
+        /// <param name="freedBytes">Bytes the evicted entries took up.</param>
+        internal static List<string> EvictLowestPriority(int targetCount, long targetSize, TransactionRating? onlyRatedBelow, long? knownTotalSize, out long freedBytes)
         {
+            freedBytes = 0;
             var evictedHashes = new List<string>();
             var mempool = TransactionData.GetPool();
             var allTxs = mempool.FindAll().ToList();
@@ -156,7 +217,7 @@ namespace VerifiedXCore.Utilities
 
             if (targetSize > 0)
             {
-                long currentSize = allTxs.Sum(tx => CalculateTransactionSize(tx));
+                long currentSize = knownTotalSize ?? allTxs.Sum(SizeOf);
                 if (currentSize > targetSize)
                 {
                     sizeToEvict = currentSize - targetSize;
@@ -166,12 +227,13 @@ namespace VerifiedXCore.Utilities
             if (countToEvict == 0 && sizeToEvict == 0)
                 return evictedHashes;
 
-            // Lowest rating first (F is the highest enum value). Within a rating the newest go first: a burst of new
-            // entries makes room by evicting itself, not the transactions that were already waiting.
+            // Lowest rating first (F is the highest enum value). Within a rating the latest to arrive here go first: a burst
+            // of new entries makes room by evicting itself, not the transactions that were already waiting. A row with no
+            // recorded arrival (inserted locally, or before a restart) counts as the earliest.
             var sortedTxs = allTxs
                 .Where(x => onlyRatedBelow == null || (x.TransactionRating ?? TransactionRating.F) > onlyRatedBelow.Value)
                 .OrderByDescending(x => x.TransactionRating ?? TransactionRating.F)
-                .ThenByDescending(x => x.Timestamp)
+                .ThenByDescending(x => x.Hash != null && ArrivedAtUtc.TryGetValue(x.Hash, out var at) ? at : DateTime.MinValue)
                 .ToList();
 
             long evictedSize = 0;
@@ -191,8 +253,13 @@ namespace VerifiedXCore.Utilities
                     mempool.DeleteManySafe(x => x.Hash == tx.Hash);
                     TransactionData.ReleasePrivateMempoolNullifiersForTx(tx.Hash);
                     evictedHashes.Add(tx.Hash);
-                    evictedSize += CalculateTransactionSize(tx);
+                    evictedSize += SizeOf(tx);
                     evictedCount++;
+                    if (tx.Hash != null)
+                    {
+                        SizeByHash.TryRemove(tx.Hash, out _);
+                        ArrivedAtUtc.TryRemove(tx.Hash, out _);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -207,6 +274,7 @@ namespace VerifiedXCore.Utilities
                     "MempoolEvictionUtility.EvictLowestPriority");
             }
 
+            freedBytes = evictedSize;
             return evictedHashes;
         }
 
