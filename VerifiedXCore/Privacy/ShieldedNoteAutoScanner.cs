@@ -24,7 +24,10 @@ namespace VerifiedXCore.Privacy
         /// </summary>
         public static void Enqueue(Block block)
         {
-            if (block?.Transactions == null || !block.Transactions.Any(t => t != null && PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)))
+            // Every block, so the scanner's record moves on with the chain and a restart's catch-up is short (round 28:
+            // recorded only at private blocks, a restart re-read every block since the last of them). A block without
+            // private transactions is passed over at once by the worker.
+            if (block == null)
                 return;
             if (Interlocked.Exchange(ref _workerStarted, 1) == 0)
                 _ = Task.Run(Worker);
