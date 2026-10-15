@@ -2177,6 +2177,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     var blocking = VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()?.Query()
                         .Where(x => x.SmartContractUID == payload.SmartContractUID && !x.IsCompleted)
                         .ToList()
+                        .OrderBy(x => x.Id)
                         .OrderByDescending(x => x.RequestBlockHeight)
                         .FirstOrDefault();
                     var releaseHeight = blocking != null && blocking.RequestBlockHeight > 0
@@ -3098,6 +3099,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                                 x.SmartContractUID == payload.SmartContractUID &&
                                 !x.IsCompleted)
                     .ToList()
+                    .OrderBy(x => x.Id)
                     .Where(x => !string.IsNullOrEmpty(x.TransactionHash))
                     .FirstOrDefault(x => VBTCWithdrawalRequest.IsStillBlocking(x, Globals.LastBlock?.Height ?? 0, TimeUtil.GetTime()));
                 if (existingRequest != null)

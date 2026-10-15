@@ -222,6 +222,13 @@ namespace VerifiedXCore.Data
             // every row ever written (fifth review, round 28).
             rsrvTransactions.EnsureIndexSafe(x => x.ReserveTransactionStatus);
             rsrvTransactions.EnsureIndexSafe(x => x.FromAddress);
+            // Withdrawal requests had no index: every request, settlement, owner balance and vault creation read every
+            // request row ever stored, on every node, and the table only grows (fifth review, round 33). Readers keep the
+            // order they read rows in before (by Id) wherever more than one can match.
+            var vbtcWithdrawalRequests = DB_VBTCWithdrawalRequests.GetCollection<VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest>(RSRV_VBTC_WITHDRAWAL_REQUESTS);
+            vbtcWithdrawalRequests.EnsureIndexSafe(x => x.TransactionHash);
+            vbtcWithdrawalRequests.EnsureIndexSafe(x => x.SmartContractUID);
+            vbtcWithdrawalRequests.EnsureIndexSafe(x => x.RequestorAddress);
 
             var transactions = DbContext.DB_Wallet.GetCollection<Transaction>(DbContext.RSRV_TRANSACTIONS);
             transactions.EnsureIndexSafe(x => x.Hash, false);

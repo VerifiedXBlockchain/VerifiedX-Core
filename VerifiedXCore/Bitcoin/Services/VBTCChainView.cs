@@ -93,6 +93,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Mined withdrawal rows for a contract (rows with no request hash exist only on the API node that served them).</summary>
         public static List<VBTCWithdrawalRequest> MinedWithdrawals(string scUID) =>
             (VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()?.Query().Where(x => x.SmartContractUID == scUID).ToList() ?? new List<VBTCWithdrawalRequest>())
+                .OrderBy(x => x.Id) // ties below keep the order rows were read in before they were indexed (round 33)
                 .Where(x => !string.IsNullOrEmpty(x.TransactionHash))
                 .OrderBy(x => x.RequestBlockHeight).ThenBy(x => x.Timestamp).ToList();
 

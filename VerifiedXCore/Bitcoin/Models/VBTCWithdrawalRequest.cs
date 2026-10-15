@@ -118,8 +118,10 @@ namespace VerifiedXCore.Bitcoin.Models
 
             var request = vwrDb.Query()
                 .Where(x => x.RequestorAddress == address && 
-                            x.OriginalUniqueId == uniqueId && 
+                            x.OriginalUniqueId == uniqueId &&
                             x.SmartContractUID == scUID)
+                .ToList()
+                .OrderBy(x => x.Id) // the order the rows were read in before they were indexed (round 33)
                 .FirstOrDefault();
 
             return request;
@@ -143,6 +145,7 @@ namespace VerifiedXCore.Bitcoin.Models
             var mined = vwrDb.Query()
                 .Where(x => x.RequestorAddress == address && x.OriginalUniqueId == uniqueId && x.SmartContractUID == scUID)
                 .ToList()
+                .OrderBy(x => x.Id)
                 .FirstOrDefault(x => !string.IsNullOrEmpty(x.TransactionHash) && !string.Equals(x.TransactionHash, requestTxHash, StringComparison.Ordinal));
             return mined == null
                 ? null
@@ -208,6 +211,8 @@ namespace VerifiedXCore.Bitcoin.Models
 
             var incompleteRequests = vwrDb.Query()
                 .Where(x => x.SmartContractUID == scUID && !x.IsCompleted)
+                .ToList()
+                .OrderBy(x => x.Id)
                 .ToList();
 
             var fixActive = currentHeight >= Globals.V2WithdrawalExpiryFixHeight;
@@ -281,6 +286,7 @@ namespace VerifiedXCore.Bitcoin.Models
                             x.SmartContractUID == scUID &&
                             !x.IsCompleted)
                 .ToList()
+                .OrderBy(x => x.Id)
                 .Where(x => x.RequestBlockHeight > 0 && !string.IsNullOrEmpty(x.TransactionHash));
 
             foreach (var r in expiredIncomplete)
@@ -327,6 +333,7 @@ namespace VerifiedXCore.Bitcoin.Models
                             x.SmartContractUID == scUID &&
                             !x.IsCompleted)
                 .ToList()
+                .OrderBy(x => x.Id)
                 .Where(x => IsStillBlocking(x, currentHeight, currentTime))
                 // Escrowed requests are already reflected as ledger debits.
                 .Where(x => !EscrowAppliesTo(x.RequestBlockHeight))
@@ -356,6 +363,7 @@ namespace VerifiedXCore.Bitcoin.Models
             return vwrDb.Query()
                 .Where(x => x.RequestorAddress == address && x.SmartContractUID == scUID && !x.IsCompleted)
                 .ToList()
+                .OrderBy(x => x.Id)
                 .Where(x => !string.IsNullOrEmpty(x.TransactionHash) && EscrowAppliesTo(x.RequestBlockHeight))
                 .OrderBy(x => x.RequestBlockHeight)
                 .ToList();
@@ -410,6 +418,8 @@ namespace VerifiedXCore.Bitcoin.Models
                 .Where(x => x.SmartContractUID == scUID &&
                             x.IsCompleted &&
                             x.Status == VBTCWithdrawalStatus.Completed)
+                .ToList()
+                .OrderBy(x => x.Id)
                 .ToList();
 
             var fixActive = currentHeight >= Globals.V2WithdrawalOwnerAddBackFixHeight;
@@ -446,17 +456,19 @@ namespace VerifiedXCore.Bitcoin.Models
             // single-contract request (one row per hash) this is identical to the old lookup.
             if (!string.IsNullOrEmpty(request.TransactionHash))
             {
-                existingRequest = vwrDb.FindOne(x => x.TransactionHash == request.TransactionHash &&
-                                                     x.SmartContractUID == request.SmartContractUID);
+                existingRequest = vwrDb.Query().Where(x => x.TransactionHash == request.TransactionHash &&
+                                                     x.SmartContractUID == request.SmartContractUID)
+                    .ToList().OrderBy(x => x.Id).FirstOrDefault();
             }
             
             // FIND-005: If not found by TxHash, try composite key (for raw withdrawal flow)
             if (existingRequest == null && !string.IsNullOrEmpty(request.OriginalUniqueId))
             {
-                existingRequest = vwrDb.FindOne(x =>
+                existingRequest = vwrDb.Query().Where(x =>
                     x.RequestorAddress == request.RequestorAddress &&
                     x.OriginalUniqueId == request.OriginalUniqueId &&
-                    x.SmartContractUID == request.SmartContractUID);
+                    x.SmartContractUID == request.SmartContractUID)
+                    .ToList().OrderBy(x => x.Id).FirstOrDefault();
 
                 // Fund-loss audit item 6: a composite-key match upgrades only this node's local pre-registration row
                 // (no TransactionHash yet) or the same mined request. A row of a DIFFERENT mined request is that
@@ -542,7 +554,7 @@ namespace VerifiedXCore.Bitcoin.Models
             try
             {
                 var db = GetVBTCWithdrawalRequestDb();
-                var row = db?.FindOne(x => x.TransactionHash == transactionHash && x.SmartContractUID == scUID);
+                var row = db?.Query().Where(x => x.TransactionHash == transactionHash && x.SmartContractUID == scUID).ToList().OrderBy(x => x.Id).FirstOrDefault();
                 if (row == null) return;
                 row.CompletionTxHash = completionTxHash;
                 row.CompletionTimestamp = completionTimestamp;
@@ -622,6 +634,8 @@ namespace VerifiedXCore.Bitcoin.Models
 
             var rows = vwrDb.Query()
                 .Where(x => x.TransactionHash == txHash)
+                .ToList()
+                .OrderBy(x => x.Id)
                 .ToList();
 
             if (!string.IsNullOrEmpty(scUID))
@@ -647,6 +661,7 @@ namespace VerifiedXCore.Bitcoin.Models
             return vwrDb.Query()
                 .Where(x => x.TransactionHash == txHash)
                 .ToList()
+                .OrderBy(x => x.Id)
                 .OrderBy(x => x.SmartContractUID, StringComparer.Ordinal)
                 .ToList();
         }
@@ -678,6 +693,7 @@ namespace VerifiedXCore.Bitcoin.Models
                             x.SmartContractUID == scUID &&
                             !x.IsCompleted)
                 .ToList()
+                .OrderBy(x => x.Id)
                 .FirstOrDefault(x => IsStillBlocking(x, currentHeight, currentTime));
 
             return request;
@@ -698,6 +714,7 @@ namespace VerifiedXCore.Bitcoin.Models
             return vwrDb.Query()
                 .Where(x => x.SmartContractUID == scUID)
                 .ToList()
+                .OrderBy(x => x.Id)
                 .Where(x => !string.IsNullOrEmpty(x.PinnedCoinsJson))
                 .OrderByDescending(x => x.Timestamp)
                 .FirstOrDefault();
