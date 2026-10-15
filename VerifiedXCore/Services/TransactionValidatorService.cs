@@ -1957,6 +1957,10 @@ namespace VerifiedXCore.Services
                                     if (saleAmountError != null)
                                         return (txResult, saleAmountError);
                                 }
+                                // The balance check below sums every entry; none may be negative.
+                                var saleEntriesError = LedgerIntegrityRules.SaleEntriesNonNegative(txRequest, blockHeight);
+                                if (saleEntriesError != null)
+                                    return (txResult, saleEntriesError);
                                 var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
                                 if (scStateTreiRec == null && saleRulesHeight >= Globals.SaleCompleteContractRulesHeight)
                                     return (txResult, "SC does not exist.");

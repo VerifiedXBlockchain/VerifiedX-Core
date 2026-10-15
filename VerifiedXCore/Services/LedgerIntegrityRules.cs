@@ -1013,6 +1013,26 @@ namespace VerifiedXCore.Services
             return null;
         }
 
+        /// <summary>
+        /// Every entry a sale completion carries has a non-negative amount and fee, paid or not. The buyer's balance is
+        /// checked against the sum of all entries while the apply pays only the selected ones, so an entry that is never
+        /// paid could lower that sum below what the apply takes (round 37). With every entry non-negative the sum is at
+        /// least what is paid. Refused at admission at every height; in blocks from Globals.SaleCompleteContractRulesHeight. Null when
+        /// the rule passes.
+        /// </summary>
+        public static string? SaleEntriesNonNegative(Transaction tx, long? blockHeight)
+        {
+            if (tx?.TransactionType != TransactionType.NFT_SALE || string.IsNullOrEmpty(tx.Data)) return null;
+            if (blockHeight != null && blockHeight.Value < Globals.SaleCompleteContractRulesHeight) return null;
+            List<Transaction>? entries = null;
+            try { entries = JObject.Parse(tx.Data)["Transactions"]?.ToObject<List<Transaction>?>(); } catch { }
+            if (entries == null) return null;
+            foreach (var e in entries)
+                if (e == null || e.Amount < 0M || e.Fee < 0M)
+                    return "Every entry of a sale completion must have a non-negative amount and fee.";
+            return null;
+        }
+
         // ── Fund-loss audit item 1 (freeze): no transaction from a frozen address ────────────────────────────────
 
         /// <summary>
