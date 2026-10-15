@@ -102,9 +102,11 @@ namespace VerifiedXCore.Privacy
                 // Fund-loss audit item 1 (stage 1): supply floor, required nullifier/root, outer fields bound to the
                 // payload. Block validation judges at the block's own height; admission at the height it would mine into.
                 var judgedAt = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
-                if (blockDownloads && judgedAt <= PrivateTxSupplyRules.UnshieldBindingScannedThrough
-                    && PrivateTxSupplyRules.OuterFieldsError(txRequest, payload!) is { } downloadedOuter)
-                    return (false, downloadedOuter); // a downloaded block of scanned history (round 18; round 19)
+                // Scanned history, on every path that judges it (download, height sync, peer catch-up): live blocks are
+                // always above the scanned height, so 8.x producers' blocks are never judged by it (rounds 18-20).
+                if (judgedAt <= PrivateTxSupplyRules.UnshieldBindingScannedThrough
+                    && PrivateTxSupplyRules.OuterFieldsError(txRequest, payload!) is { } historicalOuter)
+                    return (false, historicalOuter);
                 var supplyRules = PrivateTxSupplyRules.Check(txRequest, payload!, judgedAt);
                 if (!supplyRules.ok)
                     return supplyRules;

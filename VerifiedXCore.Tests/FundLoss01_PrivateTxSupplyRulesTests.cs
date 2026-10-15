@@ -151,8 +151,17 @@ namespace VerifiedXCore.Tests
             var resized = Unshield(to, 1M, withNullifier: false, withRoot: false);
             resized.Amount = 2M;
             Assert.Contains("transparent_amount", (await TransactionValidatorService.VerifyTX(resized, blockDownloads: true)).Item2);
-            // Live, below the gate: as before (the binding starts at the gate there).
-            Assert.DoesNotContain("transparent_output", (await TransactionValidatorService.VerifyTX(redirected)).Item2 ?? "");
+            // ... on any path judging scanned history (height sync and catch-up do not set the download flag; round 20).
+            Assert.Contains("transparent_output", (await TransactionValidatorService.VerifyTX(redirected)).Item2 ?? "");
+            // Above the scanned height and below the gate (live blocks): as before, the binding starts at the gate there.
+            var prior = Globals.PrivateTxSupplyRulesHeight;
+            Globals.PrivateTxSupplyRulesHeight = PrivateTxSupplyRules.UnshieldBindingScannedThrough + 100;
+            try
+            {
+                var live = PrivateTxSupplyRules.UnshieldBindingScannedThrough + 1;
+                Assert.DoesNotContain("transparent_output", (await TransactionValidatorService.VerifyTX(redirected, blockHeight: live)).Item2 ?? "");
+            }
+            finally { Globals.PrivateTxSupplyRulesHeight = prior; }
         }
 
         /// <summary>

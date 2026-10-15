@@ -62,8 +62,8 @@ namespace VerifiedXCore.Privacy
 
         /// <summary>
         /// An unshield's outer recipient and amount, which its hash does not cover, are its payload's. From the fund-loss
-        /// height for every block (StructureError). Below it, only for a block being downloaded at or below the scanned
-        /// height: whoever served blocks to a syncing node could change them and have it credit someone else (fifth
+        /// height for every block (StructureError). Below it, only for a block at or below the scanned
+        /// height, on whichever path judges it (round 20): whoever served blocks to a syncing node could change them and have it credit someone else (fifth
         /// review, round 18), and history up to there holds no unshield that differs. Not for live blocks below the gate:
         /// 8.x producers accept a relayed copy with another recipient, and refusing it split the upgrade (round 19).
         /// </summary>
