@@ -89,11 +89,17 @@ namespace VerifiedXCore.Utilities
         /// <paramref name="mempool"/> in the same locked section, then counts its bytes. Concurrent admissions therefore
         /// cannot together pass the entry or byte cap, and nothing is counted for a transaction that was not inserted.
         /// </summary>
-        public static bool TryAdmitAndInsert(Transaction tx, LiteDB.ILiteCollection<Transaction> mempool)
+        public static bool TryAdmitAndInsert(Transaction tx, LiteDB.ILiteCollection<Transaction> mempool) =>
+            TryAdmitAndInsert(tx, mempool, out _);
+
+        /// <param name="reason">Why the transaction was not admitted; empty when it was.</param>
+        public static bool TryAdmitAndInsert(Transaction tx, LiteDB.ILiteCollection<Transaction> mempool, out string reason)
         {
             lock (AdmitLock)
             {
-                if (!CheckAdmissionBounds(tx).admit)
+                var bounds = CheckAdmissionBounds(tx);
+                reason = bounds.reason;
+                if (!bounds.admit)
                     return false;
                 mempool.InsertSafe(tx);
                 NoteInserted(tx);

@@ -339,6 +339,21 @@ namespace VerifiedXCore.Data
                 catch (Exception ex) { ErrorLogUtility.LogError($"Rating transaction {transaction.Hash} failed: {ex.Message}", "TransactionData.AddToPool()"); }
             }
 
+            if (IsPoolConflict(transaction))
+                return;
+
+            await TransactionPool.InsertSafeAsync(transaction);
+        }
+
+        /// <summary>
+        /// Whether <paramref name="transaction"/> conflicts with a transaction already in the mempool: an EXIT_TO_BTC on the
+        /// same Base burn or lock, or a second POOL_UNLOCK for one burn. Every route that inserts a submitted transaction
+        /// asks this first.
+        /// </summary>
+        internal static bool IsPoolConflict(Transaction transaction)
+        {
+            var TransactionPool = GetPool();
+
             // ===== EXIT_TO_BTC MEMPOOL CONFLICT DETECTION =====
             // Reject EXIT_TO_BTC transactions that overlap with existing mempool TXs
             // on BaseBurnTxHash or LockId to prevent double-spend of FIFO allocations.
@@ -365,7 +380,7 @@ namespace VerifiedXCore.Data
                                 {
                                     LogUtility.Log($"[Mempool] Rejecting EXIT_TO_BTC {transaction.Hash}: duplicate BaseBurnTxHash {newBurnHash} already in mempool ({existing.Hash})",
                                         "TransactionData.AddToPool()");
-                                    return;
+                                    return true;
                                 }
                             }
 
@@ -377,7 +392,7 @@ namespace VerifiedXCore.Data
                                 {
                                     LogUtility.Log($"[Mempool] Rejecting EXIT_TO_BTC {transaction.Hash}: overlapping lock IDs with mempool TX {existing.Hash}",
                                         "TransactionData.AddToPool()");
-                                    return;
+                                    return true;
                                 }
                             }
                         }
@@ -406,7 +421,7 @@ namespace VerifiedXCore.Data
                         {
                             LogUtility.Log($"[Mempool] Rejecting POOL_UNLOCK {transaction.Hash}: duplicate ExitBurnTxHash {newBurnHash} already in mempool",
                                 "TransactionData.AddToPool()");
-                            return;
+                            return true;
                         }
                     }
                 }
@@ -416,7 +431,7 @@ namespace VerifiedXCore.Data
                 }
             }
 
-            await TransactionPool.InsertSafeAsync(transaction);
+            return false;
         }
 
         /// <summary>
