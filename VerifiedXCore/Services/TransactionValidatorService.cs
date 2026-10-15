@@ -2528,6 +2528,13 @@ namespace VerifiedXCore.Services
                                     if(topic == null)
                                         return (txResult, "Topic does not exist.");
 
+                                    // A topic made before the height with an end date written without an offset is stored at a
+                                    // different instant on each node, so a vote on it is refused from the height. Judged from the
+                                    // topic's own transaction in its block, which every node holds alike.
+                                    if ((blockHeight == null || blockHeight.Value >= Globals.PathAuditRulesHeight)
+                                        && topic.BlockHeight < Globals.PathAuditRulesHeight && TopicEndDateWrittenWithoutOffset(topic))
+                                        return (txResult, TopicEndDateWithoutOffsetReason);
+
                                     // From the height the end of voting is read as the moment it is (a stored date comes
                                     // back in the node's local time; compared as it stood, the answer followed the
                                     // node's time zone), against the block's timestamp in a block.
@@ -4461,6 +4468,28 @@ namespace VerifiedXCore.Services
 
         internal const string NegativeFeeReason = "A transaction's fee cannot be negative.";
         internal const string VotingEndDateNeedsOffsetReason = "A topic's voting end date must carry a UTC offset.";
+        internal const string TopicEndDateWithoutOffsetReason = "This topic's voting end date was written without a UTC offset; it cannot be voted on.";
+
+        /// <summary>
+        /// Whether the transaction that created <paramref name="topic"/> (in the block at its height) wrote the end of voting
+        /// without an offset, or cannot be found. Read from block data, never from the stored date.
+        /// </summary>
+        internal static bool TopicEndDateWrittenWithoutOffset(TopicTrei topic)
+        {
+            try
+            {
+                var block = BlockchainData.GetBlockByHeight(topic.BlockHeight);
+                foreach (var t in block?.Transactions ?? new List<Transaction>())
+                {
+                    if (t.TransactionType != TransactionType.VOTE_TOPIC || string.IsNullOrEmpty(t.Data)) continue;
+                    var written = JObject.Parse(t.Data)["Topic"]?.ToObject<TopicTrei>();
+                    if (written != null && written.TopicUID == topic.TopicUID)
+                        return written.VotingEndDate.Kind == DateTimeKind.Unspecified;
+                }
+            }
+            catch { }
+            return true;
+        }
 
         /// <summary>The transaction signature check (over the carried Hash); null when it passes.</summary>
         private static string? SignatureError(Transaction txRequest)

@@ -104,5 +104,53 @@ namespace VerifiedXCore.Tests
             var (poolOk, poolMsg) = await TransactionValidatorService.VerifyTX(tx);
             Assert.True(poolOk, poolMsg);
         }
+        /// <summary>A topic made in a block below the height, as the chain stores it (the block kept, the topic applied).</summary>
+        private async Task<string> TopicMadeBelowTheHeight(string votingEndDate, long height)
+        {
+            var tx = TopicTx("X", votingEndDate);
+            tx.Height = height;
+            var uid = Newtonsoft.Json.Linq.JObject.Parse(tx.Data)["Topic"]!["TopicUID"]!.ToString();
+            var block = new Block { Height = height, Hash = $"r37topic{height}", Timestamp = TimeUtil.GetTime(), Transactions = new System.Collections.Generic.List<Transaction> { tx } };
+            BlockchainData.GetBlocks().InsertSafe(block);
+            await StateData.UpdateTreis(block);
+            Assert.NotNull(TopicTrei.GetSpecificTopic(uid));
+            return uid;
+        }
+
+        private Transaction VoteTx(string topicUid)
+        {
+            var tx = new Transaction
+            {
+                FromAddress = _creator.Address, ToAddress = "Vote_Base", Amount = 0M, Fee = 0.00000100M, Nonce = 0,
+                Timestamp = TimeUtil.GetTime(), TransactionType = TransactionType.VOTE,
+                Data = Newtonsoft.Json.JsonConvert.SerializeObject(new { Function = "TopicVote()", Vote = new Vote { TopicUID = topicUid, Address = _creator.Address, VoteType = VoteType.Yes } }),
+            };
+            tx.Build();
+            tx.Signature = SignatureService.CreateSignature(tx.Hash, _creator.Key, _creator.Pub);
+            return tx;
+        }
+
+        /// <summary>
+        /// A topic made before the height with an end date written without an offset is stored at a different instant on
+        /// each node; from the height no vote on it is taken. A topic made then with an offset is judged as before.
+        /// </summary>
+        [Fact]
+        public async Task AVoteOnATopicMadeBeforeTheHeightWithoutAnOffset_IsRefusedFromTheHeight()
+        {
+            var offsetless = await TopicMadeBelowTheHeight(In(TimeSpan.FromDays(2), ""), Gate - 20);
+            var withOffset = await TopicMadeBelowTheHeight(In(TimeSpan.FromDays(2), "Z"), Gate - 19);
+
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(VoteTx(offsetless), false, true, false, null, false, Gate);
+            Assert.False(ok);
+            Assert.Equal(TransactionValidatorService.TopicEndDateWithoutOffsetReason, msg);
+            var (_, poolMsg) = await TransactionValidatorService.VerifyTX(VoteTx(offsetless));
+            Assert.Equal(TransactionValidatorService.TopicEndDateWithoutOffsetReason, poolMsg);
+
+            var (_, belowMsg) = await TransactionValidatorService.VerifyTX(VoteTx(offsetless), true, true, false, null, false, Gate - 1);
+            Assert.NotEqual(TransactionValidatorService.TopicEndDateWithoutOffsetReason, belowMsg); // replay below the height
+
+            var (_, honestMsg) = await TransactionValidatorService.VerifyTX(VoteTx(withOffset), false, true, false, null, false, Gate);
+            Assert.NotEqual(TransactionValidatorService.TopicEndDateWithoutOffsetReason, honestMsg);
+        }
     }
 }
