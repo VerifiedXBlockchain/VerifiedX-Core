@@ -4000,6 +4000,13 @@ namespace VerifiedXCore.Services
                     if (string.IsNullOrEmpty(evmDestination) || !evmDestination.StartsWith("0x") || evmDestination.Length != 42)
                         return (txResult, "Invalid EvmDestination for bridge lock.");
 
+                    // Validators never sign a Base mint for a destination that begins with an admin message tag, so a lock to
+                    // one would debit vBTC that is never minted. Refused at admission at every height; in blocks from the
+                    // path-audit height.
+                    if ((blockHeight == null || blockHeight.Value >= Globals.PathAuditRulesHeight)
+                        && VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.DestinationStartsWithAdminTag(evmDestination))
+                        return (txResult, BridgeLockDestinationIsAdminTagReason);
+
                     if (VBTCBridgeLockState.GetByLockId(lockId) != null)
                         return (txResult, "Bridge LockId already exists on-chain.");
 
@@ -4467,6 +4474,7 @@ namespace VerifiedXCore.Services
         }
 
         internal const string NegativeFeeReason = "A transaction's fee cannot be negative.";
+        internal const string BridgeLockDestinationIsAdminTagReason = "A bridge lock's EvmDestination cannot begin with a Base admin message tag.";
         internal const string VotingEndDateNeedsOffsetReason = "A topic's voting end date must carry a UTC offset.";
         internal const string TopicEndDateWithoutOffsetReason = "This topic's voting end date was written without a UTC offset; it cannot be voted on.";
 

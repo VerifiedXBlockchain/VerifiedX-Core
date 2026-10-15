@@ -361,7 +361,8 @@ namespace VerifiedXCore.Tests
         /// The vBTCb contract's admin messages (ADD, ADD_BATCH, REMOVE, REMOVE_BATCH, UPGRADE) begin with a text tag and
         /// are signed by the same validators the same way as a mint, whose message begins with the destination. A mint
         /// attestation is never given for a destination that begins with one of those tags (round 37); any other
-        /// destination is judged as before.
+        /// destination is judged as before. A lock to such a destination is refused itself (it would debit vBTC that is
+        /// never minted); the signer still refuses one already held in state, as a lock made before that rule would be.
         /// </summary>
         [Fact]
         public async Task AMintAttestation_IsNotGivenForADestinationThatBeginsWithAnAdminTag()
@@ -375,11 +376,24 @@ namespace VerifiedXCore.Tests
             Globals.BaseValidatorSetCastersOnly = false;
             try
             {
+                VfxTx LockTo(string destination, string lockId) => SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_BRIDGE_LOCK,
+                    new { Function = "VBTCBridgeLock()", ContractUID = vault.Uid, LockId = lockId, Amount = 0.001M, AmountSats = 100_000L, EvmDestination = destination });
                 async Task<string?> AskFor(string destination)
                 {
                     var lockId = Guid.NewGuid().ToString("N");
-                    await Mine(SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_BRIDGE_LOCK,
-                        new { Function = "VBTCBridgeLock()", ContractUID = vault.Uid, LockId = lockId, Amount = 0.001M, AmountSats = 100_000L, EvmDestination = destination }));
+                    if (VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.DestinationStartsWithAdminTag(destination))
+                    {
+                        // The lock itself is refused, in a block and at admission.
+                        await RefusedInBlock(LockTo(destination, lockId), VerifiedXCore.Services.TransactionValidatorService.BridgeLockDestinationIsAdminTagReason);
+                        var (admitted, why) = await VerifiedXCore.Services.TransactionValidatorService.VerifyTX(LockTo(destination, lockId));
+                        Assert.False(admitted);
+                        Assert.Equal(VerifiedXCore.Services.TransactionValidatorService.BridgeLockDestinationIsAdminTagReason, why);
+                        // One already in state (made before the rule) is still never signed for.
+                        Assert.True(VBTCBridgeLockState.TryInsertFromLockTx(new VerifiedXCore.Models.Transaction { Hash = "pre" + lockId, FromAddress = Minter.Address, Height = Tip },
+                            vault.Uid, lockId, 0.001M, 100_000L, destination));
+                    }
+                    else
+                        await Mine(LockTo(destination, lockId));
                     Assert.NotNull(VBTCBridgeLockState.GetByLockId(lockId));
                     var (_, _, error) = await VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.HandleMintAttestationRequest(new VerifiedXCore.Bitcoin.Models.MintAttestationRequest
                     {
