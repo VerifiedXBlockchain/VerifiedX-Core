@@ -345,7 +345,7 @@ namespace VerifiedXCore.Privacy
                 foreach (var tx in block.Transactions)
                 {
                     result.TransactionsScanned++;
-                    if (tx?.Data == null || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
+                    if (tx?.Data == null || !PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType) || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
                         continue;
                     if (payload == null)
                         continue;
@@ -435,8 +435,6 @@ namespace VerifiedXCore.Privacy
                         var c = o.CommitmentB64;
                         if (string.IsNullOrEmpty(c) || merged.Contains(c))
                             continue;
-                        merged.Add(c);
-                        result.NotesFound++;
 
                         byte[] r32 = Array.Empty<byte>();
                         if (!string.IsNullOrEmpty(note.RandomnessB64))
@@ -448,6 +446,8 @@ namespace VerifiedXCore.Privacy
                         long treePos = LookupTreePositionByCommitment(c, note.AssetType ?? "");
 
                         if (!NoteMatchesOutput(o, note.Amount, r32, keys, note.AssetType)) continue; // the note is the output it came with (round 22)
+                        merged.Add(c); // seen once it matched: a copy that does not match hid the real output (round 24)
+                        result.NotesFound++;
                         w.UnspentCommitments.Add(new UnspentCommitment
                         {
                             Commitment = c,

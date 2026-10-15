@@ -530,7 +530,7 @@ namespace VerifiedXCore.Controllers
                     foreach (var tx in block.Transactions)
                     {
                         transactionsScanned++;
-                        if (tx?.Data == null || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
+                        if (tx?.Data == null || !PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType) || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
                             continue;
                         if (payload == null)
                             continue;
@@ -572,8 +572,6 @@ namespace VerifiedXCore.Controllers
                             var c = o.CommitmentB64;
                             if (string.IsNullOrEmpty(c) || merged.Contains(c))
                                 continue;
-                            merged.Add(c);
-                            notesFound++;
                             byte[] r32 = Array.Empty<byte>();
                             if (!string.IsNullOrEmpty(note.RandomnessB64))
                             {
@@ -589,6 +587,8 @@ namespace VerifiedXCore.Controllers
 
                             w.UnspentCommitments ??= new List<UnspentCommitment>();
                             if (!PrivacyApiHelper.NoteMatchesOutput(o, note.Amount, r32, keys, note.AssetType)) continue; // the note is the output it came with (round 22)
+                            merged.Add(c); // seen once it matched: a copy that does not match hid the real output (round 24)
+                            notesFound++;
                             w.UnspentCommitments.Add(new UnspentCommitment
                             {
                                 Commitment = c,
@@ -1320,7 +1320,7 @@ namespace VerifiedXCore.Controllers
                     foreach (var tx in block.Transactions)
                     {
                         transactionsScanned++;
-                        if (tx?.Data == null || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
+                        if (tx?.Data == null || !PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType) || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
                             continue;
                         if (payload == null)
                             continue;
@@ -1367,8 +1367,6 @@ namespace VerifiedXCore.Controllers
                             var c = o.CommitmentB64;
                             if (string.IsNullOrEmpty(c) || merged.Contains(c))
                                 continue;
-                            merged.Add(c);
-                            notesFound++;
                             byte[] r32 = Array.Empty<byte>();
                             if (!string.IsNullOrEmpty(note.RandomnessB64))
                             {
@@ -1383,6 +1381,8 @@ namespace VerifiedXCore.Controllers
 
                             w.UnspentCommitments ??= new List<UnspentCommitment>();
                             if (!PrivacyApiHelper.NoteMatchesOutput(o, note.Amount, r32, keys, note.AssetType)) continue; // the note is the output it came with (round 22)
+                            merged.Add(c); // seen once it matched: a copy that does not match hid the real output (round 24)
+                            notesFound++;
                             w.UnspentCommitments.Add(new UnspentCommitment
                             {
                                 Commitment = c,

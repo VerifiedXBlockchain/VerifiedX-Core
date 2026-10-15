@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using VerifiedXCore;
 using VerifiedXCore.Data;
 using VerifiedXCore.EllipticCurve;
+using VerifiedXCore.Extensions;
 using VerifiedXCore.Models;
 using VerifiedXCore.Models.Privacy;
 using VerifiedXCore.Privacy;
@@ -324,6 +325,31 @@ namespace VerifiedXCore.Tests
             // A VFX note sealed as vBTC (round 23): no note hash covers the asset; the leaf's pool does.
             Assert.False(PrivacyApiHelper.NoteMatchesOutput(output, 5M, note.Randomness, _alice, "VBTC:" + Guid.NewGuid().ToString("N")));
             Assert.False(PrivacyApiHelper.NoteMatchesOutput(output, 5M, note.Randomness, _alice, "vfx"));
+        }
+
+        /// <summary>
+        /// The resync and scan routes marked an output's commitment seen before checking its note: a copy of the
+        /// commitment ahead of the real output, carrying a note sealed to the owner that does not match, hid the real
+        /// note from every resync (fifth review, round 24).
+        /// </summary>
+        [Fact]
+        public async Task AResync_CreditsTheRealNote_BehindACopyThatDoesNotMatch()
+        {
+            if (!ParamsLoaded()) return;
+            var shield = ShieldFor(_alice, 5M);
+            await Apply(shield, Height + 1);
+            var note = NoteOf(shield, 0, _alice);
+            var claim = ShieldedNoteEncryption.SealPlainNote(new ShieldedPlainNote { Version = 1, Amount = 500M, RandomnessB64 = Convert.ToBase64String(note.Randomness), AssetType = "VFX" }, _alice.ZfxAddress);
+            var copy = Tampered(shield, (p, _) => p.Outs[0].EncryptedNoteB64 = Convert.ToBase64String(claim));
+            var block = new Block { Height = Height + 1, StateRoot = "root", Timestamp = 1_700_000_000 + Height + 1, Hash = "resync", Transactions = new List<Transaction> { copy, shield } };
+            BlockchainData.GetBlocks().InsertSafe(block);
+            ShieldedWalletService.Upsert(new ShieldedWallet { ShieldedAddress = _alice.ZfxAddress, ViewingKey = _alice.ViewingKey32, IsViewOnly = true });
+
+            var result = PrivacyApiHelper.ResyncShieldedWallet(_alice.ZfxAddress, Height + 1, Height + 1);
+            Assert.True(string.IsNullOrEmpty(result.Error), result.Error);
+            var wallet = ShieldedWalletService.FindByZfxAddress(_alice.ZfxAddress)!;
+            Assert.Equal(5M, Assert.Single(wallet.UnspentCommitments).Amount);
+            Assert.Equal(5M, wallet.ShieldedBalances["VFX"]);
         }
 
         [Fact]
