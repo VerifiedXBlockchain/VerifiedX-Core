@@ -169,7 +169,10 @@ namespace VerifiedXCore.Services
         /// level. The chain reads its fields by exact key, the last of a repeated key winning; other readers (typed
         /// readers in this code, an exchange's deposit scanner) take another: <c>"Amount":5,"Amount":0.00000001</c> or an
         /// extra <c>"amount":5</c> credited one satoshi and showed five (fifth review, round 24). Private transactions'
-        /// payloads have their own rules. Null when the rule passes.
+        /// payloads have their own rules. Names are plain printable ASCII and are folded by hand over A-Z: a case-insensitive
+        /// comparison of other characters follows each machine's ICU or NLS tables, and a key pair cased differently on
+        /// one platform than another (U+A7C0/U+A7C1) split nodes by operating system (fifth review, round 25). Null when
+        /// the rule passes.
         /// </summary>
         public static string? VbtcDataKeysAreDistinct(Transaction tx, long height)
         {
@@ -180,9 +183,18 @@ namespace VerifiedXCore.Services
             catch { return null; } // not JSON: the type's own rules judge it
             try { JToken.Parse(tx.Data, new JsonLoadSettings { DuplicatePropertyNameHandling = DuplicatePropertyNameHandling.Error }); }
             catch { return "This vBTC transaction's Data names a key twice."; }
+            static bool PlainAscii(JToken t) => t switch
+            {
+                JObject o => o.Properties().All(p => p.Name.All(c => c >= 0x20 && c <= 0x7E) && PlainAscii(p.Value)),
+                JArray a => a.All(PlainAscii),
+                _ => true,
+            };
+            if (!PlainAscii(root))
+                return "This vBTC transaction's Data names a key in characters other than plain ASCII.";
+            static string Fold(string name) => new string(name.Select(c => c >= 'A' && c <= 'Z' ? (char)(c + 32) : c).ToArray());
             static bool Respelled(JToken t) => t switch
             {
-                JObject o => o.Properties().GroupBy(p => p.Name, StringComparer.OrdinalIgnoreCase).Any(g => g.Count() > 1) || o.Properties().Any(p => Respelled(p.Value)),
+                JObject o => o.Properties().GroupBy(p => Fold(p.Name), StringComparer.Ordinal).Any(g => g.Count() > 1) || o.Properties().Any(p => Respelled(p.Value)),
                 JArray a => a.Any(Respelled),
                 _ => false,
             };

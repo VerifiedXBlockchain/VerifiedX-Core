@@ -281,6 +281,9 @@ namespace VerifiedXCore.Tests
             Assert.Contains("two spellings", LedgerIntegrityRules.VbtcDataKeysAreDistinct(Vbtc($"{{\"Inputs\":[{{\"ContractUID\":\"{uid}\",\"Amount\":1,\"AMOUNT\":2}}]}}"), Rule));
             Assert.Null(LedgerIntegrityRules.VbtcDataKeysAreDistinct(Vbtc(clean.Replace("\"Amount\":5", "\"Amount\":5,\"Amount\":1")), Rule - 1));   // before the rules
             Assert.Null(LedgerIntegrityRules.VbtcDataKeysAreDistinct(new Transaction { TransactionType = TransactionType.NFT_TX, Data = "{\"a\":1,\"A\":2}" }, Rule));
+            // Round 25: names outside plain ASCII are refused on every platform alike (their case pairs follow ICU).
+            Assert.Contains("plain ASCII", LedgerIntegrityRules.VbtcDataKeysAreDistinct(Vbtc(clean.Replace("\"Amount\":5", "\"Amount\":5,\"Ꟁ\":1,\"ꟁ\":1")), Rule));
+            Assert.Contains("plain ASCII", LedgerIntegrityRules.VbtcDataKeysAreDistinct(Vbtc(clean.Replace("\"Amount\":5", "\"Amount\":5,\"é\":1")), Rule));
             // A transaction that is not a contract call is not this rule's business.
             Assert.Null(LedgerIntegrityRules.ContractCallIsReadable(new Transaction { TransactionType = TransactionType.TX, Data = "[{\"Function\":\"Burn()\",\"MD5List\":{}}]" }, Rule));
             // The honest transfer of a vault, resending its code unchanged, passes as before.
