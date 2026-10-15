@@ -32,6 +32,21 @@ namespace VerifiedXCore.Bitcoin.Services
             return Sha3Keccack.Current.CalculateHash(ms.ToArray());
         }
 
+        internal const string DestinationIsAdminTagReason = "EVM destination begins with a Base admin message tag";
+
+        /// <summary>The text tags the vBTCb contract's admin messages begin with (ADD_BATCH and REMOVE_BATCH start with ADD and REMOVE).</summary>
+        private static readonly byte[][] AdminMessageTags = { Encoding.ASCII.GetBytes("ADD"), Encoding.ASCII.GetBytes("REMOVE"), Encoding.ASCII.GetBytes("UPGRADE") };
+
+        /// <summary>Whether a 0x-prefixed EVM address begins with the bytes of an admin message tag. True for anything unreadable.</summary>
+        internal static bool DestinationStartsWithAdminTag(string? evmDestination)
+        {
+            var hex = (evmDestination ?? "").Trim();
+            if (hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) hex = hex[2..];
+            byte[] bytes;
+            try { bytes = Convert.FromHexString(hex); } catch { return true; }
+            return AdminMessageTags.Any(t => bytes.AsSpan().StartsWith(t));
+        }
+
         public static MintAttestationState? GetAttestationState(string lockId) =>
             string.IsNullOrEmpty(lockId) ? null : Pending.TryGetValue(lockId.Trim(), out var s) ? s : null;
 
@@ -79,6 +94,15 @@ namespace VerifiedXCore.Bitcoin.Services
                 {
                     LogUtility.Log($"[BridgeAttest] REJECT: EVM destination mismatch. Chain={chainLock.EvmDestination}, Request={request.EvmDestination}", TAG);
                     return Task.FromResult<(bool, string?, string?)>((false, null, "EVM destination mismatch"));
+                }
+
+                // A mint message starts with the destination's 20 bytes and the contract's admin messages start with a text
+                // tag, under the same signer set and signature scheme. A destination that begins with one of those tags is
+                // never signed for, so no mint signature can also read as an admin one.
+                if (DestinationStartsWithAdminTag(request.EvmDestination))
+                {
+                    LogUtility.Log($"[BridgeAttest] REJECT: EVM destination {request.EvmDestination} begins with a Base admin message tag", TAG);
+                    return Task.FromResult<(bool, string?, string?)>((false, null, DestinationIsAdminTagReason));
                 }
 
                 if (chainLock.AmountSats != request.AmountSats)
