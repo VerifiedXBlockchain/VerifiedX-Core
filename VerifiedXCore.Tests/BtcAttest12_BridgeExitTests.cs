@@ -676,8 +676,11 @@ namespace VerifiedXCore.Tests
             record.Amount = 0.002000005M; // as an older lock could be
             VBTCBridgeLockState.GetCollection().Update(record);
 
-            var plan = BridgePoolUnlockService.ComputeExitAllocationPlan(0.003M, null, Tip + 1)!;
-            Assert.Equal(new[] { 0.002M, 0.001M }, plan.Select(a => a.UnlockAmount).ToArray());
+            // An amount that needs both locks, whichever the queue takes first.
+            var plan = BridgePoolUnlockService.ComputeExitAllocationPlan(0.006M, null, Tip + 1)!;
+            Assert.Contains(plan, a => a.LockId == odd);
+            Assert.Equal(0.006M, plan.Sum(a => a.UnlockAmount));
+            Assert.All(plan, a => Assert.Equal(Math.Round(a.UnlockAmount, 8), a.UnlockAmount));
             var (ok, why) = await Verify(Exit(NewBurn(), BtcDest, plan.Select(a => (a.LockId, a.SmartContractUID, a.UnlockAmount)).ToArray()), Tip + 1);
             Assert.True(ok, why);
         }
