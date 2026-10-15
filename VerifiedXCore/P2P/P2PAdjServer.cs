@@ -285,9 +285,8 @@ namespace VerifiedXCore.P2P
                                                 transaction.TransactionRating = rating;
 
                                                 if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
-                                    && MempoolEvictionUtility.CheckAdmissionBounds(transaction).admit)
+                                    && MempoolEvictionUtility.TryAdmitAndInsert(transaction, mempool))
                                                 {
-                                                    mempool.InsertSafe(transaction);
                                                     var txOutput = "";
                                                     txOutput = JsonConvert.SerializeObject(transaction);
                                                     //await SendAdjMessageAll("tx", txOutput);//sends messages to all in fortis pool
@@ -359,9 +358,8 @@ namespace VerifiedXCore.P2P
                                             transaction.TransactionRating = rating;
 
                                             if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
-                                    && MempoolEvictionUtility.CheckAdmissionBounds(transaction).admit)
+                                    && MempoolEvictionUtility.TryAdmitAndInsert(transaction, mempool))
                                             {
-                                                mempool.InsertSafe(transaction);
                                                 var txOutput = "";
                                                 txOutput = JsonConvert.SerializeObject(transaction);
                                                 //await SendAdjMessageAll("tx", txOutput);//sends messages to all in fortis pool

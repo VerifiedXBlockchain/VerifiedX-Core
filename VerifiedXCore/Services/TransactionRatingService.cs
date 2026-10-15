@@ -504,7 +504,6 @@ namespace VerifiedXCore.Services
         private static async Task<TransactionRating> TXRating(Transaction tx)
         {
             TransactionRating rating = TransactionRating.A;
-            var mempool = TransactionData.GetMempool();
             var pool = TransactionData.GetPool();
 
             if (tx.Amount >= 0.1M)
@@ -525,11 +524,13 @@ namespace VerifiedXCore.Services
             {
                 rating = TransactionRating.D; //low priority tx
             }
-            if (mempool != null)
+            // The pool's count and this sender's rows come from the indexes: loading the whole pool here made every
+            // admission cost grow with the pool, refused ones included.
+            if (pool != null)
             {
-                if (mempool.Count() > 50)
+                if (pool.Count() > 50)
                 {
-                    var txs = mempool.FindAll(x => x.FromAddress == tx.FromAddress && x.TransactionType == TransactionType.TX);
+                    var txs = pool.Find(x => x.FromAddress == tx.FromAddress && x.TransactionType == TransactionType.TX).ToList();
                     if (txs.Count() > 50)
                     {
                         rating = TransactionRating.F; // Fail. Too many tx's being broadcasted from that address. 

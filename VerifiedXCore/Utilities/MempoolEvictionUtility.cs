@@ -1,3 +1,4 @@
+using VerifiedXCore.Extensions;
 using Newtonsoft.Json;
 using VerifiedXCore.Data;
 using VerifiedXCore.Models;
@@ -61,7 +62,8 @@ namespace VerifiedXCore.Utilities
                     targetSize: (long)(Globals.MaxMempoolSizeBytes * 0.95),
                     onlyRatedBelow: rating,
                     knownTotalSize: stats.sizeBytes,
-                    freedBytes: out var freed);
+                    freedBytes: out var freed,
+                    mustFitBytes: SizeOf(tx));
 
                 stats = (stats.count - evicted.Count, stats.sizeBytes - freed);
                 lock (AdmissionStatsLock)
@@ -76,14 +78,35 @@ namespace VerifiedXCore.Utilities
                 canAdd = CanAddToMempool(tx, stats.count, stats.sizeBytes);
             }
 
-            if (canAdd.canAdd)
-            {
-                // Counted now, so admissions inside the cache window cannot together pass the byte cap.
-                lock (AdmissionStatsLock) _cachedSizeBytes += SizeOf(tx);
-                if (!string.IsNullOrEmpty(tx.Hash))
-                    ArrivedAtUtc[tx.Hash] = DateTime.UtcNow;
-            }
             return (canAdd.canAdd, canAdd.reason);
+        }
+
+        /// <summary>Serialises admissions, so a capacity decision and the insert it allows cannot interleave with another.</summary>
+        private static readonly object AdmitLock = new();
+
+        /// <summary>
+        /// Applies <see cref="CheckAdmissionBounds"/> and, if it admits, inserts <paramref name="tx"/> into
+        /// <paramref name="mempool"/> in the same locked section, then counts its bytes. Concurrent admissions therefore
+        /// cannot together pass the entry or byte cap, and nothing is counted for a transaction that was not inserted.
+        /// </summary>
+        public static bool TryAdmitAndInsert(Transaction tx, LiteDB.ILiteCollection<Transaction> mempool)
+        {
+            lock (AdmitLock)
+            {
+                if (!CheckAdmissionBounds(tx).admit)
+                    return false;
+                mempool.InsertSafe(tx);
+                NoteInserted(tx);
+                return true;
+            }
+        }
+
+        /// <summary>Counts a transaction just inserted into the mempool toward the byte total and records when it arrived.</summary>
+        public static void NoteInserted(Transaction tx)
+        {
+            lock (AdmissionStatsLock) _cachedSizeBytes += SizeOf(tx);
+            if (!string.IsNullOrEmpty(tx.Hash))
+                ArrivedAtUtc[tx.Hash] = DateTime.UtcNow;
         }
 
         private static readonly object AdmissionStatsLock = new();
@@ -196,7 +219,9 @@ namespace VerifiedXCore.Utilities
 
         /// <param name="knownTotalSize">The pool's byte total when the caller already has it, so it is not summed again.</param>
         /// <param name="freedBytes">Bytes the evicted entries took up.</param>
-        internal static List<string> EvictLowestPriority(int targetCount, long targetSize, TransactionRating? onlyRatedBelow, long? knownTotalSize, out long freedBytes)
+        /// <param name="mustFitBytes">An incoming transaction's size: nothing is evicted unless evicting the chosen entries
+        /// leaves room for it under both caps, so honest entries are never removed for a transaction that is then refused.</param>
+        internal static List<string> EvictLowestPriority(int targetCount, long targetSize, TransactionRating? onlyRatedBelow, long? knownTotalSize, out long freedBytes, long? mustFitBytes = null)
         {
             freedBytes = 0;
             var evictedHashes = new List<string>();
@@ -235,6 +260,24 @@ namespace VerifiedXCore.Utilities
                 .OrderByDescending(x => x.TransactionRating ?? TransactionRating.F)
                 .ThenByDescending(x => x.Hash != null && ArrivedAtUtc.TryGetValue(x.Hash, out var at) ? at : DateTime.MinValue)
                 .ToList();
+
+            if (mustFitBytes != null)
+            {
+                var total = knownTotalSize ?? allTxs.Sum(SizeOf);
+                int plannedCount = 0;
+                long plannedBytes = 0;
+                foreach (var t in sortedTxs)
+                {
+                    if ((countToEvict == 0 || plannedCount >= countToEvict) && (sizeToEvict == 0 || plannedBytes >= sizeToEvict))
+                        break;
+                    plannedCount++;
+                    plannedBytes += SizeOf(t);
+                }
+                var fits = allTxs.Count - plannedCount < Globals.MaxMempoolEntries
+                    && total - plannedBytes + mustFitBytes.Value <= Globals.MaxMempoolSizeBytes;
+                if (!fits)
+                    return evictedHashes;
+            }
 
             long evictedSize = 0;
             int evictedCount = 0;

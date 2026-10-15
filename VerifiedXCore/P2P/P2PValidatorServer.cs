@@ -898,9 +898,8 @@ namespace VerifiedXCore.P2P
                                 txReceived.TransactionRating = rating;
 
                                 if (txResult.Item1 == true && dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
-                                    && MempoolEvictionUtility.CheckAdmissionBounds(txReceived).admit)
+                                    && MempoolEvictionUtility.TryAdmitAndInsert(txReceived, mempool))
                                 {
-                                mempool.InsertSafe(txReceived);
                                 
                                 // HAL-16 Fix: Broadcast guard - check if we should broadcast
                                 // Store broadcast decision but DON'T execute yet (release semaphore first)
@@ -1028,9 +1027,8 @@ namespace VerifiedXCore.P2P
                             txReceived.TransactionRating = rating;
 
                             if (txResult.Item1 == true && dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
-                                    && MempoolEvictionUtility.CheckAdmissionBounds(txReceived).admit)
+                                    && MempoolEvictionUtility.TryAdmitAndInsert(txReceived, mempool))
                             {
-                                mempool.InsertSafe(txReceived);
                                 
                                 // HAL-16 Fix: Broadcast guard - check if we should broadcast
                                 // Store broadcast decision but DON'T execute yet (release semaphore first)

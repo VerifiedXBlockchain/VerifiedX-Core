@@ -497,13 +497,12 @@ namespace VerifiedXCore.P2P
                                 if (txResult.Item1 == true && dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
                                 {
                                     // HAL-071 Fix: fee floor and mempool caps
-                                    if (!MempoolEvictionUtility.CheckAdmissionBounds(txReceived).admit)
+                                    if (!MempoolEvictionUtility.TryAdmitAndInsert(txReceived, mempool))
                                     {
                                         VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(txReceived.Hash); // verified but not pooled: claims nothing (round 32)
                                         return "TFVP";
                                     }
 
-                                    mempool.InsertSafe(txReceived);
                                 
                                     // HAL-16 Fix: Broadcast guard - check if we should broadcast
                                     // Store broadcast decision but DON'T execute yet (release semaphore first)
@@ -638,13 +637,12 @@ namespace VerifiedXCore.P2P
                             if (txResult.Item1 == true && dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
                             {
                                 // HAL-071 Fix: fee floor and mempool caps
-                                if (!MempoolEvictionUtility.CheckAdmissionBounds(txReceived).admit)
+                                if (!MempoolEvictionUtility.TryAdmitAndInsert(txReceived, mempool))
                                 {
                                     VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(txReceived.Hash); // verified but not pooled: claims nothing (round 32)
                                     return "TFVP";
                                 }
 
-                                mempool.InsertSafe(txReceived);
                                 
                                 // HAL-16 Fix: Broadcast guard - check if we should broadcast
                                 // Store broadcast decision but DON'T execute yet (release semaphore first)

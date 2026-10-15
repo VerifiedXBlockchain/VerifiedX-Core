@@ -160,13 +160,32 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public void AnAdmittedTransaction_CountsTowardTheByteTotalAtOnce()
+        public void AnAdmittedTransaction_IsInsertedAndCountedTogether_ARefusedOneNeither()
         {
             var before = MempoolEvictionUtility.GetAdmissionStats().sizeBytes;
             var tx = Send(1M);
-            Assert.True(MempoolEvictionUtility.CheckAdmissionBounds(tx).admit);
-            // Still inside the cache window, nothing inserted yet: the admitted bytes are already counted.
-            Assert.Equal(before + MempoolEvictionUtility.CalculateTransactionSize(tx), MempoolEvictionUtility.GetAdmissionStats().sizeBytes);
+            Assert.True(MempoolEvictionUtility.TryAdmitAndInsert(tx, TransactionData.GetPool()));
+            // Still inside the cache window: the inserted bytes are already counted.
+            var afterAdmit = MempoolEvictionUtility.GetAdmissionStats();
+            Assert.Equal(before + MempoolEvictionUtility.CalculateTransactionSize(tx), afterAdmit.sizeBytes);
+            Assert.Equal(1, PoolCount());
+
+            Assert.False(MempoolEvictionUtility.TryAdmitAndInsert(UnderFloor(), TransactionData.GetPool()));
+            Assert.Equal(afterAdmit.sizeBytes, MempoolEvictionUtility.GetAdmissionStats().sizeBytes);
+            Assert.Equal(1, PoolCount());
+        }
+
+        [Fact]
+        public void EvictionThatCannotMakeRoom_EvictsNothing()
+        {
+            Pool("c-old", TransactionRating.C, 1);
+            Pool("c-new", TransactionRating.C, 2);
+
+            var evicted = MempoolEvictionUtility.EvictLowestPriority(1, -1, TransactionRating.A, null, out var freed,
+                mustFitBytes: Globals.MaxMempoolSizeBytes + 1);
+            Assert.Empty(evicted);
+            Assert.Equal(0, freed);
+            Assert.Equal(2, PoolCount());
         }
 
         [Fact]

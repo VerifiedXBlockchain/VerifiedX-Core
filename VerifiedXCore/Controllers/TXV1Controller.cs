@@ -1019,13 +1019,6 @@ namespace VerifiedXCore.Controllers
                             return JsonConvert.SerializeObject(new { Result = "Fail", Message = "Transaction was rated F and cannot be added to the mempool." });
                         }
 
-                        var admission = MempoolEvictionUtility.CheckAdmissionBounds(transaction);
-                        if (!admission.admit)
-                        {
-                            VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // refused: claims nothing
-                            return JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Transaction was not admitted to the mempool: {admission.reason}" });
-                        }
-
                         // What every peer checks on receipt: with this sender's transactions already waiting it must not overspend.
                         var waitingOverspend = TransactionData.PendingOverspendReason(transaction);
                         if (waitingOverspend != null)
@@ -1034,7 +1027,16 @@ namespace VerifiedXCore.Controllers
                             return JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Not broadcast: together with this address's transactions still waiting to be mined it would overspend ({waitingOverspend}). Submit it again once they are mined." });
                         }
 
+                        var admission = MempoolEvictionUtility.CheckAdmissionBounds(transaction);
+                        if (!admission.admit)
+                        {
+                            VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // refused: claims nothing
+                            return JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Transaction was not admitted to the mempool: {admission.reason}" });
+                        }
+
                         await TransactionData.AddToPool(transaction);
+                        if (TransactionData.GetPool().Exists(x => x.Hash == transaction.Hash))
+                            MempoolEvictionUtility.NoteInserted(transaction);
                         await P2PClient.SendTXMempool(transaction);//send out to mempool
 
                         output = JsonConvert.SerializeObject(new { Result = "Success", Message = $"Transaction has been broadcasted.", Hash = transaction.Hash });

@@ -738,9 +738,8 @@ namespace VerifiedXCore.Nodes
                                 transaction.TransactionRating = rating;
 
                                 if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
-                                    && MempoolEvictionUtility.CheckAdmissionBounds(transaction).admit)
+                                    && MempoolEvictionUtility.TryAdmitAndInsert(transaction, mempool))
                                 {
-                                    mempool.InsertSafe(transaction);
                                     
                                     // Broadcast guard: Only broadcast if we haven't broadcast this TX recently
                                     var now = TimeUtil.GetTime();
@@ -813,9 +812,8 @@ namespace VerifiedXCore.Nodes
                             transaction.TransactionRating = rating;
 
                             if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
-                                    && MempoolEvictionUtility.CheckAdmissionBounds(transaction).admit)
+                                    && MempoolEvictionUtility.TryAdmitAndInsert(transaction, mempool))
                             {
-                                mempool.InsertSafe(transaction);
                             }
                             else
                             {
