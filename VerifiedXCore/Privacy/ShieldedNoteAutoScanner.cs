@@ -154,8 +154,12 @@ namespace VerifiedXCore.Privacy
             // Track incoming privacy TXs to create local TX records for the receiver
             var incomingPrivacyTxRecords = new List<(Transaction tx, string receiverTransparentAddress, string senderAddress, decimal noteAmount, long blockHeight)>();
 
-            // Acquire per-wallet locks to prevent concurrent API writes from clobbering state
+            // Acquire per-wallet locks to prevent concurrent API writes from clobbering state. Inside the try whose finally
+            // releases them: a fault reloading a wallet (a LiteDB lock timeout) left them held for good, and the scanner
+            // and every spend, scan and resync of those wallets waited on them until a restart (fifth review, round 32).
             var heldLocks = new List<SemaphoreSlim>(walletKeys.Count);
+            try
+            {
             foreach (var (w, _) in walletKeys)
             {
                 var sem = ShieldedWalletLock.For(w.ShieldedAddress);
@@ -173,9 +177,6 @@ namespace VerifiedXCore.Privacy
                     freshWalletKeys.Add((fresh, keys));
             }
             walletKeys = freshWalletKeys;
-
-            try
-            {
 
             foreach (var tx in block.Transactions)
             {
