@@ -62,14 +62,17 @@ namespace VerifiedXCore.Models.DST
         {
             var now = VaultOwnerFigure(smartContractUID);
             if (now == null) return null;
-            var bid = GetAllBids(BidSendReceive.Sent)?.FirstOrDefault(b => b != null
+            // Every bid of this buyer on the listing (re-bids share its purchase key): the highest figure recorded, so a
+            // later, higher bid made when the vault held more is the one held to (round 31).
+            var recorded = (GetAllBids(BidSendReceive.Sent) ?? new List<Bid>()).Where(b => b != null
                 && string.Equals(b.BidAddress, bidderAddress, StringComparison.Ordinal)
                 && string.Equals(b.PurchaseKey, purchaseKey, StringComparison.Ordinal)
-                && string.Equals(b.SmartContractUID, smartContractUID, StringComparison.Ordinal));
-            if (bid?.VaultOwnerBalanceAtBid == null)
+                && string.Equals(b.SmartContractUID, smartContractUID, StringComparison.Ordinal)).ToList();
+            if (recorded.Count == 0 || recorded.Any(b => b.VaultOwnerBalanceAtBid == null))
                 return $"The vault's owner balance at the time of the bid was not recorded; complete the sale by hand after checking the vault (it holds {now} vBTC for its owner now).";
-            return now.Value < bid.VaultOwnerBalanceAtBid.Value
-                ? $"The vault's owner balance fell from {bid.VaultOwnerBalanceAtBid} to {now} vBTC since the bid; the sale is not completed."
+            var atBid = recorded.Max(b => b.VaultOwnerBalanceAtBid!.Value);
+            return now.Value < atBid
+                ? $"The vault's owner balance fell from {atBid} to {now} vBTC since the bid; the sale is not completed."
                 : null;
         }
 
