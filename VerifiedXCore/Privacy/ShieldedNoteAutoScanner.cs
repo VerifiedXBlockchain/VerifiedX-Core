@@ -29,6 +29,10 @@ namespace VerifiedXCore.Privacy
             // private transactions is passed over at once by the worker.
             if (block == null)
                 return;
+            // A block without private transactions is queued as its height alone: while a wallet's lock holds the worker,
+            // a sync's blocks stayed in memory whole (round 29).
+            if (block.Transactions == null || !block.Transactions.Any(t => t != null && PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)))
+                block = new Block { Height = block.Height, Transactions = new List<Transaction>() };
             if (Interlocked.Exchange(ref _workerStarted, 1) == 0)
                 _ = Task.Run(Worker);
             _queue.Writer.TryWrite(block);
