@@ -560,7 +560,9 @@ namespace VerifiedXCore.Privacy
             var (ok, msg, tx) = Prepare(hash, signature);
             if (!ok || tx == null)
                 return (false, msg);
-            return await TransactionValidatorService.VerifyTX(tx);
+            var verdict = await TransactionValidatorService.VerifyTX(tx);
+            MempoolNullifierTracker.ReleaseClaimsIfNotPooled(tx.Hash); // a dry run claims nothing (round 27)
+            return verdict;
         }
 
         /// <summary>Verifies, claims the build (once), admits it to the mempool and broadcasts it.</summary>
@@ -572,7 +574,10 @@ namespace VerifiedXCore.Privacy
 
             var verdict = await TransactionValidatorService.VerifyTX(tx);
             if (!verdict.Item1)
+            {
+                MempoolNullifierTracker.ReleaseClaimsIfNotPooled(tx.Hash);
                 return (false, $"Transaction verification failed: {verdict.Item2}", tx.Hash);
+            }
 
             // Claim only once it is known-good, so a wrong signature can be corrected and retried; the atomic remove
             // also stops a concurrent duplicate submit from broadcasting twice.

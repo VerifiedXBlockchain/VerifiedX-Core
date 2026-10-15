@@ -404,6 +404,7 @@ namespace VerifiedXCore.Tests
             // A signature is not needed and is ignored; the dry run and the submit both pass the node's verifier.
             var verify = await PrivateRawTxService.VerifyAsync(build.Hash, null);
             Assert.True(verify.ok, verify.message);
+            Assert.DoesNotContain(Globals.MempoolNullifiers, kv => kv.Value == build.Hash); // a dry run claims nothing (round 27)
             var sent = await PrivateRawTxService.SendAsync(build.Hash, "ignored");
             Assert.True(sent.ok, sent.message);
             Assert.Equal(PrivacyConstants.PlonkSignatureSentinel, build.Transaction.Signature);

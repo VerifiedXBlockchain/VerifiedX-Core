@@ -12,6 +12,22 @@ namespace VerifiedXCore.Privacy
         public static string MakeKey(string assetType, string nullifierBase64) =>
             $"{assetType}\u001d{nullifierBase64}";
 
+        /// <summary>
+        /// Releases the claims a verification registered for a transaction that did not enter the mempool: dry runs
+        /// (verify routes) and refused submissions registered claims nothing released, and the notes stayed claimed on
+        /// this node until it restarted (fifth review, round 27). A transaction in the pool keeps its claims.
+        /// </summary>
+        public static void ReleaseClaimsIfNotPooled(string? txHash)
+        {
+            if (string.IsNullOrEmpty(txHash)) return;
+            try
+            {
+                if (VerifiedXCore.Data.TransactionData.GetPool().FindOne(x => x.Hash == txHash) == null)
+                    ReleaseClaimsForTxHash(txHash);
+            }
+            catch { }
+        }
+
         /// <summary>Remove mempool claims held by <paramref name="txHash"/>.</summary>
         public static void ReleaseClaimsForTxHash(string txHash)
         {

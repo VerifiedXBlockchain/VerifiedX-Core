@@ -961,6 +961,7 @@ namespace VerifiedXCore.Controllers
 
                     var twSkipVerify = transaction.TransactionType == TransactionType.TKNZ_WD_OWNER ? true : false;
                     var result = !twSkipVerify ? await TransactionValidatorService.VerifyTX(transaction) : await TransactionValidatorService.VerifyTX(transaction, false, false, true);
+                    VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // a dry run claims nothing (round 27)
                     if (result.Item1 == true)
                     {
 
@@ -1019,7 +1020,10 @@ namespace VerifiedXCore.Controllers
                         // What every peer checks on receipt: with this sender's transactions already waiting it must not overspend.
                         var waitingOverspend = TransactionData.PendingOverspendReason(transaction);
                         if (waitingOverspend != null)
+                        {
+                            VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // refused: claims nothing (round 27)
                             return JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Not broadcast: together with this address's transactions still waiting to be mined it would overspend ({waitingOverspend}). Submit it again once they are mined." });
+                        }
 
                         await TransactionData.AddToPool(transaction);
                         await P2PClient.SendTXMempool(transaction);//send out to mempool
