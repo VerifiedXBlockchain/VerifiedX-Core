@@ -181,6 +181,63 @@ namespace VerifiedXCore.Tests
         /// can change them below it. If history holds none, the binding can be required at every height. Inert unless
         /// UNSHIELD_SCAN_DB names the database folder; the block database is opened read-only, in place.
         /// </summary>
+        /// <summary>
+        /// Round 26: every transaction in history that the path-audit rules' plain-ASCII checks would refuse (addresses,
+        /// ADNR and BTC ADNR names and Bitcoin addresses, DecShop ids and URLs, vote topic ids; vBTC Data keys and values).
+        /// Such text goes through platform-dependent casing and collation; two items differing only by the case of a
+        /// non-ASCII letter would replay differently by platform. Inert unless ASCII_SCAN_DB names the database folder;
+        /// the block database is opened read-only, in place.
+        /// </summary>
+        [Fact]
+        public void PlainAsciiScan()
+        {
+            var dbDir = Environment.GetEnvironmentVariable("ASCII_SCAN_DB");
+            if (string.IsNullOrWhiteSpace(dbDir)) return;
+            var outDir = Environment.GetEnvironmentVariable("FUNDLOSS_SCAN_OUT");
+            if (string.IsNullOrWhiteSpace(outDir)) outDir = dbDir;
+            Directory.CreateDirectory(outDir);
+            var dbPath = Path.Combine(dbDir, DbContext.RSRV_DB_NAME);
+            Assert.True(File.Exists(dbPath), $"Block database not found: {dbPath}");
+            var mapper = new BsonMapper(null, LegacyTypeNameBinder.Instance);
+            mapper.RegisterType<DateTime>(
+                value => value.ToString("o", CultureInfo.InvariantCulture),
+                bson => DateTime.ParseExact(bson, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+            mapper.RegisterType<DateTimeOffset>(
+                value => value.ToString("o", CultureInfo.InvariantCulture),
+                bson => DateTimeOffset.ParseExact(bson, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+            var db = new LiteDatabase(new ConnectionString { Filename = dbPath, Connection = ConnectionType.Direct, ReadOnly = true }, mapper);
+            var blocks = db.GetCollection<Block>(DbContext.RSRV_BLOCKS);
+            var network = dbDir.Contains("TestNet", StringComparison.OrdinalIgnoreCase) ? "testnet" : "mainnet";
+            var lines = new System.Collections.Generic.List<string>();
+            var byType = new System.Collections.Generic.Dictionary<string, int>();
+            long scanned = 0, lastHeight = -1, txs = 0, refused = 0;
+            string? stopped = null;
+            try
+            {
+                foreach (var block in blocks.Query().Where(b => b.Height >= 0).OrderBy(b => b.Height).ToEnumerable())
+                {
+                    lastHeight = block.Height;
+                    scanned++;
+                    foreach (var tx in block.Transactions ?? new System.Collections.Generic.List<Transaction>())
+                    {
+                        if (tx == null) continue;
+                        txs++;
+                        var why = LedgerIntegrityRules.IdentifiersArePlainAscii(tx, long.MaxValue) ?? LedgerIntegrityRules.VbtcDataKeysAreDistinct(tx, long.MaxValue);
+                        if (why == null) continue;
+                        refused++;
+                        var key = tx.TransactionType.ToString();
+                        byType[key] = byType.TryGetValue(key, out var c) ? c + 1 : 1;
+                        var data = tx.Data ?? "";
+                        lines.Add($"{block.Height} {tx.Hash} {tx.TransactionType} from {tx.FromAddress} to {tx.ToAddress}: {why} Data: {(data.Length > 300 ? data.Substring(0, 300) + "..." : data)}");
+                    }
+                }
+            }
+            catch (Exception ex) { stopped = ex.ToString(); }
+            if (stopped != null) lines.Insert(0, $"STOPPED after height {lastHeight}: {stopped}");
+            lines.Insert(0, $"{network}: {scanned} blocks to height {lastHeight}, {txs} transactions, {refused} the rules would refuse ({string.Join(", ", byType.Select(kv => kv.Key + " " + kv.Value))})");
+            File.WriteAllLines(Path.Combine(outDir, $"ascii-scan-{network}.txt"), lines);
+        }
+
         [Fact]
         public void UnshieldBindingScan()
         {
