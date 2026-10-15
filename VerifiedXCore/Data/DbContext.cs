@@ -251,6 +251,10 @@ namespace VerifiedXCore.Data
             // vault's ledger (up to about 10 MB) among them (fourth review, round 7). Not unique: older states may hold a
             // UID twice; lookups take the oldest (lowest Id), as the scan did.
             scTrei.EnsureIndexSafe(x => x.SmartContractUID, false);
+            // Recover() looks a reserve's contracts up by owner and by token owner, and a reserve may recover every block:
+            // each read every contract (round 33).
+            scTrei.EnsureIndexSafe(x => x.OwnerAddress, false);
+            scTrei.EnsureIndexSafe(x => x.TokenDetails.ContractOwner, false);
 
             //var peers = DbContext.DB_Peers.GetCollection<Peers>(DbContext.RSRV_PEERS);
             //peers.EnsureIndex(x => x.PeerIP, true);

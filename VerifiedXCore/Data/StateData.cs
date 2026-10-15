@@ -1614,7 +1614,7 @@ namespace VerifiedXCore.Data
 
                 if(_scDb != null)
                 {
-                    var scList = _scDb.Query().Where(x => x.OwnerAddress == _fromAddress).ToList();
+                    var scList = _scDb.Query().Where(x => x.OwnerAddress == _fromAddress).ToList().OrderBy(x => x.Id).ToList(); // indexed (round 33); in the scan's order
                     if(scList?.Count > 0 )
                     {
                         foreach(var sc in scList)
@@ -1631,7 +1631,7 @@ namespace VerifiedXCore.Data
                     // on, and its owner powers (a pause in force) were stuck for good (round 28).
                     if (height >= Globals.PathAuditRulesHeight && _recoveryAddress != null)
                     {
-                        foreach (var token in _scDb.Query().Where(x => x.TokenDetails != null && x.TokenDetails.ContractOwner == _fromAddress).ToList())
+                        foreach (var token in _scDb.Query().Where(x => x.TokenDetails.ContractOwner == _fromAddress).ToList().Where(x => x.TokenDetails != null).OrderBy(x => x.Id).ToList())
                         {
                             token.TokenDetails!.ContractOwner = _recoveryAddress;
                             await WriteContractStateAsync(_scDb, token);

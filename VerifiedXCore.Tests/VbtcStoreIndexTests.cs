@@ -38,6 +38,14 @@ namespace VerifiedXCore.Tests
             db.GetCollection("$indexes").Find(Query.EQ("collection", collection)).Select(d => d["expression"].AsString).ToArray();
 
         [Fact]
+        public void ContractState_IsIndexedByOwnerAndTokenOwner()
+        {
+            var fields = IndexedFields(DbContext.DB_SmartContractStateTrei, DbContext.RSRV_SCSTATE_TREI);
+            Assert.Contains("$.OwnerAddress", fields);
+            Assert.Contains("$.TokenDetails.ContractOwner", fields);
+        }
+
+        [Fact]
         public void TokenVotes_AreIndexed()
         {
             var fields = IndexedFields(DbContext.DB_Wallet, DbContext.RSRV_TOKEN_VOTE);
