@@ -1355,12 +1355,16 @@ namespace VerifiedXCore.Bitcoin.Services
                 // other type had every caster that took it fail the burn and skip it for good (fifth review, round 21).
                 if (!transient)
                 {
-                    var (otherOk, otherInfo, _) = await BaseBridgeService.TryGetBurnEventAsync(record.BaseBurnTxHash, vfxExit: record.ExitType != BurnExitType.VfxPoolUnlock);
+                    var (otherOk, otherInfo, otherReason) = await BaseBridgeService.TryGetBurnEventAsync(record.BaseBurnTxHash, vfxExit: record.ExitType != BurnExitType.VfxPoolUnlock);
                     if (otherOk && otherInfo != null)
                     {
                         record.ExitType = record.ExitType == BurnExitType.VfxPoolUnlock ? BurnExitType.BtcExit : BurnExitType.VfxPoolUnlock;
                         return (false, false, "burn evidence: the burn is of the other type; the record takes Base's", otherInfo);
                     }
+                    // The other type's look-up could not be answered: asked again later, not failed (round 22).
+                    if (otherReason.StartsWith("Could not read", StringComparison.OrdinalIgnoreCase)
+                        || otherReason.IndexOf("receipt not found", StringComparison.OrdinalIgnoreCase) >= 0)
+                        transient = true;
                 }
                 return (false, transient, $"burn evidence unavailable: {reason}", null);
             }

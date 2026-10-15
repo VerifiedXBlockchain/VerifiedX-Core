@@ -69,6 +69,23 @@ namespace VerifiedXCore.Tests
             finally { BaseBridgeService.BurnEventsForTests = null; }
         }
 
+        /// <summary>When the other type's look-up cannot be answered, the burn is asked again later, not failed (round 22).</summary>
+        [Fact]
+        public async System.Threading.Tasks.Task AnUnanswerableSecondLookUp_IsTransient()
+        {
+            BaseBridgeService.BurnEventsForTests = (hash, vfxExit) => vfxExit
+                ? (false, null, "Could not read receipt: timeout")
+                : (false, null, "No matching burn event in receipt");
+            try
+            {
+                var rec = new BurnExitConsensusService.ProcessedBurnRecord { BaseBurnTxHash = "0xburn", ExitType = BurnExitConsensusService.BurnExitType.BtcExit, Amount = 0.001M };
+                var (ok, transient, _, _) = await BurnExitConsensusService.VerifyBurnEvidenceAsync(rec);
+                Assert.False(ok);
+                Assert.True(transient);
+            }
+            finally { BaseBridgeService.BurnEventsForTests = null; }
+        }
+
         [Fact]
         public void NullEvidence_LeavesRecordUntouched()
         {
