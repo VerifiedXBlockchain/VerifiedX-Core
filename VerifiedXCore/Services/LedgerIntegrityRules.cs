@@ -164,6 +164,31 @@ namespace VerifiedXCore.Services
         /// V1 ledger function (second path audit, 14 October 2026). From Globals.PathAuditRulesHeight a contract call
         /// that the dispatcher would run and the reader cannot read the same way is refused. Null when the rule passes.
         /// </summary>
+        /// <summary>
+        /// From Globals.PathAuditRulesHeight a vBTC transaction's Data names each key once, in one spelling, at every
+        /// level. The chain reads its fields by exact key, the last of a repeated key winning; other readers (typed
+        /// readers in this code, an exchange's deposit scanner) take another: <c>"Amount":5,"Amount":0.00000001</c> or an
+        /// extra <c>"amount":5</c> credited one satoshi and showed five (fifth review, round 24). Private transactions'
+        /// payloads have their own rules. Null when the rule passes.
+        /// </summary>
+        public static string? VbtcDataKeysAreDistinct(Transaction tx, long height)
+        {
+            if (tx?.Data == null || height < Globals.PathAuditRulesHeight) return null;
+            if (!tx.TransactionType.ToString().StartsWith("VBTC_V2_", StringComparison.Ordinal) || VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType)) return null;
+            JToken root;
+            try { root = JToken.Parse(tx.Data); }
+            catch { return null; } // not JSON: the type's own rules judge it
+            try { JToken.Parse(tx.Data, new JsonLoadSettings { DuplicatePropertyNameHandling = DuplicatePropertyNameHandling.Error }); }
+            catch { return "This vBTC transaction's Data names a key twice."; }
+            static bool Respelled(JToken t) => t switch
+            {
+                JObject o => o.Properties().GroupBy(p => p.Name, StringComparer.OrdinalIgnoreCase).Any(g => g.Count() > 1) || o.Properties().Any(p => Respelled(p.Value)),
+                JArray a => a.Any(Respelled),
+                _ => false,
+            };
+            return Respelled(root) ? "This vBTC transaction's Data names a key in two spellings." : null;
+        }
+
         public static string? ContractCallIsReadable(Transaction tx, long height)
         {
             if (tx?.Data == null || height < Globals.PathAuditRulesHeight) return null;

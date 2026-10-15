@@ -569,7 +569,8 @@ namespace VerifiedXCore.Services
             }
 
             // The rules below read the contract call the dispatcher runs, or the transaction is refused.
-            var contractCallError = LedgerIntegrityRules.ContractCallIsReadable(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            var contractCallError = LedgerIntegrityRules.ContractCallIsReadable(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                ?? LedgerIntegrityRules.VbtcDataKeysAreDistinct(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
             if (contractCallError != null)
                 return (txResult, contractCallError);
 
