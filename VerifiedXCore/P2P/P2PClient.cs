@@ -88,8 +88,12 @@ namespace VerifiedXCore.P2P
         #region Get Available HubConnections for Peers
         public static async Task RemoveNode(NodeInfo node)
         {
-            if(Globals.AdjudicateAccount == null && Globals.Nodes.TryRemove(node.NodeIP, out _) && node.Connection != null)
-                await node.Connection.DisposeAsync();            
+            if (Globals.AdjudicateAccount == null && Globals.Nodes.TryRemove(node.NodeIP, out _))
+            {
+                RetireReport(node.NodeIP); // a peer that is gone no longer confirms this node's address
+                if (node.Connection != null)
+                    await node.Connection.DisposeAsync();
+            }
         }
 
         #endregion
@@ -184,8 +188,23 @@ namespace VerifiedXCore.P2P
                 set.TryAdd(who, 0);
                 _reporterVote[who] = ip;
                 Globals.ReportedIPs.AddOrUpdate(ip, set.Count, (_, existing) => Math.Max(existing, set.Count));
+                TryAutoUpdateReportedIP(); // under the lock: a choice made from an older count cannot be published over a newer one
             }
-            TryAutoUpdateReportedIP();
+        }
+
+        /// <summary>Withdraws a peer's report of this node's address (the peer disconnected) and re-evaluates the address.</summary>
+        public static void RetireReport(string? reporter)
+        {
+            if (string.IsNullOrEmpty(reporter))
+                return;
+            var who = System.Net.IPAddress.TryParse(reporter.Trim(), out var reporterIp) ? VerifiedXCore.Utilities.RemoteIp.Text(reporterIp)! : reporter;
+            lock (_reportedIpLock)
+            {
+                if (!_reporterVote.TryGetValue(who, out var previous))
+                    return;
+                WithdrawReport(previous, who);
+                TryAutoUpdateReportedIP();
+            }
         }
 
         private static void WithdrawReport(string ip, string reporter)
@@ -219,6 +238,12 @@ namespace VerifiedXCore.P2P
         /// confirmations fall below two is dropped, so the first two peers to agree cannot fix it for the process lifetime.
         /// </summary>
         public static void TryAutoUpdateReportedIP()
+        {
+            lock (_reportedIpLock)
+                AutoUpdateReportedIP();
+        }
+
+        private static void AutoUpdateReportedIP()
         {
             if (Globals.ReportedIPManuallySet)
                 return;
