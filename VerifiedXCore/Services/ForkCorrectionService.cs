@@ -85,6 +85,15 @@ namespace VerifiedXCore.Services
                     return;
                 }
 
+                // The hash (and so the certificate) covers the merkle root, not the transactions: a certified header with
+                // other transactions would roll the node back and only then fail validation.
+                if (correctBlock.Transactions == null || correctBlock.NumOfTx != correctBlock.Transactions.Count
+                    || correctBlock.MerkleRootOf() != correctBlock.MerkleRoot)
+                {
+                    LogUtility.Log($"[ForkCorrection] Rejecting correction from {casterIP}: the block's transactions do not match its header (height {height}).", "ForkCorrectionService");
+                    return;
+                }
+
                 var myHeight = Globals.LastBlock.Height;
 
                 // Case 1: The correction is for a block we already have — check if hash matches
@@ -159,6 +168,12 @@ namespace VerifiedXCore.Services
                 LogUtility.Log($"[ForkCorrection] Not rolling back for the correction from {casterIP} at height {correctBlock.Height}: it carries no valid committee certificate.", "ForkCorrectionService");
                 return;
             }
+            // The certificate is the committee's approval of this block: a hash a caster approved earlier for this height
+            // (or for the heights being reverted) would otherwise refuse it after the rollback.
+            Globals.CasterApprovedBlockHashDict[correctBlock.Height] = correctBlock.Hash;
+            foreach (var stale in Globals.CasterApprovedBlockHashDict.Keys.Where(h => h > correctBlock.Height).ToList())
+                Globals.CasterApprovedBlockHashDict.TryRemove(stale, out _);
+
             var adopted = await Reorg(correctBlock.Height, correctBlock.Hash, casterIP, "ForkCorrection", correctBlock);
             LogUtility.Log($"[ForkCorrection] Correction at height {correctBlock.Height} from {casterIP}: {(adopted ? "adopted" : "not adopted")}.", "ForkCorrectionService");
         }

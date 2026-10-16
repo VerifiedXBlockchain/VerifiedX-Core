@@ -55,10 +55,11 @@ namespace VerifiedXCore.Tests
             var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
             var block = new Block
             {
-                Height = height, Version = 4, PrevHash = $"prev-{height - 1}", MerkleRoot = "merkle", Timestamp = 1_700_000_000 + height,
+                Height = height, Version = 4, PrevHash = $"prev-{height - 1}", Timestamp = 1_700_000_000 + height,
                 NumOfTx = 0, Validator = AccountData.GetHumanAddress(pub), ValidatorAnswer = "a", ChainRefId = "test-chain",
                 Transactions = new List<Transaction>(),
             };
+            block.MerkleRoot = block.MerkleRootOf();
             block.Hash = block.GetBlockHash();
             block.ValidatorSignature = SignatureService.CreateSignature(block.Hash, key, pub);
             return block;
@@ -90,6 +91,41 @@ namespace VerifiedXCore.Tests
             await ForkCorrectionService.HandleForkCorrectionAsync(100, JsonConvert.SerializeObject(tampered), "1.2.3.4");
 
             Assert.Empty(_reorgs);
+        }
+
+        [Fact]
+        public async Task ACertifiedHeaderWithOtherTransactions_IsRefusedBeforeAnyRollback()
+        {
+            ForkCorrectionService.HasValidCertificate = _ => true;
+            var altered = SignedBlock(100);
+            altered.Transactions = new List<Transaction> { new Transaction { Hash = "inserted", FromAddress = "xA", ToAddress = "xB", Amount = 1M } };
+
+            await ForkCorrectionService.HandleForkCorrectionAsync(100, JsonConvert.SerializeObject(altered), "1.2.3.4");
+
+            Assert.Empty(_reorgs);
+        }
+
+        [Fact]
+        public async Task ACertifiedCorrection_ReplacesAStaleCasterApprovedHash()
+        {
+            ForkCorrectionService.HasValidCertificate = _ => true;
+            var prior = new System.Collections.Generic.Dictionary<long, string>(Globals.CasterApprovedBlockHashDict);
+            try
+            {
+                Globals.CasterApprovedBlockHashDict[95] = "stale-95";
+                Globals.CasterApprovedBlockHashDict[97] = "stale-97";
+                var below = SignedBlock(95);
+
+                await ForkCorrectionService.HandleForkCorrectionAsync(95, JsonConvert.SerializeObject(below), "1.2.3.4");
+
+                Assert.Equal(below.Hash, Globals.CasterApprovedBlockHashDict[95]);
+                Assert.False(Globals.CasterApprovedBlockHashDict.ContainsKey(97));
+            }
+            finally
+            {
+                Globals.CasterApprovedBlockHashDict.Clear();
+                foreach (var kv in prior) Globals.CasterApprovedBlockHashDict[kv.Key] = kv.Value;
+            }
         }
 
         [Fact]
