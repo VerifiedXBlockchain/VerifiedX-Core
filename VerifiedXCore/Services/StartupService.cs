@@ -127,6 +127,9 @@ namespace VerifiedXCore.Services
         {
             ConsoleWriterService.Output("Initializing VerifiedX Database...");
             DbContext.Initialize();
+            // A stop left by a restore that failed after wiping the state holds from the first moment the node can take
+            // a block, not only once the startup restore attempt runs.
+            SnapshotRestoreUtility.RecallStateDestroyed();
             // NEW-01: remove private keys that older builds wrote to the wallet database in plaintext.
             KeyPersistenceScrub.Run(DbContext.DB_Wallet, GetPathUtility.GetDatabasePath() + DbContext.RSRV_DB_WALLET_NAME);
             var peerDb = Peers.GetAll();

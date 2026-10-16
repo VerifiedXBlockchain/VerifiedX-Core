@@ -188,6 +188,19 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void TheStop_IsRecalledWhenTheDatabaseOpens_BeforeAnyBlockCanArrive()
+        {
+            StateTreiStatusService.SetFailed("Snapshot restore failed after wiping the state (restore to 48).");
+            StateTreiStatusService.SetRestoreDestroyed(true);
+            DbContext.CloseDB();
+            SnapshotRestoreUtility.ClearStateDestroyed(); // a fresh process
+
+            StartupService.StartupDatabase();
+
+            Assert.True(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
+        }
+
+        [Fact]
         public async Task NoUsableSlot_IsNotADestroyedState()
         {
             for (long h = 1; h <= 3; h++) Globals.LastBlock = AddBlock(h);
