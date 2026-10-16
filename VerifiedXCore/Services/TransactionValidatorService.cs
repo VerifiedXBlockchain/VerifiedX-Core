@@ -2275,6 +2275,10 @@ namespace VerifiedXCore.Services
                                     var signatureValid = Bitcoin.Services.SignatureService.VerifySignature(message, signature);
                                     if (!signatureValid)
                                         return (txResult, "Invalid BTC Signature");
+                                    // ... and from BtcNameSignerOwnsAddressHeight the key that signed is BTCAddress's own key.
+                                    if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.BtcNameSignerOwnsAddressHeight
+                                        && !Bitcoin.Services.SignatureService.SignerOwnsAddress(signature, btcAddress, Globals.BTCNetwork))
+                                        return (txResult, "The BTC signature is not from the key of the BTC address.");
                                     var messageParse = long.TryParse(message, out var messageTimestamp);
 
                                     if (!messageParse)

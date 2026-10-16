@@ -372,6 +372,13 @@ namespace VerifiedXCore
         public static long BtcNameOneRecordPerAddressHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height a BTC name create is signed by the key of the Bitcoin address it names. Validation checked the
+        /// signature only against the key the signature itself carries, so any key could put a name on any address.
+        /// Not active yet.
+        /// </summary>
+        public static long BtcNameSignerOwnsAddressHeight = 999_999_999_999;
+
+        /// <summary>
         /// The validator stake is bonded from this height (Services.ValidatorBond; owner decision 2026-10-13): a
         /// registered validator cannot send its 5,000 VFX until 1,200 blocks after its exit is mined, and counts for a
         /// vault's key ceremony only once that stake has been locked for two days. Validators active at this height
