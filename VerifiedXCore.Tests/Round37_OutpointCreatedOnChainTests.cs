@@ -118,6 +118,28 @@ namespace VerifiedXCore.Tests
             Globals.ClientSettings = _servers.Select(s => new ClientSettings { Host = "127.0.0.1", Port = s.Port, UseSsl = true }).ToList();
         }
 
+        private void ServerWithHeights(IEnumerable<string> unspent, List<(NBitcoin.Transaction Tx, int Height)> history)
+        {
+            var raw = history.GroupBy(h => Id(h.Tx)).ToDictionary(g => g.Key, g => g.First().Tx.ToHex());
+            var unspentRows = unspent.Select(o => new JObject { ["tx_hash"] = o.Split(':')[0], ["tx_pos"] = int.Parse(o.Split(':')[1]), ["height"] = 100, ["value"] = 1 }).ToList();
+            var rows = history.Select(h => new JObject { ["tx_hash"] = Id(h.Tx), ["height"] = h.Height }).ToList();
+            var server = new LoopbackElectrum(req =>
+            {
+                var p = req["params"] as JArray;
+                switch ((string?)req["method"])
+                {
+                    case "server.version": return new JArray("Loopback", "1.4");
+                    case "blockchain.scripthash.listunspent": return new JArray(unspentRows);
+                    case "blockchain.scripthash.get_history": return new JArray(rows);
+                    case "blockchain.transaction.get": return raw.TryGetValue((string)p![0]!, out var hex) ? hex : null;
+                    case "blockchain.transaction.get_merkle": return new JObject { ["merkle"] = new JArray(), ["block_height"] = (int)p![1]!, ["pos"] = 0 };
+                    default: return null;
+                }
+            });
+            _servers.Add(server);
+            Globals.ClientSettings = _servers.Select(x => new ClientSettings { Host = "127.0.0.1", Port = x.Port, UseSsl = true }).ToList();
+        }
+
         private string Coin0 => $"{Id(_funding)}:0";
         private string Coin1 => $"{Id(_funding)}:1";
 
@@ -173,11 +195,22 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>From the recording height: the validators' attested header of the spend's block, whose Merkle root it is.</summary>
-        private void Recording(string? attestedRoot, long headerHeight = SpenderBtcHeight, int depth = BitcoinTransactionService.MinAttestedDepth)
+        private static int Depth => VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Depth;
+
+        private void Recording(string? attestedRoot, long headerHeight = SpenderBtcHeight, int? above = null, bool aboveAtEasiestTarget = false)
         {
+            var count = above ?? Depth;
             Globals.BitcoinAttestationRecordHeight = 1;
             Globals.LastBlock = new VerifiedXCore.Models.Block { Height = 10 };
-            VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.SaveMeta(new VerifiedXCore.Bitcoin.Attestation.AttestationMetaRow { TipHeight = headerHeight + depth - 1 });
+            VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.SaveMeta(new VerifiedXCore.Bitcoin.Attestation.AttestationMetaRow { TipHeight = headerHeight + count });
+            for (var h = headerHeight + 1; h <= headerHeight + count; h++)
+            {
+                var over = Net.Consensus.ConsensusFactory.CreateBlockHeader();
+                over.HashMerkleRoot = new uint256(RandomUtils.GetBytes(32));
+                over.Bits = new Target(aboveAtEasiestTarget ? VerifiedXCore.Bitcoin.Attestation.BtcChainRules.PowLimitBits : 0x17034219u);
+                Assert.True(VerifiedXCore.Bitcoin.Attestation.BtcHeader.TryParse(Convert.ToHexString(over.ToBytes()), out var overParsed));
+                VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.SaveHeader(h, overParsed!, 5);
+            }
             if (attestedRoot == null) return;
             var header = Net.Consensus.ConsensusFactory.CreateBlockHeader();
             header.HashMerkleRoot = uint256.Parse(attestedRoot);
@@ -269,11 +302,50 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task FromTheRecordingHeight_ASpendNotYetBuriedDeepEnough_IsInconclusive()
         {
-            Recording(Id(_spender), depth: BitcoinTransactionService.MinAttestedDepth - 1);
+            Recording(Id(_spender), above: Depth - 1);
             Server(new[] { Coin1 }, _spender);
             Server(new[] { Coin1 }, _spender);
             var (verdict, detail) = await Verdict();
             Assert.True(verdict == BitcoinTransactionService.OutpointSpendVerdict.Inconclusive, detail);
+        }
+
+        /// <summary>
+        /// On testnet4 a minimum-difficulty header does not count toward burial (as for the attestation itself): a spend
+        /// under only such headers is not yet buried.
+        /// </summary>
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task OnTestnet4_HeadersAtTheEasiestTargetDoNotBuryASpend(bool easiest)
+        {
+            VerifiedXCore.Bitcoin.Attestation.BtcChainRules.OverrideForTests = VerifiedXCore.Bitcoin.Attestation.BtcChainRules.Testnet4;
+            try
+            {
+                Recording(Id(_spender), aboveAtEasiestTarget: easiest);
+                Server(new[] { Coin1 }, _spender);
+                Server(new[] { Coin1 }, _spender);
+                var (verdict, detail) = await Verdict();
+                Assert.True(verdict == (easiest ? BitcoinTransactionService.OutpointSpendVerdict.Inconclusive : BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed), detail);
+            }
+            finally { VerifiedXCore.Bitcoin.Attestation.BtcChainRules.OverrideForTests = null; }
+        }
+
+        /// <summary>
+        /// The search reads only transactions in or after the coin's own block, so history from before the coin was made
+        /// does not count toward the limit: a missing coin with no spend since it was made is "not spent" (the signed
+        /// transaction stays alive), not Inconclusive because the address is old and busy.
+        /// </summary>
+        [Fact]
+        public async Task HistoryBeforeTheCoinWasMade_DoesNotCountTowardTheScanLimit()
+        {
+            // 250 older transactions (before the funding transaction), then the funding transaction; nothing spends coin 0.
+            var older = Enumerable.Range(0, BitcoinTransactionService.MaxConfirmedHistoryScan + 50).Select(_ => Unrelated()).ToArray();
+            var history = older.Select((t, i) => (Tx: t, Height: 10 + i)).Append((_funding, 10 + older.Length + 1)).ToList();
+            Recording(Id(_spender));
+            ServerWithHeights(new[] { Coin1 }, history);
+            ServerWithHeights(new[] { Coin1 }, history);
+            var (verdict, detail) = await Verdict();
+            Assert.True(verdict == BitcoinTransactionService.OutpointSpendVerdict.NotSpentByConfirmed, detail);
         }
 
         /// <summary>
