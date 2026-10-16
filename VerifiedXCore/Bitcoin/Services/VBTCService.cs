@@ -2312,7 +2312,7 @@ namespace VerifiedXCore.Bitcoin.Services
                                 withdrawalRequest.PinnedUnsignedTxHex = null;
                                 withdrawalRequest.PinnedCoinsJson = null;
                                 if (!isTransientRequest)
-                                    VBTCWithdrawalRequest.Save(withdrawalRequest, true);
+                                    ClearPinnedBuild(withdrawalRequestHash, scUID, deferredToo: false);
                                 break;
                         }
                     }
@@ -2504,7 +2504,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// rebuild when it can never confirm (the withheld tx won: an input is spent by a confirmed tx) — the fields
         /// are then cleared, and validators allow a new tx on the same evidence.
         /// </summary>
-        private static async Task<(DeferredCompletionAction Action, string Message)> ResolveDeferredCompletion(VBTCWithdrawalRequest row, string depositAddress)
+        internal static async Task<(DeferredCompletionAction Action, string Message)> ResolveDeferredCompletion(VBTCWithdrawalRequest row, string depositAddress)
         {
             var txid = row.CompleteAfterBtcTxId!;
 
@@ -2530,7 +2530,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 row.DeferredSignedTxHex = null;
                 row.PinnedUnsignedTxHex = null;
                 row.PinnedCoinsJson = null;
-                VBTCWithdrawalRequest.Save(row, true);
+                ClearPinnedBuild(row.TransactionHash, row.SmartContractUID, deferredToo: true);
                 return (DeferredCompletionAction.Rebuild, string.Empty);
             }
 
@@ -2730,6 +2730,35 @@ namespace VerifiedXCore.Bitcoin.Services
 
             // Definitive: outpoints gone AND the pinned tx is known-unconfirmed → conflicted away.
             return PinnedReuseDecision.RebuildFresh;
+        }
+
+        /// <summary>
+        /// Local-only: drops the stored request's pinned build (and its deferred completion), on the row as it is now. A
+        /// request object held across a Bitcoin lookup may predate the row's cancellation or completion; saving it whole
+        /// wrote its old status back over the closed row.
+        /// </summary>
+        private static void ClearPinnedBuild(string withdrawalRequestHash, string scUID, bool deferredToo)
+        {
+            try
+            {
+                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
+                if (storedRequest == null)
+                    return;
+
+                storedRequest.PinnedUnsignedTxHex = null;
+                storedRequest.PinnedCoinsJson = null;
+                if (deferredToo)
+                {
+                    storedRequest.CompleteAfterConfirmation = false;
+                    storedRequest.CompleteAfterBtcTxId = null;
+                    storedRequest.DeferredSignedTxHex = null;
+                }
+                VBTCWithdrawalRequest.Save(storedRequest, true);
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"Failed to clear pinned build on request {withdrawalRequestHash}: {ex.Message}", "VBTCService.ClearPinnedBuild()");
+            }
         }
 
         /// <summary>

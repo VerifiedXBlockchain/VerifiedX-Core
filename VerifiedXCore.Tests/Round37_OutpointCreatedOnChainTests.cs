@@ -303,6 +303,42 @@ namespace VerifiedXCore.Tests
             Assert.True(FrostWithdrawalSigningTracker.ConfirmSessionHoldsInput(uid, wrh, 0, "session-c", sighashC).Ok);
         }
 
+        /// <summary>
+        /// A wallet's deferred completion holds its withdrawal row across Bitcoin lookups. The row is cancelled (refunded)
+        /// meanwhile; when the lookups show its reclaim transaction dead, clearing the reclaim leaves the row cancelled
+        /// (saving the held object whole wrote its old "requested" back over it).
+        /// </summary>
+        [Fact]
+        public async Task ClearingADeadReclaim_DoesNotReopenAWithdrawalCancelledMeanwhile()
+        {
+            var uid = Guid.NewGuid().ToString("N") + ":1760000000";
+            const string wrh = "6a1e3a9c7b2d5e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f50617";
+            var reclaim = Convert.ToHexString(RandomUtils.GetBytes(32)).ToLowerInvariant();
+            var coins = Newtonsoft.Json.JsonConvert.SerializeObject(new[] { new VerifiedXCore.Bitcoin.Models.PinnedWithdrawalCoin { TxId = Id(_funding), Vout = 0, ValueSats = 100_000, ScriptPubKeyHex = _vault.ScriptPubKey.ToHex() } });
+            Assert.True(VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.Save(new VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest
+            {
+                RequestorAddress = "xOwner", OriginalUniqueId = Guid.NewGuid().ToString("N"), SmartContractUID = uid, TransactionHash = wrh, Amount = 0.0005M,
+                BTCDestination = _elsewhere.ToString(), FeeRate = 10, Timestamp = 1, RequestBlockHeight = 400, Status = VerifiedXCore.Bitcoin.Models.VBTCWithdrawalStatus.Requested,
+                CompleteAfterConfirmation = true, CompleteAfterBtcTxId = reclaim, PinnedCoinsJson = coins, PinnedUnsignedTxHex = "0200",
+            }));
+            var held = VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.GetByTransactionHash(wrh, uid)!;
+            var stored = VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.GetByTransactionHash(wrh, uid)!;
+            stored.Status = VerifiedXCore.Bitcoin.Models.VBTCWithdrawalStatus.Cancelled;
+            stored.IsCompleted = true;
+            Assert.True(VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.Save(stored, true));
+            Recording(Id(_spender));
+            Server(new[] { Coin1 }, _spender);
+            Server(new[] { Coin1 }, _spender);
+
+            var (action, message) = await VBTCService.ResolveDeferredCompletion(held, _vault.ToString());
+            Assert.True(action == VBTCService.DeferredCompletionAction.Rebuild, message);
+            var after = VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.GetByTransactionHash(wrh, uid)!;
+            Assert.Equal(VerifiedXCore.Bitcoin.Models.VBTCWithdrawalStatus.Cancelled, after.Status);
+            Assert.True(after.IsCompleted);
+            Assert.Null(after.CompleteAfterBtcTxId);
+            Assert.Null(after.PinnedCoinsJson);
+        }
+
         [Theory]
         [InlineData(true)]
         [InlineData(false)]
