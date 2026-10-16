@@ -222,6 +222,31 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A node whose table lacks the row of a request its requester already completed refuses a second completion in a
+        /// block, as a node holding the completed row does: the rebuilt row carries the mined completion (round 37).
+        /// </summary>
+        [Fact]
+        public async Task ANodeWhoseTableLacksTheRow_RefusesASecondCompletion_AsANodeHoldingItDoes()
+        {
+            var first = Complete(_requester, _vault, new string('b', 64));
+            first.Height = 200;
+            BlockchainData.GetBlocks().InsertSafe(new Block { Height = 200, Hash = "block-200", Timestamp = 1_755_000_200, Transactions = new List<Transaction> { first } });
+            Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash(_requestHash, _vault));
+
+            var again = Complete(_requester, _vault, new string('c', 64));
+            var (okLacking, whyLacking) = await VerifyInBlock(again, Rule);
+            Assert.False(okLacking);
+            Assert.StartsWith("Withdrawal request already completed", whyLacking);
+            Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash(_requestHash, _vault)); // validation wrote nothing
+
+            // The recovery at apply puts the row back completed, as the node holding it has it.
+            var recovered = VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain(_requestHash, Rule, _vault)!;
+            Assert.True(recovered.IsCompleted);
+            Assert.Equal(VBTCWithdrawalStatus.Completed, recovered.Status);
+            Assert.Equal(new string('b', 64), recovered.BTCTxHash);
+        }
+
+        /// <summary>
         /// Two requests mined before the rule that both ended, the first row lost on this node. The recovery of the
         /// first must not land on the second's row: saving falls back to (requester, UniqueId, contract), and the two
         /// carry the same UniqueId.

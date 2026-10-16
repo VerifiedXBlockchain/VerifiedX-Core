@@ -252,6 +252,9 @@ namespace VerifiedXCore.Bitcoin.Services
                         {
                             if (missingOnly && VBTCWithdrawalRequest.GetByTransactionHash(row.TransactionHash, row.SmartContractUID) != null)
                                 continue; // this row is here: what it has become since its request is never written over
+                            // A row put back is brought to where the chain has since taken it, not left "requested".
+                            if (missingOnly)
+                                ReplayOutcomes(row, block.Height, toHeight);
                             // (Nor is the row of another mined request that carries the same UniqueId: Save falls back to
                             // that key, and used to write this request over it.)
                             if (VBTCWithdrawalRequest.Save(row, update: true, neverOverAnotherRequest: missingOnly)) saved++;
@@ -295,12 +298,104 @@ namespace VerifiedXCore.Bitcoin.Services
                     foreach (var tx in block.Transactions)
                     {
                         if (tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST || tx.Hash != requestTxHash) continue;
-                        return TryBuildRequestRows(tx, out var rows) && rows != null ? rows.FirstOrDefault(r => r.SmartContractUID == scUID) : null;
+                        var row = TryBuildRequestRows(tx, out var rows) && rows != null ? rows.FirstOrDefault(r => r.SmartContractUID == scUID) : null;
+                        if (row != null && toHeight >= Globals.PathAuditRulesHeight)
+                            ReplayOutcomes(row, block.Height, toHeight);
+                        return row;
                     }
                 }
             }
             catch { }
             return null;
+        }
+
+        /// <summary>
+        /// Brings <paramref name="row"/>, rebuilt from its mined request, to where the chain has since taken it, reading
+        /// the blocks from <paramref name="fromHeight"/> (the request's) up to below <paramref name="belowHeight"/>, as
+        /// live processing applied them: the requester's COMPLETE, or a cancellation the validators approved (the
+        /// cancellation-voting rules: requester, one open cancellation, the vote window, the contract's active voters,
+        /// one vote each, <see cref="VBTCCancellationVoting.Decide"/>). A vault the chain watches is ended by the
+        /// attestation table instead. Writes nothing. Called from the path-audit height, whose recovery window lies
+        /// wholly above the cancellation-voting rules' height.
+        /// </summary>
+        internal static void ReplayOutcomes(VBTCWithdrawalRequest row, long fromHeight, long belowHeight)
+        {
+            if (Attestation.BtcAttestBalance.IsAttestedVault(row.SmartContractUID))
+            {
+                var closed = new[] { Attestation.VaultWithdrawalState.Settled, Attestation.VaultWithdrawalState.Void, Attestation.VaultWithdrawalState.Expired, Attestation.VaultWithdrawalState.Cancelled, Attestation.VaultWithdrawalState.Released };
+                var attested = Attestation.BtcAttestStore.Db?.GetCollection<Attestation.VaultWithdrawalRow>(Attestation.BtcAttestStore.Withdrawals)
+                    .FindOne(w => w.RequestHash == row.TransactionHash && w.SmartContractUID == row.SmartContractUID && !w.IsBridgeExit);
+                if (attested != null && closed.Contains(attested.State))
+                {
+                    var paid = attested.State == Attestation.VaultWithdrawalState.Settled;
+                    row.Status = paid ? VBTCWithdrawalStatus.Completed : VBTCWithdrawalStatus.Cancelled;
+                    row.IsCompleted = true;
+                    if (paid) row.BTCTxHash = attested.SettledTxid;
+                }
+                return;
+            }
+
+            var cancellations = new List<VBTCWithdrawalCancellation>();
+            foreach (var block in BlockchainData.GetBlocks().Find(LiteDB.Query.Between("Height", fromHeight, belowHeight - 1)).OrderBy(b => b.Height))
+            {
+                foreach (var tx in block.Transactions ?? new List<Transaction>())
+                {
+                    if (string.IsNullOrEmpty(tx.Data)) continue;
+                    try
+                    {
+                        if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE)
+                        {
+                            var j = JObject.Parse(tx.Data);
+                            if (j["WithdrawalRequestHash"]?.ToObject<string?>() != row.TransactionHash || j["ContractUID"]?.ToObject<string?>() != row.SmartContractUID) continue;
+                            var btcTxHash = j["BTCTransactionHash"]?.ToObject<string?>();
+                            if (string.IsNullOrEmpty(btcTxHash) || tx.FromAddress != row.RequestorAddress || row.IsCompleted || row.Amount <= 0.0M) continue;
+                            row.Status = VBTCWithdrawalStatus.Completed;
+                            row.IsCompleted = true;
+                            row.BTCTxHash = btcTxHash;
+                            row.CompletionTxHash = tx.Hash;
+                            row.CompletionTimestamp = tx.Timestamp;
+                        }
+                        else if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL && VBTCCancellationVoting.RulesActive(block.Height))
+                        {
+                            var j = JObject.Parse(tx.Data);
+                            if (j["WithdrawalRequestHash"]?.ToObject<string?>() != row.TransactionHash || j["ContractUID"]?.ToObject<string?>() != row.SmartContractUID) continue;
+                            if (tx.FromAddress != row.RequestorAddress || row.IsCompleted) continue;
+                            if (cancellations.Any(c => VBTCWithdrawalCancellation.IsVoteWindowOpen(c, block.Height))) continue;
+                            cancellations.Add(new VBTCWithdrawalCancellation
+                            {
+                                CancellationUID = VBTCWithdrawalCancellation.OnChainUidPrefix + tx.Hash, SmartContractUID = row.SmartContractUID,
+                                WithdrawalRequestHash = row.TransactionHash, OwnerAddress = tx.FromAddress, RequestBlockHeight = block.Height,
+                                ValidatorVotes = new Dictionary<string, bool>(),
+                            });
+                        }
+                        else if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE && VBTCCancellationVoting.RulesActive(block.Height))
+                        {
+                            var j = JObject.Parse(tx.Data);
+                            var uid = j["CancellationUID"]?.ToObject<string?>();
+                            var c = cancellations.FirstOrDefault(x => x.CancellationUID == uid);
+                            if (c == null || !VBTCWithdrawalCancellation.IsVoteWindowOpen(c, block.Height)) continue;
+                            var approve = j["Approve"]?.ToObject<bool?>() ?? false;
+                            var signedTxId = j["SignedBtcTxId"]?.ToObject<string?>();
+                            if (!string.IsNullOrEmpty(signedTxId) && (approve || !VBTCCancellationVoting.IsBtcTxId(signedTxId))) continue;
+                            if (c.ValidatorVotes.ContainsKey(tx.FromAddress)) continue;
+                            var voters = VBTCCancellationVoting.ActiveVoters(c.SmartContractUID, block.Height - 1);
+                            if (!voters.Contains(tx.FromAddress)) continue;
+                            c.ValidatorVotes[tx.FromAddress] = approve;
+                            if (approve) c.ApproveCount++; else c.RejectCount++;
+                            var outcome = VBTCCancellationVoting.Decide(c.ApproveCount, c.RejectCount, voters.Count, !approve && VBTCCancellationVoting.IsBtcTxId(signedTxId));
+                            if (outcome == VBTCCancellationVoting.Outcome.Pending) continue;
+                            c.IsProcessed = true;
+                            c.IsApproved = outcome == VBTCCancellationVoting.Outcome.Approved;
+                            if (c.IsApproved && !(row.IsCompleted && row.Status == VBTCWithdrawalStatus.Completed))
+                            {
+                                row.Status = VBTCWithdrawalStatus.Cancelled;
+                                row.IsCompleted = true;
+                            }
+                        }
+                    }
+                    catch { }
+                }
+            }
         }
 
         /// <summary>
