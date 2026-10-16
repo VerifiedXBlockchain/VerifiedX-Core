@@ -586,5 +586,14 @@ namespace VerifiedXCore.Tests
             Assert.True(row.IsViewOnly);
             Assert.Equal(_alice.ViewingKey32, row.ViewingKey);
         }
+
+        [Fact]
+        public void AV2AddressWhoseOwnerKeyIsAnothers_IsNotThisViewingKeys()
+        {
+            var mixed = ShieldedAddressCodec.Encode(_alice.EncryptionPublicKey33, ShieldedKeyMaterial.OwnerPkFromViewingKey(_bob.ViewingKey32));
+
+            Assert.False(PrivateRawTxService.TryKeyMaterial(mixed, _alice.ViewingKey32, out _, out _));
+            Assert.True(PrivateRawTxService.TryKeyMaterial(_alice.ZfxAddress, _alice.ViewingKey32, out _, out _));
+        }
     }
 }

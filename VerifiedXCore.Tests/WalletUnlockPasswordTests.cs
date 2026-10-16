@@ -89,5 +89,17 @@ namespace VerifiedXCore.Tests
             Assert.False(WalletEncryptionService.RefusesUnlock("anything"));
             Globals.IsWalletEncrypted = true;
         }
+
+        [Fact]
+        public void AnEncpassThatIsNotTheWalletPassword_LeavesTheWalletLocked()
+        {
+            Globals.EncryptPassword = "not the password".ToSecureString();
+            StartupService.EncryptedWalletCheck();
+            Assert.Equal(0, Globals.EncryptPassword.Length);
+
+            Globals.EncryptPassword = WalletPw.ToSecureString();
+            StartupService.EncryptedWalletCheck();
+            Assert.True(Globals.EncryptPassword.Length > 0);
+        }
     }
 }

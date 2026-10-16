@@ -502,6 +502,15 @@ namespace VerifiedXCore.Services
                 if(keystore.FindAll().Count() > 0)
                     Globals.IsWalletEncrypted = true;
             }
+
+            // A password given with encpass= is set before the database opens, unchecked; the GUI and plain wallet
+            // starts never reach the checked prompts. Not this wallet's password: the wallet stays locked.
+            if (Globals.EncryptPassword.Length > 0 && WalletEncryptionService.RefusesUnlock(Globals.EncryptPassword.ToUnsecureString()))
+            {
+                Globals.EncryptPassword = new System.Security.SecureString();
+                ErrorLogUtility.LogError("The encpass start argument is not this wallet's password; the wallet stays locked.", "StartupService.EncryptedWalletCheck()");
+                Console.WriteLine("The encpass password is not this wallet's password; the wallet stays locked.");
+            }
         }
         internal static void SetBlockchainChainRef()
         {
