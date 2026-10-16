@@ -60,6 +60,7 @@ namespace VerifiedXCore.Bitcoin.Services
             public int CancellationsCreated { get; set; }
             /// <summary>Rows on vaults the chain watches brought to the state the attestation table holds for them.</summary>
             public int AttestedOutcomesApplied { get; set; }
+            public int DecidedCancellationsApplied { get; set; }
             public int VotesApplied { get; set; }
             public int Skipped { get; set; }
             public int Errors { get; set; }
@@ -176,6 +177,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
 
                 ApplyAttestedOutcomes(result);
+                ApplyDecidedCancellations(result);
 
                 var meta = GetMeta() ?? new RebuildMeta();
                 meta.LastScanHeight = result.EndHeight;
@@ -188,7 +190,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 result.FinishedUtc = TimeUtil.GetTime();
                 result.Message = $"Scanned {result.BlocksScanned} blocks to height {result.EndHeight}: " +
                                  $"{result.RequestsInserted} requests inserted, {result.RequestsAlreadyPresent} already present, " +
-                                 $"{result.CompletionsApplied} completions applied, {result.AttestedOutcomesApplied} attested outcomes applied, {result.CancellationsCreated} cancellations created, " +
+                                 $"{result.CompletionsApplied} completions applied, {result.AttestedOutcomesApplied} attested outcomes applied, {result.DecidedCancellationsApplied} decided cancellations applied, {result.CancellationsCreated} cancellations created, " +
                                  $"{result.VotesApplied} votes applied, {result.Skipped} skipped, {result.Errors} errors.";
                 LogUtility.Log($"vBTC withdrawal store rebuild finished: {result.Message}", "VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync()");
             }
@@ -489,6 +491,35 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 result.Errors++;
                 ErrorLogUtility.LogError($"Withdrawal-store rebuild: applying the attested outcomes failed: {ex.Message}", "VBTCWithdrawalStoreRebuildService.ApplyAttestedOutcomes()");
+            }
+        }
+
+        /// <summary>
+        /// A cancellation this store already holds as approved has refunded its withdrawal, and the votes that decided it
+        /// are skipped when replayed (the record is decided). A request row this scan has just put back for it reads
+        /// "requested"; here it is closed as cancelled, as the deciding vote closed it. Merge-only: a row already closed
+        /// (a burn-backed Completed row included) is left alone.
+        /// </summary>
+        private static void ApplyDecidedCancellations(RebuildResult result)
+        {
+            try
+            {
+                foreach (var cancellation in (VBTCWithdrawalCancellation.GetAllCancellations() ?? new List<VBTCWithdrawalCancellation>()).Where(c => c.IsProcessed && c.IsApproved))
+                {
+                    var row = VBTCWithdrawalRequest.GetByTransactionHash(cancellation.WithdrawalRequestHash, cancellation.SmartContractUID);
+                    if (row == null || row.IsCompleted) continue;
+                    row.Status = VBTCWithdrawalStatus.Cancelled;
+                    row.IsCompleted = true;
+                    if (VBTCWithdrawalRequest.Save(row, update: true))
+                        result.DecidedCancellationsApplied++;
+                    else
+                        result.Errors++;
+                }
+            }
+            catch (Exception ex)
+            {
+                result.Errors++;
+                ErrorLogUtility.LogError($"Withdrawal-store rebuild: applying the decided cancellations failed: {ex.Message}", "VBTCWithdrawalStoreRebuildService.ApplyDecidedCancellations()");
             }
         }
 

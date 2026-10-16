@@ -160,6 +160,59 @@ namespace VerifiedXCore.Tests
             Assert.Equal("btc-live", row.BTCTxHash);
         }
 
+        /// <summary>
+        /// The request row is lost while its cancellation record survives, already decided: an approved one refunded the
+        /// withdrawal, so the row put back reads cancelled (not open, to be paid or refunded again); a rejected one leaves
+        /// it open.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task Rebuild_RestoresARowWhoseCancellationWasDecided_AsItWasDecided(bool approved)
+        {
+            const string sc = "rebuild:4";
+            InsertBlock(400, RequestTx("rb4-req", "xRequestorD", sc, 0.3M, 400));
+            VBTCWithdrawalCancellation.SaveCancellation(new VBTCWithdrawalCancellation
+            {
+                CancellationUID = "CANCEL_rb4-cancel", SmartContractUID = sc, OwnerAddress = "xRequestorD", WithdrawalRequestHash = "rb4-req",
+                BTCTxHash = "", FailureProof = "", RequestTime = 1_755_000_410L, ValidatorVotes = new Dictionary<string, bool>(),
+                ApproveCount = approved ? 3 : 0, RejectCount = approved ? 0 : 3, IsApproved = approved, IsProcessed = true,
+            });
+
+            var result = await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test");
+            Assert.True(result.Success, result.Message);
+            Assert.Equal(1, result.RequestsInserted);
+
+            var row = VBTCWithdrawalRequest.GetByTransactionHash("rb4-req", sc)!;
+            Assert.Equal(approved ? VBTCWithdrawalStatus.Cancelled : VBTCWithdrawalStatus.Requested, row.Status);
+            Assert.Equal(approved, row.IsCompleted);
+
+            // A second rebuild changes nothing.
+            var again = await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test-again");
+            Assert.Equal(0, again.DecidedCancellationsApplied);
+            Assert.Equal(approved ? VBTCWithdrawalStatus.Cancelled : VBTCWithdrawalStatus.Requested, VBTCWithdrawalRequest.GetByTransactionHash("rb4-req", sc)!.Status);
+        }
+
+        [Fact]
+        public async Task Rebuild_ADecidedCancellation_DoesNotTurnACompletedRowCancelled()
+        {
+            const string sc = "rebuild:5";
+            InsertBlock(500, RequestTx("rb5-req", "xRequestorE", sc, 0.2M, 500));
+            InsertBlock(510, CompleteTx("rb5-done", "xRequestorE", sc, "rb5-req", 510));
+            VBTCWithdrawalCancellation.SaveCancellation(new VBTCWithdrawalCancellation
+            {
+                CancellationUID = "CANCEL_rb5-cancel", SmartContractUID = sc, OwnerAddress = "xRequestorE", WithdrawalRequestHash = "rb5-req",
+                BTCTxHash = "", FailureProof = "", RequestTime = 1_755_000_505L, ValidatorVotes = new Dictionary<string, bool>(),
+                ApproveCount = 3, IsApproved = true, IsProcessed = true,
+            });
+
+            var result = await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test");
+            Assert.True(result.Success, result.Message);
+            var row = VBTCWithdrawalRequest.GetByTransactionHash("rb5-req", sc)!;
+            Assert.Equal(VBTCWithdrawalStatus.Completed, row.Status);
+            Assert.Equal(0, result.DecidedCancellationsApplied);
+        }
+
         [Fact]
         public void RecoverRequestRow_FindsMinedRequestWithinWindow()
         {
