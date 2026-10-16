@@ -399,6 +399,13 @@ namespace VerifiedXCore.Bitcoin.ElectrumX
             return Succeeded(LastCallSucceeded ? response!.Result : null);
         }
 
+        /// <summary>Up to <paramref name="count"/> consecutive headers from <paramref name="height"/>, concatenated (80 bytes each).</summary>
+        public async Task<BlockchainBlockHeaderGetResult> GetBlockHeadersHex(int height, int count)
+        {
+            var response = await Call<BlockchainBlockHeaderGetResponse>(new BlockchainBlockHeaderGetRequest(height, count).GetRequestData());
+            return Succeeded(LastCallSucceeded ? response!.Result : null);
+        }
+
         #endregion
 
         #region Get Block Transaction  Merkle

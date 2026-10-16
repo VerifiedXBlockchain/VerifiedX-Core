@@ -411,6 +411,33 @@ namespace VerifiedXCore.Bitcoin.FROST
                     await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = epoch != null, Epoch = epoch, Previous = previous }, Formatting.Indented));
                 });
 
+                // An operator's release of signing records written before exact spellings (see NeedsOperatorRelease): after
+                // confirming that no transaction signed for the withdrawal then can still pay.
+                endpoints.MapPost("/frost/evidence/release/{scUID}", async context =>
+                {
+                    if (!IsLoopbackRequest(context))
+                    {
+                        await WriteForbiddenAsync(context);
+                        return;
+                    }
+                    var scUID = context.Request.RouteValues["scUID"]?.ToString();
+                    var withdrawal = context.Request.Query["withdrawal"].ToString();
+                    if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawal) || context.Request.Query["confirm"] != "true")
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                        {
+                            Success = false,
+                            Message = "Releases this validator's signing records for one withdrawal written before exact spellings. Confirm first that no transaction signed for it then can still pay; then give ?withdrawal=<reference>&confirm=true."
+                        }));
+                        return;
+                    }
+                    var released = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ReleaseByOperator(scUID, withdrawal);
+                    LogUtility.Log($"[FROST Dedup] WARNING: operator released {released} signing record(s) for withdrawal {withdrawal} on {scUID} via localhost endpoint.", "FrostStartup./frost/evidence/release");
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = true, Released = released }));
+                });
+
                 endpoints.MapPost("/frost/pins/clear/{scUID}", async context =>
                 {
                     if (!IsLoopbackRequest(context))
@@ -476,7 +503,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                         MinedRows = rows.Count(x => !string.IsNullOrEmpty(x.TransactionHash)),
                         LocalOnlyRows = rows.Count(x => string.IsNullOrEmpty(x.TransactionHash)),
                         ByStatus = rows.GroupBy(x => x.Status.ToString()).ToDictionary(g => g.Key, g => g.Count()),
-                        RebuildRunning = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning,
+                        RebuildRunning = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.InProgress,
+                        RebuildUnfinished = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsUnfinished,
                         RebuildMeta = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.GetMeta(),
                         LastRebuildResult = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.LastResult
                     }, Formatting.Indented);
@@ -510,7 +538,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         return;
                     }
 
-                    if (VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning)
+                    if (VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.InProgress)
                     {
                         context.Response.StatusCode = StatusCodes.Status409Conflict;
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "A rebuild is already running." }));
@@ -2409,6 +2437,13 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 }));
                                 return;
                             }
+                            if (FrostSigningAuthorization.NotAtNetworkHeightToSign(request.SmartContractUID) is { } notReady)
+                            {
+                                LogUtility.Log($"[FROST] sign/start refused for {request.SmartContractUID} / {request.WithdrawalRequestHash}: {notReady}", "FrostStartup.SignStart");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = notReady }));
+                                return;
+                            }
 
                             // Durable double-payout guard: if THIS validator already signed a different
                             // transaction for this withdrawal, allow a new one only if the old one was
@@ -2810,7 +2845,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 var (beginBlocked, beginReason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
                                     .TryBeginSigning(request.SmartContractUID, request.WithdrawalRequestHash, request.SessionId,
                                         request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints, reclaimablePinsForStart,
-                                        FrostSigningAuthorization.SigningScope(request.SmartContractUID, request.BtcTxId), request.LeaderAddress);
+                                        FrostSigningAuthorization.SigningScope(request.SmartContractUID, request.BtcTxId), request.LeaderAddress, request.BtcTxId);
                                 if (beginBlocked)
                                 {
                                     FrostSessionStorage.SigningSessions.TryRemove(request.SessionId, out _);
@@ -2970,6 +3005,26 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 LogUtility.Log($"[FROST] Sign Round 2 REFUSED for session {sessionId}: a cancellation of withdrawal {session.WithdrawalRequestHash} is being voted on.", "FrostStartup.SignRound2");
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "A cancellation of this withdrawal is being voted on; refusing to sign" }));
+                                return;
+                            }
+
+                            // ... nor once it ended after the ceremony started: a cancellation approved (a session outlives
+                            // the time a cancellation vote waits for its ceremony), its row closed, or the store being rebuilt.
+                            if (!string.IsNullOrEmpty(session.WithdrawalRequestHash)
+                                && !session.WithdrawalRequestHash.StartsWith(FrostSigningAuthorization.BtcExitPrefix, StringComparison.OrdinalIgnoreCase)
+                                && !VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.IsSweepReference(session.WithdrawalRequestHash)
+                                && FrostSigningAuthorization.WithdrawalNoLongerSignable(session.WithdrawalRequestHash, session.SmartContractUID ?? "") is { } ended)
+                            {
+                                LogUtility.Log($"[FROST] Sign Round 2 REFUSED for session {sessionId}: withdrawal {session.WithdrawalRequestHash}: {ended}", "FrostStartup.SignRound2");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = ended }));
+                                return;
+                            }
+                            if (FrostSigningAuthorization.NotAtNetworkHeightToSign(session.SmartContractUID) is { } notReadyForShare)
+                            {
+                                LogUtility.Log($"[FROST] Sign Round 2 REFUSED for session {sessionId}: {notReadyForShare}", "FrostStartup.SignRound2");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = notReadyForShare }));
                                 return;
                             }
 
@@ -3649,39 +3704,75 @@ namespace VerifiedXCore.Bitcoin.FROST
                 if (VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(scUID) != null)
                     return (true, "");
 
-                var evidence = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.Get(scUID, withdrawalRequestHash);
-                if (evidence == null || string.IsNullOrEmpty(evidence.BtcTxId)) return (true, "");
-                if (string.Equals(evidence.BtcTxId, (requestedTxId ?? "").Trim(), StringComparison.OrdinalIgnoreCase)) return (true, "");
+                // Every record for this payment, under whatever spelling of its reference it was signed under (several
+                // can share one stored reference). A new transaction is signed only once every other one can never confirm.
+                var allRecords = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(scUID, withdrawalRequestHash);
+                var records = allRecords.Where(e => !string.IsNullOrEmpty(e.BtcTxId)).ToList();
+                bool IsRequested(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence e) =>
+                    string.Equals(e.BtcTxId, (requestedTxId ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
+                var dead = new List<(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence Record, string Detail)>();
+                // A record from before exact spellings, not released, may be the only trace of two transactions (one signed
+                // under another spelling was recorded over): no share is given for this payment at all, not even for the
+                // transaction it names (its missing inputs would complete it while the other can still pay).
+                var exactSince = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ExactSpellingSince();
+                if (allRecords.FirstOrDefault(e => e.NeedsOperatorRelease(exactSince)) is { } unreleased)
+                    return (false, $"This validator signed {(string.IsNullOrEmpty(unreleased.BtcTxId) ? "a transaction" : $"transaction {unreleased.BtcTxId}")} for this withdrawal before exact spellings; a transaction signed then under another spelling may have been recorded over it. " +
+                        "An operator confirms none can pay and releases it (POST /frost/evidence/release/{scUID}?withdrawal=...&confirm=true on this node).");
+                foreach (var evidence in records.Where(e => !IsRequested(e)))
+                {
+                    var (ok, reason, detail) = await CheckPriorSignedRecordAsync(scUID, evidence);
+                    if (!ok) return (false, reason);
+                    dead.Add((evidence, detail));
+                }
 
-                var lookup = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.GetTransactionConfirmationsResilient(evidence.BtcTxId);
-                var verdict = ClassifyPriorTx(lookup.Confirmations);
-                if (verdict == PriorTxVerdict.Confirmed)
-                    return (false, $"A transaction ({evidence.BtcTxId}) already signed for this withdrawal has confirmed on Bitcoin; refusing to sign another");
-                if (verdict == PriorTxVerdict.InMempool)
-                    return (false, $"Previously signed transaction {evidence.BtcTxId} for this withdrawal is in the Bitcoin mempool (unconfirmed); refusing to sign another while it can still confirm");
-                // Unknown to every Electrum server: it may have been conflicted away. Prove it below: one
-                // of its inputs must be spent by a CONFIRMED transaction.
-
-                var depositAddress = FrostSigningAuthorization.ResolveDepositAddressForContract(scUID);
-                if (string.IsNullOrEmpty(depositAddress))
-                    return (false, "Contract deposit address could not be resolved to check the previously signed transaction");
-
-                var (spendVerdict, spendDetail) = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.GetOutpointSpendVerdict(depositAddress, evidence.Outpoints);
-                if (spendVerdict == VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.OutpointSpendVerdict.Inconclusive)
-                    return (false, $"Could not establish whether previously signed transaction {evidence.BtcTxId} can still confirm ({spendDetail}); refusing to sign another");
-                if (spendVerdict != VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed)
-                    return (false, $"Previously signed transaction {evidence.BtcTxId} for this withdrawal can still confirm ({spendDetail}); refusing to sign a second one");
-
-                // Conflicted away: a confirmed transaction spent one of its inputs, so it can never confirm.
-                VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.Delete(scUID, withdrawalRequestHash);
-                VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.ForgetDeadTransaction(scUID, withdrawalRequestHash,
-                    $"signed tx {evidence.BtcTxId} can never confirm ({spendDetail})");
-                LogUtility.Log($"[FROST Dedup] Previously signed tx {evidence.BtcTxId} for {withdrawalRequestHash} was conflicted away on-chain; allowing a new transaction.", "FrostStartup.SignStart");
+                // Conflicted away: retire each dead transaction's own record, and what this node holds in memory for it.
+                var requestedIsHeld = records.Any(IsRequested);
+                foreach (var (evidence, detail) in dead)
+                {
+                    VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.DeleteRecord(evidence.Id);
+                    foreach (var spelling in new[] { withdrawalRequestHash, evidence.WithdrawalRequestHash }.Distinct(StringComparer.Ordinal))
+                        VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.ForgetDeadTransaction(scUID, spelling, evidence.BtcTxId,
+                            keepSigningRecord: requestedIsHeld, $"signed tx {evidence.BtcTxId} can never confirm ({detail})");
+                    LogUtility.Log($"[FROST Dedup] Previously signed tx {evidence.BtcTxId} for {withdrawalRequestHash} was conflicted away on-chain; allowing a new transaction.", "FrostStartup.SignStart");
+                }
                 return (true, "");
             }
             catch (Exception ex)
             {
                 return (false, $"Error checking previously signed transaction: {ApiErrorText.For(ex)}");
+            }
+        }
+
+        /// <summary>One recorded signed transaction for the payment: refused while it can pay; Ok (with why) once proven dead.</summary>
+        private static async Task<(bool Ok, string Reason, string DeadDetail)> CheckPriorSignedRecordAsync(string scUID, VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence evidence)
+        {
+            try
+            {
+                var lookup = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.GetTransactionConfirmationsResilient(evidence.BtcTxId);
+                var verdict = ClassifyPriorTx(lookup.Confirmations);
+                if (verdict == PriorTxVerdict.Confirmed)
+                    return (false, $"A transaction ({evidence.BtcTxId}) already signed for this withdrawal has confirmed on Bitcoin; refusing to sign another", "");
+                if (verdict == PriorTxVerdict.InMempool)
+                    return (false, $"Previously signed transaction {evidence.BtcTxId} for this withdrawal is in the Bitcoin mempool (unconfirmed); refusing to sign another while it can still confirm", "");
+                // Unknown to every Electrum server: it may have been conflicted away. Prove it below: one
+                // of its inputs must be spent by a CONFIRMED transaction.
+
+                var depositAddress = FrostSigningAuthorization.ResolveDepositAddressForContract(scUID);
+                if (string.IsNullOrEmpty(depositAddress))
+                    return (false, "Contract deposit address could not be resolved to check the previously signed transaction", "");
+
+                var (spendVerdict, spendDetail) = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.GetOutpointSpendVerdict(depositAddress, evidence.Outpoints, evidence.BtcTxId);
+                if (spendVerdict == VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.OutpointSpendVerdict.Inconclusive)
+                    return (false, $"Could not establish whether previously signed transaction {evidence.BtcTxId} can still confirm ({spendDetail}); refusing to sign another", "");
+                if (spendVerdict != VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed)
+                    return (false, $"Previously signed transaction {evidence.BtcTxId} for this withdrawal can still confirm ({spendDetail}); refusing to sign a second one", "");
+
+                // Conflicted away: a confirmed transaction spent one of its inputs, so it can never confirm.
+                return (true, "", spendDetail);
+            }
+            catch (Exception ex)
+            {
+                return (false, $"Error checking previously signed transaction: {ApiErrorText.For(ex)}", "");
             }
         }
 

@@ -82,5 +82,19 @@ namespace VerifiedXCore.Tests
             var (_, whyOld) = await TransactionValidatorService.VerifyTX(tx, blockVerify: true, blockHeight: 40);
             Assert.NotEqual(TransactionValidatorService.NegativeFeeReason, whyOld);
         }
+
+        /// <summary>A fee-exempt type with no fee at all is not caught by the rule (other rules may still judge it).</summary>
+        [Theory]
+        [InlineData(TransactionType.VBTC_V2_BRIDGE_UNLOCK)]
+        [InlineData(TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK)]
+        [InlineData(TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE)]
+        public async Task AZeroFee_OnAFeeExemptType_IsNotRefusedAsNegative(TransactionType type)
+        {
+            var tx = Signed(type, 0M);
+            var (_, why) = await TransactionValidatorService.VerifyTX(tx);
+            Assert.NotEqual(TransactionValidatorService.NegativeFeeReason, why);
+            var (_, whyBlock) = await TransactionValidatorService.VerifyTX(tx, blockVerify: true, blockHeight: 60);
+            Assert.NotEqual(TransactionValidatorService.NegativeFeeReason, whyBlock);
+        }
     }
 }

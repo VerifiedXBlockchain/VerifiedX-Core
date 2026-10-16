@@ -11,6 +11,7 @@ using VerifiedXCore.Data;
 using VerifiedXCore.Models;
 using Block = VerifiedXCore.Models.Block;
 using VerifiedXCore.Utilities;
+using Microsoft.AspNetCore.Hosting;
 using Xunit;
 
 namespace VerifiedXCore.Tests
@@ -115,6 +116,127 @@ namespace VerifiedXCore.Tests
             var (ok, reason) = FrostSigningAuthorization.Authorize(Request(spelling));
             Assert.False(ok);
             Assert.Equal(FrostSigningAuthorization.NonCanonicalReference, reason);
+        }
+
+        /// <summary>
+        /// A withdrawal whose cancellation was approved (and refunded) is not signed, though its row reads open: the
+        /// withdrawal-store rebuild puts a lost row back as requested before it applies how the withdrawal ended.
+        /// </summary>
+        [Theory]
+        [InlineData(true, false)]
+        [InlineData(false, true)]
+        public void ARefundedWithdrawal_IsNotSignedThoughItsRowReadsOpen(bool approved, bool signed)
+        {
+            VBTCWithdrawalCancellation.SaveCancellation(new VBTCWithdrawalCancellation
+            {
+                CancellationUID = VBTCWithdrawalCancellation.OnChainUidPrefix + "c1", SmartContractUID = _vault, OwnerAddress = Owner, WithdrawalRequestHash = Wrh,
+                BTCTxHash = "", FailureProof = "", RequestTime = TimeUtil.GetTime(), ValidatorVotes = new Dictionary<string, bool>(),
+                ApproveCount = approved ? 3 : 0, RejectCount = approved ? 0 : 3, IsApproved = approved, IsProcessed = true, RequestBlockHeight = 450,
+            });
+            Assert.Equal(VBTCWithdrawalStatus.Requested, VBTCWithdrawalRequest.GetByTransactionHash(Wrh, _vault)!.Status);
+
+            var (ok, reason) = FrostSigningAuthorization.Authorize(Request(Wrh));
+            Assert.True(ok == signed, reason);
+        }
+
+        /// <summary>
+        /// A ceremony started while the withdrawal was open; before its Round 2 the withdrawal's cancellation was approved
+        /// (a session outlives the time a cancellation vote waits for a ceremony). Round 2 gives no share.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task Round2_GivesNoShare_ForAWithdrawalRefundedSinceTheCeremonyStarted(bool refunded)
+        {
+            if (refunded)
+                VBTCWithdrawalCancellation.SaveCancellation(new VBTCWithdrawalCancellation
+                {
+                    CancellationUID = VBTCWithdrawalCancellation.OnChainUidPrefix + "c2", SmartContractUID = _vault, OwnerAddress = Owner, WithdrawalRequestHash = Wrh,
+                    BTCTxHash = "", FailureProof = "", RequestTime = TimeUtil.GetTime(), ValidatorVotes = new Dictionary<string, bool>(),
+                    ApproveCount = 3, IsApproved = true, IsProcessed = true, RequestBlockHeight = 450,
+                });
+            var (code, body) = await Round2OnThisWithdrawal();
+            if (refunded)
+            {
+                Assert.Equal(System.Net.HttpStatusCode.Conflict, code);
+                Assert.Contains("cancelled and refunded", body);
+            }
+            else Assert.DoesNotContain("refunded", body);
+        }
+
+        /// <summary>
+        /// A validator gives no share for a vault the chain does not watch unless it is at the network's height: after a
+        /// snapshot restore or a resync its store may not yet show that a withdrawal was refunded.
+        /// </summary>
+        [Theory]
+        [InlineData(true, false)]
+        [InlineData(false, true)]   // a fork recovery's download phase: IsResyncing is already cleared
+        [InlineData(false, false)]
+        public async Task Round2_GivesNoShare_WhileThisValidatorIsNotAtTheNetworksHeight(bool resyncing, bool recovering)
+        {
+            var (synced, wasResyncing, stopped, tip) = (Globals.IsChainSynced, Globals.IsResyncing, Globals.StopAllTimers, Globals.LastBlock);
+            try
+            {
+                Globals.IsChainSynced = true;
+                Globals.IsResyncing = resyncing;
+                Globals.StopAllTimers = false;
+                Globals.LastBlock = new Block { Height = 500, Timestamp = TimeUtil.GetTime() };
+                VerifiedXCore.Utilities.ForkRecoveryUtility.SetRecoveryInProgressForTests(recovering);
+                var (code, body) = await Round2OnThisWithdrawal();
+                if (resyncing || recovering)
+                {
+                    Assert.Equal(System.Net.HttpStatusCode.Conflict, code);
+                    Assert.Contains("not at the network's height", body);
+                }
+                else Assert.DoesNotContain("network's height", body);
+            }
+            finally
+            {
+                VerifiedXCore.Utilities.ForkRecoveryUtility.SetRecoveryInProgressForTests(false);
+                (Globals.IsChainSynced, Globals.IsResyncing, Globals.StopAllTimers, Globals.LastBlock) = (synced, wasResyncing, stopped, tip);
+            }
+        }
+
+        /// <summary>Round 2 of a ceremony this validator accepted for the withdrawal, sent by its leader.</summary>
+        private async Task<(System.Net.HttpStatusCode Code, string Body)> Round2OnThisWithdrawal()
+        {
+            var key = new VerifiedXCore.EllipticCurve.PrivateKey("secp256k1");
+            var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+            var leader = AccountData.GetHumanAddress(pub);
+            var session = new VerifiedXCore.Bitcoin.FROST.Models.SigningSession
+            {
+                SessionId = Guid.NewGuid().ToString("N"), LeaderAddress = leader, LeaderStartTimestamp = TimeUtil.GetTime(), StartTimestamp = TimeUtil.GetTime(),
+                SmartContractUID = _vault, WithdrawalRequestHash = Wrh, MessageHash = new string('a', 64), MyKeyPackage = "key-package",
+            };
+            Assert.True(FrostSessionStorage.SigningSessions.TryAdd(session.SessionId, session));
+            try
+            {
+                using var server = new Microsoft.AspNetCore.TestHost.TestServer(new Microsoft.AspNetCore.Hosting.WebHostBuilder().UseStartup<FrostStartup>());
+                var req = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, $"/frost/sign/round2/{session.SessionId}")
+                { Content = new System.Net.Http.StringContent("{}", System.Text.Encoding.UTF8, "application/json") };
+                req.Headers.TryAddWithoutValidation("X-Frost-Leader", leader);
+                req.Headers.TryAddWithoutValidation("X-Frost-Timestamp", session.LeaderStartTimestamp.ToString());
+                req.Headers.TryAddWithoutValidation("X-Frost-Signature", VerifiedXCore.Services.SignatureService.CreateSignature($"{session.SessionId}.{leader}.{session.LeaderStartTimestamp}", key, pub));
+                var response = await server.CreateClient().SendAsync(req);
+                var body = await response.Content.ReadAsStringAsync();
+                Assert.DoesNotContain("Leader auth failed", body);
+                return (response.StatusCode, body);
+            }
+            finally { FrostSessionStorage.SigningSessions.TryRemove(session.SessionId, out _); }
+        }
+
+        [Fact]
+        public void WhileTheWithdrawalStoreIsRebuilt_NothingIsSignedFromIt()
+        {
+            try
+            {
+                VBTCWithdrawalStoreRebuildService.SetRunningForTests(true);
+                var (ok, reason) = FrostSigningAuthorization.Authorize(Request(Wrh));
+                Assert.False(ok);
+                Assert.Contains("being rebuilt", reason);
+            }
+            finally { VBTCWithdrawalStoreRebuildService.SetRunningForTests(false); }
+            Assert.True(FrostSigningAuthorization.Authorize(Request(Wrh)).Ok);
         }
     }
 }
