@@ -491,6 +491,25 @@ namespace VerifiedXCore.Data
         public static void ReleasePrivateMempoolNullifiersForTx(string txHash) =>
             MempoolNullifierTracker.ReleaseClaimsForTxHash(txHash);
 
+        /// <summary>
+        /// Removes from the mempool the transaction a received copy was refused as, and releases its nullifier claims. Only
+        /// a row identical to that copy (same hash, signature and hashed fields) is removed: a different transaction that
+        /// carries the same hash and signature is not the one refused, and its refusal says nothing about the pooled row.
+        /// </summary>
+        public static int RemoveRefusedFromPool(LiteDB.ILiteCollection<Transaction> mempool, Transaction received)
+        {
+            var preimage = received.GetHashPreimage();
+            var removed = 0;
+            foreach (var row in mempool.Find(x => x.Hash == received.Hash && x.Signature == received.Signature).ToList())
+            {
+                if (row.GetHashPreimage() == preimage && mempool.DeleteSafe(row.Id))
+                    removed++;
+            }
+            if (removed > 0)
+                ReleasePrivateMempoolNullifiersForTx(received.Hash);
+            return removed;
+        }
+
         public static LiteDB.ILiteCollection<Transaction> GetPool()
         {
             try

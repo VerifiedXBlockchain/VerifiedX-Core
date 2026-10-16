@@ -207,6 +207,31 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ARefusedCopyThatDiffersFromThePooledTransaction_RemovesNothing()
+        {
+            var tx = Send(1M);
+            Assert.True(MempoolEvictionUtility.TryAdmitAndInsert(tx, TransactionData.GetPool()));
+
+            // Same hash and signature, other content: it fails validation, and its refusal is not the pooled transaction's.
+            var altered = JsonConvert.DeserializeObject<Transaction>(JsonConvert.SerializeObject(tx))!;
+            altered.Amount = 2M;
+            Assert.Equal(0, TransactionData.RemoveRefusedFromPool(TransactionData.GetPool(), altered));
+
+            Assert.Equal(tx.Hash, TransactionData.GetPool().FindAll().Single().Hash);
+        }
+
+        [Fact]
+        public void ARefusedCopyIdenticalToThePooledTransaction_RemovesIt()
+        {
+            var tx = Send(1M);
+            Assert.True(MempoolEvictionUtility.TryAdmitAndInsert(tx, TransactionData.GetPool()));
+
+            var same = JsonConvert.DeserializeObject<Transaction>(JsonConvert.SerializeObject(tx))!;
+            Assert.Equal(1, TransactionData.RemoveRefusedFromPool(TransactionData.GetPool(), same));
+            Assert.Equal(0, PoolCount());
+        }
+
+        [Fact]
         public void EvictionThatCannotMakeRoom_EvictsNothing()
         {
             Pool("c-old", TransactionRating.C, 1);
