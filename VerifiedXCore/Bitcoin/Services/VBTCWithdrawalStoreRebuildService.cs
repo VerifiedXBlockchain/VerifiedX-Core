@@ -277,16 +277,16 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// Whether a withdrawal request with this transaction hash was mined, within the recovery's window below
-        /// <paramref name="anchorHeight"/>, for this contract. Reads blocks only and writes nothing: block validation
-        /// asks this (a completion must name a request that exists on its own contract) and must leave no trace of a
-        /// block that is then refused. The row itself is rebuilt when the completion is applied.
+        /// The row a withdrawal request with this transaction hash, mined within the recovery's window below
+        /// <paramref name="anchorHeight"/>, makes for this contract, or null. It is the row the completion's apply recovers
+        /// (<see cref="TryRecoverRequestRowFromChain"/>), so block validation judges the completion against it exactly as a
+        /// node holding the row does. Reads blocks only and writes nothing: a block that is then refused leaves no trace.
         /// </summary>
-        public static bool MinedRequestNames(string? requestTxHash, string? scUID, long anchorHeight)
+        public static VBTCWithdrawalRequest? MinedRequestRow(string? requestTxHash, string? scUID, long anchorHeight)
         {
             try
             {
-                if (string.IsNullOrEmpty(requestTxHash) || string.IsNullOrEmpty(scUID)) return false;
+                if (string.IsNullOrEmpty(requestTxHash) || string.IsNullOrEmpty(scUID)) return null;
                 var toHeight = anchorHeight > 0 ? anchorHeight : (Globals.LastBlock?.Height ?? 0);
                 var fromHeight = Math.Max(0, toHeight - RECOVERY_SCAN_BLOCKS);
                 foreach (var block in BlockchainData.GetBlocks().Find(LiteDB.Query.Between("Height", fromHeight, toHeight)))
@@ -295,12 +295,12 @@ namespace VerifiedXCore.Bitcoin.Services
                     foreach (var tx in block.Transactions)
                     {
                         if (tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST || tx.Hash != requestTxHash) continue;
-                        return TryBuildRequestRows(tx, out var rows) && rows != null && rows.Any(r => r.SmartContractUID == scUID);
+                        return TryBuildRequestRows(tx, out var rows) && rows != null ? rows.FirstOrDefault(r => r.SmartContractUID == scUID) : null;
                     }
                 }
             }
             catch { }
-            return false;
+            return null;
         }
 
         /// <summary>
