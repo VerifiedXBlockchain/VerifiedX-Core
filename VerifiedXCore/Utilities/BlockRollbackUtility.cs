@@ -627,6 +627,9 @@ namespace VerifiedXCore.Utilities
         /// 
         /// Does NOT wipe user data (wallet, HD wallet, peers, config, keystore, beacon, DST).
         /// </summary>
+        /// <summary>Test seam: runs right after ResetTreis wipes chain-derived state, the point a crash mid-replay leaves on disk.</summary>
+        internal static Action? StateWipedForTests;
+
         public static async Task<bool> ResetTreis()
         {
             // RE-ENTRANCY GUARD: If ResetTreis is already running, reject the new request.
@@ -676,9 +679,14 @@ namespace VerifiedXCore.Utilities
                 // Every snapshot slot holds the state this rebuild replaces. Replay stamps rows with their
                 // original block heights, so a diff cycle would never copy them into those slots; mark them
                 // Invalid so the next cycles full-copy the rebuilt state and a restore cannot bring the old back.
+                // Durably unsynced before anything is destroyed: a crash during the replay then leaves a status the next
+                // startup rebuilds from, never the old IsSynced=true over partly rebuilt state.
+                StateTreiStatusService.SetFailed("A state rebuild started and did not complete.");
+
                 StateSnapshotService.InvalidateAbove(-1);
 
                 WipeChainDerivedState();
+                StateWipedForTests?.Invoke();
 
                 DbContext.DB.Checkpoint();
                 try { DbContext.DB_Mempool.Checkpoint(); } catch { }

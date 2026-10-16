@@ -74,6 +74,21 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task ARebuildStoppedAfterTheWipe_LeavesTheStateMarkedUnsynced()
+        {
+            PutAccount("addrA", 5m, 50);
+            Assert.True(StateTreiStatusService.IsSynced());
+
+            // What a crash during the replay leaves on disk: the status as it stands once the old state is gone.
+            bool? syncedAfterWipe = null;
+            BlockRollbackUtility.StateWipedForTests = () => syncedAfterWipe = StateTreiStatusService.IsSynced();
+            try { await BlockRollbackUtility.ResetTreis(); }
+            finally { BlockRollbackUtility.StateWipedForTests = null; }
+
+            Assert.False(syncedAfterWipe); // the next startup rebuilds instead of snapshotting partial state
+        }
+
+        [Fact]
         public async Task AfterRebuild_NextCycleCapturesTheRebuiltRows()
         {
             PutAccount("addrA", 5m, 50);

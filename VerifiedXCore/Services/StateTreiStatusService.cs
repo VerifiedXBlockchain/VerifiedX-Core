@@ -10,7 +10,7 @@ namespace VerifiedXCore.Services
     /// This flag tracks whether the state trie is fully built and consistent.
     /// It lives in the same DB as the state trie itself, so it:
     /// - Travels with snapshots (restored snapshot = IsSynced=true)
-    /// - Gets wiped when ResetTreis wipes the state trie (missing = needs rebuild)
+    /// - Is kept when ResetTreis wipes the state trie, and set to IsSynced=false before the wipe
     /// - Is set to true ONLY after a successful full rebuild
     /// </summary>
     public static class StateTreiStatusService
