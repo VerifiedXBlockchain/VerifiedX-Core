@@ -148,6 +148,52 @@ namespace VerifiedXCore.Tests
         [InlineData(false)]
         public async Task Round2_GivesNoShare_ForAWithdrawalRefundedSinceTheCeremonyStarted(bool refunded)
         {
+            if (refunded)
+                VBTCWithdrawalCancellation.SaveCancellation(new VBTCWithdrawalCancellation
+                {
+                    CancellationUID = VBTCWithdrawalCancellation.OnChainUidPrefix + "c2", SmartContractUID = _vault, OwnerAddress = Owner, WithdrawalRequestHash = Wrh,
+                    BTCTxHash = "", FailureProof = "", RequestTime = TimeUtil.GetTime(), ValidatorVotes = new Dictionary<string, bool>(),
+                    ApproveCount = 3, IsApproved = true, IsProcessed = true, RequestBlockHeight = 450,
+                });
+            var (code, body) = await Round2OnThisWithdrawal();
+            if (refunded)
+            {
+                Assert.Equal(System.Net.HttpStatusCode.Conflict, code);
+                Assert.Contains("cancelled and refunded", body);
+            }
+            else Assert.DoesNotContain("refunded", body);
+        }
+
+        /// <summary>
+        /// A validator gives no share for a vault the chain does not watch unless it is at the network's height: after a
+        /// snapshot restore or a resync its store may not yet show that a withdrawal was refunded.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task Round2_GivesNoShare_WhileThisValidatorIsNotAtTheNetworksHeight(bool resyncing)
+        {
+            var (synced, wasResyncing, stopped, tip) = (Globals.IsChainSynced, Globals.IsResyncing, Globals.StopAllTimers, Globals.LastBlock);
+            try
+            {
+                Globals.IsChainSynced = true;
+                Globals.IsResyncing = resyncing;
+                Globals.StopAllTimers = false;
+                Globals.LastBlock = new Block { Height = 500, Timestamp = TimeUtil.GetTime() };
+                var (code, body) = await Round2OnThisWithdrawal();
+                if (resyncing)
+                {
+                    Assert.Equal(System.Net.HttpStatusCode.Conflict, code);
+                    Assert.Contains("not at the network's height", body);
+                }
+                else Assert.DoesNotContain("network's height", body);
+            }
+            finally { (Globals.IsChainSynced, Globals.IsResyncing, Globals.StopAllTimers, Globals.LastBlock) = (synced, wasResyncing, stopped, tip); }
+        }
+
+        /// <summary>Round 2 of a ceremony this validator accepted for the withdrawal, sent by its leader.</summary>
+        private async Task<(System.Net.HttpStatusCode Code, string Body)> Round2OnThisWithdrawal()
+        {
             var key = new VerifiedXCore.EllipticCurve.PrivateKey("secp256k1");
             var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
             var leader = AccountData.GetHumanAddress(pub);
@@ -157,13 +203,6 @@ namespace VerifiedXCore.Tests
                 SmartContractUID = _vault, WithdrawalRequestHash = Wrh, MessageHash = new string('a', 64), MyKeyPackage = "key-package",
             };
             Assert.True(FrostSessionStorage.SigningSessions.TryAdd(session.SessionId, session));
-            if (refunded)
-                VBTCWithdrawalCancellation.SaveCancellation(new VBTCWithdrawalCancellation
-                {
-                    CancellationUID = VBTCWithdrawalCancellation.OnChainUidPrefix + "c2", SmartContractUID = _vault, OwnerAddress = Owner, WithdrawalRequestHash = Wrh,
-                    BTCTxHash = "", FailureProof = "", RequestTime = TimeUtil.GetTime(), ValidatorVotes = new Dictionary<string, bool>(),
-                    ApproveCount = 3, IsApproved = true, IsProcessed = true, RequestBlockHeight = 450,
-                });
             try
             {
                 using var server = new Microsoft.AspNetCore.TestHost.TestServer(new Microsoft.AspNetCore.Hosting.WebHostBuilder().UseStartup<FrostStartup>());
@@ -175,12 +214,7 @@ namespace VerifiedXCore.Tests
                 var response = await server.CreateClient().SendAsync(req);
                 var body = await response.Content.ReadAsStringAsync();
                 Assert.DoesNotContain("Leader auth failed", body);
-                if (refunded)
-                {
-                    Assert.Equal(System.Net.HttpStatusCode.Conflict, response.StatusCode);
-                    Assert.Contains("cancelled and refunded", body);
-                }
-                else Assert.DoesNotContain("refunded", body);
+                return (response.StatusCode, body);
             }
             finally { FrostSessionStorage.SigningSessions.TryRemove(session.SessionId, out _); }
         }

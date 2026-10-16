@@ -2409,6 +2409,13 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 }));
                                 return;
                             }
+                            if (FrostSigningAuthorization.NotAtNetworkHeightToSign(request.SmartContractUID) is { } notReady)
+                            {
+                                LogUtility.Log($"[FROST] sign/start refused for {request.SmartContractUID} / {request.WithdrawalRequestHash}: {notReady}", "FrostStartup.SignStart");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = notReady }));
+                                return;
+                            }
 
                             // Durable double-payout guard: if THIS validator already signed a different
                             // transaction for this withdrawal, allow a new one only if the old one was
@@ -2983,6 +2990,13 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 LogUtility.Log($"[FROST] Sign Round 2 REFUSED for session {sessionId}: withdrawal {session.WithdrawalRequestHash}: {ended}", "FrostStartup.SignRound2");
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = ended }));
+                                return;
+                            }
+                            if (FrostSigningAuthorization.NotAtNetworkHeightToSign(session.SmartContractUID) is { } notReadyForShare)
+                            {
+                                LogUtility.Log($"[FROST] Sign Round 2 REFUSED for session {sessionId}: {notReadyForShare}", "FrostStartup.SignRound2");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = notReadyForShare }));
                                 return;
                             }
 

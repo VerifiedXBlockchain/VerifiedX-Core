@@ -277,6 +277,30 @@ namespace VerifiedXCore.Bitcoin.FROST
         }
 
         /// <summary>
+        /// Why this validator is not to give a share now for a vault the chain does not watch, or null. What it signs is
+        /// judged from its own withdrawal store, cancellations and exits, which are only as current as its chain: after a
+        /// snapshot restore, a resync or while far behind, a withdrawal refunded since reads open. So it signs only with
+        /// its chain synced, not resyncing and its tip recent. (Not "no block being downloaded": that is held every time a
+        /// peer is a block ahead, and a share refused at Round 2 fails the whole ceremony. A few blocks behind, a
+        /// cancellation being voted on is already seen, and refused.) A watched vault's shares are for transactions
+        /// consensus pinned, which spend the same coins.
+        /// </summary>
+        public static string? NotAtNetworkHeightToSign(string? scUID)
+        {
+            if (string.IsNullOrEmpty(scUID) || Attestation.BtcVaultKeys.KeyRow(scUID) != null || Attestation.BtcAttestBalance.IsAttestedVault(scUID))
+                return null;
+            string? why = null;
+            var tip = Globals.LastBlock;
+            if (!Globals.IsChainSynced) why = "chain not synced";
+            else if (Globals.IsResyncing) why = "node is resyncing";
+            else if (Globals.StopAllTimers) why = "timers stopped";
+            else if (tip == null || tip.Height <= 0) why = "no tip block";
+            else if (VerifiedXCore.Utilities.TimeUtil.GetTime() - tip.Timestamp > VBTCCancellationVoteService.MAX_TIP_AGE_SECONDS)
+                why = $"tip block {tip.Height} is {VerifiedXCore.Utilities.TimeUtil.GetTime() - tip.Timestamp}s old";
+            return why == null ? null : $"This validator is not at the network's height ({why}); signing resumes when it is";
+        }
+
+        /// <summary>
         /// Why a withdrawal (not a bridge exit or a sweep) is not to have a share given for it now, or null: the withdrawal
         /// store is being rebuilt (a row put back reads "requested" until the rebuild brings it to how its withdrawal
         /// ended), its cancellation was approved (it was refunded, whatever its row reads), or its row is closed. Asked
