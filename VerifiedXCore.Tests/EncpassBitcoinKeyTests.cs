@@ -82,6 +82,18 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void AnyOtherPasswordInMemory_DoesNotHandOutAnUnsealedBitcoinKey()
+        {
+            var account = BitcoinAccount.CreateAddress(save: true);
+            Globals.IsWalletEncrypted = true;
+            Globals.EncryptPassword = "not the password".ToSecureString(); // in memory without passing a startup or unlock check
+
+            Assert.Null(BitcoinKeystore.GetPrivateKeyHex(Stored(account.Address)));
+            Assert.Null(BitcoinKeystore.GetWif(Stored(account.Address)));
+            Assert.False(Stored(account.Address).IsEncrypted);
+        }
+
+        [Fact]
         public void TheWalletPasswordAsEncpass_UnlocksBitcoinKeys_AndSealsThem()
         {
             var account = StartWith(WalletPw);
