@@ -3495,8 +3495,10 @@ namespace VerifiedXCore.Nodes
                     {
                         // A4 FIX: mid-round accept now requires a majority of casters to have attested
                         // this exact block — never a blind accept.
-                        var attested = await ConsensusCertificateHelper.TryGetMajorityAttestationsAsync(
-                            nextBlock.Height, nextBlock.Hash, nextBlock.Validator, nextBlock.PrevHash);
+                        // Its hash is registered as the agreed one on acceptance: only for a block that is exactly that hash.
+                        var attested = nextBlock.GetBlockHash() == nextBlock.Hash
+                            && await ConsensusCertificateHelper.TryGetMajorityAttestationsAsync(
+                                nextBlock.Height, nextBlock.Hash, nextBlock.Validator, nextBlock.PrevHash);
                         if (!attested)
                         {
                             ConsoleWriterService.OutputValCaster($"[Consensus Gate] Mid-round REJECT: height {nextBlock.Height} — no agreement after {spin.ElapsedMilliseconds}ms spin and no majority attestation quorum. Round retry will resolve.");
@@ -3516,8 +3518,10 @@ namespace VerifiedXCore.Nodes
                 {
                     // Case 3: No CasterRoundDict entry — we missed/haven't started this round.
                     // A4 FIX: require a majority attestation quorum instead of trusting the broadcast.
-                    var attested = await ConsensusCertificateHelper.TryGetMajorityAttestationsAsync(
-                        nextBlock.Height, nextBlock.Hash, nextBlock.Validator, nextBlock.PrevHash);
+                    // Its hash is registered as the agreed one on acceptance: only for a block that is exactly that hash.
+                    var attested = nextBlock.GetBlockHash() == nextBlock.Hash
+                        && await ConsensusCertificateHelper.TryGetMajorityAttestationsAsync(
+                            nextBlock.Height, nextBlock.Hash, nextBlock.Validator, nextBlock.PrevHash);
                     if (!attested)
                     {
                         ConsoleWriterService.OutputValCaster($"[Consensus Gate] No-round REJECT: height {nextBlock.Height} — no majority attestation quorum for peer broadcast. Reconcile will resolve.");
@@ -4491,6 +4495,12 @@ namespace VerifiedXCore.Nodes
             }
 
             var hasRoundEntry = Globals.CasterRoundDict.ContainsKey(block.Height);
+            // Its hash is registered as the agreed one below: only for a block that is exactly that hash.
+            if (block.GetBlockHash() != block.Hash)
+            {
+                CasterLogUtility.Log($"GOSSIP-GATE REFUSE: h={block.Height} hash={shortHash} from {source} — the block is not its own hash.", "GOSSIP-GATE");
+                return false;
+            }
             var attested = await ConsensusCertificateHelper.TryGetMajorityAttestationsAsync(block.Height, block.Hash, block.Validator, block.PrevHash);
             if (attested)
             {
