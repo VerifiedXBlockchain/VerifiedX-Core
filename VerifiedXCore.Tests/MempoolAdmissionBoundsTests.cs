@@ -374,11 +374,11 @@ namespace VerifiedXCore.Tests
             Assert.All(TransactionData.GetPool().Find(x => x.FromAddress == _sender.Address), x => Assert.Equal(TransactionRating.E, x.TransactionRating));
         }
 
-        private static void FillPool(TransactionRating rating, TransactionType type = TransactionType.TX, string? data = null)
+        private static void FillPool(TransactionRating rating, TransactionType type = TransactionType.TX, string? data = null, Func<int, string>? sender = null)
         {
             TransactionData.GetPool().InsertBulk(Enumerable.Range(0, Globals.MaxMempoolEntries).Select(i => new Transaction
             {
-                Hash = $"full{i}", FromAddress = "x", ToAddress = "y", Amount = 1M, Fee = 1M, Timestamp = i,
+                Hash = $"full{i}", FromAddress = sender?.Invoke(i) ?? "x", ToAddress = "y", Amount = 1M, Fee = 1M, Timestamp = i,
                 TransactionType = type, Data = data, TransactionRating = rating,
             }));
             MempoolEvictionUtility.InvalidateAdmissionStats();
@@ -409,12 +409,30 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public void ADeadlineBoundTransaction_DoesNotDisplaceAnother()
+        public void ADeadlineBoundTransaction_DoesNotDisplaceAnotherSendersProtectedOnes()
         {
-            FillPool(TransactionRating.A, TransactionType.RESERVE, JsonConvert.SerializeObject(new { Function = "CallBack()", Hash = "other" }));
+            // Every sender within its protected share: nothing to displace.
+            FillPool(TransactionRating.A, TransactionType.RESERVE, JsonConvert.SerializeObject(new { Function = "CallBack()", Hash = "other" }), i => $"owner{i}");
 
             Assert.False(MempoolEvictionUtility.CheckAdmissionBounds(Reserve("Recover()")).admit);
             Assert.Equal(Globals.MaxMempoolEntries, PoolCount());
+        }
+
+        [Fact]
+        public void OneSendersCallbacksBeyondItsShare_CanBeDisplacedByAnotherOwners()
+        {
+            FillPool(TransactionRating.A, TransactionType.RESERVE, JsonConvert.SerializeObject(new { Function = "CallBack()", Hash = "other" }), _ => "xRBXhog");
+
+            var (admit, reason) = MempoolEvictionUtility.CheckAdmissionBounds(Reserve("Recover()"));
+
+            Assert.True(admit, reason);
+            Assert.True(PoolCount() < Globals.MaxMempoolEntries);
+            Assert.True(PoolCount() >= MempoolEvictionUtility.ProtectedPerSender); // the hog's earliest share stays
+            for (var i = 0; i < MempoolEvictionUtility.ProtectedPerSender; i++)
+            {
+                var earliest = $"full{i}";
+                Assert.NotNull(TransactionData.GetPool().FindOne(x => x.Hash == earliest));
+            }
         }
 
         [Fact]

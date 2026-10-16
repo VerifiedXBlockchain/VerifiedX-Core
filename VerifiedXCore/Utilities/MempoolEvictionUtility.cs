@@ -74,6 +74,23 @@ namespace VerifiedXCore.Utilities
             }
         }
 
+        /// <summary>How many of one sender's deadline-bound entries are kept from displacement by another deadline-bound one.</summary>
+        internal const int ProtectedPerSender = 8;
+
+        /// <summary>
+        /// The deadline-bound entries no other deadline-bound transaction displaces: each sender's earliest
+        /// <see cref="ProtectedPerSender"/>. Beyond that a sender's entries can go, so one sender's many callbacks cannot
+        /// hold every protected place and keep out another owner's.
+        /// </summary>
+        private static HashSet<string> ProtectedEntries(List<Transaction> pooled) =>
+            pooled.Where(IsDeadlineBound)
+                .GroupBy(x => x.FromAddress ?? "")
+                .SelectMany(g => g.OrderBy(x => x.Hash != null && ArrivedAtUtc.TryGetValue(x.Hash, out var at) ? at : DateTime.MinValue)
+                    .ThenBy(x => x.Timestamp)
+                    .Take(ProtectedPerSender))
+                .Select(x => x.Hash)
+                .ToHashSet();
+
         private static (bool admit, string reason, List<Transaction> victims) PlanAdmission(Transaction tx)
         {
             var none = new List<Transaction>();
@@ -326,7 +343,7 @@ namespace VerifiedXCore.Utilities
         /// <paramref name="mustFitBytes"/> is given and removing them would not leave room for it. Deletes nothing.
         /// </summary>
         /// <param name="sameRatedOrdinaryToo">Entries rated the same as <paramref name="onlyRatedBelow"/> may go too, unless
-        /// they are themselves deadline-bound.</param>
+        /// they are themselves deadline-bound and among their sender's first <see cref="ProtectedPerSender"/> such entries.</param>
         private static List<Transaction>? PlanEviction(int targetCount, long targetSize, TransactionRating? onlyRatedBelow, long? knownTotalSize, long? mustFitBytes, bool sameRatedOrdinaryToo = false)
         {
             var mempool = TransactionData.GetPool();
@@ -359,9 +376,10 @@ namespace VerifiedXCore.Utilities
             // Lowest rating first (F is the highest enum value). Within a rating the latest to arrive here go first: a burst
             // of new entries makes room by evicting itself, not the transactions that were already waiting. A row with no
             // recorded arrival (inserted locally, or before a restart) counts as the earliest.
+            var protectedHashes = sameRatedOrdinaryToo ? ProtectedEntries(allTxs) : null;
             var sortedTxs = allTxs
                 .Where(x => onlyRatedBelow == null || (x.TransactionRating ?? TransactionRating.F) > onlyRatedBelow.Value
-                    || (sameRatedOrdinaryToo && (x.TransactionRating ?? TransactionRating.F) == onlyRatedBelow.Value && !IsDeadlineBound(x)))
+                    || (sameRatedOrdinaryToo && (x.TransactionRating ?? TransactionRating.F) == onlyRatedBelow.Value && !protectedHashes!.Contains(x.Hash)))
                 .OrderByDescending(x => x.TransactionRating ?? TransactionRating.F)
                 .ThenByDescending(x => x.Hash != null && ArrivedAtUtc.TryGetValue(x.Hash, out var at) ? at : DateTime.MinValue)
                 .ToList();
