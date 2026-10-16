@@ -39,11 +39,45 @@ namespace VerifiedXCore.Bitcoin.Models
             get { try { return JsonConvert.DeserializeObject<List<string>>(OutpointsJson) ?? new(); } catch { return new(); } }
         }
 
+        /// <summary>The record for a payment: under its reference as given, else under another spelling of it (<see cref="ForPayment"/>).</summary>
         public static FrostSignedWithdrawalEvidence? Get(string scUID, string withdrawalRequestHash)
         {
             if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash)) return null;
-            try { return Coll()?.FindOne(x => x.ScUID == scUID && x.WithdrawalRequestHash == withdrawalRequestHash); }
+            try { return Coll()?.FindOne(x => x.ScUID == scUID && x.WithdrawalRequestHash == withdrawalRequestHash) ?? ForPayment(scUID, withdrawalRequestHash).FirstOrDefault(); }
             catch { return null; }
+        }
+
+        /// <summary>
+        /// Every record this validator holds for one payment of a vault: under the reference the chain names it by, and
+        /// under any other spelling an earlier version signed it under (padded or in another case; for a bridge exit, a
+        /// longer, shorter or 0x-prefixed burn hash). A record whose spelling could name this payment counts as one for it.
+        /// </summary>
+        public static List<FrostSignedWithdrawalEvidence> ForPayment(string scUID, string reference)
+        {
+            if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(reference)) return new();
+            try { return Coll()?.Find(x => x.ScUID == scUID).Where(x => SamePayment(x.WithdrawalRequestHash, reference)).ToList() ?? new(); }
+            catch { return new(); }
+        }
+
+        /// <summary>Whether a recorded reference may name the same payment of the same vault as <paramref name="reference"/>.</summary>
+        internal static bool SamePayment(string? recorded, string reference)
+        {
+            var r = (recorded ?? string.Empty).Trim();
+            if (string.Equals(r, reference.Trim(), StringComparison.OrdinalIgnoreCase)) return true;
+            var exit = FROST.FrostSigningAuthorization.BtcExitPrefix;
+            if (!r.StartsWith(exit, StringComparison.OrdinalIgnoreCase) || !reference.Trim().StartsWith(exit, StringComparison.OrdinalIgnoreCase)) return false;
+            // A bridge exit is named by its burn hash's prefix (the vault is the record's own): prefixes of one hash overlap.
+            var a = ExitBurnPart(r);
+            var b = ExitBurnPart(reference.Trim());
+            return a.Length > 0 && b.Length > 0 && (a.StartsWith(b, StringComparison.Ordinal) || b.StartsWith(a, StringComparison.Ordinal));
+        }
+
+        private static string ExitBurnPart(string reference)
+        {
+            var parts = reference.Substring(FROST.FrostSigningAuthorization.BtcExitPrefix.Length).Split('_');
+            if (parts.Length != 2) return string.Empty;
+            var p = parts[0].Trim().ToLowerInvariant();
+            return p.StartsWith("0x") ? p.Substring(2) : p;
         }
 
         /// <summary>Upsert: the most recently signed transaction for the withdrawal wins.</summary>
