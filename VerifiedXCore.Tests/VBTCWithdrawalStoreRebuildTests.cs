@@ -238,6 +238,218 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// The rebuild runs holding the lock block validation, its commit and the state snapshots run under: it waits for
+        /// a block being processed, and none is processed (nor snapshot taken) while it rewrites the store, so none reads
+        /// a row it has put back before the scan has brought it to how its withdrawal ended.
+        /// </summary>
+        [Fact]
+        public async Task Rebuild_HoldsBlockProcessingOff_ForItsWholeRun()
+        {
+            InsertBlock(700, RequestTx("rb7-req", "xRequestorG", "rebuild:7", 0.1M, 700));
+            InsertBlock(710, RequestTx("rb7b-req", "xRequestorG", "rebuild:7", 0.2M, 710));
+            var seen = new List<(bool Running, int Free)>();
+            var processing = VerifiedXCore.Services.BlockValidatorService.ValidateBlockSemaphore;
+            VBTCWithdrawalStoreRebuildService.BlockScannedForTests = _ => seen.Add((VBTCWithdrawalStoreRebuildService.IsRunning, processing.CurrentCount));
+            try
+            {
+                await processing.WaitAsync();   // a block is being processed
+                Task<VBTCWithdrawalStoreRebuildService.RebuildResult> rebuild;
+                try
+                {
+                    rebuild = Task.Run(() => VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test"));
+                    await Task.Delay(300);
+                    Assert.False(rebuild.IsCompleted);
+                    Assert.False(VBTCWithdrawalStoreRebuildService.IsRunning);
+                    Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash("rb7-req", "rebuild:7"));
+                }
+                finally { processing.Release(); }
+
+                var result = await rebuild;
+                Assert.True(result.Success, result.Message);
+                Assert.Equal(2, result.RequestsInserted);
+                Assert.NotEmpty(seen);
+                Assert.All(seen, s => { Assert.True(s.Running); Assert.Equal(0, s.Free); });
+                Assert.Equal(1, processing.CurrentCount);
+                Assert.False(VBTCWithdrawalStoreRebuildService.IsRunning);
+            }
+            finally { VBTCWithdrawalStoreRebuildService.BlockScannedForTests = null; }
+        }
+
+        [Fact]
+        public async Task Rebuild_DoesNotRunAlongsideASnapshotRestore()
+        {
+            InsertBlock(800, RequestTx("rb8-req", "xRequestorH", "rebuild:8", 0.1M, 800));
+            try
+            {
+                VerifiedXCore.Utilities.SnapshotRestoreUtility.SetRestoreRunningForTests(true);
+                var result = await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test");
+                Assert.False(result.Success);
+                Assert.Contains("snapshot restore", result.Message);
+                Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash("rb8-req", "rebuild:8"));
+            }
+            finally { VerifiedXCore.Utilities.SnapshotRestoreUtility.SetRestoreRunningForTests(false); }
+            Assert.True((await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test-after")).Success);
+        }
+
+        /// <summary>
+        /// A snapshot restore that starts while the rebuild runs: the rebuild stops at its next block, and the restore
+        /// does not rewrite the store until it has.
+        /// </summary>
+        [Fact]
+        public async Task ARestoreStartingMidRebuild_StopsItBeforeRewritingTheStore()
+        {
+            for (var h = 1000; h < 1010; h++) InsertBlock(h, RequestTx($"rb10-{h}", "xRequestorJ", "rebuild:10", 0.1M, h));
+            using var reached = new System.Threading.ManualResetEventSlim();
+            using var resume = new System.Threading.ManualResetEventSlim();
+            VBTCWithdrawalStoreRebuildService.BlockScannedForTests = height => { if (height == 1003) { reached.Set(); resume.Wait(5000); } };
+            try
+            {
+                var rebuild = Task.Run(() => VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test"));
+                Assert.True(reached.Wait(5000));
+                VerifiedXCore.Utilities.SnapshotRestoreUtility.SetRestoreRunningForTests(true);
+                var restoreWaits = VBTCWithdrawalStoreRebuildService.WaitUntilStoppedAsync();
+                await Task.Delay(200);
+                Assert.False(restoreWaits.IsCompleted);   // the rebuild is still writing
+                resume.Set();
+                var result = await rebuild;
+                await restoreWaits;
+                Assert.False(result.Success);
+                Assert.Contains("snapshot restore", result.Message);
+                Assert.True(result.BlocksScanned < 10);
+                Assert.False(VBTCWithdrawalStoreRebuildService.InProgress);
+                Assert.True(VBTCWithdrawalStoreRebuildService.IsUnfinished);   // until the restore finishes rewriting the store
+            }
+            finally
+            {
+                VBTCWithdrawalStoreRebuildService.BlockScannedForTests = null;
+                VerifiedXCore.Utilities.SnapshotRestoreUtility.SetRestoreRunningForTests(false);
+            }
+        }
+
+        /// <summary>
+        /// A rebuild that fails part-way leaves rows put back but not brought to how their withdrawals ended: the store
+        /// stays treated as being rebuilt (withdrawal transactions refused, nothing signed, no snapshot) until a rebuild
+        /// finishes, which the next start runs by itself.
+        /// </summary>
+        [Fact]
+        public async Task ARebuildThatFailsPartWay_KeepsTheStoreTreatedAsRebuilding_UntilOneFinishes()
+        {
+            for (var h = 1100; h < 1105; h++) InsertBlock(h, RequestTx($"rb11-{h}", "xRequestorK", "rebuild:11", 0.1M, h));
+            VBTCWithdrawalStoreRebuildService.FailAtBlockForTests = height => height == 1102;
+            try
+            {
+                var failed = await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test");
+                Assert.False(failed.Success);
+                Assert.Contains("unfinished", failed.Message);
+            }
+            finally { VBTCWithdrawalStoreRebuildService.FailAtBlockForTests = null; }
+            Assert.True(VBTCWithdrawalStoreRebuildService.IsRunning);
+            Assert.True(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+            Assert.False(VBTCWithdrawalStoreRebuildService.InProgress);   // the operator can start the rebuild again
+            Assert.Equal(1, VerifiedXCore.Services.BlockValidatorService.ValidateBlockSemaphore.CurrentCount);   // block processing goes on, refusing withdrawal transactions
+
+            await VBTCWithdrawalStoreRebuildService.MaybeAutoRebuildOnStartupAsync();
+            Assert.False(VBTCWithdrawalStoreRebuildService.IsRunning);
+            Assert.True(VBTCWithdrawalStoreRebuildService.LastResult!.Success, VBTCWithdrawalStoreRebuildService.LastResult.Message);
+            Assert.NotNull(VBTCWithdrawalRequest.GetByTransactionHash("rb11-1104", "rebuild:11"));
+        }
+
+        /// <summary>A state rebuild that finishes rewrites the store from the chain: an unfinished withdrawal-store rebuild no longer holds it.</summary>
+        [Fact]
+        public async Task AFinishedStateRebuild_ClearsAnUnfinishedWithdrawalStoreRebuild()
+        {
+            InsertBlock(1400, RequestTx("rb14-req", "xRequestorN", "rebuild:14", 0.1M, 1400));
+            VBTCWithdrawalStoreRebuildService.FailAtBlockForTests = _ => true;
+            try { Assert.False((await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test")).Success); }
+            finally { VBTCWithdrawalStoreRebuildService.FailAtBlockForTests = null; }
+            Assert.True(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+
+            BlockchainData.GetBlocks().DeleteAllSafe();   // nothing to replay: the state rebuild finishes cleanly
+            Assert.True(await BlockRollbackUtility.ResetTreis());
+            Assert.False(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+            Assert.False(VBTCWithdrawalStoreRebuildService.IsRunning);
+        }
+
+        /// <summary>
+        /// Data the chain carries that cannot be read is skipped, as live processing skipped it: it does not leave the
+        /// store unfinished (one such transaction in history would otherwise hold every node's store unfinished).
+        /// </summary>
+        [Fact]
+        public async Task UnreadableDataInHistory_IsSkipped_AndTheRebuildFinishes()
+        {
+            InsertBlock(1500, RequestTx("rb15-req", "xRequestorO", "rebuild:15", 0.1M, 1500));
+            var bad = CompleteTx("rb15-bad", "xRequestorO", "rebuild:15", "rb15-req", 1510);
+            bad.Data = "{not json";
+            InsertBlock(1510, bad);
+            var result = await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test");
+            Assert.True(result.Success, result.Message);
+            Assert.Equal(0, result.Errors);
+            Assert.True(result.Skipped >= 1);
+            Assert.False(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+        }
+
+        /// <summary>A request live processing never wrote a row for (a non-positive amount, VX-01) gets none from the rebuild either.</summary>
+        [Fact]
+        public async Task ARequestLiveProcessingRefused_IsNotPutBack()
+        {
+            InsertBlock(1700, RequestTx("rb17-zero", "xRequestorQ", "rebuild:17", 0M, 1700));
+            InsertBlock(1710, RequestTx("rb17-req", "xRequestorQ", "rebuild:17", 0.1M, 1710));
+            var result = await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test");
+            Assert.True(result.Success, result.Message);
+            Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash("rb17-zero", "rebuild:17"));
+            Assert.NotNull(VBTCWithdrawalRequest.GetByTransactionHash("rb17-req", "rebuild:17"));
+        }
+
+        /// <summary>
+        /// A mined request whose fields validation never reads carries a value of the wrong shape (any holder can send
+        /// one): live processing skips it, and so does the rebuild, which still finishes.
+        /// </summary>
+        [Fact]
+        public async Task ARequestWithAFieldOfTheWrongShape_IsSkipped_AndTheRebuildFinishes()
+        {
+            var odd = RequestTx("rb16-odd", "xRequestorP", "rebuild:16", 0.1M, 1600);
+            odd.Data = odd.Data!.TrimEnd('}') + ",\"OriginalRequestTime\":\"x\"}";
+            InsertBlock(1600, odd);
+            InsertBlock(1610, RequestTx("rb16-req", "xRequestorP", "rebuild:16", 0.2M, 1610));
+            var result = await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test");
+            Assert.True(result.Success, result.Message);
+            Assert.Equal(0, result.Errors);
+            Assert.False(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+            Assert.NotNull(VBTCWithdrawalRequest.GetByTransactionHash("rb16-req", "rebuild:16"));
+        }
+
+        /// <summary>
+        /// A state rebuild that starts while the withdrawal store is rebuilt waits for the rebuild to stop (it does at its
+        /// next block) before it rewrites the store.
+        /// </summary>
+        [Fact]
+        public async Task AStateRebuildStartingMidRebuild_WaitsForItToStop()
+        {
+            for (var h = 1200; h < 1210; h++) InsertBlock(h, RequestTx($"rb12-{h}", "xRequestorL", "rebuild:12", 0.1M, h));
+            using var reached = new System.Threading.ManualResetEventSlim();
+            using var resume = new System.Threading.ManualResetEventSlim();
+            VBTCWithdrawalStoreRebuildService.BlockScannedForTests = height => { if (height == 1203) { reached.Set(); resume.Wait(5000); } };
+            try
+            {
+                var rebuild = Task.Run(() => VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test"));
+                Assert.True(reached.Wait(5000));
+                var reset = Task.Run(() => BlockRollbackUtility.ResetTreis());
+                await Task.Delay(300);
+                Assert.False(reset.IsCompleted);   // waits: the rebuild is still writing
+                Assert.NotNull(VBTCWithdrawalRequest.GetByTransactionHash("rb12-1201", "rebuild:12"));   // and has not wiped the store
+                Assert.True(BlockRollbackUtility.IsResetTreisRunning);
+                resume.Set();
+                var result = await rebuild;
+                Assert.False(result.Success);
+                Assert.Contains("state rebuild", result.Message);
+                Assert.True(result.BlocksScanned < 10);
+                Assert.Same(reset, await Task.WhenAny(reset, Task.Delay(60_000)));
+                Assert.False(VBTCWithdrawalStoreRebuildService.IsRunning);   // the state rebuild rewrites the store itself
+            }
+            finally { VBTCWithdrawalStoreRebuildService.BlockScannedForTests = null; }
+        }
+
+        /// <summary>
         /// A wallet path's own fields are written alone: a row rewritten meanwhile by a writer that does not take the row
         /// lock (a state rebuild or snapshot restore copying the store) keeps its status.
         /// </summary>

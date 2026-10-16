@@ -503,7 +503,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                         MinedRows = rows.Count(x => !string.IsNullOrEmpty(x.TransactionHash)),
                         LocalOnlyRows = rows.Count(x => string.IsNullOrEmpty(x.TransactionHash)),
                         ByStatus = rows.GroupBy(x => x.Status.ToString()).ToDictionary(g => g.Key, g => g.Count()),
-                        RebuildRunning = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning,
+                        RebuildRunning = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.InProgress,
+                        RebuildUnfinished = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsUnfinished,
                         RebuildMeta = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.GetMeta(),
                         LastRebuildResult = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.LastResult
                     }, Formatting.Indented);
@@ -537,7 +538,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         return;
                     }
 
-                    if (VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning)
+                    if (VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.InProgress)
                     {
                         context.Response.StatusCode = StatusCodes.Status409Conflict;
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "A rebuild is already running." }));

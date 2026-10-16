@@ -18,6 +18,7 @@ namespace VerifiedXCore.Utilities
 
         /// <summary>Public accessor so block validation can hold off while a restore is in progress.</summary>
         public static bool IsRestoreRunning => _isRestoreRunning;
+        internal static void SetRestoreRunningForTests(bool running) => _isRestoreRunning = running;
 
         private static volatile bool _stateDestroyed = false;
 
@@ -80,6 +81,7 @@ namespace VerifiedXCore.Utilities
             }
 
             _isRestoreRunning = true;
+            await VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.WaitUntilStoppedAsync();
             var wasResyncing = Globals.IsResyncing;
             var wasStopTimers = Globals.StopAllTimers;
             if (manageFlags)
@@ -273,6 +275,7 @@ namespace VerifiedXCore.Utilities
                 LogUtility.Log($"[SnapshotRestore] Success: slot={slot.SlotId} target={targetHeight} replayed={replayed} in {sw.ElapsedMilliseconds} ms", "SnapshotRestoreUtility");
                 restored = true;
                 _stateDestroyed = false;
+                VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.StoreRewrittenFromChain();
                 return true;
             }
             catch (Exception ex)

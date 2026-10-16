@@ -34,7 +34,11 @@ namespace VerifiedXCore.Models
         /// <summary>Bumped when the snapshot layout/collection set changes; mismatched slots are rebuilt.</summary>
         public int SchemaVersion { get; set; } = CurrentSchemaVersion;
 
-        public const int CurrentSchemaVersion = 1;
+        /// <remarks>
+        /// 2: a slot taken by an older build may hold the withdrawal store copied while one of its rebuilds ran (rows put
+        /// back open before the rebuild closed them); this build never takes a slot then, and retakes every older one.
+        /// </remarks>
+        public const int CurrentSchemaVersion = 2;
         public const int SlotCount = 3;
 
         /// <summary>Wave 5 deep anchors: dedicated slots refreshed on coarse cadences (~H-100 and

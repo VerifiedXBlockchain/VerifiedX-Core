@@ -35,14 +35,68 @@ namespace VerifiedXCore.Bitcoin.Services
         /// can run longer, so the window is generous. ~20k blocks ≈ 2.7 days at 12s.</summary>
         private const long RECOVERY_SCAN_BLOCKS = 20_000;
 
-        private static int _running = 0;
-        public static bool IsRunning => _running == 1;
+        private static int _claimed = 0;   // one rebuild at a time
+        private static int _running = 0;   // the store is being rewritten (block processing is held off meanwhile)
+        private static long _started = 0;  // rebuilds that have begun rewriting the store
+
+        /// <summary>
+        /// The store is being rewritten, or a rewrite did not finish (it failed, or the node stopped during it) and rows
+        /// it put back may not yet show how their withdrawals ended. Until a rebuild finishes, block validation refuses
+        /// withdrawal transactions, nothing is signed from the store and no snapshot is taken of it.
+        /// </summary>
+        public static bool IsRunning => _running == 1 || Unfinished();
+
+        /// <summary>How many rebuilds have begun rewriting the store (a snapshot copy compares it before and after).</summary>
+        public static long RebuildsStarted => Interlocked.Read(ref _started);
+
+        /// <summary>A rebuild is in progress (one at a time): what the operator endpoint and the status report show.</summary>
+        public static bool InProgress => Volatile.Read(ref _claimed) == 1;
+
+        /// <summary>A rebuild began rewriting the store and none has finished since (read error: taken as unfinished).</summary>
+        public static bool IsUnfinished => Unfinished();
+
+        private static bool Unfinished()
+        {
+            try { return GetMeta()?.Unfinished == true; }
+            catch { return true; }
+        }
+
+        private static bool SetUnfinished(bool unfinished)
+        {
+            try
+            {
+                var db = GetMetaDb();
+                if (db == null) return false;
+                var meta = GetMeta() ?? new RebuildMeta();
+                meta.Unfinished = unfinished;
+                db.Upsert(meta);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Withdrawal-store rebuild: could not record Unfinished={unfinished}: {ex.Message}", "VBTCWithdrawalStoreRebuildService.SetUnfinished()");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// A state rebuild or a snapshot restore has rewritten this store from the chain and finished: a rebuild of it
+        /// that did not finish no longer leaves rows unreconciled.
+        /// </summary>
+        public static void StoreRewrittenFromChain()
+        {
+            if (BlockRollbackUtility.WithdrawalStoreWiped) SetUnfinished(false);
+        }
         internal static void SetRunningForTests(bool running) => Interlocked.Exchange(ref _running, running ? 1 : 0);
+        internal static Func<long, bool>? FailAtBlockForTests;
+        internal static Action<long>? BlockScannedForTests;
         public static RebuildResult? LastResult { get; private set; }
 
         public class RebuildMeta
         {
             public int Id { get; set; } = 1;
+            /// <summary>A rebuild began rewriting the store and has not finished (see IsRunning).</summary>
+            public bool Unfinished { get; set; }
             public long LastScanHeight { get; set; }
             public long LastScanUtc { get; set; }
             public int RequestsInserted { get; set; }
@@ -98,6 +152,15 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (vwrDb == null)
                     return;
 
+                // A rebuild that did not finish is run again: until one does, the store is treated as being rebuilt.
+                if (GetMeta()?.Unfinished == true)
+                {
+                    LogUtility.Log("vBTC withdrawal store: the last rebuild did not finish — rebuilding from chain.", "VBTCWithdrawalStoreRebuildService.MaybeAutoRebuildOnStartupAsync()");
+                    var resumed = await RebuildFromChainAsync("startup: last rebuild did not finish");
+                    LogUtility.Log($"vBTC withdrawal store startup rebuild finished: {resumed.Message}", "VBTCWithdrawalStoreRebuildService.MaybeAutoRebuildOnStartupAsync()");
+                    return;
+                }
+
                 var minedRowCount = vwrDb.Query().Where(x => x.TransactionHash != "").Count();
                 if (minedRowCount > 0)
                     return;
@@ -117,27 +180,64 @@ namespace VerifiedXCore.Bitcoin.Services
 
         /// <summary>
         /// Streams every block ascending and merge-replays the four withdrawal transaction types
-        /// into the store. Idempotent; never destructive; safe alongside live processing.
+        /// into the store. Idempotent; never destructive.
+        /// It runs holding the lock block validation, its commit and the state snapshots run under, so none of them
+        /// reads (or copies) a row it has put back before the scan has brought it to how its withdrawal ended: blocks
+        /// wait until it finishes. It does not run alongside a state rebuild or a snapshot restore (both rewrite this
+        /// store), and stops if one starts.
         /// </summary>
         public static async Task<RebuildResult> RebuildFromChainAsync(string reason)
         {
             var result = new RebuildResult { StartedUtc = TimeUtil.GetTime() };
 
-            if (Interlocked.CompareExchange(ref _running, 1, 0) != 0)
+            if (Interlocked.CompareExchange(ref _claimed, 1, 0) != 0)
             {
                 result.Message = "A rebuild is already running.";
                 return result;
             }
 
+            var holdingBlocks = false;
             try
             {
-                LogUtility.Log($"vBTC withdrawal store rebuild starting ({reason}).", "VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync()");
+                if (StateBeingRewritten())
+                {
+                    result.Message = "A state rebuild or snapshot restore is running; rebuild the withdrawal store after it.";
+                    return result;
+                }
+                await VerifiedXCore.Services.BlockValidatorService.ValidateBlockSemaphore.WaitAsync();
+                holdingBlocks = true;
+                if (StateBeingRewritten())
+                {
+                    result.Message = "A state rebuild or snapshot restore started; rebuild the withdrawal store after it.";
+                    return result;
+                }
+                Interlocked.Increment(ref _started);
+                Interlocked.Exchange(ref _running, 1);
+                // Before the first row is written: a failure or a stop from here leaves it set until a rebuild (or a state
+                // rebuild or restore) finishes. Not recorded, nothing is written.
+                if (!SetUnfinished(true))
+                {
+                    result.Message = "The withdrawal store's rebuild marker could not be written; nothing was changed.";
+                    ErrorLogUtility.LogError(result.Message, "VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync()");
+                    return result;
+                }
+                LogUtility.Log($"vBTC withdrawal store rebuild starting ({reason}); block processing waits until it finishes.", "VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync()");
 
                 var blocks = BlockchainData.GetBlocks();
                 foreach (var block in blocks.Find(LiteDB.Query.All("Height", LiteDB.Query.Ascending)))
                 {
+                    if (StateBeingRewritten())
+                    {
+                        // The state rebuild or restore rewrites this store from the chain itself; it clears the marker when
+                        // it finishes (StoreRewrittenFromChain).
+                        result.Message = $"Stopped at height {block.Height}: a state rebuild or snapshot restore started, which rewrites the store.";
+                        ErrorLogUtility.LogError(result.Message, "VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync()");
+                        return result;
+                    }
                     result.BlocksScanned++;
                     result.EndHeight = block.Height;
+                    BlockScannedForTests?.Invoke(block.Height);
+                    if (FailAtBlockForTests?.Invoke(block.Height) == true) throw new InvalidOperationException("test failure");
 
                     if (result.BlocksScanned % 100_000 == 0)
                         LogUtility.Log($"vBTC withdrawal store rebuild progress: {result.BlocksScanned} blocks scanned (height {block.Height}).", "VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync()");
@@ -165,6 +265,13 @@ namespace VerifiedXCore.Bitcoin.Services
                                     break;
                             }
                         }
+                        catch (Exception txEx) when (!StateData.IsNodeLocalFault(txEx))
+                        {
+                            // What the transaction carries could not be applied (a field of the wrong shape, ...): live
+                            // processing could not apply it either and skipped it the same way (StateData.IsNodeLocalFault).
+                            result.Skipped++;
+                            LogUtility.Log($"Withdrawal-store rebuild: tx {tx.Hash} at height {block.Height} skipped ({txEx.GetType().Name}: {txEx.Message}).", "VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync()");
+                        }
                         catch (Exception txEx)
                         {
                             result.Errors++;
@@ -181,23 +288,26 @@ namespace VerifiedXCore.Bitcoin.Services
                 ApplyDecidedCancellations(result);
 
                 var meta = GetMeta() ?? new RebuildMeta();
+                // A row this scan could not write or reconcile may still read open: the store stays unfinished.
+                meta.Unfinished = result.Errors > 0;
                 meta.LastScanHeight = result.EndHeight;
                 meta.LastScanUtc = TimeUtil.GetTime();
                 meta.RequestsInserted += result.RequestsInserted;
                 meta.CompletionsApplied += result.CompletionsApplied;
                 GetMetaDb()?.Upsert(meta);
 
-                result.Success = true;
+                result.Success = result.Errors == 0;
                 result.FinishedUtc = TimeUtil.GetTime();
                 result.Message = $"Scanned {result.BlocksScanned} blocks to height {result.EndHeight}: " +
                                  $"{result.RequestsInserted} requests inserted, {result.RequestsAlreadyPresent} already present, " +
                                  $"{result.CompletionsApplied} completions applied, {result.AttestedOutcomesApplied} attested outcomes applied, {result.DecidedCancellationsApplied} decided cancellations applied, {result.CancellationsCreated} cancellations created, " +
-                                 $"{result.VotesApplied} votes applied, {result.Skipped} skipped, {result.Errors} errors.";
+                                 $"{result.VotesApplied} votes applied, {result.Skipped} skipped, {result.Errors} errors." +
+                                 (result.Errors > 0 ? " The store is left unfinished: withdrawal transactions are refused and nothing is signed from it until a rebuild finishes without errors." : "");
                 LogUtility.Log($"vBTC withdrawal store rebuild finished: {result.Message}", "VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync()");
             }
             catch (Exception ex)
             {
-                result.Message = $"Rebuild failed: {ex.Message}";
+                result.Message = $"Rebuild failed: {ex.Message}. The withdrawal store is left unfinished: withdrawal transactions are refused and nothing is signed from it until a rebuild finishes (POST /frost/withdrawals/rebuild, or the next start).";
                 result.FinishedUtc = TimeUtil.GetTime();
                 ErrorLogUtility.LogError(result.Message, "VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync()");
             }
@@ -205,9 +315,23 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 LastResult = result;
                 Interlocked.Exchange(ref _running, 0);
+                if (holdingBlocks) VerifiedXCore.Services.BlockValidatorService.ValidateBlockSemaphore.Release();
+                Interlocked.Exchange(ref _claimed, 0);
             }
 
             return result;
+        }
+
+        private static bool StateBeingRewritten() => BlockRollbackUtility.IsResetTreisRunning || SnapshotRestoreUtility.IsRestoreRunning;
+
+        /// <summary>
+        /// A state rebuild or snapshot restore, its own flag raised, waits here before it rewrites this store: a running
+        /// withdrawal-store rebuild sees the flag and stops at its next block, so the two never write the store at once.
+        /// </summary>
+        internal static async Task WaitUntilStoppedAsync()
+        {
+            while (Volatile.Read(ref _running) == 1)
+                await Task.Delay(50);
         }
 
         /// <summary>
@@ -416,6 +540,18 @@ namespace VerifiedXCore.Bitcoin.Services
                     continue;
                 }
 
+                // Only rows live processing wrote (StateData.RequestVBTCV2Withdrawal / ...Multi): a non-positive amount
+                // never makes one (VX-01); on a vault the chain watches the row is written only after its escrow debit,
+                // and every row written there is then recorded in the attestation table, so a request without that
+                // record never had a row.
+                if (row.Amount <= 0M
+                    || (Attestation.BtcAttestBalance.IsAttestedVault(row.SmartContractUID)
+                        && Attestation.BtcAttestStore.Withdrawal(Attestation.BtcWithdrawals.RefOf(tx.Hash, row.SmartContractUID)) == null))
+                {
+                    result.Skipped++;
+                    continue;
+                }
+
                 // update:true matches live processing — it upgrades an API node's local
                 // pre-registration row (same composite key, empty TransactionHash, no pins yet).
                 if (VBTCWithdrawalRequest.Save(row, update: true))
@@ -439,8 +575,8 @@ namespace VerifiedXCore.Bitcoin.Services
             if (row == null)
             {
                 // REQUEST replays before COMPLETE in the same ascending scan; a miss means the
-                // request tx itself was malformed. Nothing to converge on.
-                result.Errors++;
+                // request tx itself was malformed. Nothing to converge on (live processing found no row either).
+                result.Skipped++;
                 ErrorLogUtility.LogError($"Withdrawal-store rebuild: COMPLETE {tx.Hash} references unknown request {withdrawalRequestHash}.", "VBTCWithdrawalStoreRebuildService.ReplayComplete()");
                 return;
             }
@@ -595,10 +731,10 @@ namespace VerifiedXCore.Bitcoin.Services
             var cancellation = VBTCWithdrawalCancellation.GetCancellation(cancellationUID);
             if (cancellation == null || cancellation.IsProcessed) { result.Skipped++; return; }
 
-            // Same eligibility rules as live processing / ResetTreis replay: resolved against the
-            // node's current registry + DKG snapshot (both chain-derived).
-            var voterSet = VBTCService.ResolveCancellationVoterSet(cancellation.SmartContractUID);
-            var validator = VBTCValidatorRegistry.GetValidator(tx.FromAddress);
+            // Same eligibility as live processing (StateData.VoteOnVBTCV2Cancellation): the voter set and the voter as of
+            // the vote's own height, read from committed blocks, so a replay decides as the network did then.
+            var voterSet = VBTCService.ResolveCancellationVoterSet(cancellation.SmartContractUID, tx.Height);
+            var validator = VBTCValidatorRegistry.GetValidatorAt(tx.FromAddress, tx.Height);
             if (validator == null || !validator.IsActive || !voterSet.Contains(tx.FromAddress)) { result.Skipped++; return; }
 
             if (VBTCWithdrawalCancellation.HasValidatorVoted(cancellationUID, tx.FromAddress)) { result.Skipped++; return; }
@@ -620,9 +756,10 @@ namespace VerifiedXCore.Bitcoin.Services
                 VBTCWithdrawalCancellation.MarkAsProcessed(cancellationUID, true);
 
                 var row = VBTCWithdrawalRequest.GetByTransactionHash(cancellation.WithdrawalRequestHash, cancellation.SmartContractUID);
-                // Mirror of the completed-guard in StateData.VoteOnVBTCV2Cancellation: a burn-backed
-                // Completed row must never flip to Cancelled.
-                if (row != null && !(row.IsCompleted && row.Status == VBTCWithdrawalStatus.Completed))
+                // Mirror of the completed-guard in StateData.VoteOnVBTCV2Cancellation, at the vote's height: from
+                // V2WithdrawalOwnerAddBackFixHeight a burn-backed Completed row never flips to Cancelled.
+                var voteFixActive = tx.Height >= Globals.V2WithdrawalOwnerAddBackFixHeight;
+                if (row != null && !(voteFixActive && row.IsCompleted && row.Status == VBTCWithdrawalStatus.Completed))
                 {
                     row.Status = VBTCWithdrawalStatus.Cancelled;
                     row.IsCompleted = true;

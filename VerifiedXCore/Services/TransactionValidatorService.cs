@@ -348,8 +348,8 @@ namespace VerifiedXCore.Services
             // not read as state corruption).
             if ((txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE || txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL
                     || txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
-                && Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning
-                && (blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.PathAuditRulesHeight)
+                && (blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.PathAuditRulesHeight
+                && Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning)
                 return (txResult, WithdrawalStoreRebuildingReason);
             // A cancellation on such a vault has passed its whole rule just above; the vote-based rules below are not its.
             var watchedCancel = txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL

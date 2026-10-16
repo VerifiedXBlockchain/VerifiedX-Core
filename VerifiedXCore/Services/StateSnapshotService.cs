@@ -195,6 +195,10 @@ namespace VerifiedXCore.Services
 
         // ── Snapshot creation ───────────────────────────────────────────────────────────────
 
+        /// <summary>A rebuild runs, or one began, while this slot was copied (a copy outside the block lock, at start).</summary>
+        private static bool RebuildOverlapped(long height, long rebuildsBefore) =>
+            WithdrawalStoreBeingRebuilt(height) || VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.RebuildsStarted != rebuildsBefore;
+
         /// <summary>
         /// While the withdrawal-store rebuild runs, a row it has put back reads "requested" until the rebuild brings it to
         /// how its withdrawal ended: a snapshot then would keep it open, and a restore of it bring it back so. Asked when a
@@ -236,6 +240,7 @@ namespace VerifiedXCore.Services
                 LogUtility.Log($"[Snapshot] Skipped cycle at {height}: TreisUpdating was true.", "StateSnapshotService");
                 return Task.CompletedTask;
             }
+            var rebuildsBefore = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.RebuildsStarted;
             if (WithdrawalStoreBeingRebuilt(height))
                 return Task.CompletedTask;
 
@@ -286,7 +291,7 @@ namespace VerifiedXCore.Services
                 {
                     try { anchorHash = BlockchainData.GetBlockByHeight(height)?.Hash; } catch { }
                 }
-                MarkSlot(slot, WithdrawalStoreBeingRebuilt(height) ? SnapshotSlotStatus.Invalid : SnapshotSlotStatus.Valid, height, anchorHash);
+                MarkSlot(slot, RebuildOverlapped(height, rebuildsBefore) ? SnapshotSlotStatus.Invalid : SnapshotSlotStatus.Valid, height, anchorHash);
                 PruneTombstones();
 
                 sw.Stop();
@@ -319,6 +324,7 @@ namespace VerifiedXCore.Services
             if (height < MinSnapshotHeight) return Task.CompletedTask;
             if (DbContext.DB_Snapshot == null) return Task.CompletedTask;
             if (Globals.TreisUpdating) return Task.CompletedTask;
+            var rebuildsBefore = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.RebuildsStarted;
             if (WithdrawalStoreBeingRebuilt(height)) return Task.CompletedTask;
 
             var treiStatus = StateTreiStatusService.GetStatus();
@@ -357,7 +363,7 @@ namespace VerifiedXCore.Services
                 {
                     try { anchorHash = BlockchainData.GetBlockByHeight(height)?.Hash; } catch { }
                 }
-                MarkSlot(slot, WithdrawalStoreBeingRebuilt(height) ? SnapshotSlotStatus.Invalid : SnapshotSlotStatus.Valid, height, anchorHash);
+                MarkSlot(slot, RebuildOverlapped(height, rebuildsBefore) ? SnapshotSlotStatus.Invalid : SnapshotSlotStatus.Valid, height, anchorHash);
 
                 sw.Stop();
                 LogUtility.Log(
