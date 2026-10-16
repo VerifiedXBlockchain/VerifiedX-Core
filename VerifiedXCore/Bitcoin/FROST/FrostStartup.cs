@@ -2973,6 +2973,19 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // ... nor once it ended after the ceremony started: a cancellation approved (a session outlives
+                            // the time a cancellation vote waits for its ceremony), its row closed, or the store being rebuilt.
+                            if (!string.IsNullOrEmpty(session.WithdrawalRequestHash)
+                                && !session.WithdrawalRequestHash.StartsWith(FrostSigningAuthorization.BtcExitPrefix, StringComparison.OrdinalIgnoreCase)
+                                && !VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.IsSweepReference(session.WithdrawalRequestHash)
+                                && FrostSigningAuthorization.WithdrawalNoLongerSignable(session.WithdrawalRequestHash, session.SmartContractUID ?? "") is { } ended)
+                            {
+                                LogUtility.Log($"[FROST] Sign Round 2 REFUSED for session {sessionId}: withdrawal {session.WithdrawalRequestHash}: {ended}", "FrostStartup.SignRound2");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = ended }));
+                                return;
+                            }
+
                             if (session.NonceConsumed)
                             {
                                 ErrorLogUtility.LogError($"FROST Sign Round 2 REFUSED for session {sessionId}: nonce already consumed (re-sign attempt).", "FrostStartup.SignRound2");

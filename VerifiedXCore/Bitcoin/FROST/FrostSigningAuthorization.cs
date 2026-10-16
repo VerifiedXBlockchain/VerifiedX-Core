@@ -179,18 +179,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                     // The hash alone would return an arbitrary sibling (wrong amount cap, and
                     // IsWithdrawalSignable would reject on the contract mismatch), and a
                     // cancellation filed against another vault's share would block this one.
-                    // A row the withdrawal-store rebuild has just put back reads "requested" until the rebuild has brought
-                    // it to how its withdrawal ended, so nothing is signed from the store while it is being rebuilt.
-                    if (VBTCWithdrawalStoreRebuildService.IsRunning)
-                        return (false, "The withdrawal store is being rebuilt; signing resumes when it finishes");
+                    if (WithdrawalNoLongerSignable(wrh, vaultUid) is { } notNow) return (false, notNow);
                     var wr = VBTCWithdrawalRequest.GetByTransactionHash(wrh, vaultUid);
                     var pendingCancellation = VBTCWithdrawalCancellation.HasPendingCancellation(
                         wrh, VerifiedXCore.Utilities.TimeUtil.GetTime(), vaultUid);
                     var (signable, signableReason) = IsWithdrawalSignable(wr, vaultUid, pendingCancellation);
                     if (!signable) return (false, signableReason);
-                    // A withdrawal whose cancellation was approved was refunded, whatever its row reads.
-                    if (VBTCWithdrawalCancellation.GetCancellationsFor(wrh, vaultUid).Any(c => c.IsProcessed && c.IsApproved))
-                        return (false, "Withdrawal request was cancelled and refunded");
                     if (!string.Equals(wrh, wr!.TransactionHash, StringComparison.Ordinal)) return (false, NonCanonicalReference);
                     destination = wr.BTCDestination;
                     maxDestinationSats = (long)(wr.Amount * 100_000_000M);
@@ -280,6 +274,25 @@ namespace VerifiedXCore.Bitcoin.FROST
             if (isBridgeExit)
                 return leaderIsCommitteeCaster ? (true, "") : (false, "Bridge exit signing must be led by a committee caster");
             return leaderIsOwner ? (true, "") : (false, "Withdrawal signing must be led by the withdrawal owner");
+        }
+
+        /// <summary>
+        /// Why a withdrawal (not a bridge exit or a sweep) is not to have a share given for it now, or null: the withdrawal
+        /// store is being rebuilt (a row put back reads "requested" until the rebuild brings it to how its withdrawal
+        /// ended), its cancellation was approved (it was refunded, whatever its row reads), or its row is closed. Asked
+        /// when a ceremony starts and again just before Round 2 gives the share: a signing session lives longer than a
+        /// cancellation vote waits for a ceremony to end.
+        /// </summary>
+        public static string? WithdrawalNoLongerSignable(string wrh, string vaultUid)
+        {
+            if (VBTCWithdrawalStoreRebuildService.IsRunning)
+                return "The withdrawal store is being rebuilt; signing resumes when it finishes";
+            if (VBTCWithdrawalCancellation.GetCancellationsFor(wrh, vaultUid).Any(c => c.IsProcessed && c.IsApproved))
+                return "Withdrawal request was cancelled and refunded";
+            var row = VBTCWithdrawalRequest.GetByTransactionHash(wrh, vaultUid);
+            if (row != null && (row.IsCompleted || row.Status == VBTCWithdrawalStatus.Completed || row.Status == VBTCWithdrawalStatus.Cancelled))
+                return IsWithdrawalSignable(row, vaultUid).Reason;
+            return null;
         }
 
         /// <summary>

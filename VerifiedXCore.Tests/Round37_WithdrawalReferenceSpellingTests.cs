@@ -11,6 +11,7 @@ using VerifiedXCore.Data;
 using VerifiedXCore.Models;
 using Block = VerifiedXCore.Models.Block;
 using VerifiedXCore.Utilities;
+using Microsoft.AspNetCore.Hosting;
 using Xunit;
 
 namespace VerifiedXCore.Tests
@@ -136,6 +137,52 @@ namespace VerifiedXCore.Tests
 
             var (ok, reason) = FrostSigningAuthorization.Authorize(Request(Wrh));
             Assert.True(ok == signed, reason);
+        }
+
+        /// <summary>
+        /// A ceremony started while the withdrawal was open; before its Round 2 the withdrawal's cancellation was approved
+        /// (a session outlives the time a cancellation vote waits for a ceremony). Round 2 gives no share.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task Round2_GivesNoShare_ForAWithdrawalRefundedSinceTheCeremonyStarted(bool refunded)
+        {
+            var key = new VerifiedXCore.EllipticCurve.PrivateKey("secp256k1");
+            var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+            var leader = AccountData.GetHumanAddress(pub);
+            var session = new VerifiedXCore.Bitcoin.FROST.Models.SigningSession
+            {
+                SessionId = Guid.NewGuid().ToString("N"), LeaderAddress = leader, LeaderStartTimestamp = TimeUtil.GetTime(), StartTimestamp = TimeUtil.GetTime(),
+                SmartContractUID = _vault, WithdrawalRequestHash = Wrh, MessageHash = new string('a', 64), MyKeyPackage = "key-package",
+            };
+            Assert.True(FrostSessionStorage.SigningSessions.TryAdd(session.SessionId, session));
+            if (refunded)
+                VBTCWithdrawalCancellation.SaveCancellation(new VBTCWithdrawalCancellation
+                {
+                    CancellationUID = VBTCWithdrawalCancellation.OnChainUidPrefix + "c2", SmartContractUID = _vault, OwnerAddress = Owner, WithdrawalRequestHash = Wrh,
+                    BTCTxHash = "", FailureProof = "", RequestTime = TimeUtil.GetTime(), ValidatorVotes = new Dictionary<string, bool>(),
+                    ApproveCount = 3, IsApproved = true, IsProcessed = true, RequestBlockHeight = 450,
+                });
+            try
+            {
+                using var server = new Microsoft.AspNetCore.TestHost.TestServer(new Microsoft.AspNetCore.Hosting.WebHostBuilder().UseStartup<FrostStartup>());
+                var req = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, $"/frost/sign/round2/{session.SessionId}")
+                { Content = new System.Net.Http.StringContent("{}", System.Text.Encoding.UTF8, "application/json") };
+                req.Headers.TryAddWithoutValidation("X-Frost-Leader", leader);
+                req.Headers.TryAddWithoutValidation("X-Frost-Timestamp", session.LeaderStartTimestamp.ToString());
+                req.Headers.TryAddWithoutValidation("X-Frost-Signature", VerifiedXCore.Services.SignatureService.CreateSignature($"{session.SessionId}.{leader}.{session.LeaderStartTimestamp}", key, pub));
+                var response = await server.CreateClient().SendAsync(req);
+                var body = await response.Content.ReadAsStringAsync();
+                Assert.DoesNotContain("Leader auth failed", body);
+                if (refunded)
+                {
+                    Assert.Equal(System.Net.HttpStatusCode.Conflict, response.StatusCode);
+                    Assert.Contains("cancelled and refunded", body);
+                }
+                else Assert.DoesNotContain("refunded", body);
+            }
+            finally { FrostSessionStorage.SigningSessions.TryRemove(session.SessionId, out _); }
         }
 
         [Fact]
