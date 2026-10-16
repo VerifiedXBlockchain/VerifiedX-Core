@@ -8,6 +8,7 @@ using Newtonsoft.Json;
 using VerifiedXCore;
 using VerifiedXCore.Data;
 using VerifiedXCore.DST;
+using VerifiedXCore.Extensions;
 using VerifiedXCore.Models.DST;
 using VerifiedXCore.Utilities;
 using Xunit;
@@ -102,6 +103,34 @@ namespace VerifiedXCore.Tests
             var bids = JsonConvert.DeserializeObject<System.Collections.Generic.List<Bid>>(reply!.Data)!;
             Assert.Equal(DecShopMessageService.MaxBidsPerReply, bids.Count);
             Assert.Equal(now - 1000 + DecShopMessageService.MaxBidsPerReply + 14, bids.Max(b => b.BidSendTime)); // the newest is kept
+        }
+
+        [Fact]
+        public void CollectionsReply_IsCapped_AndPagesThroughTheRest()
+        {
+            var total = DecShopMessageService.MaxCollectionsPerReply + 7;
+            for (var i = 1; i <= total; i++)
+                Collection.GetCollectionDb()!.InsertSafe(new Collection { Id = i, Name = $"c{i}", Description = "", CollectionLive = true });
+
+            var first = JsonConvert.DeserializeObject<System.Collections.Generic.List<Collection>>(DecShopMessageService.ProcessMessage(Request("Collections"))!.Data)!;
+            var second = JsonConvert.DeserializeObject<System.Collections.Generic.List<Collection>>(DecShopMessageService.ProcessMessage(Request("Collections,1"))!.Data)!;
+
+            Assert.Equal(DecShopMessageService.MaxCollectionsPerReply, first.Count);
+            Assert.Equal(7, second.Count);
+            Assert.Empty(first.Select(c => c.Id).Intersect(second.Select(c => c.Id)));
+        }
+
+        [Fact]
+        public void ListingsByCollectionReply_IsOnePage()
+        {
+            for (var i = 1; i <= 25; i++)
+                Listing.GetListingDb()!.InsertSafe(new Listing { Id = i, CollectionId = 3, IsVisibleAfterEndDate = true, IsVisibleBeforeStartDate = true, PurchaseKey = $"k{i}" });
+
+            var page0 = JsonConvert.DeserializeObject<System.Collections.Generic.List<Listing>>(DecShopMessageService.ProcessMessage(Request("ListingsByCollection,3,0"))!.Data)!;
+            var page2 = JsonConvert.DeserializeObject<System.Collections.Generic.List<Listing>>(DecShopMessageService.ProcessMessage(Request("ListingsByCollection,3,2"))!.Data)!;
+
+            Assert.Equal(10, page0.Count);
+            Assert.Equal(new[] { 21, 22, 23, 24, 25 }, page2.Select(l => l.Id).ToArray());
         }
 
         [Fact]
