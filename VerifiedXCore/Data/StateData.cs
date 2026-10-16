@@ -1997,11 +1997,22 @@ namespace VerifiedXCore.Data
             catch { }
             
         }
+        /// <summary>
+        /// The call of a contract transaction whose apply reads only the array form. Any other shape gives null, and the apply
+        /// then has no effect, as it always had (it threw before reading anything), without reporting the block's state as
+        /// failed on every node.
+        /// </summary>
+        private static JToken? ArrayFormCall(Transaction tx)
+        {
+            try { return JsonConvert.DeserializeObject<JArray>(tx.Data)?[0] as JObject; }
+            catch { return null; }
+        }
+
         private static void TransferSmartContract(Transaction tx)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-            var scData = scDataArray[0];
+            var scData = ArrayFormCall(tx);
+            if (scData == null) return;
 
             var function = (string?)scData["Function"];
             var data = (string?)scData["Data"];
@@ -2052,8 +2063,8 @@ namespace VerifiedXCore.Data
         private static void BurnSmartContract(Transaction tx)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-            var scData = scDataArray[0];
+            var scData = ArrayFormCall(tx);
+            if (scData == null) return;
             var function = (string?)scData["Function"];
             var data = (string?)scData["Data"];
             var scUID = (string?)scData["ContractUID"];
@@ -2069,8 +2080,8 @@ namespace VerifiedXCore.Data
         private static void EvolveSC(Transaction tx)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-            var scData = scDataArray[0];
+            var scData = ArrayFormCall(tx);
+            if (scData == null) return;
 
             var data = (string?)scData["Data"];
             var scUID = (string?)scData["ContractUID"];
@@ -2088,8 +2099,8 @@ namespace VerifiedXCore.Data
         private static void DevolveSC(Transaction tx)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-            var scData = scDataArray[0];
+            var scData = ArrayFormCall(tx);
+            if (scData == null) return;
 
             var data = (string?)scData["Data"];
             var scUID = (string?)scData["ContractUID"];
@@ -2107,8 +2118,8 @@ namespace VerifiedXCore.Data
         private static void EvolveDevolveSpecific(Transaction tx)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-            var scData = scDataArray[0];
+            var scData = ArrayFormCall(tx);
+            if (scData == null) return;
 
             var data = (string?)scData["Data"];
             var scUID = (string?)scData["ContractUID"];

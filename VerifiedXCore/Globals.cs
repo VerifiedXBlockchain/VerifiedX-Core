@@ -358,6 +358,13 @@ namespace VerifiedXCore
         public static long RecipientIsAddressHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height a smart contract's Update(), Transfer(), Burn(), Evolve(), Devolve() or
+        /// ChangeEvolveStateSpecific() must carry its Data in the array form those applies read. Validation also accepted
+        /// a single object, which every apply then skips, so the transaction was mined with no effect. Not active yet.
+        /// </summary>
+        public static long ContractPayloadArrayHeight = 999_999_999_999;
+
+        /// <summary>
         /// The validator stake is bonded from this height (Services.ValidatorBond; owner decision 2026-10-13): a
         /// registered validator cannot send its 5,000 VFX until 1,200 blocks after its exit is mined, and counts for a
         /// vault's key ceremony only once that stake has been locked for two days. Validators active at this height

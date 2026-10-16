@@ -310,7 +310,9 @@ namespace VerifiedXCore.Services
                 // What a token transaction adds to a document read whole later is bounded (round 33).
                 ?? LedgerIntegrityRules.TokenDocumentLimits(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                 // Nothing is addressed to a name: the applies credit the ToAddress as written.
-                ?? LedgerIntegrityRules.RecipientIsNotAName(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+                ?? LedgerIntegrityRules.RecipientIsNotAName(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // A contract call is in the shape its apply reads.
+                ?? LedgerIntegrityRules.ContractCallIsArrayForm(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
             if (vaultInTransitError != null)
                 return (false, vaultInTransitError);
 

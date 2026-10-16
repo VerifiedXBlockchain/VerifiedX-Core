@@ -429,6 +429,28 @@ namespace VerifiedXCore.Services
                 : null;
         }
 
+        /// <summary>The contract functions whose apply reads its Data only in the array form.</summary>
+        public static readonly string[] ArrayFormContractFunctions = { "Update()", "Transfer()", "Burn()", "Evolve()", "Devolve()", "ChangeEvolveStateSpecific()" };
+
+        /// <summary>
+        /// From Globals.ContractPayloadArrayHeight a call to one of <see cref="ArrayFormContractFunctions"/> carries its Data as
+        /// an array whose first element is the call: their applies read nothing else, so any other shape was mined with no
+        /// effect. Null when the rule passes.
+        /// </summary>
+        public static string? ContractCallIsArrayForm(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.ContractPayloadArrayHeight) return null;
+            if (!ContractCallTypes.Contains(tx.TransactionType)) return null;
+            var function = DispatchedCall(tx.Data).Function;
+            if (function == null || !ArrayFormContractFunctions.Contains(function)) return null;
+            try
+            {
+                if (Newtonsoft.Json.JsonConvert.DeserializeObject<JArray>(tx.Data!)![0] is JObject) return null;
+            }
+            catch { }
+            return $"{function} carries its call as an array whose first element is the call.";
+        }
+
         public static string? VbtcRecipientCanHoldIt(Transaction tx, long height)
         {
             if (tx == null || height < Globals.PathAuditRulesHeight) return null;
