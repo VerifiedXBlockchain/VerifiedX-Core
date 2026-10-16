@@ -114,8 +114,6 @@ namespace VerifiedXCore.Services
                 var col = db.GetCollection<StateTreiStatus>(COLLECTION_NAME);
                 var restoreDestroyed = col.FindOne(x => true)?.RestoreDestroyed; // a later failure does not lift the restore stop
 
-                col.DeleteAll();
-
                 var status = new StateTreiStatus
                 {
                     Id = 1,
@@ -126,7 +124,10 @@ namespace VerifiedXCore.Services
                     RestoreDestroyed = restoreDestroyed
                 };
 
-                col.Insert(status);
+                // One write replaces the record: a delete then an insert left no record (and no restore stop) if
+                // interrupted between them.
+                col.Upsert(status);
+                col.DeleteMany(x => x.Id != 1);
                 db.Checkpoint();
 
                 LogUtility.Log(

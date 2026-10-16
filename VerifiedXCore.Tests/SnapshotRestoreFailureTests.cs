@@ -100,8 +100,10 @@ namespace VerifiedXCore.Tests
             Assert.False(await SnapshotRestoreUtility.TryRestoreAsync(48));
             Assert.True(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
 
-            // Under the settings the slot was taken with, the same blocks replay: the restore succeeds and lifts the stop.
+            // Under the settings the slot was taken with, and with the missing block back, the restore succeeds and lifts the stop.
             Globals.ValidatorBondHeight = _priorBondHeight;
+            BlockchainData.GetBlocks().DeleteManySafe(x => x.Height > 45); // re-added in height order, as a chain is stored
+            for (long h = 46; h <= 48; h++) AddBlock(h);
             Assert.True(await SnapshotRestoreUtility.TryRestoreAsync(48));
             Assert.False(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
             Assert.Equal(48, Globals.LastBlock.Height);
@@ -145,6 +147,18 @@ namespace VerifiedXCore.Tests
             SnapshotRestoreUtility.RecallStateDestroyed();
 
             Assert.True(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
+        }
+
+        [Fact]
+        public async Task AReplayRangeWithAMissingBlock_IsNotARestoredState()
+        {
+            await ChainWithSlotAt45_ThatFailsToReplay();
+            Globals.ValidatorBondHeight = _priorBondHeight; // every block present replays; block 46 is still missing
+
+            Assert.False(await SnapshotRestoreUtility.TryRestoreAsync(48));
+
+            Assert.True(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
+            Assert.False(StateTreiStatusService.IsSynced());
         }
 
         [Fact]

@@ -217,6 +217,14 @@ namespace VerifiedXCore.Utilities
                     }
                 }
 
+                // Every height from the slot to the target must have been replayed: a block missing from the store left a
+                // gap the loop above skipped, and the state then matched no chain.
+                if (replayed != targetHeight - slot.Height)
+                {
+                    replayFails++;
+                    ErrorLogUtility.LogError($"[SnapshotRestore] Replayed {replayed} block(s) for heights {slot.Height + 1}..{targetHeight}; the block store is missing some.", "SnapshotRestoreUtility");
+                }
+
                 if (replayFails > 0)
                 {
                     ErrorLogUtility.LogError($"[SnapshotRestore] Replay had {replayFails} failure(s) — state left dirty; caller must run ResetTreis.", "SnapshotRestoreUtility");
