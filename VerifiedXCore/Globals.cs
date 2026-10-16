@@ -373,9 +373,10 @@ namespace VerifiedXCore
         public static long BtcNameOneRecordPerAddressHeight = 999_999_999_999;
 
         /// <summary>
-        /// From this height a BTC name create is signed by the key of the Bitcoin address it names. Validation checked the
-        /// signature only against the key the signature itself carries, so any key could put a name on any address.
-        /// Not active yet.
+        /// From this height a BTC name create is signed by the key of the Bitcoin address it names, and a transfer by the key
+        /// of the address it moves to. Each signed message names the VFX owner and the name (BtcNameSignatures), so a
+        /// signature can't be reused for another owner or name. Validation checked the create signature only against the
+        /// key the signature itself carries, and a transfer's destination not at all. Not active yet.
         /// </summary>
         public static long BtcNameSignerOwnsAddressHeight = 999_999_999_999;
 

@@ -2272,17 +2272,24 @@ namespace VerifiedXCore.Services
                                     //Rules:
                                     //1. Must be a valid signature from the BTC address
                                     //2. Message must be a timestamp no older than 30 minutes. 
-                                    var signatureValid = Bitcoin.Services.SignatureService.VerifySignature(message, signature);
-                                    if (!signatureValid)
-                                        return (txResult, "Invalid BTC Signature");
-                                    // ... and from BtcNameSignerOwnsAddressHeight the key that signed is BTCAddress's own key.
-                                    if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.BtcNameSignerOwnsAddressHeight
-                                        && !Bitcoin.Services.SignatureService.SignerOwnsAddress(signature, btcAddress, Globals.BTCNetwork))
-                                        return (txResult, "The BTC signature is not from the key of the BTC address.");
-                                    var messageParse = long.TryParse(message, out var messageTimestamp);
+                                    //From BtcNameSignerOwnsAddressHeight the signer is BTCAddress's own key and the message names this sender and name.
+                                    long messageTimestamp;
+                                    if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.BtcNameSignerOwnsAddressHeight)
+                                    {
+                                        var boundError = Bitcoin.Services.BtcNameSignatures.Check(message, signature, btcAddress, txRequest.FromAddress, name, Globals.BTCNetwork, out messageTimestamp);
+                                        if (boundError != null)
+                                            return (txResult, boundError);
+                                    }
+                                    else
+                                    {
+                                        var signatureValid = Bitcoin.Services.SignatureService.VerifySignature(message, signature);
+                                        if (!signatureValid)
+                                            return (txResult, "Invalid BTC Signature");
+                                        var messageParse = long.TryParse(message, out messageTimestamp);
 
-                                    if (!messageParse)
-                                        return (txResult, "Improper Message Format. Message must be a timestamp.");
+                                        if (!messageParse)
+                                            return (txResult, "Improper Message Format. Message must be a timestamp.");
+                                    }
 
                                     if (blockTime != null)
                                     {
@@ -2322,6 +2329,31 @@ namespace VerifiedXCore.Services
                                     if (toAddressCheck != null)
                                     {
                                         return (txResult, "Address is already associated with an active DNR");
+                                    }
+
+                                    //From BtcNameSignerOwnsAddressHeight the receiving Bitcoin key accepts the name for the new owner.
+                                    if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.BtcNameSignerOwnsAddressHeight)
+                                    {
+                                        var acceptMessage = (string?)jobj["BTCToMessage"];
+                                        var acceptSignature = (string?)jobj["BTCToSignature"];
+                                        if (acceptMessage == null || acceptSignature == null)
+                                            return (txResult, "The receiving BTC address must sign the transfer.");
+
+                                        var acceptError = Bitcoin.Services.BtcNameSignatures.Check(acceptMessage, acceptSignature, BTCToAddress, txRequest.ToAddress, addressCheck.Name, Globals.BTCNetwork, out var acceptTimestamp);
+                                        if (acceptError != null)
+                                            return (txResult, acceptError);
+
+                                        var maxAge = Bitcoin.Services.BtcNameSignatures.TransferAcceptanceMaxAgeSeconds;
+                                        if (blockTime != null)
+                                        {
+                                            if (acceptTimestamp < LedgerIntegrityRules.NowForAgeRules(blockTime) - maxAge)
+                                                return (txResult, "The receiving BTC address's signature is too old. Please sign again.");
+                                        }
+                                        else if (!blockDownloads)
+                                        {
+                                            if (acceptTimestamp < TimeUtil.GetTime() - maxAge)
+                                                return (txResult, "The receiving BTC address's signature is too old. Please sign again.");
+                                        }
                                     }
                                 }
 
