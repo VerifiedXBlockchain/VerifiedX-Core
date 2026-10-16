@@ -178,6 +178,35 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task GetDebugInfo_NeedsTheApiToken_WhenOneIsSet()
+        {
+            Startup.APIEnabled = true;
+            Globals.APIToken = Secure("operator-token");
+            using var server = NewServer();
+
+            var without = await server.CreateClient().GetAsync("/api/V1/GetDebugInfo");
+            var withToken = new HttpRequestMessage(HttpMethod.Get, "/api/V1/GetDebugInfo");
+            withToken.Headers.Add("apitoken", "operator-token");
+            var with = await server.CreateClient().SendAsync(withToken);
+            var status = await server.CreateClient().GetAsync("/api/V1/CheckStatus"); // still on the token-free list
+
+            Assert.Equal(HttpStatusCode.Forbidden, without.StatusCode);
+            Assert.NotEqual(HttpStatusCode.Forbidden, with.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, status.StatusCode);
+        }
+
+        [Fact]
+        public async Task GetDebugInfo_StillAnswers_WhenNoTokenIsSet()
+        {
+            Startup.APIEnabled = true;
+            using var server = NewServer();
+
+            var r = await server.CreateClient().GetAsync("/api/V1/GetDebugInfo");
+
+            Assert.NotEqual(HttpStatusCode.Forbidden, r.StatusCode);
+        }
+
+        [Fact]
         public async Task VX03_Control_SendVfx_WithToken_ReachesController()
         {
             // Authorized caller still reaches the route (it then fails on the unknown account — the
