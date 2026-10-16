@@ -1330,6 +1330,7 @@ namespace VerifiedXCore.Services
                                 // instead of a full genesis replay (~45 min). Crash-recovery case, so
                                 // the target is the current local tip.
                                 var restoreTarget = BlockchainData.GetLastBlock()?.Height ?? Globals.LastBlock.Height;
+                                SnapshotRestoreUtility.RecallStateDestroyed(); // a stop from before the restart holds unless this restore succeeds
                                 var restored = await SnapshotRestoreUtility.TryRestoreAsync(restoreTarget);
                                 if (restored)
                                 {

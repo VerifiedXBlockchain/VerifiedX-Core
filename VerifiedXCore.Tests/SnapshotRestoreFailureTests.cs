@@ -109,6 +109,25 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task TheStop_KeepsTheNodeOutOfProduction_AndOutlivesARestart()
+        {
+            await ChainWithSlotAt45_ThatFailsToReplay();
+            Assert.False(await SnapshotRestoreUtility.TryRestoreAsync(48));
+            Assert.False(Globals.ProducerReady);
+
+            // A restart forgets the in-memory flag; the recorded status brings it back.
+            SnapshotRestoreUtility.ClearStateDestroyed();
+            SnapshotRestoreUtility.RecallStateDestroyed();
+            Assert.True(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
+
+            // A state that is merely unverified (not wiped by a failed restore) is not stopped.
+            SnapshotRestoreUtility.ClearStateDestroyed();
+            StateTreiStatusService.SetFailed("Improper shutdown.");
+            SnapshotRestoreUtility.RecallStateDestroyed();
+            Assert.False(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
+        }
+
+        [Fact]
         public async Task NoUsableSlot_IsNotADestroyedState()
         {
             for (long h = 1; h <= 3; h++) Globals.LastBlock = AddBlock(h);

@@ -31,6 +31,20 @@ namespace VerifiedXCore.Utilities
 
         internal static void ClearStateDestroyed() => _stateDestroyed = false;
 
+        /// <summary>Recorded as the state status's failure reason, so the stop outlives a restart.</summary>
+        public const string StateDestroyedReason = "Snapshot restore failed after wiping the state";
+
+        /// <summary>
+        /// At startup: a state flagged by a restore that failed after its wipe stays stopped (the flag above is in memory
+        /// only). A later restore that succeeds, or a rebuild, marks the state synced and clears it.
+        /// </summary>
+        public static void RecallStateDestroyed()
+        {
+            var status = StateTreiStatusService.GetStatus();
+            if (status != null && !status.IsSynced && (status.LastFailureReason ?? "").StartsWith(StateDestroyedReason, StringComparison.Ordinal))
+                _stateDestroyed = true;
+        }
+
         /// <summary>
         /// Attempts a snapshot restore so that state matches the chain at <paramref name="targetHeight"/>.
         /// Blocks above the target are deleted (fork case — callers re-download the correct tip via
@@ -263,6 +277,7 @@ namespace VerifiedXCore.Utilities
                 if (wiped && !restored && !replayedButUnverified)
                 {
                     _stateDestroyed = true;
+                    StateTreiStatusService.SetFailed($"{StateDestroyedReason} (restore to {targetHeight}); restart with 'rebuildstate'.");
                     BlockRollbackUtility.RefreshInMemoryTip(targetHeight); // the tip the block store holds now, not the deleted one
                     ErrorLogUtility.LogError($"[SnapshotRestore] Restore to {targetHeight} failed after the state was wiped; this node stops validating blocks. Restart it with the 'rebuildstate' argument.", "SnapshotRestoreUtility");
                     Console.WriteLine("[SnapshotRestore] FAILED after wiping state: this node stops validating blocks. Restart it with the 'rebuildstate' argument.");
