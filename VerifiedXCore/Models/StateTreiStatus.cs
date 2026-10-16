@@ -28,5 +28,12 @@ namespace VerifiedXCore.Models
 
         /// <summary>If IsSynced is false, the reason why the last rebuild failed.</summary>
         public string? LastFailureReason { get; set; }
+
+        /// <summary>
+        /// Set just before a snapshot restore wipes the state, cleared only when the state is next marked synced (a restore
+        /// that completes, or a rebuild). While set, this node does not validate or produce blocks. A separate field, so a
+        /// crash mid-restore or a later failure reason cannot drop it.
+        /// </summary>
+        public bool? RestoreDestroyed { get; set; }
     }
 }

@@ -120,11 +120,31 @@ namespace VerifiedXCore.Tests
             SnapshotRestoreUtility.RecallStateDestroyed();
             Assert.True(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
 
-            // A state that is merely unverified (not wiped by a failed restore) is not stopped.
+            // A later failure reason (an improper shutdown flagged at startup) does not drop it.
             SnapshotRestoreUtility.ClearStateDestroyed();
             StateTreiStatusService.SetFailed("Improper shutdown.");
             SnapshotRestoreUtility.RecallStateDestroyed();
+            Assert.True(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
+
+            // A state that is merely unverified (synced once, then flagged) is not stopped.
+            SnapshotRestoreUtility.ClearStateDestroyed();
+            StateTreiStatusService.SetSynced(48);
+            StateTreiStatusService.SetFailed("Improper shutdown.");
+            SnapshotRestoreUtility.RecallStateDestroyed();
             Assert.False(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
+        }
+
+        [Fact]
+        public void ACrashMidRestore_StillStopsTheNodeAfterTheRestart()
+        {
+            // The restore marked the state before its wipe, then the process died before it finished.
+            StateTreiStatusService.SetFailed("Snapshot restore in progress (slot 1 -> 48).");
+            StateTreiStatusService.SetRestoreDestroyed(true);
+            StateTreiStatusService.SetFailed("Improper shutdown.");
+
+            SnapshotRestoreUtility.RecallStateDestroyed();
+
+            Assert.True(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
         }
 
         [Fact]

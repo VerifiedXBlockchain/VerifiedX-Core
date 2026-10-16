@@ -92,6 +92,18 @@ namespace VerifiedXCore.Services
         /// Note: Usually the record is already gone because ResetTreis wipes the DB.
         /// This method handles the edge case where the DB wasn't fully wiped.
         /// </summary>
+        /// <summary>Records or clears <see cref="StateTreiStatus.RestoreDestroyed"/> on the current (unsynced) status.</summary>
+        public static void SetRestoreDestroyed(bool destroyed)
+        {
+            var db = DbContext.DB_AccountStateTrei;
+            if (db == null) return;
+            var col = db.GetCollection<StateTreiStatus>(COLLECTION_NAME);
+            var status = col.FindOne(x => true) ?? new StateTreiStatus { Id = 1, IsSynced = false, LastSyncTime = DateTime.UtcNow };
+            status.RestoreDestroyed = destroyed;
+            col.Upsert(status);
+            db.Checkpoint();
+        }
+
         public static void SetFailed(string reason)
         {
             try
@@ -100,7 +112,8 @@ namespace VerifiedXCore.Services
                 if (db == null) return;
 
                 var col = db.GetCollection<StateTreiStatus>(COLLECTION_NAME);
-                
+                var restoreDestroyed = col.FindOne(x => true)?.RestoreDestroyed; // a later failure does not lift the restore stop
+
                 col.DeleteAll();
 
                 var status = new StateTreiStatus
@@ -109,7 +122,8 @@ namespace VerifiedXCore.Services
                     IsSynced = false,
                     LastSyncedHeight = Globals.LastBlock?.Height ?? 0,
                     LastSyncTime = DateTime.UtcNow,
-                    LastFailureReason = reason
+                    LastFailureReason = reason,
+                    RestoreDestroyed = restoreDestroyed
                 };
 
                 col.Insert(status);

@@ -35,13 +35,14 @@ namespace VerifiedXCore.Utilities
         public const string StateDestroyedReason = "Snapshot restore failed after wiping the state";
 
         /// <summary>
-        /// At startup: a state flagged by a restore that failed after its wipe stays stopped (the flag above is in memory
-        /// only). A later restore that succeeds, or a rebuild, marks the state synced and clears it.
+        /// At startup: a state a restore wiped and did not finish (it failed, or the node stopped mid-restore) stays stopped;
+        /// the flag above is in memory only, the status records it. A later restore that succeeds, or a rebuild, marks the
+        /// state synced and clears it.
         /// </summary>
         public static void RecallStateDestroyed()
         {
             var status = StateTreiStatusService.GetStatus();
-            if (status != null && !status.IsSynced && (status.LastFailureReason ?? "").StartsWith(StateDestroyedReason, StringComparison.Ordinal))
+            if (status != null && !status.IsSynced && status.RestoreDestroyed == true)
                 _stateDestroyed = true;
         }
 
@@ -102,6 +103,7 @@ namespace VerifiedXCore.Utilities
                 StateTreiStatusService.SetFailed($"Snapshot restore in progress (slot {slot.SlotId} → {targetHeight}).");
 
                 // 1) Wipe all chain-derived state, then copy the slot back into the live collections.
+                StateTreiStatusService.SetRestoreDestroyed(true); // before the wipe: a crash from here on keeps the stop
                 wiped = true;
                 BlockRollbackUtility.WipeChainDerivedState();
                 if (!StateSnapshotService.RestoreSlotToLive(slot.SlotId))
@@ -249,6 +251,7 @@ namespace VerifiedXCore.Utilities
                     ErrorLogUtility.LogError($"[SnapshotRestore] The restored state must be rebuilt from the chain: {otherSettings}.", "SnapshotRestoreUtility");
                     StateTreiStatusService.SetFailed($"Attestation state built under other settings: {otherSettings}.");
                     replayedButUnverified = true;
+                    StateTreiStatusService.SetRestoreDestroyed(false); // restored and replayed; flagged for a rebuild, not wiped
                     return false;
                 }
 
