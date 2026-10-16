@@ -550,6 +550,11 @@ namespace VerifiedXCore.Data
             return null;
         }
 
+        /// <summary>The Bitcoin address a BTC name create or transfer gives a name to; null for any other call.</summary>
+        internal static string? BtcNameTargetAddress(string? function, JObject call) =>
+            function == "BTCAdnrCreate()" ? (string?)call["BTCAddress"]
+            : function == "BTCAdnrTransfer()" ? (string?)call["BTCToAddress"] : null;
+
         public static async Task<List<Transaction>> ProcessTxPool()
         {
             // Block proposal: an owner debit whose Bitcoin deposit no Electrum server can confirm is left out of this
@@ -602,6 +607,7 @@ namespace VerifiedXCore.Data
             queuedMempoolTxList = Globals.NetworkBlockQueue.Values.SelectMany(x => x.Transactions).ToList();
 
             var adnrNameList = new List<string>();
+            var btcNameAddressList = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // as the name table matches addresses
 
             if(sizedMempoolList.Count() > 0)
             {
@@ -781,6 +787,18 @@ namespace VerifiedXCore.Data
                                             {
                                                 adnrNameList.Add(name.ToLower());
                                             }
+                                        }
+
+                                        // One BTC name per Bitcoin address in a block: a create or transfer to an address
+                                        // another one in this block already names is dropped, as validation refuses it once
+                                        // the first has applied.
+                                        var btcAddress = BtcNameTargetAddress(function, jobj);
+                                        if (!reject && !string.IsNullOrWhiteSpace(btcAddress))
+                                        {
+                                            if (btcNameAddressList.Contains(btcAddress))
+                                                reject = true;
+                                            else
+                                                btcNameAddressList.Add(btcAddress);
                                         }
                                     }
                                 }

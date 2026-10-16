@@ -167,8 +167,17 @@ namespace VerifiedXCore.Services
             }
         }
 
+        /// <summary>
+        /// A replacement only displaces the original once nonces are enforced (TXHeightRule4): before that, the original
+        /// stays in every pool and both can be mined, so the replacement would pay its recipient a second time.
+        /// </summary>
+        public static bool ReplaceByFeeIsActive() => Globals.LastBlock.Height > Globals.TXHeightRule4;
+
         public static async Task<string> SendTXOutRBF(string FromAddress, string ToAddress, decimal Amount, decimal NewFee, string ReplacingTxHash)
         {
+            if (!ReplaceByFeeIsActive())
+                return JsonConvert.SerializeObject(new { Result = "Fail", Message = "Replace-by-fee is not available until nonce rules are active. The original transaction stays pending." });
+
             string output = "Bad TX Format... Please Try Again";
             var account = AccountData.GetSingleAccount(FromAddress);
             if (account == null)
