@@ -929,7 +929,7 @@ namespace VerifiedXCore.Models
                 Fee = 0,
                 Nonce = AccountStateTrei.GetNextNonce(account.Address),
                 TransactionType = TransactionType.TX,
-                UnlockTime = TimeUtil.GetReserveTime(sendTxData.UnlockDelayHours),
+                UnlockTime = TimeUtil.GetReserveSendTime(sendTxData.UnlockDelayHours),
                 Data = null
             };
 
