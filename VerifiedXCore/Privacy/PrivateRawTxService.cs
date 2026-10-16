@@ -342,7 +342,7 @@ namespace VerifiedXCore.Privacy
             catch { /* not a G1 commitment */ }
 
             var spent = candidates.Any(n => NullifierService.IsNullifierSpentInDb(n, AssetVfx, db));
-            var pending = !spent && candidates.Any(n => Globals.MempoolNullifiers.ContainsKey(MempoolNullifierTracker.MakeKey(AssetVfx, n)));
+            var pending = !spent && candidates.Any(n => MempoolNullifierTracker.IsClaimedByPendingTx(MempoolNullifierTracker.MakeKey(AssetVfx, n)));
             return (spent, pending);
         }
 

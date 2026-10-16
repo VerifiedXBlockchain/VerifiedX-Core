@@ -1,48 +1,45 @@
-# Contributing to VerifiedX
-We love your input! We want to make contributing to this project as easy and transparent as possible, whether it's:
+# Contributing to VerifiedX Core
 
-- Reporting a bug
-- Discussing the current state of the code
-- Submitting a fix
-- Proposing new features
-- Becoming a maintainer
+All changes go through pull requests. This repository is public: anything in a commit, PR, issue or code comment is visible to everyone.
 
-## We Develop with Github
-We use github to host code, to track issues and feature requests, as well as accept pull requests.
+## Branches
 
-## We Use [Github Flow](https://guides.github.com/introduction/flow/index.html), So All Code Changes Happen Through Pull Requests
-Pull requests are the best way to propose changes to the codebase (we use [Github Flow](https://guides.github.com/introduction/flow/index.html)). We actively welcome your pull requests:
+- `testnet` is the integration branch. Branch from it and open your PR against it.
+- `main` is mainnet. It only receives release PRs from `testnet` (for example "Testnet to mainnet 8.1.0"). Never open a feature or fix PR against `main`.
+- Name branches `fix/<topic>` or `feature/<topic>`.
 
-1. Fork the repo and create your branch from `master`.
-2. If you've added code that should be tested, add tests.
-3. If you've changed APIs, update the documentation.
-4. Ensure the test suite passes.
-5. Make sure your code lints.
-6. Issue that pull request!
+## Before you open a PR
 
-## Any contributions you make will be under the MIT Software License
-In short, when you submit code changes, your submissions are understood to be under the same [MIT License](http://choosealicense.com/licenses/mit/) that covers the project. Feel free to contact the maintainers if that's a concern.
+1. `dotnet build` succeeds with no new warnings.
+2. `dotnet test` passes. CI runs it on Ubuntu and Windows for every PR into `testnet` or `main`.
+3. The ship-gate tests pass. They guard against a release that loses wallet secrets or chain state, so run them for every change, however small:
+   ```bash
+   dotnet test --filter "FullyQualifiedName~SecretPreservation|FullyQualifiedName~StateSnapshot"
+   ```
+4. A bug fix comes with a test that fails before the fix and passes after it, plus a test that the legitimate behaviour still works.
 
-## Report bugs using Github's [issues](https://github.com/briandk/transcriptase-atom/issues)
-We use GitHub issues to track public bugs. Report a bug by [opening a new issue](); it's that easy!
+On macOS 5 `FrostKeyBackupTests` that use `AesGcm` fail, because .NET 6 has no `AesGcm` on Apple platforms. They pass in CI; that is the only expected local failure.
 
-## Write bug reports with detail, background, and sample code
-[This is an example](http://stackoverflow.com/q/12488905/180626) of a bug report written, and I think it's not a bad model. Here's [another example from Craig Hockenberry](http://www.openradar.me/11905408), an app developer whom I greatly respect.
+## Changes that need extra care
 
-**Great Bug Reports** tend to have:
+- **Consensus, block validation and state application.** A rule change must activate at a block height so that nodes on older and newer builds agree on past blocks. Ask @Mathis1337 to review it.
+- **Anything that moves funds or keys** (vBTC, FROST, bridge, privacy, wallet). Name the invariant the change keeps in the PR description.
 
-- A quick summary and/or background
-- Steps to reproduce
-  - Be specific!
-  - Give sample code if you can. [My stackoverflow question](http://stackoverflow.com/q/12488905/180626) includes sample code that *anyone* with a base R setup can run to reproduce what I was seeing
-- What you expected would happen
-- What actually happens
-- Notes (possibly including why you think this might be happening, or stuff you tried that didn't work)
+## Commits
 
-People *love* thorough bug reports. I'm not even kidding.
+- One logical change per commit.
+- The subject states the behaviour the change establishes, not the bug it removes: "one Bitcoin transaction pays one withdrawal", not "fix double-pay".
+- Fixes for findings in the private issue tracker end with a trailer, one line per issue:
+  ```
+  Fixes-Issue: VerifiedX-Issues#23
+  ```
+  Do not use GitHub closing keywords (`Fixes #23`). Fixes land on `testnet`, so they would close the issue too early.
+- Never describe how to exploit the old code, and never paste tracker content (traces, scenarios, proof tests) into commits, PRs or comments.
 
-## Use a Consistent Coding Style
-I'm again borrowing these from [Facebook's Guidelines](https://github.com/facebook/draft-js/blob/a9316a723f9e918afde44dea68b5f9f39b7d9b00/CONTRIBUTING.md)
+## Reporting bugs and vulnerabilities
 
-* 2 spaces for indentation rather than tabs
-* You can try running `npm run lint` for style unification
+Never report a security vulnerability in a public issue. Contact a maintainer privately. For other bugs, open an issue with steps to reproduce, what you expected, what happened, and the node version and network (mainnet or testnet).
+
+## License
+
+Contributions are made under the [MIT License](LICENSE) that covers the project.

@@ -3631,9 +3631,9 @@ namespace VerifiedXCore.Nodes
                                 var rating = await TransactionRatingService.GetTransactionRating(transaction);
                                 transaction.TransactionRating = rating;
 
-                                if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
+                                if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
+                                    && MempoolEvictionUtility.TryAdmitAndInsert(transaction, mempool))
                                 {
-                                    mempool.InsertSafe(transaction);
                                     _ = Broadcast("7777", data, "SendTxToMempoolVals");
 
                                 }
@@ -3673,9 +3673,9 @@ namespace VerifiedXCore.Nodes
                             var rating = await TransactionRatingService.GetTransactionRating(transaction);
                             transaction.TransactionRating = rating;
 
-                            if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
+                            if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
+                                && MempoolEvictionUtility.TryAdmitAndInsert(transaction, mempool))
                             {
-                                mempool.InsertSafe(transaction);
                             }
                             else
                             {

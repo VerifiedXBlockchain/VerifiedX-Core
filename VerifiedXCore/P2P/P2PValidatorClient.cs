@@ -527,7 +527,7 @@ namespace VerifiedXCore.P2P
             var SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
                 .Union(Globals.BannedIPs.Keys)
                 .Union(Globals.SkipValPeers.Keys)
-                .Union(Globals.ReportedIPs.Keys)
+                .Union(P2PClient.OwnAddressesToSkip())
                 .Union(cooldownIPs));
 
             var connectedNodes = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToArray();
@@ -560,7 +560,7 @@ namespace VerifiedXCore.P2P
                 SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
                 .Union(Globals.BannedIPs.Keys)
                 .Union(Globals.SkipValPeers.Keys)
-                .Union(Globals.ReportedIPs.Keys)
+                .Union(P2PClient.OwnAddressesToSkip())
                 .Union(cooldownIPs));
 
                 connectedNodes = Globals.ValidatorNodes.Values.Where(x => x.IsConnected).ToArray();
@@ -634,7 +634,7 @@ namespace VerifiedXCore.P2P
             var SkipIPs = new HashSet<string>(Globals.BlockCasterNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
                 .Union(Globals.BannedIPs.Keys)
                 .Union(Globals.SkipValPeers.Keys)
-                .Union(Globals.ReportedIPs.Keys));
+                .Union(P2PClient.OwnAddressesToSkip()));
 
             var connectedNodes = Globals.BlockCasterNodes.Values.Where(x => x.IsConnected).ToArray();
 
@@ -664,7 +664,7 @@ namespace VerifiedXCore.P2P
                 SkipIPs = new HashSet<string>(Globals.BlockCasterNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
                 .Union(Globals.BannedIPs.Keys)
                 .Union(Globals.SkipValPeers.Keys)
-                .Union(Globals.ReportedIPs.Keys));
+                .Union(P2PClient.OwnAddressesToSkip()));
 
                 connectedNodes = Globals.BlockCasterNodes.Values.Where(x => x.IsConnected).ToArray();
 
