@@ -374,6 +374,60 @@ namespace VerifiedXCore.Tests
             Assert.All(TransactionData.GetPool().Find(x => x.FromAddress == _sender.Address), x => Assert.Equal(TransactionRating.E, x.TransactionRating));
         }
 
+        private static void FillPool(TransactionRating rating, TransactionType type = TransactionType.TX, string? data = null)
+        {
+            TransactionData.GetPool().InsertBulk(Enumerable.Range(0, Globals.MaxMempoolEntries).Select(i => new Transaction
+            {
+                Hash = $"full{i}", FromAddress = "x", ToAddress = "y", Amount = 1M, Fee = 1M, Timestamp = i,
+                TransactionType = type, Data = data, TransactionRating = rating,
+            }));
+            MempoolEvictionUtility.InvalidateAdmissionStats();
+        }
+
+        private static Transaction Reserve(string function) => new Transaction
+        {
+            Hash = Guid.NewGuid().ToString("N"), FromAddress = "xRBXowner", ToAddress = "xRBXowner", Amount = 0M, Fee = 1M, Timestamp = 1,
+            TransactionType = TransactionType.RESERVE, Data = JsonConvert.SerializeObject(new { Function = function, Hash = "pending" }),
+            TransactionRating = TransactionRating.A,
+        };
+
+        [Theory]
+        [InlineData("Recover()")]
+        [InlineData("CallBack()")]
+        public void AFullPoolOfSameRatedTransfers_StillAdmitsAReserveCallBackOrRecover(string function)
+        {
+            FillPool(TransactionRating.A);
+            var transfer = Send(1M);
+            transfer.TransactionRating = TransactionRating.A;
+            Assert.False(MempoolEvictionUtility.CheckAdmissionBounds(transfer).admit); // an ordinary transfer is refused, as before
+            Assert.True(MempoolEvictionUtility.RefusingWithoutScanFor(TransactionRating.A));
+
+            var (admit, reason) = MempoolEvictionUtility.CheckAdmissionBounds(Reserve(function));
+
+            Assert.True(admit, reason); // neither the same rating nor the no-room cache holds it out
+            Assert.True(PoolCount() < Globals.MaxMempoolEntries);
+        }
+
+        [Fact]
+        public void ADeadlineBoundTransaction_DoesNotDisplaceAnother()
+        {
+            FillPool(TransactionRating.A, TransactionType.RESERVE, JsonConvert.SerializeObject(new { Function = "CallBack()", Hash = "other" }));
+
+            Assert.False(MempoolEvictionUtility.CheckAdmissionBounds(Reserve("Recover()")).admit);
+            Assert.Equal(Globals.MaxMempoolEntries, PoolCount());
+        }
+
+        [Fact]
+        public void OnlyCallBackRecoverWithdrawalVotesAndAttestations_AreDeadlineBound()
+        {
+            Assert.True(MempoolEvictionUtility.IsDeadlineBound(Reserve("Recover()")));
+            Assert.True(MempoolEvictionUtility.IsDeadlineBound(new Transaction { TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_CANCEL }));
+            Assert.True(MempoolEvictionUtility.IsDeadlineBound(new Transaction { TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_VOTE }));
+            Assert.False(MempoolEvictionUtility.IsDeadlineBound(Reserve("Register()")));
+            Assert.False(MempoolEvictionUtility.IsDeadlineBound(new Transaction { TransactionType = TransactionType.RESERVE, Data = "[\"not an object\"]" }));
+            Assert.False(MempoolEvictionUtility.IsDeadlineBound(Send(1M)));
+        }
+
         [Fact]
         public void AnInsertThatFails_EvictsNothing()
         {

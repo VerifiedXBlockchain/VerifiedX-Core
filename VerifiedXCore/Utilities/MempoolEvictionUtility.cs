@@ -36,7 +36,8 @@ namespace VerifiedXCore.Utilities
         /// <summary>
         /// The admission bounds every path that inserts a received or submitted transaction into the mempool applies
         /// first: the fee floor, then the global entry and size caps. When the pool is full, only entries rated strictly
-        /// below the incoming transaction make room for it; if there are none it is refused.
+        /// below the incoming transaction make room for it (for a deadline-bound one, also same-rated entries that are not);
+        /// if there are none it is refused.
         /// </summary>
         public static (bool admit, string reason) CheckAdmissionBounds(Transaction tx)
         {
@@ -50,6 +51,29 @@ namespace VerifiedXCore.Utilities
         /// Decides whether <paramref name="tx"/> can enter the pool, and which lower-rated entries must go to make room for
         /// it. Deletes nothing: the caller evicts the returned entries once the transaction is in.
         /// </summary>
+        /// <summary>
+        /// Transactions that stop being valid at a deadline: a reserve CallBack() or Recover() (until the send settles), a
+        /// vBTC V2 withdrawal cancel or vote, and attestations.
+        /// </summary>
+        internal static bool IsDeadlineBound(Transaction tx)
+        {
+            if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL
+                || tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE
+                || VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(tx.TransactionType))
+                return true;
+            if (tx.TransactionType != TransactionType.RESERVE || string.IsNullOrEmpty(tx.Data))
+                return false;
+            try
+            {
+                var function = (string?)Newtonsoft.Json.Linq.JObject.Parse(tx.Data)["Function"];
+                return function == "CallBack()" || function == "Recover()";
+            }
+            catch (Newtonsoft.Json.JsonException)
+            {
+                return false;
+            }
+        }
+
         private static (bool admit, string reason, List<Transaction> victims) PlanAdmission(Transaction tx)
         {
             var none = new List<Transaction>();
@@ -63,12 +87,19 @@ namespace VerifiedXCore.Utilities
             if (canAdd.canAdd)
                 return (true, canAdd.reason, none);
 
+            // A transaction valid only until a deadline may also displace same-rated ordinary entries: otherwise a pool
+            // kept full of same-rated transfers holds it out until the deadline passes.
+            var deadlineBound = IsDeadlineBound(tx);
+
             // A full pool that just had nothing to give up for this rating (or a better one) refuses at once:
             // otherwise every refused submission would pay for a whole-pool scan.
-            lock (AdmissionStatsLock)
+            if (!deadlineBound)
             {
-                if (_noRoomForRatingUntilUtc > DateTime.UtcNow && rating >= _noRoomForRating)
-                    return (false, canAdd.reason, none);
+                lock (AdmissionStatsLock)
+                {
+                    if (_noRoomForRatingUntilUtc > DateTime.UtcNow && rating >= _noRoomForRating)
+                        return (false, canAdd.reason, none);
+                }
             }
 
             var victims = PlanEviction(
@@ -76,13 +107,17 @@ namespace VerifiedXCore.Utilities
                 targetSize: (long)(Globals.MaxMempoolSizeBytes * 0.95),
                 onlyRatedBelow: rating,
                 knownTotalSize: stats.sizeBytes,
-                mustFitBytes: SizeOf(tx));
+                mustFitBytes: SizeOf(tx),
+                sameRatedOrdinaryToo: deadlineBound);
             if (victims == null || victims.Count == 0)
             {
-                lock (AdmissionStatsLock)
+                if (!deadlineBound)
                 {
-                    _noRoomForRating = rating;
-                    _noRoomForRatingUntilUtc = DateTime.UtcNow + AdmissionSizeCacheTtl;
+                    lock (AdmissionStatsLock)
+                    {
+                        _noRoomForRating = rating;
+                        _noRoomForRatingUntilUtc = DateTime.UtcNow + AdmissionSizeCacheTtl;
+                    }
                 }
                 return (false, canAdd.reason, none);
             }
@@ -290,7 +325,9 @@ namespace VerifiedXCore.Utilities
         /// The entries an eviction would remove, lowest rating first: null when nothing needs to go, or when
         /// <paramref name="mustFitBytes"/> is given and removing them would not leave room for it. Deletes nothing.
         /// </summary>
-        private static List<Transaction>? PlanEviction(int targetCount, long targetSize, TransactionRating? onlyRatedBelow, long? knownTotalSize, long? mustFitBytes)
+        /// <param name="sameRatedOrdinaryToo">Entries rated the same as <paramref name="onlyRatedBelow"/> may go too, unless
+        /// they are themselves deadline-bound.</param>
+        private static List<Transaction>? PlanEviction(int targetCount, long targetSize, TransactionRating? onlyRatedBelow, long? knownTotalSize, long? mustFitBytes, bool sameRatedOrdinaryToo = false)
         {
             var mempool = TransactionData.GetPool();
             var allTxs = mempool.FindAll().ToList();
@@ -323,7 +360,8 @@ namespace VerifiedXCore.Utilities
             // of new entries makes room by evicting itself, not the transactions that were already waiting. A row with no
             // recorded arrival (inserted locally, or before a restart) counts as the earliest.
             var sortedTxs = allTxs
-                .Where(x => onlyRatedBelow == null || (x.TransactionRating ?? TransactionRating.F) > onlyRatedBelow.Value)
+                .Where(x => onlyRatedBelow == null || (x.TransactionRating ?? TransactionRating.F) > onlyRatedBelow.Value
+                    || (sameRatedOrdinaryToo && (x.TransactionRating ?? TransactionRating.F) == onlyRatedBelow.Value && !IsDeadlineBound(x)))
                 .OrderByDescending(x => x.TransactionRating ?? TransactionRating.F)
                 .ThenByDescending(x => x.Hash != null && ArrivedAtUtc.TryGetValue(x.Hash, out var at) ? at : DateTime.MinValue)
                 .ToList();
