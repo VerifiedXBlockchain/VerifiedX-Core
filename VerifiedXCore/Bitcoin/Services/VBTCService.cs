@@ -2678,14 +2678,12 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
-                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
-                if (storedRequest == null)
-                    return;
-
-                storedRequest.LastSigningFailureCode = ceremony?.FailureCode.ToString() ?? "Unknown";
-                storedRequest.LastSigningFailureAt = TimeUtil.GetTime();
-                storedRequest.LastSigningSessionId = ceremony?.SessionId ?? string.Empty;
-                VBTCWithdrawalRequest.Save(storedRequest, true);
+                VBTCWithdrawalRequest.UpdateLocalFields(withdrawalRequestHash, scUID, storedRequest =>
+                {
+                    storedRequest.LastSigningFailureCode = ceremony?.FailureCode.ToString() ?? "Unknown";
+                    storedRequest.LastSigningFailureAt = TimeUtil.GetTime();
+                    storedRequest.LastSigningSessionId = ceremony?.SessionId ?? string.Empty;
+                });
             }
             catch (Exception ex)
             {
@@ -2741,19 +2739,17 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
-                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
-                if (storedRequest == null)
-                    return;
-
-                storedRequest.PinnedUnsignedTxHex = null;
-                storedRequest.PinnedCoinsJson = null;
-                if (deferredToo)
+                VBTCWithdrawalRequest.UpdateLocalFields(withdrawalRequestHash, scUID, storedRequest =>
                 {
-                    storedRequest.CompleteAfterConfirmation = false;
-                    storedRequest.CompleteAfterBtcTxId = null;
-                    storedRequest.DeferredSignedTxHex = null;
-                }
-                VBTCWithdrawalRequest.Save(storedRequest, true);
+                    storedRequest.PinnedUnsignedTxHex = null;
+                    storedRequest.PinnedCoinsJson = null;
+                    if (deferredToo)
+                    {
+                        storedRequest.CompleteAfterConfirmation = false;
+                        storedRequest.CompleteAfterBtcTxId = null;
+                        storedRequest.DeferredSignedTxHex = null;
+                    }
+                });
             }
             catch (Exception ex)
             {
@@ -2770,17 +2766,15 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
-                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
-                if (storedRequest == null)
-                    return;
-
-                storedRequest.PinnedUnsignedTxHex = unsignedTxHex;
-                storedRequest.PinnedCoinsJson = JsonConvert.SerializeObject(coins);
-                // A retry reuses this exact tx, so it must keep waiting for confirmation too.
-                storedRequest.CompleteAfterConfirmation = reclaimBuild;
-                storedRequest.CompleteAfterBtcTxId = null;
-                storedRequest.DeferredSignedTxHex = null;
-                VBTCWithdrawalRequest.Save(storedRequest, true);
+                VBTCWithdrawalRequest.UpdateLocalFields(withdrawalRequestHash, scUID, storedRequest =>
+                {
+                    storedRequest.PinnedUnsignedTxHex = unsignedTxHex;
+                    storedRequest.PinnedCoinsJson = JsonConvert.SerializeObject(coins);
+                    // A retry reuses this exact tx, so it must keep waiting for confirmation too.
+                    storedRequest.CompleteAfterConfirmation = reclaimBuild;
+                    storedRequest.CompleteAfterBtcTxId = null;
+                    storedRequest.DeferredSignedTxHex = null;
+                });
             }
             catch (Exception ex)
             {
@@ -2796,14 +2790,12 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
-                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
-                if (storedRequest == null)
-                    return;
-
-                storedRequest.CompleteAfterConfirmation = true;
-                storedRequest.CompleteAfterBtcTxId = btcTxId;
-                storedRequest.DeferredSignedTxHex = signedTxHex;
-                VBTCWithdrawalRequest.Save(storedRequest, true);
+                VBTCWithdrawalRequest.UpdateLocalFields(withdrawalRequestHash, scUID, storedRequest =>
+                {
+                    storedRequest.CompleteAfterConfirmation = true;
+                    storedRequest.CompleteAfterBtcTxId = btcTxId;
+                    storedRequest.DeferredSignedTxHex = signedTxHex;
+                });
             }
             catch (Exception ex)
             {
@@ -2822,12 +2814,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (string.IsNullOrEmpty(btcTxHash))
                     return;
 
-                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
-                if (storedRequest == null)
-                    return;
-
-                storedRequest.LastSignedBtcTxId = btcTxHash;
-                VBTCWithdrawalRequest.Save(storedRequest, true);
+                VBTCWithdrawalRequest.UpdateLocalFields(withdrawalRequestHash, scUID, storedRequest => storedRequest.LastSignedBtcTxId = btcTxHash);
             }
             catch (Exception ex)
             {
