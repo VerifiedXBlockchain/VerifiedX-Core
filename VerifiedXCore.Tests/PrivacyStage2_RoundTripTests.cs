@@ -480,10 +480,13 @@ namespace VerifiedXCore.Tests
 
             await Scanned(Height + 10);                                           // too soon
             Assert.True(Note().IsSpent);
+            // A claim counts while its spend is in the mempool (a claim whose holder has left it is stale).
+            TransactionData.GetPool().InsertSafe(new Transaction { Hash = "still-pooled", FromAddress = "xPooled", ToAddress = "xPooled", Timestamp = VerifiedXCore.Utilities.TimeUtil.GetTime(), TransactionType = TransactionType.VFX_PRIVATE_TRANSFER });
             Globals.MempoolNullifiers[claim] = "still-pooled";
             await Scanned(Height + 1 + PrivacyApiHelper.UnminedSpendBlocks + 5);  // still claimed by a pooled spend
             Assert.True(Note().IsSpent);
             Globals.MempoolNullifiers.TryRemove(claim, out _);
+            TransactionData.GetPool().DeleteManySafe(x => x.Hash == "still-pooled");
             await Scanned(Height + 1 + PrivacyApiHelper.UnminedSpendBlocks + 6);  // never mined: restored
             Assert.False(Note().IsSpent);
             Assert.Null(Note().SpendPendingSince);
