@@ -179,7 +179,11 @@ namespace VerifiedXCore.Services
             return null;
         }
 
-        /// <summary>Marks slots above the given height Invalid (their state includes rolled-back blocks).</summary>
+        /// <summary>
+        /// Marks slots above the given height Invalid (their state includes rolled-back blocks) and drops the deletion
+        /// records above it. Those deletions happened on the discarded blocks; a later diff cycle applying one would remove
+        /// a row that is live on the chain that replaced them. Records at or below the height stay: valid slots diff from them.
+        /// </summary>
         public static void InvalidateAbove(long height)
         {
             var col = SnapshotManifest.GetManifest();
@@ -190,6 +194,7 @@ namespace VerifiedXCore.Services
                 slot.UpdatedUtc = DateTime.UtcNow;
                 col.Upsert(slot);
             }
+            StateTombstone.GetTombstones()?.DeleteMany(x => x.Height > height);
             TryCheckpoint();
         }
 

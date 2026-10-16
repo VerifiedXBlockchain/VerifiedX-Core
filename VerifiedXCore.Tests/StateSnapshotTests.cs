@@ -263,6 +263,50 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task ARollback_DropsDeletionsFromTheDiscardedBlocks_AndKeepsTheOnesBelowIt()
+        {
+            DbContext.DB = _live; // anchored slots, so slot 40 diffs forward instead of being copied whole
+            try
+            {
+                var blocks = _live.GetCollection<Block>(DbContext.RSRV_BLOCKS);
+                StateWriteContext.SetHeight(35);
+                SmartContractStateTrei.SaveSmartContract(NewContract("sc:nft"));
+                SmartContractStateTrei.SaveSmartContract(NewContract("sc:burned"));
+                StateWriteContext.Clear();
+                foreach (var h in new long[] { 40, 50, 60 })
+                {
+                    blocks.Insert(new Block { Height = h, Hash = $"canon-{h}", Transactions = new List<Transaction>() });
+                    await StateSnapshotService.UpdateCycleAsync(h, $"canon-{h}");
+                }
+
+                // Burned at 61 on the chain that stays; sc:nft burned at 65 on a branch that is then rolled back to 62.
+                StateWriteContext.SetHeight(61);
+                SmartContractStateTrei.DeleteSmartContract(NewContract("sc:burned"));
+                StateWriteContext.SetHeight(65);
+                SmartContractStateTrei.DeleteSmartContract(NewContract("sc:nft"));
+                StateWriteContext.Clear();
+
+                StateSnapshotService.InvalidateAbove(62);
+                // The rollback brings sc:nft back with its original stamp, below every slot height.
+                StateWriteContext.SetHeight(35);
+                SmartContractStateTrei.SaveSmartContract(NewContract("sc:nft"));
+                StateWriteContext.Clear();
+
+                blocks.Insert(new Block { Height = 70, Hash = "canon-70", Transactions = new List<Transaction>() });
+                await StateSnapshotService.UpdateCycleAsync(70, "canon-70"); // slot 40 diffs forward to 70
+
+                var rolled = StateSnapshotService.GetSlots().Single(x => x.Height == 70);
+                Assert.Equal(SnapshotSlotStatus.Valid, rolled.Status);
+                Assert.Equal(1, SlotCount(rolled.SlotId, "scstate", "sc:nft"));
+                Assert.Equal(0, SlotCount(rolled.SlotId, "scstate", "sc:burned"));
+            }
+            finally
+            {
+                DbContext.DB = null;
+            }
+        }
+
+        [Fact]
         public async Task UpdateCycle_SkipsWhenStateNotSynced()
         {
             StateTreiStatusService.SetFailed("test: dirty state");
