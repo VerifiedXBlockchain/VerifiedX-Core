@@ -4,14 +4,15 @@ All changes go through pull requests. This repository is public: anything in a c
 
 ## Branches
 
-- `testnet` is the integration branch. Branch from it and open your PR against it.
+- `testnet-staging` is where work merges first. Branch from it (or from `testnet`) and open your PR against it. PRs are merged with a merge commit, never squashed or rebase-merged, so each commit and its message survive.
+- `testnet` takes `testnet-staging` by PR once a batch is reviewed and CI passes, every few days. Don't open other PRs against `testnet`.
 - `main` is mainnet. It only receives release PRs from `testnet` (for example "Testnet to mainnet 8.1.0"). Never open a feature or fix PR against `main`.
 - Name branches `fix/<topic>` or `feature/<topic>`.
 
 ## Before you open a PR
 
 1. `dotnet build` succeeds with no new warnings.
-2. `dotnet test` passes. CI runs it on Ubuntu and Windows for every PR into `testnet` or `main`.
+2. `dotnet test` passes. CI runs it on Ubuntu and Windows for every PR into `testnet-staging`, `testnet` or `main`.
 3. The ship-gate tests pass. They guard against a release that loses wallet secrets or chain state, so run them for every change, however small:
    ```bash
    dotnet test --filter "FullyQualifiedName~SecretPreservation|FullyQualifiedName~StateSnapshot"

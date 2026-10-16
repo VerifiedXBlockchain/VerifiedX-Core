@@ -30,7 +30,8 @@ Command-line args are parsed in `VerifiedXCore/Program.cs` (case-insensitive: `t
 
 ## Branches
 
-- `testnet` is the integration branch. Branch from it, and open PRs against it.
+- `testnet-staging` is where work merges first. Branch from it (or from `testnet`) and open PRs against it, merged with a merge commit (never squash or rebase-merge).
+- `testnet` takes `testnet-staging` by PR once a batch is reviewed and CI passes, every few days. No PRs from other branches into `testnet`.
 - `main` is mainnet. It only takes release PRs from `testnet`.
 - `VerifiedXCore/Program.cs` sets `Globals.IsTestNet = true;` under `//Forced Testnet` on `testnet`; the line is commented out on `main`. That one line is how the two branches differ. Never change it in a fix or feature PR.
 
