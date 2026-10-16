@@ -320,6 +320,12 @@ namespace VerifiedXCore.Commands
                             if (account == null)
                                 break;
 
+                            if (WalletEncryptionService.RefusesUnlock(pwd.ToUnsecureString()))
+                            {
+                                Console.WriteLine("Failed to decrypt wallet. Password was incorrect!");
+                                break;
+                            }
+
                             Globals.EncryptPassword = pwd;
                             await Task.Delay(200);
                             var privKey = account.GetKey;
