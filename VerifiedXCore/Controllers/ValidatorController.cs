@@ -745,7 +745,7 @@ namespace VerifiedXCore.Controllers
             try
             {
                 var myHeight = Globals.LastBlock.Height;
-                var ready = Globals.IsBlockCaster && !string.IsNullOrEmpty(Globals.ValidatorAddress);
+                var ready = Globals.IsBlockCaster && !string.IsNullOrEmpty(Globals.ValidatorAddress) && Globals.ProofVerifierReady;
                 // Wave 3: RecordSeq lets round peers detect a stale membership view and trigger catch-up.
                 var recordSeq = CasterMembershipStore.GetCurrent()?.RecordSeq ?? -1;
                 var result = new { Height = myHeight, Ready = ready, Address = Globals.ValidatorAddress ?? "", RecordSeq = recordSeq };
@@ -1548,6 +1548,10 @@ namespace VerifiedXCore.Controllers
         [Route("VerifyBlock/{nextBlock}/{**proofHash}")]
         public async Task<ActionResult<string>> VerifyBlock(long nextBlock, string proofHash)
         {
+            // From the proof-rules height, a node without its PLONK verifier does not hand out a block it produced.
+            if (!Globals.ProofVerifierReady)
+                return BadRequest();
+
             var block = Globals.NextValidatorBlock;
 
             if (block.Height != nextBlock)

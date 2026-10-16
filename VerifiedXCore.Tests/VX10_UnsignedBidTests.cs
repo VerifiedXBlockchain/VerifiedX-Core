@@ -117,6 +117,41 @@ namespace VerifiedXCore.Tests
             Assert.Equal(_bidder.Address, a.CurrentWinningAddress);
         }
 
+        private void EndListingAt(DateTime end, bool cancelled = false)
+        {
+            var listing = CurrentListing();
+            listing.EndDate = end;
+            listing.IsCancelled = cancelled;
+            Listing.GetListingDb()!.Update(listing);
+        }
+
+        [Fact]
+        public void ABidArrivingAfterTheListingEnds_IsRejected_BeforeTheAuctioneerCloses()
+        {
+            EndListingAt(DateTime.UtcNow.AddSeconds(-2)); // past its end; the auctioneer has not run yet
+            Globals.BidQueue.Enqueue(GenuineBid(20M));
+            AuctionEngine.ProcessBidQueue();
+
+            Assert.Equal(10M, CurrentAuction().CurrentBidPrice);
+            Assert.Equal("xShopOwner", CurrentAuction().CurrentWinningAddress);
+        }
+
+        [Fact]
+        public void ABuyNowAfterTheEnd_OrOnACancelledListing_IsRejected()
+        {
+            EndListingAt(DateTime.UtcNow.AddSeconds(-2));
+            var late = GenuineBid(100M); late.IsBuyNow = true;
+            Globals.BuyNowQueue.Enqueue(late);
+            AuctionEngine.ProcessBuyNowQueue();
+            Assert.False(CurrentAuction().IsAuctionOver);
+
+            EndListingAt(DateTime.UtcNow.AddDays(1), cancelled: true);
+            var onCancelled = GenuineBid(100M); onCancelled.IsBuyNow = true;
+            Globals.BuyNowQueue.Enqueue(onCancelled);
+            AuctionEngine.ProcessBuyNowQueue();
+            Assert.False(CurrentAuction().IsAuctionOver);
+        }
+
         [Fact]
         public void VX10_SignedBid_WithInflatedUnsignedMaxBid_Refused()
         {

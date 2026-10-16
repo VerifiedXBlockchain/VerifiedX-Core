@@ -46,18 +46,28 @@ namespace VerifiedXCore.Privacy
             catch { }
         }
 
-        /// <summary>Remove mempool claims held by <paramref name="txHash"/>.</summary>
+        /// <summary>Test seam: runs after a release has read which claims it holds and before it removes them.</summary>
+        internal static Action? ClaimsReadForTests;
+
+        /// <summary>
+        /// Remove mempool claims held by <paramref name="txHash"/>. Under the registration lock, and each key only while
+        /// this transaction still holds it: a take-over that lands first is never undone by a release that started earlier.
+        /// </summary>
         public static void ReleaseClaimsForTxHash(string txHash)
         {
             if (string.IsNullOrEmpty(txHash))
                 return;
-            var toRemove = Globals.MempoolNullifiers
-                .Where(kv => kv.Value == txHash)
-                .Select(kv => kv.Key)
-                .ToList();
-            foreach (var k in toRemove)
-                Globals.MempoolNullifiers.TryRemove(k, out _);
-            ClaimedAtUtc.TryRemove(txHash, out _);
+            lock (MempoolRegisterLock)
+            {
+                var toRemove = Globals.MempoolNullifiers
+                    .Where(kv => kv.Value == txHash)
+                    .Select(kv => kv.Key)
+                    .ToList();
+                ClaimsReadForTests?.Invoke();
+                foreach (var k in toRemove)
+                    Globals.MempoolNullifiers.TryRemove(new KeyValuePair<string, string>(k, txHash));
+                ClaimedAtUtc.TryRemove(txHash, out _);
+            }
         }
 
         /// <summary>

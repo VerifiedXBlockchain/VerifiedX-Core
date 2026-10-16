@@ -491,6 +491,39 @@ namespace VerifiedXCore.Data
         public static void ReleasePrivateMempoolNullifiersForTx(string txHash) =>
             MempoolNullifierTracker.ReleaseClaimsForTxHash(txHash);
 
+        /// <summary>
+        /// Removes from the mempool the transaction a received copy was refused as, and releases its nullifier claims. Only
+        /// a row identical to that copy (same hash, signature and hashed fields) is removed: a different transaction that
+        /// carries the same hash and signature is not the one refused, and its refusal says nothing about the pooled row.
+        /// </summary>
+        public static int RemoveRefusedFromPool(LiteDB.ILiteCollection<Transaction> mempool, Transaction received)
+        {
+            var removed = 0;
+            foreach (var row in mempool.Find(x => x.Hash == received.Hash && x.Signature == received.Signature).ToList())
+            {
+                if (SameHashedFields(row, received) && mempool.DeleteSafe(row.Id))
+                    removed++;
+            }
+            if (removed > 0)
+                ReleasePrivateMempoolNullifiersForTx(received.Hash);
+            return removed;
+        }
+
+        // Field by field and case-sensitive: the hash preimage concatenates fields without separators, so two transactions
+        // can share it, and the mempool lookup ignores case.
+        private static bool SameHashedFields(Transaction a, Transaction b) =>
+            string.Equals(a.Hash, b.Hash, StringComparison.Ordinal)
+            && string.Equals(a.Signature, b.Signature, StringComparison.Ordinal)
+            && a.Timestamp == b.Timestamp
+            && string.Equals(a.FromAddress, b.FromAddress, StringComparison.Ordinal)
+            && string.Equals(a.ToAddress, b.ToAddress, StringComparison.Ordinal)
+            && a.Amount.ToString() == b.Amount.ToString()
+            && a.Fee.ToString() == b.Fee.ToString()
+            && a.Nonce == b.Nonce
+            && a.TransactionType == b.TransactionType
+            && string.Equals(a.Data, b.Data, StringComparison.Ordinal)
+            && a.UnlockTime == b.UnlockTime;
+
         public static LiteDB.ILiteCollection<Transaction> GetPool()
         {
             try
@@ -550,6 +583,11 @@ namespace VerifiedXCore.Data
             return null;
         }
 
+        /// <summary>The Bitcoin address a BTC name create or transfer gives a name to; null for any other call.</summary>
+        internal static string? BtcNameTargetAddress(string? function, JObject call) =>
+            function == "BTCAdnrCreate()" ? (string?)call["BTCAddress"]
+            : function == "BTCAdnrTransfer()" ? (string?)call["BTCToAddress"] : null;
+
         public static async Task<List<Transaction>> ProcessTxPool()
         {
             // Block proposal: an owner debit whose Bitcoin deposit no Electrum server can confirm is left out of this
@@ -602,6 +640,7 @@ namespace VerifiedXCore.Data
             queuedMempoolTxList = Globals.NetworkBlockQueue.Values.SelectMany(x => x.Transactions).ToList();
 
             var adnrNameList = new List<string>();
+            var btcNameAddressList = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // as the name table matches addresses
 
             if(sizedMempoolList.Count() > 0)
             {
@@ -781,6 +820,18 @@ namespace VerifiedXCore.Data
                                             {
                                                 adnrNameList.Add(name.ToLower());
                                             }
+                                        }
+
+                                        // One BTC name per Bitcoin address in a block: a create or transfer to an address
+                                        // another one in this block already names is dropped, as validation refuses it once
+                                        // the first has applied.
+                                        var btcAddress = BtcNameTargetAddress(function, jobj);
+                                        if (!reject && !string.IsNullOrWhiteSpace(btcAddress))
+                                        {
+                                            if (btcNameAddressList.Contains(btcAddress))
+                                                reject = true;
+                                            else
+                                                btcNameAddressList.Add(btcAddress);
                                         }
                                     }
                                 }

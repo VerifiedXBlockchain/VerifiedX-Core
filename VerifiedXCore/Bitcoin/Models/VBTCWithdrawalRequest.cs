@@ -1,3 +1,4 @@
+using LiteDB;
 using VerifiedXCore.Data;
 using VerifiedXCore.Utilities;
 
@@ -461,6 +462,49 @@ namespace VerifiedXCore.Bitcoin.Models
         /// row is inserted on its own. For the chain recovery, which must only add what is missing.</param>
         public static bool Save(VBTCWithdrawalRequest request, bool update = false, bool neverOverAnotherRequest = false)
         {
+            lock (RowWrite)
+                return SaveUnderRowLock(request, update, neverOverAnotherRequest);
+        }
+
+        /// <summary>
+        /// Save, the completion record and UpdateLocalFields each look the row up and write it under this lock, so none
+        /// lands between UpdateLocalFields' read and its write (a caller that read a row earlier and passes it to Save
+        /// still carries what it read).
+        /// </summary>
+        private static readonly object RowWrite = new();
+
+        /// <summary>
+        /// Changes only this node's own fields of a request row (its pinned build, deferred completion and signing
+        /// notes), on the row as it is at that moment: read and written under the row lock, so the status, completion
+        /// and everything else the chain decides stay exactly as they are. A wallet path held a row across a Bitcoin
+        /// lookup and saved it whole, writing its old status back over a withdrawal cancelled meanwhile.
+        /// </summary>
+        public static bool UpdateLocalFields(string transactionHash, string scUID, Action<VBTCWithdrawalRequest> change)
+        {
+            var vwrDb = GetVBTCWithdrawalRequestDb();
+            if (vwrDb == null || string.IsNullOrEmpty(transactionHash)) return false;
+            lock (RowWrite)
+            {
+                var row = vwrDb.Query().Where(x => x.TransactionHash == transactionHash && x.SmartContractUID == scUID).ToList().OrderBy(x => x.Id).FirstOrDefault();
+                if (row == null) return false;
+                change(row);
+                // Only these fields are written, in one operation on the row by its id: a row a state rebuild or restore
+                // has removed meanwhile (they write outside this lock) is not put back, and one it has rewritten keeps
+                // everything but these.
+                static BsonValue S(string? v) => v == null ? BsonValue.Null : new BsonValue(v);
+                var updated = vwrDb.UpdateMany(
+                    BsonExpression.Create(
+                        "{ PinnedUnsignedTxHex: @0, PinnedCoinsJson: @1, CompleteAfterConfirmation: @2, CompleteAfterBtcTxId: @3, DeferredSignedTxHex: @4, " +
+                        "LastSigningFailureCode: @5, LastSigningFailureAt: @6, LastSigningSessionId: @7, LastSignedBtcTxId: @8 }",
+                        S(row.PinnedUnsignedTxHex), S(row.PinnedCoinsJson), new BsonValue(row.CompleteAfterConfirmation), S(row.CompleteAfterBtcTxId), S(row.DeferredSignedTxHex),
+                        S(row.LastSigningFailureCode), row.LastSigningFailureAt.HasValue ? new BsonValue(row.LastSigningFailureAt.Value) : BsonValue.Null, S(row.LastSigningSessionId), S(row.LastSignedBtcTxId)),
+                    BsonExpression.Create("_id = @0", new BsonValue(row.Id)));
+                return updated > 0;
+            }
+        }
+
+        private static bool SaveUnderRowLock(VBTCWithdrawalRequest request, bool update, bool neverOverAnotherRequest)
+        {
             var vwrDb = GetVBTCWithdrawalRequestDb();
             if (vwrDb == null)
             {
@@ -577,12 +621,15 @@ namespace VerifiedXCore.Bitcoin.Models
         {
             try
             {
-                var db = GetVBTCWithdrawalRequestDb();
-                var row = db?.Query().Where(x => x.TransactionHash == transactionHash && x.SmartContractUID == scUID).ToList().OrderBy(x => x.Id).FirstOrDefault();
-                if (row == null) return;
-                row.CompletionTxHash = completionTxHash;
-                row.CompletionTimestamp = completionTimestamp;
-                db!.UpdateSafe(row);
+                lock (RowWrite)
+                {
+                    var db = GetVBTCWithdrawalRequestDb();
+                    var row = db?.Query().Where(x => x.TransactionHash == transactionHash && x.SmartContractUID == scUID).ToList().OrderBy(x => x.Id).FirstOrDefault();
+                    if (row == null) return;
+                    row.CompletionTxHash = completionTxHash;
+                    row.CompletionTimestamp = completionTimestamp;
+                    db!.UpdateSafe(row);
+                }
             }
             catch (Exception ex)
             {

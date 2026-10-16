@@ -49,9 +49,8 @@ Command-line args are parsed in `VerifiedXCore/Program.cs` (case-insensitive: `t
 Every activation height is a `public static long XxxHeight` (or `const`) in `VerifiedXCore/Globals.cs`, with a `///` comment explaining the rule. To add one:
 
 1. Declare the mainnet height in `Globals.cs`. It must be above the tip by the time every validator runs the new build. Related fixes can share one height (`FundLossAuditHeight`).
-2. Set the testnet value in `Program.cs` (`Globals.X = Globals.IsTestNet ? <testnet> : Globals.X;`).
-3. Set the same override in `Services/WardenService.cs`, which repeats the `Program.cs` overrides. This is easy to miss.
-4. Gate on the height of the block or transaction being processed (`tx.Height >= Globals.XHeight`), never the local tip. Example: `Data/StateData.cs`, `BridgeIntraBlockGuardHeight`.
+2. Set the testnet value in `Globals.ApplyNetworkHeights()` (`GlobalsNetworkHeights.cs`): `Globals.X = Globals.IsTestNet ? <testnet> : Globals.X;`. `Program.cs` and the Warden both call it, so it is the only place.
+3. Gate on the height of the block or transaction being processed (`tx.Height >= Globals.XHeight`), never the local tip. Example: `Data/StateData.cs`, `BridgeIntraBlockGuardHeight`.
 
 `999_999_999_999` means "not active yet".
 
@@ -65,7 +64,7 @@ Paths are under `VerifiedXCore/`. "consensus" means a bug can fork the chain; "f
 | Transaction validation | `Services/TransactionValidatorService.cs` (`VerifyTX`), `Services/LedgerIntegrityRules.cs` | consensus |
 | State application | `Data/StateData.cs` (`UpdateTreis`), `Data/DbContext.cs` (static LiteDB handles) | consensus |
 | Transaction types | `Models/Transaction.cs` (`TransactionType` enum, 0–42) | consensus |
-| Activation heights, global state | `Globals.cs`, `GlobalsPrivacy.cs`, overrides in `Program.cs` and `Services/WardenService.cs` | consensus |
+| Activation heights, global state | `Globals.cs`, `GlobalsPrivacy.cs`, per-network overrides in `GlobalsNetworkHeights.cs` | consensus |
 | Caster and validator loops | `Nodes/` (`BlockcasterNode.cs`, `ValidatorNode.cs`) | consensus |
 | P2P (SignalR hubs) | `P2P/`, hub routes in `StartupP2P*.cs` | consensus, DoS |
 | vBTC, FROST, Base bridge, Bitcoin wallet | `Bitcoin/` (`Services/VBTCService.cs`, `Services/BridgeTxRules.cs`, `FROST/`) | funds, consensus |

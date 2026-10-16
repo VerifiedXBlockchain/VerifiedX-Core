@@ -18,6 +18,7 @@ namespace VerifiedXCore.Utilities
 
         /// <summary>Public accessor so block validation can hold off while a restore is in progress.</summary>
         public static bool IsRestoreRunning => _isRestoreRunning;
+        internal static void SetRestoreRunningForTests(bool running) => _isRestoreRunning = running;
 
         private static volatile bool _stateDestroyed = false;
 
@@ -42,7 +43,8 @@ namespace VerifiedXCore.Utilities
         public static void RecallStateDestroyed()
         {
             var status = StateTreiStatusService.GetStatus();
-            if (status != null && !status.IsSynced && status.RestoreDestroyed == true)
+            // A rebuild that never ended (the node stopped mid-replay) left partial state in the same way.
+            if (status != null && !status.IsSynced && (status.RestoreDestroyed == true || status.RebuildInProgress == true))
                 _stateDestroyed = true;
         }
 
@@ -80,6 +82,7 @@ namespace VerifiedXCore.Utilities
             }
 
             _isRestoreRunning = true;
+            await VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.WaitUntilStoppedAsync();
             var wasResyncing = Globals.IsResyncing;
             var wasStopTimers = Globals.StopAllTimers;
             if (manageFlags)
@@ -130,6 +133,9 @@ namespace VerifiedXCore.Utilities
                 var blockStore = Block.GetBlocks();
                 blockStore.DeleteManySafe(x => x.Height > targetHeight);
                 DbContext.DB.Checkpoint();
+                // Slots and deletion records above the target came from the removed blocks. Dropped now, while the state is
+                // still marked dirty, so no exit from here on leaves them behind a synced status.
+                StateSnapshotService.InvalidateAbove(targetHeight);
 
                 // 5) Replay local blocks (slotHeight, target] through the standard commit path.
                 var walletAccounts = AccountData.GetAccounts().FindAll().ToList();
@@ -263,16 +269,15 @@ namespace VerifiedXCore.Utilities
                     return false;
                 }
 
-                // 8) State is verified consistent up to the target. Slots newer than the target
-                //    contain rolled-back blocks — invalidate them.
+                // 8) State is verified consistent up to the target (slots above it were invalidated at step 4).
                 StateTreiStatusService.SetSynced(targetHeight);
-                StateSnapshotService.InvalidateAbove(targetHeight);
 
                 sw.Stop();
                 Console.WriteLine($"[SnapshotRestore] SUCCESS: restored to height {targetHeight} (replayed {replayed} block(s), {walletTxInserts} wallet TX(s)) in {sw.Elapsed.TotalSeconds:F1}s.");
                 LogUtility.Log($"[SnapshotRestore] Success: slot={slot.SlotId} target={targetHeight} replayed={replayed} in {sw.ElapsedMilliseconds} ms", "SnapshotRestoreUtility");
                 restored = true;
                 _stateDestroyed = false;
+                VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.StoreRewrittenFromChain();
                 return true;
             }
             catch (Exception ex)

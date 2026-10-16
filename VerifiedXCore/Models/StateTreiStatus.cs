@@ -9,9 +9,9 @@ namespace VerifiedXCore.Models
     /// - IsSynced = false → ResetTreis was started but didn't finish → needs retry
     /// - IsSynced = true → state trie is consistent with the block database
     /// 
-    /// When ResetTreis() wipes the state trie (DeleteAllSafe), this record is also wiped.
-    /// A new record with IsSynced=true is only inserted at the END of a successful rebuild.
-    /// If the node crashes mid-rebuild, the record stays gone → startup detects and retries.
+    /// ResetTreis() keeps this record when it wipes the state trie: it first writes IsSynced=false with
+    /// RebuildInProgress set, and only a successful rebuild writes IsSynced=true at its END.
+    /// If the node crashes mid-rebuild, RebuildInProgress is still set at startup and the node stays stopped.
     /// </summary>
     public class StateTreiStatus
     {
@@ -35,5 +35,12 @@ namespace VerifiedXCore.Models
         /// crash mid-restore or a later failure reason cannot drop it.
         /// </summary>
         public bool? RestoreDestroyed { get; set; }
+
+        /// <summary>
+        /// Set before a rebuild (ResetTreis, or a revert ahead of one) destroys anything, and gone once that rebuild ends:
+        /// a rebuild that completes marks the state synced, one that ends with failures records them. Still set at startup,
+        /// the rebuild was interrupted and the state is partial, so it stops this node as <see cref="RestoreDestroyed"/> does.
+        /// </summary>
+        public bool? RebuildInProgress { get; set; }
     }
 }

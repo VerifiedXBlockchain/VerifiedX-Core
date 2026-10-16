@@ -1,3 +1,4 @@
+using System.Linq;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using VerifiedXCore;
@@ -176,6 +177,99 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ASecondDeliveryOfAPooledTransaction_IsAlreadyAdmitted_AndTheFirstCopyStays()
+        {
+            var tx = Send(1M);
+            Assert.True(MempoolEvictionUtility.TryAdmitAndInsert(tx, TransactionData.GetPool()));
+            var counted = MempoolEvictionUtility.GetAdmissionStats().sizeBytes;
+
+            // Two handlers can both pass their "not pooled" check; the later one reaches admission with the same transaction.
+            var again = JsonConvert.DeserializeObject<Transaction>(JsonConvert.SerializeObject(tx))!;
+            Assert.True(MempoolEvictionUtility.TryAdmitAndInsert(again, TransactionData.GetPool(), out var reason));
+            Assert.Equal("", reason);
+
+            Assert.Equal(1, PoolCount());
+            Assert.Equal(tx.Hash, TransactionData.GetPool().FindAll().Single().Hash);
+            Assert.Equal(counted, MempoolEvictionUtility.GetAdmissionStats().sizeBytes); // not counted twice
+        }
+
+        [Fact]
+        public void ACopyWithTheSameHashButAnotherSignature_IsRefused_AndThePooledOneStays()
+        {
+            var tx = Send(1M);
+            Assert.True(MempoolEvictionUtility.TryAdmitAndInsert(tx, TransactionData.GetPool()));
+
+            var forged = JsonConvert.DeserializeObject<Transaction>(JsonConvert.SerializeObject(tx))!;
+            forged.Signature = "not-the-signature";
+            Assert.False(MempoolEvictionUtility.TryAdmitAndInsert(forged, TransactionData.GetPool()));
+
+            var recased = JsonConvert.DeserializeObject<Transaction>(JsonConvert.SerializeObject(tx))!;
+            recased.Hash = Flip(tx.Hash);
+            Assert.False(MempoolEvictionUtility.TryAdmitAndInsert(recased, TransactionData.GetPool()));
+
+            Assert.Equal(tx.Signature, TransactionData.GetPool().FindAll().Single().Signature);
+        }
+
+        [Fact]
+        public void ARefusedCopyThatDiffersFromThePooledTransaction_RemovesNothing()
+        {
+            var tx = Send(1M);
+            Assert.True(MempoolEvictionUtility.TryAdmitAndInsert(tx, TransactionData.GetPool()));
+
+            // Same hash and signature, other content: it fails validation, and its refusal is not the pooled transaction's.
+            var altered = JsonConvert.DeserializeObject<Transaction>(JsonConvert.SerializeObject(tx))!;
+            altered.Amount = 2M;
+            Assert.Equal(0, TransactionData.RemoveRefusedFromPool(TransactionData.GetPool(), altered));
+
+            Assert.Equal(tx.Hash, TransactionData.GetPool().FindAll().Single().Hash);
+        }
+
+        [Fact]
+        public void ARefusedCopyWithTheSameConcatenatedFields_SplitDifferently_RemovesNothing()
+        {
+            var tx = Send(1M, data: null!);
+            tx.UnlockTime = 1792235000;
+            Assert.True(MempoolEvictionUtility.TryAdmitAndInsert(tx, TransactionData.GetPool()));
+
+            var resplit = JsonConvert.DeserializeObject<Transaction>(JsonConvert.SerializeObject(tx))!;
+            resplit.Data = "1";
+            resplit.UnlockTime = 792235000;
+            Assert.Equal(tx.GetHashPreimage(), resplit.GetHashPreimage());
+            Assert.Equal(0, TransactionData.RemoveRefusedFromPool(TransactionData.GetPool(), resplit));
+
+            Assert.Equal(1, PoolCount());
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void ARefusedCopyWhoseSignatureOrHashDiffersOnlyInCase_RemovesNothing(bool signature)
+        {
+            var tx = Send(1M);
+            Assert.True(MempoolEvictionUtility.TryAdmitAndInsert(tx, TransactionData.GetPool()));
+
+            var recased = JsonConvert.DeserializeObject<Transaction>(JsonConvert.SerializeObject(tx))!;
+            if (signature) recased.Signature = Flip(tx.Signature);
+            else recased.Hash = Flip(tx.Hash);
+            Assert.Equal(0, TransactionData.RemoveRefusedFromPool(TransactionData.GetPool(), recased));
+
+            Assert.Equal(1, PoolCount());
+        }
+
+        private static string Flip(string s) => new string(s.Select(c => char.IsUpper(c) ? char.ToLowerInvariant(c) : char.ToUpperInvariant(c)).ToArray());
+
+        [Fact]
+        public void ARefusedCopyIdenticalToThePooledTransaction_RemovesIt()
+        {
+            var tx = Send(1M);
+            Assert.True(MempoolEvictionUtility.TryAdmitAndInsert(tx, TransactionData.GetPool()));
+
+            var same = JsonConvert.DeserializeObject<Transaction>(JsonConvert.SerializeObject(tx))!;
+            Assert.Equal(1, TransactionData.RemoveRefusedFromPool(TransactionData.GetPool(), same));
+            Assert.Equal(0, PoolCount());
+        }
+
+        [Fact]
         public void EvictionThatCannotMakeRoom_EvictsNothing()
         {
             Pool("c-old", TransactionRating.C, 1);
@@ -278,6 +372,80 @@ namespace VerifiedXCore.Tests
             var rating = TransactionRatingService.GetTransactionRating(Send(1M)).GetAwaiter().GetResult();
             Assert.Equal(TransactionRating.F, rating);
             Assert.All(TransactionData.GetPool().Find(x => x.FromAddress == _sender.Address), x => Assert.Equal(TransactionRating.E, x.TransactionRating));
+        }
+
+        private static void FillPool(TransactionRating rating, TransactionType type = TransactionType.TX, string? data = null, Func<int, string>? sender = null)
+        {
+            TransactionData.GetPool().InsertBulk(Enumerable.Range(0, Globals.MaxMempoolEntries).Select(i => new Transaction
+            {
+                Hash = $"full{i}", FromAddress = sender?.Invoke(i) ?? "x", ToAddress = "y", Amount = 1M, Fee = 1M, Timestamp = i,
+                TransactionType = type, Data = data, TransactionRating = rating,
+            }));
+            MempoolEvictionUtility.InvalidateAdmissionStats();
+        }
+
+        private static Transaction Reserve(string function) => new Transaction
+        {
+            Hash = Guid.NewGuid().ToString("N"), FromAddress = "xRBXowner", ToAddress = "xRBXowner", Amount = 0M, Fee = 1M, Timestamp = 1,
+            TransactionType = TransactionType.RESERVE, Data = JsonConvert.SerializeObject(new { Function = function, Hash = "pending" }),
+            TransactionRating = TransactionRating.A,
+        };
+
+        [Theory]
+        [InlineData("Recover()")]
+        [InlineData("CallBack()")]
+        public void AFullPoolOfSameRatedTransfers_StillAdmitsAReserveCallBackOrRecover(string function)
+        {
+            FillPool(TransactionRating.A);
+            var transfer = Send(1M);
+            transfer.TransactionRating = TransactionRating.A;
+            Assert.False(MempoolEvictionUtility.CheckAdmissionBounds(transfer).admit); // an ordinary transfer is refused, as before
+            Assert.True(MempoolEvictionUtility.RefusingWithoutScanFor(TransactionRating.A));
+
+            var (admit, reason) = MempoolEvictionUtility.CheckAdmissionBounds(Reserve(function));
+
+            Assert.True(admit, reason); // neither the same rating nor the no-room cache holds it out
+            Assert.True(PoolCount() < Globals.MaxMempoolEntries);
+        }
+
+        [Fact]
+        public void ADeadlineBoundTransaction_DoesNotDisplaceAnotherSendersProtectedOnes()
+        {
+            // Every sender within its protected share: nothing to displace.
+            FillPool(TransactionRating.A, TransactionType.RESERVE, JsonConvert.SerializeObject(new { Function = "CallBack()", Hash = "other" }), i => $"owner{i}");
+
+            Assert.False(MempoolEvictionUtility.CheckAdmissionBounds(Reserve("Recover()")).admit);
+            Assert.Equal(Globals.MaxMempoolEntries, PoolCount());
+        }
+
+        [Fact]
+        public void OneSendersCallbacksBeyondItsShare_CanBeDisplacedByAnotherOwners()
+        {
+            FillPool(TransactionRating.A, TransactionType.RESERVE, JsonConvert.SerializeObject(new { Function = "CallBack()", Hash = "other" }), _ => "xRBXhog");
+
+            var (admit, reason) = MempoolEvictionUtility.CheckAdmissionBounds(Reserve("Recover()"));
+
+            Assert.True(admit, reason);
+            Assert.True(PoolCount() < Globals.MaxMempoolEntries);
+            Assert.True(PoolCount() >= MempoolEvictionUtility.ProtectedPerSender); // the hog's earliest share stays
+            for (var i = 0; i < MempoolEvictionUtility.ProtectedPerSender; i++)
+            {
+                var earliest = $"full{i}";
+                Assert.NotNull(TransactionData.GetPool().FindOne(x => x.Hash == earliest));
+            }
+        }
+
+        [Fact]
+        public void OnlyCallBackRecoverWithdrawalVotesAndAttestations_AreDeadlineBound()
+        {
+            Assert.True(MempoolEvictionUtility.IsDeadlineBound(Reserve("Recover()")));
+            Assert.True(MempoolEvictionUtility.IsDeadlineBound(new Transaction { TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_CANCEL }));
+            Assert.True(MempoolEvictionUtility.IsDeadlineBound(new Transaction { TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_VOTE }));
+            foreach (var attestation in Enum.GetValues<TransactionType>().Where(VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType))
+                Assert.True(MempoolEvictionUtility.IsDeadlineBound(new Transaction { TransactionType = attestation }));
+            Assert.False(MempoolEvictionUtility.IsDeadlineBound(Reserve("Register()")));
+            Assert.False(MempoolEvictionUtility.IsDeadlineBound(new Transaction { TransactionType = TransactionType.RESERVE, Data = "[\"not an object\"]" }));
+            Assert.False(MempoolEvictionUtility.IsDeadlineBound(Send(1M)));
         }
 
         [Fact]

@@ -79,6 +79,7 @@
          .NET native loader probes the app directory by per-OS filename (no RID layout). -->
     <None Include="Plonk\win\plonk_ffi.dll" Link="plonk_ffi.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </None>
     <!-- x64 .so excluded on linux-arm64 publishes: the arm rule below links the SAME output
          filename (libplonk_ffi.so) and the two must not collide (re-audit 9 Oct 2026: arm64 shipped the x86-64 file). -->
@@ -93,6 +94,7 @@
     </None>
     <None Include="Plonk\mac\libplonk_ffi.dylib" Link="libplonk_ffi.dylib">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </None>
     <None Include="Frost\win\frost_ffi.dll" Link="frost_ffi.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

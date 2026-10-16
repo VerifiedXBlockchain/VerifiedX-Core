@@ -1,3 +1,4 @@
+using System.Threading.Tasks;
 using VerifiedXCore;
 using VerifiedXCore.P2P;
 using Xunit;
@@ -125,6 +126,79 @@ namespace VerifiedXCore.Tests
                 Assert.True(string.IsNullOrEmpty(Globals.ReportedIP), "one endpoint must not confirm an address on its own");
             }
             finally { Reset(); Globals.ReportedIP = ip; Globals.ReportedIPManuallySet = manual; }
+        }
+
+        [Fact]
+        public void AnAddressTwoPeersAgreedOn_IsReplacedWhenMorePeersConfirmAnother()
+        {
+            var (ip, manual) = (Globals.ReportedIP, Globals.ReportedIPManuallySet);
+            try
+            {
+                Reset();
+                P2PClient.RecordReportedIP("6.6.6.6", "203.0.113.1");
+                P2PClient.RecordReportedIP("6.6.6.6", "203.0.113.2");
+                Assert.Equal("6.6.6.6", Globals.ReportedIP);
+
+                P2PClient.RecordReportedIP("198.51.100.50", "203.0.113.3");
+                P2PClient.RecordReportedIP("198.51.100.50", "203.0.113.4");
+                Assert.Equal("6.6.6.6", Globals.ReportedIP); // a tie keeps the current address
+
+                P2PClient.RecordReportedIP("198.51.100.50", "203.0.113.5");
+                Assert.Equal("198.51.100.50", Globals.ReportedIP);
+                Assert.Equal(new[] { "198.51.100.50" }, P2PClient.OwnAddressesToSkip());
+            }
+            finally { Reset(); Globals.ReportedIP = ip; Globals.ReportedIPManuallySet = manual; }
+        }
+
+        [Fact]
+        public void AnAddressWhoseConfirmationsAreWithdrawn_IsDropped_AndAConfiguredOneNeverIs()
+        {
+            var (ip, manual) = (Globals.ReportedIP, Globals.ReportedIPManuallySet);
+            try
+            {
+                Reset();
+                P2PClient.RecordReportedIP("6.6.6.6", "203.0.113.1");
+                P2PClient.RecordReportedIP("6.6.6.6", "203.0.113.2");
+                Assert.Equal("6.6.6.6", Globals.ReportedIP);
+
+                P2PClient.RecordReportedIP("7.7.7.7", "203.0.113.1"); // one of the two now reports another address
+                Assert.True(string.IsNullOrEmpty(Globals.ReportedIP));
+
+                Reset();
+                Globals.ReportedIP = "198.51.100.60";
+                Globals.ReportedIPManuallySet = true;
+                P2PClient.RecordReportedIP("6.6.6.6", "203.0.113.1");
+                P2PClient.RecordReportedIP("6.6.6.6", "203.0.113.2");
+                P2PClient.RecordReportedIP("6.6.6.6", "203.0.113.3");
+                Assert.Equal("198.51.100.60", Globals.ReportedIP);
+            }
+            finally { Reset(); Globals.ReportedIP = ip; Globals.ReportedIPManuallySet = manual; }
+        }
+
+        [Fact]
+        public async Task APeerThatDisconnects_NoLongerConfirmsTheAddress()
+        {
+            var (ip, manual, adj) = (Globals.ReportedIP, Globals.ReportedIPManuallySet, Globals.AdjudicateAccount);
+            try
+            {
+                Reset();
+                Globals.AdjudicateAccount = null;
+                P2PClient.RecordReportedIP("6.6.6.6", "203.0.113.1");
+                P2PClient.RecordReportedIP("6.6.6.6", "203.0.113.2");
+                Assert.Equal("6.6.6.6", Globals.ReportedIP);
+
+                var gone = new VerifiedXCore.Models.NodeInfo { NodeIP = "203.0.113.2" };
+                Globals.Nodes[gone.NodeIP] = gone;
+                await P2PClient.RemoveNode(gone);
+
+                Assert.True(string.IsNullOrEmpty(Globals.ReportedIP)); // one connected peer is not a confirmation
+
+                // Connected peers that confirm another address now outweigh the votes of peers that left.
+                P2PClient.RecordReportedIP("198.51.100.70", "203.0.113.3");
+                P2PClient.RecordReportedIP("198.51.100.70", "203.0.113.4");
+                Assert.Equal("198.51.100.70", Globals.ReportedIP);
+            }
+            finally { Reset(); Globals.ReportedIP = ip; Globals.ReportedIPManuallySet = manual; Globals.AdjudicateAccount = adj; }
         }
     }
 }

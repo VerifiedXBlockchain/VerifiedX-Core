@@ -380,7 +380,7 @@ namespace VerifiedXCore.Services
                         Nonce = AccountStateTrei.GetNextNonce(fromAddress),
                         TransactionType = txType,
                         Data = txData,
-                        UnlockTime = rAccount != null ? TimeUtil.GetReserveTime(unlockTime) : null
+                        UnlockTime = rAccount != null ? TimeUtil.GetReserveSendTime(unlockTime) : null
                     };
 
                     scTx.Fee = FeeCalcService.CalculateTXFee(scTx);

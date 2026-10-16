@@ -40,8 +40,10 @@ namespace VerifiedXCore.Bitcoin.Services
             if (BitcoinFeePolicy.WalletIsLocked()) return null;
             if (!account.IsEncrypted)
             {
+                // An encrypted wallet hands out a key not yet sealed only under its own password, not any password in memory.
+                if (Globals.IsWalletEncrypted && VerifiedPassword() == null) return null;
                 var plain = account.PrivateKey;
-                if (Globals.IsWalletEncrypted && VerifiedPassword() != null && TrySealAndSave(account))
+                if (Globals.IsWalletEncrypted && TrySealAndSave(account))
                 {
                     // VX-13 (follow-up): seal the caller's copy too. Send/RBF write this object back after signing
                     // (balance update), which put the plaintext key back over the freshly sealed record.

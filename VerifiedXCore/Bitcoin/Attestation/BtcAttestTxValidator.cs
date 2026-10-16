@@ -34,20 +34,30 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <param name="height">The block's height in block validation; the height it would be mined at (tip + 1) at admission.</param>
         /// <param name="admission">True when the transaction is being judged for the mempool or for a block proposal,
         /// false in block validation. Only admission reads the mempool.</param>
+
+        /// <summary>The envelope every attestation transaction has: no sender, no value, no fee, the sentinel signature. Null when it has it.</summary>
+        internal static string? EnvelopeError(Transaction tx)
+        {
+            if (tx.FromAddress != BtcAttestRules.SystemAddress || tx.ToAddress != BtcAttestRules.SystemAddress)
+                return $"A Bitcoin attestation transaction is from and to {BtcAttestRules.SystemAddress}.";
+            if (tx.Amount != 0M || tx.Fee != 0M || tx.Nonce != 0)
+                return "A Bitcoin attestation transaction carries no amount, no fee and nonce 0.";
+            if (tx.Signature != BtcAttestRules.SignatureSentinel)
+                return "A Bitcoin attestation transaction carries the attestation sentinel as its signature.";
+            if (tx.UnlockTime != null)
+                return "A Bitcoin attestation transaction has no unlock time.";
+            return null;
+        }
+
         public static async Task<(bool, string)> Verify(Transaction tx, long height, bool blockDownloads, bool admission = false, long? blockTimestamp = null)
         {
             if (!BtcAttestRules.Recording(height))
                 return (false, "Bitcoin attestation transactions are not accepted before the recording height.");
 
             // ── The envelope: no sender, no value, no fee ────────────────────────────────────────────────────
-            if (tx.FromAddress != BtcAttestRules.SystemAddress || tx.ToAddress != BtcAttestRules.SystemAddress)
-                return (false, $"A Bitcoin attestation transaction is from and to {BtcAttestRules.SystemAddress}.");
-            if (tx.Amount != 0M || tx.Fee != 0M || tx.Nonce != 0)
-                return (false, "A Bitcoin attestation transaction carries no amount, no fee and nonce 0.");
-            if (tx.Signature != BtcAttestRules.SignatureSentinel)
-                return (false, "A Bitcoin attestation transaction carries the attestation sentinel as its signature.");
-            if (tx.UnlockTime != null)
-                return (false, "A Bitcoin attestation transaction has no unlock time.");
+            var envelopeError = EnvelopeError(tx);
+            if (envelopeError != null)
+                return (false, envelopeError);
             if (string.IsNullOrEmpty(tx.Data))
                 return (false, "A Bitcoin attestation transaction carries data.");
             if (!TransactionValidatorService.VerifyTXSize(tx, BtcAttestRules.MaxReportTxBytes))

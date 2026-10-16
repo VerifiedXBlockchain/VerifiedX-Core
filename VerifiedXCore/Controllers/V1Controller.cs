@@ -264,6 +264,8 @@ namespace VerifiedXCore.Controllers
 
                 if (!string.IsNullOrEmpty(password))
                 {
+                    if (VerifiedXCore.Services.WalletEncryptionService.RefusesUnlock(password))
+                        return JsonConvert.SerializeObject(new { Result = "Fail", Message = "Password was incorrect. Please attempt again" });
                     Globals.EncryptPassword = password.ToSecureString();
                     var account = AccountData.GetSingleAccount(Globals.ValidatorAddress);
                     BigInteger b1 = BigInteger.Parse(account.GetKey, NumberStyles.AllowHexSpecifier);//converts hex private key into big int.
@@ -465,6 +467,11 @@ namespace VerifiedXCore.Controllers
             {
                 if (!string.IsNullOrEmpty(password))
                 {
+                    if (VerifiedXCore.Services.WalletEncryptionService.RefusesUnlock(password))
+                    {
+                        password = "";
+                        return JsonConvert.SerializeObject(new { Result = "Fail", Message = "Password was incorrect. Please attempt again" });
+                    }
                     Globals.EncryptPassword = password.ToSecureString();
                     var accounts = AccountData.GetAccounts();
                     if (accounts != null)

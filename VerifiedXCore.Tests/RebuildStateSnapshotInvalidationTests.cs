@@ -74,6 +74,48 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task ARebuildStoppedAfterTheWipe_LeavesTheStateMarkedUnsynced()
+        {
+            PutAccount("addrA", 5m, 50);
+            Assert.True(StateTreiStatusService.IsSynced());
+
+            // What a crash during the replay leaves on disk: the status as it stands once the old state is gone.
+            StateTreiStatus? afterWipe = null;
+            BlockRollbackUtility.StateWipedForTests = () => afterWipe = StateTreiStatusService.GetStatus();
+            try { await BlockRollbackUtility.ResetTreis(); }
+            finally { BlockRollbackUtility.StateWipedForTests = null; }
+
+            Assert.False(afterWipe!.IsSynced); // never the old IsSynced=true over partial state
+            Assert.True(afterWipe.RebuildInProgress);
+            Assert.NotEqual(true, StateTreiStatusService.GetStatus()?.RebuildInProgress); // the rebuild ended, so it is no longer in progress
+        }
+
+        [Fact]
+        public void ARebuildStillInProgressAtStartup_StopsTheNode_UntilARebuildCompletes()
+        {
+            try
+            {
+                StateTreiStatusService.SetRebuildStarted(); // as a crash mid-replay leaves it
+                SnapshotRestoreUtility.RecallStateDestroyed();
+                Assert.True(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
+
+                // A later failure reason does not hide an interrupted rebuild's partial state from the next start...
+                SnapshotRestoreUtility.ClearStateDestroyed();
+                StateTreiStatusService.SetRebuildStarted();
+                StateTreiStatusService.SetRestoreDestroyed(false);
+                SnapshotRestoreUtility.RecallStateDestroyed();
+                Assert.True(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
+
+                // ...and a completed rebuild clears it.
+                SnapshotRestoreUtility.ClearStateDestroyed();
+                StateTreiStatusService.SetSynced(100);
+                SnapshotRestoreUtility.RecallStateDestroyed();
+                Assert.False(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
+            }
+            finally { SnapshotRestoreUtility.ClearStateDestroyed(); }
+        }
+
+        [Fact]
         public async Task AfterRebuild_NextCycleCapturesTheRebuiltRows()
         {
             PutAccount("addrA", 5m, 50);
@@ -88,6 +130,27 @@ namespace VerifiedXCore.Tests
             var slot = StateSnapshotService.PickSlotForRestore(110);
             Assert.NotNull(slot);
             Assert.Equal(7m, SlotBalance(slot!.SlotId, "addrA"));
+        }
+
+        /// <summary>
+        /// No snapshot is taken while the withdrawal store is being rebuilt: a row it has put back reads "requested" until
+        /// the rebuild brings it to how its withdrawal ended, and a restore of such a snapshot would bring it back open.
+        /// </summary>
+        [Fact]
+        public async Task WhileTheWithdrawalStoreIsRebuilt_NoSnapshotIsTaken()
+        {
+            PutAccount("addrA", 5m, 50);
+            try
+            {
+                VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.SetRunningForTests(true);
+                await StateSnapshotService.UpdateCycleAsync(100, "h100");
+                await StateSnapshotService.UpdateAnchorCycleAsync(100, "h100", SnapshotManifest.AnchorSlot100);
+                Assert.False(StateSnapshotService.HasValidSlot());
+            }
+            finally { VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.SetRunningForTests(false); }
+
+            await StateSnapshotService.UpdateCycleAsync(110, "h110");
+            Assert.NotNull(StateSnapshotService.PickSlotForRestore(110));
         }
     }
 }

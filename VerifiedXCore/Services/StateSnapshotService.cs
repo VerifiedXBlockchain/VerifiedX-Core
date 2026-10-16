@@ -179,7 +179,11 @@ namespace VerifiedXCore.Services
             return null;
         }
 
-        /// <summary>Marks slots above the given height Invalid (their state includes rolled-back blocks).</summary>
+        /// <summary>
+        /// Marks slots above the given height Invalid (their state includes rolled-back blocks) and drops the deletion
+        /// records above it. Those deletions happened on the discarded blocks; a later diff cycle applying one would remove
+        /// a row that is live on the chain that replaced them. Records at or below the height stay: valid slots diff from them.
+        /// </summary>
         public static void InvalidateAbove(long height)
         {
             var col = SnapshotManifest.GetManifest();
@@ -190,10 +194,50 @@ namespace VerifiedXCore.Services
                 slot.UpdatedUtc = DateTime.UtcNow;
                 col.Upsert(slot);
             }
+            DropDeletionRecordsAbove(height);
+        }
+
+        /// <summary>
+        /// Drops the deletion records above <paramref name="height"/>. Called with the stored tip at startup too: no deletion
+        /// happens above the tip, so any record there is left from a rollback that did not finish dropping it.
+        /// </summary>
+        /// <summary>
+        /// On the first start of a build whose snapshot format is newer than a valid slot's: invalidates every slot (each is
+        /// rebuilt by a full copy anyway) and drops every deletion record. Records written before this build may be left
+        /// from a rollback that never dropped them, and no record is needed once no slot is usable. Later starts find no
+        /// older slot and do nothing.
+        /// </summary>
+        public static void ResetAfterFormatChange()
+        {
+            if (!GetSlots().Any(x => x.Status == SnapshotSlotStatus.Valid && x.SchemaVersion < SnapshotManifest.CurrentSchemaVersion))
+                return;
+            InvalidateAbove(-1);
+            LogUtility.Log("[Snapshot] Slots from an older snapshot format were invalidated and their deletion records dropped; the next cycles rebuild them.", "StateSnapshotService");
+        }
+
+        public static void DropDeletionRecordsAbove(long height)
+        {
+            StateTombstone.GetTombstones()?.DeleteMany(x => x.Height > height);
             TryCheckpoint();
         }
 
         // ── Snapshot creation ───────────────────────────────────────────────────────────────
+
+        /// <summary>A rebuild runs, or one began, while this slot was copied (a copy outside the block lock, at start).</summary>
+        private static bool RebuildOverlapped(long height, long rebuildsBefore) =>
+            WithdrawalStoreBeingRebuilt(height) || VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.RebuildsStarted != rebuildsBefore;
+
+        /// <summary>
+        /// While the withdrawal-store rebuild runs, a row it has put back reads "requested" until the rebuild brings it to
+        /// how its withdrawal ended: a snapshot then would keep it open, and a restore of it bring it back so. Asked when a
+        /// cycle starts, and again before its slot is marked valid (a rebuild may have started while it copied).
+        /// </summary>
+        private static bool WithdrawalStoreBeingRebuilt(long height)
+        {
+            if (!VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning) return false;
+            LogUtility.Log($"[Snapshot] Skipped cycle at {height}: the withdrawal store is being rebuilt.", "StateSnapshotService");
+            return true;
+        }
 
         /// <summary>
         /// Per-cadence roll-forward, called synchronously from the block commit path (inside the
@@ -224,6 +268,9 @@ namespace VerifiedXCore.Services
                 LogUtility.Log($"[Snapshot] Skipped cycle at {height}: TreisUpdating was true.", "StateSnapshotService");
                 return Task.CompletedTask;
             }
+            var rebuildsBefore = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.RebuildsStarted;
+            if (WithdrawalStoreBeingRebuilt(height))
+                return Task.CompletedTask;
 
             // Never snapshot state that is flagged dirty/incomplete — a snapshot of corrupt
             // state would just make recovery restore the corruption. A MISSING record is clean:
@@ -251,7 +298,9 @@ namespace VerifiedXCore.Services
                 var slot = slots.FirstOrDefault(x => !IsUsable(x))
                         ?? slots.OrderBy(x => x.Height).First();
 
-                var fullCopy = !IsUsable(slot) || slot.Height <= 0;
+                // A slot whose anchor block is gone or replaced (a fast rollback across its height) holds a dead branch's
+                // state: a diff from its height would keep that state and re-anchor it to the canonical block. Rebuild it.
+                var fullCopy = !IsUsable(slot) || slot.Height <= 0 || string.IsNullOrEmpty(slot.BlockHash) || !VerifySlotAnchor(slot);
                 var previousHeight = slot.Height;
 
                 MarkSlot(slot, SnapshotSlotStatus.Updating, previousHeight, slot.BlockHash);
@@ -272,7 +321,7 @@ namespace VerifiedXCore.Services
                 {
                     try { anchorHash = BlockchainData.GetBlockByHeight(height)?.Hash; } catch { }
                 }
-                MarkSlot(slot, SnapshotSlotStatus.Valid, height, anchorHash);
+                MarkSlot(slot, RebuildOverlapped(height, rebuildsBefore) ? SnapshotSlotStatus.Invalid : SnapshotSlotStatus.Valid, height, anchorHash);
                 PruneTombstones();
 
                 sw.Stop();
@@ -305,6 +354,8 @@ namespace VerifiedXCore.Services
             if (height < MinSnapshotHeight) return Task.CompletedTask;
             if (DbContext.DB_Snapshot == null) return Task.CompletedTask;
             if (Globals.TreisUpdating) return Task.CompletedTask;
+            var rebuildsBefore = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.RebuildsStarted;
+            if (WithdrawalStoreBeingRebuilt(height)) return Task.CompletedTask;
 
             var treiStatus = StateTreiStatusService.GetStatus();
             if (treiStatus != null && !treiStatus.IsSynced)
@@ -324,7 +375,9 @@ namespace VerifiedXCore.Services
                     col.Upsert(slot);
                 }
 
-                var fullCopy = !IsUsable(slot) || slot.Height <= 0;
+                // A slot whose anchor block is gone or replaced (a fast rollback across its height) holds a dead branch's
+                // state: a diff from its height would keep that state and re-anchor it to the canonical block. Rebuild it.
+                var fullCopy = !IsUsable(slot) || slot.Height <= 0 || string.IsNullOrEmpty(slot.BlockHash) || !VerifySlotAnchor(slot);
                 var previousHeight = slot.Height;
 
                 MarkSlot(slot, SnapshotSlotStatus.Updating, previousHeight, slot.BlockHash);
@@ -342,7 +395,7 @@ namespace VerifiedXCore.Services
                 {
                     try { anchorHash = BlockchainData.GetBlockByHeight(height)?.Hash; } catch { }
                 }
-                MarkSlot(slot, SnapshotSlotStatus.Valid, height, anchorHash);
+                MarkSlot(slot, RebuildOverlapped(height, rebuildsBefore) ? SnapshotSlotStatus.Invalid : SnapshotSlotStatus.Valid, height, anchorHash);
 
                 sw.Stop();
                 LogUtility.Log(

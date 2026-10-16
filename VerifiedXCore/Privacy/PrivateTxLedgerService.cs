@@ -21,16 +21,35 @@ namespace VerifiedXCore.Privacy
             if (!PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _) || payload == null || !payload.TryValidateStructure(out _))
                 return;
 
+            if (NamesAnotherPoolThanVfx(tx, payload, block.Height))
+            {
+                LogUtility.Log($"VFX private transaction {tx.Hash} at block {block.Height} names the {payload.Asset} pool; it has no effect.", "PrivateTxLedgerService.ApplyBlockTransactionAsync()");
+                return;
+            }
+
             var db = privacyDb ?? PrivacyDbContext.GetPrivacyDb();
             ApplyPrivacyStore(tx, block, payload, db);
             await ApplyTransparentLedgerAsync(tx, block, payload).ConfigureAwait(false);
         }
+
+        /// <summary>
+        /// From Globals.PathAuditRulesHeight a VFX private transaction names the VFX pool exactly, and validation refuses
+        /// one that does not (PrivateTransactionValidatorService.EncodingRefusal). Applying one anyway would be judged
+        /// against another pool's supply and paid in VFX, so it is applied to nothing, pools or ledger.
+        /// </summary>
+        private static bool NamesAnotherPoolThanVfx(Transaction tx, PrivateTxPayload payload, long height) =>
+            height >= Globals.PathAuditRulesHeight
+            && (tx.TransactionType == TransactionType.VFX_SHIELD || tx.TransactionType == TransactionType.VFX_UNSHIELD
+                || tx.TransactionType == TransactionType.VFX_PRIVATE_TRANSFER)
+            && !string.Equals(payload.Asset, "VFX", StringComparison.Ordinal);
 
         /// <summary>Applies nullifiers, marks spent commitments, appends outputs, refreshes pool Merkle row.</summary>
         public static void ApplyPrivacyStore(Transaction tx, Block block, PrivateTxPayload payload, LiteDatabase db)
         {
             var height = block.Height;
             var ts = tx.Timestamp;
+            if (NamesAnotherPoolThanVfx(tx, payload, height))
+                return;
 
             // A private transaction in the proof-rules epoch that does not have the epoch's shape was mined under the old
             // rules by a node that had not upgraded (current validation refuses it: PrivateTxProofRules, and the reset block

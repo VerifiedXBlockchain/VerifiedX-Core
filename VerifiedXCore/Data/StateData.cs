@@ -574,10 +574,10 @@ namespace VerifiedXCore.Data
                                             AddNewBTCAdnr(tx);
                                             break;
                                         case "BTCAdnrTransfer()":
-                                            await TransferBTCAdnr(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
+                                            await TransferBTCAdnr(tx, block.Height); // NEW-12: awaited (ran concurrently with the rest of the block)
                                             break;
                                         case "BTCAdnrDelete()":
-                                            DeleteBTCAdnr(tx);
+                                            DeleteBTCAdnr(tx, block.Height);
                                             break;
                                         default:
                                             break;
@@ -1802,7 +1802,12 @@ namespace VerifiedXCore.Data
         /// sender's name in one block passes validation, which reads the state before the block, and found nothing at
         /// apply, so every node spun on that block for good (fifth review, round 26). A name that is not there is left.
         /// </summary>
-        private static async Task TransferBTCAdnr(Transaction tx)
+        /// <remarks>
+        /// From <see cref="Globals.BtcNameOneRecordPerAddressHeight"/> a transfer to an address that already holds a name
+        /// (another transfer to it earlier in the block) is left, so an address keeps one record, and the name moved is the
+        /// sender's own (validation checks the sender holds one there, but an address could hold two records before).
+        /// </remarks>
+        internal static async Task TransferBTCAdnr(Transaction tx, long height)
         {
             try
             {
@@ -1812,10 +1817,20 @@ namespace VerifiedXCore.Data
                 var BTCFromAddress = (string?)jobj["BTCFromAddress"];
 
                 var adnrs = BitcoinAdnr.GetBitcoinAdnr();
-                var adnr = adnrs?.FindOne(x => x.BTCAddress == BTCFromAddress);
+                var ownOnly = height >= Globals.BtcNameOneRecordPerAddressHeight;
+                var adnr = height >= Globals.BtcNameSignerOwnsAddressHeight
+                    ? (adnrs == null ? null : SignedBtcNameRecord(adnrs, BTCFromAddress, tx.FromAddress, (string?)jobj["BTCToMessage"]))
+                    : ownOnly
+                        ? adnrs?.FindOne(x => x.BTCAddress == BTCFromAddress && x.RBXAddress == tx.FromAddress)
+                        : adnrs?.FindOne(x => x.BTCAddress == BTCFromAddress);
                 if (adnr == null)
                 {
                     ErrorLogUtility.LogError($"BTC ADNR transfer {tx.Hash}: no name for {BTCFromAddress} (moved or deleted earlier in the block); nothing applied.", "StateData.TransferBTCAdnr()");
+                    return;
+                }
+                if (height >= Globals.BtcNameOneRecordPerAddressHeight && adnrs!.FindOne(x => x.BTCAddress == BTCToAddress) != null)
+                {
+                    ErrorLogUtility.LogError($"BTC ADNR transfer {tx.Hash}: {BTCToAddress} already holds a name (moved there earlier in the block); nothing applied.", "StateData.TransferBTCAdnr()");
                     return;
                 }
                 adnr.BTCAddress = BTCToAddress;
@@ -1826,7 +1841,23 @@ namespace VerifiedXCore.Data
             catch { }
         }
 
-        private static void DeleteBTCAdnr(Transaction tx)
+        /// <summary>
+        /// From <see cref="Globals.BtcNameSignerOwnsAddressHeight"/> a transfer moves the sender's record at the address
+        /// whose name the receiver signed, so validation and apply agree on the record even when the address holds two.
+        /// </summary>
+        internal static BitcoinAdnr? SignedBtcNameRecord(LiteDB.ILiteCollection<BitcoinAdnr> adnrs, string? btcAddress, string owner, string? acceptMessage)
+        {
+            var signedName = Bitcoin.Services.BtcNameSignatures.SignedName(acceptMessage);
+            if (signedName == null) return null;
+            return adnrs.Find(x => x.BTCAddress == btcAddress && x.RBXAddress == owner)
+                .FirstOrDefault(x => string.Equals(x.Name, signedName, StringComparison.OrdinalIgnoreCase));
+        }
+
+        /// <summary>
+        /// Deletes a BTC name. From <see cref="Globals.BtcNameOneRecordPerAddressHeight"/> only the sender's own record at the
+        /// address goes; before, every record there did.
+        /// </summary>
+        internal static void DeleteBTCAdnr(Transaction tx, long height)
         {
             try
             {
@@ -1834,7 +1865,10 @@ namespace VerifiedXCore.Data
                 {
                     var jobj = JObject.Parse(tx.Data);
                     var BTCFromAddress = (string?)jobj["BTCFromAddress"];
-                    BitcoinAdnr.DeleteAdnr(BTCFromAddress);
+                    if (height >= Globals.BtcNameOneRecordPerAddressHeight)
+                        BitcoinAdnr.DeleteAdnr(BTCFromAddress, tx.FromAddress);
+                    else
+                        BitcoinAdnr.DeleteAdnr(BTCFromAddress);
                 }
                 
             }
@@ -1997,11 +2031,22 @@ namespace VerifiedXCore.Data
             catch { }
             
         }
+        /// <summary>
+        /// The call of a contract transaction whose apply reads only the array form. Any other shape gives null, and the apply
+        /// then has no effect, as it always had (it threw before reading anything), without reporting the block's state as
+        /// failed on every node.
+        /// </summary>
+        private static JToken? ArrayFormCall(Transaction tx)
+        {
+            try { return JsonConvert.DeserializeObject<JArray>(tx.Data)?[0] as JObject; }
+            catch { return null; }
+        }
+
         private static void TransferSmartContract(Transaction tx)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-            var scData = scDataArray[0];
+            var scData = ArrayFormCall(tx);
+            if (scData == null) return;
 
             var function = (string?)scData["Function"];
             var data = (string?)scData["Data"];
@@ -2052,8 +2097,8 @@ namespace VerifiedXCore.Data
         private static void BurnSmartContract(Transaction tx)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-            var scData = scDataArray[0];
+            var scData = ArrayFormCall(tx);
+            if (scData == null) return;
             var function = (string?)scData["Function"];
             var data = (string?)scData["Data"];
             var scUID = (string?)scData["ContractUID"];
@@ -2069,8 +2114,8 @@ namespace VerifiedXCore.Data
         private static void EvolveSC(Transaction tx)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-            var scData = scDataArray[0];
+            var scData = ArrayFormCall(tx);
+            if (scData == null) return;
 
             var data = (string?)scData["Data"];
             var scUID = (string?)scData["ContractUID"];
@@ -2088,8 +2133,8 @@ namespace VerifiedXCore.Data
         private static void DevolveSC(Transaction tx)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-            var scData = scDataArray[0];
+            var scData = ArrayFormCall(tx);
+            if (scData == null) return;
 
             var data = (string?)scData["Data"];
             var scUID = (string?)scData["ContractUID"];
@@ -2107,8 +2152,8 @@ namespace VerifiedXCore.Data
         private static void EvolveDevolveSpecific(Transaction tx)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-            var scData = scDataArray[0];
+            var scData = ArrayFormCall(tx);
+            if (scData == null) return;
 
             var data = (string?)scData["Data"];
             var scUID = (string?)scData["ContractUID"];

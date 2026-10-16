@@ -880,11 +880,7 @@ namespace VerifiedXCore.P2P
                                 {
                                     try
                                     {
-                                        // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
-                                        // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
-                                        // carrying a real transaction's hash remove it (and free its claims) during propagation.
-                                        if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
-                                            TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                        TransactionData.RemoveRefusedFromPool(mempool, txReceived); // only the row identical to this copy
                                     }
                                     catch (Exception ex)
                                     {
@@ -945,11 +941,7 @@ namespace VerifiedXCore.P2P
                                     VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(txReceived.Hash); // verified but not pooled: claims nothing (round 32)
                                     try
                                     {
-                                        // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
-                                        // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
-                                        // carrying a real transaction's hash remove it (and free its claims) during propagation.
-                                        if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
-                                            TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                        TransactionData.RemoveRefusedFromPool(mempool, txReceived); // only the row identical to this copy
                                     }
                                     catch (Exception ex)
                                     {
@@ -1011,11 +1003,7 @@ namespace VerifiedXCore.P2P
                             {
                                 try
                                 {
-                                    // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
-                                    // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
-                                    // carrying a real transaction's hash remove it (and free its claims) during propagation.
-                                    if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
-                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                    TransactionData.RemoveRefusedFromPool(mempool, txReceived); // only the row identical to this copy
                                 }
                                 catch { }
 
@@ -1077,11 +1065,7 @@ namespace VerifiedXCore.P2P
                                 VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(txReceived.Hash); // verified but not pooled: claims nothing (round 32)
                                 try
                                 {
-                                    // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
-                                    // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
-                                    // carrying a real transaction's hash remove it (and free its claims) during propagation.
-                                    if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
-                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                    TransactionData.RemoveRefusedFromPool(mempool, txReceived); // only the row identical to this copy
                                 }
                                 catch { }
 

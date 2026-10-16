@@ -406,14 +406,45 @@ namespace VerifiedXCore.Bitcoin.Controllers
         }
 
         /// <summary>
+        /// Sign, as the receiver, that a BTC name may be transferred to one of this wallet's Bitcoin addresses for a VFX owner.
+        /// Give the Message and Signature to the sender for TransferAdnr.
+        /// </summary>
+        /// <param name="btcAddress">This wallet's Bitcoin address that will receive the name</param>
+        /// <param name="name">The name, with or without .btc</param>
+        /// <param name="newOwner">The VFX address that will own the name</param>
+        /// <returns></returns>
+        [HttpGet("SignAdnrTransferAcceptance/{btcAddress}/{name}/{newOwner}")]
+        public async Task<string> SignAdnrTransferAcceptance(string btcAddress, string name, string newOwner)
+        {
+            try
+            {
+                if (!AddressValidateUtility.ValidateAddress(newOwner))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "New owner is not a valid VFX address." });
+
+                var result = BitcoinAdnr.SignTransferAcceptance(btcAddress, name, newOwner);
+                if (result.Error != null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = result.Error });
+
+                return JsonConvert.SerializeObject(new { Success = true, Message = "Signed.", BTCToMessage = result.Message, BTCToSignature = result.Signature });
+            }
+            catch (Exception ex)
+            {
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"Unknown Error: {ApiErrorText.For(ex)}" });
+            }
+        }
+
+        /// <summary>
         /// Transfer ADNR from one address to another
         /// </summary>
         /// <param name="toAddress"></param>
         /// <param name="btcFromAddress"></param>
         /// <param name="btcToAddress"></param>
+        /// <param name="btcToMessage">The receiver's acceptance message (from SignAdnrTransferAcceptance). Not needed when btcToAddress's key is in this wallet.</param>
+        /// <param name="btcToSignature">The receiver's acceptance signature over btcToMessage.</param>
         /// <returns></returns>
         [HttpGet("TransferAdnr/{toAddress}/{btcFromAddress}/{btcToAddress}")]
-        public async Task<string> TransferAdnr(string toAddress, string btcFromAddress, string btcToAddress)
+        public async Task<string> TransferAdnr(string toAddress, string btcFromAddress, string btcToAddress,
+            [FromQuery] string? btcToMessage = null, [FromQuery] string? btcToSignature = null)
         {
             string output = "";
 
@@ -443,7 +474,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                             var toAddrAdnr = adnr.FindOne(x => x.BTCAddress == btcToAddress);
                             if (toAddrAdnr == null)
                             {
-                                var result = await BitcoinAdnr.TransferAdnrTx(addressFrom, toAddress, btcToAddress, btcFromAddress);
+                                var result = await BitcoinAdnr.TransferAdnrTx(addressFrom, toAddress, btcToAddress, btcFromAddress, btcToMessage, btcToSignature);
                                 if (result.Item1 != null)
                                 {
                                     output = JsonConvert.SerializeObject(new { Success = true, Message = $"Transaction has been broadcasted.", Hash = result.Item1.Hash });
