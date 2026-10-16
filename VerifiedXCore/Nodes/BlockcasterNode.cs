@@ -4697,6 +4697,7 @@ namespace VerifiedXCore.Nodes
                 var rollbackResult = await BlockRollbackUtility.RollbackBlocksFast(1);
                 if (rollbackResult)
                 {
+                    ForkRecoveryUtility.DropApprovalOfRolledBack(stuckHeight, preRecoveryHash);
                     CasterLogUtility.Log(
                         $"FORK-RECOVERY: Rollback succeeded. New lastBlock height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
                         "FORK-RECOVERY");

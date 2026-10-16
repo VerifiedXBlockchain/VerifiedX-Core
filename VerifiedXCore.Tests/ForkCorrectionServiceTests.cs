@@ -93,13 +93,13 @@ namespace VerifiedXCore.Tests
             Assert.Empty(_reorgs);
         }
 
-        private static Transaction SignedTransfer()
+        private static Transaction SignedTransfer(decimal amount = 2.5M)
         {
             var key = new PrivateKey("secp256k1");
             var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
             var tx = new Transaction
             {
-                Timestamp = 1_700_000_000, FromAddress = AccountData.GetHumanAddress(pub), ToAddress = "xRecipient", Amount = 2.5M,
+                Timestamp = 1_700_000_000, FromAddress = AccountData.GetHumanAddress(pub), ToAddress = "xRecipient", Amount = amount,
                 Fee = 0.00001M, Nonce = 0, TransactionType = TransactionType.TX,
             };
             tx.Build();
@@ -144,6 +144,48 @@ namespace VerifiedXCore.Tests
             ForkCorrectionService.HasValidCertificate = _ => true;
             var block = SignedBlockWith(100, SignedTransfer(), tx => tx.Amount = 2500M);
 
+            await ForkCorrectionService.HandleForkCorrectionAsync(100, JsonConvert.SerializeObject(block), "1.2.3.4");
+
+            Assert.Empty(_reorgs);
+        }
+
+        private static Transaction SignedShield()
+        {
+            var key = new PrivateKey("secp256k1");
+            var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+            var tx = new Transaction
+            {
+                Timestamp = 1_700_000_000, FromAddress = AccountData.GetHumanAddress(pub), ToAddress = VerifiedXCore.Privacy.PrivacyConstants.ShieldedPoolAddress,
+                Amount = 5.0M, Fee = 0.00001M, Nonce = 0, TransactionType = TransactionType.VFX_SHIELD, Data = "{}", // one decimal place, as wallets build it
+            };
+            tx.BuildPrivate(100);
+            tx.Signature = SignatureService.CreateSignature(tx.Hash, key, pub);
+            return tx;
+        }
+
+        [Theory]
+        [InlineData("zero-amount")]
+        [InlineData("attestation-signature")]
+        [InlineData("shield-recipient")]
+        public async Task AFieldOutsideTheHash_ChangedInACertifiedCorrection_IsRefusedBeforeAnyRollback(string field)
+        {
+            ForkCorrectionService.HasValidCertificate = _ => true;
+            Transaction AsSigned() => field switch
+            {
+                "zero-amount" => SignedTransfer(amount: 0M), // VerifyTX re-hashes a carried fraction as 0
+                "attestation-signature" => VerifiedXCore.Bitcoin.Attestation.BtcAttestTxValidator.Create(TransactionType.VBTC_V2_BTC_REPORT, "{}", 1_700_000_000),
+                _ => SignedShield(),
+            };
+            Action<Transaction> alter = field switch
+            {
+                "zero-amount" => t => t.Amount = 0.5M,
+                "attestation-signature" => t => t.Signature = "not-the-sentinel",
+                _ => t => t.ToAddress = "xSomewhereElse",
+            };
+            var asSigned = JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(SignedBlockWith(100, AsSigned())))!;
+            Assert.Null(ForkCorrectionService.TransactionIntegrityError(asSigned)); // as signed, accepted after crossing the wire
+
+            var block = SignedBlockWith(100, AsSigned(), alter);
             await ForkCorrectionService.HandleForkCorrectionAsync(100, JsonConvert.SerializeObject(block), "1.2.3.4");
 
             Assert.Empty(_reorgs);
@@ -220,6 +262,42 @@ namespace VerifiedXCore.Tests
                 Globals.CasterApprovedBlockHashDict.Clear();
                 foreach (var kv in prior) Globals.CasterApprovedBlockHashDict[kv.Key] = kv.Value;
             }
+        }
+
+        [Fact]
+        public void ACastersRollbackOfItsOwnBlock_DropsOnlyTheApprovalThatNamedIt()
+        {
+            var prior = new System.Collections.Generic.Dictionary<long, string>(Globals.CasterApprovedBlockHashDict);
+            try
+            {
+                Globals.CasterApprovedBlockHashDict[95] = "rolled-back-95";
+                Globals.CasterApprovedBlockHashDict[96] = "agreed-96";
+
+                VerifiedXCore.Utilities.ForkRecoveryUtility.DropApprovalOfRolledBack(95, "rolled-back-95");
+                VerifiedXCore.Utilities.ForkRecoveryUtility.DropApprovalOfRolledBack(96, "rolled-back-96");
+
+                Assert.False(Globals.CasterApprovedBlockHashDict.ContainsKey(95));
+                Assert.Equal("agreed-96", Globals.CasterApprovedBlockHashDict[96]); // an approval of another block stays
+            }
+            finally
+            {
+                Globals.CasterApprovedBlockHashDict.Clear();
+                foreach (var kv in prior) Globals.CasterApprovedBlockHashDict[kv.Key] = kv.Value;
+            }
+        }
+
+        [Fact]
+        public void AutomaticRecovery_RefusesAnExpectedReplacementWithAnAlteredBody_BeforeRollingBack()
+        {
+            var intact = SignedBlockWith(100, SignedTransfer());
+            Assert.Null(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(intact, 100, intact.Hash));
+
+            var altered = SignedBlockWith(100, SignedTransfer(), tx => tx.Amount = 2500M);
+            Assert.NotNull(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(altered, 100, altered.Hash));
+
+            // A block that could not be fetched, or another block than the expected one, leaves the recovery as before.
+            Assert.Null(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(null, 100, altered.Hash));
+            Assert.Null(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(altered, 100, "another-hash"));
         }
 
         [Fact]

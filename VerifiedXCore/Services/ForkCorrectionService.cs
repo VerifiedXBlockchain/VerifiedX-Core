@@ -193,6 +193,9 @@ namespace VerifiedXCore.Services
                 {
                     if (!string.Equals(tx.Hash, tx.GetHash(), StringComparison.Ordinal))
                         return $"transaction {tx.Hash} does not hash to its carried hash.";
+                    var envelopeError = VerifiedXCore.Bitcoin.Attestation.BtcAttestTxValidator.EnvelopeError(tx);
+                    if (envelopeError != null)
+                        return $"transaction {tx.Hash}: {envelopeError}";
                     continue;
                 }
 
@@ -205,16 +208,45 @@ namespace VerifiedXCore.Services
                         : tx.Signature == VerifiedXCore.Privacy.PrivacyConstants.PlonkSignatureSentinel;
                     if (!signatureOk)
                         return $"private transaction {tx.Hash} has no valid signature.";
+                    // The private hash leaves out the recipient (and, past a shield, the sender, amount, nonce and fee):
+                    // those are held to the values the validator requires.
+                    if (VerifiedXCore.Privacy.PrivateTransactionTypes.IsTransparentShield(tx.TransactionType))
+                    {
+                        if (tx.ToAddress != VerifiedXCore.Privacy.PrivacyConstants.ShieldedPoolAddress)
+                            return $"private transaction {tx.Hash} is a shield not sent to the shielded pool.";
+                    }
+                    else
+                    {
+                        if (!VerifiedXCore.Privacy.PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _) || payload == null)
+                            return $"private transaction {tx.Hash} carries no readable payload.";
+                        var (envelopeOk, envelopeMessage) = VerifiedXCore.Privacy.PrivateTransactionValidatorService.ValidateZkPrivate(tx, payload);
+                        if (!envelopeOk)
+                            return $"private transaction {tx.Hash}: {envelopeMessage}";
+                    }
                     continue;
                 }
 
-                if (!TransactionValidatorService.StandardHashMatches(tx))
+                if (!HashMatchesStrictly(tx))
                     return $"transaction {tx.Hash} does not hash to its carried hash.";
                 var signatureError = TransactionValidatorService.SignatureError(tx);
                 if (signatureError != null)
                     return $"transaction {tx.Hash}: {signatureError}";
             }
             return null;
+        }
+
+        /// <summary>
+        /// The standard hash check without its zero-amount fallback for a non-whole amount: VerifyTX re-hashes such an
+        /// amount as 0, so a carried fraction passes it against a signature over 0 and is refused only by later rules. Here,
+        /// before a rollback, the amount must be the one that was hashed (or its "N.0" spelling, or a zero amount).
+        /// </summary>
+        private static bool HashMatchesStrictly(Transaction tx)
+        {
+            if (string.Equals(tx.Hash, tx.GetHash(), StringComparison.Ordinal))
+                return true;
+            if (tx.Amount % 1 != 0)
+                return false;
+            return TransactionValidatorService.StandardHashMatches(tx);
         }
 
         private static Transaction WithoutTrailingZeros(Transaction tx) => new Transaction

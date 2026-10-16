@@ -411,7 +411,7 @@ namespace VerifiedXCore.Privacy
             return (true, "");
         }
 
-        private static (bool ok, string message) ValidateZkPrivate(Transaction txRequest, PrivateTxPayload payload)
+        internal static (bool ok, string message) ValidateZkPrivate(Transaction txRequest, PrivateTxPayload payload)
         {
             if (txRequest.Fee != 0)
                 return (false, "Private ZK transactions must have Fee 0 (fee is burned inside the proof in later phases).");
