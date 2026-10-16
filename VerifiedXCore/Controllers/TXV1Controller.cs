@@ -1011,10 +1011,12 @@ namespace VerifiedXCore.Controllers
                     var result = !twSkipVerify ? await TransactionValidatorService.VerifyTX(transaction) : await TransactionValidatorService.VerifyTX(transaction, false, false, true);
                     if (result.Item1 == true)
                     {
-                        if (transaction.TransactionRating == null)
+                        // The node rates the transaction itself; a rating supplied by the caller is ignored.
+                        transaction.TransactionRating = await TransactionRatingService.GetTransactionRating(transaction);
+                        if (transaction.TransactionRating == TransactionRating.F)
                         {
-                            var rating = await TransactionRatingService.GetTransactionRating(transaction);
-                            transaction.TransactionRating = rating;
+                            VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // refused: claims nothing
+                            return JsonConvert.SerializeObject(new { Result = "Fail", Message = "Transaction was rated F and cannot be added to the mempool." });
                         }
 
                         // What every peer checks on receipt: with this sender's transactions already waiting it must not overspend.
@@ -1025,7 +1027,19 @@ namespace VerifiedXCore.Controllers
                             return JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Not broadcast: together with this address's transactions still waiting to be mined it would overspend ({waitingOverspend}). Submit it again once they are mined." });
                         }
 
-                        await TransactionData.AddToPool(transaction);
+                        if (TransactionData.IsPoolConflict(transaction))
+                        {
+                            VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // refused: claims nothing
+                            return JsonConvert.SerializeObject(new { Result = "Fail", Message = "Transaction conflicts with one already in the mempool." });
+                        }
+
+                        // Checked and inserted in one locked step, as on the peer paths.
+                        if (!MempoolEvictionUtility.TryAdmitAndInsert(transaction, TransactionData.GetPool(), out var admissionReason))
+                        {
+                            VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // refused: claims nothing
+                            return JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Transaction was not admitted to the mempool: {admissionReason}" });
+                        }
+
                         await P2PClient.SendTXMempool(transaction);//send out to mempool
 
                         output = JsonConvert.SerializeObject(new { Result = "Success", Message = $"Transaction has been broadcasted.", Hash = transaction.Hash });

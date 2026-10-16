@@ -135,6 +135,22 @@ namespace VerifiedXCore.P2P
         // NEW-20: reporters per reported address (a peer counts once), and a bound on how many addresses are tracked.
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, System.Collections.Concurrent.ConcurrentDictionary<string, byte>> _ipReporters = new();
         private const int MaxTrackedReportedIPs = 256;
+        // A peer sees one address for this node, so it holds one vote: a new report moves it. Every dial selector skips
+        // ReportedIPs, so without this one peer could fill the table with addresses this node would then never dial.
+        private static readonly Dictionary<string, string> _reporterVote = new();
+        private const int MaxTrackedReporters = 1024;
+        private static readonly object _reportedIpLock = new();
+        // Program.cs and Config.cs seed a manually configured address with this weight; peer votes never remove it.
+        private const int ManualReportWeight = 99999;
+
+        internal static void ResetReportedIPTracking()
+        {
+            lock (_reportedIpLock)
+            {
+                _ipReporters.Clear();
+                _reporterVote.Clear();
+            }
+        }
 
         /// <summary>
         /// NEW-20: records a peer's report of this node's public address. The value was any string (up to ~1.15 MB), was
@@ -148,14 +164,54 @@ namespace VerifiedXCore.P2P
             if (string.IsNullOrWhiteSpace(reported) || reported.Length > 45 || !System.Net.IPAddress.TryParse(reported.Trim(), out var parsed))
                 return;
             var ip = VerifiedXCore.Utilities.RemoteIp.Text(parsed)!;
-            var who = string.IsNullOrEmpty(reporter) ? "?" : reporter;
-            if (!_ipReporters.ContainsKey(ip) && _ipReporters.Count >= MaxTrackedReportedIPs)
-                return;
-            var set = _ipReporters.GetOrAdd(ip, _ => new System.Collections.Concurrent.ConcurrentDictionary<string, byte>());
-            if (set.Count < 64) set.TryAdd(who, 0);
-            Globals.ReportedIPs.AddOrUpdate(ip, set.Count, (_, existing) => Math.Max(existing, set.Count));
+            // One endpoint, one vote: the reporter's address is canonicalised so other spellings of it are the same key.
+            var who = !string.IsNullOrEmpty(reporter) && System.Net.IPAddress.TryParse(reporter.Trim(), out var reporterIp)
+                ? VerifiedXCore.Utilities.RemoteIp.Text(reporterIp)!
+                : string.IsNullOrEmpty(reporter) ? "?" : reporter;
+            lock (_reportedIpLock)
+            {
+                _reporterVote.TryGetValue(who, out var previous);
+                if (previous == ip)
+                    return;
+                if (previous == null && _reporterVote.Count >= MaxTrackedReporters)
+                    return;
+                if (_ipReporters.TryGetValue(ip, out var existingSet) ? existingSet.Count >= 64 : _ipReporters.Count >= MaxTrackedReportedIPs)
+                    return;
+                if (previous != null)
+                    WithdrawReport(previous, who);
+
+                var set = _ipReporters.GetOrAdd(ip, _ => new System.Collections.Concurrent.ConcurrentDictionary<string, byte>());
+                set.TryAdd(who, 0);
+                _reporterVote[who] = ip;
+                Globals.ReportedIPs.AddOrUpdate(ip, set.Count, (_, existing) => Math.Max(existing, set.Count));
+            }
             TryAutoUpdateReportedIP();
         }
+
+        private static void WithdrawReport(string ip, string reporter)
+        {
+            _reporterVote.Remove(reporter);
+            if (!_ipReporters.TryGetValue(ip, out var set))
+                return;
+            set.TryRemove(reporter, out _);
+            var remaining = set.Count;
+            if (remaining == 0)
+                _ipReporters.TryRemove(ip, out _);
+            if (Globals.ReportedIPs.TryGetValue(ip, out var current) && current >= ManualReportWeight)
+                return;
+            if (remaining == 0)
+                Globals.ReportedIPs.TryRemove(ip, out _);
+            else
+                Globals.ReportedIPs[ip] = remaining;
+        }
+
+        /// <summary>
+        /// The addresses an outbound dial skips as this node's own: only the confirmed <see cref="Globals.ReportedIP"/>.
+        /// ReportedIPs holds every candidate peers have reported, so skipping all of them let peers keep this node from
+        /// dialing addresses of their choosing.
+        /// </summary>
+        public static IEnumerable<string> OwnAddressesToSkip() =>
+            string.IsNullOrWhiteSpace(Globals.ReportedIP) ? Array.Empty<string>() : new[] { Globals.ReportedIP };
 
         public static void TryAutoUpdateReportedIP()
         {
@@ -444,17 +500,13 @@ namespace VerifiedXCore.P2P
 
             await DropDisconnectedPeers();            
 
-            // FIX: Removed Globals.ReportedIPs from skip set — ReportedIPs contains external IPs
-            // that peers report back to us (our own IP as seen by them). Including them in the
-            // skip set was incorrectly preventing connections to legitimate peers whose IP happened
-            // to match an entry in ReportedIPs.
             // CHURN-FIX: peers evicted for lagging (or under connect-failure backoff) are excluded in
             // BOTH passes below, so a node dropped by the height check is not re-dialed 10s later.
             var cooldownIPs = PeerConnectionBackoff.BlockedIPs();
 
             var SkipIPs = new HashSet<string>(Globals.Nodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
                 .Union(Globals.BannedIPs.Keys)
-                .Union(Globals.ReportedIPs.Keys)
+                .Union(OwnAddressesToSkip())
                 .Union(Globals.SkipPeers.Keys)
                 .Union(cooldownIPs));
 
@@ -511,7 +563,7 @@ namespace VerifiedXCore.P2P
 
                 var fortisOnlyIPs = new HashSet<string>(fortisList.Select(x => x))
                     .Union(Globals.BannedIPs.Keys)
-                    .Union(Globals.ReportedIPs.Keys);
+                    .Union(OwnAddressesToSkip());
 
                 Random rnd = new Random();
                 var newPeers = peerDB.Find(x => x.IsOutgoing == true).ToArray()

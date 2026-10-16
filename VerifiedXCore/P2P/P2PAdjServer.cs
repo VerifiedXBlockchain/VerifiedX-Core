@@ -284,9 +284,9 @@ namespace VerifiedXCore.P2P
                                                 var rating = await TransactionRatingService.GetTransactionRating(transaction);
                                                 transaction.TransactionRating = rating;
 
-                                                if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
+                                                if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
+                                    && MempoolEvictionUtility.TryAdmitAndInsert(transaction, mempool))
                                                 {
-                                                    mempool.InsertSafe(transaction);
                                                     var txOutput = "";
                                                     txOutput = JsonConvert.SerializeObject(transaction);
                                                     //await SendAdjMessageAll("tx", txOutput);//sends messages to all in fortis pool
@@ -357,9 +357,9 @@ namespace VerifiedXCore.P2P
                                             var rating = await TransactionRatingService.GetTransactionRating(transaction);
                                             transaction.TransactionRating = rating;
 
-                                            if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
+                                            if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
+                                    && MempoolEvictionUtility.TryAdmitAndInsert(transaction, mempool))
                                             {
-                                                mempool.InsertSafe(transaction);
                                                 var txOutput = "";
                                                 txOutput = JsonConvert.SerializeObject(transaction);
                                                 //await SendAdjMessageAll("tx", txOutput);//sends messages to all in fortis pool

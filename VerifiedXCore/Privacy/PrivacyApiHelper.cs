@@ -302,7 +302,7 @@ namespace VerifiedXCore.Privacy
                             continue;
                         }
                         if (tipHeight - since < UnminedSpendBlocks
-                            || Globals.MempoolNullifiers.ContainsKey(MempoolNullifierTracker.MakeKey(asset, nullifier)))
+                            || MempoolNullifierTracker.IsClaimedByPendingTx(MempoolNullifierTracker.MakeKey(asset, nullifier)))
                             continue;
                         uc.IsSpent = false;
                         uc.SpendPendingSince = null;

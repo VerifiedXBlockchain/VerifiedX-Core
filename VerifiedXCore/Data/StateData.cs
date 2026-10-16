@@ -184,6 +184,20 @@ namespace VerifiedXCore.Data
         public static async Task<bool> UpdateTreis(Block block)
         {
             Globals.TreisUpdating = true;
+            try
+            {
+                return await UpdateTreisCore(block);
+            }
+            finally
+            {
+                // AddBlock waits while this is set, so a throw anywhere in the apply must still clear it.
+                StateWriteContext.Clear();
+                Globals.TreisUpdating = false;
+            }
+        }
+
+        private static async Task<bool> UpdateTreisCore(Block block)
+        {
             _applyStepFailed = false;
             lock (_ownerChangesThisBlock) _ownerChangesThisBlock.Clear();
             StateWriteContext.SetHeight(block.Height); //stamp LastModifiedHeight on state writes for snapshot diffing
@@ -854,7 +868,6 @@ namespace VerifiedXCore.Data
                 // under-stamp and be missed by snapshot diffs — always clear, even on throw.
                 StateWriteContext.Clear();
             }
-            Globals.TreisUpdating = false;
 
             // ROOT-CAUSE GUARD: Report whether every transaction's state mutation actually applied.
             // A false here means the block was/will be committed to the chain while its state
