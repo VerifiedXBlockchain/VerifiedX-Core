@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json.Linq;
 using VerifiedXCore;
@@ -108,6 +109,41 @@ namespace VerifiedXCore.Tests
 
             PlonkProofVerifier.VerifierAvailable = () => true;
             Assert.True(Ready(new ValidatorController().CasterReadyCheck(1_000)));
+        }
+
+        private sealed class PlainHttpClientFactory : System.Net.Http.IHttpClientFactory
+        {
+            public System.Net.Http.HttpClient CreateClient(string name) => new();
+        }
+
+        [Fact]
+        public async Task WithoutTheVerifier_ANodeDoesNotServeItsStagedBlock_OrTakeARoundItWon()
+        {
+            var priorBlock = Globals.NextValidatorBlock;
+            var priorFactory = Globals.HttpClientFactory;
+            try
+            {
+                Globals.PrivateTxProofRulesHeight = 500;
+                Globals.ValidatorAddress = "xSelf";
+                Globals.NextValidatorBlock = new Block { Height = 1_001, Hash = "staged", Transactions = new System.Collections.Generic.List<Transaction>() };
+                Globals.HttpClientFactory = new PlainHttpClientFactory();
+                var self = new Proof { Address = "xSelf" };
+
+                PlonkProofVerifier.VerifierAvailable = () => false;
+                Assert.IsType<BadRequestResult>((await new ValidatorController().VerifyBlock(1_001, "p")).Result);
+                Assert.False((await VerifiedXCore.Utilities.ProofUtility.VerifyWinnerAvailability(self, 1_001)).Item1);
+                Assert.False((await VerifiedXCore.Utilities.ProofUtility.VerifyValAvailability("127.0.0.1", "xSelf", 1_001)).Item1);
+
+                PlonkProofVerifier.VerifierAvailable = () => true;
+                Assert.IsType<OkObjectResult>((await new ValidatorController().VerifyBlock(1_001, "p")).Result);
+                Assert.True((await VerifiedXCore.Utilities.ProofUtility.VerifyWinnerAvailability(self, 1_001)).Item1);
+                Assert.True((await VerifiedXCore.Utilities.ProofUtility.VerifyValAvailability("127.0.0.1", "xSelf", 1_001)).Item1);
+            }
+            finally
+            {
+                Globals.NextValidatorBlock = priorBlock;
+                Globals.HttpClientFactory = priorFactory;
+            }
         }
 
         private static bool Ready(ActionResult<string> result) =>

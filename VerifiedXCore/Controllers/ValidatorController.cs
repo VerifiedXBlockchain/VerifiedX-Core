@@ -1548,6 +1548,10 @@ namespace VerifiedXCore.Controllers
         [Route("VerifyBlock/{nextBlock}/{**proofHash}")]
         public async Task<ActionResult<string>> VerifyBlock(long nextBlock, string proofHash)
         {
+            // From the proof-rules height, a node without its PLONK verifier does not hand out a block it produced.
+            if (!Globals.ProofVerifierReady)
+                return BadRequest();
+
             var block = Globals.NextValidatorBlock;
 
             if (block.Height != nextBlock)
