@@ -196,19 +196,28 @@ namespace VerifiedXCore.DST
             }
         }
 
+        // The punch handlers send to an endpoint the datagram names. Answered for anyone, they let a spoofed datagram
+        // aim this node's packets at any address (PunchClient) or any port of the sender's address (AssetPunchClient).
+
+        /// <summary>Whether a datagram came from the STUN server this node registered with (or a configured one).</summary>
+        internal static bool IsFromStunServer(IPEndPoint endPoint)
+        {
+            var from = endPoint.ToString();
+            return (Globals.STUNServer?.IPAddress == from) || Globals.STUNServers.Any(s => s?.ServerIPPort == from);
+        }
+
         public static void PunchClient(Message message, IPEndPoint endPoint, UdpClient udpClient)
         {
-            var punchMessage = Encoding.UTF8.GetBytes("ack");
-            var remoteEndPoint = IPEndPoint.Parse(message.Data);
-            udpClient.Send(punchMessage, remoteEndPoint);
+            if (!IsFromStunServer(endPoint) || !IPEndPoint.TryParse(message.Data ?? "", out var remoteEndPoint) || remoteEndPoint.Port == 0)
+                return;
+            udpClient.Send(Encoding.UTF8.GetBytes("ack"), remoteEndPoint);
         }
         public static void AssetPunchClient(Message message, IPEndPoint endPoint, UdpClient udpClient)
         {
-            var punchMessage = Encoding.UTF8.GetBytes("echo");
-            var ipArray = endPoint.ToString().Split(':');
-            var ip = ipArray[0];
-            var remoteEndPoint = IPEndPoint.Parse($"{ip}:{message.Data}");
-            udpClient.Send(punchMessage, remoteEndPoint);
+            if (!Globals.ConnectedClients.ContainsKey(endPoint.ToString())
+                || !int.TryParse(message.Data, out var port) || port < IPEndPoint.MinPort + 1 || port > IPEndPoint.MaxPort)
+                return;
+            udpClient.Send(Encoding.UTF8.GetBytes("echo"), new IPEndPoint(endPoint.Address, port));
         }
         /// <summary>NEW-21: bound on the DST connection tables (entries were never pruned).</summary>
         public const int MaxDstConnections = 1000;

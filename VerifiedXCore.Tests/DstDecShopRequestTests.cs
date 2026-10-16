@@ -145,5 +145,42 @@ namespace VerifiedXCore.Tests
             Assert.True(Globals.ClientMessageDict.Count < MessageService.MaxClientMessages);
             Assert.True(Globals.ClientMessageDict.ContainsKey(request.Id)); // recent entries survive the prune
         }
+
+        [Fact]
+        public async Task PunchHandlers_IgnoreSendersTheyDoNotKnow_AndServeThoseTheyDo()
+        {
+            var priorStun = Globals.STUNServer;
+            try
+            {
+                using var node = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+                using var stranger = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+                var strangerEp = (IPEndPoint)stranger.Client.LocalEndPoint!;
+                // A fresh listener per check: a timed-out receive stays pending and would take the next datagram.
+                async Task<string?> Punch(Action<IPEndPoint> send)
+                {
+                    using var target = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+                    send((IPEndPoint)target.Client.LocalEndPoint!);
+                    return await ReceiveOrNull(target);
+                }
+                Globals.STUNServer = null;
+
+                // A datagram from no STUN server, naming a third party: nothing is sent.
+                Assert.Null(await Punch(t => MessageService.PunchClient(new Message { Data = t.ToString() }, strangerEp, node)));
+
+                // From the STUN server this node registered with: the punch goes out.
+                Globals.STUNServer = new DSTConnection { IPAddress = strangerEp.ToString() };
+                Assert.Equal("ack", await Punch(t => MessageService.PunchClient(new Message { Data = t.ToString() }, strangerEp, node)));
+
+                // An asset punch only for a sender that completed the handshake.
+                Assert.Null(await Punch(t => MessageService.AssetPunchClient(new Message { Data = t.Port.ToString() }, strangerEp, node)));
+                Globals.ConnectedClients[strangerEp.ToString()] = new DSTConnection { IPAddress = strangerEp.ToString() };
+                Assert.Equal("echo", await Punch(t => MessageService.AssetPunchClient(new Message { Data = t.Port.ToString() }, strangerEp, node)));
+
+                // Junk targets are dropped, not thrown.
+                MessageService.PunchClient(new Message { Data = "not an endpoint" }, strangerEp, node);
+                MessageService.AssetPunchClient(new Message { Data = "99999" }, strangerEp, node);
+            }
+            finally { Globals.STUNServer = priorStun; }
+        }
     }
 }
