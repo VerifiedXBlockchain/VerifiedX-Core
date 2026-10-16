@@ -1,3 +1,4 @@
+using System.Numerics;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -91,6 +92,22 @@ namespace VerifiedXCore.Tests
             await ForkCorrectionService.HandleForkCorrectionAsync(100, JsonConvert.SerializeObject(tampered), "1.2.3.4");
 
             Assert.Empty(_reorgs);
+        }
+
+        private static Transaction SignedReserveSend()
+        {
+            BigInteger scalar = 1;
+            while (!ReserveAccount.ReserveAddressOf(scalar).StartsWith("xRBX")) scalar++;
+            var key = new PrivateKey("secp256k1", scalar);
+            var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+            var tx = new Transaction
+            {
+                Timestamp = 1_700_000_000, FromAddress = ReserveAccount.ReserveAddressOf(scalar), ToAddress = Producer, Amount = 2.5M,
+                Fee = 0.00001M, Nonce = 0, TransactionType = TransactionType.TX, Data = "[]", UnlockTime = 1_700_090_000,
+            };
+            tx.Build();
+            tx.Signature = SignatureService.CreateSignature(tx.Hash, key, pub);
+            return tx;
         }
 
         private static Transaction SignedTransfer(decimal amount = 2.5M, long? unlockTime = null)
@@ -213,6 +230,7 @@ namespace VerifiedXCore.Tests
         [InlineData("fee-reward-amount")]
         [InlineData("reward-recipient-split")]
         [InlineData("shield-fee")]
+        [InlineData("reserve-unlock-collapse")]
         public async Task AFieldOutsideTheHash_ChangedInACertifiedCorrection_IsRefusedBeforeAnyRollback(string field)
         {
             ForkCorrectionService.HasValidCertificate = _ => true;
@@ -222,6 +240,7 @@ namespace VerifiedXCore.Tests
                 "attestation-signature" => VerifiedXCore.Bitcoin.Attestation.BtcAttestTxValidator.Create(TransactionType.VBTC_V2_BTC_REPORT, "{}", 1_700_000_000),
                 "fee-reward-amount" or "reward-recipient-split" => FeeReward(),
                 "shield-fee" => SignedShield(),
+                "reserve-unlock-collapse" => SignedReserveSend(),
                 "unshield-reserve-recipient" or "unshield-recipient" or "unshield-amount" => Unshield(),
                 "data-unlock-resplit" => SignedTransfer(unlockTime: 1790390189),
                 _ => SignedShield(),
@@ -239,6 +258,7 @@ namespace VerifiedXCore.Tests
                 "fee-reward-amount" => t => t.Amount = 32.5M, // no signature covers a reward's amount
                 "reward-recipient-split" => t => { t.ToAddress += "3"; t.Amount = 2M; }, // "...3" + "2" hashes like "..." + "32"
                 "shield-fee" => t => t.Fee = 0M, // outside the hash below the shield-fee height
+                "reserve-unlock-collapse" => t => { t.Data = (t.Data ?? "") + t.UnlockTime; t.UnlockTime = null; }, // same preimage
                 _ => t => t.ToAddress = "xSomewhereElse",
             };
             var asSigned = JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(SignedBlockWith(100, AsSigned())))!;

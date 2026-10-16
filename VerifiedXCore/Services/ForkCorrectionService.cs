@@ -209,6 +209,7 @@ namespace VerifiedXCore.Services
 
                 if (VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType))
                 {
+
                     if (!VerifiedXCore.Privacy.PrivateTransactionValidatorService.VerifyPrivateHash(tx, block.Height))
                         return $"private transaction {tx.Hash} does not hash to its carried hash.";
                     var signatureOk = VerifiedXCore.Privacy.PrivateTransactionTypes.IsTransparentShield(tx.TransactionType)
@@ -245,6 +246,9 @@ namespace VerifiedXCore.Services
 
                 if (!HashMatchesStrictly(tx))
                     return $"transaction {tx.Hash} does not hash to its carried hash.";
+                // A reserve send's settlement time: with none, its digits could have moved into Data (the preimage joins them).
+                if ((tx.FromAddress ?? "").StartsWith("xRBX") && tx.UnlockTime == null)
+                    return $"reserve transaction {tx.Hash} has no unlock time.";
                 var signatureError = TransactionValidatorService.SignatureError(tx);
                 if (signatureError != null)
                     return $"transaction {tx.Hash}: {signatureError}";
