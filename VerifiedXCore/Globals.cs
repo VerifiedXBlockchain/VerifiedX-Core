@@ -349,6 +349,38 @@ namespace VerifiedXCore
         public static long PathAuditRulesHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// From this height no transaction's ToAddress may be a registered name (".vfx" or ".rbx"): validation resolved
+        /// the name through the node's own name table and accepted it, but every apply credits or assigns the ToAddress as
+        /// written, so the VFX, token, NFT or name went to the literal string and nobody could use it, and the verdict
+        /// depended on the local table. PathAuditRulesHeight already refuses it for VFX sends and unshields; this covers
+        /// every other type. Not active yet.
+        /// </summary>
+        public static long RecipientIsAddressHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height a smart contract's Update(), Transfer(), Burn(), Evolve(), Devolve() or
+        /// ChangeEvolveStateSpecific() must carry its Data in the array form those applies read. Validation also accepted
+        /// a single object, which every apply then skips, so the transaction was mined with no effect. Not active yet.
+        /// </summary>
+        public static long ContractPayloadArrayHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height a BTC name transfer to a Bitcoin address that already holds a name is skipped at apply.
+        /// Validation reads the names as they were before the block, so two transfers to one address in one block both
+        /// passed and left two records on it, and deleting either then removed both. From the same height a BTC name
+        /// delete or transfer acts only on the sender's own record at the address. Not active yet.
+        /// </summary>
+        public static long BtcNameOneRecordPerAddressHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height a BTC name create is signed by the key of the Bitcoin address it names, and a transfer by the key
+        /// of the address it moves to. Each signed message names the VFX owner and the name (BtcNameSignatures), so a
+        /// signature can't be reused for another owner or name. Validation checked the create signature only against the
+        /// key the signature itself carries, and a transfer's destination not at all. Not active yet.
+        /// </summary>
+        public static long BtcNameSignerOwnsAddressHeight = 999_999_999_999;
+
+        /// <summary>
         /// The validator stake is bonded from this height (Services.ValidatorBond; owner decision 2026-10-13): a
         /// registered validator cannot send its 5,000 VFX until 1,200 blocks after its exit is mined, and counts for a
         /// vault's key ceremony only once that stake has been locked for two days. Validators active at this height

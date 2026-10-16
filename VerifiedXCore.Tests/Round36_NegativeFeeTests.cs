@@ -83,6 +83,7 @@ namespace VerifiedXCore.Tests
             Assert.NotEqual(TransactionValidatorService.NegativeFeeReason, whyOld);
         }
 
+        /// <summary>A fee-exempt type with no fee at all is not caught by the rule (other rules may still judge it).</summary>
         [Theory]
         [InlineData(TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE)]
         [InlineData(TransactionType.VBTC_V2_BRIDGE_UNLOCK)]

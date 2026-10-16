@@ -15,6 +15,9 @@ namespace VerifiedXCore.Utilities
         /// <summary>Public accessor so other services can check if a full state rebuild is in progress.</summary>
         public static bool IsResetTreisRunning => _isResetTreisRunning;
 
+        /// <summary>The last WipeChainDerivedState wiped the vBTC withdrawal store (its replay then rebuilt it from the chain).</summary>
+        public static bool WithdrawalStoreWiped { get; private set; }
+
         /// <summary>
         /// Full chain rescan rollback — deletes blocks above newHeight, nukes all state,
         /// and replays the entire blockchain from genesis.
@@ -551,6 +554,7 @@ namespace VerifiedXCore.Utilities
             }
 
             // vBTC withdrawal requests + bridge lock/exit consensus state (all written from StateData)
+            WithdrawalStoreWiped = false;
             try
             {
                 if (DbContext.DB_VBTCWithdrawalRequests != null)
@@ -561,6 +565,7 @@ namespace VerifiedXCore.Utilities
                     // Consumed Base burns are chain-derived too. Left in place, a full replay would find
                     // every post-gate pool unlock "already consumed" and credit nothing (state divergence).
                     DbContext.DB_VBTCWithdrawalRequests.GetCollection(VBTCBridgeConsumedBurn.CollectionName).DeleteAll();
+                    WithdrawalStoreWiped = true;
                 }
             }
             catch (Exception ex)
@@ -642,6 +647,7 @@ namespace VerifiedXCore.Utilities
             }
 
             _isResetTreisRunning = true;
+            await VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.WaitUntilStoppedAsync();
             // CRITICAL FIX: Set IsResyncing to block ALL block validation during the entire
             // state rebuild. Without this, ResetTreis wipes the state trie (Step 1) but
             // ValidateBlock keeps running on incoming P2P blocks, sees empty state → 
@@ -917,6 +923,7 @@ namespace VerifiedXCore.Utilities
                 {
                     StateTreiStatusService.SetSynced(Globals.LastBlock.Height);
                     SnapshotRestoreUtility.ClearStateDestroyed();
+                    VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.StoreRewrittenFromChain();
                     Console.WriteLine($"[ResetTreis] Step 5: StateTreiStatus set to SYNCED at height {Globals.LastBlock.Height}.");
                 }
                 else

@@ -223,6 +223,22 @@ namespace VerifiedXCore.Services
 
         // ── Snapshot creation ───────────────────────────────────────────────────────────────
 
+        /// <summary>A rebuild runs, or one began, while this slot was copied (a copy outside the block lock, at start).</summary>
+        private static bool RebuildOverlapped(long height, long rebuildsBefore) =>
+            WithdrawalStoreBeingRebuilt(height) || VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.RebuildsStarted != rebuildsBefore;
+
+        /// <summary>
+        /// While the withdrawal-store rebuild runs, a row it has put back reads "requested" until the rebuild brings it to
+        /// how its withdrawal ended: a snapshot then would keep it open, and a restore of it bring it back so. Asked when a
+        /// cycle starts, and again before its slot is marked valid (a rebuild may have started while it copied).
+        /// </summary>
+        private static bool WithdrawalStoreBeingRebuilt(long height)
+        {
+            if (!VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning) return false;
+            LogUtility.Log($"[Snapshot] Skipped cycle at {height}: the withdrawal store is being rebuilt.", "StateSnapshotService");
+            return true;
+        }
+
         /// <summary>
         /// Per-cadence roll-forward, called synchronously from the block commit path (inside the
         /// block-processing lock, so no UpdateTreis can run concurrently). Rolls the oldest slot
@@ -252,6 +268,9 @@ namespace VerifiedXCore.Services
                 LogUtility.Log($"[Snapshot] Skipped cycle at {height}: TreisUpdating was true.", "StateSnapshotService");
                 return Task.CompletedTask;
             }
+            var rebuildsBefore = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.RebuildsStarted;
+            if (WithdrawalStoreBeingRebuilt(height))
+                return Task.CompletedTask;
 
             // Never snapshot state that is flagged dirty/incomplete — a snapshot of corrupt
             // state would just make recovery restore the corruption. A MISSING record is clean:
@@ -302,7 +321,7 @@ namespace VerifiedXCore.Services
                 {
                     try { anchorHash = BlockchainData.GetBlockByHeight(height)?.Hash; } catch { }
                 }
-                MarkSlot(slot, SnapshotSlotStatus.Valid, height, anchorHash);
+                MarkSlot(slot, RebuildOverlapped(height, rebuildsBefore) ? SnapshotSlotStatus.Invalid : SnapshotSlotStatus.Valid, height, anchorHash);
                 PruneTombstones();
 
                 sw.Stop();
@@ -335,6 +354,8 @@ namespace VerifiedXCore.Services
             if (height < MinSnapshotHeight) return Task.CompletedTask;
             if (DbContext.DB_Snapshot == null) return Task.CompletedTask;
             if (Globals.TreisUpdating) return Task.CompletedTask;
+            var rebuildsBefore = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.RebuildsStarted;
+            if (WithdrawalStoreBeingRebuilt(height)) return Task.CompletedTask;
 
             var treiStatus = StateTreiStatusService.GetStatus();
             if (treiStatus != null && !treiStatus.IsSynced)
@@ -374,7 +395,7 @@ namespace VerifiedXCore.Services
                 {
                     try { anchorHash = BlockchainData.GetBlockByHeight(height)?.Hash; } catch { }
                 }
-                MarkSlot(slot, SnapshotSlotStatus.Valid, height, anchorHash);
+                MarkSlot(slot, RebuildOverlapped(height, rebuildsBefore) ? SnapshotSlotStatus.Invalid : SnapshotSlotStatus.Valid, height, anchorHash);
 
                 sw.Stop();
                 LogUtility.Log(

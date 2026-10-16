@@ -308,7 +308,11 @@ namespace VerifiedXCore.Services
                 // VFX goes to an address somebody can sign for (round 27).
                 ?? LedgerIntegrityRules.VfxRecipientCanHoldIt(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                 // What a token transaction adds to a document read whole later is bounded (round 33).
-                ?? LedgerIntegrityRules.TokenDocumentLimits(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+                ?? LedgerIntegrityRules.TokenDocumentLimits(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // Nothing is addressed to a name: the applies credit the ToAddress as written.
+                ?? LedgerIntegrityRules.RecipientIsNotAName(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // A contract call is in the shape its apply reads.
+                ?? LedgerIntegrityRules.ContractCallIsArrayForm(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
             if (vaultInTransitError != null)
                 return (false, vaultInTransitError);
 
@@ -342,6 +346,15 @@ namespace VerifiedXCore.Services
                 : null;
             if (watchedWithdrawalRefusal != null)
                 return (false, watchedWithdrawalRefusal);
+            // While this node's withdrawal store is being rebuilt, a row put back reads "requested" until the rebuild brings
+            // it to how its withdrawal ended, so a completion, cancel or vote judged against it now could be judged otherwise
+            // by every other node. From the path-audit rules none is taken meanwhile, refused as a missing row is (reported,
+            // not read as state corruption).
+            if ((txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE || txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL
+                    || txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
+                && (blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.PathAuditRulesHeight
+                && Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning)
+                return (txResult, WithdrawalStoreRebuildingReason);
             // A cancellation on such a vault has passed its whole rule just above; the vote-based rules below are not its.
             var watchedCancel = txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL
                 && VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.IsWatched(txRequest);
@@ -2198,13 +2211,27 @@ namespace VerifiedXCore.Services
                                     //Rules:
                                     //1. Must be a valid signature from the BTC address
                                     //2. Message must be a timestamp no older than 30 minutes. 
-                                    var signatureValid = Bitcoin.Services.SignatureService.VerifySignature(message, signature);
-                                    if (!signatureValid)
-                                        return (txResult, "Invalid BTC Signature");
-                                    var messageParse = long.TryParse(message, out var messageTimestamp);
+                                    //From BtcNameSignerOwnsAddressHeight the signer is BTCAddress's own key and the message names this sender and name.
+                                    long messageTimestamp;
+                                    if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.BtcNameSignerOwnsAddressHeight)
+                                    {
+                                        //The apply stores Name + ".btc", so a Name carrying the suffix would store a name the signer never signed.
+                                        if (name.Contains(".btc", StringComparison.OrdinalIgnoreCase))
+                                            return (txResult, "Name may not contain network suffix '.btc'!");
+                                        var boundError = Bitcoin.Services.BtcNameSignatures.Check(message, signature, btcAddress, txRequest.FromAddress, name + ".btc", Globals.BTCNetwork, out messageTimestamp);
+                                        if (boundError != null)
+                                            return (txResult, boundError);
+                                    }
+                                    else
+                                    {
+                                        var signatureValid = Bitcoin.Services.SignatureService.VerifySignature(message, signature);
+                                        if (!signatureValid)
+                                            return (txResult, "Invalid BTC Signature");
+                                        var messageParse = long.TryParse(message, out messageTimestamp);
 
-                                    if (!messageParse)
-                                        return (txResult, "Improper Message Format. Message must be a timestamp.");
+                                        if (!messageParse)
+                                            return (txResult, "Improper Message Format. Message must be a timestamp.");
+                                    }
 
                                     if (blockTime != null)
                                     {
@@ -2244,6 +2271,36 @@ namespace VerifiedXCore.Services
                                     if (toAddressCheck != null)
                                     {
                                         return (txResult, "Address is already associated with an active DNR");
+                                    }
+
+                                    //From BtcNameSignerOwnsAddressHeight the receiving Bitcoin key accepts the name for the new owner.
+                                    if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.BtcNameSignerOwnsAddressHeight)
+                                    {
+                                        var acceptMessage = (string?)jobj["BTCToMessage"];
+                                        var acceptSignature = (string?)jobj["BTCToSignature"];
+                                        if (acceptMessage == null || acceptSignature == null)
+                                            return (txResult, "The receiving BTC address must sign the transfer.");
+
+                                        //The name moved is the one the receiver signed, among the sender's records at the address (the apply picks it the same way).
+                                        var signedRecord = StateData.SignedBtcNameRecord(adnrList, BTCFromAddress, txRequest.FromAddress, acceptMessage);
+                                        if (signedRecord == null)
+                                            return (txResult, "The receiving BTC address's signature names a name the sender does not hold at that address.");
+
+                                        var acceptError = Bitcoin.Services.BtcNameSignatures.Check(acceptMessage, acceptSignature, BTCToAddress, txRequest.ToAddress, signedRecord.Name, Globals.BTCNetwork, out var acceptTimestamp);
+                                        if (acceptError != null)
+                                            return (txResult, acceptError);
+
+                                        var maxAge = Bitcoin.Services.BtcNameSignatures.TransferAcceptanceMaxAgeSeconds;
+                                        if (blockTime != null)
+                                        {
+                                            if (acceptTimestamp < LedgerIntegrityRules.NowForAgeRules(blockTime) - maxAge)
+                                                return (txResult, "The receiving BTC address's signature is too old. Please sign again.");
+                                        }
+                                        else if (!blockDownloads)
+                                        {
+                                            if (acceptTimestamp < TimeUtil.GetTime() - maxAge)
+                                                return (txResult, "The receiving BTC address's signature is too old. Please sign again.");
+                                        }
                                     }
                                 }
 
@@ -4416,6 +4473,7 @@ namespace VerifiedXCore.Services
         internal const string NegativeFeeReason = "A transaction's fee cannot be negative.";
 
         internal const string NoWithdrawalRequestPrefix = "No withdrawal request ";
+        internal const string WithdrawalStoreRebuildingReason = NoWithdrawalRequestPrefix + "is judged while this node's withdrawal store is being rebuilt.";
         internal static string NoWithdrawalRequestReason(string? requestHash, string? scUID) =>
             $"{NoWithdrawalRequestPrefix}{requestHash} exists on contract {scUID}.";
 

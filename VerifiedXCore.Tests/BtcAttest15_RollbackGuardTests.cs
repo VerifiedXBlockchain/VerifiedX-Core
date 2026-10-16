@@ -218,6 +218,15 @@ namespace VerifiedXCore.Tests
             Assert.Equal(0, again.RequestsInserted);
             Assert.Equal(0, again.AttestedOutcomesApplied);
             Assert.Equal(before, requests.Select(Of).ToList());
+
+            // A request on a watched vault that live processing gave no row (its escrow debit was not written, so it
+            // was never recorded in the attestation table either) gets none from the rebuild.
+            VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()!.DeleteAll();
+            DbContext.DB_BtcAttest.GetCollection(BtcAttestStore.Withdrawals).Delete(BtcWithdrawals.RefOf(open.Hash, vault.Uid));
+            var withoutRecord = await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test, a request live never wrote");
+            Assert.True(withoutRecord.Success, withoutRecord.Message);
+            Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash(open.Hash, vault.Uid));
+            Assert.NotNull(VBTCWithdrawalRequest.GetByTransactionHash(paid.Hash, vault.Uid));
         }
 
         [Fact]
