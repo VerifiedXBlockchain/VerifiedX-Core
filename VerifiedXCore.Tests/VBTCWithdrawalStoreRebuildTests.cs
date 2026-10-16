@@ -193,6 +193,50 @@ namespace VerifiedXCore.Tests
             Assert.Equal(approved ? VBTCWithdrawalStatus.Cancelled : VBTCWithdrawalStatus.Requested, VBTCWithdrawalRequest.GetByTransactionHash("rb4-req", sc)!.Status);
         }
 
+        /// <summary>
+        /// While the store is being rebuilt, from the path-audit rules a completion, cancel or vote is not judged against it
+        /// (a row put back reads open until the rebuild brings it to how its withdrawal ended); the refusal is not read as
+        /// state corruption. Before the rules, and once the rebuild has finished, it is judged as before.
+        /// </summary>
+        [Theory]
+        [InlineData(TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE)]
+        [InlineData(TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)]
+        [InlineData(TransactionType.VBTC_V2_WITHDRAWAL_VOTE)]
+        public async Task WhileTheStoreIsRebuilt_AWithdrawalTransactionInABlockIsNotJudged(TransactionType type)
+        {
+            var (priorAudit, priorTip) = (Globals.PathAuditRulesHeight, Globals.LastBlock);
+            var key = new VerifiedXCore.EllipticCurve.PrivateKey("secp256k1");
+            var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+            var address = AccountData.GetHumanAddress(pub);
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = address, Balance = 10M, Nonce = 0 });
+            var tx = new Transaction
+            {
+                Timestamp = TimeUtil.GetTime(), FromAddress = address, ToAddress = "TW_Base", Amount = 0M, Fee = 0M, Nonce = 0, TransactionType = type,
+                Data = "{\"Function\":\"x\",\"ContractUID\":\"rebuild:6\",\"WithdrawalRequestHash\":\"rb6-req\",\"CancellationUID\":\"CANCEL_rb6\",\"BTCTransactionHash\":\"" + new string('a', 64) + "\"}",
+            };
+            tx.Build();
+            tx.Signature = VerifiedXCore.Services.SignatureService.CreateSignature(tx.Hash, key, pub);
+            try
+            {
+                Globals.PathAuditRulesHeight = 50;
+                Globals.LastBlock = new Block { Height = 100 };
+                VBTCWithdrawalStoreRebuildService.SetRunningForTests(true);
+                var (_, why) = await VerifiedXCore.Services.TransactionValidatorService.VerifyTX(tx, blockVerify: true, blockHeight: 60);
+                Assert.Equal(VerifiedXCore.Services.TransactionValidatorService.WithdrawalStoreRebuildingReason, why);
+                Assert.False(VerifiedXCore.Services.BlockValidatorService.IsStateCorruptionSignal(why));
+                var (_, whyBefore) = await VerifiedXCore.Services.TransactionValidatorService.VerifyTX(tx, blockVerify: true, blockHeight: 40);
+                Assert.NotEqual(VerifiedXCore.Services.TransactionValidatorService.WithdrawalStoreRebuildingReason, whyBefore);
+                VBTCWithdrawalStoreRebuildService.SetRunningForTests(false);
+                var (_, whyAfter) = await VerifiedXCore.Services.TransactionValidatorService.VerifyTX(tx, blockVerify: true, blockHeight: 60);
+                Assert.NotEqual(VerifiedXCore.Services.TransactionValidatorService.WithdrawalStoreRebuildingReason, whyAfter);
+            }
+            finally
+            {
+                VBTCWithdrawalStoreRebuildService.SetRunningForTests(false);
+                (Globals.PathAuditRulesHeight, Globals.LastBlock) = (priorAudit, priorTip);
+            }
+        }
+
         [Fact]
         public async Task Rebuild_ADecidedCancellation_DoesNotTurnACompletedRowCancelled()
         {

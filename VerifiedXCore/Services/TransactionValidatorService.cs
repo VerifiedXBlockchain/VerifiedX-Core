@@ -342,6 +342,15 @@ namespace VerifiedXCore.Services
                 : null;
             if (watchedWithdrawalRefusal != null)
                 return (false, watchedWithdrawalRefusal);
+            // While this node's withdrawal store is being rebuilt, a row put back reads "requested" until the rebuild brings
+            // it to how its withdrawal ended, so a completion, cancel or vote judged against it now could be judged otherwise
+            // by every other node. From the path-audit rules none is taken meanwhile, refused as a missing row is (reported,
+            // not read as state corruption).
+            if ((txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE || txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL
+                    || txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
+                && Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning
+                && (blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.PathAuditRulesHeight)
+                return (txResult, WithdrawalStoreRebuildingReason);
             // A cancellation on such a vault has passed its whole rule just above; the vote-based rules below are not its.
             var watchedCancel = txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL
                 && VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.IsWatched(txRequest);
@@ -4486,6 +4495,7 @@ namespace VerifiedXCore.Services
         internal const string NegativeFeeReason = "A transaction's fee cannot be negative.";
 
         internal const string NoWithdrawalRequestPrefix = "No withdrawal request ";
+        internal const string WithdrawalStoreRebuildingReason = NoWithdrawalRequestPrefix + "is judged while this node's withdrawal store is being rebuilt.";
         internal static string NoWithdrawalRequestReason(string? requestHash, string? scUID) =>
             $"{NoWithdrawalRequestPrefix}{requestHash} exists on contract {scUID}.";
 
