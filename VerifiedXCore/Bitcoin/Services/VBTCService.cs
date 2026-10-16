@@ -3046,14 +3046,13 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// S3C §7.4/§8: resolve a contract's DKG validator snapshot — local record first, else
-        /// state-trei decompile (works on any node). Empty list if none (legacy no-snapshot).
+        /// S3C §7.4/§8: resolve a contract's DKG validator snapshot — state-trei decompile (works on any
+        /// node), the local record only for a contract not on chain yet. Empty list if none (legacy no-snapshot).
         /// </summary>
         public static List<string> ResolveContractSnapshot(string scUID)
         {
-            var local = VBTCContractV2.GetContract(scUID);
-            if (local != null && local.ValidatorAddressesSnapshot != null && local.ValidatorAddressesSnapshot.Count > 0)
-                return local.ValidatorAddressesSnapshot;
+            // Chain state first: who may vote on a cancellation, and the share that decides it, are read from here by
+            // block validation, and a record in this node's own wallet tables must not decide what a block is.
             try
             {
                 var scState = SmartContractStateTrei.GetSmartContractState(scUID);
@@ -3069,8 +3068,16 @@ namespace VerifiedXCore.Bitcoin.Services
                 // A later key of a watched vault (plan 8.8) is no contract: its holders are recorded with it.
                 var key = Attestation.BtcVaultKeys.KeyRow(scUID);
                 if (key != null && key.Generation > 0) return Attestation.BtcVaultKeys.Holders(key);
+                if (scState != null) return new List<string>();
             }
-            catch { }
+            catch
+            {
+                // A contract that is on chain and cannot be read is not answered for from this node's own records.
+                if (SmartContractStateTrei.GetSmartContractState(scUID) != null) return new List<string>();
+            }
+            var local = VBTCContractV2.GetContract(scUID);
+            if (local != null && local.ValidatorAddressesSnapshot != null && local.ValidatorAddressesSnapshot.Count > 0)
+                return local.ValidatorAddressesSnapshot;
             return new List<string>();
         }
 

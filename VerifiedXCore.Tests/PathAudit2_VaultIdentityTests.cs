@@ -433,5 +433,40 @@ namespace VerifiedXCore.Tests
             VBTCContractV2.SaveContract(new VBTCContractV2 { SmartContractUID = pending, OwnerAddress = _owner.Address, DepositAddress = _address, IsS3C = true });
             Assert.True(VBTCService.ResolveContractIsS3C(pending));
         }
+
+        /// <summary>
+        /// Who may vote on a vault's cancellation (and the share that decides it) comes from the vault's validator snapshot
+        /// on chain, not from a record this node holds for the same UID, which can say otherwise; for a vault on chain
+        /// without a snapshot, the public validators vote, whatever a local record says.
+        /// </summary>
+        [Fact]
+        public void TheCancellationVotersOfAVault_AreReadFromChainState_NotFromThisNodesOwnRecords()
+        {
+            var onChain = new[] { "xSnapshotValidatorA", "xSnapshotValidatorB", "xSnapshotValidatorC" };
+            var seeded = new List<string> { "xSeededValidator" };
+
+            var uid = Guid.NewGuid().ToString("N") + ":1755000011";
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
+            {
+                SmartContractUID = uid, ContractData = VbtcTestContracts.VaultContractData(uid, _owner.Address, _address, isS3C: true, snapshot: onChain), MinterAddress = _owner.Address, OwnerAddress = _owner.Address, Nonce = 0,
+            });
+            VBTCContractV2.SaveContract(new VBTCContractV2 { SmartContractUID = uid, OwnerAddress = _owner.Address, DepositAddress = _address, IsS3C = true, ValidatorAddressesSnapshot = seeded });
+            Assert.Equal(onChain, VBTCService.ResolveContractSnapshot(uid));
+            Assert.Equal(new HashSet<string>(onChain), VBTCService.ResolveCancellationVoterSet(uid, 10));
+
+            var noSnapshot = Guid.NewGuid().ToString("N") + ":1755000012";
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
+            {
+                SmartContractUID = noSnapshot, ContractData = VbtcTestContracts.VaultContractData(noSnapshot, _owner.Address, _address + "x", snapshot: Array.Empty<string>()), MinterAddress = _owner.Address, OwnerAddress = _owner.Address, Nonce = 0,
+            });
+            VBTCContractV2.SaveContract(new VBTCContractV2 { SmartContractUID = noSnapshot, OwnerAddress = _owner.Address, DepositAddress = _address, ValidatorAddressesSnapshot = seeded });
+            Assert.Empty(VBTCService.ResolveContractSnapshot(noSnapshot));
+            Assert.DoesNotContain("xSeededValidator", VBTCService.ResolveCancellationVoterSet(noSnapshot, 10));
+
+            // Not on chain yet: the local record is all there is.
+            var pending = Guid.NewGuid().ToString("N") + ":1755000013";
+            VBTCContractV2.SaveContract(new VBTCContractV2 { SmartContractUID = pending, OwnerAddress = _owner.Address, DepositAddress = _address, ValidatorAddressesSnapshot = seeded });
+            Assert.Equal(seeded, VBTCService.ResolveContractSnapshot(pending));
+        }
     }
 }
