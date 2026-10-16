@@ -153,7 +153,7 @@ namespace VerifiedXCore
             app.Use((context, func) =>
             {
                 if (Globals.OpenAPI && context.Request.Path.StartsWithSegments("/swagger")
-                    && (Globals.APIToken == null || context.Request.Headers["apitoken"] != Globals.APIToken.ToUnsecureString()))
+                    && (Globals.APIToken == null || Globals.APIToken.Length == 0 || context.Request.Headers["apitoken"] != Globals.APIToken.ToUnsecureString()))
                 {
                     context.Response.StatusCode = 403;
                     return Task.CompletedTask;
