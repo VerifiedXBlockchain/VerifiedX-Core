@@ -106,8 +106,10 @@ namespace VerifiedXCore.Utilities
         /// scalar by default; the legacy scalar when forced, or when only the legacy address has on-chain
         /// history (the key was previously imported by an older wallet and used there).
         /// </summary>
+        /// <param name="addressOf">The address the key controls, for the footprint check: the ordinary address by default; a
+        /// reserve restore passes its xRBX derivation, since that is where a reserve's history is.</param>
         public static bool TryParseImportedKey(string hex, bool forceLegacy, Func<string, bool> hasFootprint,
-            out BigInteger scalar, out bool usedLegacy, out string error)
+            out BigInteger scalar, out bool usedLegacy, out string error, Func<BigInteger, string>? addressOf = null)
         {
             usedLegacy = false;
             error = "";
@@ -118,11 +120,15 @@ namespace VerifiedXCore.Utilities
             }
             if (!TryParseExternalPrivateKeyHex(hex, out scalar, out error))
                 return false;
-            var legacyAddress = LegacyAddressIfDifferent(hex);
-            if (legacyAddress != null && hasFootprint(legacyAddress) && !hasFootprint(DeriveAddress(scalar)))
+            if (LegacyAddressIfDifferent(hex) != null) // the legacy reading is a different key
             {
-                scalar = ParseLegacy(LegacyDigits(hex));
-                usedLegacy = true;
+                var derive = addressOf ?? DeriveAddress;
+                var legacyScalar = ParseLegacy(LegacyDigits(hex));
+                if (hasFootprint(derive(legacyScalar)) && !hasFootprint(derive(scalar)))
+                {
+                    scalar = legacyScalar;
+                    usedLegacy = true;
+                }
             }
             return true;
         }
