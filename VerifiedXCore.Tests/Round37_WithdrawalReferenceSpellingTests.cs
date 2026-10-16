@@ -116,5 +116,40 @@ namespace VerifiedXCore.Tests
             Assert.False(ok);
             Assert.Equal(FrostSigningAuthorization.NonCanonicalReference, reason);
         }
+
+        /// <summary>
+        /// A withdrawal whose cancellation was approved (and refunded) is not signed, though its row reads open: the
+        /// withdrawal-store rebuild puts a lost row back as requested before it applies how the withdrawal ended.
+        /// </summary>
+        [Theory]
+        [InlineData(true, false)]
+        [InlineData(false, true)]
+        public void ARefundedWithdrawal_IsNotSignedThoughItsRowReadsOpen(bool approved, bool signed)
+        {
+            VBTCWithdrawalCancellation.SaveCancellation(new VBTCWithdrawalCancellation
+            {
+                CancellationUID = VBTCWithdrawalCancellation.OnChainUidPrefix + "c1", SmartContractUID = _vault, OwnerAddress = Owner, WithdrawalRequestHash = Wrh,
+                BTCTxHash = "", FailureProof = "", RequestTime = TimeUtil.GetTime(), ValidatorVotes = new Dictionary<string, bool>(),
+                ApproveCount = approved ? 3 : 0, RejectCount = approved ? 0 : 3, IsApproved = approved, IsProcessed = true, RequestBlockHeight = 450,
+            });
+            Assert.Equal(VBTCWithdrawalStatus.Requested, VBTCWithdrawalRequest.GetByTransactionHash(Wrh, _vault)!.Status);
+
+            var (ok, reason) = FrostSigningAuthorization.Authorize(Request(Wrh));
+            Assert.True(ok == signed, reason);
+        }
+
+        [Fact]
+        public void WhileTheWithdrawalStoreIsRebuilt_NothingIsSignedFromIt()
+        {
+            try
+            {
+                VBTCWithdrawalStoreRebuildService.SetRunningForTests(true);
+                var (ok, reason) = FrostSigningAuthorization.Authorize(Request(Wrh));
+                Assert.False(ok);
+                Assert.Contains("being rebuilt", reason);
+            }
+            finally { VBTCWithdrawalStoreRebuildService.SetRunningForTests(false); }
+            Assert.True(FrostSigningAuthorization.Authorize(Request(Wrh)).Ok);
+        }
     }
 }

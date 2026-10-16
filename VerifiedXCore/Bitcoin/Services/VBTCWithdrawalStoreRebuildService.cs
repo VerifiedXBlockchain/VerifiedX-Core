@@ -37,6 +37,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
         private static int _running = 0;
         public static bool IsRunning => _running == 1;
+        internal static void SetRunningForTests(bool running) => Interlocked.Exchange(ref _running, running ? 1 : 0);
         public static RebuildResult? LastResult { get; private set; }
 
         public class RebuildMeta

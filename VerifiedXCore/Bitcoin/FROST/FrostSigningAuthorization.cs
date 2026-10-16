@@ -179,11 +179,18 @@ namespace VerifiedXCore.Bitcoin.FROST
                     // The hash alone would return an arbitrary sibling (wrong amount cap, and
                     // IsWithdrawalSignable would reject on the contract mismatch), and a
                     // cancellation filed against another vault's share would block this one.
+                    // A row the withdrawal-store rebuild has just put back reads "requested" until the rebuild has brought
+                    // it to how its withdrawal ended, so nothing is signed from the store while it is being rebuilt.
+                    if (VBTCWithdrawalStoreRebuildService.IsRunning)
+                        return (false, "The withdrawal store is being rebuilt; signing resumes when it finishes");
                     var wr = VBTCWithdrawalRequest.GetByTransactionHash(wrh, vaultUid);
                     var pendingCancellation = VBTCWithdrawalCancellation.HasPendingCancellation(
                         wrh, VerifiedXCore.Utilities.TimeUtil.GetTime(), vaultUid);
                     var (signable, signableReason) = IsWithdrawalSignable(wr, vaultUid, pendingCancellation);
                     if (!signable) return (false, signableReason);
+                    // A withdrawal whose cancellation was approved was refunded, whatever its row reads.
+                    if (VBTCWithdrawalCancellation.GetCancellationsFor(wrh, vaultUid).Any(c => c.IsProcessed && c.IsApproved))
+                        return (false, "Withdrawal request was cancelled and refunded");
                     if (!string.Equals(wrh, wr!.TransactionHash, StringComparison.Ordinal)) return (false, NonCanonicalReference);
                     destination = wr.BTCDestination;
                     maxDestinationSats = (long)(wr.Amount * 100_000_000M);
