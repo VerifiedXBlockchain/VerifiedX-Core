@@ -120,10 +120,13 @@ namespace VerifiedXCore
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
         public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
         {
-            if (env.IsDevelopment())
+            // An unhandled exception returns 500 with no body in every environment, as on the P2P hosts: the developer
+            // exception page (Development) handed callers the stack trace, source paths and request values.
+            app.UseExceptionHandler(errorApp => errorApp.Run(context =>
             {
-                app.UseDeveloperExceptionPage();
-            }
+                context.Response.StatusCode = 500;
+                return Task.CompletedTask;
+            }));
 
             //app.UseElmah();
             app.UseSwagger();
