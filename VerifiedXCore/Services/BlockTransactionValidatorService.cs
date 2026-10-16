@@ -175,7 +175,7 @@ namespace VerifiedXCore.Services
                                 // Marked first: the bid then pays automatically once; a later Sale_Start under the same
                                 // signature (after a cancel) is left for the owner to complete by hand.
                                 Bid.MarkAutoCompleted(toAddress ?? account.Address, keySign, scUID);
-                                _ = SmartContractService.CompleteSaleSmartContractTX(scUID, tx.FromAddress, amountSoldFor.Value, keySign);
+                                _ = SmartContractService.CompleteSaleSmartContractTX(scUID, tx.FromAddress, amountSoldFor.Value, keySign, expectedBuyer: toAddress ?? account.Address);
                             }
                             else
                             {

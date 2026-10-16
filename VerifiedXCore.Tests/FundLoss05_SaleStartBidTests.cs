@@ -332,6 +332,24 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task AutoCompletion_ChargesOnlyTheBuyerWhoseBidWasChecked()
+        {
+            var nft = ListedNft();
+            var state = SmartContractStateTrei.GetSmartContractState(nft)!;
+            var other = NewKey();
+            state.NextOwner = other.Address; // a competing Sale_Start moved the sale to another account
+            SmartContractStateTrei.UpdateSmartContract(state);
+
+            var (refused, why) = await SmartContractService.CompleteSaleSmartContractTX(nft, _seller.Address, 500M, "key-40", expectedBuyer: _victim.Address);
+            Assert.Null(refused);
+            Assert.Contains("not completing it automatically", why);
+
+            // The buyer the sale names is not refused by this check (it then needs the account in this wallet).
+            var (_, sameBuyer) = await SmartContractService.CompleteSaleSmartContractTX(nft, _seller.Address, 500M, "key-40", expectedBuyer: other.Address);
+            Assert.DoesNotContain("not completing it automatically", sameBuyer);
+        }
+
+        [Fact]
         public void ShopResponse_StillUpdatesASentBid()
         {
             var nft = ListedNft();
