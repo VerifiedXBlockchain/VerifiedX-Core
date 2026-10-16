@@ -351,6 +351,30 @@ namespace VerifiedXCore.Tests
             Assert.True(row.IsCompleted);
         }
 
+        /// <summary>
+        /// Round 37: from the path-audit height, a node whose table lacks a vote's withdrawal row (a damaged store) refuses
+        /// the vote in a block rather than count it without cancelling the row or refunding its escrow. A node holding the
+        /// row counts it.
+        /// </summary>
+        [Fact]
+        public void AVoteWhoseWithdrawalRowIsMissing_IsRefusedFromThePathAuditHeight()
+        {
+            var priorGate = Globals.PathAuditRulesHeight;
+            Globals.PathAuditRulesHeight = CancelHeight;
+            try
+            {
+                var c = OpenCancellation();
+                var vote = VoteTx(c.CancellationUID, "xVal1", true, CancelHeight + 1);
+                Assert.Null(VerifiedXCore.Services.TransactionValidatorService.VoteWithdrawalRowMissing(vote, CancelHeight + 1, inBlock: true)); // the row is here
+
+                VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()!.DeleteMany(x => x.TransactionHash == RequestHash);
+                Assert.Equal($"No withdrawal request {RequestHash} exists on contract {Vault}.",
+                    VerifiedXCore.Services.TransactionValidatorService.VoteWithdrawalRowMissing(vote, CancelHeight + 1, inBlock: true));
+                Assert.Null(VerifiedXCore.Services.TransactionValidatorService.VoteWithdrawalRowMissing(vote, CancelHeight - 1, inBlock: true)); // below the height
+            }
+            finally { Globals.PathAuditRulesHeight = priorGate; }
+        }
+
         [Fact]
         public void RejectNamingTheSignedTx_RejectsAtOnce_AndTheWithdrawalStaysOpen()
         {

@@ -277,33 +277,6 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// Whether a withdrawal request with this transaction hash was mined, within the recovery's window below
-        /// <paramref name="anchorHeight"/>, for this contract. Reads blocks only and writes nothing: block validation
-        /// asks this (a completion must name a request that exists on its own contract) and must leave no trace of a
-        /// block that is then refused. The row itself is rebuilt when the completion is applied.
-        /// </summary>
-        public static bool MinedRequestNames(string? requestTxHash, string? scUID, long anchorHeight)
-        {
-            try
-            {
-                if (string.IsNullOrEmpty(requestTxHash) || string.IsNullOrEmpty(scUID)) return false;
-                var toHeight = anchorHeight > 0 ? anchorHeight : (Globals.LastBlock?.Height ?? 0);
-                var fromHeight = Math.Max(0, toHeight - RECOVERY_SCAN_BLOCKS);
-                foreach (var block in BlockchainData.GetBlocks().Find(LiteDB.Query.Between("Height", fromHeight, toHeight)))
-                {
-                    if (block.Transactions == null) continue;
-                    foreach (var tx in block.Transactions)
-                    {
-                        if (tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST || tx.Hash != requestTxHash) continue;
-                        return TryBuildRequestRows(tx, out var rows) && rows != null && rows.Any(r => r.SmartContractUID == scUID);
-                    }
-                }
-            }
-            catch { }
-            return false;
-        }
-
-        /// <summary>
         /// Mirrors StateData.RequestVBTCV2Withdrawal's row construction exactly (requestor bound to
         /// tx.FromAddress, UniqueId falls back to tx.Hash, mined height stamped). Keep the two in
         /// sync — this is the consensus-visible shape of a mined request row.

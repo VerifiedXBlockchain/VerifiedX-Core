@@ -3751,19 +3751,16 @@ namespace VerifiedXCore.Services
                         var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
 
                         // From Globals.PathAuditRulesHeight a completion names a request that exists on its own contract.
-                        // The request table is written by every node from mined requests, so a missing row is either
-                        // this node's store being incomplete (in a block: rebuilt from the mined request, missing rows
-                        // only) or a completion that names a request under a contract it was never made on. That second
-                        // case used to pass here "lightweight", and its apply then reset the request's real row.
+                        // Every node writes the request table from the mined requests, in order, so a healthy node holds
+                        // every row: no row means the completion names a request that does not exist on this contract, or
+                        // this node's table is damaged. Either way this node cannot judge it as the network does, and it
+                        // refuses rather than guess (a guess accepted what nodes holding the row refused).
                         var completeHeight = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
                         if (withdrawalRequest == null && completeHeight >= Globals.PathAuditRulesHeight)
                         {
-                            // (Read from the blocks, nothing written: the missing row is rebuilt when the completion
-                            // is applied, and a block that is refused leaves no trace.)
-                            var mined = (blockVerify || blockDownloads)
-                                && Bitcoin.Services.VBTCWithdrawalStoreRebuildService.MinedRequestNames(withdrawalRequestHash, scUID, completeHeight);
-                            if (!mined)
-                                return (txResult, $"No withdrawal request {withdrawalRequestHash} exists on contract {scUID}.");
+                            if (blockVerify || blockDownloads)
+                                ReportWithdrawalStoreGap(withdrawalRequestHash, scUID, txRequest);
+                            return (txResult, NoWithdrawalRequestReason(withdrawalRequestHash, scUID));
                         }
 
                         if (withdrawalRequest != null)
@@ -3833,6 +3830,13 @@ namespace VerifiedXCore.Services
                         : Bitcoin.Services.VBTCCancellationVoting.ValidateVote(txRequest, cancelVoteHeight);
                     if (rulesError != null)
                         return (txResult, rulesError);
+
+                    // From the path-audit height a vote's withdrawal row must be here: an approving vote cancels it and
+                    // refunds its escrow, which a node lacking the row (a damaged table) would not do. As for a
+                    // completion, such a node refuses rather than guess.
+                    if (txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE
+                        && VoteWithdrawalRowMissing(txRequest, cancelVoteHeight, blockVerify || blockDownloads) is { } missingRow)
+                        return (txResult, missingRow);
                 }
                 catch (Exception ex)
                 {
@@ -4480,6 +4484,44 @@ namespace VerifiedXCore.Services
         }
 
         internal const string NegativeFeeReason = "A transaction's fee cannot be negative.";
+
+        internal const string NoWithdrawalRequestPrefix = "No withdrawal request ";
+        internal static string NoWithdrawalRequestReason(string? requestHash, string? scUID) =>
+            $"{NoWithdrawalRequestPrefix}{requestHash} exists on contract {scUID}.";
+
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> ReportedWithdrawalStoreGaps = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// From the path-audit height: the refusal for a cancellation vote whose withdrawal row this node's table lacks (a
+        /// damaged store; an approving vote would cancel the row and refund its escrow, which this node could not do), or
+        /// null. In a block it is reported loudly.
+        /// </summary>
+        internal static string? VoteWithdrawalRowMissing(Transaction vote, long height, bool inBlock)
+        {
+            if (height < Globals.PathAuditRulesHeight) return null;
+            var voted = VBTCWithdrawalCancellation.GetCancellation(JObject.Parse(vote.Data)["CancellationUID"]?.ToObject<string?>() ?? "");
+            if (voted == null || VBTCWithdrawalRequest.GetByTransactionHash(voted.WithdrawalRequestHash, voted.SmartContractUID) != null) return null;
+            if (inBlock) ReportWithdrawalStoreGap(voted.WithdrawalRequestHash, voted.SmartContractUID, vote);
+            return NoWithdrawalRequestReason(voted.WithdrawalRequestHash, voted.SmartContractUID);
+        }
+
+        /// <summary>
+        /// A block names a withdrawal request this node's table does not hold. A healthy table holds every mined request,
+        /// so either the block is invalid or this node's withdrawal store is damaged; this node refuses the block either
+        /// way. Said loudly (console and error log, once per request): if peers accept the block, this node has stopped
+        /// following the chain and needs its state rebuilt from the blocks: restart with "rebuildstate". A snapshot of the same
+        /// store would not heal it, so this refusal does not count toward the automatic snapshot restore.
+        /// </summary>
+        private static void ReportWithdrawalStoreGap(string? requestHash, string? scUID, Transaction tx)
+        {
+            if (!ReportedWithdrawalStoreGaps.TryAdd($"{requestHash}|{scUID}", 0)) return;
+            var text = $"WITHDRAWAL STORE: block transaction {tx.Hash} ({tx.TransactionType}) names withdrawal request {requestHash} on contract {scUID}, " +
+                       "which this node's withdrawal table does not hold. The block is refused. If other nodes accept it, this node's withdrawal store is " +
+                       "damaged and it has stopped following the chain: restart it with \"rebuildstate\" (full state rebuild from the blocks).";
+            ErrorLogUtility.LogError(text, "TransactionValidatorService.ReportWithdrawalStoreGap()");
+            ConsoleWriterService.OutputMarked($"[red]{Spectre.Console.Markup.Escape(text)}[/]");
+        }
+
         internal const string RegisteredBaseAddressReason = "A validator's BaseAddress must be the one its own key derives.";
 
         /// <summary>

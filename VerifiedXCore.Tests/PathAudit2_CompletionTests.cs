@@ -175,17 +175,28 @@ namespace VerifiedXCore.Tests
             Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash(_requestHash, _other));
         }
 
+        /// <summary>
+        /// Round 37: a node whose table lacks the row (a damaged store: the request is on chain) cannot judge a completion as
+        /// the network does, so it refuses it in a block rather than guess, writes nothing, and says so. Once its store is
+        /// healed it accepts the same completion; the recovery never reopens a row that has since ended.
+        /// </summary>
         [Fact]
-        public async Task ANodeWhoseTableLacksTheRow_StillAcceptsTheRealCompletionInABlock_AndRebuildsOnlyWhatIsMissing()
+        public async Task ANodeWhoseTableLacksTheRow_RefusesTheCompletionInABlock_UntilItsStoreIsHealed()
         {
-            // This node's store never got the row (a database copied from elsewhere): the request is on chain.
             Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash(_requestHash, _vault));
             var real = Complete(_requester, _vault, new string('b', 64));
 
             var (ok, why) = await VerifyInBlock(real, Rule);
-            Assert.True(ok, why);
-            // Validation wrote nothing (a block that is then refused must leave no trace); the row is rebuilt at apply.
-            Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash(_requestHash, _vault));
+            Assert.False(ok);
+            Assert.Equal($"No withdrawal request {_requestHash} exists on contract {_vault}.", why);
+            var (okForeign, _) = await VerifyInBlock(Complete(_anyone, _vault, new string('b', 64)), Rule);
+            Assert.False(okForeign);
+            Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash(_requestHash, _vault)); // validation wrote nothing
+
+            // Healed (the row as the chain wrote it), the node judges as every other node does.
+            Assert.NotNull(VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain(_requestHash, Rule, _vault));
+            var (okHealed, whyHealed) = await VerifyInBlock(real, Rule);
+            Assert.True(okHealed, whyHealed);
 
             await Apply(Rule, real);
             Assert.Equal(VBTCWithdrawalStatus.Completed, Row().Status);
@@ -196,6 +207,14 @@ namespace VerifiedXCore.Tests
             Assert.Equal(VBTCWithdrawalStatus.Completed, Row().Status);
             Assert.Null(VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain(_requestHash, Rule + 5, _other));
             Assert.Equal(VBTCWithdrawalStatus.Completed, Row().Status);
+        }
+
+        /// <summary>A missing-row refusal does not drive the automatic snapshot restore: a snapshot of the same store cannot heal it.</summary>
+        [Fact]
+        public void AMissingRowRefusal_IsNotAStateCorruptionSignal()
+        {
+            Assert.False(BlockValidatorService.IsStateCorruptionSignal(TransactionValidatorService.NoWithdrawalRequestReason(_requestHash, _vault)));
+            Assert.True(BlockValidatorService.IsStateCorruptionSignal("This is a new account with no balance."));
         }
 
         /// <summary>
