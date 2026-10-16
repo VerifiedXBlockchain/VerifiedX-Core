@@ -498,17 +498,28 @@ namespace VerifiedXCore.Data
         /// </summary>
         public static int RemoveRefusedFromPool(LiteDB.ILiteCollection<Transaction> mempool, Transaction received)
         {
-            var preimage = received.GetHashPreimage();
             var removed = 0;
             foreach (var row in mempool.Find(x => x.Hash == received.Hash && x.Signature == received.Signature).ToList())
             {
-                if (row.GetHashPreimage() == preimage && mempool.DeleteSafe(row.Id))
+                if (SameHashedFields(row, received) && mempool.DeleteSafe(row.Id))
                     removed++;
             }
             if (removed > 0)
                 ReleasePrivateMempoolNullifiersForTx(received.Hash);
             return removed;
         }
+
+        // Field by field: the hash preimage concatenates fields without separators, so two transactions can share it.
+        private static bool SameHashedFields(Transaction a, Transaction b) =>
+            a.Timestamp == b.Timestamp
+            && string.Equals(a.FromAddress, b.FromAddress, StringComparison.Ordinal)
+            && string.Equals(a.ToAddress, b.ToAddress, StringComparison.Ordinal)
+            && a.Amount.ToString() == b.Amount.ToString()
+            && a.Fee.ToString() == b.Fee.ToString()
+            && a.Nonce == b.Nonce
+            && a.TransactionType == b.TransactionType
+            && string.Equals(a.Data, b.Data, StringComparison.Ordinal)
+            && a.UnlockTime == b.UnlockTime;
 
         public static LiteDB.ILiteCollection<Transaction> GetPool()
         {

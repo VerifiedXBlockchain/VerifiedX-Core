@@ -221,6 +221,22 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ARefusedCopyWithTheSameConcatenatedFields_SplitDifferently_RemovesNothing()
+        {
+            var tx = Send(1M, data: null!);
+            tx.UnlockTime = 1792235000;
+            Assert.True(MempoolEvictionUtility.TryAdmitAndInsert(tx, TransactionData.GetPool()));
+
+            var resplit = JsonConvert.DeserializeObject<Transaction>(JsonConvert.SerializeObject(tx))!;
+            resplit.Data = "1";
+            resplit.UnlockTime = 792235000;
+            Assert.Equal(tx.GetHashPreimage(), resplit.GetHashPreimage());
+            Assert.Equal(0, TransactionData.RemoveRefusedFromPool(TransactionData.GetPool(), resplit));
+
+            Assert.Equal(1, PoolCount());
+        }
+
+        [Fact]
         public void ARefusedCopyIdenticalToThePooledTransaction_RemovesIt()
         {
             var tx = Send(1M);
