@@ -712,10 +712,10 @@ namespace VerifiedXCore.Utilities
 
                 foreach (var block in blockCollection.Find(LiteDB.Query.All("Height", LiteDB.Query.Ascending)))
                 {
-                    if (liftsRestoreStop && previousHeight >= 0 && block.Height != previousHeight + 1)
+                    if (liftsRestoreStop && block.Height != previousHeight + 1) // from genesis (height 0), then every height
                     {
                         failCount++;
-                        ErrorLogUtility.LogError($"[ResetTreis] The block store has no block between heights {previousHeight} and {block.Height}; the failed restore's stop holds.", "BlockRollbackUtility.ResetTreis");
+                        ErrorLogUtility.LogError($"[ResetTreis] The block store has no block between heights {Math.Max(previousHeight, -1) + 1} and {block.Height - 1}; the failed restore's stop holds.", "BlockRollbackUtility.ResetTreis");
                     }
                     previousHeight = block.Height;
 
@@ -781,6 +781,12 @@ namespace VerifiedXCore.Utilities
                         failCount++;
                         ErrorLogUtility.LogError($"[ResetTreis] Error replaying block {block.Height}: {ex.Message}", "BlockRollbackUtility.ResetTreis");
                     }
+                }
+
+                if (liftsRestoreStop && previousHeight < 0)
+                {
+                    failCount++;
+                    ErrorLogUtility.LogError("[ResetTreis] The block store is empty; the failed restore's stop holds.", "BlockRollbackUtility.ResetTreis");
                 }
 
                 rebuildStopwatch.Stop();
