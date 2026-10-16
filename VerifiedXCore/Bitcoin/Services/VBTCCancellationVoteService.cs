@@ -180,7 +180,7 @@ namespace VerifiedXCore.Bitcoin.Services
             if (string.IsNullOrEmpty(depositAddress))
                 return new SigningEvidence { HasEvidence = true, BtcTxId = txId, Inconclusive = true };
 
-            var (verdict, _) = await BitcoinTransactionService.GetOutpointSpendVerdict(depositAddress, outpoints);
+            var (verdict, _) = await BitcoinTransactionService.GetOutpointSpendVerdict(depositAddress, outpoints, txId);
             return verdict switch
             {
                 BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed => new SigningEvidence { HasEvidence = true, BtcTxId = txId, ProvenDead = true },

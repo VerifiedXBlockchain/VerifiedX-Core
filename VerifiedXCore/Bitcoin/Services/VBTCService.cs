@@ -2521,7 +2521,7 @@ namespace VerifiedXCore.Bitcoin.Services
             var coins = string.IsNullOrEmpty(row.PinnedCoinsJson)
                 ? new List<PinnedWithdrawalCoin>()
                 : JsonConvert.DeserializeObject<List<PinnedWithdrawalCoin>>(row.PinnedCoinsJson) ?? new List<PinnedWithdrawalCoin>();
-            var (verdict, detail) = await BitcoinTransactionService.GetOutpointSpendVerdict(depositAddress, coins.Select(c => c.ToOutpointKey()));
+            var (verdict, detail) = await BitcoinTransactionService.GetOutpointSpendVerdict(depositAddress, coins.Select(c => c.ToOutpointKey()), txid);
             if (verdict == BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed)
             {
                 SCLogUtility.Log($"Reclaim tx {txid} for withdrawal {row.TransactionHash} can never confirm ({detail}); rebuilding.", "VBTCService.ResolveDeferredCompletion()");

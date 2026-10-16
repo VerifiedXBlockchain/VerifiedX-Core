@@ -21,11 +21,13 @@ namespace VerifiedXCore.Tests
 {
     /// <summary>
     /// Round 37: a signed withdrawal transaction is dead only once one of its inputs is spent by a confirmed transaction,
-    /// and an input is "spent" only if a confirmed transaction created it at the vault's address. An input no
-    /// transaction on chain created (its creator not broadcast yet, or an output index the funding transaction does not
-    /// have) leaves the signed transaction able to confirm later. Driven through
-    /// BitcoinTransactionService.GetOutpointSpendVerdict, which every dead-transaction decision reads (the sign/start
-    /// guard, the pin release, the cancellation vote's evidence), against an Electrum server on loopback.
+    /// and that is shown, not inferred: an input counts as spent when <see cref="BitcoinTransactionService.SpentProofsRequired"/>
+    /// Electrum servers each show the confirmed transaction that spends it, validly signed over the real funding output
+    /// (which a confirmed transaction created at the vault's address) and other than the transaction asked about. A server
+    /// that only leaves a coin out of its unspent set, shows an unsigned spender, or stands alone cannot make a signed
+    /// transaction look dead. Driven through BitcoinTransactionService.GetOutpointSpendVerdict, which every dead-transaction
+    /// decision reads (the sign/start guard, the pin release, the cancellation vote's evidence, the deferred completion),
+    /// against Electrum servers on loopback.
     /// </summary>
     [Collection("DbContextSequential")]
     public class Round37_OutpointCreatedOnChainTests : IDisposable
@@ -33,73 +35,186 @@ namespace VerifiedXCore.Tests
         private static readonly Network Net = Network.TestNet;
         private readonly Network? _priorNetwork = Globals.BTCNetwork;
         private readonly List<ClientSettings>? _priorServers = Globals.ClientSettings;
-        private readonly BitcoinAddress _vault = new Key().PubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, Net);
+        private readonly string? _priorCustomPath = Globals.CustomPath;
+        private readonly VerifiedXCore.Models.Block _priorLastBlock = Globals.LastBlock;
+        private readonly long _priorRecordHeight = Globals.BitcoinAttestationRecordHeight;
+        private readonly string _tempRoot = Path.Combine(Path.GetTempPath(), $"r37outpoint_{Guid.NewGuid():N}") + Path.DirectorySeparatorChar;
+        private const long SpenderBtcHeight = 101;
+        private readonly Key _vaultKey = new();
+        private readonly BitcoinAddress _vault;
         private readonly BitcoinAddress _elsewhere = new Key().PubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, Net);
         private readonly NBitcoin.Transaction _funding;   // confirmed: vout 0 and 1 pay the vault, vout 2 pays elsewhere
-        private readonly NBitcoin.Transaction _spender;   // confirmed: spends funding:0
-        private readonly LoopbackElectrum _electrum;
+        private readonly NBitcoin.Transaction _spender;   // confirmed, signed by the vault key: spends funding:0
+        private readonly NBitcoin.Transaction _forged;    // spends funding:0 with no valid signature
+        private readonly List<LoopbackElectrum> _servers = new();
 
         public Round37_OutpointCreatedOnChainTests()
         {
+            Directory.CreateDirectory(_tempRoot);
+            Globals.CustomPath = _tempRoot;
+            VerifiedXCore.Data.DbContext.Initialize();
+            Globals.LastBlock = new VerifiedXCore.Models.Block { Height = 10 }; // before the attestation's recording height
             Globals.BTCNetwork = Net;
+            _vault = _vaultKey.PubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, Net);
             _funding = Net.CreateTransaction();
             _funding.Inputs.Add(new OutPoint(new uint256(RandomUtils.GetBytes(32)), 0));
             _funding.Outputs.Add(Money.Satoshis(100_000), _vault);
             _funding.Outputs.Add(Money.Satoshis(200_000), _vault);
             _funding.Outputs.Add(Money.Satoshis(300_000), _elsewhere);
-            _spender = Net.CreateTransaction();
-            _spender.Inputs.Add(new OutPoint(_funding.GetHash(), 0));
-            _spender.Outputs.Add(Money.Satoshis(90_000), _elsewhere);
 
-            var raw = new Dictionary<string, string> { [Id(_funding)] = _funding.ToHex(), [Id(_spender)] = _spender.ToHex() };
-            _electrum = new LoopbackElectrum(req =>
+            _spender = Net.CreateTransactionBuilder()
+                .AddCoins(new Coin(_funding, 0u)).AddKeys(_vaultKey)
+                .Send(_elsewhere, Money.Satoshis(90_000)).SetChange(_vault).SendFees(Money.Satoshis(10_000))
+                .BuildTransaction(true);
+            _forged = Net.CreateTransaction();
+            _forged.Inputs.Add(new OutPoint(_funding.GetHash(), 0));
+            _forged.Outputs.Add(Money.Satoshis(90_000), _elsewhere);
+        }
+
+        public void Dispose()
+        {
+            foreach (var s in _servers) s.Dispose();
+            Globals.ClientSettings = _priorServers;
+            Globals.BTCNetwork = _priorNetwork;
+            Globals.BitcoinAttestationRecordHeight = _priorRecordHeight;
+            Globals.LastBlock = _priorLastBlock;
+            try { VerifiedXCore.Data.DbContext.CloseDB(); } catch { }
+            Globals.CustomPath = _priorCustomPath;
+            try { Directory.Delete(_tempRoot, recursive: true); } catch { }
+        }
+
+        private static string Id(NBitcoin.Transaction tx) => tx.GetHash().ToString();
+
+        /// <summary>One Electrum server: its unspent set and its confirmed history (every transaction it can return).</summary>
+        private void Server(IEnumerable<string> unspent, params NBitcoin.Transaction[] confirmed)
+        {
+            var raw = confirmed.Append(_funding).ToDictionary(Id, t => t.ToHex());
+            var unspentRows = unspent.Select(o => new JObject { ["tx_hash"] = o.Split(':')[0], ["tx_pos"] = int.Parse(o.Split(':')[1]), ["height"] = 100, ["value"] = 1 }).ToList();
+            var history = confirmed.Prepend(_funding).Select((t, i) => new JObject { ["tx_hash"] = Id(t), ["height"] = 100 + i }).ToList();
+            var server = new LoopbackElectrum(req =>
             {
                 var p = req["params"] as JArray;
                 switch ((string?)req["method"])
                 {
                     case "server.version": return new JArray("Loopback", "1.4");
-                    case "blockchain.scripthash.listunspent":
-                        return new JArray(new JObject { ["tx_hash"] = Id(_funding), ["tx_pos"] = 1, ["height"] = 100, ["value"] = 200_000 });
-                    case "blockchain.scripthash.get_history":
-                        return new JArray(new JObject { ["tx_hash"] = Id(_funding), ["height"] = 100 }, new JObject { ["tx_hash"] = Id(_spender), ["height"] = 101 });
-                    case "blockchain.transaction.get":
-                        return raw.TryGetValue((string)p![0]!, out var hex) ? hex : null;
+                    case "blockchain.scripthash.listunspent": return new JArray(unspentRows);
+                    case "blockchain.scripthash.get_history": return new JArray(history);
+                    case "blockchain.transaction.get": return raw.TryGetValue((string)p![0]!, out var hex) ? hex : null;
+                    // Each confirmed transaction is the only one in its block: an empty branch, position 0.
+                    case "blockchain.transaction.get_merkle": return new JObject { ["merkle"] = new JArray(), ["block_height"] = (int)p![1]!, ["pos"] = 0 };
                     default: return null;
                 }
             });
-            Globals.ClientSettings = new List<ClientSettings> { new ClientSettings { Host = "127.0.0.1", Port = _electrum.Port, UseSsl = true } };
+            _servers.Add(server);
+            Globals.ClientSettings = _servers.Select(s => new ClientSettings { Host = "127.0.0.1", Port = s.Port, UseSsl = true }).ToList();
         }
 
-        public void Dispose()
-        {
-            _electrum.Dispose();
-            Globals.ClientSettings = _priorServers;
-            Globals.BTCNetwork = _priorNetwork;
-        }
+        private string Coin0 => $"{Id(_funding)}:0";
+        private string Coin1 => $"{Id(_funding)}:1";
 
-        private static string Id(NBitcoin.Transaction tx) => tx.GetHash().ToString();
+        private Task<(BitcoinTransactionService.OutpointSpendVerdict Verdict, string Detail)> Verdict(string? signedTxId = null, params string[] outpoints) =>
+            BitcoinTransactionService.GetOutpointSpendVerdict(_vault.ToString(), outpoints.Length > 0 ? outpoints : new[] { Coin0 }, signedTxId);
 
         [Fact]
-        public async Task AnInputAConfirmedTransactionCreatedAndAnotherSpent_IsSpentByConfirmed()
+        public async Task TwoServersShowingAValidlySignedConfirmedSpend_IsSpentByConfirmed()
         {
-            var (verdict, detail) = await BitcoinTransactionService.GetOutpointSpendVerdict(_vault.ToString(), new[] { $"{Id(_funding)}:0" });
+            Server(new[] { Coin1 }, _spender);
+            Server(new[] { Coin1 }, _spender);
+            var (verdict, detail) = await Verdict();
             Assert.True(verdict == BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed, detail);
         }
 
         [Fact]
-        public async Task AnInputWhoseCreatorIsNotOnChain_LeavesTheTransactionAlive()
+        public async Task OneServerShowingTheSpend_IsNotEnough()
         {
-            var phantom = $"{new uint256(RandomUtils.GetBytes(32))}:0";
-            var (verdict, detail) = await BitcoinTransactionService.GetOutpointSpendVerdict(_vault.ToString(), new[] { $"{Id(_funding)}:1", phantom });
+            Server(new[] { Coin1 }, _spender);
+            Server(new[] { Coin0, Coin1 });
+            var (verdict, detail) = await Verdict();
+            Assert.True(verdict != BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed, detail);
+        }
+
+        [Fact]
+        public async Task ServersThatOnlyLeaveTheCoinOut_DoNotMakeItSpent()
+        {
+            // Both servers omit the coin from their unspent sets and show no transaction that spends it.
+            Server(new[] { Coin1 });
+            Server(new[] { Coin1 });
+            var (verdict, detail) = await Verdict();
             Assert.True(verdict == BitcoinTransactionService.OutpointSpendVerdict.NotSpentByConfirmed, detail);
+        }
+
+        [Fact]
+        public async Task ASpenderWithoutAValidSignature_DoesNotMakeItSpent()
+        {
+            Server(new[] { Coin1 }, _forged);
+            Server(new[] { Coin1 }, _forged);
+            var (verdict, detail) = await Verdict();
+            Assert.True(verdict == BitcoinTransactionService.OutpointSpendVerdict.NotSpentByConfirmed, detail);
+        }
+
+        [Fact]
+        public async Task TheTransactionAskedAbout_IsNotItsOwnDeath()
+        {
+            // The only confirmed spender is the signed transaction itself: it confirmed, it is not dead.
+            Server(new[] { Coin1 }, _spender);
+            Server(new[] { Coin1 }, _spender);
+            var (verdict, detail) = await Verdict(Id(_spender));
+            Assert.True(verdict != BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed, detail);
+        }
+
+        /// <summary>From the recording height: the validators' attested header of the spend's block, whose Merkle root it is.</summary>
+        private void Recording(string? attestedRoot)
+        {
+            Globals.BitcoinAttestationRecordHeight = 1;
+            Globals.LastBlock = new VerifiedXCore.Models.Block { Height = 10 };
+            if (attestedRoot == null) return;
+            var header = Net.Consensus.ConsensusFactory.CreateBlockHeader();
+            header.HashMerkleRoot = uint256.Parse(attestedRoot);
+            Assert.True(VerifiedXCore.Bitcoin.Attestation.BtcHeader.TryParse(Convert.ToHexString(header.ToBytes()), out var parsed));
+            VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.SaveHeader(SpenderBtcHeight, parsed!, 5);
+        }
+
+        [Fact]
+        public async Task FromTheRecordingHeight_ASpendProvenToTheAttestedHeader_IsSpentByConfirmed()
+        {
+            Recording(Id(_spender));
+            Server(new[] { Coin1 }, _spender);
+            Server(new[] { Coin1 }, _spender);
+            var (verdict, detail) = await Verdict();
+            Assert.True(verdict == BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed, detail);
+        }
+
+        [Fact]
+        public async Task FromTheRecordingHeight_ASpendWhoseBlockIsNotAttestedYet_IsInconclusive()
+        {
+            Recording(null);
+            Server(new[] { Coin1 }, _spender);
+            Server(new[] { Coin1 }, _spender);
+            var (verdict, detail) = await Verdict();
+            Assert.True(verdict == BitcoinTransactionService.OutpointSpendVerdict.Inconclusive, detail);
+        }
+
+        [Fact]
+        public async Task FromTheRecordingHeight_ASignedSpendShownAsConfirmedButNotInTheAttestedBlock_IsNotSpent()
+        {
+            // The servers (or one party answering for all of them) present a validly signed spend as confirmed; the attested
+            // header of that height commits to other transactions.
+            Recording(new uint256(RandomUtils.GetBytes(32)).ToString());
+            Server(new[] { Coin1 }, _spender);
+            Server(new[] { Coin1 }, _spender);
+            var (verdict, detail) = await Verdict();
+            Assert.True(verdict != BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed, detail);
         }
 
         [Theory]
         [InlineData(2)]  // the funding transaction's output exists but pays another address
         [InlineData(7)]  // the funding transaction has no such output
-        public async Task AnOutputIndexTheFundingTransactionDoesNotPayTheVault_LeavesTheTransactionAlive(int vout)
+        public async Task AnInputNoConfirmedTransactionCreatedAtTheVault_LeavesTheTransactionAlive(int vout)
         {
-            var (verdict, detail) = await BitcoinTransactionService.GetOutpointSpendVerdict(_vault.ToString(), new[] { $"{Id(_funding)}:{vout}" });
+            Server(new[] { Coin1 }, _spender);
+            Server(new[] { Coin1 }, _spender);
+            var phantom = $"{new uint256(RandomUtils.GetBytes(32))}:0";
+            var (verdict, detail) = await Verdict(null, $"{Id(_funding)}:{vout}", phantom, Coin1);
             Assert.True(verdict == BitcoinTransactionService.OutpointSpendVerdict.NotSpentByConfirmed, detail);
         }
 
