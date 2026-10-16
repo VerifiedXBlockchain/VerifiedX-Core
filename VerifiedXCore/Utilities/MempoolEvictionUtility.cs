@@ -114,6 +114,17 @@ namespace VerifiedXCore.Utilities
         {
             lock (AdmitLock)
             {
+                // Two deliveries of one transaction can both pass a caller's "not pooled" check before either inserts. The
+                // second is the same transaction (same hash and signature): it is already admitted, and a refusal here made
+                // that caller's cleanup delete the first copy. A pooled copy with another signature is refused.
+                var pooled = string.IsNullOrEmpty(tx.Hash) ? null : mempool.FindOne(x => x.Hash == tx.Hash);
+                if (pooled != null)
+                {
+                    var same = string.Equals(pooled.Signature, tx.Signature, StringComparison.Ordinal);
+                    reason = same ? "" : "A different transaction with this hash is in the mempool.";
+                    return same;
+                }
+
                 var plan = PlanAdmission(tx);
                 reason = plan.reason;
                 if (!plan.admit)

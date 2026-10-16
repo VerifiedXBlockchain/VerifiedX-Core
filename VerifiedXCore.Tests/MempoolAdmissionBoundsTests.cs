@@ -1,3 +1,4 @@
+using System.Linq;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using VerifiedXCore;
@@ -173,6 +174,36 @@ namespace VerifiedXCore.Tests
             Assert.False(MempoolEvictionUtility.TryAdmitAndInsert(UnderFloor(), TransactionData.GetPool()));
             Assert.Equal(afterAdmit.sizeBytes, MempoolEvictionUtility.GetAdmissionStats().sizeBytes);
             Assert.Equal(1, PoolCount());
+        }
+
+        [Fact]
+        public void ASecondDeliveryOfAPooledTransaction_IsAlreadyAdmitted_AndTheFirstCopyStays()
+        {
+            var tx = Send(1M);
+            Assert.True(MempoolEvictionUtility.TryAdmitAndInsert(tx, TransactionData.GetPool()));
+            var counted = MempoolEvictionUtility.GetAdmissionStats().sizeBytes;
+
+            // Two handlers can both pass their "not pooled" check; the later one reaches admission with the same transaction.
+            var again = JsonConvert.DeserializeObject<Transaction>(JsonConvert.SerializeObject(tx))!;
+            Assert.True(MempoolEvictionUtility.TryAdmitAndInsert(again, TransactionData.GetPool(), out var reason));
+            Assert.Equal("", reason);
+
+            Assert.Equal(1, PoolCount());
+            Assert.Equal(tx.Hash, TransactionData.GetPool().FindAll().Single().Hash);
+            Assert.Equal(counted, MempoolEvictionUtility.GetAdmissionStats().sizeBytes); // not counted twice
+        }
+
+        [Fact]
+        public void ACopyWithTheSameHashButAnotherSignature_IsRefused_AndThePooledOneStays()
+        {
+            var tx = Send(1M);
+            Assert.True(MempoolEvictionUtility.TryAdmitAndInsert(tx, TransactionData.GetPool()));
+
+            var forged = JsonConvert.DeserializeObject<Transaction>(JsonConvert.SerializeObject(tx))!;
+            forged.Signature = "not-the-signature";
+            Assert.False(MempoolEvictionUtility.TryAdmitAndInsert(forged, TransactionData.GetPool()));
+
+            Assert.Equal(tx.Signature, TransactionData.GetPool().FindAll().Single().Signature);
         }
 
         [Fact]
