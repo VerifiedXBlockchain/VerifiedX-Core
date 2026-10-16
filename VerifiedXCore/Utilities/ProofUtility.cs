@@ -818,10 +818,10 @@ namespace VerifiedXCore.Utilities
             {
                 try
                 {
-                    //skip call because current winner is our node.
+                    //skip call because current winner is our node (unless it cannot verify private-tx proofs yet).
                     if (winningProof.Address == Globals.ValidatorAddress)
                     {
-                        return (true, null);
+                        return (Globals.ProofVerifierReady, null);
                     }
 
                     var cleanIP = winningProof.IPAddress.Replace("::ffff:", "");
@@ -989,10 +989,10 @@ namespace VerifiedXCore.Utilities
             {
                 try
                 {
-                    //skip call because current winner is our node.
+                    //skip call because current winner is our node (unless it cannot verify private-tx proofs yet).
                     if (winningAddress == Globals.ValidatorAddress)
                     {
-                        return (true, Globals.NextValidatorBlock);
+                        return Globals.ProofVerifierReady ? (true, Globals.NextValidatorBlock) : (false, null);
                     }
 
                     var cleanIP = ip.Replace("::ffff:", "");

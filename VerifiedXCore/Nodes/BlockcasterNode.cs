@@ -1226,7 +1226,9 @@ namespace VerifiedXCore.Nodes
                 // Strict OR (not the StopAllTimers && !IsChainSynced idiom) because casting must
                 // pause during a mid-life resync even if IsChainSynced was true earlier. In-loop
                 // placement means fork recovery setting IsResyncing pauses casting automatically.
-                if (Globals.StopAllTimers || !Globals.IsChainSynced || Globals.IsResyncing)
+                // From the proof-rules height, a caster without its PLONK verifier would refuse every block with a private
+                // transaction, so it does not cast until the verifier is loaded.
+                if (Globals.StopAllTimers || !Globals.IsChainSynced || Globals.IsResyncing || !Globals.ProofVerifierReady)
                 {
                     await Task.Delay(2000);
                     continue;
