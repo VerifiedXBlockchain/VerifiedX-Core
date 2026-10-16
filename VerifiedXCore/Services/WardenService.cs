@@ -110,6 +110,13 @@ namespace VerifiedXCore.Services
             Config.Config.EstablishConfigFile();
             Config.Config.EstablishABLFile();
             var config = Config.Config.ReadConfigFile();
+            var configMismatch = Config.Config.TestnetConfigMismatch(config);
+            if (configMismatch != null)
+            {
+                Console.WriteLine(configMismatch);
+                ErrorLogUtility.LogError(configMismatch, "Config.TestnetConfigMismatch()");
+                Environment.Exit(1);
+            }
             Config.Config.ProcessConfig(config);
             Config.Config.ProcessABL();
 
