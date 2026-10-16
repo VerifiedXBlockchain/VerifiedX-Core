@@ -340,6 +340,19 @@ namespace VerifiedXCore.Utilities
             if (attestationChanged)
                 return $"Bitcoin attestation state was written above block {targetHeight}.";
 
+            // The forged-VFX burn is not undone by reversing the removed blocks' transactions, and re-applying the block
+            // that carried it burns again; a snapshot restore brings back the balances and the burn marker together.
+            if (Globals.ForgedVfxBurns.Count > 0)
+            {
+                try
+                {
+                    var burnedAt = WorldTrei.GetWorldTrei().FindOne(x => true)?.ForgedVfxBurnAppliedHeight ?? 0;
+                    if (burnedAt > targetHeight)
+                        return $"The forged-VFX burn was applied above block {targetHeight}.";
+                }
+                catch { return "The forged-VFX burn marker could not be read."; }
+            }
+
             // Delayed reserve payments settle after each block whose time passed their unlock time; a removed block may
             // have settled some, which undoing its transactions does not reverse (fifth review, round 29).
             try
