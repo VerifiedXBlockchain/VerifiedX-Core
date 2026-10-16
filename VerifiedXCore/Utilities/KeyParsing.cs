@@ -66,6 +66,17 @@ namespace VerifiedXCore.Utilities
         public static BigInteger ParseLegacy(string hex) =>
             BigInteger.Parse(hex.Replace(" ", ""), NumberStyles.AllowHexSpecifier);
 
+        /// <summary>
+        /// The digits a pre-fix wallet read: an import is accepted with a "0x" prefix, which those wallets refused, so
+        /// the legacy reading of a prefixed key is that of its digits. Without this the prefix made the legacy parse
+        /// throw, and a 0x import skipped the legacy address (and a forced-legacy import of it failed).
+        /// </summary>
+        public static string LegacyDigits(string? hex)
+        {
+            var s = (hex ?? "").Replace(" ", "").Trim();
+            return s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? s[2..] : s;
+        }
+
         /// <summary>Address derived from a scalar exactly as the wallet derives it.</summary>
         public static string DeriveAddress(BigInteger scalar)
         {
@@ -81,7 +92,7 @@ namespace VerifiedXCore.Utilities
         {
             try
             {
-                var legacy = ParseLegacy(hex);
+                var legacy = ParseLegacy(LegacyDigits(hex));
                 if (!TryParseExternalPrivateKeyHex(hex, out var canonical, out _)) return null;
                 if (Integer.modulo(legacy, CurveOrder) == canonical) return null;
                 if (legacy.IsZero) return null;
@@ -102,7 +113,7 @@ namespace VerifiedXCore.Utilities
             error = "";
             if (forceLegacy)
             {
-                try { scalar = ParseLegacy(hex); usedLegacy = true; return !scalar.IsZero; }
+                try { scalar = ParseLegacy(LegacyDigits(hex)); usedLegacy = true; return !scalar.IsZero; }
                 catch { scalar = BigInteger.Zero; error = "Private key is not valid hexadecimal."; return false; }
             }
             if (!TryParseExternalPrivateKeyHex(hex, out scalar, out error))
@@ -110,7 +121,7 @@ namespace VerifiedXCore.Utilities
             var legacyAddress = LegacyAddressIfDifferent(hex);
             if (legacyAddress != null && hasFootprint(legacyAddress) && !hasFootprint(DeriveAddress(scalar)))
             {
-                scalar = ParseLegacy(hex);
+                scalar = ParseLegacy(LegacyDigits(hex));
                 usedLegacy = true;
             }
             return true;
