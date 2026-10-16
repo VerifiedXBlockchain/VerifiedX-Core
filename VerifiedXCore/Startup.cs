@@ -147,6 +147,19 @@ namespace VerifiedXCore
                 return func.Invoke();
             });
 
+            // Under openapi the API description is for token holders, like the API itself (Swagger does not run the MVC
+            // token filter). A loopback-only node keeps it open to its operator's browser.
+            app.Use((context, func) =>
+            {
+                if (Globals.OpenAPI && Globals.APIToken != null && context.Request.Path.StartsWithSegments("/swagger")
+                    && context.Request.Headers["apitoken"] != Globals.APIToken.ToUnsecureString())
+                {
+                    context.Response.StatusCode = 403;
+                    return Task.CompletedTask;
+                }
+                return func.Invoke();
+            });
+
             // After the guard, so the API description gets the same Host and cross-origin protection as every route.
             app.UseSwagger();
             app.UseSwaggerUI(c => {

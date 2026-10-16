@@ -273,6 +273,29 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task Swagger_UnderOpenApi_NeedsTheApiToken()
+        {
+            try
+            {
+                Globals.OpenAPI = true;
+                Globals.APIToken = Secure("operator-token");
+                using (var open = NewServer())
+                {
+                    Assert.Equal(HttpStatusCode.Forbidden, (await open.CreateClient().GetAsync("/swagger/v1/swagger.json")).StatusCode);
+                    var withToken = new HttpRequestMessage(HttpMethod.Get, "/swagger/v1/swagger.json");
+                    withToken.Headers.Add("apitoken", "operator-token");
+                    Assert.NotEqual(HttpStatusCode.Forbidden, (await open.CreateClient().SendAsync(withToken)).StatusCode);
+                }
+
+                // A loopback-only node keeps it open to its operator.
+                Globals.OpenAPI = false;
+                using var local = NewServer();
+                Assert.NotEqual(HttpStatusCode.Forbidden, (await local.CreateClient().GetAsync("/swagger/v1/swagger.json")).StatusCode);
+            }
+            finally { Globals.OpenAPI = false; Globals.APIToken = null; }
+        }
+
+        [Fact]
         public async Task VX03_Control_SendVfx_WithToken_ReachesController()
         {
             // Authorized caller still reaches the route (it then fails on the unknown account — the
