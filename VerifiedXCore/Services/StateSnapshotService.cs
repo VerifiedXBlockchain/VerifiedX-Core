@@ -201,6 +201,20 @@ namespace VerifiedXCore.Services
         /// Drops the deletion records above <paramref name="height"/>. Called with the stored tip at startup too: no deletion
         /// happens above the tip, so any record there is left from a rollback that did not finish dropping it.
         /// </summary>
+        /// <summary>
+        /// On the first start of a build whose snapshot format is newer than a valid slot's: invalidates every slot (each is
+        /// rebuilt by a full copy anyway) and drops every deletion record. Records written before this build may be left
+        /// from a rollback that never dropped them, and no record is needed once no slot is usable. Later starts find no
+        /// older slot and do nothing.
+        /// </summary>
+        public static void ResetAfterFormatChange()
+        {
+            if (!GetSlots().Any(x => x.Status == SnapshotSlotStatus.Valid && x.SchemaVersion < SnapshotManifest.CurrentSchemaVersion))
+                return;
+            InvalidateAbove(-1);
+            LogUtility.Log("[Snapshot] Slots from an older snapshot format were invalidated and their deletion records dropped; the next cycles rebuild them.", "StateSnapshotService");
+        }
+
         public static void DropDeletionRecordsAbove(long height)
         {
             StateTombstone.GetTombstones()?.DeleteMany(x => x.Height > height);

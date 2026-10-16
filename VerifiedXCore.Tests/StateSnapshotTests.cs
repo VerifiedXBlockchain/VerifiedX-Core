@@ -319,6 +319,30 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task TheFirstStartAfterAFormatChange_DropsEveryDeletionRecord_AndLaterStartsKeepThem()
+        {
+            SeedAccount("alice", 100m, stamp: 35);
+            await StateSnapshotService.UpdateCycleAsync(40);
+            await StateSnapshotService.UpdateCycleAsync(50);
+            var tombstones = StateTombstone.GetTombstones()!;
+            tombstones.Insert(new StateTombstone { SourceColl = StateTombstone.COLL_SCSTATE, Key = "left-over", Height = 45 }); // below the tip
+
+            // A later start with slots in the current format keeps the records.
+            StateSnapshotService.ResetAfterFormatChange();
+            Assert.Equal(1, tombstones.Count());
+
+            // A slot written by an older build: the first start of this one drops them all and invalidates the slots.
+            var old = StateSnapshotService.GetSlots().First(x => x.Status == SnapshotSlotStatus.Valid);
+            old.SchemaVersion = SnapshotManifest.CurrentSchemaVersion - 1;
+            SnapshotManifest.GetManifest()!.Upsert(old);
+
+            StateSnapshotService.ResetAfterFormatChange();
+
+            Assert.Equal(0, tombstones.Count());
+            Assert.False(StateSnapshotService.HasValidSlot());
+        }
+
+        [Fact]
         public async Task UpdateCycle_SkipsWhenStateNotSynced()
         {
             StateTreiStatusService.SetFailed("test: dirty state");

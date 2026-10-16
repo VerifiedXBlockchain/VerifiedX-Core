@@ -1262,6 +1262,7 @@ namespace VerifiedXCore.Services
                 var blockCount = BlockchainData.GetBlocks().Count();
                 if (blockCount > 0)
                 {
+                    StateSnapshotService.ResetAfterFormatChange();
                     var storedTip = BlockchainData.GetLastBlock()?.Height;
                     if (storedTip != null)
                         StateSnapshotService.DropDeletionRecordsAbove(storedTip.Value);
