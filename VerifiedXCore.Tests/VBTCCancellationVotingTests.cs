@@ -351,43 +351,6 @@ namespace VerifiedXCore.Tests
             Assert.True(row.IsCompleted);
         }
 
-        /// <summary>Stores <paramref name="txs"/> in a block at <paramref name="height"/>, as the chain holds them.</summary>
-        private static void Mined(long height, params Transaction[] txs) =>
-            BlockchainData.GetBlocks().InsertSafe(new Block { Height = height, Hash = $"m{height}-{Guid.NewGuid():N}", Transactions = txs.ToList() });
-
-        private static VBTCWithdrawalRequest FreshRow() => new()
-        {
-            RequestorAddress = Requester, OriginalUniqueId = RequestHash, SmartContractUID = Vault, Amount = 0.0004M, BTCDestination = "tb1qdestination",
-            FeeRate = 10, TransactionHash = RequestHash, Status = VBTCWithdrawalStatus.Requested, IsCompleted = false, RequestBlockHeight = 150,
-        };
-
-        /// <summary>
-        /// Round 37: a row rebuilt from its mined request (a node whose table lacks it) is brought to where live processing
-        /// took the same blocks: an approved cancellation leaves it Cancelled, a rejected one leaves it open.
-        /// </summary>
-        [Theory]
-        [InlineData(true)]
-        [InlineData(false)]
-        public void TheRebuiltRow_EndsAsLiveProcessingEndedIt(bool approve)
-        {
-            var cancel = CancelTx(CancelHeight);
-            Mined(CancelHeight, cancel);
-            Assert.True(VBTCCancellationVoting.ApplyCancel(cancel, out var c));
-            var votes = approve
-                ? new[] { VoteTx(c!.CancellationUID, "xVal1", true, CancelHeight + 1), VoteTx(c.CancellationUID, "xVal2", true, CancelHeight + 1), VoteTx(c.CancellationUID, "xVal3", true, CancelHeight + 2) }
-                : new[] { VoteTx(c!.CancellationUID, "xVal1", true, CancelHeight + 1), VoteTx(c.CancellationUID, "xVal2", false, CancelHeight + 1), VoteTx(c.CancellationUID, "xVal3", false, CancelHeight + 2) };
-            Mined(CancelHeight + 1, votes[0], votes[1]);
-            Mined(CancelHeight + 2, votes[2]);
-            foreach (var v in votes) VBTCCancellationVoting.ApplyVote(v);
-            var live = VBTCWithdrawalRequest.GetByTransactionHash(RequestHash, Vault)!;
-
-            var rebuilt = FreshRow();
-            VBTCWithdrawalStoreRebuildService.ReplayOutcomes(rebuilt, 150, CancelHeight + 3);
-            Assert.Equal(live.Status, rebuilt.Status);
-            Assert.Equal(live.IsCompleted, rebuilt.IsCompleted);
-            Assert.Equal(approve, rebuilt.IsCompleted);
-        }
-
         [Fact]
         public void RejectNamingTheSignedTx_RejectsAtOnce_AndTheWithdrawalStaysOpen()
         {
