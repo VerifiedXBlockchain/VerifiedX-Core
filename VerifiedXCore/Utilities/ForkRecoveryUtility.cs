@@ -402,7 +402,9 @@ namespace VerifiedXCore.Utilities
         /// fast-rollback path escalates internally to snapshot restore for non-trivial TX
         /// content. NEVER triggers a genesis rebuild (owner invariant).
         /// </summary>
-        public static async Task<bool> ReorgToBranchAsync(long divergenceHeight, string expectedHash, string sourceIP, string caller = "ForkChoice")
+        /// <param name="knownBlock">The block at the divergence height when the caller already holds it (a pushed fork
+        /// correction); otherwise it is fetched from <paramref name="sourceIP"/>.</param>
+        public static async Task<bool> ReorgToBranchAsync(long divergenceHeight, string expectedHash, string sourceIP, string caller = "ForkChoice", Models.Block? knownBlock = null)
         {
             var myHeight = Globals.LastBlock.Height;
             var depth = (int)(myHeight - divergenceHeight + 1);
@@ -450,7 +452,7 @@ namespace VerifiedXCore.Utilities
                         if (RecoverySourcePolicy.IsActive)
                             await RecoverySourcePolicy.EnsureSourcesConnectedAsync();
 
-                        var winningBlock = await FetchCommittedBlockAsync(sourceIP, divergenceHeight);
+                        var winningBlock = knownBlock ?? await FetchCommittedBlockAsync(sourceIP, divergenceHeight);
 
                         // Full consensus validation — header, proof, signature, every TX — same as a live block.
                         if (winningBlock != null && winningBlock.Hash == expectedHash && winningBlock.Height == divergenceHeight)

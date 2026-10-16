@@ -13,8 +13,15 @@ namespace VerifiedXCore.Services
     /// </summary>
     public static class ForkCorrectionService
     {
-        /// <summary>Prevents concurrent fork corrections.</summary>
-        private static int _correctionInProgress; // 0 = idle, 1 = running
+        /// <summary>Replaceable for tests: whether the block carries a valid committee certificate (strict).</summary>
+        internal static Func<Block, bool> HasValidCertificate = ConsensusCertificateVerifier.HasValidCertificate;
+
+        /// <summary>
+        /// Replaceable for tests: the bounded reorg onto the corrected block. It shares the recovery interlock, opens the
+        /// download phase so the block is accepted, validates it fully and checks the result; the earlier in-house
+        /// rollback left the node resyncing, so the replacement block was always refused and never applied.
+        /// </summary>
+        internal static Func<long, string, string, string, Block?, Task<bool>> Reorg = Utilities.ForkRecoveryUtility.ReorgToBranchAsync;
 
         /// <summary>
         /// Handles an incoming fork correction from a caster.
@@ -70,6 +77,14 @@ namespace VerifiedXCore.Services
                     }
                 }
 
+                // The block must be the one the message names and must hash to its own hash: the rollback depth comes
+                // from the height, and a signature over an arbitrary hash proves nothing about the block's content.
+                if (correctBlock.Height != height || correctBlock.GetBlockHash() != correctBlock.Hash)
+                {
+                    LogUtility.Log($"[ForkCorrection] Rejecting correction from {casterIP}: block height or hash does not match (message height {height}).", "ForkCorrectionService");
+                    return;
+                }
+
                 var myHeight = Globals.LastBlock.Height;
 
                 // Case 1: The correction is for a block we already have — check if hash matches
@@ -89,7 +104,7 @@ namespace VerifiedXCore.Services
                         $"from caster {casterIP}. Initiating correction.",
                         "ForkCorrectionService");
 
-                    await ApplyCorrectionAsync(height, correctBlock, casterIP);
+                    await ReorgOntoAsync(correctBlock, casterIP);
                 }
                 // Case 2: The correction is for a height we haven't reached yet — just queue it
                 else if (height == myHeight + 1)
@@ -114,11 +129,10 @@ namespace VerifiedXCore.Services
                         $"[ForkCorrection] Correction for past height {height} (we're at {myHeight}). " +
                         $"Our hash at {height}={ourBlock?.Hash?[..Math.Min(16, ourBlock?.Hash?.Length ?? 0)]} " +
                         $"Correct hash={correctBlock.Hash?[..Math.Min(16, correctBlock.Hash?.Length ?? 0)]}. " +
-                        $"Rolling back {myHeight - height + 1} block(s).",
+                        $"Correcting {myHeight - height + 1} block(s).",
                         "ForkCorrectionService");
 
-                    var blocksToRollback = (int)(myHeight - height + 1);
-                    await ApplyDeepCorrectionAsync(height, correctBlock, blocksToRollback, casterIP);
+                    await ReorgOntoAsync(correctBlock, casterIP);
                 }
                 else
                 {
@@ -135,130 +149,18 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
-        /// Applies a fork correction by rolling back the current tip and applying the correct block.
-        /// Used when the correction is for our current height.
+        /// Rolls back to and adopts the corrected block, only when it carries a valid committee certificate: a block a
+        /// single key signed made every recipient roll back. Without one, the fork is left to ForkChoice and recovery.
         /// </summary>
-        private static async Task ApplyCorrectionAsync(long height, Block correctBlock, string casterIP)
+        private static async Task ReorgOntoAsync(Block correctBlock, string casterIP)
         {
-            if (Interlocked.CompareExchange(ref _correctionInProgress, 1, 0) != 0)
+            if (!HasValidCertificate(correctBlock))
             {
-                LogUtility.Log("[ForkCorrection] Correction already in progress, skipping.", "ForkCorrectionService");
+                LogUtility.Log($"[ForkCorrection] Not rolling back for the correction from {casterIP} at height {correctBlock.Height}: it carries no valid committee certificate.", "ForkCorrectionService");
                 return;
             }
-
-            try
-            {
-                var wasResyncing = Globals.IsResyncing;
-                Globals.IsResyncing = true;
-
-                try
-                {
-                    // Rollback the bad block (1 block from tip)
-                    var rollbackResult = await BlockRollbackUtility.RollbackBlocksFast(1, manageIsResyncing: false);
-                    if (!rollbackResult)
-                    {
-                        LogUtility.Log("[ForkCorrection] Rollback failed.", "ForkCorrectionService");
-                        return;
-                    }
-
-                    // Apply the correct block
-                    var validateResult = await BlockValidatorService.ValidateBlock(correctBlock, false, false, false);
-                    
-                    LogUtility.Log(
-                        $"[ForkCorrection] Correction applied for height {height}: success={validateResult}. " +
-                        $"New tip: height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
-                        "ForkCorrectionService");
-                    ConsoleWriterService.Output(
-                        $"[ForkCorrection] Applied correction from caster {casterIP} at height {height}.");
-
-                    // Re-download any subsequent blocks
-                    if (validateResult)
-                    {
-                        try { await BlockDownloadService.GetAllBlocks(); } catch { }
-                    }
-                }
-                finally
-                {
-                    Globals.IsResyncing = wasResyncing;
-                }
-            }
-            catch (Exception ex)
-            {
-                LogUtility.Log($"[ForkCorrection] Error during correction: {ex.Message}", "ForkCorrectionService");
-            }
-            finally
-            {
-                Interlocked.Exchange(ref _correctionInProgress, 0);
-            }
-        }
-
-        /// <summary>
-        /// Applies a deep fork correction by rolling back multiple blocks.
-        /// Used when the correction is for a height below our current tip.
-        /// </summary>
-        private static async Task ApplyDeepCorrectionAsync(long height, Block correctBlock, int blocksToRollback, string casterIP)
-        {
-            if (Interlocked.CompareExchange(ref _correctionInProgress, 1, 0) != 0)
-            {
-                LogUtility.Log("[ForkCorrection] Correction already in progress, skipping.", "ForkCorrectionService");
-                return;
-            }
-
-            try
-            {
-                // Safety: don't roll back too many blocks from a single correction message.
-                // Wave 5: raised 5→MAX_REORG_DEPTH (10) — safe now that senders are verified
-                // casters (A1 IP check + Wave 3 committee-membership check at both handlers),
-                // and 10 matches the single reorg bound used everywhere else.
-                if (blocksToRollback > Utilities.ForkChoiceUtility.MAX_REORG_DEPTH)
-                {
-                    LogUtility.Log(
-                        $"[ForkCorrection] Deep correction requires {blocksToRollback} blocks — too deep. " +
-                        $"Max allowed is {Utilities.ForkChoiceUtility.MAX_REORG_DEPTH}. Ignoring to prevent potential attack.",
-                        "ForkCorrectionService");
-                    return;
-                }
-
-                var wasResyncing = Globals.IsResyncing;
-                Globals.IsResyncing = true;
-
-                try
-                {
-                    var rollbackResult = await BlockRollbackUtility.RollbackBlocksFast(blocksToRollback, manageIsResyncing: false);
-                    if (!rollbackResult)
-                    {
-                        LogUtility.Log("[ForkCorrection] Deep rollback failed.", "ForkCorrectionService");
-                        return;
-                    }
-
-                    // Apply the correct block
-                    var validateResult = await BlockValidatorService.ValidateBlock(correctBlock, false, false, false);
-
-                    LogUtility.Log(
-                        $"[ForkCorrection] Deep correction applied for height {height}: success={validateResult}. " +
-                        $"Rolled back {blocksToRollback} block(s). " +
-                        $"New tip: height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
-                        "ForkCorrectionService");
-
-                    // Re-download subsequent blocks from peers
-                    if (validateResult)
-                    {
-                        try { await BlockDownloadService.GetAllBlocks(); } catch { }
-                    }
-                }
-                finally
-                {
-                    Globals.IsResyncing = wasResyncing;
-                }
-            }
-            catch (Exception ex)
-            {
-                LogUtility.Log($"[ForkCorrection] Error during deep correction: {ex.Message}", "ForkCorrectionService");
-            }
-            finally
-            {
-                Interlocked.Exchange(ref _correctionInProgress, 0);
-            }
+            var adopted = await Reorg(correctBlock.Height, correctBlock.Hash, casterIP, "ForkCorrection", correctBlock);
+            LogUtility.Log($"[ForkCorrection] Correction at height {correctBlock.Height} from {casterIP}: {(adopted ? "adopted" : "not adopted")}.", "ForkCorrectionService");
         }
     }
 }
