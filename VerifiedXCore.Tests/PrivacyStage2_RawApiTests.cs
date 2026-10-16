@@ -549,5 +549,42 @@ namespace VerifiedXCore.Tests
             var verify = await PrivateRawTxService.VerifyAsync(unshield.Hash, null);
             Assert.True(verify.ok, verify.message);
         }
+
+        private static Newtonsoft.Json.Linq.JObject Import(string zfx, byte[] vk) =>
+            Newtonsoft.Json.Linq.JObject.Parse(new VerifiedXCore.Controllers.PrivacyV1Controller()
+                .ImportViewingKey(new ImportViewingKeyRequest { ZfxAddress = zfx, ViewingKeyBase64 = Convert.ToBase64String(vk) }).GetAwaiter().GetResult());
+
+        [Fact]
+        public void ImportViewingKey_RefusesAKeyThatIsNotTheAddresss()
+        {
+            var result = Import(_alice.ZfxAddress, _bob.ViewingKey32);
+
+            Assert.False((bool)result["Success"]!);
+            Assert.Null(ShieldedWalletService.FindByZfxAddress(_alice.ZfxAddress));
+        }
+
+        [Fact]
+        public void ImportViewingKey_LeavesASpendableWalletAsItIs()
+        {
+            ShieldedWalletService.Upsert(ShieldedWalletService.CreateFromKeyMaterial(_alice, null, "spend password"));
+
+            Assert.False((bool)Import(_alice.ZfxAddress, _bob.ViewingKey32)["Success"]!);
+            Assert.True((bool)Import(_alice.ZfxAddress, _alice.ViewingKey32)["Success"]!); // its own key: a no-op
+
+            var row = ShieldedWalletService.FindByZfxAddress(_alice.ZfxAddress)!;
+            Assert.Equal(_alice.ViewingKey32, row.ViewingKey);
+            Assert.False(row.IsViewOnly);
+            Assert.NotEmpty(row.SpendingKey!);
+        }
+
+        [Fact]
+        public void ImportViewingKey_StillImportsTheAddresssOwnKey()
+        {
+            Assert.True((bool)Import(_alice.ZfxAddress, _alice.ViewingKey32)["Success"]!);
+
+            var row = ShieldedWalletService.FindByZfxAddress(_alice.ZfxAddress)!;
+            Assert.True(row.IsViewOnly);
+            Assert.Equal(_alice.ViewingKey32, row.ViewingKey);
+        }
     }
 }
