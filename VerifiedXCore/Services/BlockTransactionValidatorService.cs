@@ -172,6 +172,9 @@ namespace VerifiedXCore.Services
                             else if (amountSoldFor.HasValue && Bid.HasLocalSentBid(toAddress ?? account.Address, keySign, amountSoldFor.Value, scUID))
                             {
                                 //if you have a bid or buy now this should auto start the process.
+                                // Marked first: the bid then pays automatically once; a later Sale_Start under the same
+                                // signature (after a cancel) is left for the owner to complete by hand.
+                                Bid.MarkAutoCompleted(toAddress ?? account.Address, keySign, scUID);
                                 _ = SmartContractService.CompleteSaleSmartContractTX(scUID, tx.FromAddress, amountSoldFor.Value, keySign);
                             }
                             else

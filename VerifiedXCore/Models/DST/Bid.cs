@@ -41,6 +41,23 @@ namespace VerifiedXCore.Models.DST
         /// </summary>
         public decimal? VaultOwnerBalanceAtBid { get; set; }
 
+        /// <summary>
+        /// Until when (unix seconds) a Sale_Start may complete this bid from the wallet automatically: the listing's end plus
+        /// <see cref="AutoCompleteGraceSeconds"/>, or the bid time plus that grace when the end is unknown. A bid signature
+        /// never expires and a cancelled sale does not use up its purchase key, so without a deadline the seller could start
+        /// the sale under the old signature at any later time and the wallet paid. Null on rows from before this field:
+        /// those use the bid time.
+        /// </summary>
+        public long? AutoCompleteUntil { get; set; }
+
+        /// <summary>Whether a Sale_Start already completed this bid automatically. A bid pays automatically at most once.</summary>
+        public bool? AutoCompleted { get; set; }
+
+        /// <summary>How long after a listing ends (or, when its end is unknown, after the bid) a sale is completed automatically.</summary>
+        public const long AutoCompleteGraceSeconds = 3 * 24 * 60 * 60;
+
+        internal long AutoCompleteDeadline => AutoCompleteUntil ?? BidSendTime + AutoCompleteGraceSeconds;
+
         /// <summary>The owner's spendable vBTC on <paramref name="smartContractUID"/> now, when it is a watched vault; else null.</summary>
         internal static decimal? VaultOwnerFigure(string? smartContractUID)
         {
@@ -105,6 +122,7 @@ namespace VerifiedXCore.Models.DST
             if (string.IsNullOrWhiteSpace(SmartContractUID))
                 SmartContractUID = ListingContractFor(ListingId, PurchaseKey);
             VaultOwnerBalanceAtBid = VaultOwnerFigure(SmartContractUID);
+            AutoCompleteUntil = Math.Max(ListingEndFor(PurchaseKey) ?? BidSendTime, BidSendTime) + AutoCompleteGraceSeconds;
 
             var bidModifier = (BidAmount * Globals.BidModifier);
             var bidAmount = Convert.ToInt64(bidModifier);
@@ -359,15 +377,58 @@ namespace VerifiedXCore.Models.DST
                 return false;
             try
             {
-                var bids = GetAllBids(BidSendReceive.Sent);
-                if (bids == null) return false;
-                return bids.Any(b => b != null
-                    && string.Equals(b.BidAddress, bidderAddress, StringComparison.Ordinal)
-                    && string.Equals(b.PurchaseKey, purchaseKey, StringComparison.Ordinal)
-                    && Math.Max(b.BidAmount, b.MaxBidAmount) >= amount
-                    && string.Equals(b.SmartContractUID, smartContractUID, StringComparison.Ordinal)); // no fallback: shop data is the seller's (re-audit)
+                var now = TimeUtil.GetTime();
+                return MatchingSentBids(bidderAddress, purchaseKey, smartContractUID).Any(b =>
+                    Math.Max(b.BidAmount, b.MaxBidAmount) >= amount
+                    && b.BidStatus != BidStatus.Rejected
+                    && b.AutoCompleted != true
+                    && now <= b.AutoCompleteDeadline);
             }
             catch { return false; }
+        }
+
+        /// <summary>
+        /// Records that a sale completed this wallet's bids on <paramref name="purchaseKey"/> automatically, so a later
+        /// Sale_Start under the same bid signature (after a cancel) is not paid automatically again.
+        /// </summary>
+        public static void MarkAutoCompleted(string? bidderAddress, string? purchaseKey, string? smartContractUID)
+        {
+            var db = GetBidDb();
+            if (db == null) return;
+            foreach (var b in MatchingSentBids(bidderAddress, purchaseKey, smartContractUID))
+            {
+                b.AutoCompleted = true;
+                db.UpdateSafe(b);
+            }
+        }
+
+        private static List<Bid> MatchingSentBids(string? bidderAddress, string? purchaseKey, string? smartContractUID) =>
+            (GetAllBids(BidSendReceive.Sent) ?? new List<Bid>()).Where(b => b != null
+                && string.Equals(b.BidAddress, bidderAddress, StringComparison.Ordinal)
+                && string.Equals(b.PurchaseKey, purchaseKey, StringComparison.Ordinal)
+                && string.Equals(b.SmartContractUID, smartContractUID, StringComparison.Ordinal)) // no fallback: shop data is the seller's (re-audit)
+                .ToList();
+
+        /// <summary>
+        /// The end (unix seconds) of the auction listed under <paramref name="purchaseKey"/>, from the shop data this node
+        /// holds, when every shop holding that key names one end; null for a buy-now-only listing or when unknown.
+        /// </summary>
+        public static long? ListingEndFor(string? purchaseKey)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(purchaseKey)) return null;
+                var sources = new List<IEnumerable<Listing>?> { Globals.DecShopData?.Listings };
+                foreach (var shop in Globals.MultiDecShopData.Values)
+                    sources.Add(shop?.Listings);
+                var listings = sources.Where(s => s != null)
+                    .SelectMany(s => s!.Where(l => l != null && string.Equals(l.PurchaseKey, purchaseKey, StringComparison.Ordinal)))
+                    .ToList();
+                if (listings.Count == 0 || listings.Any(l => l.IsBuyNowOnly)) return null;
+                var ends = listings.Select(l => new DateTimeOffset(DateTime.SpecifyKind(l.EndDate, DateTimeKind.Utc)).ToUnixTimeSeconds()).Distinct().ToList();
+                return ends.Count == 1 ? ends[0] : null;
+            }
+            catch { return null; }
         }
 
         /// <summary>
