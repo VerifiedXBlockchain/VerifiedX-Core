@@ -23,5 +23,17 @@ namespace VerifiedXCore.Tests
 
             Assert.Equal(new[] { "apitoken=***", "encpass=***", "testnet" }, logged);
         }
+
+        [Fact]
+        public void NoStartLine_LogsTheRawArguments()
+        {
+            var dir = new System.IO.DirectoryInfo(System.AppContext.BaseDirectory);
+            while (dir != null && !System.IO.File.Exists(System.IO.Path.Combine(dir.FullName, "VerifiedXCore", "Services", "WardenService.cs")))
+                dir = dir.Parent;
+            var source = System.IO.File.ReadAllText(System.IO.Path.Combine(dir!.FullName, "VerifiedXCore", "Services", "WardenService.cs"));
+
+            Assert.DoesNotContain("string.Join(\" \", args)", source);
+            Assert.DoesNotContain("string.Join(\" \", allArgs)", source);
+        }
     }
 }

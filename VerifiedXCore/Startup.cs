@@ -148,11 +148,12 @@ namespace VerifiedXCore
             });
 
             // Under openapi the API description is for token holders, like the API itself (Swagger does not run the MVC
-            // token filter). A loopback-only node keeps it open to its operator's browser.
+            // filter): served only with the configured token, and not at all when the node has none (a per-request API
+            // password cannot be checked here). A loopback-only node keeps it open to its operator's browser.
             app.Use((context, func) =>
             {
-                if (Globals.OpenAPI && Globals.APIToken != null && context.Request.Path.StartsWithSegments("/swagger")
-                    && context.Request.Headers["apitoken"] != Globals.APIToken.ToUnsecureString())
+                if (Globals.OpenAPI && context.Request.Path.StartsWithSegments("/swagger")
+                    && (Globals.APIToken == null || context.Request.Headers["apitoken"] != Globals.APIToken.ToUnsecureString()))
                 {
                     context.Response.StatusCode = 403;
                     return Task.CompletedTask;

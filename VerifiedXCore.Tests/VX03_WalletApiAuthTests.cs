@@ -287,6 +287,11 @@ namespace VerifiedXCore.Tests
                     Assert.NotEqual(HttpStatusCode.Forbidden, (await open.CreateClient().SendAsync(withToken)).StatusCode);
                 }
 
+                // Under openapi with no token (a per-request password only), it is not served at all.
+                Globals.APIToken = null;
+                using (var passwordOnly = NewServer())
+                    Assert.Equal(HttpStatusCode.Forbidden, (await passwordOnly.CreateClient().GetAsync("/swagger/v1/swagger.json")).StatusCode);
+
                 // A loopback-only node keeps it open to its operator.
                 Globals.OpenAPI = false;
                 using var local = NewServer();

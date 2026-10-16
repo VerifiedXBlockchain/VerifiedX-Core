@@ -256,7 +256,7 @@ namespace VerifiedXCore.Services
 
                     startInfo = ChildStartInfo(executablePath, args, null);
                     
-                    LogUtility.Log($"Starting child process on Windows: {executablePath} {string.Join(" ", args)}", "WardenService.StartChildProcess()");
+                    LogUtility.Log($"Starting child process on Windows: {executablePath} {string.Join(" ", RedactCredentials(args))}", "WardenService.StartChildProcess()");
                 }
 
                 _childProcess = new Process { StartInfo = startInfo };
