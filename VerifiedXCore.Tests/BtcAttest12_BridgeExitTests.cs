@@ -357,6 +357,67 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        /// <summary>
+        /// The vBTCb contract's admin messages (ADD, ADD_BATCH, REMOVE, REMOVE_BATCH, UPGRADE) begin with a text tag and
+        /// are signed by the same validators the same way as a mint, whose message begins with the destination. A mint
+        /// attestation is never given for a destination that begins with one of those tags (round 37); any other
+        /// destination is judged as before. A lock to such a destination is refused itself (it would debit vBTC that is
+        /// never minted); the signer still refuses one already held in state, as a lock made before that rule would be.
+        /// </summary>
+        [Fact]
+        public async Task AMintAttestation_IsNotGivenForADestinationThatBeginsWithAnAdminTag()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            var priorValidator = Globals.ValidatorAddress;
+            var priorCastersOnly = Globals.BaseValidatorSetCastersOnly;
+            Globals.ValidatorAddress = "xNotLoadedHere";
+            Globals.BaseValidatorSetCastersOnly = false;
+            try
+            {
+                VfxTx LockTo(string destination, string lockId) => SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_BRIDGE_LOCK,
+                    new { Function = "VBTCBridgeLock()", ContractUID = vault.Uid, LockId = lockId, Amount = 0.001M, AmountSats = 100_000L, EvmDestination = destination });
+                async Task<string?> AskFor(string destination)
+                {
+                    var lockId = Guid.NewGuid().ToString("N");
+                    if (VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.DestinationStartsWithAdminTag(destination))
+                    {
+                        // The lock itself is refused, in a block and at admission.
+                        await RefusedInBlock(LockTo(destination, lockId), VerifiedXCore.Services.TransactionValidatorService.BridgeLockDestinationIsAdminTagReason);
+                        var (admitted, why) = await VerifiedXCore.Services.TransactionValidatorService.VerifyTX(LockTo(destination, lockId));
+                        Assert.False(admitted);
+                        Assert.Equal(VerifiedXCore.Services.TransactionValidatorService.BridgeLockDestinationIsAdminTagReason, why);
+                        // One already in state (made before the rule) is still never signed for.
+                        Assert.True(VBTCBridgeLockState.TryInsertFromLockTx(new VerifiedXCore.Models.Transaction { Hash = "pre" + lockId, FromAddress = Minter.Address, Height = Tip },
+                            vault.Uid, lockId, 0.001M, 100_000L, destination));
+                    }
+                    else
+                        await Mine(LockTo(destination, lockId));
+                    Assert.NotNull(VBTCBridgeLockState.GetByLockId(lockId));
+                    var (_, _, error) = await VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.HandleMintAttestationRequest(new VerifiedXCore.Bitcoin.Models.MintAttestationRequest
+                    {
+                        LockId = lockId, EvmDestination = destination, AmountSats = 100_000, Nonce = 1,
+                        ChainId = Globals.BaseEvmChainId, ContractAddress = "0x" + new string('b', 40),
+                    });
+                    return error;
+                }
+
+                foreach (var tag in new[] { "414444", "52454d4f5645", "55504752414445" }) // ADD, REMOVE, UPGRADE
+                    Assert.Equal(VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.DestinationIsAdminTagReason,
+                        await AskFor("0x" + tag + new string('1', 40 - tag.Length)));
+
+                // An ordinary destination passes this check (and goes on to the signing key, not loaded in this test).
+                Assert.NotEqual(VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.DestinationIsAdminTagReason,
+                    await AskFor("0x" + new string('a', 40)));
+            }
+            finally
+            {
+                Globals.ValidatorAddress = priorValidator;
+                Globals.BaseValidatorSetCastersOnly = priorCastersOnly;
+            }
+        }
+
         [Fact]
         public async Task AnExit_IsPinnedInItsOwnBlock_BitcoinCompletesIt_AndTheOwnerIsChargedOnce()
         {

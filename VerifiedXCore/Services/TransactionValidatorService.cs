@@ -1957,6 +1957,10 @@ namespace VerifiedXCore.Services
                                     if (saleAmountError != null)
                                         return (txResult, saleAmountError);
                                 }
+                                // The balance check below sums every entry; none may be negative.
+                                var saleEntriesError = LedgerIntegrityRules.SaleEntriesNonNegative(txRequest, blockHeight);
+                                if (saleEntriesError != null)
+                                    return (txResult, saleEntriesError);
                                 var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
                                 if (scStateTreiRec == null && saleRulesHeight >= Globals.SaleCompleteContractRulesHeight)
                                     return (txResult, "SC does not exist.");
@@ -2372,6 +2376,12 @@ namespace VerifiedXCore.Services
                             {
                                 var function = (string)jobj["Function"];
                                 TopicTrei topic = jobj["Topic"].ToObject<TopicTrei>();//review this to ensure deserialization works.
+                                // From the height a topic's end of voting names its instant: a date with no offset is read in
+                                // each node's own time zone when it is stored, so nodes would hold different instants. Checked
+                                // for every function, since the apply stores the topic whatever the function. Refused at admission at every height.
+                                if (topic != null && topic.VotingEndDate.Kind == DateTimeKind.Unspecified
+                                    && (blockHeight == null || blockHeight.Value >= Globals.PathAuditRulesHeight))
+                                    return (txResult, VotingEndDateNeedsOffsetReason);
                                 if (function == "TopicAdd()")
                                 {
                                     if (topic == null)
@@ -2517,6 +2527,13 @@ namespace VerifiedXCore.Services
                                     var topic = TopicTrei.GetSpecificTopic(vote.TopicUID);
                                     if(topic == null)
                                         return (txResult, "Topic does not exist.");
+
+                                    // A topic made before the height with an end date written without an offset is stored at a
+                                    // different instant on each node, so a vote on it is refused from the height. Judged from the
+                                    // topic's own transaction in its block, which every node holds alike.
+                                    if ((blockHeight == null || blockHeight.Value >= Globals.PathAuditRulesHeight)
+                                        && topic.BlockHeight < Globals.PathAuditRulesHeight && TopicEndDateWrittenWithoutOffset(topic))
+                                        return (txResult, TopicEndDateWithoutOffsetReason);
 
                                     // From the height the end of voting is read as the moment it is (a stored date comes
                                     // back in the node's local time; compared as it stood, the answer followed the
@@ -3322,6 +3339,9 @@ namespace VerifiedXCore.Services
                             && !FrostKeyIsOwn(jobj["FrostPublicKey"], validatorAddress, required: true))
                             return (txResult, "FrostPublicKey must be the validator's own public key.");
 
+                        if (RegisteredBaseAddressRefusal(jobj, blockHeight) is { } baseRefusal)
+                            return (txResult, baseRefusal);
+
                         if (txRequest.Fee != 0M)
                             return (txResult, "Validator registration must be a free transaction (Fee = 0).");
                         
@@ -3455,6 +3475,9 @@ namespace VerifiedXCore.Services
                         if ((blockHeight ?? (Globals.LastBlock.Height + 1)) >= Globals.PathAuditRulesHeight
                             && !FrostKeyIsOwn(jobj["FrostPublicKey"], validatorAddress, required: false))
                             return (txResult, "FrostPublicKey must be the validator's own public key.");
+
+                        if (RegisteredBaseAddressRefusal(jobj, blockHeight) is { } baseRefusal)
+                            return (txResult, baseRefusal);
 
                         if (txRequest.Fee != 0M)
                             return (txResult, "Validator heartbeat must be a free transaction (Fee = 0).");
@@ -3728,19 +3751,16 @@ namespace VerifiedXCore.Services
                         var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
 
                         // From Globals.PathAuditRulesHeight a completion names a request that exists on its own contract.
-                        // The request table is written by every node from mined requests, so a missing row is either
-                        // this node's store being incomplete (in a block: rebuilt from the mined request, missing rows
-                        // only) or a completion that names a request under a contract it was never made on. That second
-                        // case used to pass here "lightweight", and its apply then reset the request's real row.
+                        // Every node writes the request table from the mined requests, in order, so a healthy node holds
+                        // every row: no row means the completion names a request that does not exist on this contract, or
+                        // this node's table is damaged. Either way this node cannot judge it as the network does, and it
+                        // refuses rather than guess (a guess accepted what nodes holding the row refused).
                         var completeHeight = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
                         if (withdrawalRequest == null && completeHeight >= Globals.PathAuditRulesHeight)
                         {
-                            // (Read from the blocks, nothing written: the missing row is rebuilt when the completion
-                            // is applied, and a block that is refused leaves no trace.)
-                            var mined = (blockVerify || blockDownloads)
-                                && Bitcoin.Services.VBTCWithdrawalStoreRebuildService.MinedRequestNames(withdrawalRequestHash, scUID, completeHeight);
-                            if (!mined)
-                                return (txResult, $"No withdrawal request {withdrawalRequestHash} exists on contract {scUID}.");
+                            if (blockVerify || blockDownloads)
+                                ReportWithdrawalStoreGap(withdrawalRequestHash, scUID, txRequest);
+                            return (txResult, NoWithdrawalRequestReason(withdrawalRequestHash, scUID));
                         }
 
                         if (withdrawalRequest != null)
@@ -3810,6 +3830,13 @@ namespace VerifiedXCore.Services
                         : Bitcoin.Services.VBTCCancellationVoting.ValidateVote(txRequest, cancelVoteHeight);
                     if (rulesError != null)
                         return (txResult, rulesError);
+
+                    // From the path-audit height a vote's withdrawal row must be here: an approving vote cancels it and
+                    // refunds its escrow, which a node lacking the row (a damaged table) would not do. As for a
+                    // completion, such a node refuses rather than guess.
+                    if (txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE
+                        && VoteWithdrawalRowMissing(txRequest, cancelVoteHeight, blockVerify || blockDownloads) is { } missingRow)
+                        return (txResult, missingRow);
                 }
                 catch (Exception ex)
                 {
@@ -3982,6 +4009,13 @@ namespace VerifiedXCore.Services
 
                     if (string.IsNullOrEmpty(evmDestination) || !evmDestination.StartsWith("0x") || evmDestination.Length != 42)
                         return (txResult, "Invalid EvmDestination for bridge lock.");
+
+                    // Validators never sign a Base mint for a destination that begins with an admin message tag, so a lock to
+                    // one would debit vBTC that is never minted. Refused at admission at every height; in blocks from the
+                    // path-audit height.
+                    if ((blockHeight == null || blockHeight.Value >= Globals.PathAuditRulesHeight)
+                        && VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.DestinationStartsWithAdminTag(evmDestination))
+                        return (txResult, BridgeLockDestinationIsAdminTagReason);
 
                     if (VBTCBridgeLockState.GetByLockId(lockId) != null)
                         return (txResult, "Bridge LockId already exists on-chain.");
@@ -4450,6 +4484,85 @@ namespace VerifiedXCore.Services
         }
 
         internal const string NegativeFeeReason = "A transaction's fee cannot be negative.";
+
+        internal const string NoWithdrawalRequestPrefix = "No withdrawal request ";
+        internal static string NoWithdrawalRequestReason(string? requestHash, string? scUID) =>
+            $"{NoWithdrawalRequestPrefix}{requestHash} exists on contract {scUID}.";
+
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> ReportedWithdrawalStoreGaps = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// From the path-audit height: the refusal for a cancellation vote whose withdrawal row this node's table lacks (a
+        /// damaged store; an approving vote would cancel the row and refund its escrow, which this node could not do), or
+        /// null. In a block it is reported loudly.
+        /// </summary>
+        internal static string? VoteWithdrawalRowMissing(Transaction vote, long height, bool inBlock)
+        {
+            if (height < Globals.PathAuditRulesHeight) return null;
+            var voted = VBTCWithdrawalCancellation.GetCancellation(JObject.Parse(vote.Data)["CancellationUID"]?.ToObject<string?>() ?? "");
+            if (voted == null || VBTCWithdrawalRequest.GetByTransactionHash(voted.WithdrawalRequestHash, voted.SmartContractUID) != null) return null;
+            if (inBlock) ReportWithdrawalStoreGap(voted.WithdrawalRequestHash, voted.SmartContractUID, vote);
+            return NoWithdrawalRequestReason(voted.WithdrawalRequestHash, voted.SmartContractUID);
+        }
+
+        /// <summary>
+        /// A block names a withdrawal request this node's table does not hold. A healthy table holds every mined request,
+        /// so either the block is invalid or this node's withdrawal store is damaged; this node refuses the block either
+        /// way. Said loudly (console and error log, once per request): if peers accept the block, this node has stopped
+        /// following the chain and needs its state rebuilt from the blocks: restart with "rebuildstate". A snapshot of the same
+        /// store would not heal it, so this refusal does not count toward the automatic snapshot restore.
+        /// </summary>
+        private static void ReportWithdrawalStoreGap(string? requestHash, string? scUID, Transaction tx)
+        {
+            if (!ReportedWithdrawalStoreGaps.TryAdd($"{requestHash}|{scUID}", 0)) return;
+            var text = $"WITHDRAWAL STORE: block transaction {tx.Hash} ({tx.TransactionType}) names withdrawal request {requestHash} on contract {scUID}, " +
+                       "which this node's withdrawal table does not hold. The block is refused. If other nodes accept it, this node's withdrawal store is " +
+                       "damaged and it has stopped following the chain: restart it with \"rebuildstate\" (full state rebuild from the blocks).";
+            ErrorLogUtility.LogError(text, "TransactionValidatorService.ReportWithdrawalStoreGap()");
+            ConsoleWriterService.OutputMarked($"[red]{Spectre.Console.Markup.Escape(text)}[/]");
+        }
+
+        internal const string RegisteredBaseAddressReason = "A validator's BaseAddress must be the one its own key derives.";
+
+        /// <summary>
+        /// A validator registration or heartbeat that names a BaseAddress names the one its own key (FrostPublicKey, checked
+        /// to be the validator's own) derives: the vBTCb validator set knows validators by it, and a chosen address could
+        /// be shaped into another contract message. Refused at admission at every height; in blocks from the path-audit
+        /// height. Null when it passes.
+        /// </summary>
+        internal static string? RegisteredBaseAddressRefusal(JObject data, long? blockHeight)
+        {
+            var named = data["BaseAddress"]?.ToObject<string>();
+            if (string.IsNullOrEmpty(named) || (blockHeight != null && blockHeight.Value < Globals.PathAuditRulesHeight)) return null;
+            var key = data["FrostPublicKey"]?.ToObject<string>();
+            string? derived = null;
+            try { derived = string.IsNullOrEmpty(key) ? null : Bitcoin.Services.ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(key); } catch { }
+            return string.Equals(named.Trim(), derived, StringComparison.OrdinalIgnoreCase) ? null : RegisteredBaseAddressReason;
+        }
+        internal const string BridgeLockDestinationIsAdminTagReason = "A bridge lock's EvmDestination cannot begin with a Base admin message tag.";
+        internal const string VotingEndDateNeedsOffsetReason = "A topic's voting end date must carry a UTC offset.";
+        internal const string TopicEndDateWithoutOffsetReason = "This topic's voting end date was written without a UTC offset; it cannot be voted on.";
+
+        /// <summary>
+        /// Whether the transaction that created <paramref name="topic"/> (in the block at its height) wrote the end of voting
+        /// without an offset, or cannot be found. Read from block data, never from the stored date.
+        /// </summary>
+        internal static bool TopicEndDateWrittenWithoutOffset(TopicTrei topic)
+        {
+            try
+            {
+                var block = BlockchainData.GetBlockByHeight(topic.BlockHeight);
+                foreach (var t in block?.Transactions ?? new List<Transaction>())
+                {
+                    if (t.TransactionType != TransactionType.VOTE_TOPIC || string.IsNullOrEmpty(t.Data)) continue;
+                    var written = JObject.Parse(t.Data)["Topic"]?.ToObject<TopicTrei>();
+                    if (written != null && written.TopicUID == topic.TopicUID)
+                        return written.VotingEndDate.Kind == DateTimeKind.Unspecified;
+                }
+            }
+            catch { }
+            return true;
+        }
 
         /// <summary>The transaction signature check (over the carried Hash); null when it passes.</summary>
         private static string? SignatureError(Transaction txRequest)

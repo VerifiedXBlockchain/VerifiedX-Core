@@ -351,7 +351,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void Spend_AllUnspent_NotSpent()
         {
-            var verdict = BitcoinTransactionService.ClassifyOutpointSpends(new[] { "t:0", "t:1" }, new HashSet<string> { "t:0", "t:1" }, new HashSet<string>());
+            var verdict = BitcoinTransactionService.ClassifyOutpointSpends(new[] { "t:0", "t:1" }, new HashSet<string> { "t:0", "t:1" }, new HashSet<string>(), new HashSet<string> { "t:0", "t:1" });
             Assert.Equal(BitcoinTransactionService.OutpointSpendVerdict.NotSpentByConfirmed, verdict);
         }
 
@@ -359,7 +359,7 @@ namespace VerifiedXCore.Tests
         public void Spend_MissingOnlyBecauseAMempoolTxSpendsIt_NotDead()
         {
             // The double-payout case: the spender can still be evicted or replaced, and the signed tx confirm.
-            var verdict = BitcoinTransactionService.ClassifyOutpointSpends(new[] { "t:0", "t:1" }, new HashSet<string>(), new HashSet<string> { "t:0", "t:1" });
+            var verdict = BitcoinTransactionService.ClassifyOutpointSpends(new[] { "t:0", "t:1" }, new HashSet<string>(), new HashSet<string> { "t:0", "t:1" }, new HashSet<string> { "t:0", "t:1" });
             Assert.Equal(BitcoinTransactionService.OutpointSpendVerdict.NotSpentByConfirmed, verdict);
         }
 
@@ -367,14 +367,14 @@ namespace VerifiedXCore.Tests
         public void Spend_OneInputSpentByConfirmedTx_Dead()
         {
             // Partial overlap is enough: a tx whose input is gone for good can never confirm.
-            var verdict = BitcoinTransactionService.ClassifyOutpointSpends(new[] { "t:0", "t:1" }, new HashSet<string> { "t:1" }, new HashSet<string>());
+            var verdict = BitcoinTransactionService.ClassifyOutpointSpends(new[] { "t:0", "t:1" }, new HashSet<string> { "t:1" }, new HashSet<string>(), new HashSet<string> { "t:0", "t:1" });
             Assert.Equal(BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed, verdict);
         }
 
         [Fact]
         public void Spend_MempoolUnreadable_Inconclusive()
         {
-            var verdict = BitcoinTransactionService.ClassifyOutpointSpends(new[] { "t:0" }, new HashSet<string>(), null);
+            var verdict = BitcoinTransactionService.ClassifyOutpointSpends(new[] { "t:0" }, new HashSet<string>(), null, new HashSet<string> { "t:0" });
             Assert.Equal(BitcoinTransactionService.OutpointSpendVerdict.Inconclusive, verdict);
         }
 

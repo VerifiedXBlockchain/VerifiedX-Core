@@ -76,6 +76,10 @@ namespace VerifiedXCore.Services
                 return false;
             if (reason.StartsWith("Duplicate withdrawal request", StringComparison.Ordinal))
                 return false;
+            // A withdrawal row this node's table lacks: a snapshot of the same store would not bring it back (only a full
+            // state rebuild does, which the refusal reports), so it does not drive the snapshot restore.
+            if (reason.StartsWith(TransactionValidatorService.NoWithdrawalRequestPrefix, StringComparison.Ordinal))
+                return false;
             // Bridge intra-block conflicts are producer-selection faults, not local state corruption.
             if (reason.StartsWith("Duplicate Base burn", StringComparison.Ordinal))
                 return false;

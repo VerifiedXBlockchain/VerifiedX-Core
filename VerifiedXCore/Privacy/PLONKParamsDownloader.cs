@@ -10,19 +10,19 @@ namespace VerifiedXCore.Privacy
     public static class PLONKParamsDownloader
     {
         /// <summary>
-        /// GitHub Release URL for the VXPLNK05 params file: the v2 owner-bound circuits over the Zcash Sapling Powers of Tau
-        /// universal parameters (re-audit 9 Oct 2026: the earlier seeded setups VXPLNK03/04 had a public tau and are refused
-        /// by the library). 400 MB.
+        /// GitHub Release URL for the VXPLNK06 params file: the v2 owner-bound circuits over the Zcash Sapling Powers of Tau
+        /// universal parameters, with a spend's position bound to its Merkle path (Oct 2026; the library refuses the earlier
+        /// VXPLNK03/04/05 files). 400 MB.
         /// </summary>
         public const string DownloadUrl =
-            "https://github.com/VerifiedXBlockchain/plonk/releases/download/v3/vfx_plonk_v3.params";
+            "https://github.com/VerifiedXBlockchain/plonk/releases/download/v4/vfx_plonk_v4.params";
 
         /// <summary>Expected SHA-256 hash (lowercase hex) of the params file.</summary>
         public const string ExpectedSha256 =
-            "0d171b6ec5ef31147f230673ab615db0e61a05fcc9ffd8ba10a30ece84cd614c";
+            "b62620e681f997f56a78bfda26bca0b6d540ded8b4f6bd1e3436deb5f9414d25";
 
         /// <summary>Local filename stored inside the PlonkParams directory.</summary>
-        public const string ParamsFileName = "vfx_plonk_v3.params";
+        public const string ParamsFileName = "vfx_plonk_v4.params";
 
         /// <summary>
         /// Ensures the PLONK params file is available locally.
