@@ -2400,7 +2400,10 @@ namespace VerifiedXCore.Nodes
         /// FIX (Issue 3): Cross-validates downloaded blocks against multiple peers to avoid
         /// accepting a bad block from a single malicious/forked peer.
         /// </summary>
-        private static async Task SyncHeightWithPeersAsync()
+        /// <param name="approveCertifiedAt">During this caster's fork recovery, the height it rolled back: the block fetched
+        /// there is checked for a valid committee certificate and, with one, becomes the approved hash before it is validated
+        /// (as for a fork correction), so it is adopted rather than left pending without an approval.</param>
+        private static async Task SyncHeightWithPeersAsync(long? approveCertifiedAt = null)
         {
             try
             {
@@ -2517,6 +2520,8 @@ namespace VerifiedXCore.Nodes
                                             }
                                         }
 
+                                        if (approveCertifiedAt == block.Height)
+                                            ForkRecoveryUtility.ApproveIfCertified(block);
                                         var result = await BlockValidatorService.ValidateBlock(block, true, false, false, true, source: $"HeightSync:{bestPeerIP}");
                                         if (result)
                                         {
@@ -4674,39 +4679,6 @@ namespace VerifiedXCore.Nodes
         /// 5. Returns to normal consensus participation
         /// This requires NO human intervention — the node heals itself automatically.
         /// </summary>
-        /// <summary>
-        /// After this caster rolls back its own block at <paramref name="height"/>: the first block a peer caster serves at
-        /// that height that carries a valid committee certificate becomes the approved hash there, as for a fork correction,
-        /// so height sync adopts it instead of leaving it pending without an approval. Nothing is approved otherwise.
-        /// </summary>
-        private static async Task ApproveCertifiedReplacementAsync(long height)
-        {
-            foreach (var caster in Globals.BlockCasters.ToList().Where(c => !string.IsNullOrEmpty(c.PeerIP) && c.ValidatorAddress != Globals.ValidatorAddress))
-            {
-                try
-                {
-                    using var client = Globals.HttpClientFactory.CreateClient();
-                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                    var resp = await client.GetAsync($"http://{caster.PeerIP!.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/validator/GetBlock/{height}", cts.Token);
-                    if (!resp.IsSuccessStatusCode) continue;
-                    var json = await resp.Content.ReadAsStringAsync();
-                    if (string.IsNullOrEmpty(json) || json == "0") continue;
-                    var block = Newtonsoft.Json.JsonConvert.DeserializeObject<Block>(json);
-                    if (block == null || block.Height != height || block.GetBlockHash() != block.Hash) continue;
-                    if (ForkCorrectionService.HasValidCertificate(block))
-                    {
-                        ForkCorrectionService.ApproveCertified(block);
-                        CasterLogUtility.Log($"FORK-RECOVERY: approved the certified replacement {block.Hash?[..Math.Min(16, block.Hash?.Length ?? 0)]} at height {height} from {caster.PeerIP}.", "FORK-RECOVERY");
-                        return;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    CasterLogUtility.Log($"FORK-RECOVERY: could not fetch the block at {height} from {caster.PeerIP}: {ex.Message}", "FORK-RECOVERY");
-                }
-            }
-        }
-
         private static async Task ForkRecoveryAsync(long stuckHeight)
         {
             // Prevent concurrent recovery attempts
@@ -4733,7 +4705,6 @@ namespace VerifiedXCore.Nodes
                 if (rollbackResult)
                 {
                     ForkRecoveryUtility.DropApprovalOfRolledBack(stuckHeight, preRecoveryHash);
-                    await ApproveCertifiedReplacementAsync(stuckHeight);
                     CasterLogUtility.Log(
                         $"FORK-RECOVERY: Rollback succeeded. New lastBlock height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
                         "FORK-RECOVERY");
@@ -4745,7 +4716,7 @@ namespace VerifiedXCore.Nodes
 
                 // Step 3: Sync height with peers and download the correct block
                 CasterLogUtility.Log($"FORK-RECOVERY: Syncing height with peers...", "FORK-RECOVERY");
-                await SyncHeightWithPeersAsync();
+                await SyncHeightWithPeersAsync(approveCertifiedAt: stuckHeight);
 
                 CasterLogUtility.Log($"FORK-RECOVERY: Downloading blocks from peers...", "FORK-RECOVERY");
                 try { await BlockDownloadService.GetAllBlocks(); } catch { }
