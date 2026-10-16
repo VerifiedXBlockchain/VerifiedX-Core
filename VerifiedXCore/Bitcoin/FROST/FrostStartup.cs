@@ -411,6 +411,33 @@ namespace VerifiedXCore.Bitcoin.FROST
                     await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = epoch != null, Epoch = epoch, Previous = previous }, Formatting.Indented));
                 });
 
+                // An operator's release of signing records written before exact spellings (see NeedsOperatorRelease): after
+                // confirming that no transaction signed for the withdrawal then can still pay.
+                endpoints.MapPost("/frost/evidence/release/{scUID}", async context =>
+                {
+                    if (!IsLoopbackRequest(context))
+                    {
+                        await WriteForbiddenAsync(context);
+                        return;
+                    }
+                    var scUID = context.Request.RouteValues["scUID"]?.ToString();
+                    var withdrawal = context.Request.Query["withdrawal"].ToString();
+                    if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawal) || context.Request.Query["confirm"] != "true")
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                        {
+                            Success = false,
+                            Message = "Releases this validator's signing records for one withdrawal written before exact spellings. Confirm first that no transaction signed for it then can still pay; then give ?withdrawal=<reference>&confirm=true."
+                        }));
+                        return;
+                    }
+                    var released = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ReleaseByOperator(scUID, withdrawal);
+                    LogUtility.Log($"[FROST Dedup] WARNING: operator released {released} signing record(s) for withdrawal {withdrawal} on {scUID} via localhost endpoint.", "FrostStartup./frost/evidence/release");
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = true, Released = released }));
+                });
+
                 endpoints.MapPost("/frost/pins/clear/{scUID}", async context =>
                 {
                     if (!IsLoopbackRequest(context))
@@ -3683,10 +3710,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                 bool IsRequested(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence e) =>
                     string.Equals(e.BtcTxId, (requestedTxId ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
                 var dead = new List<(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence Record, string Detail)>();
+                var exactSince = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ExactSpellingSince();
                 foreach (var evidence in records.Where(e => !IsRequested(e)))
                 {
                     var (ok, reason, detail) = await CheckPriorSignedRecordAsync(scUID, evidence);
                     if (!ok) return (false, reason);
+                    if (evidence.NeedsOperatorRelease(exactSince))
+                        return (false, $"Transaction {evidence.BtcTxId} signed for this withdrawal before exact spellings can never confirm, but a transaction signed then under another spelling may have been recorded over it. " +
+                            "An operator confirms none can pay and releases it (POST /frost/evidence/release/{scUID}?withdrawal=...&confirm=true on this node).");
                     dead.Add((evidence, detail));
                 }
 

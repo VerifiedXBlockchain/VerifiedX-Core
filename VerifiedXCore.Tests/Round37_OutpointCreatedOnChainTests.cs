@@ -339,6 +339,51 @@ namespace VerifiedXCore.Tests
             Assert.Null(after.PinnedCoinsJson);
         }
 
+        /// <summary>
+        /// A signing record from before this validator signed under exact spellings only may be the one trace of two
+        /// transactions (a signing under another letter case was saved over the first). Its transaction proven dead does
+        /// not by itself let another be signed or the cancellation be approved; an operator's release does. A record
+        /// written since is judged as before.
+        /// </summary>
+        [Theory]
+        [InlineData(true, false)]
+        [InlineData(true, true)]    // a record an older binary wrote (no first-signed time), with no stamp at all
+        [InlineData(false, false)]
+        public async Task ADeadRecordFromBeforeExactSpellings_NeedsAnOperatorsRelease(bool recordIsOld, bool writtenByAnOlderBinary)
+        {
+            var (uid, wrh, dead, _) = TwoRecordsForOneWithdrawal();
+            foreach (var r in VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(uid, wrh).Where(r => r.BtcTxId != dead))
+                VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.DeleteRecord(r.Id);
+            var now = VerifiedXCore.Utilities.TimeUtil.GetTime();
+            if (writtenByAnOlderBinary)
+            {
+                var records = VerifiedXCore.Data.DbContext.DB_vBTC.GetCollection<VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence>(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.CollectionName);
+                var old = Assert.Single(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(uid, wrh));
+                old.FirstSignedAt = 0;
+                Assert.True(records.Update(old));
+            }
+            else
+                VerifiedXCore.Data.DbContext.DB_vBTC.GetCollection<VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ExactSpelling>(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ExactSpellingCollectionName)
+                    .Upsert(new VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ExactSpelling { Since = recordIsOld ? now + 3600 : now - 3600 });
+            var newTx = Convert.ToHexString(RandomUtils.GetBytes(32)).ToLowerInvariant();
+
+            var vote = await VBTCCancellationVoteService.GetSigningEvidenceAsync(uid, wrh, null);
+            Assert.Equal(!recordIsOld, vote.ProvenDead);
+            Assert.Equal(recordIsOld, vote.Inconclusive);
+            Assert.Equal(recordIsOld, vote.AwaitsOperatorRelease);
+            var (ok, reason) = await VerifiedXCore.Bitcoin.FROST.FrostStartup.CheckPriorSignedTransactionAsync(uid, wrh, newTx);
+            Assert.True(ok == !recordIsOld, reason);
+            if (!recordIsOld) return;
+            Assert.Contains("operator", reason);
+            Assert.Single(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(uid, wrh));
+
+            Assert.Equal(1, VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ReleaseByOperator(uid, wrh));
+            Assert.True((await VBTCCancellationVoteService.GetSigningEvidenceAsync(uid, wrh, null)).ProvenDead);
+            (ok, reason) = await VerifiedXCore.Bitcoin.FROST.FrostStartup.CheckPriorSignedTransactionAsync(uid, wrh, newTx);
+            Assert.True(ok, reason);
+            Assert.Empty(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(uid, wrh));
+        }
+
         [Theory]
         [InlineData(true)]
         [InlineData(false)]

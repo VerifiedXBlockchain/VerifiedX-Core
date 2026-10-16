@@ -39,6 +39,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                     
                     // Pins live in memory; rebuild them from the durable signed evidence so a restart cannot
                     // let a new withdrawal spend the coins of a signed transaction that is still out there.
+                    // Signing records from here on are under exact spellings only (older ones may hide an overwritten one).
+                    VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.EnsureExactSpellingSince();
                     try { FrostStartup.RestorePinsFromEvidence(); }
                     catch (Exception ex) { Console.WriteLine($"[FROST] Pin restore error: {ex.Message}"); }
 

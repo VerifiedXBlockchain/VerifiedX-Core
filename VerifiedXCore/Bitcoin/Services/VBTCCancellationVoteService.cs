@@ -113,6 +113,8 @@ namespace VerifiedXCore.Bitcoin.Services
             public bool ProvenDead { get; init; }
             /// <summary>Bitcoin could not be read well enough to tell whether the signed transaction is dead.</summary>
             public bool Inconclusive { get; init; }
+            /// <summary>A record from before exact spellings, whose transaction is dead, waits for this validator's operator to release it.</summary>
+            public bool AwaitsOperatorRelease { get; init; }
         }
 
         /// <summary>
@@ -140,6 +142,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     return (VoteDecision.Abstain, $"the withdrawal was requested at block {request.RequestBlockHeight}, before this validator's signing records begin (block {evidenceEpochHeight.Value})", null);
                 return (VoteDecision.Approve, "no signature share of this validator exists for the withdrawal", null);
             }
+            if (evidence.AwaitsOperatorRelease)
+                return (VoteDecision.Wait, "this validator holds a signing record for the withdrawal from before exact spellings; its operator confirms no transaction signed then can pay and releases it (POST /frost/evidence/release)", null);
             if (evidence.Inconclusive)
                 return (VoteDecision.Wait, "this validator signed a transaction and could not establish from Bitcoin whether it can still confirm", null);
             if (evidence.ProvenDead)
@@ -154,6 +158,20 @@ namespace VerifiedXCore.Bitcoin.Services
         /// the local request row), and - when a signed transaction is known - whether Bitcoin proves it dead.
         /// </summary>
         public static async Task<SigningEvidence> GetSigningEvidenceAsync(string scUID, string withdrawalRequestHash, VBTCWithdrawalRequest? localRow)
+        {
+            var evidence = await GetSigningEvidenceFromRecordsAsync(scUID, withdrawalRequestHash, localRow);
+            // A record written before exact spellings may hide a transaction signed then under another spelling: its own
+            // transaction being dead does not show the withdrawal unpaid until an operator releases it.
+            if (evidence.ProvenDead)
+            {
+                var exactSince = FrostSignedWithdrawalEvidence.ExactSpellingSince();
+                if (FrostSignedWithdrawalEvidence.ForPayment(scUID, withdrawalRequestHash).Any(r => r.NeedsOperatorRelease(exactSince)))
+                    return new SigningEvidence { HasEvidence = true, BtcTxId = evidence.BtcTxId, Inconclusive = true, AwaitsOperatorRelease = true };
+            }
+            return evidence;
+        }
+
+        private static async Task<SigningEvidence> GetSigningEvidenceFromRecordsAsync(string scUID, string withdrawalRequestHash, VBTCWithdrawalRequest? localRow)
         {
             // Records naming more than one transaction (an earlier version signed under more than one spelling of the
             // reference): the withdrawal is refundable only once every one of them can never confirm.
