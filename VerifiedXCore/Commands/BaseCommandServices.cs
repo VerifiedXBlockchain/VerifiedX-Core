@@ -1655,7 +1655,11 @@ namespace VerifiedXCore.Commands
                         {
                             Console.WriteLine("Please input your encryption password to create a new address");
                             var password = Console.ReadLine();
-                            if (!string.IsNullOrEmpty(password))
+                            if (!string.IsNullOrEmpty(password) && WalletEncryptionService.RefusesUnlock(password))
+                            {
+                                Console.WriteLine("Password was incorrect. Please attempt again");
+                            }
+                            else if (!string.IsNullOrEmpty(password))
                             {
                                 Globals.EncryptPassword = password.ToSecureString();
                                 Console.WriteLine("Creating new addresses. Please wait...");

@@ -77,5 +77,17 @@ namespace VerifiedXCore.Tests
             Assert.Equal("Success", (string?)result["Result"]);
             Assert.True(Globals.EncryptPassword.Length > 0);
         }
+
+        [Fact]
+        public void RefusesUnlock_TellsTheWalletPasswordFromAnyOther()
+        {
+            Assert.True(WalletEncryptionService.RefusesUnlock("not the password"));
+            Assert.False(WalletEncryptionService.RefusesUnlock(WalletPw));
+
+            // An unencrypted wallet has no password to check; its unlock paths are unchanged.
+            Globals.IsWalletEncrypted = false;
+            Assert.False(WalletEncryptionService.RefusesUnlock("anything"));
+            Globals.IsWalletEncrypted = true;
+        }
     }
 }

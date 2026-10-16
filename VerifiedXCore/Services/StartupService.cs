@@ -337,7 +337,9 @@ namespace VerifiedXCore.Services
                     var randString = RandomStringUtility.GetRandomString(8);
 
                     var signature = SignatureService.CreateSignature(randString, privateKey, account.PublicKey);
-                    var sigVerify = SignatureService.VerifySignature(account.Address, randString, signature);
+                    // The signature alone proves nothing when the account's key is still stored in plaintext.
+                    var sigVerify = SignatureService.VerifySignature(account.Address, randString, signature)
+                        && !WalletEncryptionService.RefusesUnlock(password);
 
                     if(sigVerify)
                     {
@@ -392,7 +394,9 @@ namespace VerifiedXCore.Services
                     var randString = RandomStringUtility.GetRandomString(8);
 
                     var signature = SignatureService.CreateSignature(randString, privateKey, account.PublicKey);
-                    var sigVerify = SignatureService.VerifySignature(account.Address, randString, signature);
+                    // The signature alone proves nothing when the account's key is still stored in plaintext.
+                    var sigVerify = SignatureService.VerifySignature(account.Address, randString, signature)
+                        && !WalletEncryptionService.RefusesUnlock(password);
 
                     if (sigVerify)
                     {
