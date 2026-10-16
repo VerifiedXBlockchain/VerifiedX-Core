@@ -209,6 +209,10 @@ namespace VerifiedXCore.Utilities
                 DbContext.DB.Checkpoint();
                 DbContext.DB_AccountStateTrei.Checkpoint();
 
+                // Snapshot slots above the target hold state from the removed blocks; keep them out of any restore.
+                try { StateSnapshotService.InvalidateAbove(targetHeight); }
+                catch (Exception ex) { ErrorLogUtility.LogError($"[RollbackBlocksFast] Could not invalidate snapshot slots above {targetHeight}: {ex.Message}", "BlockRollbackUtility.RollbackBlocksFast"); }
+
                 // Step 5 + 6: Update Globals.LastBlock to the new tip and clear stale in-memory
                 // queues (shared with SnapshotRestoreUtility).
                 RefreshInMemoryTip(targetHeight);

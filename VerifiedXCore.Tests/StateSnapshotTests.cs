@@ -350,6 +350,73 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        /// <summary>
+        /// A slot taken on a branch a fast rollback removed: its anchor block was replaced, so the next cycle rebuilds it
+        /// rather than diffing forward from its height (which kept the dead branch's state and re-anchored it).
+        /// </summary>
+        [Fact]
+        public async Task UpdateCycle_RebuildsASlotWhoseAnchorBlockWasReplaced()
+        {
+            DbContext.DB = _live;
+            try
+            {
+                var blocks = _live.GetCollection<Block>(DbContext.RSRV_BLOCKS);
+                blocks.Insert(new Block { Height = 40, Hash = "fork-40", Transactions = new List<Transaction>() });
+                SeedAccount("alice", 100m, stamp: 35);
+                await StateSnapshotService.UpdateCycleAsync(40, "fork-40");
+                foreach (var h in new long[] { 50, 60 })
+                {
+                    blocks.Insert(new Block { Height = h, Hash = $"canon-{h}", Transactions = new List<Transaction>() });
+                    await StateSnapshotService.UpdateCycleAsync(h, $"canon-{h}");
+                }
+
+                // Block 40 is rolled back and replaced; the replacement's write is stamped at 40.
+                blocks.DeleteMany(x => x.Height == 40);
+                blocks.Insert(new Block { Height = 40, Hash = "canon-40", Transactions = new List<Transaction>() });
+                SeedAccount("alice", 70m, stamp: 40);
+                blocks.Insert(new Block { Height = 70, Hash = "canon-70", Transactions = new List<Transaction>() });
+
+                await StateSnapshotService.UpdateCycleAsync(70, "canon-70"); // rolls the oldest slot (40) forward
+
+                var rolled = StateSnapshotService.GetSlots().Single(x => x.Height == 70);
+                Assert.Equal(70m, SlotBalance(rolled.SlotId, "alice"));
+            }
+            finally
+            {
+                DbContext.DB = null;
+            }
+        }
+
+        [Fact]
+        public async Task UpdateCycle_StillRollsAnAnchoredSlotForwardOnALinearChain()
+        {
+            DbContext.DB = _live;
+            try
+            {
+                var blocks = _live.GetCollection<Block>(DbContext.RSRV_BLOCKS);
+                SeedAccount("alice", 100m, stamp: 35);
+                foreach (var h in new long[] { 40, 50, 60 })
+                {
+                    blocks.Insert(new Block { Height = h, Hash = $"canon-{h}", Transactions = new List<Transaction>() });
+                    await StateSnapshotService.UpdateCycleAsync(h, $"canon-{h}");
+                }
+                SeedAccount("alice", 999m, stamp: 65);
+                blocks.Insert(new Block { Height = 70, Hash = "canon-70", Transactions = new List<Transaction>() });
+
+                await StateSnapshotService.UpdateCycleAsync(70, "canon-70");
+
+                var rolled = StateSnapshotService.GetSlots().Single(x => x.Height == 70);
+                Assert.Equal(SnapshotSlotStatus.Valid, rolled.Status);
+                Assert.Equal("canon-70", rolled.BlockHash);
+                Assert.Equal(999m, SlotBalance(rolled.SlotId, "alice"));
+                Assert.NotNull(StateSnapshotService.PickVerifiedSlotForRestore(70));
+            }
+            finally
+            {
+                DbContext.DB = null;
+            }
+        }
+
         [Fact]
         public async Task CrashMidUpdate_SlotLeftUpdating_IsSkippedAndRebuilt()
         {

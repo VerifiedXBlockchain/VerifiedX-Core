@@ -251,7 +251,9 @@ namespace VerifiedXCore.Services
                 var slot = slots.FirstOrDefault(x => !IsUsable(x))
                         ?? slots.OrderBy(x => x.Height).First();
 
-                var fullCopy = !IsUsable(slot) || slot.Height <= 0;
+                // A slot whose anchor block is gone or replaced (a fast rollback across its height) holds a dead branch's
+                // state: a diff from its height would keep that state and re-anchor it to the canonical block. Rebuild it.
+                var fullCopy = !IsUsable(slot) || slot.Height <= 0 || string.IsNullOrEmpty(slot.BlockHash) || !VerifySlotAnchor(slot);
                 var previousHeight = slot.Height;
 
                 MarkSlot(slot, SnapshotSlotStatus.Updating, previousHeight, slot.BlockHash);
@@ -324,7 +326,9 @@ namespace VerifiedXCore.Services
                     col.Upsert(slot);
                 }
 
-                var fullCopy = !IsUsable(slot) || slot.Height <= 0;
+                // A slot whose anchor block is gone or replaced (a fast rollback across its height) holds a dead branch's
+                // state: a diff from its height would keep that state and re-anchor it to the canonical block. Rebuild it.
+                var fullCopy = !IsUsable(slot) || slot.Height <= 0 || string.IsNullOrEmpty(slot.BlockHash) || !VerifySlotAnchor(slot);
                 var previousHeight = slot.Height;
 
                 MarkSlot(slot, SnapshotSlotStatus.Updating, previousHeight, slot.BlockHash);
