@@ -293,7 +293,11 @@ namespace VerifiedXCore.Tests
                     Assert.Equal(HttpStatusCode.Forbidden, (await passwordOnly.CreateClient().GetAsync("/swagger/v1/swagger.json")).StatusCode);
                 Globals.APIToken = Secure(""); // an explicit empty apitoken= is no token
                 using (var emptyToken = NewServer())
-                    Assert.Equal(HttpStatusCode.Forbidden, (await emptyToken.CreateClient().GetAsync("/swagger/v1/swagger.json")).StatusCode);
+                {
+                    var emptyHeader = new HttpRequestMessage(HttpMethod.Get, "/swagger/v1/swagger.json");
+                    emptyHeader.Headers.TryAddWithoutValidation("apitoken", "");
+                    Assert.Equal(HttpStatusCode.Forbidden, (await emptyToken.CreateClient().SendAsync(emptyHeader)).StatusCode);
+                }
 
                 // A loopback-only node keeps it open to its operator.
                 Globals.OpenAPI = false;
