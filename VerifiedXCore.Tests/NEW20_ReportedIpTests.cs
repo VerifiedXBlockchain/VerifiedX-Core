@@ -126,5 +126,52 @@ namespace VerifiedXCore.Tests
             }
             finally { Reset(); Globals.ReportedIP = ip; Globals.ReportedIPManuallySet = manual; }
         }
+
+        [Fact]
+        public void AnAddressTwoPeersAgreedOn_IsReplacedWhenMorePeersConfirmAnother()
+        {
+            var (ip, manual) = (Globals.ReportedIP, Globals.ReportedIPManuallySet);
+            try
+            {
+                Reset();
+                P2PClient.RecordReportedIP("6.6.6.6", "203.0.113.1");
+                P2PClient.RecordReportedIP("6.6.6.6", "203.0.113.2");
+                Assert.Equal("6.6.6.6", Globals.ReportedIP);
+
+                P2PClient.RecordReportedIP("198.51.100.50", "203.0.113.3");
+                P2PClient.RecordReportedIP("198.51.100.50", "203.0.113.4");
+                Assert.Equal("6.6.6.6", Globals.ReportedIP); // a tie keeps the current address
+
+                P2PClient.RecordReportedIP("198.51.100.50", "203.0.113.5");
+                Assert.Equal("198.51.100.50", Globals.ReportedIP);
+                Assert.Equal(new[] { "198.51.100.50" }, P2PClient.OwnAddressesToSkip());
+            }
+            finally { Reset(); Globals.ReportedIP = ip; Globals.ReportedIPManuallySet = manual; }
+        }
+
+        [Fact]
+        public void AnAddressWhoseConfirmationsAreWithdrawn_IsDropped_AndAConfiguredOneNeverIs()
+        {
+            var (ip, manual) = (Globals.ReportedIP, Globals.ReportedIPManuallySet);
+            try
+            {
+                Reset();
+                P2PClient.RecordReportedIP("6.6.6.6", "203.0.113.1");
+                P2PClient.RecordReportedIP("6.6.6.6", "203.0.113.2");
+                Assert.Equal("6.6.6.6", Globals.ReportedIP);
+
+                P2PClient.RecordReportedIP("7.7.7.7", "203.0.113.1"); // one of the two now reports another address
+                Assert.True(string.IsNullOrEmpty(Globals.ReportedIP));
+
+                Reset();
+                Globals.ReportedIP = "198.51.100.60";
+                Globals.ReportedIPManuallySet = true;
+                P2PClient.RecordReportedIP("6.6.6.6", "203.0.113.1");
+                P2PClient.RecordReportedIP("6.6.6.6", "203.0.113.2");
+                P2PClient.RecordReportedIP("6.6.6.6", "203.0.113.3");
+                Assert.Equal("198.51.100.60", Globals.ReportedIP);
+            }
+            finally { Reset(); Globals.ReportedIP = ip; Globals.ReportedIPManuallySet = manual; }
+        }
     }
 }
