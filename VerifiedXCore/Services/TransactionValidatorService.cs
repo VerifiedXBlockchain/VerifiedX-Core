@@ -3339,6 +3339,9 @@ namespace VerifiedXCore.Services
                             && !FrostKeyIsOwn(jobj["FrostPublicKey"], validatorAddress, required: true))
                             return (txResult, "FrostPublicKey must be the validator's own public key.");
 
+                        if (RegisteredBaseAddressRefusal(jobj, blockHeight) is { } baseRefusal)
+                            return (txResult, baseRefusal);
+
                         if (txRequest.Fee != 0M)
                             return (txResult, "Validator registration must be a free transaction (Fee = 0).");
                         
@@ -3472,6 +3475,9 @@ namespace VerifiedXCore.Services
                         if ((blockHeight ?? (Globals.LastBlock.Height + 1)) >= Globals.PathAuditRulesHeight
                             && !FrostKeyIsOwn(jobj["FrostPublicKey"], validatorAddress, required: false))
                             return (txResult, "FrostPublicKey must be the validator's own public key.");
+
+                        if (RegisteredBaseAddressRefusal(jobj, blockHeight) is { } baseRefusal)
+                            return (txResult, baseRefusal);
 
                         if (txRequest.Fee != 0M)
                             return (txResult, "Validator heartbeat must be a free transaction (Fee = 0).");
@@ -4475,6 +4481,23 @@ namespace VerifiedXCore.Services
         }
 
         internal const string NegativeFeeReason = "A transaction's fee cannot be negative.";
+        internal const string RegisteredBaseAddressReason = "A validator's BaseAddress must be the one its own key derives.";
+
+        /// <summary>
+        /// A validator registration or heartbeat that names a BaseAddress names the one its own key (FrostPublicKey, checked
+        /// to be the validator's own) derives: the vBTCb validator set knows validators by it, and a chosen address could
+        /// be shaped into another contract message. Refused at admission at every height; in blocks from the path-audit
+        /// height. Null when it passes.
+        /// </summary>
+        internal static string? RegisteredBaseAddressRefusal(JObject data, long? blockHeight)
+        {
+            var named = data["BaseAddress"]?.ToObject<string>();
+            if (string.IsNullOrEmpty(named) || (blockHeight != null && blockHeight.Value < Globals.PathAuditRulesHeight)) return null;
+            var key = data["FrostPublicKey"]?.ToObject<string>();
+            string? derived = null;
+            try { derived = string.IsNullOrEmpty(key) ? null : Bitcoin.Services.ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(key); } catch { }
+            return string.Equals(named.Trim(), derived, StringComparison.OrdinalIgnoreCase) ? null : RegisteredBaseAddressReason;
+        }
         internal const string BridgeLockDestinationIsAdminTagReason = "A bridge lock's EvmDestination cannot begin with a Base admin message tag.";
         internal const string VotingEndDateNeedsOffsetReason = "A topic's voting end date must carry a UTC offset.";
         internal const string TopicEndDateWithoutOffsetReason = "This topic's voting end date was written without a UTC offset; it cannot be voted on.";
