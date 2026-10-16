@@ -1818,9 +1818,11 @@ namespace VerifiedXCore.Data
 
                 var adnrs = BitcoinAdnr.GetBitcoinAdnr();
                 var ownOnly = height >= Globals.BtcNameOneRecordPerAddressHeight;
-                var adnr = ownOnly
-                    ? adnrs?.FindOne(x => x.BTCAddress == BTCFromAddress && x.RBXAddress == tx.FromAddress)
-                    : adnrs?.FindOne(x => x.BTCAddress == BTCFromAddress);
+                var adnr = height >= Globals.BtcNameSignerOwnsAddressHeight
+                    ? (adnrs == null ? null : SignedBtcNameRecord(adnrs, BTCFromAddress, tx.FromAddress, (string?)jobj["BTCToMessage"]))
+                    : ownOnly
+                        ? adnrs?.FindOne(x => x.BTCAddress == BTCFromAddress && x.RBXAddress == tx.FromAddress)
+                        : adnrs?.FindOne(x => x.BTCAddress == BTCFromAddress);
                 if (adnr == null)
                 {
                     ErrorLogUtility.LogError($"BTC ADNR transfer {tx.Hash}: no name for {BTCFromAddress} (moved or deleted earlier in the block); nothing applied.", "StateData.TransferBTCAdnr()");
@@ -1837,6 +1839,18 @@ namespace VerifiedXCore.Data
                 await adnrs!.UpdateSafeAsync(adnr);
             }
             catch { }
+        }
+
+        /// <summary>
+        /// From <see cref="Globals.BtcNameSignerOwnsAddressHeight"/> a transfer moves the sender's record at the address
+        /// whose name the receiver signed, so validation and apply agree on the record even when the address holds two.
+        /// </summary>
+        internal static BitcoinAdnr? SignedBtcNameRecord(LiteDB.ILiteCollection<BitcoinAdnr> adnrs, string? btcAddress, string owner, string? acceptMessage)
+        {
+            var signedName = Bitcoin.Services.BtcNameSignatures.SignedName(acceptMessage);
+            if (signedName == null) return null;
+            return adnrs.Find(x => x.BTCAddress == btcAddress && x.RBXAddress == owner)
+                .FirstOrDefault(x => string.Equals(x.Name, signedName, StringComparison.OrdinalIgnoreCase));
         }
 
         /// <summary>

@@ -2276,7 +2276,10 @@ namespace VerifiedXCore.Services
                                     long messageTimestamp;
                                     if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.BtcNameSignerOwnsAddressHeight)
                                     {
-                                        var boundError = Bitcoin.Services.BtcNameSignatures.Check(message, signature, btcAddress, txRequest.FromAddress, name, Globals.BTCNetwork, out messageTimestamp);
+                                        //The apply stores Name + ".btc", so a Name carrying the suffix would store a name the signer never signed.
+                                        if (name.Contains(".btc", StringComparison.OrdinalIgnoreCase))
+                                            return (txResult, "Name may not contain network suffix '.btc'!");
+                                        var boundError = Bitcoin.Services.BtcNameSignatures.Check(message, signature, btcAddress, txRequest.FromAddress, name + ".btc", Globals.BTCNetwork, out messageTimestamp);
                                         if (boundError != null)
                                             return (txResult, boundError);
                                     }
@@ -2339,7 +2342,12 @@ namespace VerifiedXCore.Services
                                         if (acceptMessage == null || acceptSignature == null)
                                             return (txResult, "The receiving BTC address must sign the transfer.");
 
-                                        var acceptError = Bitcoin.Services.BtcNameSignatures.Check(acceptMessage, acceptSignature, BTCToAddress, txRequest.ToAddress, addressCheck.Name, Globals.BTCNetwork, out var acceptTimestamp);
+                                        //The name moved is the one the receiver signed, among the sender's records at the address (the apply picks it the same way).
+                                        var signedRecord = StateData.SignedBtcNameRecord(adnrList, BTCFromAddress, txRequest.FromAddress, acceptMessage);
+                                        if (signedRecord == null)
+                                            return (txResult, "The receiving BTC address's signature names a name the sender does not hold at that address.");
+
+                                        var acceptError = Bitcoin.Services.BtcNameSignatures.Check(acceptMessage, acceptSignature, BTCToAddress, txRequest.ToAddress, signedRecord.Name, Globals.BTCNetwork, out var acceptTimestamp);
                                         if (acceptError != null)
                                             return (txResult, acceptError);
 

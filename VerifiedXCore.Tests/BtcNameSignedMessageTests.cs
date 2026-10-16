@@ -205,17 +205,82 @@ namespace VerifiedXCore.Tests
             Assert.True(ok, why);
         }
 
+        [Fact]
+        public async Task FromTheHeight_ACreateWhoseNameCarriesTheSuffix_IsRefused()
+        {
+            // The apply stores Name + ".btc"; "alice.btc" would become "alice.btc.btc", a name nobody signed.
+            var (m, s) = BtcSigned(_aliceBtc, BtcNameSignatures.Message(TimeUtil.GetTime(), _alice.Address, "alice.btc"));
+            var tx = Signed(_alice, "Adnr_Base", new { Function = "BTCAdnrCreate()", Name = "alice.btc", BTCAddress = BtcAddress(_aliceBtc), Message = m, Signature = s });
+            var (ok, why) = await Verify(tx, Rule);
+            Assert.False(ok);
+            Assert.Contains("network suffix", why);
+        }
+
+        // --- two records at one address, as the older apply could leave ---
+
+        private void AliceHoldsTwoNamesAtOneAddress()
+        {
+            var col = BitcoinAdnr.GetBitcoinAdnr()!;
+            col.InsertSafe(new BitcoinAdnr { Name = "first.btc", BTCAddress = BtcAddress(_aliceBtc), RBXAddress = _alice.Address, TxHash = "c1", Timestamp = 1 });
+            col.InsertSafe(new BitcoinAdnr { Name = "second.btc", BTCAddress = BtcAddress(_aliceBtc), RBXAddress = _alice.Address, TxHash = "c2", Timestamp = 2 });
+        }
+
+        private Transaction SignedTransferOf(string name, Key receiver)
+        {
+            var (m, s) = BtcSigned(receiver, BtcNameSignatures.Message(TimeUtil.GetTime(), _carol.Address, name));
+            return Transfer(_carol.Address, BtcAddress(receiver), m, s);
+        }
+
+        private static BitcoinAdnr? Named(string name) => BitcoinAdnr.GetBitcoinAdnr()!.FindOne(x => x.Name == name);
+
+        [Fact]
+        public async Task FromTheHeight_ValidationJudgesTheRecordTheReceiverSigned()
+        {
+            AliceHoldsTwoNamesAtOneAddress();
+            var (ok, why) = await Verify(SignedTransferOf("second.btc", _carolBtc), Rule);
+            Assert.True(ok, why);
+            var (okMissing, whyMissing) = await Verify(SignedTransferOf("third.btc", _carolBtc), Rule);
+            Assert.False(okMissing);
+            Assert.Contains("does not hold", whyMissing);
+        }
+
+        [Fact]
+        public async Task FromTheHeight_TheApplyMovesTheSignedName_NotTheFirstRecord()
+        {
+            AliceHoldsTwoNamesAtOneAddress();
+            await StateData.TransferBTCAdnr(SignedTransferOf("second.btc", _carolBtc), Rule);
+            Assert.Equal(BtcAddress(_carolBtc), Named("second.btc")!.BTCAddress);
+            Assert.Equal(BtcAddress(_aliceBtc), Named("first.btc")!.BTCAddress);
+        }
+
+        [Fact]
+        public async Task FromTheHeight_ASecondTransferSignedForAMovedName_LeavesTheOtherRecord()
+        {
+            AliceHoldsTwoNamesAtOneAddress();
+            var other = new Key();
+            await StateData.TransferBTCAdnr(SignedTransferOf("first.btc", _carolBtc), Rule);
+            await StateData.TransferBTCAdnr(SignedTransferOf("first.btc", other), Rule);
+            Assert.Equal(BtcAddress(_carolBtc), Named("first.btc")!.BTCAddress);
+            Assert.Equal(BtcAddress(_aliceBtc), Named("second.btc")!.BTCAddress);
+        }
+
         // --- message ---
 
         [Theory]
-        [InlineData("alice")]
         [InlineData("alice.btc")]
         [InlineData("Alice.BTC")]
-        public void TheSignedName_IsComparedWithItsSuffixAndAnyCase(string signedName)
+        public void TheSignedName_IsComparedInAnyCase(string signedName)
         {
             var (m, s) = BtcSigned(_aliceBtc, BtcNameSignatures.Message(1, _alice.Address, signedName));
-            Assert.Null(BtcNameSignatures.Check(m, s, BtcAddress(_aliceBtc), _alice.Address, "alice", Globals.BTCNetwork, out var ts));
+            Assert.Null(BtcNameSignatures.Check(m, s, BtcAddress(_aliceBtc), _alice.Address, "alice.btc", Globals.BTCNetwork, out var ts));
             Assert.Equal(1, ts);
+        }
+
+        [Fact]
+        public void TheSignedName_MustBeTheFullName()
+        {
+            var (m, s) = BtcSigned(_aliceBtc, $"1:{_alice.Address}:alice");
+            Assert.NotNull(BtcNameSignatures.Check(m, s, BtcAddress(_aliceBtc), _alice.Address, "alice.btc", Globals.BTCNetwork, out _));
         }
     }
 }

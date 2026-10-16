@@ -28,12 +28,17 @@ namespace VerifiedXCore.Bitcoin.Services
             return owner.Length > 0 && name.Length > 0;
         }
 
+        /// <summary>The name a well-formed message signs, or null.</summary>
+        public static string? SignedName(string? message) =>
+            message != null && TryParse(message, out _, out _, out var name) ? name : null;
+
         /// <summary>
         /// Null when <paramref name="signature"/> over <paramref name="message"/> is from the key of
-        /// <paramref name="btcAddress"/> and the message names <paramref name="owner"/> and <paramref name="name"/>;
-        /// otherwise the reason. The signed timestamp comes back for the caller's age rule.
+        /// <paramref name="btcAddress"/> and the message names <paramref name="owner"/> and exactly
+        /// <paramref name="fullName"/> (the stored name, with its ".btc"; case aside); otherwise the reason. The signed
+        /// timestamp comes back for the caller's age rule.
         /// </summary>
-        public static string? Check(string message, string signature, string btcAddress, string owner, string name, Network network, out long timestamp)
+        public static string? Check(string message, string signature, string btcAddress, string owner, string fullName, Network network, out long timestamp)
         {
             timestamp = 0;
             if (!SignatureService.VerifySignature(message, signature))
@@ -44,7 +49,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 return "Improper Message Format. Message must be <timestamp>:<VFX address>:<name>.";
             if (signedOwner != owner)
                 return "The BTC signature message names a different VFX address.";
-            if (!string.Equals(signedName, Suffixed(name), StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(signedName, fullName, StringComparison.OrdinalIgnoreCase))
                 return "The BTC signature message names a different name.";
             return null;
         }
