@@ -566,7 +566,9 @@ namespace VerifiedXCore.Utilities
                         if (!rewound)
                         {
                             _consecutiveRecoveryFailures++;
-                            LogUtility.Log($"[{caller}] DEEP-REORG: could not rewind below the divergence (no snapshot slot, rollback unavailable). Chain unchanged — will retry.", $"{caller}.DeepReorg");
+                            LogUtility.Log(SnapshotRestoreUtility.StateDestroyedByFailedRestore
+                                ? $"[{caller}] DEEP-REORG: the snapshot restore to {target} failed after wiping the state; block validation is stopped. Restart with 'rebuildstate'."
+                                : $"[{caller}] DEEP-REORG: could not rewind below the divergence (no snapshot slot, rollback unavailable). Chain unchanged — will retry.", $"{caller}.DeepReorg");
                             return false;
                         }
                     }
