@@ -169,9 +169,10 @@ namespace VerifiedXCore.Tests
         /// snapshot restore or a resync its store may not yet show that a withdrawal was refunded.
         /// </summary>
         [Theory]
-        [InlineData(true)]
-        [InlineData(false)]
-        public async Task Round2_GivesNoShare_WhileThisValidatorIsNotAtTheNetworksHeight(bool resyncing)
+        [InlineData(true, false)]
+        [InlineData(false, true)]   // a fork recovery's download phase: IsResyncing is already cleared
+        [InlineData(false, false)]
+        public async Task Round2_GivesNoShare_WhileThisValidatorIsNotAtTheNetworksHeight(bool resyncing, bool recovering)
         {
             var (synced, wasResyncing, stopped, tip) = (Globals.IsChainSynced, Globals.IsResyncing, Globals.StopAllTimers, Globals.LastBlock);
             try
@@ -180,15 +181,20 @@ namespace VerifiedXCore.Tests
                 Globals.IsResyncing = resyncing;
                 Globals.StopAllTimers = false;
                 Globals.LastBlock = new Block { Height = 500, Timestamp = TimeUtil.GetTime() };
+                VerifiedXCore.Utilities.ForkRecoveryUtility.SetRecoveryInProgressForTests(recovering);
                 var (code, body) = await Round2OnThisWithdrawal();
-                if (resyncing)
+                if (resyncing || recovering)
                 {
                     Assert.Equal(System.Net.HttpStatusCode.Conflict, code);
                     Assert.Contains("not at the network's height", body);
                 }
                 else Assert.DoesNotContain("network's height", body);
             }
-            finally { (Globals.IsChainSynced, Globals.IsResyncing, Globals.StopAllTimers, Globals.LastBlock) = (synced, wasResyncing, stopped, tip); }
+            finally
+            {
+                VerifiedXCore.Utilities.ForkRecoveryUtility.SetRecoveryInProgressForTests(false);
+                (Globals.IsChainSynced, Globals.IsResyncing, Globals.StopAllTimers, Globals.LastBlock) = (synced, wasResyncing, stopped, tip);
+            }
         }
 
         /// <summary>Round 2 of a ceremony this validator accepted for the withdrawal, sent by its leader.</summary>

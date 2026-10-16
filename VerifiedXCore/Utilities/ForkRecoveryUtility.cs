@@ -713,5 +713,6 @@ namespace VerifiedXCore.Utilities
         /// Returns true if a recovery operation is currently in progress.
         /// </summary>
         public static bool IsRecoveryInProgress => Volatile.Read(ref _recoveryInProgress) != 0;
+        internal static void SetRecoveryInProgressForTests(bool running) => Interlocked.Exchange(ref _recoveryInProgress, running ? 1 : 0);
     }
 }
