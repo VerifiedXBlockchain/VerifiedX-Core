@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using VerifiedXCore;
@@ -223,6 +224,176 @@ namespace VerifiedXCore.Tests
                 Bid.SaveBid(built);
                 Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-10", 500M, nft));
                 Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-10", 500M, other));
+            }
+            finally
+            {
+                Globals.DecShopData = priorShop;
+            }
+        }
+
+        // ── Wallet-local: a bid pays automatically only while fresh, only if not rejected, and only once ──────────────
+
+        private Bid SaveSentBid(string key, string nft, BidStatus status, long sendTime, long? autoCompleteUntil = null)
+        {
+            var bid = new Bid
+            {
+                Id = Guid.NewGuid(), BidAddress = _victim.Address, PurchaseKey = key, BidAmount = 500M, MaxBidAmount = 500M,
+                BidStatus = status, BidSendReceive = BidSendReceive.Sent, BidSendTime = sendTime, ListingId = 20, CollectionId = 1,
+                SmartContractUID = nft, AutoCompleteUntil = autoCompleteUntil,
+            };
+            Bid.SaveBid(bid);
+            return bid;
+        }
+
+        [Fact]
+        public void IncomingSale_FromARejectedOrExpiredOrUsedBid_IsNotCompleted()
+        {
+            var nft = ListedNft();
+            var now = TimeUtil.GetTime();
+
+            SaveSentBid("key-rejected", nft, BidStatus.Rejected, now);
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-rejected", 500M, nft));
+
+            SaveSentBid("key-expired", nft, BidStatus.Accepted, now - 30 * 24 * 3600, autoCompleteUntil: now - 1);
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-expired", 500M, nft));
+
+            // A row from before the deadline field: judged from its bid time.
+            SaveSentBid("key-legacy-old", nft, BidStatus.Sent, now - Bid.AutoCompleteGraceSeconds - 60);
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-legacy-old", 500M, nft));
+
+            // Completed once: a second Sale_Start under the same signature (after a cancel) is not paid again.
+            SaveSentBid("key-used", nft, BidStatus.Accepted, now);
+            Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-used", 500M, nft));
+            Bid.MarkAutoCompleted(_victim.Address, "key-used", nft);
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-used", 500M, nft));
+        }
+
+        [Fact]
+        public void IncomingSale_FromAFreshSentOrAcceptedBid_IsStillCompleted()
+        {
+            var nft = ListedNft();
+            var other = ListedNft();
+            var now = TimeUtil.GetTime();
+
+            SaveSentBid("key-sent", nft, BidStatus.Sent, now);
+            Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-sent", 500M, nft));
+
+            // An auction bid made long before the listing ends stays completable until the end plus the grace.
+            SaveSentBid("key-long-auction", nft, BidStatus.Accepted, now - 20 * 24 * 3600, autoCompleteUntil: now + 3600);
+            Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-long-auction", 500M, nft));
+
+            // Marking one contract's bid used leaves another contract's bid on the same key alone.
+            SaveSentBid("key-shared", nft, BidStatus.Accepted, now);
+            SaveSentBid("key-shared", other, BidStatus.Accepted, now);
+            Bid.MarkAutoCompleted(_victim.Address, "key-shared", nft);
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-shared", 500M, nft));
+            Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-shared", 500M, other));
+        }
+
+        [Fact]
+        public void ShopResponse_CannotReviveARejectedBid_OrTouchABidThisWalletDidNotSend()
+        {
+            var nft = ListedNft();
+            var now = TimeUtil.GetTime();
+
+            var rejected = SaveSentBid("key-revive", nft, BidStatus.Rejected, now);
+            Bid.ApplyShopResponse(rejected.Id, BidStatus.Accepted);
+            Assert.Equal(BidStatus.Rejected, Bid.GetSingleBid(rejected.Id)!.BidStatus);
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-revive", 500M, nft));
+
+            var received = new Bid
+            {
+                Id = Guid.NewGuid(), BidAddress = _victim.Address, PurchaseKey = "key-recv", BidAmount = 500M, MaxBidAmount = 500M,
+                BidStatus = BidStatus.Received, BidSendReceive = BidSendReceive.Received, BidSendTime = now, ListingId = 30, CollectionId = 1,
+                SmartContractUID = nft,
+            };
+            Bid.SaveBid(received);
+            Bid.ApplyShopResponse(received.Id, BidStatus.Accepted);
+            Assert.Equal(BidStatus.Received, Bid.GetSingleBid(received.Id)!.BidStatus);
+        }
+
+        [Fact]
+        public void OwnerResend_ReopensARejectedBid_SoTheShopsAcceptanceCounts()
+        {
+            var nft = ListedNft();
+            var rejected = SaveSentBid("key-retry", nft, BidStatus.Rejected, TimeUtil.GetTime() - 30 * 24 * 3600, autoCompleteUntil: TimeUtil.GetTime() - 1);
+
+            var reopened = Bid.ReopenForResend(rejected.Id);
+            Bid.ApplyShopResponse(rejected.Id, BidStatus.Accepted);
+
+            Assert.Equal(BidStatus.Accepted, Bid.GetSingleBid(rejected.Id)!.BidStatus);
+            Assert.True(reopened!.AutoCompleteUntil > TimeUtil.GetTime()); // the window runs from the resend
+            Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-retry", 500M, nft));
+
+            // A used bid stays used, resent or not.
+            Bid.MarkAutoCompleted(_victim.Address, "key-retry", nft);
+            Bid.ReopenForResend(rejected.Id);
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-retry", 500M, nft));
+        }
+
+        [Fact]
+        public async Task AutoCompletion_ChargesOnlyTheBuyerWhoseBidWasChecked()
+        {
+            var nft = ListedNft();
+            var state = SmartContractStateTrei.GetSmartContractState(nft)!;
+            var other = NewKey();
+            state.NextOwner = other.Address; // a competing Sale_Start moved the sale to another account
+            SmartContractStateTrei.UpdateSmartContract(state);
+
+            var (refused, why) = await SmartContractService.CompleteSaleSmartContractTX(nft, _seller.Address, 500M, "key-40", expectedBuyer: _victim.Address);
+            Assert.Null(refused);
+            Assert.Contains("not completing it automatically", why);
+
+            // The buyer the sale names is not refused by this check (it then needs the account in this wallet).
+            var (_, sameBuyer) = await SmartContractService.CompleteSaleSmartContractTX(nft, _seller.Address, 500M, "key-40", expectedBuyer: other.Address);
+            Assert.DoesNotContain("not completing it automatically", sameBuyer);
+        }
+
+        [Fact]
+        public void ShopResponse_StillUpdatesASentBid()
+        {
+            var nft = ListedNft();
+            var sent = SaveSentBid("key-accept", nft, BidStatus.Sent, TimeUtil.GetTime());
+
+            Bid.ApplyShopResponse(sent.Id, BidStatus.Accepted);
+
+            Assert.Equal(BidStatus.Accepted, Bid.GetSingleBid(sent.Id)!.BidStatus);
+            Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-accept", 500M, nft));
+        }
+
+        [Fact]
+        public void SavingACopyReadBeforeTheBidWasUsed_DoesNotMakeItUnusedAgain()
+        {
+            var nft = ListedNft();
+            SaveSentBid("key-stale", nft, BidStatus.Accepted, TimeUtil.GetTime());
+            var staleCopy = Bid.GetAllBids(BidSendReceive.Sent)!.Single(b => b.PurchaseKey == "key-stale");
+
+            Bid.MarkAutoCompleted(_victim.Address, "key-stale", nft);
+            staleCopy.BidStatus = BidStatus.Accepted;
+            Bid.SaveBid(staleCopy);
+
+            Assert.True(Bid.GetSingleBid(staleCopy.Id)!.AutoCompleted);
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-stale", 500M, nft));
+        }
+
+        [Fact]
+        public void NewBid_DeadlineIsTheListingEndPlusGrace_OrTheBidTimePlusGrace()
+        {
+            var priorShop = Globals.DecShopData;
+            try
+            {
+                var nft = ListedNft();
+                var end = DateTime.UtcNow.AddDays(10);
+                Globals.DecShopData = new DecShopData { Listings = new System.Collections.Generic.List<Listing> { new Listing { Id = 21, PurchaseKey = "key-21", SmartContractUID = nft, EndDate = end } } };
+                var auctionBid = new Bid { BidAddress = _victim.Address, PurchaseKey = "key-21", BidAmount = 500M, ListingId = 21, CollectionId = 1, RawBid = true };
+                Assert.True(auctionBid.Build());
+                Assert.Equal(new DateTimeOffset(end).ToUnixTimeSeconds() + Bid.AutoCompleteGraceSeconds, auctionBid.AutoCompleteUntil);
+
+                // Unknown listing (or an end before the bid): the window runs from the bid.
+                Globals.DecShopData = null;
+                var unknown = new Bid { BidAddress = _victim.Address, PurchaseKey = "key-22", BidAmount = 500M, ListingId = 22, CollectionId = 1, RawBid = true, SmartContractUID = nft };
+                Assert.True(unknown.Build());
+                Assert.Equal(unknown.BidSendTime + Bid.AutoCompleteGraceSeconds, unknown.AutoCompleteUntil);
             }
             finally
             {

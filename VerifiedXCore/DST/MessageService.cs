@@ -369,6 +369,12 @@ namespace VerifiedXCore.DST
 
         public static void DecShopMessage(Message message, IPEndPoint endPoint, UdpClient udpClient, string shopURL = "NA")
         {
+            // A request is answered only to a sender that completed the shop handshake, as AssetReq and Bid are. The reply
+            // goes to the datagram's source address, which a UDP sender can forge, so answering anyone made the shop send
+            // multi-KB listings to addresses that never asked.
+            if (message.ComType == MessageComType.Request && !Globals.ConnectedClients.ContainsKey(endPoint.ToString()))
+                return;
+
             var respMessage = DecShopMessageService.ProcessMessage(message, shopURL);
 
             if(respMessage != null)
@@ -625,14 +631,7 @@ namespace VerifiedXCore.DST
                         var isEnumStringParsed = Enum.TryParse(dataSplit[1], true, out BidStatus bidStatus);
 
                         if(isEnumStringParsed)
-                        {
-                            var bid = Bid.GetSingleBid(bidId);
-                            if (bid != null)
-                            {
-                                bid.BidStatus = bidStatus;
-                                Bid.SaveBid(bid);
-                            }
-                        }
+                            Bid.ApplyShopResponse(bidId, bidStatus);
                     }
                     catch { }
                 }
@@ -699,14 +698,7 @@ namespace VerifiedXCore.DST
                         var isEnumStringParsed = Enum.TryParse(dataSplit[1], true, out BidStatus bidStatus);
 
                         if (isEnumStringParsed)
-                        {
-                            var bid = Bid.GetSingleBid(bidId);
-                            if (bid != null)
-                            {
-                                bid.BidStatus = bidStatus;
-                                Bid.SaveBid(bid);
-                            }
-                        }
+                            Bid.ApplyShopResponse(bidId, bidStatus);
                     }
                 }
                 catch { }
@@ -775,10 +767,37 @@ namespace VerifiedXCore.DST
             var output = "";
             message.Build();
 
-            Globals.ClientMessageDict.TryAdd(message.Id, new MessageState { Message = message, MessageId = message.Id, MessageSentTimestamp = TimeUtil.GetTime() });
+            // A reply is looked up by the id of the request it answers, never by its own, so only messages that may be
+            // answered are kept. The table was never pruned: every reply the shop sent stayed in it for good.
+            if (!message.ResponseMessage)
+            {
+                if (Globals.ClientMessageDict.Count >= MaxClientMessages)
+                    PruneClientMessages(TimeUtil.GetTime());
+                Globals.ClientMessageDict.TryAdd(message.Id, new MessageState { Message = message, MessageId = message.Id, MessageSentTimestamp = TimeUtil.GetTime() });
+            }
             output = JsonConvert.SerializeObject(message);
 
             return output;
+        }
+
+        /// <summary>Sent messages kept for matching their responses. Past this, older ones are dropped.</summary>
+        public const int MaxClientMessages = 10_000;
+
+        /// <summary>How long a sent message is kept for matching its response.</summary>
+        public const long ClientMessageTtlSeconds = 10 * 60;
+
+        /// <summary>Drops sent messages older than <see cref="ClientMessageTtlSeconds"/>, then the oldest until below <see cref="MaxClientMessages"/>.</summary>
+        internal static void PruneClientMessages(long now)
+        {
+            foreach (var kv in Globals.ClientMessageDict)
+                if (now - kv.Value.MessageSentTimestamp > ClientMessageTtlSeconds)
+                    Globals.ClientMessageDict.TryRemove(kv.Key, out _);
+
+            var excess = Globals.ClientMessageDict.Count - MaxClientMessages + 1;
+            if (excess <= 0)
+                return;
+            foreach (var key in Globals.ClientMessageDict.OrderBy(kv => kv.Value.MessageSentTimestamp).Take(excess).Select(kv => kv.Key).ToList())
+                Globals.ClientMessageDict.TryRemove(key, out _);
         }
     }
 }

@@ -1768,7 +1768,9 @@ namespace VerifiedXCore.Services
 
         #region Complete Sale Smart Contract
 
-        public static async Task<(Transaction?, string)> CompleteSaleSmartContractTX(string scUID, string toAddress, decimal amountSoldFor, string keySign)
+        /// <param name="expectedBuyer">For an automatic completion: the local account whose bid was checked. The account charged is
+        /// the next owner the contract state names now, which a competing Sale_Start can have changed since the check.</param>
+        public static async Task<(Transaction?, string)> CompleteSaleSmartContractTX(string scUID, string toAddress, decimal amountSoldFor, string keySign, string? expectedBuyer = null)
         {
             Transaction? scTx = null;
             bool isRoyalty = false;
@@ -1782,6 +1784,9 @@ namespace VerifiedXCore.Services
 
             if(smartContractStateTrei.NextOwner == null) 
                 return (null, "There was no next owner identified on the state trei level.");
+
+            if (expectedBuyer != null && !string.Equals(smartContractStateTrei.NextOwner, expectedBuyer, StringComparison.Ordinal))
+                return (null, $"The sale now names {smartContractStateTrei.NextOwner} as next owner, not {expectedBuyer} whose bid was checked; not completing it automatically.");
 
             var account = AccountData.GetSingleAccount(smartContractStateTrei.NextOwner);
             if (account == null) 

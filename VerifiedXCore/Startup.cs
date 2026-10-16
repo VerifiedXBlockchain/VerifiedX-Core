@@ -149,6 +149,12 @@ namespace VerifiedXCore
                 return func.Invoke();
             });
 
+            //if(Globals.TestURL)
+                //app.UseHttpsRedirection();
+
+            app.UseRouting();
+
+            // Runs after UseRouting so the password-window exemption can check which action was selected.
             app.Use((context, func) =>
             {
                 // VX-03: only the read-only explorer and the browser-wallet HTML shell skip the API gate.
@@ -172,8 +178,7 @@ namespace VerifiedXCore
                     else
                     {
                         var now = DateTime.UtcNow;
-                        var target = context.Request.Path.HasValue ? context.Request.Path.Value.ToLower() : "NA";
-                        if(target.Contains("/api/v1/unlockwallet/"))
+                        if (ApiRequestGuard.IsUnlockWalletEndpoint(context.Request.Method, context.GetEndpoint()))
                         {
                             return func.Invoke();
                         }
@@ -191,11 +196,6 @@ namespace VerifiedXCore
                 context.Response.StatusCode = 403;//if u want to return specific status code when not ready to accept requests
                 return Task.CompletedTask;
             });
-
-            //if(Globals.TestURL)
-                //app.UseHttpsRedirection();
-
-            app.UseRouting();
 
             app.UseAuthorization();
 

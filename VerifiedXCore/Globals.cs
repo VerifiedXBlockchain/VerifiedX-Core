@@ -832,6 +832,7 @@ namespace VerifiedXCore
             && !IsDeparting
             && !Utilities.ForkRecoveryUtility.IsRecoveryInProgress
             && !Utilities.SnapshotRestoreUtility.IsRestoreRunning
+            && !Utilities.SnapshotRestoreUtility.StateDestroyedByFailedRestore
             && !Services.BlockValidatorService.GetProbationStatus().Active
             // STALL-RESOLVE: a node whose tip has not moved while the network is ahead is
             // stranded on a dead branch — casters must not select it as a winner.

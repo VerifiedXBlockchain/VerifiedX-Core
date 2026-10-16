@@ -433,6 +433,12 @@ namespace VerifiedXCore.Services
                 return false; // Always block during full state rebuild / snapshot restore — no exceptions
             }
 
+            // A restore that failed after wiping the state leaves state that matches no chain: no block is judged on it.
+            if (SnapshotRestoreUtility.StateDestroyedByFailedRestore)
+            {
+                return false;
+            }
+
             if ((Globals.IsResyncing || ForkRecoveryUtility.IsRecoveryInProgress)
                 && !ForkRecoveryUtility.IsInDownloadPhase)
             {
@@ -444,7 +450,8 @@ namespace VerifiedXCore.Services
             try
             {
                 // Double-check after acquiring semaphore (recovery may have started while waiting)
-                if (BlockRollbackUtility.IsResetTreisRunning || SnapshotRestoreUtility.IsRestoreRunning)
+                if (BlockRollbackUtility.IsResetTreisRunning || SnapshotRestoreUtility.IsRestoreRunning
+                    || SnapshotRestoreUtility.StateDestroyedByFailedRestore)
                 {
                     return false;
                 }

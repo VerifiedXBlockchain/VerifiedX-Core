@@ -1378,7 +1378,7 @@ namespace VerifiedXCore.Controllers
         {
             try
             {
-                var bid = Bid.GetSingleBid(bidId);
+                var bid = Bid.ReopenForResend(bidId);
                 if (bid != null)
                 {
                     var bidJson = JsonConvert.SerializeObject(bid);

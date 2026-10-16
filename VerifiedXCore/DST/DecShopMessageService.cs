@@ -17,6 +17,8 @@ namespace VerifiedXCore.DST
     public class DecShopMessageService
     {
         const int PaginationAmount = 10;
+        /// <summary>Most bids one Bids reply carries (the newest).</summary>
+        public const int MaxBidsPerReply = 25;
         public static Message? ProcessMessage(Message message, string shopURL = "NA")
         {
             if (message.ComType == MessageComType.Request)
@@ -1039,7 +1041,7 @@ namespace VerifiedXCore.DST
                         if (listings?.Count() > 0)
                         {
                             var pageSkip = page * PaginationAmount;
-                            var listingsPageApplied = listings.Skip(pageSkip);
+                            var listingsPageApplied = listings.OrderBy(x => x.Id).Skip(pageSkip).Take(PaginationAmount).ToList();
                             var respMessage = new Message
                             {
                                 ResponseMessage = true,
@@ -1246,7 +1248,8 @@ namespace VerifiedXCore.DST
                         var bids = Bid.GetListingBids(listingId);
                         if (bids?.Count() > 0)
                         {
-                            var bidList = bids.ToList();
+                            // The newest bids only: the full history of a busy listing outgrew one datagram.
+                            var bidList = bids.OrderByDescending(b => b.BidSendTime).Take(MaxBidsPerReply).ToList();
                             var respMessage = new Message
                             {
                                 ResponseMessage = true,
