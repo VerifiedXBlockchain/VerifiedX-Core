@@ -42,7 +42,8 @@ namespace VerifiedXCore.Utilities
         public static void RecallStateDestroyed()
         {
             var status = StateTreiStatusService.GetStatus();
-            if (status != null && !status.IsSynced && status.RestoreDestroyed == true)
+            // A rebuild that never ended (the node stopped mid-replay) left partial state in the same way.
+            if (status != null && !status.IsSynced && (status.RestoreDestroyed == true || status.RebuildInProgress == true))
                 _stateDestroyed = true;
         }
 

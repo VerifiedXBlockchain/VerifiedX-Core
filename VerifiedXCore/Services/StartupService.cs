@@ -1358,7 +1358,7 @@ namespace VerifiedXCore.Services
                                 else if (SnapshotRestoreUtility.StateDestroyedByFailedRestore)
                                 {
                                     ConsoleWriterService.Output(
-                                        $"[STARTUP] ERROR: The snapshot restore failed after wiping the state. This node will not validate blocks. " +
+                                        $"[STARTUP] ERROR: A snapshot restore or state rebuild did not finish after wiping the state. This node will not validate blocks. " +
                                         $"Restart it with the 'rebuildstate' argument.");
                                     ErrorLogUtility.LogError(
                                         $"[STARTUP] Snapshot restore to {restoreTarget} failed after wiping the state; block validation is stopped until a rebuild.",

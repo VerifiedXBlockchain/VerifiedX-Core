@@ -1543,7 +1543,7 @@ namespace VerifiedXCore.Services
                             }
                             // A failed restore's stop is lifted only by a restore that succeeds or a rebuild, never by a
                             // clean streak on the wiped state.
-                            else if (SnapshotRestoreUtility.StateDestroyedByFailedRestore || StateTreiStatusService.GetStatus()?.RestoreDestroyed == true)
+                            else if (SnapshotRestoreUtility.StateDestroyedByFailedRestore || StateTreiStatusService.GetStatus() is { } st && (st.RestoreDestroyed == true || st.RebuildInProgress == true))
                             {
                                 _cleanBlockStreak = 0;
                             }

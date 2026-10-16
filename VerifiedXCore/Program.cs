@@ -508,6 +508,7 @@ namespace VerifiedXCore
                     else if (rebuildStateRequested)
                     {
                         Console.WriteLine($"[REVERT] No snapshot covers height {revertToHeight.Value} — rebuildstate passed, running full revert + genesis replay...");
+                        StateTreiStatusService.SetRebuildStarted(); // before the blocks go: a crash from here on leaves the node stopped
 
                         var revertBlocks = Block.GetBlocks();
                         var deletedBlocks = revertBlocks.DeleteManySafe(x => x.Height > revertToHeight.Value);

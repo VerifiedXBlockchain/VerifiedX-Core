@@ -679,9 +679,9 @@ namespace VerifiedXCore.Utilities
                 // Every snapshot slot holds the state this rebuild replaces. Replay stamps rows with their
                 // original block heights, so a diff cycle would never copy them into those slots; mark them
                 // Invalid so the next cycles full-copy the rebuilt state and a restore cannot bring the old back.
-                // Durably unsynced before anything is destroyed: a crash during the replay then leaves a status the next
-                // startup rebuilds from, never the old IsSynced=true over partly rebuilt state.
-                StateTreiStatusService.SetFailed("A state rebuild started and did not complete.");
+                // Durably marked before anything is destroyed: a crash during the replay leaves a status that stops this
+                // node until a rebuild completes, never the old IsSynced=true over partly rebuilt state.
+                StateTreiStatusService.SetRebuildStarted();
 
                 StateSnapshotService.InvalidateAbove(-1);
 
