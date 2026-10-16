@@ -313,6 +313,25 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void OwnerResend_ReopensARejectedBid_SoTheShopsAcceptanceCounts()
+        {
+            var nft = ListedNft();
+            var rejected = SaveSentBid("key-retry", nft, BidStatus.Rejected, TimeUtil.GetTime() - 30 * 24 * 3600, autoCompleteUntil: TimeUtil.GetTime() - 1);
+
+            var reopened = Bid.ReopenForResend(rejected.Id);
+            Bid.ApplyShopResponse(rejected.Id, BidStatus.Accepted);
+
+            Assert.Equal(BidStatus.Accepted, Bid.GetSingleBid(rejected.Id)!.BidStatus);
+            Assert.True(reopened!.AutoCompleteUntil > TimeUtil.GetTime()); // the window runs from the resend
+            Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-retry", 500M, nft));
+
+            // A used bid stays used, resent or not.
+            Bid.MarkAutoCompleted(_victim.Address, "key-retry", nft);
+            Bid.ReopenForResend(rejected.Id);
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-retry", 500M, nft));
+        }
+
+        [Fact]
         public void ShopResponse_StillUpdatesASentBid()
         {
             var nft = ListedNft();

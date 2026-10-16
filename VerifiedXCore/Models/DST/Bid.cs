@@ -289,6 +289,26 @@ namespace VerifiedXCore.Models.DST
             }
         }
 
+        /// <summary>
+        /// The owner resending a bid authorises it again: a rejected bid is Sent once more and its auto-complete window runs
+        /// from now. Only this owner action reopens a rejected bid; a shop response cannot (<see cref="ApplyShopResponse"/>).
+        /// A bid a sale already completed automatically stays used.
+        /// </summary>
+        public static Bid? ReopenForResend(Guid bidId)
+        {
+            lock (BidWriteLock)
+            {
+                var bid = GetSingleBid(bidId);
+                if (bid == null || bid.BidSendReceive != BidSendReceive.Sent)
+                    return bid;
+                bid.BidStatus = BidStatus.Sent;
+                bid.BidSendTime = TimeUtil.GetTime();
+                bid.AutoCompleteUntil = Math.Max(ListingEndFor(bid.PurchaseKey) ?? bid.BidSendTime, bid.BidSendTime) + AutoCompleteGraceSeconds;
+                GetBidDb()?.UpdateSafe(bid);
+                return bid;
+            }
+        }
+
         /// <summary>Serialises bid writes, so a status update and <see cref="MarkAutoCompleted"/> cannot interleave.</summary>
         private static readonly object BidWriteLock = new();
 
