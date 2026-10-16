@@ -8,6 +8,30 @@ namespace VerifiedXCore.Services
 {
     public class WardenService
     {
+        /// <summary>
+        /// The child node's start info. Each argument is passed as given (ArgumentList): joined with spaces, an apitoken= or
+        /// encpass= value containing a space reached the child as two arguments.
+        /// </summary>
+        internal static ProcessStartInfo ChildStartInfo(string fileName, IEnumerable<string> args, string? workingDirectory)
+        {
+            var info = new ProcessStartInfo
+            {
+                FileName = fileName,
+                UseShellExecute = false,
+                RedirectStandardOutput = false,
+                RedirectStandardError = false,
+                CreateNoWindow = false,
+            };
+            if (workingDirectory != null) info.WorkingDirectory = workingDirectory;
+            foreach (var a in args) info.ArgumentList.Add(a);
+            return info;
+        }
+
+        /// <summary>The arguments as they may be logged: credential values replaced.</summary>
+        internal static IEnumerable<string> RedactCredentials(IEnumerable<string> args) =>
+            args.Select(a => StartArgs.TryGetValue(a, "apitoken", out _) ? "apitoken=***"
+                : StartArgs.TryGetValue(a, "encpass", out _) ? "encpass=***" : a);
+
         private static Process? _childProcess;
         private static HttpClient? _httpClient;
         private static bool _isRunning = true;
@@ -216,18 +240,9 @@ namespace VerifiedXCore.Services
                     var allArgs = new List<string> { dllPath };
                     allArgs.AddRange(args);
                     
-                    startInfo = new ProcessStartInfo
-                    {
-                        FileName = "dotnet",
-                        Arguments = string.Join(" ", allArgs),
-                        UseShellExecute = false,
-                        RedirectStandardOutput = false,
-                        RedirectStandardError = false,
-                        CreateNoWindow = false,
-                        WorkingDirectory = exeLocation
-                    };
-                    
-                    LogUtility.Log($"Starting child process on Linux: dotnet {string.Join(" ", allArgs)}", "WardenService.StartChildProcess()");
+                    startInfo = ChildStartInfo("dotnet", allArgs, exeLocation);
+
+                    LogUtility.Log($"Starting child process on Linux: dotnet {string.Join(" ", RedactCredentials(allArgs))}", "WardenService.StartChildProcess()");
                 }
                 else
                 {
@@ -239,15 +254,7 @@ namespace VerifiedXCore.Services
                         return;
                     }
 
-                    startInfo = new ProcessStartInfo
-                    {
-                        FileName = executablePath,
-                        Arguments = string.Join(" ", args),
-                        UseShellExecute = false,
-                        RedirectStandardOutput = false,
-                        RedirectStandardError = false,
-                        CreateNoWindow = false
-                    };
+                    startInfo = ChildStartInfo(executablePath, args, null);
                     
                     LogUtility.Log($"Starting child process on Windows: {executablePath} {string.Join(" ", args)}", "WardenService.StartChildProcess()");
                 }
