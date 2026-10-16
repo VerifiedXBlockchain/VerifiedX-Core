@@ -110,7 +110,7 @@ namespace VerifiedXCore.Tests
         /// <summary>A certified-looking block at <paramref name="height"/> holding a block reward and <paramref name="tx"/>.</summary>
         private static Block SignedBlockWith(long height, Transaction tx, Action<Transaction>? alterAfterSigning = null)
         {
-            var reward = new Transaction { Timestamp = 1_700_000_000, FromAddress = "Coinbase_BlkRwd", ToAddress = "xProducer", Amount = 32M, TransactionType = TransactionType.TX };
+            var reward = new Transaction { Timestamp = 1_700_000_000, FromAddress = "Coinbase_BlkRwd", ToAddress = Producer, Amount = 32M, TransactionType = TransactionType.TX };
             reward.Build();
             alterAfterSigning?.Invoke(tx); // the carried hash, and so the merkle root and block hash, stay those of the signed body
             var key = new PrivateKey("secp256k1");
@@ -179,9 +179,11 @@ namespace VerifiedXCore.Tests
             return tx;
         }
 
+        private static readonly string Producer = AccountData.GetHumanAddress("04" + Convert.ToHexString(new PrivateKey("secp256k1").publicKey().toString()).ToLowerInvariant());
+
         private static Transaction FeeReward()
         {
-            var tx = new Transaction { Timestamp = 1_700_000_000, FromAddress = "Coinbase_TrxFees", ToAddress = "xProducer", Amount = 0M, Fee = 0.00M, TransactionType = TransactionType.TX }; // as BlockchainData builds it
+            var tx = new Transaction { Timestamp = 1_700_000_000, FromAddress = "Coinbase_TrxFees", ToAddress = Producer, Amount = 32M, Fee = 0.00M, TransactionType = TransactionType.TX }; // as BlockchainData builds it
             tx.Build();
             return tx;
         }
@@ -209,6 +211,8 @@ namespace VerifiedXCore.Tests
         [InlineData("unshield-amount")]
         [InlineData("data-unlock-resplit")]
         [InlineData("fee-reward-amount")]
+        [InlineData("reward-recipient-split")]
+        [InlineData("shield-fee")]
         public async Task AFieldOutsideTheHash_ChangedInACertifiedCorrection_IsRefusedBeforeAnyRollback(string field)
         {
             ForkCorrectionService.HasValidCertificate = _ => true;
@@ -216,7 +220,8 @@ namespace VerifiedXCore.Tests
             {
                 "zero-amount" => SignedTransfer(amount: 0M), // VerifyTX re-hashes a carried fraction as 0
                 "attestation-signature" => VerifiedXCore.Bitcoin.Attestation.BtcAttestTxValidator.Create(TransactionType.VBTC_V2_BTC_REPORT, "{}", 1_700_000_000),
-                "fee-reward-amount" => FeeReward(),
+                "fee-reward-amount" or "reward-recipient-split" => FeeReward(),
+                "shield-fee" => SignedShield(),
                 "unshield-reserve-recipient" or "unshield-recipient" or "unshield-amount" => Unshield(),
                 "data-unlock-resplit" => SignedTransfer(unlockTime: 1790390189),
                 _ => SignedShield(),
@@ -231,7 +236,9 @@ namespace VerifiedXCore.Tests
                 "unshield-amount" => t => t.Amount = 2.0M,
                 // Same preimage, hash and signature: digits moved from UnlockTime into Data.
                 "data-unlock-resplit" => t => { t.Data = "1"; t.UnlockTime = 790390189; },
-                "fee-reward-amount" => t => t.Amount = 0.5M, // no signature covers a reward; VerifyTX's zero re-hash would pass it
+                "fee-reward-amount" => t => t.Amount = 32.5M, // no signature covers a reward's amount
+                "reward-recipient-split" => t => { t.ToAddress += "3"; t.Amount = 2M; }, // "...3" + "2" hashes like "..." + "32"
+                "shield-fee" => t => t.Fee = 0M, // outside the hash below the shield-fee height
                 _ => t => t.ToAddress = "xSomewhereElse",
             };
             var asSigned = JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(SignedBlockWith(100, AsSigned())))!;
@@ -317,6 +324,31 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ACertifiedBlockThatIsNotExactlyItsOwnHash_IsNotApproved()
+        {
+            var prior = new System.Collections.Generic.Dictionary<long, string>(Globals.CasterApprovedBlockHashDict);
+            try
+            {
+                ForkCorrectionService.HasValidCertificate = _ => true;
+                Globals.CasterApprovedBlockHashDict.Clear();
+                var recased = SignedBlock(95);
+                recased.Hash = recased.Hash.ToUpperInvariant(); // the same hash spelled otherwise
+                VerifiedXCore.Utilities.ForkRecoveryUtility.ApproveIfCertified(recased);
+                Assert.False(Globals.CasterApprovedBlockHashDict.ContainsKey(95));
+
+                var unsigned = SignedBlock(95);
+                unsigned.ValidatorSignature = SignedBlock(95).ValidatorSignature; // another key's signature
+                VerifiedXCore.Utilities.ForkRecoveryUtility.ApproveIfCertified(unsigned);
+                Assert.False(Globals.CasterApprovedBlockHashDict.ContainsKey(95));
+            }
+            finally
+            {
+                Globals.CasterApprovedBlockHashDict.Clear();
+                foreach (var kv in prior) Globals.CasterApprovedBlockHashDict[kv.Key] = kv.Value;
+            }
+        }
+
+        [Fact]
         public void ACastersRollbackOfItsOwnBlock_DropsOnlyTheApprovalThatNamedIt()
         {
             var prior = new System.Collections.Generic.Dictionary<long, string>(Globals.CasterApprovedBlockHashDict);
@@ -351,6 +383,18 @@ namespace VerifiedXCore.Tests
             var unsigned = SignedBlockWith(100, SignedTransfer());
             unsigned.ValidatorSignature = SignedBlockWith(100, SignedTransfer()).ValidatorSignature;
             Assert.NotNull(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(unsigned, 100, unsigned.Hash));
+
+            // Nor, once certificates are enforced, one without a valid certificate.
+            var priorEnforce = Globals.CertEnforceHeight;
+            try
+            {
+                Globals.CertEnforceHeight = 1;
+                ForkCorrectionService.HasValidCertificate = _ => false;
+                Assert.NotNull(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(intact, 100, intact.Hash));
+                ForkCorrectionService.HasValidCertificate = _ => true;
+                Assert.Null(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(intact, 100, intact.Hash));
+            }
+            finally { Globals.CertEnforceHeight = priorEnforce; }
 
             // A source that cannot serve the expected block does not start a reorg either.
             Assert.NotNull(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(null, 100, intact.Hash));

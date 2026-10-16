@@ -688,6 +688,8 @@ namespace VerifiedXCore.Utilities
                 return $"the block at {height} does not hash to its hash.";
             if (replacement.Height > 0 && !SignatureService.VerifySignature(replacement.Validator, replacement.Hash, replacement.ValidatorSignature))
                 return $"the block at {height} does not carry its producer's signature.";
+            if (height >= Globals.CertEnforceHeight && !Services.ForkCorrectionService.HasValidCertificate(replacement))
+                return $"the block at {height} carries no valid committee certificate.";
             if (replacement.Transactions == null || replacement.NumOfTx != replacement.Transactions.Count
                 || replacement.MerkleRootOf() != replacement.MerkleRoot)
                 return $"the block at {height} carries transactions its header does not.";
@@ -723,6 +725,12 @@ namespace VerifiedXCore.Utilities
         /// </summary>
         internal static void ApproveIfCertified(Models.Block replacement)
         {
+            // Only a block that is its own hash (exactly, as computed) and carries its producer's signature: the approval
+            // stored here is what every later block at the height is held to.
+            if (replacement.GetBlockHash() != replacement.Hash)
+                return;
+            if (replacement.Height > 0 && !SignatureService.VerifySignature(replacement.Validator, replacement.Hash, replacement.ValidatorSignature))
+                return;
             if (Services.ForkCorrectionService.HasValidCertificate(replacement))
                 Services.ForkCorrectionService.ApproveCertified(replacement);
         }

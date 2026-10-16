@@ -191,6 +191,10 @@ namespace VerifiedXCore.Services
                 {
                     if (!RewardHashMatches(tx))
                         return $"transaction {tx.Hash} does not hash to its carried hash.";
+                    // The recipient and amount are joined in the hash: digits could move between them unless the recipient
+                    // is a whole address, and between amount and fee unless the fee is written as validation requires.
+                    if (!AddressValidateUtility.ValidateAddress(tx.ToAddress) || LedgerIntegrityRules.CanonicalPreimage(tx) != null)
+                        return $"reward {tx.Hash} does not read one way.";
                     continue;
                 }
                 if (VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(tx.TransactionType))
@@ -220,6 +224,9 @@ namespace VerifiedXCore.Services
                     {
                         if (tx.ToAddress != VerifiedXCore.Privacy.PrivacyConstants.ShieldedPoolAddress)
                             return $"private transaction {tx.Hash} is a shield not sent to the shielded pool.";
+                        // Below ShieldFeeSignedHeight the fee is outside the hash: held to the shield validator's rule.
+                        if (tx.Fee <= 0 || (Globals.LastBlock.Height > Globals.TXHeightRule2 && tx.Fee < Globals.MinFeePerKB))
+                            return $"private transaction {tx.Hash} is a shield without the fee validation requires.";
                     }
                     else
                     {
