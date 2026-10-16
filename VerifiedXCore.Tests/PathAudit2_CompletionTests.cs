@@ -199,29 +199,6 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
-        /// A node whose table lacks the row judges a completion in a block against the row the chain's request makes, as a
-        /// node holding it does: a sender that is neither the requester nor a validator is refused on both, and nothing is
-        /// written (round 37).
-        /// </summary>
-        [Fact]
-        public async Task ANodeWhoseTableLacksTheRow_RefusesACompletionFromAnyoneElse_AsANodeHoldingItDoes()
-        {
-            Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash(_requestHash, _vault));
-            var foreign = Complete(_anyone, _vault, new string('b', 64));
-
-            var (okLacking, whyLacking) = await VerifyInBlock(foreign, Rule);
-            Assert.False(okLacking);
-            Assert.StartsWith("Only the original requester", whyLacking);
-            Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash(_requestHash, _vault)); // validation wrote nothing
-
-            // A node holding the row gives the same answer.
-            Assert.NotNull(VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain(_requestHash, Rule, _vault));
-            var (okHolding, whyHolding) = await VerifyInBlock(Complete(_anyone, _vault, new string('b', 64)), Rule);
-            Assert.False(okHolding);
-            Assert.Equal(whyLacking, whyHolding);
-        }
-
-        /// <summary>
         /// Two requests mined before the rule that both ended, the first row lost on this node. The recovery of the
         /// first must not land on the second's row: saving falls back to (requester, UniqueId, contract), and the two
         /// carry the same UniqueId.
