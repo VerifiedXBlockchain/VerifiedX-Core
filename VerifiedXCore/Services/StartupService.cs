@@ -1338,6 +1338,15 @@ namespace VerifiedXCore.Services
                                         $"[STARTUP] Snapshot restore succeeded at height {restoreTarget}.",
                                         "StartupService.DownloadBlocksOnStart");
                                 }
+                                else if (SnapshotRestoreUtility.StateDestroyedByFailedRestore)
+                                {
+                                    ConsoleWriterService.Output(
+                                        $"[STARTUP] ERROR: The snapshot restore failed after wiping the state. This node will not validate blocks. " +
+                                        $"Restart it with the 'rebuildstate' argument.");
+                                    ErrorLogUtility.LogError(
+                                        $"[STARTUP] Snapshot restore to {restoreTarget} failed after wiping the state; block validation is stopped until a rebuild.",
+                                        "StartupService.DownloadBlocksOnStart");
+                                }
                                 else
                                 {
                                     // NO AUTOMATIC REBUILD: the multi-hour genesis replay is

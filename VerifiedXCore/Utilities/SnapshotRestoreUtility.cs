@@ -19,6 +19,18 @@ namespace VerifiedXCore.Utilities
         /// <summary>Public accessor so block validation can hold off while a restore is in progress.</summary>
         public static bool IsRestoreRunning => _isRestoreRunning;
 
+        private static volatile bool _stateDestroyed = false;
+
+        /// <summary>
+        /// Set when a restore failed after it had wiped the chain-derived state (and possibly deleted the blocks above its
+        /// target): the state then matches no chain, so this node must not validate or produce blocks on it until a restore
+        /// succeeds or the state is rebuilt ('rebuildstate'). Callers read a failed restore as "nothing changed"; without
+        /// this the node went on accepting blocks on top of the wiped state.
+        /// </summary>
+        public static bool StateDestroyedByFailedRestore => _stateDestroyed;
+
+        internal static void ClearStateDestroyed() => _stateDestroyed = false;
+
         /// <summary>
         /// Attempts a snapshot restore so that state matches the chain at <paramref name="targetHeight"/>.
         /// Blocks above the target are deleted (fork case — callers re-download the correct tip via
@@ -61,6 +73,9 @@ namespace VerifiedXCore.Utilities
                 Globals.StopAllTimers = true;
             }
 
+            var wiped = false;
+            var restored = false;
+            var replayedButUnverified = false;
             try
             {
                 var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -73,6 +88,7 @@ namespace VerifiedXCore.Utilities
                 StateTreiStatusService.SetFailed($"Snapshot restore in progress (slot {slot.SlotId} → {targetHeight}).");
 
                 // 1) Wipe all chain-derived state, then copy the slot back into the live collections.
+                wiped = true;
                 BlockRollbackUtility.WipeChainDerivedState();
                 if (!StateSnapshotService.RestoreSlotToLive(slot.SlotId))
                 {
@@ -218,6 +234,7 @@ namespace VerifiedXCore.Utilities
                 {
                     ErrorLogUtility.LogError($"[SnapshotRestore] The restored state must be rebuilt from the chain: {otherSettings}.", "SnapshotRestoreUtility");
                     StateTreiStatusService.SetFailed($"Attestation state built under other settings: {otherSettings}.");
+                    replayedButUnverified = true;
                     return false;
                 }
 
@@ -229,6 +246,8 @@ namespace VerifiedXCore.Utilities
                 sw.Stop();
                 Console.WriteLine($"[SnapshotRestore] SUCCESS: restored to height {targetHeight} (replayed {replayed} block(s), {walletTxInserts} wallet TX(s)) in {sw.Elapsed.TotalSeconds:F1}s.");
                 LogUtility.Log($"[SnapshotRestore] Success: slot={slot.SlotId} target={targetHeight} replayed={replayed} in {sw.ElapsedMilliseconds} ms", "SnapshotRestoreUtility");
+                restored = true;
+                _stateDestroyed = false;
                 return true;
             }
             catch (Exception ex)
@@ -239,6 +258,15 @@ namespace VerifiedXCore.Utilities
             }
             finally
             {
+                // The attestation-settings exit restored the slot and replayed to the target (the state is flagged for a
+                // rebuild, as at startup); every other failure after the wipe leaves a wiped or half-replayed state.
+                if (wiped && !restored && !replayedButUnverified)
+                {
+                    _stateDestroyed = true;
+                    BlockRollbackUtility.RefreshInMemoryTip(targetHeight); // the tip the block store holds now, not the deleted one
+                    ErrorLogUtility.LogError($"[SnapshotRestore] Restore to {targetHeight} failed after the state was wiped; this node stops validating blocks. Restart it with the 'rebuildstate' argument.", "SnapshotRestoreUtility");
+                    Console.WriteLine("[SnapshotRestore] FAILED after wiping state: this node stops validating blocks. Restart it with the 'rebuildstate' argument.");
+                }
                 _isRestoreRunning = false;
                 if (manageFlags)
                 {

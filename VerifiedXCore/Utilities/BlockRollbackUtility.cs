@@ -47,6 +47,14 @@ namespace VerifiedXCore.Utilities
                 if (restored)
                     return true;
 
+                if (SnapshotRestoreUtility.StateDestroyedByFailedRestore)
+                {
+                    ErrorLogUtility.LogError(
+                        $"[RollbackBlocks] The snapshot restore to {newHeight} failed after wiping the state. This node stops validating blocks; restart it with the 'rebuildstate' argument.",
+                        "BlockRollbackUtility.RollbackBlocks");
+                    return false;
+                }
+
                 ErrorLogUtility.LogError(
                     $"[RollbackBlocks] No usable snapshot covers rollback target {newHeight} (tip {height}). " +
                     $"Rollback aborted with chain untouched. If this node stays stuck, restart it with the 'rebuildstate' argument.",
@@ -861,6 +869,7 @@ namespace VerifiedXCore.Utilities
                 if (failCount == 0)
                 {
                     StateTreiStatusService.SetSynced(Globals.LastBlock.Height);
+                    SnapshotRestoreUtility.ClearStateDestroyed();
                     Console.WriteLine($"[ResetTreis] Step 5: StateTreiStatus set to SYNCED at height {Globals.LastBlock.Height}.");
                 }
                 else

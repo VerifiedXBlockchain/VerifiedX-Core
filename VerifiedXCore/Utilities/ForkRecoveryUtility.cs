@@ -556,7 +556,9 @@ namespace VerifiedXCore.Utilities
                     var rewound = await SnapshotRestoreUtility.TryRestoreAsync(target, manageFlags: false);
                     if (!rewound)
                     {
-                        if (depth <= MAX_FALLBACK_ROLLBACK)
+                        // A restore that failed after wiping the state, or one that already rewound the chain to the target,
+                        // leaves nothing a further rollback could fix: it would only cut the chain below the target.
+                        if (depth <= MAX_FALLBACK_ROLLBACK && !SnapshotRestoreUtility.StateDestroyedByFailedRestore && Globals.LastBlock.Height > target)
                         {
                             LogUtility.Log($"[{caller}] DEEP-REORG: no usable snapshot slot at/below {target} — falling back to fast rollback of {depth} block(s).", $"{caller}.DeepReorg");
                             rewound = await BlockRollbackUtility.RollbackBlocksFast((int)depth, manageIsResyncing: false);
