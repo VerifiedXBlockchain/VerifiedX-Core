@@ -2810,7 +2810,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 var (beginBlocked, beginReason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
                                     .TryBeginSigning(request.SmartContractUID, request.WithdrawalRequestHash, request.SessionId,
                                         request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints, reclaimablePinsForStart,
-                                        FrostSigningAuthorization.SigningScope(request.SmartContractUID, request.BtcTxId), request.LeaderAddress);
+                                        FrostSigningAuthorization.SigningScope(request.SmartContractUID, request.BtcTxId), request.LeaderAddress, request.BtcTxId);
                                 if (beginBlocked)
                                 {
                                     FrostSessionStorage.SigningSessions.TryRemove(request.SessionId, out _);

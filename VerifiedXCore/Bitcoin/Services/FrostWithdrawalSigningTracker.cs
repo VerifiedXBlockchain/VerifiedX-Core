@@ -253,7 +253,8 @@ namespace VerifiedXCore.Bitcoin.Services
             List<string>? txInputOutpoints = null,
             ISet<string>? reclaimablePins = null,
             string? transactionScope = null,
-            string? leaderAddress = null)
+            string? leaderAddress = null,
+            string? btcTxId = null)
         {
             if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
                 return (false, string.Empty); // Non-withdrawal signing, allow (nothing to record)
@@ -269,7 +270,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 var (blocked, reason) = CheckWithdrawalSigning(scUID, withdrawalRequestHash, inputIndex, messageHash, allInputSighashes, txInputOutpoints, reclaimablePins, transactionScope);
                 if (blocked)
                     return (true, reason);
-                RecordSigningStarted(scUID, withdrawalRequestHash, sessionId, inputIndex, messageHash, allInputSighashes, transactionScope, leaderAddress);
+                RecordSigningStarted(scUID, withdrawalRequestHash, sessionId, inputIndex, messageHash, allInputSighashes, transactionScope, leaderAddress, btcTxId);
                 return (false, string.Empty);
             }
         }
@@ -313,7 +314,8 @@ namespace VerifiedXCore.Bitcoin.Services
         /// sighash set on first sight.
         /// </summary>
         public static void RecordSigningStarted(string scUID, string withdrawalRequestHash, string sessionId,
-            int inputIndex = 0, string? messageHash = null, List<string>? allInputSighashes = null, string? transactionScope = null, string? leaderAddress = null)
+            int inputIndex = 0, string? messageHash = null, List<string>? allInputSighashes = null, string? transactionScope = null, string? leaderAddress = null,
+            string? btcTxId = null)
         {
             if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
                 return;
@@ -331,6 +333,8 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 if (record.PinnedSighashes == null && allInputSighashes != null && allInputSighashes.Count > 0)
                     record.PinnedSighashes = allInputSighashes.Select(s => s.ToLowerInvariant()).ToList();
+                if (string.IsNullOrEmpty(record.BtcTxId) && !string.IsNullOrWhiteSpace(btcTxId))
+                    record.BtcTxId = btcTxId.Trim().ToLowerInvariant();
 
                 if (record.Inputs.TryGetValue(inputIndex, out var existing))
                 {
@@ -389,6 +393,8 @@ namespace VerifiedXCore.Bitcoin.Services
             lock (record.Lock)
             {
                 record.LastActivity = TimeUtil.GetTime();
+                if (string.IsNullOrEmpty(record.BtcTxId) && !string.IsNullOrWhiteSpace(btcTxId))
+                    record.BtcTxId = btcTxId.Trim().ToLowerInvariant();
                 record.Inputs[inputIndex] = new InputRecord
                 {
                     SessionId = sessionId,
@@ -470,8 +476,14 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
                 return;
-            if (!keepSigningRecord)
-                _withdrawals.TryRemove(BuildKey(scUID, withdrawalRequestHash), out _);
+            // The record goes only if it is that transaction's: a ceremony for another transaction may have started
+            // under the same reference while the dead one was being looked up.
+            // Only a record naming that transaction: one a start has just created names its own a moment later, and every
+            // start names one (a record with none was only a failed attempt).
+            if (!keepSigningRecord && _withdrawals.TryGetValue(BuildKey(scUID, withdrawalRequestHash), out var record))
+                lock (record.Lock)
+                    if (!string.IsNullOrEmpty(btcTxId) && string.Equals(record.BtcTxId, btcTxId, StringComparison.OrdinalIgnoreCase))
+                        _withdrawals.TryRemove(new KeyValuePair<string, WithdrawalRecord>(BuildKey(scUID, withdrawalRequestHash), record));
             if (_contractPins.TryGetValue(scUID, out var pins) && pins.TryGetValue(withdrawalRequestHash, out var pin)
                 && (string.IsNullOrEmpty(pin.BtcTxId) || string.Equals(pin.BtcTxId, btcTxId, StringComparison.OrdinalIgnoreCase)))
                 ClearContractPin(scUID, withdrawalRequestHash, reason);
@@ -729,6 +741,8 @@ namespace VerifiedXCore.Bitcoin.Services
             public string WithdrawalRequestHash { get; set; } = string.Empty;
             /// <summary>Ordered sighash-per-input set announced by the first sign/start (lowercase hex).</summary>
             public List<string>? PinnedSighashes { get; set; }
+            /// <summary>The transaction this record is for (the first one started here), when the start named it.</summary>
+            public string BtcTxId { get; set; } = string.Empty;
             public Dictionary<int, InputRecord> Inputs { get; } = new();
             public long LastActivity { get; set; } = TimeUtil.GetTime();
             public object Lock { get; } = new();

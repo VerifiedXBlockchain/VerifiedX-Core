@@ -282,6 +282,27 @@ namespace VerifiedXCore.Tests
             Assert.Empty(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(uid, wrh));
         }
 
+        /// <summary>
+        /// Two sign/starts for one withdrawal: while the second waits to learn that an old transaction is dead, the first
+        /// begins a ceremony for its own transaction. Retiring the dead one leaves that ceremony's record in place, so the
+        /// second, for yet another transaction, is still refused.
+        /// </summary>
+        [Fact]
+        public async Task RetiringADeadTransaction_LeavesACeremonyBegunMeanwhileForAnother()
+        {
+            var (uid, wrh, dead, _) = TwoRecordsForOneWithdrawal();
+            foreach (var r in VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(uid, wrh).Where(r => r.BtcTxId != dead))
+                VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.DeleteRecord(r.Id);
+            string Hex() => Convert.ToHexString(RandomUtils.GetBytes(32)).ToLowerInvariant();
+            var (c, sighashC, d, sighashD) = (Hex(), Hex(), Hex(), Hex());
+
+            Assert.False(FrostWithdrawalSigningTracker.TryBeginSigning(uid, wrh, "session-c", 0, sighashC, new List<string> { sighashC }, new List<string> { Coin1 }, btcTxId: c).Blocked);
+            var (ok, reason) = await VerifiedXCore.Bitcoin.FROST.FrostStartup.CheckPriorSignedTransactionAsync(uid, wrh, d);
+            Assert.True(ok, reason);
+            Assert.True(FrostWithdrawalSigningTracker.TryBeginSigning(uid, wrh, "session-d", 0, sighashD, new List<string> { sighashD }, new List<string> { Coin1 }, btcTxId: d).Blocked);
+            Assert.True(FrostWithdrawalSigningTracker.ConfirmSessionHoldsInput(uid, wrh, 0, "session-c", sighashC).Ok);
+        }
+
         [Theory]
         [InlineData(true)]
         [InlineData(false)]
