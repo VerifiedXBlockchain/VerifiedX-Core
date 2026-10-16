@@ -93,14 +93,14 @@ namespace VerifiedXCore.Tests
             Assert.Empty(_reorgs);
         }
 
-        private static Transaction SignedTransfer(decimal amount = 2.5M)
+        private static Transaction SignedTransfer(decimal amount = 2.5M, long? unlockTime = null)
         {
             var key = new PrivateKey("secp256k1");
             var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
             var tx = new Transaction
             {
                 Timestamp = 1_700_000_000, FromAddress = AccountData.GetHumanAddress(pub), ToAddress = "xRecipient", Amount = amount,
-                Fee = 0.00001M, Nonce = 0, TransactionType = TransactionType.TX,
+                Fee = 0.00001M, Nonce = 0, TransactionType = TransactionType.TX, UnlockTime = unlockTime,
             };
             tx.Build();
             tx.Signature = SignatureService.CreateSignature(tx.Hash, key, pub);
@@ -205,6 +205,9 @@ namespace VerifiedXCore.Tests
         [InlineData("attestation-signature")]
         [InlineData("shield-recipient")]
         [InlineData("unshield-reserve-recipient")]
+        [InlineData("unshield-recipient")]
+        [InlineData("unshield-amount")]
+        [InlineData("data-unlock-resplit")]
         [InlineData("fee-reward-amount")]
         public async Task AFieldOutsideTheHash_ChangedInACertifiedCorrection_IsRefusedBeforeAnyRollback(string field)
         {
@@ -214,7 +217,8 @@ namespace VerifiedXCore.Tests
                 "zero-amount" => SignedTransfer(amount: 0M), // VerifyTX re-hashes a carried fraction as 0
                 "attestation-signature" => VerifiedXCore.Bitcoin.Attestation.BtcAttestTxValidator.Create(TransactionType.VBTC_V2_BTC_REPORT, "{}", 1_700_000_000),
                 "fee-reward-amount" => FeeReward(),
-                "unshield-reserve-recipient" => Unshield(),
+                "unshield-reserve-recipient" or "unshield-recipient" or "unshield-amount" => Unshield(),
+                "data-unlock-resplit" => SignedTransfer(unlockTime: 1790390189),
                 _ => SignedShield(),
             };
             Action<Transaction> alter = field switch
@@ -223,6 +227,10 @@ namespace VerifiedXCore.Tests
                 "attestation-signature" => t => t.Signature = "not-the-sentinel",
                 // A checksum-valid reserve address: the private hash leaves the recipient out, and only VerifyPrivateTX refuses it.
                 "unshield-reserve-recipient" => t => t.ToAddress = ReserveAddress(),
+                "unshield-recipient" => t => t.ToAddress = SignedTransfer().FromAddress, // another valid address; the payload names the first
+                "unshield-amount" => t => t.Amount = 2.0M,
+                // Same preimage, hash and signature: digits moved from UnlockTime into Data.
+                "data-unlock-resplit" => t => { t.Data = "1"; t.UnlockTime = 790390189; },
                 "fee-reward-amount" => t => t.Amount = 0.5M, // no signature covers a reward; VerifyTX's zero re-hash would pass it
                 _ => t => t.ToAddress = "xSomewhereElse",
             };
@@ -338,6 +346,11 @@ namespace VerifiedXCore.Tests
 
             var altered = SignedBlockWith(100, SignedTransfer(), tx => tx.Amount = 2500M);
             Assert.NotNull(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(altered, 100, altered.Hash));
+
+            // Nor one whose producer signature is not the producer's.
+            var unsigned = SignedBlockWith(100, SignedTransfer());
+            unsigned.ValidatorSignature = SignedBlockWith(100, SignedTransfer()).ValidatorSignature;
+            Assert.NotNull(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(unsigned, 100, unsigned.Hash));
 
             // A source that cannot serve the expected block does not start a reorg either.
             Assert.NotNull(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(null, 100, intact.Hash));

@@ -686,6 +686,8 @@ namespace VerifiedXCore.Utilities
                 return $"the source served another block than the expected one at {height}.";
             if (replacement.GetBlockHash() != replacement.Hash)
                 return $"the block at {height} does not hash to its hash.";
+            if (replacement.Height > 0 && !SignatureService.VerifySignature(replacement.Validator, replacement.Hash, replacement.ValidatorSignature))
+                return $"the block at {height} does not carry its producer's signature.";
             if (replacement.Transactions == null || replacement.NumOfTx != replacement.Transactions.Count
                 || replacement.MerkleRootOf() != replacement.MerkleRoot)
                 return $"the block at {height} carries transactions its header does not.";

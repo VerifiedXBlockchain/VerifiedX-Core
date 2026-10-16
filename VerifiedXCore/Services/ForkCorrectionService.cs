@@ -181,6 +181,11 @@ namespace VerifiedXCore.Services
                 if (LedgerIntegrityRules.IsHonoredWhitelistEntry(tx, block.Height))
                     continue;
 
+                // VerifyTX reads Data and UnlockTime one way only (they are joined without a separator in the hash).
+                if (tx.FromAddress != "Coinbase_BlkRwd" && tx.FromAddress != "Coinbase_TrxFees"
+                    && LedgerIntegrityRules.CanonicalPreimage(tx) is { } preimageError)
+                    return $"transaction {tx.Hash}: {preimageError}";
+
                 // Sender-less, and no signature covers a reward's amount: the hash only, with its own values.
                 if (tx.FromAddress == "Coinbase_BlkRwd" || tx.FromAddress == "Coinbase_TrxFees")
                 {
@@ -223,6 +228,10 @@ namespace VerifiedXCore.Services
                         var (envelopeOk, envelopeMessage) = VerifiedXCore.Privacy.PrivateTransactionValidatorService.ValidateZkPrivate(tx, payload);
                         if (!envelopeOk)
                             return $"private transaction {tx.Hash}: {envelopeMessage}";
+                        // An unshield's outer recipient and amount are its payload's, on the heights validation holds them to it.
+                        if ((block.Height >= Globals.PrivateTxSupplyRulesHeight || block.Height <= VerifiedXCore.Privacy.PrivateTxSupplyRules.UnshieldBindingScannedThrough)
+                            && VerifiedXCore.Privacy.PrivateTxSupplyRules.OuterFieldsError(tx, payload) is { } outerError)
+                            return $"private transaction {tx.Hash}: {outerError}";
                     }
                     continue;
                 }
