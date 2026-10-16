@@ -93,6 +93,74 @@ namespace VerifiedXCore.Tests
             Assert.Empty(_reorgs);
         }
 
+        private static Transaction SignedTransfer()
+        {
+            var key = new PrivateKey("secp256k1");
+            var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+            var tx = new Transaction
+            {
+                Timestamp = 1_700_000_000, FromAddress = AccountData.GetHumanAddress(pub), ToAddress = "xRecipient", Amount = 2.5M,
+                Fee = 0.00001M, Nonce = 0, TransactionType = TransactionType.TX,
+            };
+            tx.Build();
+            tx.Signature = SignatureService.CreateSignature(tx.Hash, key, pub);
+            return tx;
+        }
+
+        /// <summary>A certified-looking block at <paramref name="height"/> holding a block reward and <paramref name="tx"/>.</summary>
+        private static Block SignedBlockWith(long height, Transaction tx, Action<Transaction>? alterAfterSigning = null)
+        {
+            var reward = new Transaction { Timestamp = 1_700_000_000, FromAddress = "Coinbase_BlkRwd", ToAddress = "xProducer", Amount = 32M, TransactionType = TransactionType.TX };
+            reward.Build();
+            alterAfterSigning?.Invoke(tx); // the carried hash, and so the merkle root and block hash, stay those of the signed body
+            var key = new PrivateKey("secp256k1");
+            var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+            var block = new Block
+            {
+                Height = height, Version = 4, PrevHash = $"prev-{height - 1}", Timestamp = 1_700_000_000 + height,
+                NumOfTx = 2, Validator = AccountData.GetHumanAddress(pub), ValidatorAnswer = "a", ChainRefId = "test-chain",
+                Transactions = new List<Transaction> { reward, tx },
+            };
+            block.MerkleRoot = block.MerkleRootOf();
+            block.Hash = block.GetBlockHash();
+            block.ValidatorSignature = SignatureService.CreateSignature(block.Hash, key, pub);
+            return block;
+        }
+
+        [Fact]
+        public async Task ACertifiedCorrectionWithIntactTransactions_StillRollsBack()
+        {
+            ForkCorrectionService.HasValidCertificate = _ => true;
+            var block = SignedBlockWith(100, SignedTransfer());
+
+            await ForkCorrectionService.HandleForkCorrectionAsync(100, JsonConvert.SerializeObject(block), "1.2.3.4");
+
+            Assert.Single(_reorgs);
+        }
+
+        [Fact]
+        public async Task ACertifiedCorrectionWithAnAlteredTransactionBody_IsRefusedBeforeAnyRollback()
+        {
+            ForkCorrectionService.HasValidCertificate = _ => true;
+            var block = SignedBlockWith(100, SignedTransfer(), tx => tx.Amount = 2500M);
+
+            await ForkCorrectionService.HandleForkCorrectionAsync(100, JsonConvert.SerializeObject(block), "1.2.3.4");
+
+            Assert.Empty(_reorgs);
+        }
+
+        [Fact]
+        public async Task ACertifiedCorrectionWithABadSignature_IsRefusedBeforeAnyRollback()
+        {
+            ForkCorrectionService.HasValidCertificate = _ => true;
+            var other = SignedTransfer();
+            var block = SignedBlockWith(100, SignedTransfer(), tx => tx.Signature = other.Signature); // the signature is outside the hash
+
+            await ForkCorrectionService.HandleForkCorrectionAsync(100, JsonConvert.SerializeObject(block), "1.2.3.4");
+
+            Assert.Empty(_reorgs);
+        }
+
         [Fact]
         public async Task ACertifiedHeaderWithOtherTransactions_IsRefusedBeforeAnyRollback()
         {
@@ -119,6 +187,32 @@ namespace VerifiedXCore.Tests
                 await ForkCorrectionService.HandleForkCorrectionAsync(95, JsonConvert.SerializeObject(below), "1.2.3.4");
 
                 Assert.Equal(below.Hash, Globals.CasterApprovedBlockHashDict[95]);
+                Assert.False(Globals.CasterApprovedBlockHashDict.ContainsKey(97));
+            }
+            finally
+            {
+                Globals.CasterApprovedBlockHashDict.Clear();
+                foreach (var kv in prior) Globals.CasterApprovedBlockHashDict[kv.Key] = kv.Value;
+            }
+        }
+
+        [Fact]
+        public void AutomaticRecovery_ReplacesAStaleApproval_OnlyForACertifiedReplacement()
+        {
+            var prior = new System.Collections.Generic.Dictionary<long, string>(Globals.CasterApprovedBlockHashDict);
+            try
+            {
+                var replacement = SignedBlock(95);
+
+                ForkCorrectionService.HasValidCertificate = _ => false;
+                Globals.CasterApprovedBlockHashDict[95] = "stale-95";
+                VerifiedXCore.Utilities.ForkRecoveryUtility.ApproveIfCertified(replacement);
+                Assert.Equal("stale-95", Globals.CasterApprovedBlockHashDict[95]); // an uncertified block changes nothing
+
+                ForkCorrectionService.HasValidCertificate = _ => true;
+                Globals.CasterApprovedBlockHashDict[97] = "stale-97";
+                VerifiedXCore.Utilities.ForkRecoveryUtility.ApproveIfCertified(replacement);
+                Assert.Equal(replacement.Hash, Globals.CasterApprovedBlockHashDict[95]);
                 Assert.False(Globals.CasterApprovedBlockHashDict.ContainsKey(97));
             }
             finally

@@ -515,78 +515,8 @@ namespace VerifiedXCore.Services
             }
 
             //Hash Check
-            var newTxn = new Transaction()
-            {
-                Timestamp = txRequest.Timestamp,
-                FromAddress = txRequest.FromAddress,
-                ToAddress = txRequest.ToAddress,
-                Amount = txRequest.Amount,
-                Fee = txRequest.Fee,
-                Nonce = txRequest.Nonce,
-                TransactionType = txRequest.TransactionType,
-                Data = txRequest.Data,
-                UnlockTime = txRequest.UnlockTime,
-            };
-
-            newTxn.Build();
-
-            if (!newTxn.Hash.Equals(txRequest.Hash))
-            {
-                var amountCheck = txRequest.Amount % 1 == 0;
-                var amountFormat = 0M;
-                if (amountCheck)
-                {
-                    var amountStr = txRequest.Amount.ToString("0.0");
-                    amountFormat = decimal.Parse(amountStr);
-                }
-
-                var newTxnMod = new Transaction()
-                {
-                    Timestamp = txRequest.Timestamp,
-                    FromAddress = txRequest.FromAddress,
-                    ToAddress = txRequest.ToAddress,
-                    Amount = amountFormat,
-                    Fee = txRequest.Fee,
-                    Nonce = txRequest.Nonce,
-                    TransactionType = txRequest.TransactionType,
-                    Data = txRequest.Data,
-                    UnlockTime = txRequest.UnlockTime,
-                };
-
-                newTxnMod.Build();
-
-                // NEW-22: the "Amount 0" re-hash below matched a transaction SIGNED with Amount "0" whatever Amount it now
-                // carries (the non-integer case above also re-hashed with 0): a relay or producer could raise the amount
-                // of any such transaction without breaking its signature. It applies only to a zero amount.
-                if (!newTxnMod.Hash.Equals(txRequest.Hash) && txRequest.Amount != 0M)
-                {
-                    return (txResult, "This transactions hash is not equal to the original hash.");
-                }
-
-                if (!newTxnMod.Hash.Equals(txRequest.Hash))
-                {
-                    var newTxnModZero = new Transaction()
-                    {
-                        Timestamp = txRequest.Timestamp,
-                        FromAddress = txRequest.FromAddress,
-                        ToAddress = txRequest.ToAddress,
-                        Amount = 0,
-                        Fee = txRequest.Fee,
-                        Nonce = txRequest.Nonce,
-                        TransactionType = txRequest.TransactionType,
-                        Data = txRequest.Data,
-                        UnlockTime = txRequest.UnlockTime,
-                    };
-
-                    newTxnModZero.Build();
-
-                    if (!newTxnModZero.Hash.Equals(txRequest.Hash))
-                    {
-                        return (txResult, "This transactions hash is not equal to the original hash.");
-                    }
-                }
-
-            }
+            if (!StandardHashMatches(txRequest))
+                return (txResult, "This transactions hash is not equal to the original hash.");
 
             // The signature before any rule that parses or runs carried contract code: every transaction that reaches this
             // point must pass the same check at the end of VerifyTX, so only the order of refusals changes, and a
@@ -4564,8 +4494,82 @@ namespace VerifiedXCore.Services
             return true;
         }
 
+        /// <summary>
+        /// Whether a standard (non-private) transaction's carried Hash is the hash of its content. Accepts the legacy
+        /// spellings VerifyTX always has: a whole-number Amount hashed as "N.0", and a zero Amount hashed as "0".
+        /// </summary>
+        internal static bool StandardHashMatches(Transaction txRequest)
+        {
+            var newTxn = new Transaction()
+            {
+                Timestamp = txRequest.Timestamp,
+                FromAddress = txRequest.FromAddress,
+                ToAddress = txRequest.ToAddress,
+                Amount = txRequest.Amount,
+                Fee = txRequest.Fee,
+                Nonce = txRequest.Nonce,
+                TransactionType = txRequest.TransactionType,
+                Data = txRequest.Data,
+                UnlockTime = txRequest.UnlockTime,
+            };
+
+            newTxn.Build();
+
+            if (newTxn.Hash.Equals(txRequest.Hash))
+                return true;
+
+            var amountCheck = txRequest.Amount % 1 == 0;
+            var amountFormat = 0M;
+            if (amountCheck)
+            {
+                var amountStr = txRequest.Amount.ToString("0.0");
+                amountFormat = decimal.Parse(amountStr);
+            }
+
+            var newTxnMod = new Transaction()
+            {
+                Timestamp = txRequest.Timestamp,
+                FromAddress = txRequest.FromAddress,
+                ToAddress = txRequest.ToAddress,
+                Amount = amountFormat,
+                Fee = txRequest.Fee,
+                Nonce = txRequest.Nonce,
+                TransactionType = txRequest.TransactionType,
+                Data = txRequest.Data,
+                UnlockTime = txRequest.UnlockTime,
+            };
+
+            newTxnMod.Build();
+
+            if (newTxnMod.Hash.Equals(txRequest.Hash))
+                return true;
+
+            // NEW-22: the "Amount 0" re-hash below matched a transaction SIGNED with Amount "0" whatever Amount it now
+            // carries (the non-integer case above also re-hashed with 0): a relay or producer could raise the amount
+            // of any such transaction without breaking its signature. It applies only to a zero amount.
+            if (txRequest.Amount != 0M)
+                return false;
+
+            var newTxnModZero = new Transaction()
+            {
+                Timestamp = txRequest.Timestamp,
+                FromAddress = txRequest.FromAddress,
+                ToAddress = txRequest.ToAddress,
+                Amount = 0,
+                Fee = txRequest.Fee,
+                Nonce = txRequest.Nonce,
+                TransactionType = txRequest.TransactionType,
+                Data = txRequest.Data,
+                UnlockTime = txRequest.UnlockTime,
+            };
+
+            newTxnModZero.Build();
+
+            return newTxnModZero.Hash.Equals(txRequest.Hash);
+        }
+
         /// <summary>The transaction signature check (over the carried Hash); null when it passes.</summary>
-        private static string? SignatureError(Transaction txRequest)
+        internal static string? SignatureError(Transaction txRequest)
         {
             if (string.IsNullOrEmpty(txRequest.Signature))
                 return "Signature cannot be null.";

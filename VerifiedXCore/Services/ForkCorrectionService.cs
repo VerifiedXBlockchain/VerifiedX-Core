@@ -94,6 +94,15 @@ namespace VerifiedXCore.Services
                     return;
                 }
 
+                // The merkle root covers each transaction's carried hash, not its body: every body must hash to it, and every
+                // signature (outside the hash) must verify, before anything is rolled back.
+                var txError = TransactionIntegrityError(correctBlock);
+                if (txError != null)
+                {
+                    LogUtility.Log($"[ForkCorrection] Rejecting correction from {casterIP} at height {height}: {txError}", "ForkCorrectionService");
+                    return;
+                }
+
                 var myHeight = Globals.LastBlock.Height;
 
                 // Case 1: The correction is for a block we already have — check if hash matches
@@ -161,10 +170,65 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
+        /// Whether each transaction in <paramref name="block"/> carries the hash its content gives and the signature that hash
+        /// needs, checked the way block validation checks it for the transaction's kind; null when they all do.
+        /// </summary>
+        internal static string? TransactionIntegrityError(Block block)
+        {
+            foreach (var tx in block.Transactions)
+            {
+                // Validation skips an honored whitelist entry; so does this.
+                if (LedgerIntegrityRules.IsHonoredWhitelistEntry(tx, block.Height))
+                    continue;
+
+                // Sender-less: the hash only. A reward built as 32 and 0 reads 32.0 and 0.0 once it has crossed the wire, so
+                // its amounts are also tried without trailing zeros.
+                if (tx.FromAddress == "Coinbase_BlkRwd" || tx.FromAddress == "Coinbase_TrxFees")
+                {
+                    if (!TransactionValidatorService.StandardHashMatches(tx) && !string.Equals(tx.Hash, WithoutTrailingZeros(tx).GetHash(), StringComparison.Ordinal))
+                        return $"transaction {tx.Hash} does not hash to its carried hash.";
+                    continue;
+                }
+                if (VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(tx.TransactionType))
+                {
+                    if (!string.Equals(tx.Hash, tx.GetHash(), StringComparison.Ordinal))
+                        return $"transaction {tx.Hash} does not hash to its carried hash.";
+                    continue;
+                }
+
+                if (VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType))
+                {
+                    if (!VerifiedXCore.Privacy.PrivateTransactionValidatorService.VerifyPrivateHash(tx, block.Height))
+                        return $"private transaction {tx.Hash} does not hash to its carried hash.";
+                    var signatureOk = VerifiedXCore.Privacy.PrivateTransactionTypes.IsTransparentShield(tx.TransactionType)
+                        ? !string.IsNullOrEmpty(tx.Signature) && SignatureService.VerifySignature(tx.FromAddress, tx.Hash, tx.Signature)
+                        : tx.Signature == VerifiedXCore.Privacy.PrivacyConstants.PlonkSignatureSentinel;
+                    if (!signatureOk)
+                        return $"private transaction {tx.Hash} has no valid signature.";
+                    continue;
+                }
+
+                if (!TransactionValidatorService.StandardHashMatches(tx))
+                    return $"transaction {tx.Hash} does not hash to its carried hash.";
+                var signatureError = TransactionValidatorService.SignatureError(tx);
+                if (signatureError != null)
+                    return $"transaction {tx.Hash}: {signatureError}";
+            }
+            return null;
+        }
+
+        private static Transaction WithoutTrailingZeros(Transaction tx) => new Transaction
+        {
+            Timestamp = tx.Timestamp, FromAddress = tx.FromAddress, ToAddress = tx.ToAddress,
+            Amount = tx.Amount / 1.000000000000000000000000000000000m, Fee = tx.Fee / 1.000000000000000000000000000000000m,
+            Nonce = tx.Nonce, TransactionType = tx.TransactionType, Data = tx.Data, UnlockTime = tx.UnlockTime,
+        };
+
+        /// <summary>
         /// The certificate is the committee's approval of the block: a hash a caster approved earlier for its height (or
         /// for the heights above it) would otherwise make validation refuse it.
         /// </summary>
-        private static void ApproveCertified(Block certified)
+        internal static void ApproveCertified(Block certified)
         {
             Globals.CasterApprovedBlockHashDict[certified.Height] = certified.Hash;
             foreach (var stale in Globals.CasterApprovedBlockHashDict.Keys.Where(h => h > certified.Height).ToList())

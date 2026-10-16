@@ -457,6 +457,7 @@ namespace VerifiedXCore.Utilities
                         // Full consensus validation — header, proof, signature, every TX — same as a live block.
                         if (winningBlock != null && winningBlock.Hash == expectedHash && winningBlock.Height == divergenceHeight)
                         {
+                            ApproveIfCertified(winningBlock);
                             await BlockValidatorService.ValidateBlock(winningBlock, false, false, false);
                         }
 
@@ -587,7 +588,10 @@ namespace VerifiedXCore.Utilities
                         {
                             var winningBlock = await FetchCommittedBlockAsync(sourceIP, divergenceHeight);
                             if (winningBlock != null && winningBlock.Hash == expectedHash && winningBlock.Height == divergenceHeight)
+                            {
+                                ApproveIfCertified(winningBlock);
                                 await BlockValidatorService.ValidateBlock(winningBlock, false, false, false);
+                            }
                         }
 
                         BanService.UnbanAllForForkRecovery();
@@ -646,6 +650,16 @@ namespace VerifiedXCore.Utilities
         /// NOT-yet-upgraded majority peer. The P2P fallback uses the P2P link to that IP when we
         /// hold one, otherwise any connected peer the recovery source policy allows.
         /// </summary>
+        /// <summary>
+        /// A certified replacement is the committee's approval for its height, as for a fork correction: without this a
+        /// caster refused it against the approval it still held for the block the reorg replaced.
+        /// </summary>
+        internal static void ApproveIfCertified(Models.Block replacement)
+        {
+            if (Services.ForkCorrectionService.HasValidCertificate(replacement))
+                Services.ForkCorrectionService.ApproveCertified(replacement);
+        }
+
         public static async Task<Models.Block?> FetchCommittedBlockAsync(string ip, long height)
         {
             try

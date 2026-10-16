@@ -507,7 +507,7 @@ namespace VerifiedXCore.Privacy
             return null;
         }
 
-        private static bool VerifyPrivateHash(Transaction txRequest, long height)
+        internal static bool VerifyPrivateHash(Transaction txRequest, long height)
         {
             var probe = new Transaction
             {
