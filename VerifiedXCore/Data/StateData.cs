@@ -574,7 +574,7 @@ namespace VerifiedXCore.Data
                                             AddNewBTCAdnr(tx);
                                             break;
                                         case "BTCAdnrTransfer()":
-                                            await TransferBTCAdnr(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
+                                            await TransferBTCAdnr(tx, block.Height); // NEW-12: awaited (ran concurrently with the rest of the block)
                                             break;
                                         case "BTCAdnrDelete()":
                                             DeleteBTCAdnr(tx);
@@ -1802,7 +1802,11 @@ namespace VerifiedXCore.Data
         /// sender's name in one block passes validation, which reads the state before the block, and found nothing at
         /// apply, so every node spun on that block for good (fifth review, round 26). A name that is not there is left.
         /// </summary>
-        private static async Task TransferBTCAdnr(Transaction tx)
+        /// <remarks>
+        /// From <see cref="Globals.BtcNameOneRecordPerAddressHeight"/> a transfer to an address that already holds a name
+        /// (another transfer to it earlier in the block) is left, so an address keeps one record.
+        /// </remarks>
+        internal static async Task TransferBTCAdnr(Transaction tx, long height)
         {
             try
             {
@@ -1816,6 +1820,11 @@ namespace VerifiedXCore.Data
                 if (adnr == null)
                 {
                     ErrorLogUtility.LogError($"BTC ADNR transfer {tx.Hash}: no name for {BTCFromAddress} (moved or deleted earlier in the block); nothing applied.", "StateData.TransferBTCAdnr()");
+                    return;
+                }
+                if (height >= Globals.BtcNameOneRecordPerAddressHeight && adnrs!.FindOne(x => x.BTCAddress == BTCToAddress) != null)
+                {
+                    ErrorLogUtility.LogError($"BTC ADNR transfer {tx.Hash}: {BTCToAddress} already holds a name (moved there earlier in the block); nothing applied.", "StateData.TransferBTCAdnr()");
                     return;
                 }
                 adnr.BTCAddress = BTCToAddress;
