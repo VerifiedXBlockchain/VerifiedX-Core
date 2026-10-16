@@ -631,14 +631,7 @@ namespace VerifiedXCore.DST
                         var isEnumStringParsed = Enum.TryParse(dataSplit[1], true, out BidStatus bidStatus);
 
                         if(isEnumStringParsed)
-                        {
-                            var bid = Bid.GetSingleBid(bidId);
-                            if (bid != null)
-                            {
-                                bid.BidStatus = bidStatus;
-                                Bid.SaveBid(bid);
-                            }
-                        }
+                            Bid.ApplyShopResponse(bidId, bidStatus);
                     }
                     catch { }
                 }
@@ -705,14 +698,7 @@ namespace VerifiedXCore.DST
                         var isEnumStringParsed = Enum.TryParse(dataSplit[1], true, out BidStatus bidStatus);
 
                         if (isEnumStringParsed)
-                        {
-                            var bid = Bid.GetSingleBid(bidId);
-                            if (bid != null)
-                            {
-                                bid.BidStatus = bidStatus;
-                                Bid.SaveBid(bid);
-                            }
-                        }
+                            Bid.ApplyShopResponse(bidId, bidStatus);
                     }
                 }
                 catch { }

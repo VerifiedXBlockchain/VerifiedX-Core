@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using VerifiedXCore;
@@ -287,6 +288,55 @@ namespace VerifiedXCore.Tests
             Bid.MarkAutoCompleted(_victim.Address, "key-shared", nft);
             Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-shared", 500M, nft));
             Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-shared", 500M, other));
+        }
+
+        [Fact]
+        public void ShopResponse_CannotReviveARejectedBid_OrTouchABidThisWalletDidNotSend()
+        {
+            var nft = ListedNft();
+            var now = TimeUtil.GetTime();
+
+            var rejected = SaveSentBid("key-revive", nft, BidStatus.Rejected, now);
+            Bid.ApplyShopResponse(rejected.Id, BidStatus.Accepted);
+            Assert.Equal(BidStatus.Rejected, Bid.GetSingleBid(rejected.Id)!.BidStatus);
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-revive", 500M, nft));
+
+            var received = new Bid
+            {
+                Id = Guid.NewGuid(), BidAddress = _victim.Address, PurchaseKey = "key-recv", BidAmount = 500M, MaxBidAmount = 500M,
+                BidStatus = BidStatus.Received, BidSendReceive = BidSendReceive.Received, BidSendTime = now, ListingId = 30, CollectionId = 1,
+                SmartContractUID = nft,
+            };
+            Bid.SaveBid(received);
+            Bid.ApplyShopResponse(received.Id, BidStatus.Accepted);
+            Assert.Equal(BidStatus.Received, Bid.GetSingleBid(received.Id)!.BidStatus);
+        }
+
+        [Fact]
+        public void ShopResponse_StillUpdatesASentBid()
+        {
+            var nft = ListedNft();
+            var sent = SaveSentBid("key-accept", nft, BidStatus.Sent, TimeUtil.GetTime());
+
+            Bid.ApplyShopResponse(sent.Id, BidStatus.Accepted);
+
+            Assert.Equal(BidStatus.Accepted, Bid.GetSingleBid(sent.Id)!.BidStatus);
+            Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-accept", 500M, nft));
+        }
+
+        [Fact]
+        public void SavingACopyReadBeforeTheBidWasUsed_DoesNotMakeItUnusedAgain()
+        {
+            var nft = ListedNft();
+            SaveSentBid("key-stale", nft, BidStatus.Accepted, TimeUtil.GetTime());
+            var staleCopy = Bid.GetAllBids(BidSendReceive.Sent)!.Single(b => b.PurchaseKey == "key-stale");
+
+            Bid.MarkAutoCompleted(_victim.Address, "key-stale", nft);
+            staleCopy.BidStatus = BidStatus.Accepted;
+            Bid.SaveBid(staleCopy);
+
+            Assert.True(Bid.GetSingleBid(staleCopy.Id)!.AutoCompleted);
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-stale", 500M, nft));
         }
 
         [Fact]

@@ -261,25 +261,52 @@ namespace VerifiedXCore.Models.DST
         #region Save Bid
         public static (bool, string) SaveBid(Bid bid, bool dontUpdate = false)
         {
-            var singleBid = GetSingleBid(bid.Id);
-            var bidDb = GetBidDb();
-            if (singleBid == null)
+            lock (BidWriteLock)
             {
-                if (bidDb != null)
+                var singleBid = GetSingleBid(bid.Id);
+                var bidDb = GetBidDb();
+                if (singleBid == null)
                 {
-                    bidDb.InsertSafe(bid);
-                    return (true, "Bid saved.");
+                    if (bidDb != null)
+                    {
+                        bidDb.InsertSafe(bid);
+                        return (true, "Bid saved.");
+                    }
                 }
+                else
+                {
+                    if (bidDb != null && !dontUpdate)
+                    {
+                        // A bid a sale already completed automatically stays used: a caller holding a copy read before
+                        // that would otherwise save it back unused.
+                        if (singleBid.AutoCompleted == true)
+                            bid.AutoCompleted = true;
+                        bidDb.UpdateSafe(bid);
+                        return (true, "Bid updated.");
+                    }
+                }
+                return (false, "Bid DB was null.");
             }
-            else
+        }
+
+        /// <summary>Serialises bid writes, so a status update and <see cref="MarkAutoCompleted"/> cannot interleave.</summary>
+        private static readonly object BidWriteLock = new();
+
+        /// <summary>
+        /// Applies a shop's response to a bid this wallet sent. The response is the shop's word and is not authenticated,
+        /// so it can change only the status of a sent bid, and a rejected bid stays rejected: otherwise a response naming
+        /// it made it payable again by <see cref="HasLocalSentBid"/>.
+        /// </summary>
+        public static void ApplyShopResponse(Guid bidId, BidStatus status)
+        {
+            lock (BidWriteLock)
             {
-                if (bidDb != null && !dontUpdate)
-                {
-                    bidDb.UpdateSafe(bid);
-                    return (true, "Bid updated.");
-                }
+                var bid = GetSingleBid(bidId);
+                if (bid == null || bid.BidSendReceive != BidSendReceive.Sent || bid.BidStatus == BidStatus.Rejected)
+                    return;
+                bid.BidStatus = status;
+                GetBidDb()?.UpdateSafe(bid);
             }
-            return (false, "Bid DB was null.");
         }
 
         #endregion
@@ -393,12 +420,15 @@ namespace VerifiedXCore.Models.DST
         /// </summary>
         public static void MarkAutoCompleted(string? bidderAddress, string? purchaseKey, string? smartContractUID)
         {
-            var db = GetBidDb();
-            if (db == null) return;
-            foreach (var b in MatchingSentBids(bidderAddress, purchaseKey, smartContractUID))
+            lock (BidWriteLock)
             {
-                b.AutoCompleted = true;
-                db.UpdateSafe(b);
+                var db = GetBidDb();
+                if (db == null) return;
+                foreach (var b in MatchingSentBids(bidderAddress, purchaseKey, smartContractUID))
+                {
+                    b.AutoCompleted = true;
+                    db.UpdateSafe(b);
+                }
             }
         }
 
