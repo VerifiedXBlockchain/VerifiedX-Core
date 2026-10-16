@@ -155,6 +155,23 @@ namespace VerifiedXCore.Bitcoin.Services
         /// </summary>
         public static async Task<SigningEvidence> GetSigningEvidenceAsync(string scUID, string withdrawalRequestHash, VBTCWithdrawalRequest? localRow)
         {
+            // Records naming more than one transaction (an earlier version signed under more than one spelling of the
+            // reference): the withdrawal is refundable only once every one of them can never confirm.
+            var records = FrostSignedWithdrawalEvidence.ForPayment(scUID, withdrawalRequestHash);
+            var recorded = records.Where(r => VBTCCancellationVoting.IsBtcTxId(r.BtcTxId)).GroupBy(r => r.BtcTxId.ToLowerInvariant()).ToList();
+            if (recorded.Count > 1)
+            {
+                SigningEvidence? inconclusive = null;
+                foreach (var tx in recorded)
+                {
+                    var judged = await JudgeSignedTransactionAsync(scUID, tx.Key, tx.SelectMany(r => r.Outpoints).Distinct().ToList());
+                    if (judged.ProvenDead) continue;
+                    if (!judged.Inconclusive) return judged;
+                    inconclusive ??= judged;
+                }
+                return inconclusive ?? new SigningEvidence { HasEvidence = true, BtcTxId = recorded[0].Key, ProvenDead = true };
+            }
+
             var durable = FrostSignedWithdrawalEvidence.Get(scUID, withdrawalRequestHash);
             var pin = FrostWithdrawalSigningTracker.GetContractPins(scUID)
                 .FirstOrDefault(p => string.Equals(p.WithdrawalRequestHash, withdrawalRequestHash, StringComparison.OrdinalIgnoreCase));
@@ -167,6 +184,12 @@ namespace VerifiedXCore.Bitcoin.Services
             var txId = new[] { durable?.BtcTxId, pin?.BtcTxId, localRow?.LastSignedBtcTxId }
                 .FirstOrDefault(VBTCCancellationVoting.IsBtcTxId)?.ToLowerInvariant();
             var outpoints = (durable?.Outpoints ?? new List<string>()).Concat(pin?.Outpoints ?? new List<string>()).Distinct().ToList();
+            return await JudgeSignedTransactionAsync(scUID, txId, outpoints);
+        }
+
+        /// <summary>Whether one transaction this validator signed for the withdrawal can still pay, from Bitcoin.</summary>
+        private static async Task<SigningEvidence> JudgeSignedTransactionAsync(string scUID, string? txId, List<string> outpoints)
+        {
             if (txId == null || outpoints.Count == 0)
                 return new SigningEvidence { HasEvidence = true, BtcTxId = txId };
 

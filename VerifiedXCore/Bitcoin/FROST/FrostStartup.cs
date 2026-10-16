@@ -3649,13 +3649,29 @@ namespace VerifiedXCore.Bitcoin.FROST
                 if (VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(scUID) != null)
                     return (true, "");
 
-                // Every record for this payment, under whatever spelling of its reference it was signed under.
-                foreach (var evidence in VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(scUID, withdrawalRequestHash))
+                // Every record for this payment, under whatever spelling of its reference it was signed under (several
+                // can share one stored reference). A new transaction is signed only once every other one can never confirm.
+                var records = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(scUID, withdrawalRequestHash)
+                    .Where(e => !string.IsNullOrEmpty(e.BtcTxId)).ToList();
+                bool IsRequested(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence e) =>
+                    string.Equals(e.BtcTxId, (requestedTxId ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
+                var dead = new List<(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence Record, string Detail)>();
+                foreach (var evidence in records.Where(e => !IsRequested(e)))
                 {
-                    if (string.IsNullOrEmpty(evidence.BtcTxId)) continue;
-                    if (string.Equals(evidence.BtcTxId, (requestedTxId ?? "").Trim(), StringComparison.OrdinalIgnoreCase)) continue;
-                    var (ok, reason) = await CheckPriorSignedRecordAsync(scUID, withdrawalRequestHash, evidence);
+                    var (ok, reason, detail) = await CheckPriorSignedRecordAsync(scUID, evidence);
                     if (!ok) return (false, reason);
+                    dead.Add((evidence, detail));
+                }
+
+                // Conflicted away: retire each dead transaction's own record, and what this node holds in memory for it.
+                var requestedIsHeld = records.Any(IsRequested);
+                foreach (var (evidence, detail) in dead)
+                {
+                    VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.DeleteRecord(evidence.Id);
+                    foreach (var spelling in new[] { withdrawalRequestHash, evidence.WithdrawalRequestHash }.Distinct(StringComparer.Ordinal))
+                        VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.ForgetDeadTransaction(scUID, spelling, evidence.BtcTxId,
+                            keepSigningRecord: requestedIsHeld, $"signed tx {evidence.BtcTxId} can never confirm ({detail})");
+                    LogUtility.Log($"[FROST Dedup] Previously signed tx {evidence.BtcTxId} for {withdrawalRequestHash} was conflicted away on-chain; allowing a new transaction.", "FrostStartup.SignStart");
                 }
                 return (true, "");
             }
@@ -3665,41 +3681,36 @@ namespace VerifiedXCore.Bitcoin.FROST
             }
         }
 
-        /// <summary>One recorded signed transaction for the payment: refused while it can pay, forgotten once proven dead.</summary>
-        private static async Task<(bool Ok, string Reason)> CheckPriorSignedRecordAsync(string scUID, string withdrawalRequestHash, VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence evidence)
+        /// <summary>One recorded signed transaction for the payment: refused while it can pay; Ok (with why) once proven dead.</summary>
+        private static async Task<(bool Ok, string Reason, string DeadDetail)> CheckPriorSignedRecordAsync(string scUID, VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence evidence)
         {
             try
             {
                 var lookup = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.GetTransactionConfirmationsResilient(evidence.BtcTxId);
                 var verdict = ClassifyPriorTx(lookup.Confirmations);
                 if (verdict == PriorTxVerdict.Confirmed)
-                    return (false, $"A transaction ({evidence.BtcTxId}) already signed for this withdrawal has confirmed on Bitcoin; refusing to sign another");
+                    return (false, $"A transaction ({evidence.BtcTxId}) already signed for this withdrawal has confirmed on Bitcoin; refusing to sign another", "");
                 if (verdict == PriorTxVerdict.InMempool)
-                    return (false, $"Previously signed transaction {evidence.BtcTxId} for this withdrawal is in the Bitcoin mempool (unconfirmed); refusing to sign another while it can still confirm");
+                    return (false, $"Previously signed transaction {evidence.BtcTxId} for this withdrawal is in the Bitcoin mempool (unconfirmed); refusing to sign another while it can still confirm", "");
                 // Unknown to every Electrum server: it may have been conflicted away. Prove it below: one
                 // of its inputs must be spent by a CONFIRMED transaction.
 
                 var depositAddress = FrostSigningAuthorization.ResolveDepositAddressForContract(scUID);
                 if (string.IsNullOrEmpty(depositAddress))
-                    return (false, "Contract deposit address could not be resolved to check the previously signed transaction");
+                    return (false, "Contract deposit address could not be resolved to check the previously signed transaction", "");
 
                 var (spendVerdict, spendDetail) = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.GetOutpointSpendVerdict(depositAddress, evidence.Outpoints, evidence.BtcTxId);
                 if (spendVerdict == VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.OutpointSpendVerdict.Inconclusive)
-                    return (false, $"Could not establish whether previously signed transaction {evidence.BtcTxId} can still confirm ({spendDetail}); refusing to sign another");
+                    return (false, $"Could not establish whether previously signed transaction {evidence.BtcTxId} can still confirm ({spendDetail}); refusing to sign another", "");
                 if (spendVerdict != VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed)
-                    return (false, $"Previously signed transaction {evidence.BtcTxId} for this withdrawal can still confirm ({spendDetail}); refusing to sign a second one");
+                    return (false, $"Previously signed transaction {evidence.BtcTxId} for this withdrawal can still confirm ({spendDetail}); refusing to sign a second one", "");
 
                 // Conflicted away: a confirmed transaction spent one of its inputs, so it can never confirm.
-                VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.Delete(scUID, evidence.WithdrawalRequestHash);
-                foreach (var spelling in new[] { withdrawalRequestHash, evidence.WithdrawalRequestHash }.Distinct(StringComparer.Ordinal))
-                    VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.ForgetDeadTransaction(scUID, spelling,
-                        $"signed tx {evidence.BtcTxId} can never confirm ({spendDetail})");
-                LogUtility.Log($"[FROST Dedup] Previously signed tx {evidence.BtcTxId} for {withdrawalRequestHash} was conflicted away on-chain; allowing a new transaction.", "FrostStartup.SignStart");
-                return (true, "");
+                return (true, "", spendDetail);
             }
             catch (Exception ex)
             {
-                return (false, $"Error checking previously signed transaction: {ApiErrorText.For(ex)}");
+                return (false, $"Error checking previously signed transaction: {ApiErrorText.For(ex)}", "");
             }
         }
 

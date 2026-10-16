@@ -462,6 +462,22 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// One signed transaction for the withdrawal, <paramref name="btcTxId"/>, can never confirm: its pin goes (only that
+        /// transaction's), and the in-memory signing record too unless <paramref name="keepSigningRecord"/> (another
+        /// transaction signed for the withdrawal is still held, and the record does not say which one it belongs to).
+        /// </summary>
+        public static void ForgetDeadTransaction(string scUID, string withdrawalRequestHash, string btcTxId, bool keepSigningRecord, string reason)
+        {
+            if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash))
+                return;
+            if (!keepSigningRecord)
+                _withdrawals.TryRemove(BuildKey(scUID, withdrawalRequestHash), out _);
+            if (_contractPins.TryGetValue(scUID, out var pins) && pins.TryGetValue(withdrawalRequestHash, out var pin)
+                && (string.IsNullOrEmpty(pin.BtcTxId) || string.Equals(pin.BtcTxId, btcTxId, StringComparison.OrdinalIgnoreCase)))
+                ClearContractPin(scUID, withdrawalRequestHash, reason);
+        }
+
+        /// <summary>
         /// Record that the signing ceremony failed for a withdrawal input. Allows retry after the
         /// cooldown. Never downgrades a Signed input.
         /// </summary>

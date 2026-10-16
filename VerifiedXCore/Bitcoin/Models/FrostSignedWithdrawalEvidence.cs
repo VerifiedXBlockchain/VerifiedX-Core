@@ -160,6 +160,13 @@ namespace VerifiedXCore.Bitcoin.Models
             catch { return new(); }
         }
 
+        /// <summary>One record, by its row: records of other transactions for the same withdrawal can share its stored reference.</summary>
+        public static bool DeleteRecord(long id)
+        {
+            try { return Coll()?.Delete(id) ?? false; }
+            catch { return false; }
+        }
+
         public static bool Delete(string scUID, string withdrawalRequestHash)
         {
             try { return (Coll()?.DeleteMany(x => x.ScUID == scUID && x.WithdrawalRequestHash == withdrawalRequestHash) ?? 0) > 0; }

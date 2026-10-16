@@ -227,6 +227,74 @@ namespace VerifiedXCore.Tests
             return tx;
         }
 
+        /// <summary>
+        /// A legacy vault whose validator holds two signing records for one withdrawal (an earlier version kept one per
+        /// spelling of the reference; the store trims what it saves, so both read the same): A, whose coin a confirmed
+        /// transaction spent, and B, whose coin is unspent. A being dead neither removes B's record nor lets a new
+        /// transaction be signed or the withdrawal be refunded.
+        /// </summary>
+        private (string Uid, string Wrh, string Dead, string Live) TwoRecordsForOneWithdrawal(bool deadFirst = true)
+        {
+            var uid = Guid.NewGuid().ToString("N") + ":1760000000";
+            const string wrh = "4f1e3a9c7b2d5e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f50617";
+            VerifiedXCore.Models.SmartContractStateTrei.SaveSmartContract(new VerifiedXCore.Models.SmartContractStateTrei
+            {
+                SmartContractUID = uid, ContractData = VbtcTestContracts.VaultContractData(uid, "xOwner", _vault.ToString()), MinterAddress = "xOwner", OwnerAddress = "xOwner", Nonce = 0,
+            });
+            var dead = Convert.ToHexString(RandomUtils.GetBytes(32)).ToLowerInvariant();
+            var live = Convert.ToHexString(RandomUtils.GetBytes(32)).ToLowerInvariant();
+            var (first, firstCoin, second, secondCoin) = deadFirst ? (dead, Coin0, live, Coin1) : (live, Coin1, dead, Coin0);
+            Assert.True(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.Record(uid, wrh, first, new[] { firstCoin }));
+            Assert.True(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.Record(uid, " " + wrh, second, new[] { secondCoin }));
+            Assert.Equal(2, VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(uid, wrh).Count);
+            Recording(Id(_spender));
+            Server(new[] { Coin1 }, _spender);
+            Server(new[] { Coin1 }, _spender);
+            return (uid, wrh, dead, live);
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task OneDeadSigningRecord_DoesNotRetireAnotherForTheSameWithdrawal(bool deadFirst)
+        {
+            var (uid, wrh, _, live) = TwoRecordsForOneWithdrawal(deadFirst);
+            var newTx = Convert.ToHexString(RandomUtils.GetBytes(32)).ToLowerInvariant();
+
+            Assert.False((await VerifiedXCore.Bitcoin.FROST.FrostStartup.CheckPriorSignedTransactionAsync(uid, wrh, newTx)).Ok);
+            Assert.Contains(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(uid, wrh), r => r.BtcTxId == live);
+            Assert.False((await VerifiedXCore.Bitcoin.FROST.FrostStartup.CheckPriorSignedTransactionAsync(uid, wrh, newTx)).Ok);
+        }
+
+        [Fact]
+        public async Task WhenEverySigningRecordIsDead_ANewTransactionIsSigned_AndTheRecordsAreRetired()
+        {
+            var (uid, wrh, dead, _) = TwoRecordsForOneWithdrawal();
+            // The second record's transaction spent the same coin as the first: both can never confirm.
+            var other = Convert.ToHexString(RandomUtils.GetBytes(32)).ToLowerInvariant();
+            foreach (var r in VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(uid, wrh).Where(r => r.BtcTxId != dead))
+                VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.DeleteRecord(r.Id);
+            Assert.True(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.Record(uid, " " + wrh, other, new[] { Coin0 }));
+            Assert.Equal(2, VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(uid, wrh).Count);
+
+            var (ok, reason) = await VerifiedXCore.Bitcoin.FROST.FrostStartup.CheckPriorSignedTransactionAsync(uid, wrh, Convert.ToHexString(RandomUtils.GetBytes(32)).ToLowerInvariant());
+            Assert.True(ok, reason);
+            Assert.Empty(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(uid, wrh));
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task OneDeadSigningRecord_DoesNotApproveTheCancellationWhileAnotherCanPay(bool deadFirst)
+        {
+            var (uid, wrh, _, live) = TwoRecordsForOneWithdrawal(deadFirst);
+            var evidence = await VBTCCancellationVoteService.GetSigningEvidenceAsync(uid, wrh, null);
+            Assert.True(evidence.HasEvidence);
+            Assert.False(evidence.ProvenDead);
+            Assert.False(evidence.Inconclusive);
+            Assert.Equal(live, evidence.BtcTxId);
+        }
+
         [Fact]
         public async Task FromTheRecordingHeight_ASpendProvenToTheAttestedHeader_IsSpentByConfirmed()
         {
