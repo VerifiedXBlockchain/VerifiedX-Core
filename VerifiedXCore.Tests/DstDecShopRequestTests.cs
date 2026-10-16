@@ -106,18 +106,15 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public void CollectionsReply_IsCapped_AndPagesThroughTheRest()
+        public void CollectionsReply_CarriesEveryLiveCollection()
         {
-            var total = DecShopMessageService.MaxCollectionsPerReply + 7;
-            for (var i = 1; i <= total; i++)
-                Collection.GetCollectionDb()!.InsertSafe(new Collection { Id = i, Name = $"c{i}", Description = "", CollectionLive = true });
+            // Clients ask for collections once and take the reply as complete, so the reply is not paged.
+            for (var i = 1; i <= 60; i++)
+                Collection.GetCollectionDb()!.InsertSafe(new Collection { Id = i, Name = $"c{i}", Description = "", CollectionLive = i <= 57 });
 
-            var first = JsonConvert.DeserializeObject<System.Collections.Generic.List<Collection>>(DecShopMessageService.ProcessMessage(Request("Collections"))!.Data)!;
-            var second = JsonConvert.DeserializeObject<System.Collections.Generic.List<Collection>>(DecShopMessageService.ProcessMessage(Request("Collections,1"))!.Data)!;
+            var reply = JsonConvert.DeserializeObject<System.Collections.Generic.List<Collection>>(DecShopMessageService.ProcessMessage(Request("Collections"))!.Data)!;
 
-            Assert.Equal(DecShopMessageService.MaxCollectionsPerReply, first.Count);
-            Assert.Equal(7, second.Count);
-            Assert.Empty(first.Select(c => c.Id).Intersect(second.Select(c => c.Id)));
+            Assert.Equal(57, reply.Count);
         }
 
         [Fact]

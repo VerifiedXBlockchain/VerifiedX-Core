@@ -19,8 +19,6 @@ namespace VerifiedXCore.DST
         const int PaginationAmount = 10;
         /// <summary>Most bids one Bids reply carries (the newest).</summary>
         public const int MaxBidsPerReply = 25;
-        /// <summary>Most collections one Collections reply carries.</summary>
-        public const int MaxCollectionsPerReply = 50;
         public static Message? ProcessMessage(Message message, string shopURL = "NA")
         {
             if (message.ComType == MessageComType.Request)
@@ -940,10 +938,7 @@ namespace VerifiedXCore.DST
                     }
                     else if(option == "Collections")
                     {
-                        // At most MaxCollectionsPerReply per reply; "Collections,<page>" pages through the rest.
-                        var collectionsPage = requestOptArray.Length > 1 && int.TryParse(requestOptArray[1], out var cp) && cp > 0 ? cp : 0;
-                        var collections = Collection.GetAllCollections()?.Where(x => x.CollectionLive).OrderBy(x => x.Id)
-                            .Skip(collectionsPage * MaxCollectionsPerReply).Take(MaxCollectionsPerReply).ToList();
+                        var collections = Collection.GetAllCollections()?.Where(x => x.CollectionLive).ToList();
                         if(collections?.Count() > 0)
                         {
                             var respMessage = new Message
