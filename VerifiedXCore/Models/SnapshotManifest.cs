@@ -34,7 +34,9 @@ namespace VerifiedXCore.Models
         /// <summary>Bumped when the snapshot layout/collection set changes; mismatched slots are rebuilt.</summary>
         public int SchemaVersion { get; set; } = CurrentSchemaVersion;
 
-        public const int CurrentSchemaVersion = 1;
+        /// <remarks>2: slots from before the anchor check on every cycle could have been re-anchored to a block they do not
+        /// hold the state of (a dead branch diffed forward after a fast rollback); none of them is trusted again.</remarks>
+        public const int CurrentSchemaVersion = 2;
         public const int SlotCount = 3;
 
         /// <summary>Wave 5 deep anchors: dedicated slots refreshed on coarse cadences (~H-100 and

@@ -388,6 +388,28 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task ASlotFromBeforeTheAnchorCheck_IsNotRestored_AndIsRebuilt()
+        {
+            SeedAccount("alice", 100m, stamp: 35);
+            await StateSnapshotService.UpdateCycleAsync(40);
+            var manifest = SnapshotManifest.GetManifest()!;
+            var old = StateSnapshotService.GetSlots().Single(x => x.Height == 40);
+            old.SchemaVersion = 1; // written by a build before the anchor check
+            manifest.Upsert(old);
+
+            Assert.Null(StateSnapshotService.PickSlotForRestore(45));
+
+            SeedAccount("alice", 70m, stamp: 40); // what the slot's diff from 40 would miss
+            await StateSnapshotService.UpdateCycleAsync(50);
+            await StateSnapshotService.UpdateCycleAsync(60);
+            await StateSnapshotService.UpdateCycleAsync(70); // reaches the old slot: rebuilt, not diffed
+
+            var slots = StateSnapshotService.GetSlots();
+            Assert.All(slots.Where(x => x.Status == SnapshotSlotStatus.Valid), x => Assert.Equal(SnapshotManifest.CurrentSchemaVersion, x.SchemaVersion));
+            Assert.Equal(70m, SlotBalance(slots.Single(x => x.SlotId == old.SlotId).SlotId, "alice"));
+        }
+
+        [Fact]
         public async Task UpdateCycle_StillRollsAnAnchoredSlotForwardOnALinearChain()
         {
             DbContext.DB = _live;
