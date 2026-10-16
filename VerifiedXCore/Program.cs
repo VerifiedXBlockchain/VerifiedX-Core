@@ -288,10 +288,8 @@ namespace VerifiedXCore
                     {
                         skipStateSync = true;
                     }
-                    if (argC.Contains("encpass"))
+                    if (StartArgs.TryGetValue(x, "encpass", out var encPassword))
                     {
-                        var encPassSplit = argC.Split(new char[] { '=' });
-                        var encPassword = encPassSplit[1];
                         Globals.EncryptPassword = encPassword.ToSecureString();
                     }
                     if(argC.Contains("openapi"))
@@ -306,10 +304,8 @@ namespace VerifiedXCore
                     {
                         await Task.Delay(5000);//give previous session time to close.
                     }
-                    if(argC.Contains("apitoken"))
+                    if (StartArgs.TryGetValue(x, "apitoken", out var apiToken))
                     {
-                        var apiTokens = argC.Split(new char[] { '=' });
-                        var apiToken = apiTokens[1];
                         Globals.APIToken = apiToken.ToSecureString();
                     }
                     if(argC.Contains("blockseedcalls"))
