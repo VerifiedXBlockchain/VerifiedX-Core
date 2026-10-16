@@ -430,6 +430,8 @@ namespace VerifiedXCore.Utilities
                     $"{caller}.Reorg");
                 ConsoleWriterService.Output($"[{caller}] REORG: rolling back {depth} block(s), adopting winning branch…");
 
+                if (knownBlock == null && RecoverySourcePolicy.IsActive)
+                    await RecoverySourcePolicy.EnsureSourcesConnectedAsync();
                 var prefetched = knownBlock ?? await TryFetchBeforeRollbackAsync(sourceIP, divergenceHeight);
                 var refusal = ReplacementRefusal(prefetched, divergenceHeight, expectedHash);
                 if (refusal != null)
@@ -559,6 +561,8 @@ namespace VerifiedXCore.Utilities
                     $"{caller}.DeepReorg");
                 ConsoleWriterService.Output($"[{caller}] DEEP-REORG: fork is {depth} blocks deep — restoring snapshot below height {divergenceHeight} and resyncing from the majority…");
 
+                if (RecoverySourcePolicy.IsActive)
+                    await RecoverySourcePolicy.EnsureSourcesConnectedAsync();
                 var prefetched = await TryFetchBeforeRollbackAsync(sourceIP, divergenceHeight);
                 var refusal = ReplacementRefusal(prefetched, divergenceHeight, expectedHash);
                 if (refusal != null)
@@ -669,15 +673,17 @@ namespace VerifiedXCore.Utilities
         /// hold one, otherwise any connected peer the recovery source policy allows.
         /// </summary>
         /// <summary>
-        /// Why the replacement block must not be adopted, checked before anything is rolled back; null when nothing is known
-        /// against it. Only the expected block (its height and hash) is judged: one that could not be fetched, or another
-        /// block, leaves the recovery to fetch it again afterwards as before. The expected block must hash to its own hash,
-        /// its transactions must match its header, and each must be intact (ForkCorrectionService.TransactionIntegrityError).
+        /// Why the reorg must not start, checked before anything is rolled back or restored; null when the replacement is
+        /// in hand and intact. The source must serve the expected block (its height and hash): a reorg the source cannot back
+        /// with that block is not started, and the recovery tries again on its next attempt. The block must hash to its own
+        /// hash, its transactions must match its header, and each must be intact (ForkCorrectionService.TransactionIntegrityError).
         /// </summary>
         internal static string? ReplacementRefusal(Models.Block? replacement, long height, string expectedHash)
         {
-            if (replacement == null || replacement.Height != height || replacement.Hash != expectedHash)
-                return null;
+            if (replacement == null)
+                return $"the block at {height} could not be fetched from the source.";
+            if (replacement.Height != height || replacement.Hash != expectedHash)
+                return $"the source served another block than the expected one at {height}.";
             if (replacement.GetBlockHash() != replacement.Hash)
                 return $"the block at {height} does not hash to its hash.";
             if (replacement.Transactions == null || replacement.NumOfTx != replacement.Transactions.Count

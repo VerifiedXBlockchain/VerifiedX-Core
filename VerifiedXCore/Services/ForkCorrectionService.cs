@@ -181,11 +181,10 @@ namespace VerifiedXCore.Services
                 if (LedgerIntegrityRules.IsHonoredWhitelistEntry(tx, block.Height))
                     continue;
 
-                // Sender-less: the hash only. A reward built as 32 and 0 reads 32.0 and 0.0 once it has crossed the wire, so
-                // its amounts are also tried without trailing zeros.
+                // Sender-less, and no signature covers a reward's amount: the hash only, with its own values.
                 if (tx.FromAddress == "Coinbase_BlkRwd" || tx.FromAddress == "Coinbase_TrxFees")
                 {
-                    if (!TransactionValidatorService.StandardHashMatches(tx) && !string.Equals(tx.Hash, WithoutTrailingZeros(tx).GetHash(), StringComparison.Ordinal))
+                    if (!RewardHashMatches(tx))
                         return $"transaction {tx.Hash} does not hash to its carried hash.";
                     continue;
                 }
@@ -210,6 +209,8 @@ namespace VerifiedXCore.Services
                         return $"private transaction {tx.Hash} has no valid signature.";
                     // The private hash leaves out the recipient (and, past a shield, the sender, amount, nonce and fee):
                     // those are held to the values the validator requires.
+                    if ((tx.FromAddress ?? "").StartsWith("xRBX") || (tx.ToAddress ?? "").StartsWith("xRBX"))
+                        return $"private transaction {tx.Hash} involves a reserve (xRBX) address.";
                     if (VerifiedXCore.Privacy.PrivateTransactionTypes.IsTransparentShield(tx.TransactionType))
                     {
                         if (tx.ToAddress != VerifiedXCore.Privacy.PrivacyConstants.ShieldedPoolAddress)
@@ -249,12 +250,26 @@ namespace VerifiedXCore.Services
             return TransactionValidatorService.StandardHashMatches(tx);
         }
 
-        private static Transaction WithoutTrailingZeros(Transaction tx) => new Transaction
+        /// <summary>
+        /// Whether a block reward hashes to its carried hash with the values it carries. A whole number built with no decimal
+        /// places (32, 0) reads 32.0 and 0.0 once the block has crossed the wire, so each of Amount and Fee is also tried
+        /// without trailing zeros: the same values, never another one.
+        /// </summary>
+        private static bool RewardHashMatches(Transaction tx)
         {
-            Timestamp = tx.Timestamp, FromAddress = tx.FromAddress, ToAddress = tx.ToAddress,
-            Amount = tx.Amount / 1.000000000000000000000000000000000m, Fee = tx.Fee / 1.000000000000000000000000000000000m,
-            Nonce = tx.Nonce, TransactionType = tx.TransactionType, Data = tx.Data, UnlockTime = tx.UnlockTime,
-        };
+            foreach (var amount in new[] { tx.Amount, tx.Amount / 1.000000000000000000000000000000000m })
+                foreach (var fee in new[] { tx.Fee, tx.Fee / 1.000000000000000000000000000000000m })
+                {
+                    var probe = new Transaction
+                    {
+                        Timestamp = tx.Timestamp, FromAddress = tx.FromAddress, ToAddress = tx.ToAddress, Amount = amount, Fee = fee,
+                        Nonce = tx.Nonce, TransactionType = tx.TransactionType, Data = tx.Data, UnlockTime = tx.UnlockTime,
+                    };
+                    if (string.Equals(tx.Hash, probe.GetHash(), StringComparison.Ordinal))
+                        return true;
+                }
+            return false;
+        }
 
         /// <summary>
         /// The certificate is the committee's approval of the block: a hash a caster approved earlier for its height (or

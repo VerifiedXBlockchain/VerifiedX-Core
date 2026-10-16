@@ -149,6 +149,43 @@ namespace VerifiedXCore.Tests
             Assert.Empty(_reorgs);
         }
 
+        /// <summary>A checksum-valid reserve address of the "xRBX" form the validator refuses (the prefix after "xRB" varies by key).</summary>
+        private static string ReserveAddress()
+        {
+            for (var scalar = new System.Numerics.BigInteger(1); ; scalar++)
+            {
+                var address = ReserveAccount.ReserveAddressOf(scalar);
+                if (address.StartsWith("xRBX"))
+                    return address;
+            }
+        }
+
+        private static Transaction Unshield()
+        {
+            var key = new PrivateKey("secp256k1");
+            var recipient = AccountData.GetHumanAddress("04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant());
+            var payload = new VerifiedXCore.Models.Privacy.PrivateTxPayload
+            {
+                Asset = "VFX", Kind = "unshield", NullsB64 = { Convert.ToBase64String(new byte[32]) }, MerkleRootB64 = Convert.ToBase64String(new byte[32]),
+                Fee = Globals.PrivateTxFixedFee, TransparentOutput = recipient, TransparentAmount = 1.0M,
+            };
+            var tx = new Transaction
+            {
+                TransactionType = TransactionType.VFX_UNSHIELD, FromAddress = VerifiedXCore.Privacy.PrivacyConstants.ShieldedPoolAddress, ToAddress = recipient,
+                Amount = 1.0M, Fee = 0.0M, Nonce = 0, Timestamp = 1_700_000_000, Signature = VerifiedXCore.Privacy.PrivacyConstants.PlonkSignatureSentinel,
+                Data = VerifiedXCore.Privacy.PrivateTxPayloadCodec.SerializeToJson(payload),
+            };
+            tx.BuildPrivate(100);
+            return tx;
+        }
+
+        private static Transaction FeeReward()
+        {
+            var tx = new Transaction { Timestamp = 1_700_000_000, FromAddress = "Coinbase_TrxFees", ToAddress = "xProducer", Amount = 0M, Fee = 0.00M, TransactionType = TransactionType.TX }; // as BlockchainData builds it
+            tx.Build();
+            return tx;
+        }
+
         private static Transaction SignedShield()
         {
             var key = new PrivateKey("secp256k1");
@@ -167,6 +204,8 @@ namespace VerifiedXCore.Tests
         [InlineData("zero-amount")]
         [InlineData("attestation-signature")]
         [InlineData("shield-recipient")]
+        [InlineData("unshield-reserve-recipient")]
+        [InlineData("fee-reward-amount")]
         public async Task AFieldOutsideTheHash_ChangedInACertifiedCorrection_IsRefusedBeforeAnyRollback(string field)
         {
             ForkCorrectionService.HasValidCertificate = _ => true;
@@ -174,12 +213,17 @@ namespace VerifiedXCore.Tests
             {
                 "zero-amount" => SignedTransfer(amount: 0M), // VerifyTX re-hashes a carried fraction as 0
                 "attestation-signature" => VerifiedXCore.Bitcoin.Attestation.BtcAttestTxValidator.Create(TransactionType.VBTC_V2_BTC_REPORT, "{}", 1_700_000_000),
+                "fee-reward-amount" => FeeReward(),
+                "unshield-reserve-recipient" => Unshield(),
                 _ => SignedShield(),
             };
             Action<Transaction> alter = field switch
             {
                 "zero-amount" => t => t.Amount = 0.5M,
                 "attestation-signature" => t => t.Signature = "not-the-sentinel",
+                // A checksum-valid reserve address: the private hash leaves the recipient out, and only VerifyPrivateTX refuses it.
+                "unshield-reserve-recipient" => t => t.ToAddress = ReserveAddress(),
+                "fee-reward-amount" => t => t.Amount = 0.5M, // no signature covers a reward; VerifyTX's zero re-hash would pass it
                 _ => t => t.ToAddress = "xSomewhereElse",
             };
             var asSigned = JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(SignedBlockWith(100, AsSigned())))!;
@@ -295,9 +339,9 @@ namespace VerifiedXCore.Tests
             var altered = SignedBlockWith(100, SignedTransfer(), tx => tx.Amount = 2500M);
             Assert.NotNull(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(altered, 100, altered.Hash));
 
-            // A block that could not be fetched, or another block than the expected one, leaves the recovery as before.
-            Assert.Null(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(null, 100, altered.Hash));
-            Assert.Null(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(altered, 100, "another-hash"));
+            // A source that cannot serve the expected block does not start a reorg either.
+            Assert.NotNull(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(null, 100, intact.Hash));
+            Assert.NotNull(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(intact, 100, "another-hash"));
         }
 
         [Fact]
