@@ -3048,8 +3048,10 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>
         /// S3C §7.4/§8: resolve a contract's DKG validator snapshot — state-trei decompile (works on any
         /// node), the local record only for a contract not on chain yet. Empty list if none (legacy no-snapshot).
+        /// <paramref name="localIfNotOnChain"/> false: chain state only. A contract with no state row may also be one
+        /// that was burned, which this node's own record cannot tell apart.
         /// </summary>
-        public static List<string> ResolveContractSnapshot(string scUID)
+        public static List<string> ResolveContractSnapshot(string scUID, bool localIfNotOnChain = true)
         {
             // Chain state first: who may vote on a cancellation, and the share that decides it, are read from here by
             // block validation, and a record in this node's own wallet tables must not decide what a block is.
@@ -3075,6 +3077,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 // A contract that is on chain and cannot be read is not answered for from this node's own records.
                 if (SmartContractStateTrei.GetSmartContractState(scUID) != null) return new List<string>();
             }
+            if (!localIfNotOnChain) return new List<string>();
             var local = VBTCContractV2.GetContract(scUID);
             if (local != null && local.ValidatorAddressesSnapshot != null && local.ValidatorAddressesSnapshot.Count > 0)
                 return local.ValidatorAddressesSnapshot;
@@ -3093,7 +3096,8 @@ namespace VerifiedXCore.Bitcoin.Services
         /// </remarks>
         public static HashSet<string> ResolveCancellationVoterSet(string scUID, long? asOfHeight = null)
         {
-            var snapshot = ResolveContractSnapshot(scUID);
+            // Chain state only: a vault with withdrawals to cancel is on chain, or was and has been burned.
+            var snapshot = ResolveContractSnapshot(scUID, localIfNotOnChain: false);
             if (snapshot.Count > 0)
                 return new HashSet<string>(snapshot);
             var publicSet = asOfHeight is long h

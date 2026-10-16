@@ -467,6 +467,13 @@ namespace VerifiedXCore.Tests
             var pending = Guid.NewGuid().ToString("N") + ":1755000013";
             VBTCContractV2.SaveContract(new VBTCContractV2 { SmartContractUID = pending, OwnerAddress = _owner.Address, DepositAddress = _address, ValidatorAddressesSnapshot = seeded });
             Assert.Equal(seeded, VBTCService.ResolveContractSnapshot(pending));
+
+            // A vault burned (its state row removed) whose record this node still holds: its cancellation voters are not
+            // read from that record, which a node without it would not have.
+            var burned = Guid.NewGuid().ToString("N") + ":1755000014";
+            VBTCContractV2.SaveContract(new VBTCContractV2 { SmartContractUID = burned, OwnerAddress = _owner.Address, DepositAddress = _address, ValidatorAddressesSnapshot = seeded });
+            Assert.DoesNotContain("xSeededValidator", VBTCService.ResolveCancellationVoterSet(burned, 10));
+            Assert.DoesNotContain("xSeededValidator", VBTCService.ResolveCancellationVoterSet(burned));
         }
     }
 }
