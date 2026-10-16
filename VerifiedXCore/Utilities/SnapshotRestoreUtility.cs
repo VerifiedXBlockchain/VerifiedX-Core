@@ -131,6 +131,9 @@ namespace VerifiedXCore.Utilities
                 var blockStore = Block.GetBlocks();
                 blockStore.DeleteManySafe(x => x.Height > targetHeight);
                 DbContext.DB.Checkpoint();
+                // Slots and deletion records above the target came from the removed blocks. Dropped now, while the state is
+                // still marked dirty, so no exit from here on leaves them behind a synced status.
+                StateSnapshotService.InvalidateAbove(targetHeight);
 
                 // 5) Replay local blocks (slotHeight, target] through the standard commit path.
                 var walletAccounts = AccountData.GetAccounts().FindAll().ToList();
@@ -264,10 +267,8 @@ namespace VerifiedXCore.Utilities
                     return false;
                 }
 
-                // 8) State is verified consistent up to the target. Slots newer than the target
-                //    contain rolled-back blocks — invalidate them.
+                // 8) State is verified consistent up to the target (slots above it were invalidated at step 4).
                 StateTreiStatusService.SetSynced(targetHeight);
-                StateSnapshotService.InvalidateAbove(targetHeight);
 
                 sw.Stop();
                 Console.WriteLine($"[SnapshotRestore] SUCCESS: restored to height {targetHeight} (replayed {replayed} block(s), {walletTxInserts} wallet TX(s)) in {sw.Elapsed.TotalSeconds:F1}s.");

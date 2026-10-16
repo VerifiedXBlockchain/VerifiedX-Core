@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using VerifiedXCore;
 using VerifiedXCore.Data;
@@ -91,6 +92,19 @@ namespace VerifiedXCore.Tests
             Assert.False(await BlockValidatorService.ValidateBlock(next, true));
             var onStoredTip = new Block { Height = 49, Hash = "hash-49b", PrevHash = "hash-48", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction>() };
             Assert.False(await BlockValidatorService.ValidateBlock(onStoredTip, true));
+        }
+
+        [Fact]
+        public async Task ARestoreThatStopsAfterRemovingBlocks_HasAlreadyDroppedTheirDeletionRecords()
+        {
+            await ChainWithSlotAt45_ThatFailsToReplay();
+            var tombstones = StateTombstone.GetTombstones()!;
+            tombstones.Insert(new StateTombstone { SourceColl = StateTombstone.COLL_SCSTATE, Key = "kept", Height = 47 });
+            tombstones.Insert(new StateTombstone { SourceColl = StateTombstone.COLL_SCSTATE, Key = "removed-branch", Height = 49 });
+
+            Assert.False(await SnapshotRestoreUtility.TryRestoreAsync(48)); // ends early, after blocks 49 and 50 are gone
+
+            Assert.Equal(new[] { "kept" }, tombstones.FindAll().Select(x => x.Key).ToArray());
         }
 
         [Fact]

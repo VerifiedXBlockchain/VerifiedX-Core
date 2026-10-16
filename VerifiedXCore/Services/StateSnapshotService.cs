@@ -194,6 +194,15 @@ namespace VerifiedXCore.Services
                 slot.UpdatedUtc = DateTime.UtcNow;
                 col.Upsert(slot);
             }
+            DropDeletionRecordsAbove(height);
+        }
+
+        /// <summary>
+        /// Drops the deletion records above <paramref name="height"/>. Called with the stored tip at startup too: no deletion
+        /// happens above the tip, so any record there is left from a rollback that did not finish dropping it.
+        /// </summary>
+        public static void DropDeletionRecordsAbove(long height)
+        {
             StateTombstone.GetTombstones()?.DeleteMany(x => x.Height > height);
             TryCheckpoint();
         }

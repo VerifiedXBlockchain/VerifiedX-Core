@@ -307,6 +307,18 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void DeletionRecordsAboveTheStoredTip_AreDropped_AtOrBelowItKept()
+        {
+            var tombstones = StateTombstone.GetTombstones()!;
+            tombstones.Insert(new StateTombstone { SourceColl = StateTombstone.COLL_SCSTATE, Key = "at-tip", Height = 60 });
+            tombstones.Insert(new StateTombstone { SourceColl = StateTombstone.COLL_SCSTATE, Key = "orphan", Height = 61 });
+
+            StateSnapshotService.DropDeletionRecordsAbove(60);
+
+            Assert.Equal(new[] { "at-tip" }, tombstones.FindAll().Select(x => x.Key).ToArray());
+        }
+
+        [Fact]
         public async Task UpdateCycle_SkipsWhenStateNotSynced()
         {
             StateTreiStatusService.SetFailed("test: dirty state");

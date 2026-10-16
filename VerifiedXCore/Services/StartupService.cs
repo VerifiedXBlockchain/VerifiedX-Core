@@ -1262,6 +1262,10 @@ namespace VerifiedXCore.Services
                 var blockCount = BlockchainData.GetBlocks().Count();
                 if (blockCount > 0)
                 {
+                    var storedTip = BlockchainData.GetLastBlock()?.Height;
+                    if (storedTip != null)
+                        StateSnapshotService.DropDeletionRecordsAbove(storedTip.Value);
+
                     var treiStatus = StateTreiStatusService.GetStatus();
                     if (treiStatus == null || !treiStatus.IsSynced)
                     {
