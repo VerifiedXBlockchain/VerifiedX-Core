@@ -745,7 +745,7 @@ namespace VerifiedXCore.Controllers
             try
             {
                 var myHeight = Globals.LastBlock.Height;
-                var ready = Globals.IsBlockCaster && !string.IsNullOrEmpty(Globals.ValidatorAddress);
+                var ready = Globals.IsBlockCaster && !string.IsNullOrEmpty(Globals.ValidatorAddress) && Globals.ProofVerifierReady;
                 // Wave 3: RecordSeq lets round peers detect a stale membership view and trigger catch-up.
                 var recordSeq = CasterMembershipStore.GetCurrent()?.RecordSeq ?? -1;
                 var result = new { Height = myHeight, Ready = ready, Address = Globals.ValidatorAddress ?? "", RecordSeq = recordSeq };
