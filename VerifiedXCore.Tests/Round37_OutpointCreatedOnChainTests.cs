@@ -47,6 +47,7 @@ namespace VerifiedXCore.Tests
         private readonly NBitcoin.Transaction _spender;   // confirmed, signed by the vault key: spends funding:0
         private readonly NBitcoin.Transaction _forged;    // spends funding:0 with no valid signature
         private readonly List<LoopbackElectrum> _servers = new();
+        private readonly Dictionary<long, string> _headerHex = new();   // headers the servers answer blockchain.block.headers with
 
         public Round37_OutpointCreatedOnChainTests()
         {
@@ -102,6 +103,14 @@ namespace VerifiedXCore.Tests
                     case "blockchain.transaction.get": return raw.TryGetValue((string)p![0]!, out var hex) ? hex : null;
                     // Each confirmed transaction is the only one in its block: an empty branch, position 0.
                     case "blockchain.transaction.get_merkle": return new JObject { ["merkle"] = new JArray(), ["block_height"] = (int)p![1]!, ["pos"] = 0 };
+                    case "blockchain.block.headers":
+                    {
+                        var from = (long)p![0]!;
+                        var count = (int)p[1]!;
+                        var hexes = Enumerable.Range(0, count).Select(i => _headerHex.TryGetValue(from + i, out var h) ? h : null).ToList();
+                        if (hexes.Any(h => h == null)) return null;
+                        return new JObject { ["hex"] = string.Concat(hexes), ["count"] = count, ["max"] = 2016 };
+                    }
                     default: return null;
                 }
             });
@@ -115,13 +124,14 @@ namespace VerifiedXCore.Tests
         private Task<(BitcoinTransactionService.OutpointSpendVerdict Verdict, string Detail)> Verdict(string? signedTxId = null, params string[] outpoints) =>
             BitcoinTransactionService.GetOutpointSpendVerdict(_vault.ToString(), outpoints.Length > 0 ? outpoints : new[] { Coin0 }, signedTxId);
 
+        /// <summary>Before the recording height no header is attested, so even two servers showing a signed spend prove nothing.</summary>
         [Fact]
-        public async Task TwoServersShowingAValidlySignedConfirmedSpend_IsSpentByConfirmed()
+        public async Task BeforeTheRecordingHeight_NoSpendIsProven()
         {
             Server(new[] { Coin1 }, _spender);
             Server(new[] { Coin1 }, _spender);
             var (verdict, detail) = await Verdict();
-            Assert.True(verdict == BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed, detail);
+            Assert.True(verdict == BitcoinTransactionService.OutpointSpendVerdict.Inconclusive, detail);
         }
 
         [Fact]
@@ -163,15 +173,25 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>From the recording height: the validators' attested header of the spend's block, whose Merkle root it is.</summary>
-        private void Recording(string? attestedRoot)
+        private void Recording(string? attestedRoot, long headerHeight = SpenderBtcHeight, int depth = BitcoinTransactionService.MinAttestedDepth)
         {
             Globals.BitcoinAttestationRecordHeight = 1;
             Globals.LastBlock = new VerifiedXCore.Models.Block { Height = 10 };
+            VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.SaveMeta(new VerifiedXCore.Bitcoin.Attestation.AttestationMetaRow { TipHeight = headerHeight + depth - 1 });
             if (attestedRoot == null) return;
             var header = Net.Consensus.ConsensusFactory.CreateBlockHeader();
             header.HashMerkleRoot = uint256.Parse(attestedRoot);
             Assert.True(VerifiedXCore.Bitcoin.Attestation.BtcHeader.TryParse(Convert.ToHexString(header.ToBytes()), out var parsed));
-            VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.SaveHeader(SpenderBtcHeight, parsed!, 5);
+            VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.SaveHeader(headerHeight, parsed!, 5);
+        }
+
+        /// <summary>A confirmed transaction on the address that spends nothing of the vault's.</summary>
+        private NBitcoin.Transaction Unrelated()
+        {
+            var tx = Net.CreateTransaction();
+            tx.Inputs.Add(new OutPoint(new uint256(RandomUtils.GetBytes(32)), 0));
+            tx.Outputs.Add(Money.Satoshis(1_000), _vault);
+            return tx;
         }
 
         [Fact]
@@ -204,6 +224,75 @@ namespace VerifiedXCore.Tests
             Server(new[] { Coin1 }, _spender);
             var (verdict, detail) = await Verdict();
             Assert.True(verdict != BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed, detail);
+        }
+
+        /// <summary>
+        /// The attestation begins at a checkpoint (an attested header); a spend mined below it is proven by its block's header
+        /// linked by hashes, header to header, up to the attested checkpoint header. A chain that does not reach it proves nothing.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task ASpendBelowTheAttestedCheckpoint_IsProvenThroughTheLinkedHeaders(bool chainReachesTheCheckpoint)
+        {
+            const long checkpointHeight = SpenderBtcHeight + 9;
+            Globals.BitcoinAttestationRecordHeight = 1;
+            Globals.LastBlock = new VerifiedXCore.Models.Block { Height = 10 };
+            uint256 prev = new(RandomUtils.GetBytes(32));
+            NBitcoin.BlockHeader? last = null;
+            for (var h = SpenderBtcHeight; h <= checkpointHeight; h++)
+            {
+                var header = Net.Consensus.ConsensusFactory.CreateBlockHeader();
+                header.HashPrevBlock = prev;
+                header.HashMerkleRoot = h == SpenderBtcHeight ? _spender.GetHash() : new uint256(RandomUtils.GetBytes(32));
+                _headerHex[h] = Convert.ToHexString(header.ToBytes()).ToLowerInvariant();
+                prev = header.GetHash();
+                last = header;
+            }
+            // The checkpoint the validators attested: this chain's last header, or another one.
+            var attested = last!;
+            if (!chainReachesTheCheckpoint)
+            {
+                attested = Net.Consensus.ConsensusFactory.CreateBlockHeader();
+                attested.HashPrevBlock = new uint256(RandomUtils.GetBytes(32));
+            }
+            Assert.True(VerifiedXCore.Bitcoin.Attestation.BtcHeader.TryParse(Convert.ToHexString(attested.ToBytes()), out var parsed));
+            VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.SaveHeader(checkpointHeight, parsed!, 5);
+            VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.SaveMeta(new VerifiedXCore.Bitcoin.Attestation.AttestationMetaRow { CheckpointHeight = checkpointHeight, TipHeight = checkpointHeight });
+
+            Server(new[] { Coin1 }, _spender);
+            Server(new[] { Coin1 }, _spender);
+            var (verdict, detail) = await Verdict();
+            Assert.True(verdict == (chainReachesTheCheckpoint ? BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed : BitcoinTransactionService.OutpointSpendVerdict.Inconclusive), detail);
+        }
+
+        [Fact]
+        public async Task FromTheRecordingHeight_ASpendNotYetBuriedDeepEnough_IsInconclusive()
+        {
+            Recording(Id(_spender), depth: BitcoinTransactionService.MinAttestedDepth - 1);
+            Server(new[] { Coin1 }, _spender);
+            Server(new[] { Coin1 }, _spender);
+            var (verdict, detail) = await Verdict();
+            Assert.True(verdict == BitcoinTransactionService.OutpointSpendVerdict.Inconclusive, detail);
+        }
+
+        /// <summary>
+        /// An address with more confirmed transactions than are read: the newest are read, so a recent spend is still found;
+        /// one older than that is Inconclusive, never "not spent".
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task AnAddressWithMoreHistoryThanIsRead_FindsARecentSpend_AndCallsAnOlderOneInconclusive(bool spendIsRecent)
+        {
+            var others = Enumerable.Range(0, BitcoinTransactionService.MaxConfirmedHistoryScan).Select(_ => Unrelated()).ToArray();
+            var confirmed = spendIsRecent ? others.Append(_spender).ToArray() : others.Prepend(_spender).ToArray();
+            var spenderHeight = 100 + 1 + Array.IndexOf(confirmed, _spender);
+            Recording(Id(_spender), spenderHeight);
+            Server(new[] { Coin1 }, confirmed);
+            Server(new[] { Coin1 }, confirmed);
+            var (verdict, detail) = await Verdict();
+            Assert.True(verdict == (spendIsRecent ? BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed : BitcoinTransactionService.OutpointSpendVerdict.Inconclusive), detail);
         }
 
         [Theory]

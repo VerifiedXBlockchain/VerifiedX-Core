@@ -896,8 +896,52 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Servers that must each prove an outpoint spent by a confirmed transaction before it is treated as spent.</summary>
         public const int SpentProofsRequired = 2;
 
-        /// <summary>Most confirmed deposit-address transactions read, per server, looking for the one that spends an outpoint.</summary>
+        /// <summary>
+        /// Most confirmed deposit-address transactions read, per server, looking for the one that spends an outpoint (the
+        /// newest first). An address with more is still read up to this many; a spend not found among them is not
+        /// "not spent" but Inconclusive.
+        /// </summary>
         public const int MaxConfirmedHistoryScan = 200;
+
+        /// <summary>Attested Bitcoin blocks, the spend's own included, a spend must be buried under before it counts.</summary>
+        public const int MinAttestedDepth = 6;
+
+        /// <summary>
+        /// Most headers read below the attested checkpoint to reach a spend's block: 26 Electrum chunks, about a year, which
+        /// covers every vBTC V2 vault (the first were made in May 2026). Read only once a validly signed spender is found.
+        /// </summary>
+        public const int MaxHeadersBelowCheckpoint = 26 * 2016;
+
+        /// <summary>
+        /// The header of a Bitcoin block below the attested checkpoint, which the validators did not attest themselves: read
+        /// from the server with every header up to the checkpoint, each linked to the next by its hash and the last one the
+        /// attested checkpoint header. A server cannot change one without breaking the chain to the attested hash. Null when
+        /// the block is at or above the checkpoint, too far below it, or the chain does not hold.
+        /// </summary>
+        private static async Task<VerifiedXCore.Bitcoin.Attestation.BtcHeader?> HeaderBelowCheckpoint(Client client, long height)
+        {
+            var meta = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.GetMeta();
+            if (meta == null || height < 0 || height >= meta.CheckpointHeight || meta.CheckpointHeight - height > MaxHeadersBelowCheckpoint) return null;
+            var checkpoint = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.HeaderAt(meta.CheckpointHeight);
+            if (checkpoint == null) return null;
+
+            var chain = new List<VerifiedXCore.Bitcoin.Attestation.BtcHeader>();
+            for (var from = height; from <= meta.CheckpointHeight;)
+            {
+                var count = (int)Math.Min(2016, meta.CheckpointHeight - from + 1);
+                var read = await client.GetBlockHeadersHex((int)from, count);
+                var hex = read?.Hex;
+                if (hex == null || read!.Count != count || hex.Length != count * VerifiedXCore.Bitcoin.Attestation.BtcHeader.Size * 2) return null;
+                for (var i = 0; i < count; i++)
+                {
+                    if (!VerifiedXCore.Bitcoin.Attestation.BtcHeader.TryParse(hex.Substring(i * 160, 160), out var header) || header == null) return null;
+                    if (chain.Count > 0 && !string.Equals(header.PrevHash, chain[^1].Hash, StringComparison.OrdinalIgnoreCase)) return null;
+                    chain.Add(header);
+                }
+                from += count;
+            }
+            return string.Equals(chain[^1].Hash, checkpoint.Hash, StringComparison.OrdinalIgnoreCase) ? chain[0] : null;
+        }
 
         /// <summary>
         /// Classifies <paramref name="outpoints"/> (lowercase "txid:vout") of a signed transaction, asking each Electrum server
@@ -905,9 +949,10 @@ namespace VerifiedXCore.Bitcoin.Services
         /// each show the transaction that spends it: confirmed in the address's history, other than
         /// <paramref name="signedTxId"/> (the transaction asked about: its own confirmation is not its death), and carrying
         /// a valid signature over the real funding output (every transaction read is checked against its txid). A server
-        /// that leaves a coin out of its unspent set cannot alone make a signed transaction look dead. From the Bitcoin
-        /// attestation's recording height the spend's confirmation must also be proven by a Merkle branch to the attested
-        /// header of its block (so nothing between this node and the servers can fake it). Anything less is
+        /// that leaves a coin out of its unspent set cannot alone make a signed transaction look dead. The spend's
+        /// confirmation must also be proven by a Merkle branch to the validator-attested header of its block, buried at
+        /// least <see cref="MinAttestedDepth"/> attested blocks deep (so nothing between this node and the servers can fake
+        /// it, nor a shallow reorg undo it); before the attestation's recording height no spend is proven. Anything less is
         /// NotSpentByConfirmed when the servers that answered all say so, else Inconclusive; callers keep their pins then.
         /// </summary>
         public static async Task<(OutpointSpendVerdict Verdict, string Detail)> GetOutpointSpendVerdict(string depositAddress, IEnumerable<string> outpoints, string? signedTxId = null)
@@ -948,7 +993,11 @@ namespace VerifiedXCore.Bitcoin.Services
             }
         }
 
-        /// <summary>One server's answer for <see cref="GetOutpointSpendVerdict"/>.</summary>
+        /// <summary>
+        /// One server's answer for <see cref="GetOutpointSpendVerdict"/>. A spend is proven only from the Bitcoin attestation's
+        /// recording height: before it the validators attest no headers, so a spend's confirmation could not be told from a
+        /// claim and nothing is declared dead (Inconclusive: evidence and pins are kept until then).
+        /// </summary>
         private static async Task<(OutpointSpendVerdict, string)> ServerOutpointVerdict(Client client, string depositAddress, Script depositScript, string scriptHash, List<string> ops, string excludeTxId)
         {
             var listed = await client.GetListUnspent(scriptHash);
@@ -986,7 +1035,8 @@ namespace VerifiedXCore.Bitcoin.Services
             // Newest first: the transaction that spends a coin is usually among the latest on the address.
             var confirmed = history.Where(h => h.Height > 0).OrderByDescending(h => h.Height).Select(h => h.TxHash.ToLowerInvariant()).Distinct().ToList();
             var confirmedAt = history.Where(h => h.Height > 0).GroupBy(h => h.TxHash.ToLowerInvariant()).ToDictionary(g => g.Key, g => g.First().Height);
-            if (confirmed.Count > MaxConfirmedHistoryScan) return (OutpointSpendVerdict.Inconclusive, $"{confirmed.Count} confirmed transactions on the address");
+            var searchable = confirmed.Take(MaxConfirmedHistoryScan).ToList();
+            var searchCut = false; // a spend was looked for while older history was left unread
 
             foreach (var o in missing.Where(o => !mempoolSpent.Contains(o)))
             {
@@ -1000,7 +1050,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (n >= creator.Outputs.Count || creator.Outputs[(int)n].ScriptPubKey != depositScript) continue;
 
                 // The confirmed transaction that spends it, validly signed over that output.
-                foreach (var candidateId in confirmed.Where(t => t != creatorId && t != excludeTxId))
+                if (confirmed.Count > searchable.Count) searchCut = true;
+                foreach (var candidateId in searchable.Where(t => t != creatorId && t != excludeTxId))
                 {
                     var spender = await Tx(candidateId);
                     if (spender == null) return (OutpointSpendVerdict.Inconclusive, $"history tx {candidateId} unavailable");
@@ -1019,18 +1070,26 @@ namespace VerifiedXCore.Bitcoin.Services
                     // From the recording height the validators attest Bitcoin's headers: the spend's confirmation is then
                     // proven against the attested header of its block, which no server (nor anything between this node and
                     // the servers, whose certificates are not pinned) can forge. A block not attested yet: ask again later.
-                    if (VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(Globals.LastBlock?.Height ?? 0))
-                    {
-                        var proof = await client.GetBlockchainTransactionGetMerkle(candidateId, confirmedAt[candidateId]);
-                        var header = proof?.Merkle == null ? null : VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.HeaderAt(proof.Height);
-                        if (header == null)
-                            return (OutpointSpendVerdict.Inconclusive, $"the block of {candidateId} is not attested yet");
-                        if (!string.Equals(VerifiedXCore.Bitcoin.Attestation.BtcMerkle.RootFromBranch(candidateId, proof.Pos, proof.Merkle), header.MerkleRoot, StringComparison.OrdinalIgnoreCase))
-                            continue;
-                    }
+                    if (!VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(Globals.LastBlock?.Height ?? 0))
+                        return (OutpointSpendVerdict.Inconclusive, "no attested Bitcoin headers before the attestation's recording height");
+                    var proof = await client.GetBlockchainTransactionGetMerkle(candidateId, confirmedAt[candidateId]);
+                    // The attested header of its block; or, for a block below the attested checkpoint (a spend from before the
+                    // attestation began), its header linked by hashes up to the attested checkpoint header.
+                    var header = proof?.Merkle == null ? null
+                        : VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.HeaderAt(proof.Height) ?? await HeaderBelowCheckpoint(client, proof.Height);
+                    if (header == null)
+                        return (OutpointSpendVerdict.Inconclusive, $"the block of {candidateId} is not attested yet");
+                    if (!string.Equals(VerifiedXCore.Bitcoin.Attestation.BtcMerkle.RootFromBranch(candidateId, proof.Pos, proof.Merkle), header.MerkleRoot, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    // Buried: a shallow Bitcoin reorg could still undo it and bring the signed transaction back.
+                    var attestedTip = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.GetMeta()?.TipHeight ?? 0;
+                    if (attestedTip - proof.Height + 1 < MinAttestedDepth)
+                        return (OutpointSpendVerdict.Inconclusive, $"{candidateId} is {Math.Max(0, attestedTip - proof.Height + 1)} attested blocks deep, under {MinAttestedDepth}");
                     return (OutpointSpendVerdict.SpentByConfirmed, $"{o} spent by confirmed {candidateId}");
                 }
             }
+            if (searchCut)
+                return (OutpointSpendVerdict.Inconclusive, $"no spend among the newest {MaxConfirmedHistoryScan} of {confirmed.Count} confirmed transactions");
             return (OutpointSpendVerdict.NotSpentByConfirmed, $"{missing.Count}/{ops.Count} missing, no confirmed spend shown");
         }
 
