@@ -83,7 +83,7 @@ namespace VerifiedXCore.Utilities
         /// hold every protected place and keep out another owner's.
         /// </summary>
         private static HashSet<string> ProtectedEntries(List<Transaction> pooled) =>
-            pooled.Where(IsDeadlineBound)
+            pooled.Where(x => x.Hash != null && IsDeadlineBound(x))
                 .GroupBy(x => x.FromAddress ?? "")
                 .SelectMany(g => g.OrderBy(x => x.Hash != null && ArrivedAtUtc.TryGetValue(x.Hash, out var at) ? at : DateTime.MinValue)
                     .ThenBy(x => x.Timestamp)

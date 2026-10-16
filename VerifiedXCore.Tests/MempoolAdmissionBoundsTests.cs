@@ -441,6 +441,8 @@ namespace VerifiedXCore.Tests
             Assert.True(MempoolEvictionUtility.IsDeadlineBound(Reserve("Recover()")));
             Assert.True(MempoolEvictionUtility.IsDeadlineBound(new Transaction { TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_CANCEL }));
             Assert.True(MempoolEvictionUtility.IsDeadlineBound(new Transaction { TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_VOTE }));
+            foreach (var attestation in Enum.GetValues<TransactionType>().Where(VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType))
+                Assert.True(MempoolEvictionUtility.IsDeadlineBound(new Transaction { TransactionType = attestation }));
             Assert.False(MempoolEvictionUtility.IsDeadlineBound(Reserve("Register()")));
             Assert.False(MempoolEvictionUtility.IsDeadlineBound(new Transaction { TransactionType = TransactionType.RESERVE, Data = "[\"not an object\"]" }));
             Assert.False(MempoolEvictionUtility.IsDeadlineBound(Send(1M)));
