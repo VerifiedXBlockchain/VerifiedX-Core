@@ -35,10 +35,12 @@ namespace VerifiedXCore.Models
         public int SchemaVersion { get; set; } = CurrentSchemaVersion;
 
         /// <remarks>
-        /// 2: a slot taken by an older build may hold the withdrawal store copied while one of its rebuilds ran (rows put
-        /// back open before the rebuild closed them); this build never takes a slot then, and retakes every older one.
+        /// 2 (two branches, each on its own): a slot taken by an older build may hold the withdrawal store copied while one
+        /// of its rebuilds ran (rows put back open before the rebuild closed them), and slots from before the anchor check on
+        /// every cycle could have been re-anchored to a block they do not hold the state of (a dead branch diffed forward after
+        /// a fast rollback). 3: the build with both, so a slot written by a build with only one of them is retaken too.
         /// </remarks>
-        public const int CurrentSchemaVersion = 2;
+        public const int CurrentSchemaVersion = 3;
         public const int SlotCount = 3;
 
         /// <summary>Wave 5 deep anchors: dedicated slots refreshed on coarse cadences (~H-100 and

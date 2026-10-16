@@ -179,7 +179,11 @@ namespace VerifiedXCore.Services
             return null;
         }
 
-        /// <summary>Marks slots above the given height Invalid (their state includes rolled-back blocks).</summary>
+        /// <summary>
+        /// Marks slots above the given height Invalid (their state includes rolled-back blocks) and drops the deletion
+        /// records above it. Those deletions happened on the discarded blocks; a later diff cycle applying one would remove
+        /// a row that is live on the chain that replaced them. Records at or below the height stay: valid slots diff from them.
+        /// </summary>
         public static void InvalidateAbove(long height)
         {
             var col = SnapshotManifest.GetManifest();
@@ -190,6 +194,30 @@ namespace VerifiedXCore.Services
                 slot.UpdatedUtc = DateTime.UtcNow;
                 col.Upsert(slot);
             }
+            DropDeletionRecordsAbove(height);
+        }
+
+        /// <summary>
+        /// Drops the deletion records above <paramref name="height"/>. Called with the stored tip at startup too: no deletion
+        /// happens above the tip, so any record there is left from a rollback that did not finish dropping it.
+        /// </summary>
+        /// <summary>
+        /// On the first start of a build whose snapshot format is newer than a valid slot's: invalidates every slot (each is
+        /// rebuilt by a full copy anyway) and drops every deletion record. Records written before this build may be left
+        /// from a rollback that never dropped them, and no record is needed once no slot is usable. Later starts find no
+        /// older slot and do nothing.
+        /// </summary>
+        public static void ResetAfterFormatChange()
+        {
+            if (!GetSlots().Any(x => x.Status == SnapshotSlotStatus.Valid && x.SchemaVersion < SnapshotManifest.CurrentSchemaVersion))
+                return;
+            InvalidateAbove(-1);
+            LogUtility.Log("[Snapshot] Slots from an older snapshot format were invalidated and their deletion records dropped; the next cycles rebuild them.", "StateSnapshotService");
+        }
+
+        public static void DropDeletionRecordsAbove(long height)
+        {
+            StateTombstone.GetTombstones()?.DeleteMany(x => x.Height > height);
             TryCheckpoint();
         }
 
@@ -270,7 +298,9 @@ namespace VerifiedXCore.Services
                 var slot = slots.FirstOrDefault(x => !IsUsable(x))
                         ?? slots.OrderBy(x => x.Height).First();
 
-                var fullCopy = !IsUsable(slot) || slot.Height <= 0;
+                // A slot whose anchor block is gone or replaced (a fast rollback across its height) holds a dead branch's
+                // state: a diff from its height would keep that state and re-anchor it to the canonical block. Rebuild it.
+                var fullCopy = !IsUsable(slot) || slot.Height <= 0 || string.IsNullOrEmpty(slot.BlockHash) || !VerifySlotAnchor(slot);
                 var previousHeight = slot.Height;
 
                 MarkSlot(slot, SnapshotSlotStatus.Updating, previousHeight, slot.BlockHash);
@@ -345,7 +375,9 @@ namespace VerifiedXCore.Services
                     col.Upsert(slot);
                 }
 
-                var fullCopy = !IsUsable(slot) || slot.Height <= 0;
+                // A slot whose anchor block is gone or replaced (a fast rollback across its height) holds a dead branch's
+                // state: a diff from its height would keep that state and re-anchor it to the canonical block. Rebuild it.
+                var fullCopy = !IsUsable(slot) || slot.Height <= 0 || string.IsNullOrEmpty(slot.BlockHash) || !VerifySlotAnchor(slot);
                 var previousHeight = slot.Height;
 
                 MarkSlot(slot, SnapshotSlotStatus.Updating, previousHeight, slot.BlockHash);

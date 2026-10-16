@@ -149,5 +149,37 @@ namespace VerifiedXCore.Tests
             }
             finally { a?.Dispose(); b?.Dispose(); }
         }
+
+        [Fact]
+        public async Task ThePerPeerTable_ForgetsAddressesOnceTheyAreServed()
+        {
+            var before = BlockServeLimits.TrackedPeerCount;
+            for (var i = 0; i < 500; i++)
+            {
+                var slot = await BlockServeLimits.TryEnterAsync($"2001:db8::{i:x}", TimeSpan.FromMilliseconds(50));
+                Assert.NotNull(slot);
+                slot!.Dispose();
+            }
+            Assert.Equal(before, BlockServeLimits.TrackedPeerCount);
+        }
+
+        [Fact]
+        public async Task APeerBeingServed_KeepsItsSlotsUntilItsLastRequestEnds()
+        {
+            const string ip = "198.51.100.171";
+            var a = await BlockServeLimits.TryEnterAsync(ip, TimeSpan.FromMilliseconds(50));
+            var b = await BlockServeLimits.TryEnterAsync(ip, TimeSpan.FromMilliseconds(50));
+            Assert.Null(await BlockServeLimits.TryEnterAsync(ip, TimeSpan.FromMilliseconds(50))); // its two slots are taken
+
+            a!.Dispose();
+            var c = await BlockServeLimits.TryEnterAsync(ip, TimeSpan.FromMilliseconds(50)); // the freed slot, same limit
+            Assert.NotNull(c);
+            Assert.Null(await BlockServeLimits.TryEnterAsync(ip, TimeSpan.FromMilliseconds(50)));
+
+            var tracked = BlockServeLimits.TrackedPeerCount;
+            b!.Dispose();
+            c!.Dispose();
+            Assert.Equal(tracked - 1, BlockServeLimits.TrackedPeerCount);
+        }
     }
 }

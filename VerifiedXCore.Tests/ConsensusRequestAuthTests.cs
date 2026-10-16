@@ -86,5 +86,20 @@ namespace VerifiedXCore.Tests
             Assert.Equal(
                 ConsensusMessageFormatter.FormatWinnerVoteV1(5, "v", "w", new[] { "b", "a" }, 7),
                 ConsensusMessageFormatter.FormatWinnerVoteV1(5, "v", "w", new[] { "a", "b" }, 7));
+
+        [Theory]
+        [InlineData("P2PAdjServer.cs")]
+        [InlineData("ConsensusServer.cs")]
+        public void TheHandshakeHubs_KeyReplayOnTheCanonicalSignature(string hub)
+        {
+            var dir = new System.IO.DirectoryInfo(AppContext.BaseDirectory);
+            while (dir != null && !System.IO.File.Exists(System.IO.Path.Combine(dir.FullName, "VerifiedXCore", "P2P", hub)))
+                dir = dir.Parent;
+            Assert.NotNull(dir);
+            var source = System.IO.File.ReadAllText(System.IO.Path.Combine(dir!.FullName, "VerifiedXCore", "P2P", hub));
+
+            Assert.DoesNotContain("Globals.Signatures.TryAdd(signature", source); // raw string: a re-encoding passed
+            Assert.Contains("ConsensusRequestAuth.TryConsume(signature", source);
+        }
     }
 }

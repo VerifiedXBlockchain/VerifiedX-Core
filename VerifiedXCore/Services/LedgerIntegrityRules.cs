@@ -916,6 +916,10 @@ namespace VerifiedXCore.Services
         /// words inside a broken multi-line string (e.g. "do" in a description) must not refuse it. No mainnet or testnet
         /// body uses these, so there is no activation height. Null when the rule passes.
         /// </summary>
+        /// <summary>Replaceable for tests: the node's parse of a contract body.</summary>
+        internal static Func<string, global::Trillium.Syntax.SyntaxTree> ParseContractBody =
+            text => global::Trillium.Syntax.SyntaxTree.Parse(text, preventLoopsAndRecursion: true);
+
         public static string? ContractBodyAllowed(Transaction tx, long height = 0)
         {
             var alsoRefused = height >= Globals.PathAuditRulesHeight ? ProcessBoundBuiltins : Array.Empty<string>();
@@ -924,20 +928,30 @@ namespace VerifiedXCore.Services
                 string text;
                 try { text = System.Text.Encoding.Unicode.GetString(SmartContractUtility.Decompress(Convert.FromBase64String(body))); }
                 catch { continue; } // not a contract body: nothing ever runs it
-                var tree = global::Trillium.Syntax.SyntaxTree.Parse(text, preventLoopsAndRecursion: true); // as the node parses it
-                if (tree.Diagnostics.Length > 0) continue;
-                var pending = new Stack<global::Trillium.Syntax.SyntaxNode>();
-                pending.Push(tree.Root);
-                while (pending.Count > 0)
+                // A parser fault is a refusal, as in NotTimelessBecause: thrown, it left VerifyTX as an exception (which
+                // already made a block carrying it invalid, so validity is unchanged).
+                try
                 {
-                    var node = pending.Pop();
-                    if (node is global::Trillium.Syntax.DoWhileStatementSyntax)
-                        return "Contract code may not use a do-while loop.";
-                    if (node is global::Trillium.Syntax.CallExpressionSyntax call
-                        && (NondeterministicBuiltins.Contains(call.Identifier.Text) || alsoRefused.Contains(call.Identifier.Text)))
-                        return $"Contract code may not call {call.Identifier.Text}().";
-                    foreach (var child in node.GetChildren())
-                        pending.Push(child);
+                    var tree = ParseContractBody(text); // as the node parses it
+                    if (tree.Diagnostics.Length > 0) continue;
+                    var pending = new Stack<global::Trillium.Syntax.SyntaxNode>();
+                    pending.Push(tree.Root);
+                    while (pending.Count > 0)
+                    {
+                        var node = pending.Pop();
+                        if (node is global::Trillium.Syntax.DoWhileStatementSyntax)
+                            return "Contract code may not use a do-while loop.";
+                        if (node is global::Trillium.Syntax.CallExpressionSyntax call
+                            && (NondeterministicBuiltins.Contains(call.Identifier.Text) || alsoRefused.Contains(call.Identifier.Text)))
+                            return $"Contract code may not call {call.Identifier.Text}().";
+                        foreach (var child in node.GetChildren())
+                            pending.Push(child);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Contract body of {tx?.Hash} could not be read: {ex.Message}", "LedgerIntegrityRules.ContractBodyAllowed()");
+                    return "Contract code cannot be read.";
                 }
             }
             return null;

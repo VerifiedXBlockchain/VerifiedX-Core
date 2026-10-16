@@ -708,6 +708,15 @@ namespace VerifiedXCore.Controllers
                 if (vk.Length != 32)
                     return Task.FromResult(Fail("Viewing key must be 32 bytes."));
 
+                // The key must be this address's own: any other produced a wallet that sees nothing and, imported over a
+                // spendable row, replaced its viewing key while the row kept its spend key.
+                if (!PrivateRawTxService.TryKeyMaterial(req.ZfxAddress, vk, out _, out var bindErr))
+                    return Task.FromResult(Fail(bindErr ?? "The viewing key does not belong to this zfx address."));
+
+                var existing = ShieldedWalletService.FindByZfxAddress(req.ZfxAddress);
+                if (existing?.SpendingKey != null && existing.SpendingKey.Length > 0)
+                    return Task.FromResult(Ok(new { Message = "This node already holds the spendable wallet for this address; nothing imported." }));
+
                 var row = new ShieldedWallet
                 {
                     ShieldedAddress = req.ZfxAddress,

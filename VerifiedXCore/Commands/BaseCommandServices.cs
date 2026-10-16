@@ -320,6 +320,12 @@ namespace VerifiedXCore.Commands
                             if (account == null)
                                 break;
 
+                            if (WalletEncryptionService.RefusesUnlock(pwd.ToUnsecureString()))
+                            {
+                                Console.WriteLine("Failed to decrypt wallet. Password was incorrect!");
+                                break;
+                            }
+
                             Globals.EncryptPassword = pwd;
                             await Task.Delay(200);
                             var privKey = account.GetKey;
@@ -1649,7 +1655,11 @@ namespace VerifiedXCore.Commands
                         {
                             Console.WriteLine("Please input your encryption password to create a new address");
                             var password = Console.ReadLine();
-                            if (!string.IsNullOrEmpty(password))
+                            if (!string.IsNullOrEmpty(password) && WalletEncryptionService.RefusesUnlock(password))
+                            {
+                                Console.WriteLine("Password was incorrect. Please attempt again");
+                            }
+                            else if (!string.IsNullOrEmpty(password))
                             {
                                 Globals.EncryptPassword = password.ToSecureString();
                                 Console.WriteLine("Creating new addresses. Please wait...");

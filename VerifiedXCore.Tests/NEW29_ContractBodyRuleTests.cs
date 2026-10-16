@@ -130,6 +130,20 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ABodyTheParserCannotRead_IsRefused_NotThrown()
+        {
+            var prior = LedgerIntegrityRules.ParseContractBody;
+            try
+            {
+                LedgerIntegrityRules.ParseContractBody = _ => throw new InvalidOperationException("parser fault");
+                Assert.Equal("Contract code cannot be read.", LedgerIntegrityRules.ContractBodyAllowed(Tx("Mint()", Plain())));
+            }
+            finally { LedgerIntegrityRules.ParseContractBody = prior; }
+
+            Assert.Null(LedgerIntegrityRules.ContractBodyAllowed(Tx("Mint()", Plain()))); // the real parser reads it
+        }
+
+        [Fact]
         public void OrdinaryBodies_AndDateProc_AreAllowed()
         {
             Assert.Null(LedgerIntegrityRules.ContractBodyAllowed(Tx("Mint()", Plain())));

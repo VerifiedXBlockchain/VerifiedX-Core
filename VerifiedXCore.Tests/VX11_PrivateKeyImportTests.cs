@@ -94,6 +94,43 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task A0xPrefixedKey_FindsTheSameLegacyAddress_AndCanForceIt()
+        {
+            var legacy = KeyParsing.LegacyAddressIfDifferent(HighKey);
+            Assert.NotNull(legacy);
+            Assert.Equal(legacy, KeyParsing.LegacyAddressIfDifferent("0x" + HighKey));
+            Assert.Equal(legacy, KeyParsing.LegacyAddressIfDifferent("0X" + HighKey));
+
+            var forced = await AccountData.RestoreAccount("0x" + HighKey, skipSave: true, legacy: true);
+            Assert.Equal(legacy, forced.Address);
+            Assert.True(KeyParsing.TryParseImportedKey("0x" + HighKey, false, a => a == legacy, out _, out var usedLegacy, out _));
+            Assert.True(usedLegacy);
+        }
+
+        [Fact]
+        public void A0xPrefixedLowDigitKey_StillHasNoSeparateLegacyAddress_AndJunkIsStillRefused()
+        {
+            Assert.Null(KeyParsing.LegacyAddressIfDifferent("0x" + LowKey));
+            Assert.Null(KeyParsing.LegacyAddressIfDifferent("0x"));
+            Assert.Null(KeyParsing.LegacyAddressIfDifferent("0xzz"));
+        }
+
+        [Fact]
+        public void AReserveRestore_FindsAFundedLegacyReserveAddress()
+        {
+            var legacyScalar = KeyParsing.ParseLegacy(HighKey);
+            var legacyReserve = ReserveAccount.ReserveAddressOf(legacyScalar);
+            bool HasHistory(string address) => address == legacyReserve; // only the legacy RESERVE address has history
+
+            Assert.True(KeyParsing.TryParseImportedKey(HighKey, false, HasHistory, out _, out var usedLegacy, out _, ReserveAccount.ReserveAddressOf));
+            Assert.True(usedLegacy);
+
+            // Probed at the ordinary address (as before), the funded reserve was missed.
+            Assert.True(KeyParsing.TryParseImportedKey(HighKey, false, HasHistory, out _, out var viaOrdinary, out _));
+            Assert.False(viaOrdinary);
+        }
+
+        [Fact]
         public async Task VX11_ExplicitLegacyFlag_ForcesTheLegacyAddress()
         {
             var forced = await AccountData.RestoreAccount(HighKey, skipSave: true, legacy: true);

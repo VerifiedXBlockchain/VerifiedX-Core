@@ -1226,7 +1226,9 @@ namespace VerifiedXCore.Nodes
                 // Strict OR (not the StopAllTimers && !IsChainSynced idiom) because casting must
                 // pause during a mid-life resync even if IsChainSynced was true earlier. In-loop
                 // placement means fork recovery setting IsResyncing pauses casting automatically.
-                if (Globals.StopAllTimers || !Globals.IsChainSynced || Globals.IsResyncing)
+                // From the proof-rules height, a caster without its PLONK verifier would refuse every block with a private
+                // transaction, so it does not cast until the verifier is loaded.
+                if (Globals.StopAllTimers || !Globals.IsChainSynced || Globals.IsResyncing || !Globals.ProofVerifierReady)
                 {
                     await Task.Delay(2000);
                     continue;
@@ -2398,7 +2400,10 @@ namespace VerifiedXCore.Nodes
         /// FIX (Issue 3): Cross-validates downloaded blocks against multiple peers to avoid
         /// accepting a bad block from a single malicious/forked peer.
         /// </summary>
-        private static async Task SyncHeightWithPeersAsync()
+        /// <param name="approveCertifiedAt">During this caster's fork recovery, the height it rolled back: the block fetched
+        /// there is checked for a valid committee certificate and, with one, becomes the approved hash before it is validated
+        /// (as for a fork correction), so it is adopted rather than left pending without an approval.</param>
+        private static async Task SyncHeightWithPeersAsync(long? approveCertifiedAt = null)
         {
             try
             {
@@ -2515,6 +2520,8 @@ namespace VerifiedXCore.Nodes
                                             }
                                         }
 
+                                        if (approveCertifiedAt == block.Height)
+                                            ForkRecoveryUtility.ApproveIfCertified(block);
                                         var result = await BlockValidatorService.ValidateBlock(block, true, false, false, true, source: $"HeightSync:{bestPeerIP}");
                                         if (result)
                                         {
@@ -4697,6 +4704,7 @@ namespace VerifiedXCore.Nodes
                 var rollbackResult = await BlockRollbackUtility.RollbackBlocksFast(1);
                 if (rollbackResult)
                 {
+                    ForkRecoveryUtility.DropApprovalOfRolledBack(stuckHeight, preRecoveryHash);
                     CasterLogUtility.Log(
                         $"FORK-RECOVERY: Rollback succeeded. New lastBlock height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
                         "FORK-RECOVERY");
@@ -4708,7 +4716,7 @@ namespace VerifiedXCore.Nodes
 
                 // Step 3: Sync height with peers and download the correct block
                 CasterLogUtility.Log($"FORK-RECOVERY: Syncing height with peers...", "FORK-RECOVERY");
-                await SyncHeightWithPeersAsync();
+                await SyncHeightWithPeersAsync(approveCertifiedAt: stuckHeight);
 
                 CasterLogUtility.Log($"FORK-RECOVERY: Downloading blocks from peers...", "FORK-RECOVERY");
                 try { await BlockDownloadService.GetAllBlocks(); } catch { }

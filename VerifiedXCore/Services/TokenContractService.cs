@@ -47,7 +47,7 @@ namespace VerifiedXCore.Services
                     Nonce = AccountStateTrei.GetNextNonce(fromAddress),
                     TransactionType = TransactionType.FTKN_TX,
                     Data = txData,
-                    UnlockTime = rAccount != null ? TimeUtil.GetReserveTime(unlockTime) : null
+                    UnlockTime = rAccount != null ? TimeUtil.GetReserveSendTime(unlockTime) : null
                 };
 
                 tokenTx.Fee = FeeCalcService.CalculateTXFee(tokenTx);
@@ -256,7 +256,7 @@ namespace VerifiedXCore.Services
                     Nonce = AccountStateTrei.GetNextNonce(fromAddress),
                     TransactionType = TransactionType.FTKN_BURN,
                     Data = txData,
-                    UnlockTime = rAccount != null ? TimeUtil.GetReserveTime(unlockTime) : null
+                    UnlockTime = rAccount != null ? TimeUtil.GetReserveSendTime(unlockTime) : null
                 };
 
                 tokenTx.Fee = FeeCalcService.CalculateTXFee(tokenTx);
@@ -779,7 +779,7 @@ namespace VerifiedXCore.Services
                     Nonce = AccountStateTrei.GetNextNonce(fromAddress),
                     TransactionType = TransactionType.FTKN_TX,
                     Data = txData,
-                    UnlockTime = rAccount != null ? TimeUtil.GetReserveTime(unlockTime) : null
+                    UnlockTime = rAccount != null ? TimeUtil.GetReserveSendTime(unlockTime) : null
                 };
 
                 tokenTx.Fee = FeeCalcService.CalculateTXFee(tokenTx);

@@ -228,5 +228,29 @@ namespace VerifiedXCore.Tests
             Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash(open.Hash, vault.Uid));
             Assert.NotNull(VBTCWithdrawalRequest.GetByTransactionHash(paid.Hash, vault.Uid));
         }
+
+        [Fact]
+        public void ABlockThatAppliedTheForgedVfxBurn_IsNotUndoneOneTransactionAtATime()
+        {
+            var prior = new System.Collections.Generic.Dictionary<string, decimal>(Globals.ForgedVfxBurns);
+            try
+            {
+                Globals.ForgedVfxBurns.Clear();
+                Globals.ForgedVfxBurns["RBurnedAddress"] = 100M;
+                VerifiedXCore.Models.WorldTrei.GetWorldTrei().DeleteAll();
+                VerifiedXCore.Models.WorldTrei.GetWorldTrei().Insert(new VerifiedXCore.Models.WorldTrei { StateRoot = "r", ForgedVfxBurnAppliedHeight = 500 });
+
+                Assert.Contains("forged-VFX burn", BlockRollbackUtility.WhyNotIncremental(new[] { PlainBlock(500) }, 499) ?? "");
+                Assert.DoesNotContain("forged-VFX burn", BlockRollbackUtility.WhyNotIncremental(new[] { PlainBlock(503) }, 502) ?? ""); // above the burn
+
+                Globals.ForgedVfxBurns.Clear(); // testnet: nothing listed
+                Assert.DoesNotContain("forged-VFX burn", BlockRollbackUtility.WhyNotIncremental(new[] { PlainBlock(500) }, 499) ?? "");
+            }
+            finally
+            {
+                Globals.ForgedVfxBurns.Clear();
+                foreach (var kv in prior) Globals.ForgedVfxBurns[kv.Key] = kv.Value;
+            }
+        }
     }
 }

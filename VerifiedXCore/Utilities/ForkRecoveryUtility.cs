@@ -402,7 +402,9 @@ namespace VerifiedXCore.Utilities
         /// fast-rollback path escalates internally to snapshot restore for non-trivial TX
         /// content. NEVER triggers a genesis rebuild (owner invariant).
         /// </summary>
-        public static async Task<bool> ReorgToBranchAsync(long divergenceHeight, string expectedHash, string sourceIP, string caller = "ForkChoice")
+        /// <param name="knownBlock">The block at the divergence height when the caller already holds it (a pushed fork
+        /// correction); otherwise it is fetched from <paramref name="sourceIP"/>.</param>
+        public static async Task<bool> ReorgToBranchAsync(long divergenceHeight, string expectedHash, string sourceIP, string caller = "ForkChoice", Models.Block? knownBlock = null)
         {
             var myHeight = Globals.LastBlock.Height;
             var depth = (int)(myHeight - divergenceHeight + 1);
@@ -428,6 +430,17 @@ namespace VerifiedXCore.Utilities
                     $"{caller}.Reorg");
                 ConsoleWriterService.Output($"[{caller}] REORG: rolling back {depth} block(s), adopting winning branch…");
 
+                if (knownBlock == null && RecoverySourcePolicy.IsActive)
+                    await RecoverySourcePolicy.EnsureSourcesConnectedAsync();
+                var prefetched = knownBlock ?? await TryFetchBeforeRollbackAsync(sourceIP, divergenceHeight);
+                var refusal = ReplacementRefusal(prefetched, divergenceHeight, expectedHash);
+                if (refusal != null)
+                {
+                    LogUtility.Log($"[{caller}] REORG-REFUSED before rollback: {refusal}", $"{caller}.Reorg");
+                    _consecutiveRecoveryFailures++;
+                    return false;
+                }
+
                 var wasResyncing = Globals.IsResyncing;
                 Globals.IsResyncing = true;
                 try
@@ -450,11 +463,12 @@ namespace VerifiedXCore.Utilities
                         if (RecoverySourcePolicy.IsActive)
                             await RecoverySourcePolicy.EnsureSourcesConnectedAsync();
 
-                        var winningBlock = await FetchCommittedBlockAsync(sourceIP, divergenceHeight);
+                        var winningBlock = prefetched ?? await FetchCommittedBlockAsync(sourceIP, divergenceHeight);
 
                         // Full consensus validation — header, proof, signature, every TX — same as a live block.
                         if (winningBlock != null && winningBlock.Hash == expectedHash && winningBlock.Height == divergenceHeight)
                         {
+                            ApproveIfCertified(winningBlock);
                             await BlockValidatorService.ValidateBlock(winningBlock, false, false, false);
                         }
 
@@ -547,6 +561,17 @@ namespace VerifiedXCore.Utilities
                     $"{caller}.DeepReorg");
                 ConsoleWriterService.Output($"[{caller}] DEEP-REORG: fork is {depth} blocks deep — restoring snapshot below height {divergenceHeight} and resyncing from the majority…");
 
+                if (RecoverySourcePolicy.IsActive)
+                    await RecoverySourcePolicy.EnsureSourcesConnectedAsync();
+                var prefetched = await TryFetchBeforeRollbackAsync(sourceIP, divergenceHeight);
+                var refusal = ReplacementRefusal(prefetched, divergenceHeight, expectedHash);
+                if (refusal != null)
+                {
+                    LogUtility.Log($"[{caller}] DEEP-REORG-REFUSED before the restore: {refusal}", $"{caller}.DeepReorg");
+                    _consecutiveRecoveryFailures++;
+                    return false;
+                }
+
                 var wasResyncing = Globals.IsResyncing;
                 var wasStopTimers = Globals.StopAllTimers;
                 Globals.IsResyncing = true;
@@ -583,9 +608,12 @@ namespace VerifiedXCore.Utilities
 
                         if (Globals.LastBlock.Height == divergenceHeight - 1)
                         {
-                            var winningBlock = await FetchCommittedBlockAsync(sourceIP, divergenceHeight);
+                            var winningBlock = prefetched ?? await FetchCommittedBlockAsync(sourceIP, divergenceHeight);
                             if (winningBlock != null && winningBlock.Hash == expectedHash && winningBlock.Height == divergenceHeight)
+                            {
+                                ApproveIfCertified(winningBlock);
                                 await BlockValidatorService.ValidateBlock(winningBlock, false, false, false);
+                            }
                         }
 
                         BanService.UnbanAllForForkRecovery();
@@ -644,6 +672,61 @@ namespace VerifiedXCore.Utilities
         /// NOT-yet-upgraded majority peer. The P2P fallback uses the P2P link to that IP when we
         /// hold one, otherwise any connected peer the recovery source policy allows.
         /// </summary>
+        /// <summary>
+        /// Why the reorg must not start, checked before anything is rolled back or restored; null when the replacement is
+        /// in hand and intact. The source must serve the expected block (its height and hash): a reorg the source cannot back
+        /// with that block is not started, and the recovery tries again on its next attempt. The block must hash to its own
+        /// hash, its transactions must match its header, and each must be intact (ForkCorrectionService.TransactionIntegrityError).
+        /// </summary>
+        internal static string? ReplacementRefusal(Models.Block? replacement, long height, string expectedHash)
+        {
+            if (replacement == null)
+                return $"the block at {height} could not be fetched from the source.";
+            if (replacement.Height != height || replacement.Hash != expectedHash)
+                return $"the source served another block than the expected one at {height}.";
+            if (replacement.GetBlockHash() != replacement.Hash)
+                return $"the block at {height} does not hash to its hash.";
+            if (replacement.Height > 0 && !SignatureService.VerifySignature(replacement.Validator, replacement.Hash, replacement.ValidatorSignature))
+                return $"the block at {height} does not carry its producer's signature.";
+            if (replacement.Transactions == null || replacement.NumOfTx != replacement.Transactions.Count
+                || replacement.MerkleRootOf() != replacement.MerkleRoot)
+                return $"the block at {height} carries transactions its header does not.";
+            var txError = Services.ForkCorrectionService.TransactionIntegrityError(replacement);
+            return txError == null ? null : $"the block at {height}: {txError}";
+        }
+
+        /// <summary>
+        /// After a caster rolls back its own block at <paramref name="height"/>: an approval that named that block is
+        /// dropped, so the replacement is judged as any block at the live tip without an agreement (it needs a valid
+        /// certificate) instead of being refused against the block just removed. An approval of another hash stays.
+        /// </summary>
+        internal static void DropApprovalOfRolledBack(long height, string? rolledBackHash)
+        {
+            if (!string.IsNullOrEmpty(rolledBackHash)
+                && Globals.CasterApprovedBlockHashDict.TryGetValue(height, out var approved) && approved == rolledBackHash)
+                Globals.CasterApprovedBlockHashDict.TryRemove(height, out _);
+        }
+
+        private static async Task<Models.Block?> TryFetchBeforeRollbackAsync(string sourceIP, long height)
+        {
+            try { return await FetchCommittedBlockAsync(sourceIP, height); }
+            catch (Exception ex)
+            {
+                LogUtility.Log($"[ForkRecovery] Could not fetch the block at {height} from {sourceIP} before rolling back: {ex.Message}", "ForkRecoveryUtility");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// A certified replacement is the committee's approval for its height, as for a fork correction: without this a
+        /// caster refused it against the approval it still held for the block the reorg replaced.
+        /// </summary>
+        internal static void ApproveIfCertified(Models.Block replacement)
+        {
+            if (Services.ForkCorrectionService.HasValidCertificate(replacement))
+                Services.ForkCorrectionService.ApproveCertified(replacement);
+        }
+
         public static async Task<Models.Block?> FetchCommittedBlockAsync(string ip, long height)
         {
             try

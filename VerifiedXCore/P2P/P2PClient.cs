@@ -88,8 +88,12 @@ namespace VerifiedXCore.P2P
         #region Get Available HubConnections for Peers
         public static async Task RemoveNode(NodeInfo node)
         {
-            if(Globals.AdjudicateAccount == null && Globals.Nodes.TryRemove(node.NodeIP, out _) && node.Connection != null)
-                await node.Connection.DisposeAsync();            
+            if (Globals.AdjudicateAccount == null && Globals.Nodes.TryRemove(node.NodeIP, out _))
+            {
+                RetireReport(node.NodeIP); // a peer that is gone no longer confirms this node's address
+                if (node.Connection != null)
+                    await node.Connection.DisposeAsync();
+            }
         }
 
         #endregion
@@ -184,8 +188,23 @@ namespace VerifiedXCore.P2P
                 set.TryAdd(who, 0);
                 _reporterVote[who] = ip;
                 Globals.ReportedIPs.AddOrUpdate(ip, set.Count, (_, existing) => Math.Max(existing, set.Count));
+                TryAutoUpdateReportedIP(); // under the lock: a choice made from an older count cannot be published over a newer one
             }
-            TryAutoUpdateReportedIP();
+        }
+
+        /// <summary>Withdraws a peer's report of this node's address (the peer disconnected) and re-evaluates the address.</summary>
+        public static void RetireReport(string? reporter)
+        {
+            if (string.IsNullOrEmpty(reporter))
+                return;
+            var who = System.Net.IPAddress.TryParse(reporter.Trim(), out var reporterIp) ? VerifiedXCore.Utilities.RemoteIp.Text(reporterIp)! : reporter;
+            lock (_reportedIpLock)
+            {
+                if (!_reporterVote.TryGetValue(who, out var previous))
+                    return;
+                WithdrawReport(previous, who);
+                TryAutoUpdateReportedIP();
+            }
         }
 
         private static void WithdrawReport(string ip, string reporter)
@@ -213,28 +232,46 @@ namespace VerifiedXCore.P2P
         public static IEnumerable<string> OwnAddressesToSkip() =>
             string.IsNullOrWhiteSpace(Globals.ReportedIP) ? Array.Empty<string>() : new[] { Globals.ReportedIP };
 
+        /// <summary>
+        /// Sets <see cref="Globals.ReportedIP"/> from peers' reports unless it was configured. Re-evaluated on every report:
+        /// a candidate with more confirming peers replaces the current address (a tie keeps it), and an address whose
+        /// confirmations fall below two is dropped, so the first two peers to agree cannot fix it for the process lifetime.
+        /// </summary>
         public static void TryAutoUpdateReportedIP()
         {
-            // Don't overwrite manually configured IP
+            lock (_reportedIpLock)
+                AutoUpdateReportedIP();
+        }
+
+        private static void AutoUpdateReportedIP()
+        {
             if (Globals.ReportedIPManuallySet)
                 return;
 
-            // Already set via auto-discovery
-            if (!string.IsNullOrEmpty(Globals.ReportedIP))
-                return;
+            var current = Globals.ReportedIP;
+            var currentVotes = !string.IsNullOrEmpty(current) && Globals.ReportedIPs.TryGetValue(current, out var votes) ? votes : 0;
 
-            // Find the top non-private IP with at least 2 confirmations
-            var bestIP = Globals.ReportedIPs
+            // The top non-private IP with at least 2 confirmations
+            var best = Globals.ReportedIPs
                 .Where(kv => !IsPrivateIP(kv.Key) && kv.Value >= 2)
                 .OrderByDescending(kv => kv.Value)
-                .Select(kv => kv.Key)
                 .FirstOrDefault();
 
-            if (!string.IsNullOrEmpty(bestIP))
+            if (best.Key == null)
             {
-                Globals.ReportedIP = bestIP;
-                LogUtility.Log($"Auto-discovered IP address: {bestIP}", "P2PClient.TryAutoUpdateReportedIP()");
+                if (!string.IsNullOrEmpty(current) && currentVotes < 2)
+                {
+                    Globals.ReportedIP = "";
+                    LogUtility.Log($"Auto-discovered IP address {current} lost its confirmations; cleared.", "P2PClient.TryAutoUpdateReportedIP()");
+                }
+                return;
             }
+
+            if (best.Key == current || (currentVotes >= 2 && best.Value <= currentVotes))
+                return;
+
+            Globals.ReportedIP = best.Key;
+            LogUtility.Log($"Auto-discovered IP address: {best.Key}", "P2PClient.TryAutoUpdateReportedIP()");
         }
 
         public static string MostLikelyIP()

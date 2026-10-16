@@ -66,6 +66,17 @@ namespace VerifiedXCore.Utilities
         public static BigInteger ParseLegacy(string hex) =>
             BigInteger.Parse(hex.Replace(" ", ""), NumberStyles.AllowHexSpecifier);
 
+        /// <summary>
+        /// The digits a pre-fix wallet read: an import is accepted with a "0x" prefix, which those wallets refused, so
+        /// the legacy reading of a prefixed key is that of its digits. Without this the prefix made the legacy parse
+        /// throw, and a 0x import skipped the legacy address (and a forced-legacy import of it failed).
+        /// </summary>
+        public static string LegacyDigits(string? hex)
+        {
+            var s = (hex ?? "").Replace(" ", "").Trim();
+            return s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? s[2..] : s;
+        }
+
         /// <summary>Address derived from a scalar exactly as the wallet derives it.</summary>
         public static string DeriveAddress(BigInteger scalar)
         {
@@ -81,7 +92,7 @@ namespace VerifiedXCore.Utilities
         {
             try
             {
-                var legacy = ParseLegacy(hex);
+                var legacy = ParseLegacy(LegacyDigits(hex));
                 if (!TryParseExternalPrivateKeyHex(hex, out var canonical, out _)) return null;
                 if (Integer.modulo(legacy, CurveOrder) == canonical) return null;
                 if (legacy.IsZero) return null;
@@ -95,23 +106,29 @@ namespace VerifiedXCore.Utilities
         /// scalar by default; the legacy scalar when forced, or when only the legacy address has on-chain
         /// history (the key was previously imported by an older wallet and used there).
         /// </summary>
+        /// <param name="addressOf">The address the key controls, for the footprint check: the ordinary address by default; a
+        /// reserve restore passes its xRBX derivation, since that is where a reserve's history is.</param>
         public static bool TryParseImportedKey(string hex, bool forceLegacy, Func<string, bool> hasFootprint,
-            out BigInteger scalar, out bool usedLegacy, out string error)
+            out BigInteger scalar, out bool usedLegacy, out string error, Func<BigInteger, string>? addressOf = null)
         {
             usedLegacy = false;
             error = "";
             if (forceLegacy)
             {
-                try { scalar = ParseLegacy(hex); usedLegacy = true; return !scalar.IsZero; }
+                try { scalar = ParseLegacy(LegacyDigits(hex)); usedLegacy = true; return !scalar.IsZero; }
                 catch { scalar = BigInteger.Zero; error = "Private key is not valid hexadecimal."; return false; }
             }
             if (!TryParseExternalPrivateKeyHex(hex, out scalar, out error))
                 return false;
-            var legacyAddress = LegacyAddressIfDifferent(hex);
-            if (legacyAddress != null && hasFootprint(legacyAddress) && !hasFootprint(DeriveAddress(scalar)))
+            if (LegacyAddressIfDifferent(hex) != null) // the legacy reading is a different key
             {
-                scalar = ParseLegacy(hex);
-                usedLegacy = true;
+                var derive = addressOf ?? DeriveAddress;
+                var legacyScalar = ParseLegacy(LegacyDigits(hex));
+                if (hasFootprint(derive(legacyScalar)) && !hasFootprint(derive(scalar)))
+                {
+                    scalar = legacyScalar;
+                    usedLegacy = true;
+                }
             }
             return true;
         }

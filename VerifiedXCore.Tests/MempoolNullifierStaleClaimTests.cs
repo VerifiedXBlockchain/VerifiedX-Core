@@ -61,6 +61,31 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ARelease_ThatStartedBeforeATakeOver_DoesNotUndoIt()
+        {
+            MempoolNullifierTracker.StaleClaimGrace = TimeSpan.Zero;
+            var a = Nullifier(4);
+            var key = MempoolNullifierTracker.MakeKey("VFX", a);
+            Assert.True(MempoolNullifierTracker.TryRegisterForMempool("held", "VFX", new[] { a }, out var e1), e1);
+
+            // "held" is being released (it left the mempool) while "taker" takes its stale claim over on another thread.
+            Task<bool>? takeOver = null;
+            MempoolNullifierTracker.ClaimsReadForTests = () =>
+            {
+                MempoolNullifierTracker.ClaimsReadForTests = null;
+                takeOver = Task.Run(() => MempoolNullifierTracker.TryRegisterForMempool("taker", "VFX", new[] { a }, out _));
+                takeOver.Wait(TimeSpan.FromMilliseconds(500)); // without the lock the take-over completes inside the release
+            };
+            try { MempoolNullifierTracker.ReleaseClaimsForTxHash("held"); }
+            finally { MempoolNullifierTracker.ClaimsReadForTests = null; }
+
+            Assert.True(takeOver!.Wait(TimeSpan.FromSeconds(10)) && takeOver.Result);
+            Assert.Equal("taker", Globals.MempoolNullifiers[key]);
+            MempoolNullifierTracker.StaleClaimGrace = TimeSpan.FromSeconds(60);
+            Assert.True(MempoolNullifierTracker.IsClaimedByPendingTx(key)); // its claim time survived, so its grace holds
+        }
+
+        [Fact]
         public void ClaimOfATxStillInMempool_StillBlocksAConflictingSpend()
         {
             MempoolNullifierTracker.StaleClaimGrace = TimeSpan.Zero;
