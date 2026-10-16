@@ -120,7 +120,8 @@ namespace VerifiedXCore.Utilities
                 var pooled = string.IsNullOrEmpty(tx.Hash) ? null : mempool.FindOne(x => x.Hash == tx.Hash);
                 if (pooled != null)
                 {
-                    var same = string.Equals(pooled.Signature, tx.Signature, StringComparison.Ordinal);
+                    var same = string.Equals(pooled.Hash, tx.Hash, StringComparison.Ordinal) // the lookup ignores case
+                        && string.Equals(pooled.Signature, tx.Signature, StringComparison.Ordinal);
                     reason = same ? "" : "A different transaction with this hash is in the mempool.";
                     return same;
                 }

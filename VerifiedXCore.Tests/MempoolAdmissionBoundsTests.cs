@@ -203,6 +203,10 @@ namespace VerifiedXCore.Tests
             forged.Signature = "not-the-signature";
             Assert.False(MempoolEvictionUtility.TryAdmitAndInsert(forged, TransactionData.GetPool()));
 
+            var recased = JsonConvert.DeserializeObject<Transaction>(JsonConvert.SerializeObject(tx))!;
+            recased.Hash = Flip(tx.Hash);
+            Assert.False(MempoolEvictionUtility.TryAdmitAndInsert(recased, TransactionData.GetPool()));
+
             Assert.Equal(tx.Signature, TransactionData.GetPool().FindAll().Single().Signature);
         }
 
@@ -235,6 +239,24 @@ namespace VerifiedXCore.Tests
 
             Assert.Equal(1, PoolCount());
         }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void ARefusedCopyWhoseSignatureOrHashDiffersOnlyInCase_RemovesNothing(bool signature)
+        {
+            var tx = Send(1M);
+            Assert.True(MempoolEvictionUtility.TryAdmitAndInsert(tx, TransactionData.GetPool()));
+
+            var recased = JsonConvert.DeserializeObject<Transaction>(JsonConvert.SerializeObject(tx))!;
+            if (signature) recased.Signature = Flip(tx.Signature);
+            else recased.Hash = Flip(tx.Hash);
+            Assert.Equal(0, TransactionData.RemoveRefusedFromPool(TransactionData.GetPool(), recased));
+
+            Assert.Equal(1, PoolCount());
+        }
+
+        private static string Flip(string s) => new string(s.Select(c => char.IsUpper(c) ? char.ToLowerInvariant(c) : char.ToUpperInvariant(c)).ToArray());
 
         [Fact]
         public void ARefusedCopyIdenticalToThePooledTransaction_RemovesIt()

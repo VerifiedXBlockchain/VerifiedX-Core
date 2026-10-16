@@ -509,9 +509,12 @@ namespace VerifiedXCore.Data
             return removed;
         }
 
-        // Field by field: the hash preimage concatenates fields without separators, so two transactions can share it.
+        // Field by field and case-sensitive: the hash preimage concatenates fields without separators, so two transactions
+        // can share it, and the mempool lookup ignores case.
         private static bool SameHashedFields(Transaction a, Transaction b) =>
-            a.Timestamp == b.Timestamp
+            string.Equals(a.Hash, b.Hash, StringComparison.Ordinal)
+            && string.Equals(a.Signature, b.Signature, StringComparison.Ordinal)
+            && a.Timestamp == b.Timestamp
             && string.Equals(a.FromAddress, b.FromAddress, StringComparison.Ordinal)
             && string.Equals(a.ToAddress, b.ToAddress, StringComparison.Ordinal)
             && a.Amount.ToString() == b.Amount.ToString()
