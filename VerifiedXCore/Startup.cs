@@ -129,11 +129,6 @@ namespace VerifiedXCore
             }));
 
             //app.UseElmah();
-            app.UseSwagger();
-            app.UseSwaggerUI(c => {
-                c.SwaggerEndpoint("/swagger/v1/swagger.json", "VerifiedX API v1");
-                c.DisplayRequestDuration();
-            });
 
             // VX-03: refuse cross-origin browser requests and (unless openapi) non-loopback Host headers
             // before anything else runs. See ApiRequestGuard for why this cannot break a working client.
@@ -150,6 +145,13 @@ namespace VerifiedXCore
                     return context.Response.WriteAsync(rejection);
                 }
                 return func.Invoke();
+            });
+
+            // After the guard, so the API description gets the same Host and cross-origin protection as every route.
+            app.UseSwagger();
+            app.UseSwaggerUI(c => {
+                c.SwaggerEndpoint("/swagger/v1/swagger.json", "VerifiedX API v1");
+                c.DisplayRequestDuration();
             });
 
             //if(Globals.TestURL)

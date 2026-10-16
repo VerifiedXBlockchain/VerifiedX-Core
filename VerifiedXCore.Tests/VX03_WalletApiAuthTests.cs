@@ -252,6 +252,27 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task Swagger_GetsTheSameHostAndCrossOriginGuard()
+        {
+            using var server = NewServer();
+            var client = server.CreateClient();
+
+            var rebound = new HttpRequestMessage(HttpMethod.Get, "/swagger/v1/swagger.json");
+            rebound.Headers.Host = "rebind.attacker.example";
+            Assert.Equal(HttpStatusCode.Forbidden, (await client.SendAsync(rebound)).StatusCode);
+
+            var crossSite = new HttpRequestMessage(HttpMethod.Get, "/swagger/v1/swagger.json");
+            crossSite.Headers.Add("Sec-Fetch-Site", "cross-site");
+            Assert.Equal(HttpStatusCode.Forbidden, (await client.SendAsync(crossSite)).StatusCode);
+
+            // The operator's own browser (same origin) and non-browser tools still get it.
+            var sameOrigin = new HttpRequestMessage(HttpMethod.Get, "/swagger/v1/swagger.json");
+            sameOrigin.Headers.Add("Sec-Fetch-Site", "same-origin");
+            Assert.NotEqual(HttpStatusCode.Forbidden, (await client.SendAsync(sameOrigin)).StatusCode);
+            Assert.NotEqual(HttpStatusCode.Forbidden, (await client.GetAsync("/swagger/index.html")).StatusCode);
+        }
+
+        [Fact]
         public async Task VX03_Control_SendVfx_WithToken_ReachesController()
         {
             // Authorized caller still reaches the route (it then fails on the unknown account — the
