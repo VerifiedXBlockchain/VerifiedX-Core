@@ -367,7 +367,8 @@ namespace VerifiedXCore
         /// <summary>
         /// From this height a BTC name transfer to a Bitcoin address that already holds a name is skipped at apply.
         /// Validation reads the names as they were before the block, so two transfers to one address in one block both
-        /// passed and left two records on it, and deleting either then removed both. Not active yet.
+        /// passed and left two records on it, and deleting either then removed both. From the same height a BTC name
+        /// delete or transfer acts only on the sender's own record at the address. Not active yet.
         /// </summary>
         public static long BtcNameOneRecordPerAddressHeight = 999_999_999_999;
 

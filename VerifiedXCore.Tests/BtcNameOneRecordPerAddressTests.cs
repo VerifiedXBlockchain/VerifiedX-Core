@@ -42,9 +42,10 @@ namespace VerifiedXCore.Tests
         private static void Name(string name, string btcAddress, string owner) =>
             BitcoinAdnr.GetBitcoinAdnr()!.InsertSafe(new BitcoinAdnr { Name = name, BTCAddress = btcAddress, RBXAddress = owner, TxHash = name, Timestamp = 1 });
 
-        private static Transaction Transfer(string from, string newOwner) => new Transaction
+        private static Transaction Transfer(string from, string newOwner, string sender = "xSender") => new Transaction
         {
             Hash = Guid.NewGuid().ToString("N"),
+            FromAddress = sender,
             ToAddress = newOwner,
             TransactionType = TransactionType.ADNR,
             Data = JsonConvert.SerializeObject(new { Function = "BTCAdnrTransfer()", BTCFromAddress = from, BTCToAddress = Target }),
@@ -58,8 +59,8 @@ namespace VerifiedXCore.Tests
             Name("alice.btc", "bc1qalice", "xAlice");
             Name("bob.btc", "bc1qbob", "xBob");
 
-            await StateData.TransferBTCAdnr(Transfer("bc1qalice", "xCarol"), Height);
-            await StateData.TransferBTCAdnr(Transfer("bc1qbob", "xCarol"), Height);
+            await StateData.TransferBTCAdnr(Transfer("bc1qalice", "xCarol", "xAlice"), Height);
+            await StateData.TransferBTCAdnr(Transfer("bc1qbob", "xCarol", "xBob"), Height);
 
             Assert.Equal(1, RecordsAt(Target));
             Assert.Equal("alice.btc", BitcoinAdnr.GetBitcoinAdnr()!.FindOne(x => x.BTCAddress == Target).Name);
@@ -71,7 +72,7 @@ namespace VerifiedXCore.Tests
         {
             Name("alice.btc", "bc1qalice", "xAlice");
 
-            await StateData.TransferBTCAdnr(Transfer("bc1qalice", "xCarol"), Height);
+            await StateData.TransferBTCAdnr(Transfer("bc1qalice", "xCarol", "xAlice"), Height);
 
             var moved = BitcoinAdnr.GetBitcoinAdnr()!.FindOne(x => x.BTCAddress == Target);
             Assert.NotNull(moved);
@@ -89,6 +90,52 @@ namespace VerifiedXCore.Tests
             await StateData.TransferBTCAdnr(Transfer("bc1qbob", "xCarol"), Height - 1);
 
             Assert.Equal(2, RecordsAt(Target));
+        }
+
+        private static Transaction Delete(string from, string sender) => new Transaction
+        {
+            Hash = Guid.NewGuid().ToString("N"),
+            FromAddress = sender,
+            ToAddress = "Adnr_Base",
+            TransactionType = TransactionType.ADNR,
+            Data = JsonConvert.SerializeObject(new { Function = "BTCAdnrDelete()", BTCFromAddress = from }),
+        };
+
+        [Fact]
+        public void FromTheHeight_ADeleteRemovesOnlyTheSendersRecordAtTheAddress()
+        {
+            // Two records on one address, as the older apply could leave.
+            Name("alice.btc", Target, "xAlice");
+            Name("mallory.btc", Target, "xMallory");
+
+            StateData.DeleteBTCAdnr(Delete(Target, "xMallory"), Height);
+
+            Assert.Equal(1, RecordsAt(Target));
+            Assert.Equal("xAlice", BitcoinAdnr.GetBitcoinAdnr()!.FindOne(x => x.BTCAddress == Target).RBXAddress);
+        }
+
+        [Fact]
+        public void BeforeTheHeight_ADeleteRemovesEveryRecordAtTheAddress()
+        {
+            Name("alice.btc", Target, "xAlice");
+            Name("mallory.btc", Target, "xMallory");
+
+            StateData.DeleteBTCAdnr(Delete(Target, "xMallory"), Height - 1);
+
+            Assert.Equal(0, RecordsAt(Target));
+        }
+
+        [Fact]
+        public async Task FromTheHeight_ATransferMovesTheSendersOwnRecord()
+        {
+            Name("alice.btc", "bc1qshared", "xAlice");
+            Name("mallory.btc", "bc1qshared", "xMallory");
+
+            await StateData.TransferBTCAdnr(Transfer("bc1qshared", "xMallory2", "xMallory"), Height);
+
+            var moved = BitcoinAdnr.GetBitcoinAdnr()!.FindOne(x => x.BTCAddress == Target);
+            Assert.Equal("mallory.btc", moved.Name);
+            Assert.Equal("xAlice", BitcoinAdnr.GetBitcoinAdnr()!.FindOne(x => x.BTCAddress == "bc1qshared").RBXAddress);
         }
 
         [Theory]

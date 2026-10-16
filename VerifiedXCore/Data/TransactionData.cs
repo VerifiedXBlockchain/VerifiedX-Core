@@ -607,7 +607,7 @@ namespace VerifiedXCore.Data
             queuedMempoolTxList = Globals.NetworkBlockQueue.Values.SelectMany(x => x.Transactions).ToList();
 
             var adnrNameList = new List<string>();
-            var btcNameAddressList = new List<string>();
+            var btcNameAddressList = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // as the name table matches addresses
 
             if(sizedMempoolList.Count() > 0)
             {

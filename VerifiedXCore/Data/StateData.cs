@@ -577,7 +577,7 @@ namespace VerifiedXCore.Data
                                             await TransferBTCAdnr(tx, block.Height); // NEW-12: awaited (ran concurrently with the rest of the block)
                                             break;
                                         case "BTCAdnrDelete()":
-                                            DeleteBTCAdnr(tx);
+                                            DeleteBTCAdnr(tx, block.Height);
                                             break;
                                         default:
                                             break;
@@ -1804,7 +1804,8 @@ namespace VerifiedXCore.Data
         /// </summary>
         /// <remarks>
         /// From <see cref="Globals.BtcNameOneRecordPerAddressHeight"/> a transfer to an address that already holds a name
-        /// (another transfer to it earlier in the block) is left, so an address keeps one record.
+        /// (another transfer to it earlier in the block) is left, so an address keeps one record, and the name moved is the
+        /// sender's own (validation checks the sender holds one there, but an address could hold two records before).
         /// </remarks>
         internal static async Task TransferBTCAdnr(Transaction tx, long height)
         {
@@ -1816,7 +1817,10 @@ namespace VerifiedXCore.Data
                 var BTCFromAddress = (string?)jobj["BTCFromAddress"];
 
                 var adnrs = BitcoinAdnr.GetBitcoinAdnr();
-                var adnr = adnrs?.FindOne(x => x.BTCAddress == BTCFromAddress);
+                var ownOnly = height >= Globals.BtcNameOneRecordPerAddressHeight;
+                var adnr = ownOnly
+                    ? adnrs?.FindOne(x => x.BTCAddress == BTCFromAddress && x.RBXAddress == tx.FromAddress)
+                    : adnrs?.FindOne(x => x.BTCAddress == BTCFromAddress);
                 if (adnr == null)
                 {
                     ErrorLogUtility.LogError($"BTC ADNR transfer {tx.Hash}: no name for {BTCFromAddress} (moved or deleted earlier in the block); nothing applied.", "StateData.TransferBTCAdnr()");
@@ -1835,7 +1839,11 @@ namespace VerifiedXCore.Data
             catch { }
         }
 
-        private static void DeleteBTCAdnr(Transaction tx)
+        /// <summary>
+        /// Deletes a BTC name. From <see cref="Globals.BtcNameOneRecordPerAddressHeight"/> only the sender's own record at the
+        /// address goes; before, every record there did.
+        /// </summary>
+        internal static void DeleteBTCAdnr(Transaction tx, long height)
         {
             try
             {
@@ -1843,7 +1851,10 @@ namespace VerifiedXCore.Data
                 {
                     var jobj = JObject.Parse(tx.Data);
                     var BTCFromAddress = (string?)jobj["BTCFromAddress"];
-                    BitcoinAdnr.DeleteAdnr(BTCFromAddress);
+                    if (height >= Globals.BtcNameOneRecordPerAddressHeight)
+                        BitcoinAdnr.DeleteAdnr(BTCFromAddress, tx.FromAddress);
+                    else
+                        BitcoinAdnr.DeleteAdnr(BTCFromAddress);
                 }
                 
             }

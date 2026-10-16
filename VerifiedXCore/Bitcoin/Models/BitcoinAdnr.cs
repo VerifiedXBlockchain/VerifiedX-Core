@@ -116,6 +116,16 @@ namespace VerifiedXCore.Bitcoin.Models
                 adnr.DeleteManySafe(x => x.BTCAddress == address);
             }
         }
+
+        /// <summary>Deletes only the name <paramref name="owner"/> holds on <paramref name="address"/>.</summary>
+        public static void DeleteAdnr(string address, string owner)
+        {
+            var adnr = GetBitcoinAdnr();
+            if (adnr == null)
+                ErrorLogUtility.LogError("GetAdnr() returned a null value.", "Adnr.GetAdnr()");
+            else
+                adnr.DeleteManySafe(x => x.BTCAddress == address && x.RBXAddress == owner);
+        }
         #endregion
 
         #region BTCCreateAdnrTx(string address, string name, string btcAddress)
