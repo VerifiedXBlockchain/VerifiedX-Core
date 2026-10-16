@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Security;
@@ -204,6 +205,50 @@ namespace VerifiedXCore.Tests
             var r = await server.CreateClient().GetAsync("/api/V1/GetDebugInfo");
 
             Assert.NotEqual(HttpStatusCode.Forbidden, r.StatusCode);
+        }
+
+        [Fact]
+        public async Task Explorer_UnderOpenApi_DoesNotServeThisNodesWalletRows()
+        {
+            var walletOnly = new VerifiedXCore.Models.Transaction { Hash = "wallet-only-tx", FromAddress = "xOwner", ToAddress = "xFriend", Amount = 1M, Height = 5 };
+            VerifiedXCore.Data.TransactionData.GetAll().Insert(walletOnly);
+            try
+            {
+                Globals.OpenAPI = true;
+                using (var open = NewServer())
+                {
+                    var client = open.CreateClient();
+                    Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/explorer/api/tx/wallet-only-tx")).StatusCode);
+                    Assert.DoesNotContain("wallet-only-tx", await (await client.GetAsync("/explorer/api/address/xOwner")).Content.ReadAsStringAsync());
+                }
+
+                // A loopback-only node still shows its operator their own rows.
+                Globals.OpenAPI = false;
+                using var local = NewServer();
+                Assert.Equal(HttpStatusCode.OK, (await local.CreateClient().GetAsync("/explorer/api/tx/wallet-only-tx")).StatusCode);
+            }
+            finally { Globals.OpenAPI = false; }
+        }
+
+        [Fact]
+        public void EveryWalletHostController_CarriesTheActionFilter_OrIsAListedReadOnlyException()
+        {
+            var controllers = typeof(Startup).Assembly.GetTypes()
+                .Where(t => typeof(Microsoft.AspNetCore.Mvc.ControllerBase).IsAssignableFrom(t) && !t.IsAbstract)
+                .Where(t => t.Name != "ValidatorController"); // not served on the wallet host (Startup removes it)
+            foreach (var c in controllers)
+            {
+                var name = c.Name.EndsWith("Controller") ? c.Name[..^"Controller".Length] : c.Name;
+                var filtered = c.GetCustomAttributes(typeof(VerifiedXCore.Controllers.ActionFilterController), true).Length > 0;
+                Assert.True(filtered || VerifiedXCore.Controllers.ActionFilterController.FilterExemptControllers.Contains(name),
+                    $"{c.Name} has no [ActionFilterController] and is not a listed exception.");
+                if (!filtered)
+                {
+                    var writes = c.GetMethods().Where(m => m.GetCustomAttributes(true).Any(a =>
+                        a is Microsoft.AspNetCore.Mvc.HttpPostAttribute or Microsoft.AspNetCore.Mvc.HttpPutAttribute or Microsoft.AspNetCore.Mvc.HttpDeleteAttribute));
+                    Assert.Empty(writes); // an unfiltered controller serves reads only
+                }
+            }
         }
 
         [Fact]
