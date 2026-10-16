@@ -129,6 +129,34 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task ACertifiedCorrectionForTheNextHeight_IsApprovedBeforeItIsStaged()
+        {
+            ForkCorrectionService.HasValidCertificate = _ => true;
+            var prior = new System.Collections.Generic.Dictionary<long, string>(Globals.CasterApprovedBlockHashDict);
+            try
+            {
+                Globals.CasterApprovedBlockHashDict[101] = "stale-101";
+                var next = SignedBlock(101);
+
+                await ForkCorrectionService.HandleForkCorrectionAsync(101, JsonConvert.SerializeObject(next), "1.2.3.4");
+
+                Assert.Equal(next.Hash, Globals.CasterApprovedBlockHashDict[101]);
+                Assert.Empty(_reorgs);
+
+                // Uncertified: staged for normal validation, the approval is left alone.
+                ForkCorrectionService.HasValidCertificate = _ => false;
+                Globals.CasterApprovedBlockHashDict[101] = "stale-101";
+                await ForkCorrectionService.HandleForkCorrectionAsync(101, JsonConvert.SerializeObject(SignedBlock(101)), "1.2.3.4");
+                Assert.Equal("stale-101", Globals.CasterApprovedBlockHashDict[101]);
+            }
+            finally
+            {
+                Globals.CasterApprovedBlockHashDict.Clear();
+                foreach (var kv in prior) Globals.CasterApprovedBlockHashDict[kv.Key] = kv.Value;
+            }
+        }
+
+        [Fact]
         public async Task ACertifiedCorrection_GoesThroughTheReorg_WithTheBlockItCarries()
         {
             ForkCorrectionService.HasValidCertificate = _ => true;

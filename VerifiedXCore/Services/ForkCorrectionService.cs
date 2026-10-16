@@ -118,7 +118,10 @@ namespace VerifiedXCore.Services
                 // Case 2: The correction is for a height we haven't reached yet — just queue it
                 else if (height == myHeight + 1)
                 {
-                    // This is the next expected block — add to download dict for normal processing
+                    // This is the next expected block — add to download dict for normal processing. A certified one is the
+                    // committee's approval for its height, as for a rollback below.
+                    if (HasValidCertificate(correctBlock))
+                        ApproveCertified(correctBlock);
                     BlockStaging.Stage(correctBlock, casterIP); // VX-19: de-duplicated staging
 
                     await BlockValidatorService.ValidateBlocks();
@@ -158,6 +161,17 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
+        /// The certificate is the committee's approval of the block: a hash a caster approved earlier for its height (or
+        /// for the heights above it) would otherwise make validation refuse it.
+        /// </summary>
+        private static void ApproveCertified(Block certified)
+        {
+            Globals.CasterApprovedBlockHashDict[certified.Height] = certified.Hash;
+            foreach (var stale in Globals.CasterApprovedBlockHashDict.Keys.Where(h => h > certified.Height).ToList())
+                Globals.CasterApprovedBlockHashDict.TryRemove(stale, out _);
+        }
+
+        /// <summary>
         /// Rolls back to and adopts the corrected block, only when it carries a valid committee certificate: a block a
         /// single key signed made every recipient roll back. Without one, the fork is left to ForkChoice and recovery.
         /// </summary>
@@ -168,11 +182,7 @@ namespace VerifiedXCore.Services
                 LogUtility.Log($"[ForkCorrection] Not rolling back for the correction from {casterIP} at height {correctBlock.Height}: it carries no valid committee certificate.", "ForkCorrectionService");
                 return;
             }
-            // The certificate is the committee's approval of this block: a hash a caster approved earlier for this height
-            // (or for the heights being reverted) would otherwise refuse it after the rollback.
-            Globals.CasterApprovedBlockHashDict[correctBlock.Height] = correctBlock.Hash;
-            foreach (var stale in Globals.CasterApprovedBlockHashDict.Keys.Where(h => h > correctBlock.Height).ToList())
-                Globals.CasterApprovedBlockHashDict.TryRemove(stale, out _);
+            ApproveCertified(correctBlock);
 
             var adopted = await Reorg(correctBlock.Height, correctBlock.Hash, casterIP, "ForkCorrection", correctBlock);
             LogUtility.Log($"[ForkCorrection] Correction at height {correctBlock.Height} from {casterIP}: {(adopted ? "adopted" : "not adopted")}.", "ForkCorrectionService");
