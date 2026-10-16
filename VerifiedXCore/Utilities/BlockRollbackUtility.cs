@@ -47,6 +47,14 @@ namespace VerifiedXCore.Utilities
                 if (restored)
                     return true;
 
+                if (SnapshotRestoreUtility.StateDestroyedByFailedRestore)
+                {
+                    ErrorLogUtility.LogError(
+                        $"[RollbackBlocks] The snapshot restore to {newHeight} failed after wiping the state. This node stops validating blocks; restart it with the 'rebuildstate' argument.",
+                        "BlockRollbackUtility.RollbackBlocks");
+                    return false;
+                }
+
                 ErrorLogUtility.LogError(
                     $"[RollbackBlocks] No usable snapshot covers rollback target {newHeight} (tip {height}). " +
                     $"Rollback aborted with chain untouched. If this node stays stuck, restart it with the 'rebuildstate' argument.",
@@ -697,9 +705,20 @@ namespace VerifiedXCore.Utilities
                 // rebuilt vBTC ledger diverges. Flag keeps the per-block DB query off the hot path
                 // until reserve activity actually appears in the chain.
                 bool reservePendingPossible = false;
+                long previousHeight = -1;
+                // A rebuild that would lift a failed restore's stop must cover every height: a block missing from the
+                // store leaves state that matches no chain. (Other rebuilds keep their own rule.)
+                var liftsRestoreStop = SnapshotRestoreUtility.StateDestroyedByFailedRestore || StateTreiStatusService.GetStatus()?.RestoreDestroyed == true;
 
                 foreach (var block in blockCollection.Find(LiteDB.Query.All("Height", LiteDB.Query.Ascending)))
                 {
+                    if (liftsRestoreStop && previousHeight >= 0 && block.Height != previousHeight + 1)
+                    {
+                        failCount++;
+                        ErrorLogUtility.LogError($"[ResetTreis] The block store has no block between heights {previousHeight} and {block.Height}; the failed restore's stop holds.", "BlockRollbackUtility.ResetTreis");
+                    }
+                    previousHeight = block.Height;
+
                     try
                     {
                         // UpdateTreis is the comprehensive state commit path — it handles ALL TX types:
@@ -866,6 +885,7 @@ namespace VerifiedXCore.Utilities
                 if (failCount == 0)
                 {
                     StateTreiStatusService.SetSynced(Globals.LastBlock.Height);
+                    SnapshotRestoreUtility.ClearStateDestroyed();
                     Console.WriteLine($"[ResetTreis] Step 5: StateTreiStatus set to SYNCED at height {Globals.LastBlock.Height}.");
                 }
                 else

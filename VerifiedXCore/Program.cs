@@ -520,8 +520,16 @@ namespace VerifiedXCore
                     }
                     else
                     {
-                        Console.WriteLine($"[REVERT] REFUSED: no snapshot slot covers height {revertToHeight.Value} and rebuildstate was not passed.");
-                        Console.WriteLine($"[REVERT] Nothing was deleted. To force a full revert + genesis state replay (can take an hour or more),");
+                        if (SnapshotRestoreUtility.StateDestroyedByFailedRestore)
+                        {
+                            Console.WriteLine($"[REVERT] The snapshot restore to {revertToHeight.Value} failed after wiping the state. This node will not validate blocks.");
+                            Console.WriteLine($"[REVERT] To rebuild it and complete the revert,");
+                        }
+                        else
+                        {
+                            Console.WriteLine($"[REVERT] REFUSED: no snapshot slot covers height {revertToHeight.Value} and rebuildstate was not passed.");
+                            Console.WriteLine($"[REVERT] Nothing was deleted. To force a full revert + genesis state replay (can take an hour or more),");
+                        }
                         Console.WriteLine($"[REVERT] restart with BOTH arguments: revertblock={revertToHeight.Value} rebuildstate");
                     }
                 }

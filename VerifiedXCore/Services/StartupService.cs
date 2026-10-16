@@ -1330,12 +1330,22 @@ namespace VerifiedXCore.Services
                                 // instead of a full genesis replay (~45 min). Crash-recovery case, so
                                 // the target is the current local tip.
                                 var restoreTarget = BlockchainData.GetLastBlock()?.Height ?? Globals.LastBlock.Height;
+                                SnapshotRestoreUtility.RecallStateDestroyed(); // a stop from before the restart holds unless this restore succeeds
                                 var restored = await SnapshotRestoreUtility.TryRestoreAsync(restoreTarget);
                                 if (restored)
                                 {
                                     ConsoleWriterService.Output($"[STARTUP] Snapshot restore complete at height {restoreTarget}. Proceeding with block downloads.");
                                     LogUtility.Log(
                                         $"[STARTUP] Snapshot restore succeeded at height {restoreTarget}.",
+                                        "StartupService.DownloadBlocksOnStart");
+                                }
+                                else if (SnapshotRestoreUtility.StateDestroyedByFailedRestore)
+                                {
+                                    ConsoleWriterService.Output(
+                                        $"[STARTUP] ERROR: The snapshot restore failed after wiping the state. This node will not validate blocks. " +
+                                        $"Restart it with the 'rebuildstate' argument.");
+                                    ErrorLogUtility.LogError(
+                                        $"[STARTUP] Snapshot restore to {restoreTarget} failed after wiping the state; block validation is stopped until a rebuild.",
                                         "StartupService.DownloadBlocksOnStart");
                                 }
                                 else
