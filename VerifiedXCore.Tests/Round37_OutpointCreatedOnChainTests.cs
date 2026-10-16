@@ -384,6 +384,47 @@ namespace VerifiedXCore.Tests
             Assert.Empty(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(uid, wrh));
         }
 
+        /// <summary>
+        /// An unreleased record from before exact spellings holds every signing for the payment, the transaction it
+        /// names included: a retry of that transaction would get its missing input shares while one signed then under
+        /// another spelling (recorded over) can still pay. Released, the retry is signed.
+        /// </summary>
+        [Fact]
+        public async Task ARecordFromBeforeExactSpellings_WithNoTransactionId_StillHoldsTheSigning()
+        {
+            var uid = Guid.NewGuid().ToString("N") + ":1760000000";
+            const string wrh = "8c1e3a9c7b2d5e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f50617";
+            Assert.True(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.Record(uid, wrh, "", new[] { Coin1 }));
+            var records = VerifiedXCore.Data.DbContext.DB_vBTC.GetCollection<VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence>(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.CollectionName);
+            var old = Assert.Single(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(uid, wrh));
+            old.FirstSignedAt = 0;
+            Assert.True(records.Update(old));
+            var (ok, reason) = await VerifiedXCore.Bitcoin.FROST.FrostStartup.CheckPriorSignedTransactionAsync(uid, wrh, Convert.ToHexString(RandomUtils.GetBytes(32)).ToLowerInvariant());
+            Assert.False(ok);
+            Assert.Contains("operator", reason);
+        }
+
+        [Fact]
+        public async Task ARecordFromBeforeExactSpellings_HoldsEvenARetryOfItsOwnTransaction()
+        {
+            var uid = Guid.NewGuid().ToString("N") + ":1760000000";
+            const string wrh = "7b1e3a9c7b2d5e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f50617";
+            var tx = Convert.ToHexString(RandomUtils.GetBytes(32)).ToLowerInvariant();
+            Assert.True(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.Record(uid, wrh, tx, new[] { Coin1 }));
+            var records = VerifiedXCore.Data.DbContext.DB_vBTC.GetCollection<VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence>(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.CollectionName);
+            var old = Assert.Single(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(uid, wrh));
+            old.FirstSignedAt = 0;   // written by an older binary
+            Assert.True(records.Update(old));
+
+            var (ok, reason) = await VerifiedXCore.Bitcoin.FROST.FrostStartup.CheckPriorSignedTransactionAsync(uid, wrh, tx);
+            Assert.False(ok);
+            Assert.Contains("operator", reason);
+
+            Assert.Equal(1, VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ReleaseByOperator(uid, wrh));
+            (ok, reason) = await VerifiedXCore.Bitcoin.FROST.FrostStartup.CheckPriorSignedTransactionAsync(uid, wrh, tx);
+            Assert.True(ok, reason);
+        }
+
         [Theory]
         [InlineData(true)]
         [InlineData(false)]

@@ -3705,19 +3705,22 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                 // Every record for this payment, under whatever spelling of its reference it was signed under (several
                 // can share one stored reference). A new transaction is signed only once every other one can never confirm.
-                var records = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(scUID, withdrawalRequestHash)
-                    .Where(e => !string.IsNullOrEmpty(e.BtcTxId)).ToList();
+                var allRecords = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(scUID, withdrawalRequestHash);
+                var records = allRecords.Where(e => !string.IsNullOrEmpty(e.BtcTxId)).ToList();
                 bool IsRequested(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence e) =>
                     string.Equals(e.BtcTxId, (requestedTxId ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
                 var dead = new List<(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence Record, string Detail)>();
+                // A record from before exact spellings, not released, may be the only trace of two transactions (one signed
+                // under another spelling was recorded over): no share is given for this payment at all, not even for the
+                // transaction it names (its missing inputs would complete it while the other can still pay).
                 var exactSince = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ExactSpellingSince();
+                if (allRecords.FirstOrDefault(e => e.NeedsOperatorRelease(exactSince)) is { } unreleased)
+                    return (false, $"This validator signed {(string.IsNullOrEmpty(unreleased.BtcTxId) ? "a transaction" : $"transaction {unreleased.BtcTxId}")} for this withdrawal before exact spellings; a transaction signed then under another spelling may have been recorded over it. " +
+                        "An operator confirms none can pay and releases it (POST /frost/evidence/release/{scUID}?withdrawal=...&confirm=true on this node).");
                 foreach (var evidence in records.Where(e => !IsRequested(e)))
                 {
                     var (ok, reason, detail) = await CheckPriorSignedRecordAsync(scUID, evidence);
                     if (!ok) return (false, reason);
-                    if (evidence.NeedsOperatorRelease(exactSince))
-                        return (false, $"Transaction {evidence.BtcTxId} signed for this withdrawal before exact spellings can never confirm, but a transaction signed then under another spelling may have been recorded over it. " +
-                            "An operator confirms none can pay and releases it (POST /frost/evidence/release/{scUID}?withdrawal=...&confirm=true on this node).");
                     dead.Add((evidence, detail));
                 }
 

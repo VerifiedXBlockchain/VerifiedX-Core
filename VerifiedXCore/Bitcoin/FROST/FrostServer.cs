@@ -35,12 +35,13 @@ namespace VerifiedXCore.Bitcoin.FROST
                         .ConfigureLogging(loggingBuilder => loggingBuilder.ClearProviders());
                     });
 
+                    // Signing records from here on are under exact spellings only (older ones may hide an overwritten one):
+                    // stamped before the server takes a request.
+                    VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.EnsureExactSpellingSince();
                     _ = builder.RunConsoleAsync();
-                    
+
                     // Pins live in memory; rebuild them from the durable signed evidence so a restart cannot
                     // let a new withdrawal spend the coins of a signed transaction that is still out there.
-                    // Signing records from here on are under exact spellings only (older ones may hide an overwritten one).
-                    VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.EnsureExactSpellingSince();
                     try { FrostStartup.RestorePinsFromEvidence(); }
                     catch (Exception ex) { Console.WriteLine($"[FROST] Pin restore error: {ex.Message}"); }
 
