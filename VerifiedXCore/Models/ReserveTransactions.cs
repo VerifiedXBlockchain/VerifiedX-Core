@@ -78,6 +78,29 @@ namespace VerifiedXCore.Models
         #endregion
 
         #region Get ReserveTransactions transaction
+        /// <summary>Tests only: runs as the row is read for a block's apply (a fault of this node's storage).</summary>
+        internal static Action? TestReadFault;
+
+        /// <summary>
+        /// The row a call-back names, for a block's apply. A fault of this node's storage is passed on, not read as "no
+        /// such row": a call-back that found no row was skipped, the block counted as applied, and the row later settled
+        /// to its payee here while peers refunded the sender. The apply catches it and reports the block's apply
+        /// incomplete. A fault in what the data says is read as "no such row", as before. (Validation and the API keep
+        /// GetTransactions, which reads any fault as "no such row" and so refuses.)
+        /// </summary>
+        public static ReserveTransactions? GetTransactionsForApply(string hash)
+        {
+            try
+            {
+                TestReadFault?.Invoke();
+                return GetReserveTransactionsDb()?.Query().Where(x => x.Hash == hash).FirstOrDefault();
+            }
+            catch (Exception ex) when (!StateData.IsNodeLocalFault(ex))
+            {
+                return null;
+            }
+        }
+
         public static ReserveTransactions? GetTransactions(string hash)
         {
             try

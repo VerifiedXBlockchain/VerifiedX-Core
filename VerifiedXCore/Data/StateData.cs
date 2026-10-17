@@ -1222,7 +1222,7 @@ namespace VerifiedXCore.Data
             {
                 if(callBackHash != null)
                 {
-                    var rTX = ReserveTransactions.GetTransactions(callBackHash);
+                    var rTX = ReserveTransactions.GetTransactionsForApply(callBackHash);
                     if (rTX != null)
                     {
                         // HAL-070 Fix: Idempotence guard - skip if already processed
