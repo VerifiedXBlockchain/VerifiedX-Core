@@ -167,6 +167,15 @@ namespace VerifiedXCore.Tests
             var withLookalike = new LedgerIntegrityRules.NftStepState();
             Assert.Null(LedgerIntegrityRules.RegisterNftStepInBlock(lookalike, withLookalike, Globals.PathAuditRulesHeight));
             Assert.Null(LedgerIntegrityRules.RegisterNftStepInBlock(sale, withLookalike, Globals.PathAuditRulesHeight));
+            // Nor does an NFT_SALE carrying a function the chain does not run: it does not crowd the owner's transfer out.
+            var noOpSale = new Transaction
+            {
+                FromAddress = _other.Address, ToAddress = _other.Address, Amount = 0M, Fee = 0.00001M, Nonce = 0, Timestamp = TimeUtil.GetTime(),
+                TransactionType = TransactionType.NFT_SALE, Data = JsonConvert.SerializeObject(new { Function = "Nothing()", ContractUID = Nft }),
+            };
+            var withNoOp = new LedgerIntegrityRules.NftStepState();
+            Assert.Null(LedgerIntegrityRules.RegisterNftStepInBlock(noOpSale, withNoOp, Globals.PathAuditRulesHeight));
+            Assert.Null(LedgerIntegrityRules.RegisterNftStepInBlock(transfer, withNoOp, Globals.PathAuditRulesHeight));
 
             var below = new LedgerIntegrityRules.NftStepState();
             Assert.Null(LedgerIntegrityRules.RegisterNftStepInBlock(transfer, below, Globals.PathAuditRulesHeight - 1));

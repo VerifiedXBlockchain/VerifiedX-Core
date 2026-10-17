@@ -1310,6 +1310,12 @@ namespace VerifiedXCore.Services
             TransactionType.VBTC_V2_CONTRACT_CREATE, TransactionType.TKNZ_WD_ARB, TransactionType.TKNZ_WD_OWNER,
         };
 
+        /// <summary>The sale functions StateData runs for an NFT_SALE (UpdateTreis' sale dispatch); any other function does nothing.</summary>
+        private static readonly HashSet<string> SaleFunctions = new(StringComparer.Ordinal)
+        {
+            "Sale_Start()", "M_Sale_Start()", "Sale_Complete()", "M_Sale_Complete()", "Sale_Cancel()",
+        };
+
         /// <summary>Per-block register of the contracts a block moves (Transfer(), Burn()) and sells (NFT_SALE).</summary>
         public sealed class NftStepState
         {
@@ -1328,7 +1334,10 @@ namespace VerifiedXCore.Services
             if (height < Globals.PathAuditRulesHeight) return null;
             var (ok, _, uid, function, _) = TransactionUtility.GetSCTXFunctionAndUID(tx);
             if (!ok) return null;
+            // A sale, like a move, is one the chain runs: an NFT_SALE carrying another function does nothing, and
+            // registering it let anyone crowd an owner's transfer or burn out of a block.
             var isSale = tx.TransactionType == TransactionType.NFT_SALE;
+            if (isSale && !SaleFunctions.Contains(function)) return null;
             // A move is a Transfer() or Burn() the chain runs: a payment that only carries that text in its Data moves
             // nothing, and registering it let anyone crowd an owner's sale out of a block.
             if (!isSale && (!ContractFunctionTypes.Contains(tx.TransactionType) || (function != "Transfer()" && function != "Burn()"))) return null;
