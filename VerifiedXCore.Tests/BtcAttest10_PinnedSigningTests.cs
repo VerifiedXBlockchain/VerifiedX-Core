@@ -556,6 +556,66 @@ namespace VerifiedXCore.Tests
                 Assert.Empty(await BtcWithdrawalSigner.TickAsync(signer, Tip + 500));
         }
 
+        /// <summary>Electrum servers that answer a transaction's confirmations as given (per host and port); restores everything when disposed.</summary>
+        private sealed class FakeConfirmations : IDisposable
+        {
+            private readonly List<VerifiedXCore.Bitcoin.ElectrumX.ClientSettings>? _priorServers = Globals.ClientSettings;
+            private readonly Func<VerifiedXCore.Bitcoin.ElectrumX.ClientSettings, string, Task<(bool Ok, int Confirms)>> _priorQuery = VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.QueryConfirms;
+
+            public FakeConfirmations(params (string Host, int Port, bool Ok, int Confirms)[] answers)
+            {
+                Globals.ClientSettings = answers.Select(a => new VerifiedXCore.Bitcoin.ElectrumX.ClientSettings { Host = a.Host, Port = a.Port, UseSsl = true }).ToList();
+                VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.QueryConfirms = (server, _) =>
+                {
+                    var a = answers.First(x => x.Host == server.Host && x.Port == server.Port);
+                    return Task.FromResult((a.Ok, a.Confirms));
+                };
+            }
+
+            public void Dispose()
+            {
+                VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.QueryConfirms = _priorQuery;
+                Globals.ClientSettings = _priorServers;
+            }
+        }
+
+        /// <summary>
+        /// C-193: a watched vault's signers skipped the ceremony for a pinned transaction whenever one Electrum server said
+        /// Bitcoin knew it (in a block, or merely in its mempool), and every signer asks the same servers: one false
+        /// answer stopped the payment network-wide. Two distinct hosts must now know it; sending the pinned transaction
+        /// again is harmless.
+        /// </summary>
+        [Fact]
+        public async Task OneServerSayingItKnowsThePinnedTransaction_DoesNotStopTheSigners()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Report(_btc.Mine(Pay(vault.Script, 150_000)));
+            var request = await Request(vault.Uid, 0.001M);
+            var pin = BtcAttestStore.Withdrawal(BtcWithdrawals.RefOf(request.Hash, vault.Uid))!.Pins[0];
+            var addresses = Signers.Select(s => s.Address).ToList();
+            var first = addresses.OrderBy(a => BtcWithdrawalSigner.Turn(pin.Txid, a, addresses)).First();
+            var led = 0;
+            BtcWithdrawalSigner.KnownOnBitcoin = _realKnown;                     // the production check
+            BtcWithdrawalSigner.SignAndBroadcast = (row, p) => { led++; return Task.FromResult((false, "validators unreachable")); };
+            string Host(string name) => $"{name}-{Guid.NewGuid():N}";
+
+            async Task<bool> Leads(params (string Host, int Port, bool Ok, int Confirms)[] answers)
+            {
+                using var _ = new FakeConfirmations(answers);
+                BtcWithdrawalSigner.ForgetAttempts();
+                var before = led;
+                await BtcWithdrawalSigner.TickAsync(first, pin.PinnedAtVfxHeight);
+                return led > before;
+            }
+
+            Assert.True(await Leads((Host("liar"), 50002, true, 1), (Host("b"), 50002, false, 0), (Host("c"), 50002, false, 0)));   // in a block, says one
+            Assert.True(await Leads((Host("liar"), 50002, true, 0), (Host("b"), 50002, false, 0), (Host("c"), 50002, false, 0)));   // in its mempool, says one
+            var one = Host("one");
+            Assert.True(await Leads((one, 50001, true, 0), (one, 50002, true, 0)));                                                    // one host, two ports
+            Assert.False(await Leads((Host("a"), 50002, true, 0), (Host("b"), 50002, true, 1)));                                       // two hosts know it
+        }
+
         /// <summary>
         /// "Nothing is pinned, so nothing is signed" holds only while the block that made the pin stays in the chain.
         /// The signers therefore leave a pin's block to settle before anyone leads or joins a ceremony for it: a

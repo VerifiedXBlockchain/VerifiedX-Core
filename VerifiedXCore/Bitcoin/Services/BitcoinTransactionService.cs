@@ -865,6 +865,39 @@ namespace VerifiedXCore.Bitcoin.Services
                 details.Any() ? string.Join(", ", details) : "no servers tried");
         }
 
+        /// <summary>Distinct Electrum hosts that must agree before an answer may release a pin or stop a signer.</summary>
+        public const int ConfirmationAgreementRequired = 2;
+
+        /// <summary>How one server is asked for a transaction's confirmations (Ok; &gt;= 1 in a block, 0 known and unconfirmed). Replaced in tests.</summary>
+        internal static Func<ClientSettings, string, Task<(bool Ok, int Confirms)>> QueryConfirms =
+            (server, txid) => ElectrumServerPool.AttemptAsync(server, c => c.GetConfirms(txid));
+
+        /// <summary>How many distinct hosts know a transaction, and how many have it in a block.</summary>
+        public readonly record struct TxSightings(int Known, int Confirmed, int MinConfirmations, string Detail);
+
+        /// <summary>
+        /// Every usable server is asked, one answer per host, until <paramref name="required"/> hosts have the transaction in
+        /// a block (or, with <paramref name="stopWhenKnown"/>, know it at all). For a decision that releases a pin or stops
+        /// acting: one server's word - or a path to it, as certificates are not checked - is never enough.
+        /// </summary>
+        public static async Task<TxSightings> GetTransactionConfirmationsCorroborated(string txHash, int required = ConfirmationAgreementRequired, bool stopWhenKnown = false)
+        {
+            int known = 0, confirmed = 0, minConfirmations = int.MaxValue;
+            var details = new List<string>();
+            var hosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var server in GetElectrumServerCandidates())
+            {
+                if (!hosts.Add((server.Host ?? "").Trim())) continue; // two ports of one host are one opinion
+                var (ok, answer) = await QueryConfirms(server, txHash);
+                var confirms = ok ? answer : -1;
+                details.Add($"{server.Host}:{server.Port}={(confirms >= 1 ? confirms.ToString() : confirms == 0 ? "0 (mempool)" : "no-answer")}");
+                if (confirms >= 0) known++;
+                if (confirms >= 1) { confirmed++; minConfirmations = Math.Min(minConfirmations, confirms); }
+                if (confirmed >= required || (stopWhenKnown && known >= required)) break;
+            }
+            return new TxSightings(known, confirmed, confirmed > 0 ? minConfirmations : 0, details.Count > 0 ? string.Join(", ", details) : "no servers tried");
+        }
+
         /// <summary>
         /// Legacy single-value confirmation check. UNKNOWN collapses to 0 here — callers that must
         /// distinguish "couldn't ask" from "unconfirmed" (pin release, pinned-tx disposition) use
