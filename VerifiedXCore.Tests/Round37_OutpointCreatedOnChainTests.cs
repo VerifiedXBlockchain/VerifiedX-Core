@@ -304,6 +304,46 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// C-193 (residual): a wallet's deferred completion of a reclaim was submitted as soon as one Electrum server said
+        /// the reclaim was in a block, while the withheld transaction could still replace it. Two distinct hosts must now
+        /// agree; one alone (or a host on two ports) reads as unknown and the completion waits.
+        /// </summary>
+        [Fact]
+        public async Task ADeferredCompletion_IsSubmittedOnlyWhenTwoHostsHaveTheReclaimInABlock()
+        {
+            var uid = Guid.NewGuid().ToString("N") + ":1760000001";
+            const string wrh = "7b2f4b0d8c3e6f9a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f5061728";
+            var reclaim = Convert.ToHexString(RandomUtils.GetBytes(32)).ToLowerInvariant();
+            Assert.True(VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.Save(new VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest
+            {
+                RequestorAddress = "xOwner", OriginalUniqueId = Guid.NewGuid().ToString("N"), SmartContractUID = uid, TransactionHash = wrh, Amount = 0.0005M,
+                BTCDestination = _elsewhere.ToString(), FeeRate = 10, Timestamp = 1, RequestBlockHeight = 400, Status = VerifiedXCore.Bitcoin.Models.VBTCWithdrawalStatus.Requested,
+                CompleteAfterConfirmation = true, CompleteAfterBtcTxId = reclaim, PinnedUnsignedTxHex = "0200",
+            }));
+            var row = VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.GetByTransactionHash(wrh, uid)!;
+            var priorQuery = BitcoinTransactionService.QueryConfirms;
+            async Task<VBTCService.DeferredCompletionAction> Resolve(params (string Host, int Port, bool Ok, int Confirms)[] answers)
+            {
+                Globals.ClientSettings = answers.Select(a => new ClientSettings { Host = a.Host, Port = a.Port, UseSsl = true }).ToList();
+                BitcoinTransactionService.QueryConfirms = (server, _) =>
+                {
+                    var a = answers.First(x => x.Host == server.Host && x.Port == server.Port);
+                    return Task.FromResult((a.Ok, a.Confirms));
+                };
+                return (await VBTCService.ResolveDeferredCompletion(row, _vault.ToString())).Action;
+            }
+            string Host(string name) => $"{name}-{Guid.NewGuid():N}.invalid";
+            try
+            {
+                Assert.Equal(VBTCService.DeferredCompletionAction.Wait, await Resolve((Host("a"), 50002, true, 0), (Host("b"), 50002, false, 0)));   // in a mempool
+                var one = Host("one");
+                Assert.NotEqual(VBTCService.DeferredCompletionAction.Submit, await Resolve((one, 50001, true, 3), (one, 50002, true, 3)));            // one host, two ports
+                Assert.Equal(VBTCService.DeferredCompletionAction.Submit, await Resolve((Host("a"), 50002, true, 3), (Host("b"), 50002, true, 2)));   // two hosts agree
+            }
+            finally { BitcoinTransactionService.QueryConfirms = priorQuery; }
+        }
+
+        /// <summary>
         /// A wallet's deferred completion holds its withdrawal row across Bitcoin lookups. The row is cancelled (refunded)
         /// meanwhile; when the lookups show its reclaim transaction dead, clearing the reclaim leaves the row cancelled
         /// (saving the held object whole wrote its old "requested" back over it).

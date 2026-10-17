@@ -899,6 +899,20 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// Two-host agreement in the tri-state of <see cref="TxConfirmationLookup.Confirmations"/>: &gt;= 1 only when
+        /// <see cref="ConfirmationAgreementRequired"/> distinct hosts have the transaction in a block (the fewest
+        /// confirmations among them); 0 when a host knows it and none has it in a block; null otherwise, including one host
+        /// alone saying "in a block". For steps that a false "confirmed" makes final (a withdrawal's completion).
+        /// </summary>
+        public static async Task<int?> GetAgreedConfirmations(string txHash)
+        {
+            var seen = await GetTransactionConfirmationsCorroborated(txHash);
+            if (seen.Confirmed >= ConfirmationAgreementRequired) return seen.MinConfirmations;
+            if (seen.Known > 0 && seen.Confirmed == 0) return 0;
+            return null;
+        }
+
+        /// <summary>
         /// Legacy single-value confirmation check. UNKNOWN collapses to 0 here — callers that must
         /// distinguish "couldn't ask" from "unconfirmed" (pin release, pinned-tx disposition) use
         /// GetTransactionConfirmationsResilient directly.

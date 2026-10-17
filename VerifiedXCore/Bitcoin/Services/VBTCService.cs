@@ -2297,8 +2297,9 @@ namespace VerifiedXCore.Bitcoin.Services
                         int? pinnedTxConfirmations = 0;
                         if (pinLookup.Success && !anyPinnedUnspent && !string.IsNullOrEmpty(pinnedTxId))
                         {
-                            var confLookup = await BitcoinTransactionService.GetTransactionConfirmationsResilient(pinnedTxId);
-                            pinnedTxConfirmations = confLookup.Confirmations;
+                            // "Paid" submits the completion, which no block validation re-asks Bitcoin about: two hosts
+                            // must agree. One host alone reads as unknown, so the pinned transaction is reused (not rebuilt).
+                            pinnedTxConfirmations = await BitcoinTransactionService.GetAgreedConfirmations(pinnedTxId);
                         }
 
                         var disposition = DecidePinnedTxDisposition(pinLookup.Success, anyPinnedUnspent, pinnedTxConfirmations);
@@ -2528,10 +2529,12 @@ namespace VerifiedXCore.Bitcoin.Services
             if (HasPendingCompletion(row.TransactionHash, row.SmartContractUID))
                 return (DeferredCompletionAction.Wait, $"The completion for withdrawal {row.TransactionHash} is already in the mempool.");
 
-            var lookup = await BitcoinTransactionService.GetTransactionConfirmationsResilient(txid);
-            if (lookup.Confirmations >= 1)
+            // The completion is submitted only once two hosts have the reclaim in a block: one server's word submitted it
+            // while the withheld transaction could still replace the reclaim, and the completion then stood unpaid.
+            var confirmations = await BitcoinTransactionService.GetAgreedConfirmations(txid);
+            if (confirmations >= 1)
                 return (DeferredCompletionAction.Submit, string.Empty);
-            if (lookup.Confirmations == 0)
+            if (confirmations == 0)
                 return (DeferredCompletionAction.Wait, AwaitingConfirmationMessage(txid, "is in the mempool, waiting for its first confirmation"));
 
             // Unknown to every server: never broadcast (coordinator died after signing), evicted, or replaced.
