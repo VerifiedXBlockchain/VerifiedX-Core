@@ -332,8 +332,14 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Tip, VBTCBridgeLockState.GetByLockId(lockId)!.LockBlockHeight);   // the block that carried it
             var priorValidator = Globals.ValidatorAddress;
             var priorCastersOnly = Globals.BaseValidatorSetCastersOnly;
+            var priorSynced = Globals.IsChainSynced;
+            var priorResyncing = Globals.IsResyncing;
+            var priorStopTimers = Globals.StopAllTimers;
             Globals.ValidatorAddress = "xNotLoadedHere";
             Globals.BaseValidatorSetCastersOnly = false;
+            Globals.IsChainSynced = true;
+            Globals.IsResyncing = false;
+            Globals.StopAllTimers = false;
             try
             {
                 async Task<string?> Ask() => (await VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.HandleMintAttestationRequest(new()
@@ -341,16 +347,32 @@ namespace VerifiedXCore.Tests
                     LockId = lockId, EvmDestination = "0x" + new string('a', 40), AmountSats = 400_000, Nonce = 1,
                     ChainId = Globals.BaseEvmChainId, ContractAddress = "0x" + new string('b', 40),
                 })).Item3;
+                const int depth = VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.MintAttestationDepth;
+                Assert.True(depth > VerifiedXCore.Utilities.ForkChoiceUtility.MAX_REORG_DEPTH);
                 Assert.Equal(VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.LockInsideReorgWindowReason, await Ask());   // depth one
-                for (var i = 0; i < VerifiedXCore.Utilities.ForkChoiceUtility.MAX_REORG_DEPTH - 1; i++) await Apply(Tip + 1);
+                for (var i = 0; i < depth - 1; i++) await Apply(Tip + 1);
                 Assert.Equal(VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.LockInsideReorgWindowReason, await Ask());   // still reorganisable
                 await Apply(Tip + 1);
-                Assert.NotEqual(VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.LockInsideReorgWindowReason, await Ask()); // goes on to the signing key
+
+                // Deep enough, but not from a node off the network's height (here: resyncing, or not synced).
+                Globals.IsResyncing = true;
+                Assert.Contains("not at the network's height", await Ask());
+                Globals.IsResyncing = false;
+                Globals.IsChainSynced = false;
+                Assert.Contains("not at the network's height", await Ask());
+                Globals.IsChainSynced = true;
+
+                var answer = await Ask();                                                           // goes on to the signing key
+                Assert.NotEqual(VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.LockInsideReorgWindowReason, answer);
+                Assert.DoesNotContain("not at the network's height", answer ?? "");
             }
             finally
             {
                 Globals.ValidatorAddress = priorValidator;
                 Globals.BaseValidatorSetCastersOnly = priorCastersOnly;
+                Globals.IsChainSynced = priorSynced;
+                Globals.IsResyncing = priorResyncing;
+                Globals.StopAllTimers = priorStopTimers;
             }
         }
 

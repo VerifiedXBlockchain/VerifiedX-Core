@@ -323,6 +323,12 @@ namespace VerifiedXCore.Bitcoin.FROST
         {
             if (string.IsNullOrEmpty(scUID) || Attestation.BtcVaultKeys.KeyRow(scUID) != null || Attestation.BtcAttestBalance.IsAttestedVault(scUID))
                 return null;
+            return NodeNotAtNetworkHeight();
+        }
+
+        /// <summary>Why this node is not at the network's height (see <see cref="NotAtNetworkHeightToSign"/>), or null.</summary>
+        public static string? NodeNotAtNetworkHeight()
+        {
             string? why = null;
             var tip = Globals.LastBlock;
             if (!Globals.IsChainSynced) why = "chain not synced";

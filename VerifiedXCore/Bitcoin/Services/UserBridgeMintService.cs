@@ -184,7 +184,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Waits (bounded) until the lock's block is deep enough that validators will sign for it.</summary>
         private static async Task WaitPastReorgWindow(string? lockId)
         {
-            var limit = DateTime.UtcNow.AddSeconds((VerifiedXCore.Utilities.ForkChoiceUtility.MAX_REORG_DEPTH + 5) * Math.Max(1, Globals.BlockTime / 1000) + 60);
+            var limit = DateTime.UtcNow.AddSeconds((BaseBridgeAttestationService.MintAttestationDepth + 5) * Math.Max(1, Globals.BlockTime / 1000) + 60);
             while (DateTime.UtcNow < limit)
             {
                 var row = string.IsNullOrEmpty(lockId) ? null : VBTCBridgeLockState.GetByLockId(lockId);

@@ -54,13 +54,38 @@ namespace VerifiedXCore.Bitcoin.Services
         public const string LockInsideReorgWindowReason = "Bridge lock is still inside the reorg window; ask again once its block is deeper";
 
         /// <summary>
+        /// Blocks on top of a lock's block before its mint is signed: three times the deepest automatic reorganisation
+        /// (ForkChoiceUtility.MAX_REORG_DEPTH), about six minutes. A deeper reorganisation (onto a majority branch, at any
+        /// depth) is not bounded by any depth; <see cref="NotReadyToAttest"/> keeps a node that is on such a branch from
+        /// signing at all.
+        /// </summary>
+        public const int MintAttestationDepth = 3 * VerifiedXCore.Utilities.ForkChoiceUtility.MAX_REORG_DEPTH;
+
+        /// <summary>
+        /// Why this validator does not sign a mint now, or null. A lock is read from this node's chain, and vBTCb minted on
+        /// Base stays, so only a node at the network's height (synced, not resyncing or recovering, its tip recent) and not
+        /// stalled or holding another chain than the majority of its peers attests one: a lock on a branch the network
+        /// abandons is the lock a deep reorganisation drops.
+        /// </summary>
+        public static string? NotReadyToAttest()
+        {
+            if (VerifiedXCore.Bitcoin.FROST.FrostSigningAuthorization.NodeNotAtNetworkHeight() is { } notAtHeight)
+                return notAtHeight;
+            if (VerifiedXCore.Services.ForkDetectionService.IsStalled)
+                return "This validator's chain is stalled; signing resumes when it advances again";
+            if (VerifiedXCore.Services.ForkDetectionService.ForkStatusText is "Resolving" or "Unresolved")
+                return "A majority of this validator's peers holds another chain; signing resumes once it is resolved";
+            return null;
+        }
+
+        /// <summary>
         /// Whether the block that carried <paramref name="chainLock"/> can still be replaced by an automatic reorganisation
-        /// (fewer than MAX_REORG_DEPTH blocks on top of it). A row written before the block height was recorded (0) is
+        /// (fewer than MintAttestationDepth blocks on top of it). A row written before the block height was recorded (0) is
         /// not held back: it predates this rule and is long buried.
         /// </summary>
         public static bool InsideReorgWindow(VBTCBridgeLockState chainLock) =>
             chainLock.LockBlockHeight > 0
-            && (Globals.LastBlock?.Height ?? 0) - chainLock.LockBlockHeight < VerifiedXCore.Utilities.ForkChoiceUtility.MAX_REORG_DEPTH;
+            && (Globals.LastBlock?.Height ?? 0) - chainLock.LockBlockHeight < MintAttestationDepth;
 
         public static Task<(bool success, string? signatureHex, string? error)> HandleMintAttestationRequest(MintAttestationRequest request)
         {
@@ -102,8 +127,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
 
                 // C-066: vBTCb is minted on Base for good, while the block that carried the lock can still be replaced by
-                // an automatic reorganisation (up to ForkChoiceUtility.MAX_REORG_DEPTH blocks): a lock signed at depth one
-                // and dropped by a reorg left vBTCb with no lock behind it. No attestation until the lock is that deep.
+                // a reorganisation: a lock signed at depth one and dropped by a reorg left vBTCb with no lock behind it. No
+                // attestation until the lock is MintAttestationDepth deep, and none from a node off the network's chain.
                 if (InsideReorgWindow(chainLock))
                 {
                     LogUtility.Log($"[BridgeAttest] REJECT: lock {chainLock.LockId} at block {chainLock.LockBlockHeight} is inside the reorg window (tip {Globals.LastBlock?.Height}).", TAG);
@@ -135,6 +160,13 @@ namespace VerifiedXCore.Bitcoin.Services
                 {
                     LogUtility.Log($"[BridgeAttest] REJECT: Invalid contract or chainId. RequestContract={request.ContractAddress}, RequestChainId={request.ChainId}, ExpectedChainId={Globals.BaseEvmChainId}", TAG);
                     return Task.FromResult<(bool, string?, string?)>((false, null, "Invalid contract or chain id"));
+                }
+
+                // Last before the key: a request that is right in itself is signed only by a node on the network's chain.
+                if (NotReadyToAttest() is { } notReady)
+                {
+                    LogUtility.Log($"[BridgeAttest] REJECT: lock {chainLock.LockId}: {notReady}", TAG);
+                    return Task.FromResult<(bool, string?, string?)>((false, null, notReady));
                 }
 
                 var account = AccountData.GetSingleAccount(Globals.ValidatorAddress);
