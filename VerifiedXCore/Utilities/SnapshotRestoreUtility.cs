@@ -275,7 +275,6 @@ namespace VerifiedXCore.Utilities
                 LogUtility.Log($"[SnapshotRestore] Success: slot={slot.SlotId} target={targetHeight} replayed={replayed} in {sw.ElapsedMilliseconds} ms", "SnapshotRestoreUtility");
                 restored = true;
                 _stateDestroyed = false;
-                VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.StoreRewrittenFromChain();
                 return true;
             }
             catch (Exception ex)

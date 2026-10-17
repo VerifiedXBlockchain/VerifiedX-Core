@@ -4524,6 +4524,7 @@ namespace VerifiedXCore.Services
         /// </summary>
         private static void ReportWithdrawalStoreGap(string? requestHash, string? scUID, Transaction tx)
         {
+            if (ReportedWithdrawalStoreGaps.Count >= 1_000) ReportedWithdrawalStoreGaps.Clear();   // logging only: bounded
             if (!ReportedWithdrawalStoreGaps.TryAdd($"{requestHash}|{scUID}", 0)) return;
             var text = $"WITHDRAWAL STORE: block transaction {tx.Hash} ({tx.TransactionType}) names withdrawal request {requestHash} on contract {scUID}, " +
                        "which this node's withdrawal table does not hold. The block is refused. If other nodes accept it, this node's withdrawal store is " +

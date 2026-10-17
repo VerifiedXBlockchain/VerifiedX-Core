@@ -834,6 +834,8 @@ namespace VerifiedXCore
             && !Utilities.SnapshotRestoreUtility.IsRestoreRunning
             && !Utilities.SnapshotRestoreUtility.StateDestroyedByFailedRestore
             && !Services.BlockValidatorService.GetProbationStatus().Active
+            // It judges no block while its withdrawal store is rebuilt or left unfinished.
+            && !Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning
             // STALL-RESOLVE: a node whose tip has not moved while the network is ahead is
             // stranded on a dead branch — casters must not select it as a winner.
             && !Services.ForkDetectionService.IsStalled;

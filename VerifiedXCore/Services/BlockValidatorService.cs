@@ -439,6 +439,12 @@ namespace VerifiedXCore.Services
                 return false;
             }
 
+            // Nor on a withdrawal store a rebuild left unfinished (it is rebuilt again meanwhile).
+            if (VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.HoldsBlocks())
+            {
+                return false;
+            }
+
             if ((Globals.IsResyncing || ForkRecoveryUtility.IsRecoveryInProgress)
                 && !ForkRecoveryUtility.IsInDownloadPhase)
             {
@@ -449,9 +455,11 @@ namespace VerifiedXCore.Services
 
             try
             {
-                // Double-check after acquiring semaphore (recovery may have started while waiting)
+                // Double-check after acquiring semaphore (recovery may have started while waiting, or a withdrawal-store
+                // rebuild held the lock and did not finish)
                 if (BlockRollbackUtility.IsResetTreisRunning || SnapshotRestoreUtility.IsRestoreRunning
-                    || SnapshotRestoreUtility.StateDestroyedByFailedRestore)
+                    || SnapshotRestoreUtility.StateDestroyedByFailedRestore
+                    || VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.HoldsBlocks())
                 {
                     return false;
                 }

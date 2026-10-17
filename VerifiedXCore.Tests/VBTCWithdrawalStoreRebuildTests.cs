@@ -346,12 +346,71 @@ namespace VerifiedXCore.Tests
             Assert.True(VBTCWithdrawalStoreRebuildService.IsRunning);
             Assert.True(VBTCWithdrawalStoreRebuildService.IsUnfinished);
             Assert.False(VBTCWithdrawalStoreRebuildService.InProgress);   // the operator can start the rebuild again
-            Assert.Equal(1, VerifiedXCore.Services.BlockValidatorService.ValidateBlockSemaphore.CurrentCount);   // block processing goes on, refusing withdrawal transactions
+            Assert.Equal(1, VerifiedXCore.Services.BlockValidatorService.ValidateBlockSemaphore.CurrentCount);   // the lock is released; blocks are held by BlockValidatorService.ValidateBlock
 
             await VBTCWithdrawalStoreRebuildService.MaybeAutoRebuildOnStartupAsync();
             Assert.False(VBTCWithdrawalStoreRebuildService.IsRunning);
             Assert.True(VBTCWithdrawalStoreRebuildService.LastResult!.Success, VBTCWithdrawalStoreRebuildService.LastResult.Message);
             Assert.NotNull(VBTCWithdrawalRequest.GetByTransactionHash("rb11-1104", "rebuild:11"));
+        }
+
+        /// <summary>
+        /// No block is judged or applied on a store a rebuild left unfinished (every check that reads the withdrawal table
+        /// would judge it on rows not yet brought to how their withdrawals ended). Block validation holds the block and
+        /// starts the rebuild again; once it finishes, blocks are no longer held.
+        /// </summary>
+        [Fact]
+        public async Task BlockValidation_HoldsBlocksWhileTheStoreIsUnfinished_AndRebuildsIt()
+        {
+            InsertBlock(1800, RequestTx("rb18-req", "xRequestorR", "rebuild:18", 0.1M, 1800));
+            VBTCWithdrawalStoreRebuildService.ResetRetryForTests();
+            VBTCWithdrawalStoreRebuildService.FailAtBlockForTests = _ => true;
+            try { Assert.False((await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test")).Success); }
+            finally { VBTCWithdrawalStoreRebuildService.FailAtBlockForTests = null; }
+            Assert.True(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+
+            var next = new Block { Height = 1801, Hash = "block-1801", PrevHash = "block-1800", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction>() };
+            Assert.False(await VerifiedXCore.Services.BlockValidatorService.ValidateBlock(next, true));
+            Assert.True(VBTCWithdrawalStoreRebuildService.BlocksHeld >= 1);
+
+            // The rebuild it started finishes; the store is whole again.
+            for (var i = 0; i < 200 && (VBTCWithdrawalStoreRebuildService.InProgress || VBTCWithdrawalStoreRebuildService.IsUnfinished); i++)
+                await Task.Delay(50);
+            Assert.False(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+            Assert.NotNull(VBTCWithdrawalRequest.GetByTransactionHash("rb18-req", "rebuild:18"));
+
+            var held = VBTCWithdrawalStoreRebuildService.BlocksHeld;
+            await VerifiedXCore.Services.BlockValidatorService.ValidateBlock(next, true);   // judged on (and refused for its own reasons)
+            Assert.Equal(held, VBTCWithdrawalStoreRebuildService.BlocksHeld);
+            VBTCWithdrawalStoreRebuildService.ResetRetryForTests();
+        }
+
+        [Fact]
+        public async Task WhileTheRebuildKeepsFailing_ItIsStartedAgainAtMostOncePerInterval()
+        {
+            InsertBlock(1900, RequestTx("rb19-req", "xRequestorS", "rebuild:19", 0.1M, 1900));
+            VBTCWithdrawalStoreRebuildService.ResetRetryForTests();
+            VBTCWithdrawalStoreRebuildService.FailAtBlockForTests = _ => true;
+            try
+            {
+                Assert.False((await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test")).Success);
+                var started = VBTCWithdrawalStoreRebuildService.RebuildsStarted;
+                var next = new Block { Height = 1901, Hash = "block-1901", PrevHash = "block-1900", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction>() };
+                Assert.False(await VerifiedXCore.Services.BlockValidatorService.ValidateBlock(next, true));
+                for (var i = 0; i < 200 && VBTCWithdrawalStoreRebuildService.RebuildsStarted == started; i++) await Task.Delay(50);
+                for (var i = 0; i < 200 && VBTCWithdrawalStoreRebuildService.InProgress; i++) await Task.Delay(50);
+                Assert.Equal(started + 1, VBTCWithdrawalStoreRebuildService.RebuildsStarted);   // started again, failed again
+
+                for (var k = 0; k < 3; k++) Assert.False(await VerifiedXCore.Services.BlockValidatorService.ValidateBlock(next, true));
+                await Task.Delay(300);
+                Assert.Equal(started + 1, VBTCWithdrawalStoreRebuildService.RebuildsStarted);   // not again within the interval
+                Assert.True(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+            }
+            finally
+            {
+                VBTCWithdrawalStoreRebuildService.FailAtBlockForTests = null;
+                VBTCWithdrawalStoreRebuildService.ResetRetryForTests();
+            }
         }
 
         /// <summary>A state rebuild that finishes rewrites the store from the chain: an unfinished withdrawal-store rebuild no longer holds it.</summary>
