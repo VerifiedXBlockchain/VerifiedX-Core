@@ -175,6 +175,8 @@ namespace VerifiedXCore.Services
         /// </summary>
         internal static string? TransactionIntegrityError(Block block)
         {
+            // Validation measures and applies each transaction at its block's height (tx.Height is in no hash); so does this.
+            LedgerIntegrityRules.NormalizeTransactionHeights(block);
             foreach (var tx in block.Transactions)
             {
                 // Validation skips an honored whitelist entry; so does this.
@@ -204,6 +206,8 @@ namespace VerifiedXCore.Services
                     var envelopeError = VerifiedXCore.Bitcoin.Attestation.BtcAttestTxValidator.EnvelopeError(tx);
                     if (envelopeError != null)
                         return $"transaction {tx.Hash}: {envelopeError}";
+                    if (!TransactionValidatorService.VerifyTXSize(tx, VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.MaxReportTxBytes))
+                        return $"transaction {tx.Hash} is larger than validation allows.";
                     continue;
                 }
 
@@ -248,7 +252,7 @@ namespace VerifiedXCore.Services
 
                 if (!HashMatchesStrictly(tx))
                     return $"transaction {tx.Hash} does not hash to its carried hash.";
-                if (!TransactionValidatorService.VerifyTXSize(tx, LedgerIntegrityRules.MaxTxSizeBytes(tx, block.Height)))
+                if (!TransactionValidatorService.VerifyTXSize(tx, LargestSizeCap(tx, block.Height)))
                     return $"transaction {tx.Hash} is larger than validation allows."; // whitespace inside the signature's Base64 still verifies
                 // A delayed reserve send's settlement time: with none, its digits could have moved into Data (the preimage
                 // joins them). Reserve control transactions (Register, CallBack, Recover) carry none.
@@ -280,6 +284,17 @@ namespace VerifiedXCore.Services
         /// places (32, 0) reads 32.0 and 0.0 once the block has crossed the wire, so each of Amount and Fee is also tried
         /// without trailing zeros: the same values, never another one.
         /// </summary>
+        /// <summary>
+        /// The largest size validation can allow this transaction, without reading state: the state in hand before a
+        /// rollback is the branch being replaced, and MaxTxSizeBytes reads the vault a transfer moves. A vault creation, or a
+        /// transfer type that can carry a vault, may be as large as a vault from VbtcVaultTxSizeHeight; anything else is 30 KB.
+        /// </summary>
+        private static int LargestSizeCap(Transaction tx, long height) =>
+            height >= Globals.VbtcVaultTxSizeHeight
+            && (tx.TransactionType == TransactionType.VBTC_V2_CONTRACT_CREATE || tx.TransactionType == TransactionType.TKNZ_TX || tx.TransactionType == TransactionType.NFT_TX)
+                ? Math.Max(Globals.MaxVbtcVaultTxSizeBytes, LedgerIntegrityRules.DefaultMaxTxSizeBytes)
+                : LedgerIntegrityRules.DefaultMaxTxSizeBytes;
+
         private static bool RewardHashMatches(Transaction tx)
         {
             foreach (var amount in new[] { tx.Amount, tx.Amount / 1.000000000000000000000000000000000m })

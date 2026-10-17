@@ -8,6 +8,7 @@ using VerifiedXCore;
 using VerifiedXCore.Data;
 using VerifiedXCore.EllipticCurve;
 using VerifiedXCore.Models;
+using VerifiedXCore.Nodes;
 using VerifiedXCore.Services;
 using Xunit;
 
@@ -217,6 +218,50 @@ namespace VerifiedXCore.Tests
             tx.BuildPrivate(100);
             tx.Signature = SignatureService.CreateSignature(tx.Hash, key, pub);
             return tx;
+        }
+
+        [Fact]
+        public void AVaultSizedTransfer_IsNotRefusedForSize_WithoutTheVaultStateInHand()
+        {
+            var prior = Globals.VbtcVaultTxSizeHeight;
+            try
+            {
+                Globals.VbtcVaultTxSizeHeight = 1;
+                // Larger than 30 KB, within a vault's cap; the vault it moves is in no state this node has before the rollback.
+                var key = new PrivateKey("secp256k1");
+                var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+                var tx = new Transaction
+                {
+                    Timestamp = 1_700_000_000, FromAddress = AccountData.GetHumanAddress(pub), ToAddress = Producer, Amount = 0.0M, Fee = 0.00001M,
+                    TransactionType = TransactionType.TKNZ_TX, Data = "[" + JsonConvert.SerializeObject(new string('c', 40 * 1024)) + "]",
+                };
+                tx.Build();
+                tx.Signature = SignatureService.CreateSignature(tx.Hash, key, pub);
+                var block = JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(SignedBlockWith(100, tx)))!;
+
+                Assert.Null(ForkCorrectionService.TransactionIntegrityError(block));
+            }
+            finally { Globals.VbtcVaultTxSizeHeight = prior; }
+        }
+
+        [Fact]
+        public void AnAttestationOverItsCap_IsRefusedBeforeRollingBack()
+        {
+            var big = VerifiedXCore.Bitcoin.Attestation.BtcAttestTxValidator.Create(TransactionType.VBTC_V2_BTC_REPORT,
+                JsonConvert.SerializeObject(new { pad = new string('r', VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.MaxReportTxBytes) }), 1_700_000_000);
+            var block = JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(SignedBlockWith(100, big)))!;
+
+            Assert.NotNull(ForkCorrectionService.TransactionIntegrityError(block));
+        }
+
+        [Fact]
+        public void ABlockHashVote_CountsOnlyInTheSpellingABlockHashHas()
+        {
+            var hash = SignedBlock(95).Hash;
+            Assert.True(BlockcasterNode.IsBlockHashSpelling(hash));
+            Assert.False(BlockcasterNode.IsBlockHashSpelling(hash.ToUpperInvariant()));
+            Assert.False(BlockcasterNode.IsBlockHashSpelling(hash + " "));
+            Assert.False(BlockcasterNode.IsBlockHashSpelling(null));
         }
 
         [Theory]

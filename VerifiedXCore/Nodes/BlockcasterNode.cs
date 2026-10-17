@@ -4443,6 +4443,10 @@ namespace VerifiedXCore.Nodes
             }
         }
 
+        /// <summary>Whether <paramref name="hash"/> is spelled as a block hash is computed: 64 lowercase hex characters.</summary>
+        internal static bool IsBlockHashSpelling(string? hash) =>
+            hash != null && hash.Length == 64 && hash.All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
+
         private static void ClearPendingCasterBlockHash(long height)
         {
             Globals.CasterApprovedBlockHashDict.TryRemove(height, out _);
@@ -4523,7 +4527,12 @@ namespace VerifiedXCore.Nodes
             if (block == null || string.IsNullOrEmpty(producerIp))
                 return;
             if (block.GetBlockHash() != block.Hash) // registered as the approval below
+            {
+                // Not adopted: an approval already published for this hash (by the agreement) is withdrawn, not left to hold out the real block.
+                if (Globals.CasterApprovedBlockHashDict.TryGetValue(block.Height, out var published) && published == block.Hash)
+                    ClearPendingCasterBlockHash(block.Height);
                 return;
+            }
 
             while (true)
             {
@@ -4863,7 +4872,8 @@ namespace VerifiedXCore.Nodes
 
                 foreach (var r in results)
                 {
-                    if (r.hash != null)
+                    // A block hash has one spelling (64 lowercase hex): a vote for any other names no block.
+                    if (r.hash != null && IsBlockHashSpelling(r.hash))
                     {
                         if (!hashVotes.ContainsKey(r.hash))
                             hashVotes[r.hash] = 0;
@@ -4912,7 +4922,7 @@ namespace VerifiedXCore.Nodes
                     new Peers { PeerIP = sourceIP },
                     height,
                     terminalWinner);
-                if (peerBlock != null && peerBlock.Hash == majorityHash && IsVoteForWinner(peerBlock.Validator, terminalWinner))
+                if (peerBlock != null && peerBlock.Hash == majorityHash && peerBlock.GetBlockHash() == peerBlock.Hash && IsVoteForWinner(peerBlock.Validator, terminalWinner))
                 {
                     CasterRoundAudit?.AddStep($"[BlockHashAgreement] Replaced local block with majority block from {sourceIP}.", true);
                     _consecutiveMajorityBlockFetchFailures = 0;
