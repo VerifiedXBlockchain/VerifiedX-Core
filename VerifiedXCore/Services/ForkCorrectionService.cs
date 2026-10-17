@@ -252,6 +252,9 @@ namespace VerifiedXCore.Services
 
                 if (!HashMatchesStrictly(tx))
                     return $"transaction {tx.Hash} does not hash to its carried hash.";
+                // The recipient and amount are joined in the hash: a whole recipient keeps digits from moving between them.
+                if (TransactionValidatorService.RecipientError(tx) is { } recipientError)
+                    return $"transaction {tx.Hash}: {recipientError}";
                 if (!TransactionValidatorService.VerifyTXSize(tx, LargestSizeCap(tx, block.Height)))
                     return $"transaction {tx.Hash} is larger than validation allows."; // whitespace inside the signature's Base64 still verifies
                 // A delayed reserve send's settlement time: with none, its digits could have moved into Data (the preimage
@@ -286,14 +289,27 @@ namespace VerifiedXCore.Services
         /// </summary>
         /// <summary>
         /// The largest size validation can allow this transaction, without reading state: the state in hand before a
-        /// rollback is the branch being replaced, and MaxTxSizeBytes reads the vault a transfer moves. A vault creation, or a
-        /// transfer type that can carry a vault, may be as large as a vault from VbtcVaultTxSizeHeight; anything else is 30 KB.
+        /// rollback is the branch being replaced, and MaxTxSizeBytes reads the vault a transfer moves. From
+        /// VbtcVaultTxSizeHeight a vault creation, or a TKNZ/NFT Transfer() that carries a contract's code (the shape
+        /// MaxTxSizeBytes then compares with the stored vault), may be as large as a vault; anything else is 30 KB.
         /// </summary>
-        private static int LargestSizeCap(Transaction tx, long height) =>
-            height >= Globals.VbtcVaultTxSizeHeight
-            && (tx.TransactionType == TransactionType.VBTC_V2_CONTRACT_CREATE || tx.TransactionType == TransactionType.TKNZ_TX || tx.TransactionType == TransactionType.NFT_TX)
-                ? Math.Max(Globals.MaxVbtcVaultTxSizeBytes, LedgerIntegrityRules.DefaultMaxTxSizeBytes)
-                : LedgerIntegrityRules.DefaultMaxTxSizeBytes;
+        private static int LargestSizeCap(Transaction tx, long height)
+        {
+            if (height < Globals.VbtcVaultTxSizeHeight)
+                return LedgerIntegrityRules.DefaultMaxTxSizeBytes;
+            if (tx.TransactionType == TransactionType.VBTC_V2_CONTRACT_CREATE)
+                return Globals.MaxVbtcVaultTxSizeBytes;
+            if ((tx.TransactionType != TransactionType.TKNZ_TX && tx.TransactionType != TransactionType.NFT_TX) || tx.Data == null)
+                return LedgerIntegrityRules.DefaultMaxTxSizeBytes;
+            try
+            {
+                var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+                return payload.Function == "Transfer()" && !string.IsNullOrEmpty(payload.ContractUID) && !string.IsNullOrEmpty(payload.Data)
+                    ? Globals.MaxVbtcVaultTxSizeBytes
+                    : LedgerIntegrityRules.DefaultMaxTxSizeBytes;
+            }
+            catch { return LedgerIntegrityRules.DefaultMaxTxSizeBytes; }
+        }
 
         private static bool RewardHashMatches(Transaction tx)
         {

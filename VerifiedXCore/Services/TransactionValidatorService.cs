@@ -467,20 +467,9 @@ namespace VerifiedXCore.Services
 
             //if (txRequest.ToAddress != "Adnr_Base" && txRequest.ToAddress != "DecShop_Base" && txRequest.ToAddress != "Topic_Base" && txRequest.ToAddress != "Vote_Base")
 
-            if (txRequest.ToAddress != "Adnr_Base" && 
-                txRequest.ToAddress != "DecShop_Base" && 
-                txRequest.ToAddress != "Topic_Base" && 
-                txRequest.ToAddress != "Vote_Base" && 
-                txRequest.ToAddress != "Reserve_Base" &&
-                txRequest.ToAddress != "Token_Base" && 
-                txRequest.ToAddress != "TW_Base")
-            {
-                if (!AddressValidateUtility.ValidateAddress(txRequest.ToAddress))
-                    return (txResult, "To Address failed to validate");
-
-                if(txRequest.ToAddress.Length < 32)
-                    return (txResult, "Address length is too short.");
-            }
+            var recipientError = RecipientError(txRequest);
+            if (recipientError != null)
+                return (txResult, recipientError);
 
             if (Globals.LastBlock.Height > Globals.TXHeightRule1) //March 31th, 2023 at 03:44 UTC
             {
@@ -4624,6 +4613,26 @@ namespace VerifiedXCore.Services
             newTxnModZero.Build();
 
             return newTxnModZero.Hash.Equals(txRequest.Hash);
+        }
+
+        /// <summary>The recipient rule: one of the base sentinels, or a whole address. Null when it passes.</summary>
+        internal static string? RecipientError(Transaction txRequest)
+        {
+            if (txRequest.ToAddress != "Adnr_Base" &&
+                txRequest.ToAddress != "DecShop_Base" &&
+                txRequest.ToAddress != "Topic_Base" &&
+                txRequest.ToAddress != "Vote_Base" &&
+                txRequest.ToAddress != "Reserve_Base" &&
+                txRequest.ToAddress != "Token_Base" &&
+                txRequest.ToAddress != "TW_Base")
+            {
+                if (!AddressValidateUtility.ValidateAddress(txRequest.ToAddress))
+                    return "To Address failed to validate";
+
+                if (txRequest.ToAddress.Length < 32)
+                    return "Address length is too short.";
+            }
+            return null;
         }
 
         /// <summary>The transaction signature check (over the carried Hash); null when it passes.</summary>

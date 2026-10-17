@@ -4922,7 +4922,9 @@ namespace VerifiedXCore.Nodes
                     new Peers { PeerIP = sourceIP },
                     height,
                     terminalWinner);
-                if (peerBlock != null && peerBlock.Hash == majorityHash && peerBlock.GetBlockHash() == peerBlock.Hash && IsVoteForWinner(peerBlock.Validator, terminalWinner))
+                if (peerBlock != null && peerBlock.Hash == majorityHash && peerBlock.GetBlockHash() == peerBlock.Hash
+                    && SignatureService.VerifySignature(peerBlock.Validator, peerBlock.Hash, peerBlock.ValidatorSignature)
+                    && IsVoteForWinner(peerBlock.Validator, terminalWinner))
                 {
                     CasterRoundAudit?.AddStep($"[BlockHashAgreement] Replaced local block with majority block from {sourceIP}.", true);
                     _consecutiveMajorityBlockFetchFailures = 0;
