@@ -1267,8 +1267,32 @@ namespace VerifiedXCore.Tests
             var plan = BridgePoolUnlockService.ComputeAllocationPlan(0.02M);
             Assert.NotNull(plan);                                                  // paid (the cap returned no plan)
             Assert.Equal(0.02M, plan!.Sum(a => a.UnlockAmount));
-            Assert.True(plan.Count <= BridgePoolUnlockService.MaxPlanAllocations);
+            Assert.True(BridgePoolUnlockService.PlanBytes(plan) <= BridgePoolUnlockService.MaxPlanBytes);
             Assert.Contains(plan, a => a.LockId == big);
+        }
+
+        /// <summary>
+        /// C-025 (new problem from the round-27 cap): a plan stopped at 100 locks, so a burn that needed more of them, while
+        /// they fit in one transaction, got no plan and was never paid. A plan is now bounded by the bytes it takes in the
+        /// transaction, the only limit consensus has: 120 locks that fit are planned.
+        /// </summary>
+        [Fact]
+        public async Task ABurnNeedingMoreThanAHundredLocksThatFit_IsPlanned()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 5_000_000);
+            var lockRec = VBTCBridgeLockState.GetByLockId(await Lock(vault.Uid, 0.0002M))!;
+            for (var i = 1; i < 120; i++)
+            {
+                lockRec.LockId = Guid.NewGuid().ToString("N");
+                VBTCBridgeLockState.GetCollection().Insert(lockRec);
+            }
+            var plan = BridgePoolUnlockService.ComputeAllocationPlan(0.024M);   // every one of the 120
+            Assert.NotNull(plan);
+            Assert.Equal(120, plan!.Count);
+            Assert.True(plan.Count > BridgePoolUnlockService.MaxPlanAllocations);
+            Assert.True(BridgePoolUnlockService.PlanBytes(plan) <= BridgePoolUnlockService.MaxPlanBytes);
         }
 
         /// <summary>
