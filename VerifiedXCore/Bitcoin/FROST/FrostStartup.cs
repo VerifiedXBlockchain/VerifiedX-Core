@@ -3858,7 +3858,19 @@ namespace VerifiedXCore.Bitcoin.FROST
             // confirmation only when two hosts have it in a block: one server's word (or a path to it; certificates are
             // not checked) freed its coins, and its rivals' pins, for another withdrawal's transaction while it could
             // still be unconfirmed.
-            if (!string.IsNullOrEmpty(pin.BtcTxId))
+            // Once the validators attest Bitcoin's headers, the pinned tx's own confirmation is not asked of Electrum at
+            // all: its hosts are not authenticated (certificates are not checked), so a path to them can speak for any
+            // two. Step 2 releases it instead: the pinned tx is itself the confirmed spender of its inputs, proven by
+            // Merkle branches to attested, buried headers, and so are its rivals. Before then step 2 proves nothing, and
+            // the two-host answer is all there is. (The attestation's own row says so too right after a restart, before
+            // the tip is loaded.)
+            var headersAttested = VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(Globals.LastBlock?.Height ?? 0)
+                || VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.GetMeta() != null;
+            if (!string.IsNullOrEmpty(pin.BtcTxId) && headersAttested)
+            {
+                txCheckDetail = "txlookup=skipped (Bitcoin headers attested: released only on a proven confirmed spend)";
+            }
+            else if (!string.IsNullOrEmpty(pin.BtcTxId))
             {
                 var seen = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService
                     .GetTransactionConfirmationsCorroborated(pin.BtcTxId);

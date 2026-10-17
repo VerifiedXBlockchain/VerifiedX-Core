@@ -577,6 +577,8 @@ namespace VerifiedXCore.Tests
             ConcurrencyOn();
             var priorServers = Globals.ClientSettings;
             var priorQuery = BitcoinTransactionService.QueryConfirms;
+            var priorRecord = Globals.BitcoinAttestationRecordHeight;
+            Globals.BitcoinAttestationRecordHeight = long.MaxValue;                  // before Bitcoin headers are attested
             async Task<bool> Released(params (string Host, int Port, bool Ok, int Confirms)[] answers)
             {
                 FrostWithdrawalSigningTracker.ResetForTests();
@@ -603,6 +605,46 @@ namespace VerifiedXCore.Tests
             {
                 BitcoinTransactionService.QueryConfirms = priorQuery;
                 Globals.ClientSettings = priorServers;
+                Globals.BitcoinAttestationRecordHeight = priorRecord;
+            }
+        }
+
+        /// <summary>
+        /// C-048 (residual): Electrum hosts are not authenticated, so a path to them can speak for any two. Once Bitcoin's
+        /// headers are attested a pin is not released on Electrum's word at all, only on a confirmed spend proven to the
+        /// attested headers: two hosts saying the pinned transaction is in a block release nothing, and are not even asked.
+        /// </summary>
+        [Fact]
+        public async Task FromTheRecordingHeight_TwoHostsSayingConfirmed_DoNotReleaseAPin()
+        {
+            ConcurrencyOn();
+            var priorServers = Globals.ClientSettings;
+            var priorQuery = BitcoinTransactionService.QueryConfirms;
+            var priorRecord = Globals.BitcoinAttestationRecordHeight;
+            var asked = 0;
+            try
+            {
+                Globals.BitcoinAttestationRecordHeight = 1;                          // the tip (1001) records Bitcoin facts
+                FrostWithdrawalSigningTracker.ResetForTests();
+                Assert.True(FrostWithdrawalSigningTracker.RestorePin(ScUID, "w1", "btcA", new List<string> { "c1:0" }, TimeUtil.GetTime()));
+                Assert.True(FrostWithdrawalSigningTracker.RestorePin(ScUID, "w2", "btcB", new List<string> { "c1:0" }, TimeUtil.GetTime()));
+                Globals.ClientSettings = new List<VerifiedXCore.Bitcoin.ElectrumX.ClientSettings>
+                {
+                    new() { Host = $"a-{Guid.NewGuid():N}", Port = 50002, UseSsl = true },
+                    new() { Host = $"b-{Guid.NewGuid():N}", Port = 50002, UseSsl = true },
+                };
+                BitcoinTransactionService.QueryConfirms = (_, _) => { asked++; return Task.FromResult((true, 6)); };
+
+                await FrostStartup.TryReleaseContractPinIfObservedOnChain(ScUID);
+
+                Assert.Equal(2, FrostWithdrawalSigningTracker.GetContractPins(ScUID).Count(p => p.WithdrawalRequestHash is "w1" or "w2"));
+                Assert.Equal(0, asked);
+            }
+            finally
+            {
+                BitcoinTransactionService.QueryConfirms = priorQuery;
+                Globals.ClientSettings = priorServers;
+                Globals.BitcoinAttestationRecordHeight = priorRecord;
             }
         }
 
