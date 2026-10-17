@@ -364,6 +364,21 @@ namespace VerifiedXCore.Services
         /// Note: majority signatures are not required at signing time (they're being collected);
         /// ValidateSuccessor's signature check is enforced at append, not here.
         /// </summary>
+        /// <summary>Why a promotion's new entry is not the promoted validator as this node sees it, or null.</summary>
+        internal static string? PromotedEntryRefusal(CasterMembershipRecord candidate)
+        {
+            var entry = candidate.Casters?.FirstOrDefault(c => string.Equals(c.Address, candidate.ChangedAddress, StringComparison.Ordinal));
+            if (entry == null) return "the promoted member has no entry";
+            if (!Globals.NetworkValidators.TryGetValue(entry.Address, out var seen) || seen == null)
+                return $"this node does not know validator {entry.Address}";
+            var seenIp = (seen.IPAddress ?? "").Replace("::ffff:", "");
+            if (!string.Equals(entry.PeerIP, seenIp, StringComparison.Ordinal))
+                return $"the promoted member's PeerIP {entry.PeerIP} is not where this node sees it ({seenIp})";
+            if (!string.Equals(entry.PublicKey, seen.PublicKey ?? "", StringComparison.Ordinal))
+                return "the promoted member's PublicKey is not the one this node knows";
+            return null;
+        }
+
         public static RecordSignature? HandleSignRequest(MembershipSignRequest request)
         {
             if (request?.Candidate == null)
@@ -409,6 +424,15 @@ namespace VerifiedXCore.Services
                 _ => false
             };
             if (!validChange) return null;
+
+            // The promoted member's entry as this node sees that validator: its PeerIP is where it is probed, and the
+            // member is demoted on that address's silence, so a record naming another address (proposed so, or as a
+            // lower-hash sibling) is not signed. The proposer takes it from the same view (NetworkValidators).
+            if (candidate.ChangeType == "Promotion" && PromotedEntryRefusal(candidate) is { } promotedRefusal)
+            {
+                CasterLogUtility.Log($"MEMBERSHIP: REFUSED to sign seq {candidate.RecordSeq} — {promotedRefusal}. Proposer={request.ProposerAddress}", "MEMBERSHIP");
+                return null;
+            }
 
             // Every continuing member keeps its entry exactly: a rotation adds or removes one member and changes no one
             // else's PeerIP or PublicKey (ProposeRotationAsync copies them from the head).
