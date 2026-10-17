@@ -527,7 +527,8 @@ namespace VerifiedXCore.Services
                     result = true;
                     await BlockchainData.AddBlock(block);
                     committedHeight = block.Height;
-                    await ApplyStateAsync(block);
+                    if (!await ApplyStateAsync(block))
+                        StateTreiStatusService.SetFailed($"Incomplete state application at block {block.Height}.");
                     foreach (Transaction transaction in block.Transactions)
                     {
                         //Adds receiving TX to wallet
@@ -1965,15 +1966,14 @@ namespace VerifiedXCore.Services
 
             }
             catch (Exception ex) {
+                // The block and the state are separate stores: a failure after the block was written leaves the state behind
+                // it. Flagged first, so it is not snapshotted or trusted as synced whatever the rollback below does.
+                if (committedHeight != null)
+                    StateTreiStatusService.SetFailed($"An error after block {committedHeight} was committed: {ex.Message}");
                 DbContext.Rollback("BlockValidatorService.ValidateBlock()-14");
                 Console.WriteLine($"Error: {ex.ToString()}");
-                // The block and the state are separate stores: a failure after the block was written leaves the state behind
-                // it. Flagged, so it is not snapshotted or trusted as synced.
                 if (committedHeight != null)
-                {
-                    ErrorLogUtility.LogError($"[ValidateBlock] An error after block {committedHeight} was committed: {ex.Message}. Flagging the state trie.", "BlockValidatorService.ValidateBlock()");
-                    StateTreiStatusService.SetFailed($"An error after block {committedHeight} was committed: {ex.Message}");
-                }
+                    ErrorLogUtility.LogError($"[ValidateBlock] An error after block {committedHeight} was committed: {ex.Message}. The state trie is flagged.", "BlockValidatorService.ValidateBlock()");
             }
             finally
             {
