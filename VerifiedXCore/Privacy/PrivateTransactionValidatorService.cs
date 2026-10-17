@@ -37,7 +37,8 @@ namespace VerifiedXCore.Privacy
                     return (false, "The timestamp of this transaction is too old or too far in the future.");
             }
 
-            if (!await TransactionValidatorService.VerifyTXSize(txRequest))
+            var admission = blockHeight == null && !blockVerify && !blockDownloads; // measured as a block will carry it
+            if (!await TransactionValidatorService.VerifyTXSize(admission ? TransactionValidatorService.AsCarriedInABlock(txRequest) : txRequest))
                 return (false, "This transactions is too large. Max size allowed is 30 kb.");
 
             var txExist = Globals.MemBlocks.ContainsKey(txRequest.Hash);

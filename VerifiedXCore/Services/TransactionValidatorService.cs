@@ -511,7 +511,8 @@ namespace VerifiedXCore.Services
             // vBTC V2 vault transactions may be larger from VbtcVaultTxSizeHeight (see LedgerIntegrityRules.MaxTxSizeBytes);
             // block validation passes the block's height, admission the height the tx would mine into.
             var maxTxSize = LedgerIntegrityRules.MaxTxSizeBytes(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1));
-            if (!VerifyTXSize(txRequest, maxTxSize))
+            var admission = blockHeight == null && !blockVerify && !blockDownloads;
+            if (!VerifyTXSize(admission ? AsCarriedInABlock(txRequest) : txRequest, maxTxSize))
             {
                 return (txResult, $"This transactions is too large. Max size allowed is {maxTxSize / 1024} kb.");
             }
@@ -4800,6 +4801,21 @@ namespace VerifiedXCore.Services
 
             return (true, "");
         }
+
+        /// <summary>
+        /// The transaction as a block carries it, with the fields no hash covers at their widest: its Height, its stored Id
+        /// (each node's own), and its rating and status. The size cap counts them, and at admission they are empty or short:
+        /// a transaction admitted just under the cap was over it in the producer's block, which then failed its own check,
+        /// and every producer stopped. Admission measures this copy, so what it admits fits in any block.
+        /// </summary>
+        internal static Transaction AsCarriedInABlock(Transaction tx) => new Transaction
+        {
+            Id = new LiteDB.ObjectId(int.MinValue, int.MinValue, short.MinValue, int.MinValue),
+            Hash = tx.Hash, ToAddress = tx.ToAddress, FromAddress = tx.FromAddress, Amount = tx.Amount, Nonce = tx.Nonce, Fee = tx.Fee,
+            Timestamp = tx.Timestamp, Data = tx.Data, UnlockTime = tx.UnlockTime, Signature = tx.Signature,
+            Height = long.MaxValue, TransactionType = tx.TransactionType,
+            TransactionRating = Enum.GetValues<TransactionRating>().Max(), TransactionStatus = Enum.GetValues<TransactionStatus>().Max(),
+        };
 
         public static Task<bool> VerifyTXSize(Transaction txRequest) =>
             Task.FromResult(VerifyTXSize(txRequest, LedgerIntegrityRules.DefaultMaxTxSizeBytes));
