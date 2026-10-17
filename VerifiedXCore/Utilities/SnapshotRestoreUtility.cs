@@ -271,6 +271,8 @@ namespace VerifiedXCore.Utilities
 
                 // 8) State is verified consistent up to the target (slots above it were invalidated at step 4).
                 StateTreiStatusService.SetSynced(targetHeight);
+                // The withdrawal store was wiped, restored and replayed with the rest of the state.
+                VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.StateRestoredFromSnapshot();
 
                 sw.Stop();
                 Console.WriteLine($"[SnapshotRestore] SUCCESS: restored to height {targetHeight} (replayed {replayed} block(s), {walletTxInserts} wallet TX(s)) in {sw.Elapsed.TotalSeconds:F1}s.");

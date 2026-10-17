@@ -112,6 +112,30 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A store a block's apply lost a write to needs the state rebuilt with it. A restore that wipes both, copies them
+        /// back from one slot and replays every block above it lifts that; one whose replay fails does not.
+        /// </summary>
+        [Fact]
+        public async Task SuccessfulRestore_RebuildsAStoreThatNeededTheStateRebuilt_AFailedOneDoesNot()
+        {
+            await ChainWithSlotAt45_ThatFailsToReplay();
+            VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.MarkNeedsStateRebuild("test");
+            try
+            {
+                Assert.False(await SnapshotRestoreUtility.TryRestoreAsync(48));
+                Assert.True(VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsUnfinished);
+
+                Globals.ValidatorBondHeight = _priorBondHeight;
+                BlockchainData.GetBlocks().DeleteManySafe(x => x.Height > 45);
+                for (long h = 46; h <= 48; h++) AddBlock(h);
+                Assert.True(await SnapshotRestoreUtility.TryRestoreAsync(48));
+                Assert.False(VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsUnfinished);
+                Assert.False(VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+            }
+            finally { VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests(); }
+        }
+
+        /// <summary>
         /// While the withdrawal store is unfinished (blocks are held, so the node falls behind on purpose), fork recovery
         /// waits: rolling back or restoring then would stop the rebuild that makes the store whole. Afterwards it runs.
         /// </summary>

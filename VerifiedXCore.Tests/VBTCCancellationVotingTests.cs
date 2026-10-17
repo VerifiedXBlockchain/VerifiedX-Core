@@ -518,7 +518,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(!localFault, applied);
             Assert.Equal(localFault, VBTCWithdrawalStoreRebuildService.IsUnfinished);
             Assert.Equal(0.0006M, LedgerBalance(Vault, Requester));   // no credit either way; a failed block is not counted
-            if (localFault) VBTCWithdrawalStoreRebuildService.SetUnfinishedForTests(false);
+            VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests();
         }
 
         [Fact]

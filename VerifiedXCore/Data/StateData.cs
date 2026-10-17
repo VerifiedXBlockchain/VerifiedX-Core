@@ -208,12 +208,17 @@ namespace VerifiedXCore.Data
                 finally
                 {
                     // A lost store write, or a fault of this node's storage in a step that writes the store (also when the
-                    // apply then threw): it may not hold what the chain wrote, so it is marked unfinished - blocks are held
-                    // and it is rebuilt - rather than read until the next restart.
+                    // apply then threw): neither the store nor the block's other writes (an escrow debit, a refund) may hold
+                    // what the chain wrote. Blocks are held until the state is rebuilt, the store with it. The state is
+                    // marked failed here too (the caller's mark is skipped when the apply throws), so a restart restores it.
                     if (storeWrites.Count > 0 || _withdrawalStoreStepFailed)
-                        Bitcoin.Services.VBTCWithdrawalStoreRebuildService.MarkUnfinished(storeWrites.Count > 0
+                    {
+                        var why = storeWrites.Count > 0
                             ? $"{storeWrites.Count} write(s) to it failed while block {block.Height} was applied"
-                            : $"a fault of this node's storage interrupted a withdrawal step of block {block.Height}");
+                            : $"a fault of this node's storage interrupted a withdrawal step of block {block.Height}";
+                        Bitcoin.Services.VBTCWithdrawalStoreRebuildService.MarkNeedsStateRebuild(why);
+                        try { VerifiedXCore.Services.StateTreiStatusService.SetFailed($"Withdrawal store: {why}."); } catch { }
+                    }
                 }
                 if (storeWrites.Count > 0)
                 {
