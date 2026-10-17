@@ -1297,6 +1297,19 @@ namespace VerifiedXCore.Services
         /// <summary>A block carries a move (Transfer() or Burn()) and a sale of the same contract.</summary>
         public const string NftMoveAndSaleInBlock = "An NFT transfer or burn and a sale of the same contract within block";
 
+        /// <summary>
+        /// The transaction types StateData runs a contract's functions for (UpdateTreis' dispatch). Only these move a
+        /// contract by Transfer() or Burn(); the same text in another transaction's Data (a plain payment) does nothing.
+        /// </summary>
+        private static readonly HashSet<TransactionType> ContractFunctionTypes = new()
+        {
+            TransactionType.NFT_TX, TransactionType.NFT_MINT, TransactionType.NFT_BURN,
+            TransactionType.FTKN_MINT, TransactionType.FTKN_TX, TransactionType.FTKN_BURN,
+            TransactionType.TKNZ_MINT, TransactionType.TKNZ_TX, TransactionType.TKNZ_BURN,
+            TransactionType.SC_MINT, TransactionType.SC_TX, TransactionType.SC_BURN,
+            TransactionType.VBTC_V2_CONTRACT_CREATE, TransactionType.TKNZ_WD_ARB, TransactionType.TKNZ_WD_OWNER,
+        };
+
         /// <summary>Per-block register of the contracts a block moves (Transfer(), Burn()) and sells (NFT_SALE).</summary>
         public sealed class NftStepState
         {
@@ -1316,7 +1329,9 @@ namespace VerifiedXCore.Services
             var (ok, _, uid, function, _) = TransactionUtility.GetSCTXFunctionAndUID(tx);
             if (!ok) return null;
             var isSale = tx.TransactionType == TransactionType.NFT_SALE;
-            if (!isSale && function != "Transfer()" && function != "Burn()") return null;
+            // A move is a Transfer() or Burn() the chain runs: a payment that only carries that text in its Data moves
+            // nothing, and registering it let anyone crowd an owner's sale out of a block.
+            if (!isSale && (!ContractFunctionTypes.Contains(tx.TransactionType) || (function != "Transfer()" && function != "Burn()"))) return null;
             uid = SmartContractStateTrei.GetSmartContractState(uid)?.SmartContractUID ?? uid;
             if ((isSale ? state.Moves : state.Sales).Contains(uid)) return $"{NftMoveAndSaleInBlock}: {uid}";
             (isSale ? state.Sales : state.Moves).Add(uid);

@@ -158,6 +158,16 @@ namespace VerifiedXCore.Tests
             }
             finally { Globals.LastBlock = tip; }
 
+            // A plain payment whose Data only carries a Transfer() of the NFT moves nothing: it does not crowd the sale out.
+            var lookalike = new Transaction
+            {
+                FromAddress = _other.Address, ToAddress = _owner.Address, Amount = 1M, Fee = 0.00001M, Nonce = 0, Timestamp = TimeUtil.GetTime(),
+                TransactionType = TransactionType.TX, Data = JsonConvert.SerializeObject(new[] { new { Function = "Transfer()", ContractUID = Nft, ToAddress = _owner.Address } }),
+            };
+            var withLookalike = new LedgerIntegrityRules.NftStepState();
+            Assert.Null(LedgerIntegrityRules.RegisterNftStepInBlock(lookalike, withLookalike, Globals.PathAuditRulesHeight));
+            Assert.Null(LedgerIntegrityRules.RegisterNftStepInBlock(sale, withLookalike, Globals.PathAuditRulesHeight));
+
             var below = new LedgerIntegrityRules.NftStepState();
             Assert.Null(LedgerIntegrityRules.RegisterNftStepInBlock(transfer, below, Globals.PathAuditRulesHeight - 1));
             Assert.Null(LedgerIntegrityRules.RegisterNftStepInBlock(sale, below, Globals.PathAuditRulesHeight - 1));
