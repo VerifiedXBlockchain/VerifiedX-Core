@@ -296,6 +296,27 @@ namespace VerifiedXCore.Tests
             Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-raw", 500M, nft));
         }
 
+        /// <summary>
+        /// A completion this wallet sent, mined in a block, uses its bid whatever route it took (from this node, signed
+        /// elsewhere, or relayed by another node): the wallet's processing of its own mined transactions marks it.
+        /// </summary>
+        [Fact]
+        public async Task AMinedCompletionFromThisWallet_UsesItsBid_WhateverRouteItTook()
+        {
+            AccountData.GetAccounts().InsertSafe(new Account { Address = _victim.Address, PublicKey = _victim.Pub, PrivateKey = "0" + _victim.Key.secret.ToString("x") });
+            var nft = ListedNft();
+            SaveSentBid("key-mined", nft, BidStatus.Accepted, TimeUtil.GetTime());
+            Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-mined", 500M, nft));
+            var completion = new Transaction
+            {
+                Hash = "mined-completion", FromAddress = _victim.Address, ToAddress = _seller.Address, Amount = 0M, Fee = 0M, Nonce = 0,
+                Timestamp = TimeUtil.GetTime(), TransactionType = TransactionType.NFT_SALE,
+                Data = JsonConvert.SerializeObject(new { Function = "Sale_Complete()", ContractUID = nft, KeySign = "key-mined", Transactions = new List<Transaction>() }),
+            };
+            await BlockTransactionValidatorService.ProcessOutgoingTransaction(completion, AccountData.GetSingleAccount(_victim.Address)!, Gate);
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-mined", 500M, nft));
+        }
+
         [Fact]
         public void IncomingSale_FromARejectedOrExpiredOrUsedBid_IsNotCompleted()
         {
