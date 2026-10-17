@@ -20,6 +20,19 @@ namespace VerifiedXCore.Services
     {
         private const string COLLECTION_NAME = "rsrv_caster_membership";
         private const string SIGNED_MARKER_COLLECTION = "rsrv_membership_signed";
+        private const string RESET_MARKER_COLLECTION = "rsrv_membership_reset";
+
+        /// <summary>Where this node's operator last reset the membership store: the tip at the reset.</summary>
+        public class ResetMarker
+        {
+            public int Id { get; set; } = 1;
+            public long ResetAtHeight { get; set; }
+        }
+
+        private static LiteDB.ILiteCollection<ResetMarker>? ResetCollection() => DbContext.DB_Config?.GetCollection<ResetMarker>(RESET_MARKER_COLLECTION);
+
+        /// <summary>The tip at this node's last operator reset, or 0 when it never had one.</summary>
+        public static long LastOperatorResetHeight() => ResetCollection()?.FindById(1)?.ResetAtHeight ?? 0;
         public const string GenesisPrevHash = "GENESIS";
 
         private static readonly object Mut = new object();
@@ -275,6 +288,9 @@ namespace VerifiedXCore.Services
                 if (col != null)
                     removed = col.DeleteAll();
                 MarkerCollection()?.DeleteAll();
+                // A genesis from before the reset stays validly signed forever: remembered here, so it cannot re-arm the
+                // era this reset was meant to end (TryAppend refuses a genesis that takes effect below it).
+                ResetCollection()?.Upsert(new ResetMarker { Id = 1, ResetAtHeight = Globals.LastBlock?.Height ?? 0 });
                 _cachedHead = null;
                 _armed = false;
                 Globals.CertEnforceHeight = long.MaxValue;
@@ -514,6 +530,12 @@ namespace VerifiedXCore.Services
                                 "MEMBERSHIP");
                     }
                     reason = $"stale seq {candidate.RecordSeq} (head {head.RecordSeq})"; return false;
+                }
+                if (candidate.RecordSeq == 0 && candidate.EffectiveFromHeight < LastOperatorResetHeight())
+                {
+                    reason = $"genesis effective at {candidate.EffectiveFromHeight} is from before this node's operator reset at {LastOperatorResetHeight()}";
+                    CasterLogUtility.Log($"MEMBERSHIP: REJECTED pre-reset GENESIS — {reason}.", "MEMBERSHIP");
+                    return false;
                 }
                 if (!ValidateSuccessor(head, candidate, out reason))
                     return false;
