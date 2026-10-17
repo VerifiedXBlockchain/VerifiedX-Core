@@ -1285,7 +1285,95 @@ namespace VerifiedXCore.Data
             // see BlockValidatorService). Keep the first; drop a later one AND that sender's later transactions so the
             // proposal has no nonce gap. The dropped creation stays in the mempool and fails as "already deployed".
             // NEW-07: likewise for debits that together overspend a holder's balance on one contract.
-            return VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.KeepOnePerBlock(SameBlockDebitGuard.DropSameBlockOverspends(DropDuplicateContractCreations(approvedMemPoolList)));
+            // ... and for a Transfer() or Burn() that shares its contract with another of the sender's contract
+            // transactions in the block, which block validation refuses whatever their order.
+            return DropContractSiblingConflicts(VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.KeepOnePerBlock(SameBlockDebitGuard.DropSameBlockOverspends(DropDuplicateContractCreations(approvedMemPoolList))));
+        }
+
+        /// <summary>The types BlockValidatorService.ValidateBlock does not read as a contract call (besides attestations).</summary>
+        private static readonly HashSet<TransactionType> NotContractCallTypes = new()
+        {
+            TransactionType.TX, TransactionType.ADNR, TransactionType.VOTE, TransactionType.VOTE_TOPIC, TransactionType.DSTR,
+            TransactionType.RESERVE, TransactionType.NFT_SALE, TransactionType.VBTC_V2_VALIDATOR_REGISTER,
+            TransactionType.VBTC_V2_VALIDATOR_EXIT, TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT, TransactionType.VBTC_V2_CONTRACT_CREATE,
+            TransactionType.VBTC_V2_TRANSFER, TransactionType.VBTC_V2_WITHDRAWAL_REQUEST, TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE,
+            TransactionType.VBTC_V2_WITHDRAWAL_CANCEL, TransactionType.VBTC_V2_COIN_PIN, TransactionType.VBTC_V2_WITHDRAWAL_VOTE,
+            TransactionType.VBTC_V2_BRIDGE_LOCK, TransactionType.VBTC_V2_BRIDGE_UNLOCK, TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK,
+            TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC, TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE,
+            TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL, TransactionType.VFX_SHIELD, TransactionType.VFX_UNSHIELD,
+            TransactionType.VFX_PRIVATE_TRANSFER, TransactionType.VBTC_V2_SHIELD, TransactionType.VBTC_V2_UNSHIELD,
+            TransactionType.VBTC_V2_PRIVATE_TRANSFER,
+        };
+
+        /// <summary>The sibling types BlockValidatorService.ValidateBlock compares a Transfer() or Burn() with.</summary>
+        private static readonly TransactionType[] ContractSiblingTypes =
+        {
+            TransactionType.NFT_TX, TransactionType.NFT_BURN, TransactionType.NFT_MINT,
+            TransactionType.TKNZ_TX, TransactionType.TKNZ_BURN, TransactionType.TKNZ_MINT,
+            TransactionType.SC_TX, TransactionType.SC_BURN, TransactionType.SC_MINT,
+        };
+
+        /// <summary>
+        /// Block validation's Transfer()/Burn() rule (BlockValidatorService.ValidateBlock): a block is refused when a
+        /// Transfer() or Burn() and another contract transaction of the same sender, of <see cref="ContractSiblingTypes"/>,
+        /// name the same ContractUID, in either order. The proposal checked only siblings approved before it, so a Transfer()
+        /// followed by an Update() of the same contract was proposed and every validator, the producer's own self-check
+        /// included, refused the block.
+        /// </summary>
+        internal static bool ConflictsWithContractSibling(Transaction tx, IReadOnlyCollection<Transaction> block)
+        {
+            if (tx.Data == null || NotContractCallTypes.Contains(tx.TransactionType) || VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(tx.TransactionType))
+                return false;
+            try
+            {
+                var scInfo = TransactionUtility.GetSCTXFunctionAndUID(tx);
+                if (!scInfo.Item1 || scInfo.Item5 == null || !scInfo.Item2)
+                    return false;
+                var scData = scInfo.Item5[0];
+                var function = (string?)scData["Function"];
+                if (function != "Transfer()" && function != "Burn()")
+                    return false;
+                var scUID = (string?)scData["ContractUID"];
+                foreach (var otx in block)
+                {
+                    if (otx.FromAddress != tx.FromAddress || otx.Hash == tx.Hash || !ContractSiblingTypes.Contains(otx.TransactionType) || otx.Data == null)
+                        continue;
+                    if (!TransactionUtility.GetSCTXFunctionAndUID(otx).Item2)
+                        continue;
+                    var otxData = JsonConvert.DeserializeObject<JArray>(otx.Data)?[0];
+                    if (otxData == null)
+                        continue;
+                    if (!string.IsNullOrWhiteSpace((string?)otxData["Function"]) && (string?)otxData["ContractUID"] == scUID)
+                        return true;
+                }
+                return false;
+            }
+            catch (Exception)
+            {
+                return true; // the validator's read throws here too, and refuses the block
+            }
+        }
+
+        /// <summary>
+        /// Drops each Transfer() or Burn() that <see cref="ConflictsWithContractSibling"/> finds in the proposal, with its
+        /// sender's later transactions so the proposal has no nonce gap. It stays in the mempool for a later block.
+        /// </summary>
+        public static List<Transaction> DropContractSiblingConflicts(List<Transaction> approved)
+        {
+            var kept = new List<Transaction>(approved);
+            var blockedSenders = new HashSet<string>(StringComparer.Ordinal);
+            for (var i = 0; i < kept.Count;)
+            {
+                var tx = kept[i];
+                if (tx.FromAddress != null && (blockedSenders.Contains(tx.FromAddress) || ConflictsWithContractSibling(tx, kept)))
+                {
+                    blockedSenders.Add(tx.FromAddress);
+                    kept.RemoveAt(i);
+                    continue;
+                }
+                i++;
+            }
+            return kept;
         }
 
         public static List<Transaction> DropDuplicateContractCreations(List<Transaction> approved)
