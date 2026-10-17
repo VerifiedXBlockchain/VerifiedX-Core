@@ -133,9 +133,16 @@ namespace VerifiedXCore.Privacy
                 error = "Viewing key must be 32 bytes.";
                 return false;
             }
-            if (!ShieldedAddressCodec.TryDecodeEncryptionKey(zfxAddress, out var pub33, out var derr) || pub33 == null)
+            if (!ShieldedAddressCodec.TryDecode(zfxAddress, out var pub33, out var ownerPk32, out var derr) || pub33 == null)
             {
                 error = derr ?? "Invalid zfx address.";
+                return false;
+            }
+            // A v2 address also carries the owner key notes are bound to; it must be this viewing key's too, or notes
+            // paid to the address are not this wallet's to see.
+            if (ownerPk32 != null && !ShieldedKeyMaterial.OwnerPkFromViewingKey(viewingKey32).AsSpan().SequenceEqual(ownerPk32))
+            {
+                error = "The viewing key does not belong to this zfx address.";
                 return false;
             }
             byte[] encPriv;

@@ -112,7 +112,8 @@ namespace VerifiedXCore.P2P
                 }
 
                 // HAL-040 Fix: Only add to signature map AFTER successful verification
-                if (!Globals.Signatures.TryAdd(signature, now))
+                // Keyed on the canonical signature: a re-encoded copy (whitespace, high-s) is the same handshake.
+                if (!ConsensusRequestAuth.TryConsume(signature, now))
                 {
                     await EndOnConnect(peerIP, "40", startTime, conQueue, "Reused signature.", "Reused signature.");
                     return;

@@ -31,7 +31,40 @@ namespace VerifiedXCore.P2P
         public const int MaxConcurrentPerIp = 2;
         public const int MaxConcurrentGlobal = 16;
 
-        private static readonly ConcurrentDictionary<string, SemaphoreSlim> _perIp = new();
+        /// <summary>
+        /// One entry per peer address that is being served or waiting; removed when its last user leaves. Kept forever,
+        /// the table grew by one semaphore for every distinct address that ever asked (an IPv6 host has billions).
+        /// </summary>
+        private sealed class PeerSlot
+        {
+            public readonly SemaphoreSlim Semaphore = new(MaxConcurrentPerIp, MaxConcurrentPerIp);
+            public int Users;
+        }
+        private static readonly Dictionary<string, PeerSlot> _perIp = new(StringComparer.Ordinal);
+        private static readonly object _perIpLock = new();
+
+        /// <summary>Peer addresses currently tracked (for tests).</summary>
+        internal static int TrackedPeerCount { get { lock (_perIpLock) return _perIp.Count; } }
+
+        private static PeerSlot EnterSlot(string key)
+        {
+            lock (_perIpLock)
+            {
+                if (!_perIp.TryGetValue(key, out var slot))
+                    _perIp[key] = slot = new PeerSlot();
+                slot.Users++;
+                return slot;
+            }
+        }
+
+        private static void LeaveSlot(string key, PeerSlot slot)
+        {
+            lock (_perIpLock)
+            {
+                if (--slot.Users == 0 && _perIp.TryGetValue(key, out var current) && ReferenceEquals(current, slot))
+                    _perIp.Remove(key);
+            }
+        }
         private static readonly SemaphoreSlim _global = new(MaxConcurrentGlobal, MaxConcurrentGlobal);
 
         /// <summary>
@@ -79,22 +112,25 @@ namespace VerifiedXCore.P2P
         /// </summary>
         public static async Task<IDisposable?> TryEnterAsync(string ip, TimeSpan wait)
         {
-            var perIp = _perIp.GetOrAdd(ip ?? "", _ => new SemaphoreSlim(MaxConcurrentPerIp, MaxConcurrentPerIp));
-            if (!await perIp.WaitAsync(wait)) return null;
-            if (!await _global.WaitAsync(wait)) { perIp.Release(); return null; }
-            return new Releaser(perIp);
+            var key = ip ?? "";
+            var slot = EnterSlot(key);
+            if (!await slot.Semaphore.WaitAsync(wait)) { LeaveSlot(key, slot); return null; }
+            if (!await _global.WaitAsync(wait)) { slot.Semaphore.Release(); LeaveSlot(key, slot); return null; }
+            return new Releaser(key, slot);
         }
 
         private sealed class Releaser : IDisposable
         {
-            private SemaphoreSlim? _perIp;
-            public Releaser(SemaphoreSlim perIp) { _perIp = perIp; }
+            private readonly string _key;
+            private PeerSlot? _slot;
+            public Releaser(string key, PeerSlot slot) { _key = key; _slot = slot; }
             public void Dispose()
             {
-                var p = Interlocked.Exchange(ref _perIp, null);
-                if (p == null) return;
+                var slot = Interlocked.Exchange(ref _slot, null);
+                if (slot == null) return;
                 _global.Release();
-                p.Release();
+                slot.Semaphore.Release();
+                LeaveSlot(_key, slot);
             }
         }
     }

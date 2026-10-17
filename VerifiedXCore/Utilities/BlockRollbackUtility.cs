@@ -212,6 +212,10 @@ namespace VerifiedXCore.Utilities
                 DbContext.DB.Checkpoint();
                 DbContext.DB_AccountStateTrei.Checkpoint();
 
+                // Snapshot slots above the target hold state from the removed blocks; keep them out of any restore.
+                try { StateSnapshotService.InvalidateAbove(targetHeight); }
+                catch (Exception ex) { ErrorLogUtility.LogError($"[RollbackBlocksFast] Could not invalidate snapshot slots above {targetHeight}: {ex.Message}", "BlockRollbackUtility.RollbackBlocksFast"); }
+
                 // Step 5 + 6: Update Globals.LastBlock to the new tip and clear stale in-memory
                 // queues (shared with SnapshotRestoreUtility).
                 RefreshInMemoryTip(targetHeight);
@@ -338,6 +342,19 @@ namespace VerifiedXCore.Utilities
             catch { attestationChanged = true; }
             if (attestationChanged)
                 return $"Bitcoin attestation state was written above block {targetHeight}.";
+
+            // The forged-VFX burn is not undone by reversing the removed blocks' transactions, and re-applying the block
+            // that carried it burns again; a snapshot restore brings back the balances and the burn marker together.
+            if (Globals.ForgedVfxBurns.Count > 0)
+            {
+                try
+                {
+                    var burnedAt = WorldTrei.GetWorldTrei().FindOne(x => true)?.ForgedVfxBurnAppliedHeight ?? 0;
+                    if (burnedAt > targetHeight)
+                        return $"The forged-VFX burn was applied above block {targetHeight}.";
+                }
+                catch { return "The forged-VFX burn marker could not be read."; }
+            }
 
             // Delayed reserve payments settle after each block whose time passed their unlock time; a removed block may
             // have settled some, which undoing its transactions does not reverse (fifth review, round 29).
@@ -615,6 +632,9 @@ namespace VerifiedXCore.Utilities
         /// 
         /// Does NOT wipe user data (wallet, HD wallet, peers, config, keystore, beacon, DST).
         /// </summary>
+        /// <summary>Test seam: runs right after ResetTreis wipes chain-derived state, the point a crash mid-replay leaves on disk.</summary>
+        internal static Action? StateWipedForTests;
+
         public static async Task<bool> ResetTreis()
         {
             // RE-ENTRANCY GUARD: If ResetTreis is already running, reject the new request.
@@ -665,9 +685,14 @@ namespace VerifiedXCore.Utilities
                 // Every snapshot slot holds the state this rebuild replaces. Replay stamps rows with their
                 // original block heights, so a diff cycle would never copy them into those slots; mark them
                 // Invalid so the next cycles full-copy the rebuilt state and a restore cannot bring the old back.
+                // Durably marked before anything is destroyed: a crash during the replay leaves a status that stops this
+                // node until a rebuild completes, never the old IsSynced=true over partly rebuilt state.
+                StateTreiStatusService.SetRebuildStarted();
+
                 StateSnapshotService.InvalidateAbove(-1);
 
                 WipeChainDerivedState();
+                StateWipedForTests?.Invoke();
 
                 DbContext.DB.Checkpoint();
                 try { DbContext.DB_Mempool.Checkpoint(); } catch { }
@@ -718,10 +743,10 @@ namespace VerifiedXCore.Utilities
 
                 foreach (var block in blockCollection.Find(LiteDB.Query.All("Height", LiteDB.Query.Ascending)))
                 {
-                    if (liftsRestoreStop && previousHeight >= 0 && block.Height != previousHeight + 1)
+                    if (liftsRestoreStop && block.Height != previousHeight + 1) // from genesis (height 0), then every height
                     {
                         failCount++;
-                        ErrorLogUtility.LogError($"[ResetTreis] The block store has no block between heights {previousHeight} and {block.Height}; the failed restore's stop holds.", "BlockRollbackUtility.ResetTreis");
+                        ErrorLogUtility.LogError($"[ResetTreis] The block store has no block between heights {Math.Max(previousHeight, -1) + 1} and {block.Height - 1}; the failed restore's stop holds.", "BlockRollbackUtility.ResetTreis");
                     }
                     previousHeight = block.Height;
 
@@ -787,6 +812,12 @@ namespace VerifiedXCore.Utilities
                         failCount++;
                         ErrorLogUtility.LogError($"[ResetTreis] Error replaying block {block.Height}: {ex.Message}", "BlockRollbackUtility.ResetTreis");
                     }
+                }
+
+                if (liftsRestoreStop && previousHeight < 0)
+                {
+                    failCount++;
+                    ErrorLogUtility.LogError("[ResetTreis] The block store is empty; the failed restore's stop holds.", "BlockRollbackUtility.ResetTreis");
                 }
 
                 rebuildStopwatch.Stop();

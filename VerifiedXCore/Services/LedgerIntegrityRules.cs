@@ -413,6 +413,44 @@ namespace VerifiedXCore.Services
                 : "VFX can only be sent to a VFX address (not a shielded address or a name): nobody could spend it there.";
         }
 
+        /// <summary>
+        /// From Globals.RecipientIsAddressHeight no transaction (other than a private one, which has its own address rules)
+        /// is addressed to a registered name: the applies credit or assign the ToAddress as written. Null when the rule passes.
+        /// </summary>
+        public static string? RecipientIsNotAName(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.RecipientIsAddressHeight) return null;
+            if (VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType)) return null;
+            var to = tx.ToAddress ?? "";
+            if (PlaceholderRecipients.Contains(to)) return null;
+            var looksLikeName = to.Contains(".vfx", StringComparison.OrdinalIgnoreCase) || to.Contains(".rbx", StringComparison.OrdinalIgnoreCase);
+            return looksLikeName && !AddressValidateUtility.ValidateRBXAddress(to)
+                ? "A transaction is addressed to the address a name resolves to, not to the name."
+                : null;
+        }
+
+        /// <summary>The contract functions whose apply reads its Data only in the array form.</summary>
+        public static readonly string[] ArrayFormContractFunctions = { "Update()", "Transfer()", "Burn()", "Evolve()", "Devolve()", "ChangeEvolveStateSpecific()" };
+
+        /// <summary>
+        /// From Globals.ContractPayloadArrayHeight a call to one of <see cref="ArrayFormContractFunctions"/> carries its Data as
+        /// an array whose first element is the call: their applies read nothing else, so any other shape was mined with no
+        /// effect. Null when the rule passes.
+        /// </summary>
+        public static string? ContractCallIsArrayForm(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.ContractPayloadArrayHeight) return null;
+            if (!ContractCallTypes.Contains(tx.TransactionType)) return null;
+            var function = DispatchedCall(tx.Data).Function;
+            if (function == null || !ArrayFormContractFunctions.Contains(function)) return null;
+            try
+            {
+                if (Newtonsoft.Json.JsonConvert.DeserializeObject<JArray>(tx.Data!)![0] is JObject) return null;
+            }
+            catch { }
+            return $"{function} carries its call as an array whose first element is the call.";
+        }
+
         public static string? VbtcRecipientCanHoldIt(Transaction tx, long height)
         {
             if (tx == null || height < Globals.PathAuditRulesHeight) return null;
@@ -878,6 +916,10 @@ namespace VerifiedXCore.Services
         /// words inside a broken multi-line string (e.g. "do" in a description) must not refuse it. No mainnet or testnet
         /// body uses these, so there is no activation height. Null when the rule passes.
         /// </summary>
+        /// <summary>Replaceable for tests: the node's parse of a contract body.</summary>
+        internal static Func<string, global::Trillium.Syntax.SyntaxTree> ParseContractBody =
+            text => global::Trillium.Syntax.SyntaxTree.Parse(text, preventLoopsAndRecursion: true);
+
         public static string? ContractBodyAllowed(Transaction tx, long height = 0)
         {
             var alsoRefused = height >= Globals.PathAuditRulesHeight ? ProcessBoundBuiltins : Array.Empty<string>();
@@ -886,20 +928,30 @@ namespace VerifiedXCore.Services
                 string text;
                 try { text = System.Text.Encoding.Unicode.GetString(SmartContractUtility.Decompress(Convert.FromBase64String(body))); }
                 catch { continue; } // not a contract body: nothing ever runs it
-                var tree = global::Trillium.Syntax.SyntaxTree.Parse(text, preventLoopsAndRecursion: true); // as the node parses it
-                if (tree.Diagnostics.Length > 0) continue;
-                var pending = new Stack<global::Trillium.Syntax.SyntaxNode>();
-                pending.Push(tree.Root);
-                while (pending.Count > 0)
+                // A parser fault is a refusal, as in NotTimelessBecause: thrown, it left VerifyTX as an exception (which
+                // already made a block carrying it invalid, so validity is unchanged).
+                try
                 {
-                    var node = pending.Pop();
-                    if (node is global::Trillium.Syntax.DoWhileStatementSyntax)
-                        return "Contract code may not use a do-while loop.";
-                    if (node is global::Trillium.Syntax.CallExpressionSyntax call
-                        && (NondeterministicBuiltins.Contains(call.Identifier.Text) || alsoRefused.Contains(call.Identifier.Text)))
-                        return $"Contract code may not call {call.Identifier.Text}().";
-                    foreach (var child in node.GetChildren())
-                        pending.Push(child);
+                    var tree = ParseContractBody(text); // as the node parses it
+                    if (tree.Diagnostics.Length > 0) continue;
+                    var pending = new Stack<global::Trillium.Syntax.SyntaxNode>();
+                    pending.Push(tree.Root);
+                    while (pending.Count > 0)
+                    {
+                        var node = pending.Pop();
+                        if (node is global::Trillium.Syntax.DoWhileStatementSyntax)
+                            return "Contract code may not use a do-while loop.";
+                        if (node is global::Trillium.Syntax.CallExpressionSyntax call
+                            && (NondeterministicBuiltins.Contains(call.Identifier.Text) || alsoRefused.Contains(call.Identifier.Text)))
+                            return $"Contract code may not call {call.Identifier.Text}().";
+                        foreach (var child in node.GetChildren())
+                            pending.Push(child);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Contract body of {tx?.Hash} could not be read: {ex.Message}", "LedgerIntegrityRules.ContractBodyAllowed()");
+                    return "Contract code cannot be read.";
                 }
             }
             return null;

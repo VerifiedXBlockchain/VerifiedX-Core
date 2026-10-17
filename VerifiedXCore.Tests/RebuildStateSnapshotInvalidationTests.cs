@@ -74,6 +74,48 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task ARebuildStoppedAfterTheWipe_LeavesTheStateMarkedUnsynced()
+        {
+            PutAccount("addrA", 5m, 50);
+            Assert.True(StateTreiStatusService.IsSynced());
+
+            // What a crash during the replay leaves on disk: the status as it stands once the old state is gone.
+            StateTreiStatus? afterWipe = null;
+            BlockRollbackUtility.StateWipedForTests = () => afterWipe = StateTreiStatusService.GetStatus();
+            try { await BlockRollbackUtility.ResetTreis(); }
+            finally { BlockRollbackUtility.StateWipedForTests = null; }
+
+            Assert.False(afterWipe!.IsSynced); // never the old IsSynced=true over partial state
+            Assert.True(afterWipe.RebuildInProgress);
+            Assert.NotEqual(true, StateTreiStatusService.GetStatus()?.RebuildInProgress); // the rebuild ended, so it is no longer in progress
+        }
+
+        [Fact]
+        public void ARebuildStillInProgressAtStartup_StopsTheNode_UntilARebuildCompletes()
+        {
+            try
+            {
+                StateTreiStatusService.SetRebuildStarted(); // as a crash mid-replay leaves it
+                SnapshotRestoreUtility.RecallStateDestroyed();
+                Assert.True(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
+
+                // A later failure reason does not hide an interrupted rebuild's partial state from the next start...
+                SnapshotRestoreUtility.ClearStateDestroyed();
+                StateTreiStatusService.SetRebuildStarted();
+                StateTreiStatusService.SetRestoreDestroyed(false);
+                SnapshotRestoreUtility.RecallStateDestroyed();
+                Assert.True(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
+
+                // ...and a completed rebuild clears it.
+                SnapshotRestoreUtility.ClearStateDestroyed();
+                StateTreiStatusService.SetSynced(100);
+                SnapshotRestoreUtility.RecallStateDestroyed();
+                Assert.False(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
+            }
+            finally { SnapshotRestoreUtility.ClearStateDestroyed(); }
+        }
+
+        [Fact]
         public async Task AfterRebuild_NextCycleCapturesTheRebuiltRows()
         {
             PutAccount("addrA", 5m, 50);

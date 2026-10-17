@@ -116,6 +116,16 @@ namespace VerifiedXCore.Bitcoin.Models
                 adnr.DeleteManySafe(x => x.BTCAddress == address);
             }
         }
+
+        /// <summary>Deletes only the name <paramref name="owner"/> holds on <paramref name="address"/>.</summary>
+        public static void DeleteAdnr(string address, string owner)
+        {
+            var adnr = GetBitcoinAdnr();
+            if (adnr == null)
+                ErrorLogUtility.LogError("GetAdnr() returned a null value.", "Adnr.GetAdnr()");
+            else
+                adnr.DeleteManySafe(x => x.BTCAddress == address && x.RBXAddress == owner);
+        }
         #endregion
 
         #region BTCCreateAdnrTx(string address, string name, string btcAddress)
@@ -146,7 +156,9 @@ namespace VerifiedXCore.Bitcoin.Models
                 return (null, $"BTC Address is not found for : {btcAddress}");
             }
 
-            string btcSigMessage = TimeUtil.GetTime().ToString();
+            string btcSigMessage = Globals.LastBlock.Height + 1 >= Globals.BtcNameSignerOwnsAddressHeight
+                ? Services.BtcNameSignatures.Message(TimeUtil.GetTime(), vfxAddress, name)
+                : TimeUtil.GetTime().ToString();
             // VX-13: sealed keys are available only while the wallet is unlocked.
             var btcKeyHex = Services.BitcoinKeystore.GetPrivateKeyHex(btcAccount);
             if (string.IsNullOrEmpty(btcKeyHex))
@@ -251,8 +263,32 @@ namespace VerifiedXCore.Bitcoin.Models
 
         #endregion
 
+        #region SignTransferAcceptance(string btcAddress, string name, string newOwner)
+        /// <summary>
+        /// The receiving side of a BTC name transfer: this wallet's key for <paramref name="btcAddress"/> signs that it
+        /// accepts <paramref name="name"/> for <paramref name="newOwner"/>. The sender puts the result in the transfer.
+        /// </summary>
+        public static (string? Message, string? Signature, string? Error) SignTransferAcceptance(string btcAddress, string name, string newOwner)
+        {
+            var btcAccount = BitcoinAccount.GetBitcoinAccount(btcAddress);
+            if (btcAccount == null)
+                return (null, null, $"The receiving BTC address must sign the transfer, and its key is not in this wallet: {btcAddress}");
+            var btcKeyHex = Services.BitcoinKeystore.GetPrivateKeyHex(btcAccount);
+            if (string.IsNullOrEmpty(btcKeyHex))
+                return (null, null, "You must type in your encryption password first!");
+
+            var message = Services.BtcNameSignatures.Message(TimeUtil.GetTime(), newOwner, name);
+            var signature = Services.SignatureService.CreateSignature(btcKeyHex, message);
+            if (signature == "F")
+                return (null, null, $"Failed to produce signature for : {btcAddress}");
+
+            return (message, signature, null);
+        }
+        #endregion
+
         #region TransferAdnrTx(string fromAddress, string toAddress)
-        public static async Task<(Transaction?, string)> TransferAdnrTx(string fromAddress, string toAddress, string toBtcAddress, string btcFromAddress)
+        public static async Task<(Transaction?, string)> TransferAdnrTx(string fromAddress, string toAddress, string toBtcAddress, string btcFromAddress,
+            string? btcToMessage = null, string? btcToSignature = null)
         {
             Transaction? adnrTx = null;
 
@@ -269,7 +305,27 @@ namespace VerifiedXCore.Bitcoin.Models
             BigInteger b1 = BigInteger.Parse(account.GetKey, NumberStyles.AllowHexSpecifier);//converts hex private key into big int.
             PrivateKey privateKey = new PrivateKey("secp256k1", b1);
 
-            txData = JsonConvert.SerializeObject(new { Function = "BTCAdnrTransfer()", BTCToAddress = toBtcAddress, BTCFromAddress = btcFromAddress });
+            if (Globals.LastBlock.Height + 1 >= Globals.BtcNameSignerOwnsAddressHeight)
+            {
+                if (btcToMessage == null || btcToSignature == null)
+                {
+                    var name = GetBitcoinAdnr()?.FindOne(x => x.BTCAddress == btcFromAddress && x.RBXAddress == fromAddress)?.Name;
+                    if (name == null)
+                        return (null, $"No BTC name found for : {btcFromAddress}");
+                    var accepted = SignTransferAcceptance(toBtcAddress, name, toAddress);
+                    if (accepted.Error != null)
+                        return (null, accepted.Error);
+                    btcToMessage = accepted.Message;
+                    btcToSignature = accepted.Signature;
+                }
+
+                txData = JsonConvert.SerializeObject(new { Function = "BTCAdnrTransfer()", BTCToAddress = toBtcAddress, BTCFromAddress = btcFromAddress,
+                    BTCToMessage = btcToMessage, BTCToSignature = btcToSignature });
+            }
+            else
+            {
+                txData = JsonConvert.SerializeObject(new { Function = "BTCAdnrTransfer()", BTCToAddress = toBtcAddress, BTCFromAddress = btcFromAddress });
+            }
 
             adnrTx = new Transaction
             {

@@ -308,7 +308,11 @@ namespace VerifiedXCore.Services
                 // VFX goes to an address somebody can sign for (round 27).
                 ?? LedgerIntegrityRules.VfxRecipientCanHoldIt(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                 // What a token transaction adds to a document read whole later is bounded (round 33).
-                ?? LedgerIntegrityRules.TokenDocumentLimits(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+                ?? LedgerIntegrityRules.TokenDocumentLimits(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // Nothing is addressed to a name: the applies credit the ToAddress as written.
+                ?? LedgerIntegrityRules.RecipientIsNotAName(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // A contract call is in the shape its apply reads.
+                ?? LedgerIntegrityRules.ContractCallIsArrayForm(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
             if (vaultInTransitError != null)
                 return (false, vaultInTransitError);
 
@@ -524,78 +528,8 @@ namespace VerifiedXCore.Services
             }
 
             //Hash Check
-            var newTxn = new Transaction()
-            {
-                Timestamp = txRequest.Timestamp,
-                FromAddress = txRequest.FromAddress,
-                ToAddress = txRequest.ToAddress,
-                Amount = txRequest.Amount,
-                Fee = txRequest.Fee,
-                Nonce = txRequest.Nonce,
-                TransactionType = txRequest.TransactionType,
-                Data = txRequest.Data,
-                UnlockTime = txRequest.UnlockTime,
-            };
-
-            newTxn.Build();
-
-            if (!newTxn.Hash.Equals(txRequest.Hash))
-            {
-                var amountCheck = txRequest.Amount % 1 == 0;
-                var amountFormat = 0M;
-                if (amountCheck)
-                {
-                    var amountStr = txRequest.Amount.ToString("0.0");
-                    amountFormat = decimal.Parse(amountStr);
-                }
-
-                var newTxnMod = new Transaction()
-                {
-                    Timestamp = txRequest.Timestamp,
-                    FromAddress = txRequest.FromAddress,
-                    ToAddress = txRequest.ToAddress,
-                    Amount = amountFormat,
-                    Fee = txRequest.Fee,
-                    Nonce = txRequest.Nonce,
-                    TransactionType = txRequest.TransactionType,
-                    Data = txRequest.Data,
-                    UnlockTime = txRequest.UnlockTime,
-                };
-
-                newTxnMod.Build();
-
-                // NEW-22: the "Amount 0" re-hash below matched a transaction SIGNED with Amount "0" whatever Amount it now
-                // carries (the non-integer case above also re-hashed with 0): a relay or producer could raise the amount
-                // of any such transaction without breaking its signature. It applies only to a zero amount.
-                if (!newTxnMod.Hash.Equals(txRequest.Hash) && txRequest.Amount != 0M)
-                {
-                    return (txResult, "This transactions hash is not equal to the original hash.");
-                }
-
-                if (!newTxnMod.Hash.Equals(txRequest.Hash))
-                {
-                    var newTxnModZero = new Transaction()
-                    {
-                        Timestamp = txRequest.Timestamp,
-                        FromAddress = txRequest.FromAddress,
-                        ToAddress = txRequest.ToAddress,
-                        Amount = 0,
-                        Fee = txRequest.Fee,
-                        Nonce = txRequest.Nonce,
-                        TransactionType = txRequest.TransactionType,
-                        Data = txRequest.Data,
-                        UnlockTime = txRequest.UnlockTime,
-                    };
-
-                    newTxnModZero.Build();
-
-                    if (!newTxnModZero.Hash.Equals(txRequest.Hash))
-                    {
-                        return (txResult, "This transactions hash is not equal to the original hash.");
-                    }
-                }
-
-            }
+            if (!StandardHashMatches(txRequest))
+                return (txResult, "This transactions hash is not equal to the original hash.");
 
             // The signature before any rule that parses or runs carried contract code: every transaction that reaches this
             // point must pass the same check at the end of VerifyTX, so only the order of refusals changes, and a
@@ -2277,13 +2211,27 @@ namespace VerifiedXCore.Services
                                     //Rules:
                                     //1. Must be a valid signature from the BTC address
                                     //2. Message must be a timestamp no older than 30 minutes. 
-                                    var signatureValid = Bitcoin.Services.SignatureService.VerifySignature(message, signature);
-                                    if (!signatureValid)
-                                        return (txResult, "Invalid BTC Signature");
-                                    var messageParse = long.TryParse(message, out var messageTimestamp);
+                                    //From BtcNameSignerOwnsAddressHeight the signer is BTCAddress's own key and the message names this sender and name.
+                                    long messageTimestamp;
+                                    if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.BtcNameSignerOwnsAddressHeight)
+                                    {
+                                        //The apply stores Name + ".btc", so a Name carrying the suffix would store a name the signer never signed.
+                                        if (name.Contains(".btc", StringComparison.OrdinalIgnoreCase))
+                                            return (txResult, "Name may not contain network suffix '.btc'!");
+                                        var boundError = Bitcoin.Services.BtcNameSignatures.Check(message, signature, btcAddress, txRequest.FromAddress, name + ".btc", Globals.BTCNetwork, out messageTimestamp);
+                                        if (boundError != null)
+                                            return (txResult, boundError);
+                                    }
+                                    else
+                                    {
+                                        var signatureValid = Bitcoin.Services.SignatureService.VerifySignature(message, signature);
+                                        if (!signatureValid)
+                                            return (txResult, "Invalid BTC Signature");
+                                        var messageParse = long.TryParse(message, out messageTimestamp);
 
-                                    if (!messageParse)
-                                        return (txResult, "Improper Message Format. Message must be a timestamp.");
+                                        if (!messageParse)
+                                            return (txResult, "Improper Message Format. Message must be a timestamp.");
+                                    }
 
                                     if (blockTime != null)
                                     {
@@ -2323,6 +2271,36 @@ namespace VerifiedXCore.Services
                                     if (toAddressCheck != null)
                                     {
                                         return (txResult, "Address is already associated with an active DNR");
+                                    }
+
+                                    //From BtcNameSignerOwnsAddressHeight the receiving Bitcoin key accepts the name for the new owner.
+                                    if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.BtcNameSignerOwnsAddressHeight)
+                                    {
+                                        var acceptMessage = (string?)jobj["BTCToMessage"];
+                                        var acceptSignature = (string?)jobj["BTCToSignature"];
+                                        if (acceptMessage == null || acceptSignature == null)
+                                            return (txResult, "The receiving BTC address must sign the transfer.");
+
+                                        //The name moved is the one the receiver signed, among the sender's records at the address (the apply picks it the same way).
+                                        var signedRecord = StateData.SignedBtcNameRecord(adnrList, BTCFromAddress, txRequest.FromAddress, acceptMessage);
+                                        if (signedRecord == null)
+                                            return (txResult, "The receiving BTC address's signature names a name the sender does not hold at that address.");
+
+                                        var acceptError = Bitcoin.Services.BtcNameSignatures.Check(acceptMessage, acceptSignature, BTCToAddress, txRequest.ToAddress, signedRecord.Name, Globals.BTCNetwork, out var acceptTimestamp);
+                                        if (acceptError != null)
+                                            return (txResult, acceptError);
+
+                                        var maxAge = Bitcoin.Services.BtcNameSignatures.TransferAcceptanceMaxAgeSeconds;
+                                        if (blockTime != null)
+                                        {
+                                            if (acceptTimestamp < LedgerIntegrityRules.NowForAgeRules(blockTime) - maxAge)
+                                                return (txResult, "The receiving BTC address's signature is too old. Please sign again.");
+                                        }
+                                        else if (!blockDownloads)
+                                        {
+                                            if (acceptTimestamp < TimeUtil.GetTime() - maxAge)
+                                                return (txResult, "The receiving BTC address's signature is too old. Please sign again.");
+                                        }
                                     }
                                 }
 
@@ -4575,8 +4553,82 @@ namespace VerifiedXCore.Services
             return true;
         }
 
+        /// <summary>
+        /// Whether a standard (non-private) transaction's carried Hash is the hash of its content. Accepts the legacy
+        /// spellings VerifyTX always has: a whole-number Amount hashed as "N.0", and a zero Amount hashed as "0".
+        /// </summary>
+        internal static bool StandardHashMatches(Transaction txRequest)
+        {
+            var newTxn = new Transaction()
+            {
+                Timestamp = txRequest.Timestamp,
+                FromAddress = txRequest.FromAddress,
+                ToAddress = txRequest.ToAddress,
+                Amount = txRequest.Amount,
+                Fee = txRequest.Fee,
+                Nonce = txRequest.Nonce,
+                TransactionType = txRequest.TransactionType,
+                Data = txRequest.Data,
+                UnlockTime = txRequest.UnlockTime,
+            };
+
+            newTxn.Build();
+
+            if (newTxn.Hash.Equals(txRequest.Hash))
+                return true;
+
+            var amountCheck = txRequest.Amount % 1 == 0;
+            var amountFormat = 0M;
+            if (amountCheck)
+            {
+                var amountStr = txRequest.Amount.ToString("0.0");
+                amountFormat = decimal.Parse(amountStr);
+            }
+
+            var newTxnMod = new Transaction()
+            {
+                Timestamp = txRequest.Timestamp,
+                FromAddress = txRequest.FromAddress,
+                ToAddress = txRequest.ToAddress,
+                Amount = amountFormat,
+                Fee = txRequest.Fee,
+                Nonce = txRequest.Nonce,
+                TransactionType = txRequest.TransactionType,
+                Data = txRequest.Data,
+                UnlockTime = txRequest.UnlockTime,
+            };
+
+            newTxnMod.Build();
+
+            if (newTxnMod.Hash.Equals(txRequest.Hash))
+                return true;
+
+            // NEW-22: the "Amount 0" re-hash below matched a transaction SIGNED with Amount "0" whatever Amount it now
+            // carries (the non-integer case above also re-hashed with 0): a relay or producer could raise the amount
+            // of any such transaction without breaking its signature. It applies only to a zero amount.
+            if (txRequest.Amount != 0M)
+                return false;
+
+            var newTxnModZero = new Transaction()
+            {
+                Timestamp = txRequest.Timestamp,
+                FromAddress = txRequest.FromAddress,
+                ToAddress = txRequest.ToAddress,
+                Amount = 0,
+                Fee = txRequest.Fee,
+                Nonce = txRequest.Nonce,
+                TransactionType = txRequest.TransactionType,
+                Data = txRequest.Data,
+                UnlockTime = txRequest.UnlockTime,
+            };
+
+            newTxnModZero.Build();
+
+            return newTxnModZero.Hash.Equals(txRequest.Hash);
+        }
+
         /// <summary>The transaction signature check (over the carried Hash); null when it passes.</summary>
-        private static string? SignatureError(Transaction txRequest)
+        internal static string? SignatureError(Transaction txRequest)
         {
             if (string.IsNullOrEmpty(txRequest.Signature))
                 return "Signature cannot be null.";

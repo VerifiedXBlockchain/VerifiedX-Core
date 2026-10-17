@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using VerifiedXCore;
 using VerifiedXCore.Data;
@@ -133,6 +134,19 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task ARestoreThatStopsAfterRemovingBlocks_HasAlreadyDroppedTheirDeletionRecords()
+        {
+            await ChainWithSlotAt45_ThatFailsToReplay();
+            var tombstones = StateTombstone.GetTombstones()!;
+            tombstones.Insert(new StateTombstone { SourceColl = StateTombstone.COLL_SCSTATE, Key = "kept", Height = 47 });
+            tombstones.Insert(new StateTombstone { SourceColl = StateTombstone.COLL_SCSTATE, Key = "removed-branch", Height = 49 });
+
+            Assert.False(await SnapshotRestoreUtility.TryRestoreAsync(48)); // ends early, after blocks 49 and 50 are gone
+
+            Assert.Equal(new[] { "kept" }, tombstones.FindAll().Select(x => x.Key).ToArray());
+        }
+
+        [Fact]
         public async Task SuccessfulRestore_DoesNotStopValidation_AndClearsAnEarlierFailure()
         {
             await ChainWithSlotAt45_ThatFailsToReplay();
@@ -203,7 +217,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task ARebuildOverAGappedBlockStore_DoesNotLiftTheStop()
         {
-            for (long h = 1; h <= 5; h++) if (h != 3) AddBlock(h);
+            for (long h = 0; h <= 5; h++) if (h != 3) AddBlock(h);
             StateTreiStatusService.SetFailed("Snapshot restore failed after wiping the state (restore to 5).");
             StateTreiStatusService.SetRestoreDestroyed(true);
             SnapshotRestoreUtility.RecallStateDestroyed();
@@ -212,12 +226,31 @@ namespace VerifiedXCore.Tests
             Assert.True(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
             Assert.False(StateTreiStatusService.IsSynced());
 
-            // With the block back, the rebuild succeeds and lifts the stop.
-            BlockchainData.GetBlocks().DeleteManySafe(x => x.Height > 2);
-            for (long h = 3; h <= 5; h++) AddBlock(h);
+            // A store missing its first heights (from genesis) does not lift it either.
+            BlockchainData.GetBlocks().DeleteManySafe(x => x.Height < 3);
+            for (long h = 3; h <= 5; h++) if (BlockchainData.GetBlocks().FindOne(x => x.Height == h) == null) AddBlock(h);
+            Assert.False(await BlockRollbackUtility.ResetTreis());
+            Assert.True(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
+
+            // With every block from genesis, the rebuild succeeds and lifts the stop.
+            BlockchainData.GetBlocks().DeleteManySafe(x => x.Height >= 0);
+            for (long h = 0; h <= 5; h++) AddBlock(h);
             Assert.True(await BlockRollbackUtility.ResetTreis());
             Assert.False(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
             Assert.True(StateTreiStatusService.IsSynced());
+        }
+
+        [Fact]
+        public void TheStop_IsRecalledWhenTheDatabaseOpens_BeforeAnyBlockCanArrive()
+        {
+            StateTreiStatusService.SetFailed("Snapshot restore failed after wiping the state (restore to 48).");
+            StateTreiStatusService.SetRestoreDestroyed(true);
+            DbContext.CloseDB();
+            SnapshotRestoreUtility.ClearStateDestroyed(); // a fresh process
+
+            StartupService.StartupDatabase();
+
+            Assert.True(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
         }
 
         [Fact]

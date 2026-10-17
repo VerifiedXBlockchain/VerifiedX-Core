@@ -10,7 +10,7 @@ namespace VerifiedXCore.Services
     /// This flag tracks whether the state trie is fully built and consistent.
     /// It lives in the same DB as the state trie itself, so it:
     /// - Travels with snapshots (restored snapshot = IsSynced=true)
-    /// - Gets wiped when ResetTreis wipes the state trie (missing = needs rebuild)
+    /// - Is kept when ResetTreis wipes the state trie, and set to IsSynced=false before the wipe
     /// - Is set to true ONLY after a successful full rebuild
     /// </summary>
     public static class StateTreiStatusService
@@ -104,6 +104,31 @@ namespace VerifiedXCore.Services
             db.Checkpoint();
         }
 
+        /// <summary>
+        /// Marks a rebuild as started, durably and before anything is destroyed: IsSynced=false with
+        /// <see cref="StateTreiStatus.RebuildInProgress"/> set, keeping any restore stop. Only the rebuild's end clears it.
+        /// </summary>
+        public static void SetRebuildStarted()
+        {
+            var db = DbContext.DB_AccountStateTrei;
+            if (db == null) return;
+            var col = db.GetCollection<StateTreiStatus>(COLLECTION_NAME);
+            var status = new StateTreiStatus
+            {
+                Id = 1,
+                IsSynced = false,
+                LastSyncedHeight = Globals.LastBlock?.Height ?? 0,
+                LastSyncTime = DateTime.UtcNow,
+                LastFailureReason = "A state rebuild started and did not complete.",
+                RestoreDestroyed = col.FindOne(x => true)?.RestoreDestroyed,
+                RebuildInProgress = true,
+            };
+            col.Upsert(status);
+            col.DeleteMany(x => x.Id != 1);
+            db.Checkpoint();
+        }
+
+        /// <summary>Marks the state unsynced with a reason. Keeps a restore stop; a rebuild that ended is no longer in progress.</summary>
         public static void SetFailed(string reason)
         {
             try

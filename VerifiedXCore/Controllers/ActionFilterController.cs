@@ -7,7 +7,15 @@ namespace VerifiedXCore.Controllers
 {
     public class ActionFilterController : ActionFilterAttribute
     {
-        public static List<string> ApprovedMethodList = new List<string> { "GetDebugInfo", "Mother", "Egg", "CheckStatus", "GetCLIVersion", "GetWalletInfo", "NetworkMetrics", "SyncBalances" };
+        /// <summary>Actions callable without the API token. GetDebugInfo is not one: it dumps the node's settings,
+        /// peers and balances, and the GUI (which sends the token) is its only intended caller.</summary>
+        public static List<string> ApprovedMethodList = new List<string> { "Mother", "Egg", "CheckStatus", "GetCLIVersion", "GetWalletInfo", "NetworkMetrics", "SyncBalances" };
+
+        /// <summary>
+        /// Controllers served without this filter: the explorer, a read-only public surface whose own page and clients
+        /// call it without the API token. Every other controller on the wallet host must carry the filter (a test checks).
+        /// </summary>
+        public static readonly HashSet<string> FilterExemptControllers = new(StringComparer.Ordinal) { "Explorer" };
 
         public const string LockedWalletMessage = "You must type in your encryption password first!";
 
