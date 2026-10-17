@@ -948,7 +948,7 @@ namespace VerifiedXCore.Data
                     // HAL-070 Fix + reserve-vBTC hardening: re-read the row's CURRENT status from
                     // the DB (not the caller's snapshot) — real idempotence against re-entry and
                     // replay. Anything not Pending has already been finalized/cancelled/recovered.
-                    var currentRow = rtxDb.Query().Where(x => x.Id == rtx.Id).FirstOrDefault();
+                    var currentRow = ReserveTransactions.GetRowForApply(rtxDb, rtx.Id);
                     if (currentRow == null || currentRow.ReserveTransactionStatus != ReserveTransactionStatus.Pending)
                     {
                         ErrorLogUtility.LogError($"UpdateTreiFromReserve skipped for hash {rtx.Hash} - status {(currentRow?.ReserveTransactionStatus.ToString() ?? "missing")}, not Pending", "StateData.UpdateTreiFromReserve()");
@@ -1135,7 +1135,7 @@ namespace VerifiedXCore.Data
                         }
                     }
 
-                    var rtxRec = rtxDb.Query().Where(x => x.Id == rtx.Id).FirstOrDefault();
+                    var rtxRec = ReserveTransactions.GetRowForApply(rtxDb, rtx.Id);
                     var hash = rtx.Hash;
 
                     if (rtxRec != null)
