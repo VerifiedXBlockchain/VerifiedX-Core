@@ -37,7 +37,9 @@ namespace VerifiedXCore.EllipticCurve
                 random.GetBytes(randomBytes);
             }
 
-            BigInteger randomValue = new BigInteger(randomBytes);
+            // Unsigned: read as signed, any draw with its top bit set was negative, landed above the range after the mask
+            // and was thrown away, so no value (nonce or private key) ever had its top bit set.
+            BigInteger randomValue = new BigInteger(randomBytes, isUnsigned: true);
 
             /* We apply the mask to reduce the amount of attempts we might need
                 * to make to get a number that is in range. This is somewhat like
