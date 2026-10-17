@@ -186,12 +186,14 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void StallOverride_StillFollowsTheMajority_WhenTheLocalWinIsNotOnCertificateWeight()
         {
-            // Pre-cert blocks: LocalWins on hash order, the dead branch is abandoned as before.
+            // Pre-cert blocks: a majority more than a reorg window ahead wins on height, so the dead branch is abandoned
+            // by the rule itself, and a local win on hash order is not one on weight.
             var local = new ForkChoiceUtility.BranchSummary { TipHeight = 100, HashAtDivergence = "aaa" };
-            var remote = new ForkChoiceUtility.BranchSummary { TipHeight = 100, HashAtDivergence = "zzz" };
+            var remote = new ForkChoiceUtility.BranchSummary { TipHeight = 100 + ForkChoiceUtility.MAX_REORG_DEPTH + 1, HashAtDivergence = "zzz" };
+            Assert.Equal(ForkChoiceUtility.Outcome.RemoteWins, ForkChoiceUtility.CompareBranches(local, remote));
+            remote.TipHeight = 100;
             Assert.Equal(ForkChoiceUtility.Outcome.LocalWins, ForkChoiceUtility.CompareBranches(local, remote));
             Assert.False(ForkChoiceUtility.DecidedOnCertWeight(local, remote));
-            Assert.True(ShouldOverrideLocalWin(true, local.TipHeight, 100 + ForkChoiceUtility.MAX_REORG_DEPTH + 1, ForkChoiceUtility.DecidedOnCertWeight(local, remote)));
 
             // Cert-era blocks of equal weight: decided on height or hash, not weight.
             local.CertRuleApplicable = remote.CertRuleApplicable = true;
