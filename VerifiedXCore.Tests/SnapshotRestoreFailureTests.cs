@@ -306,6 +306,39 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task ARebuildWhereATransactionHitsAStorageFault_DoesNotLiftTheStop()
+        {
+            for (long h = 0; h <= 5; h++)
+            {
+                if (h != 3) { AddBlock(h); continue; }
+                BlockchainData.GetBlocks().InsertSafe(new Block
+                {
+                    Height = 3, Hash = "hash-3", PrevHash = "hash-2", StateRoot = "root-3", Timestamp = TimeUtil.GetTime(),
+                    Transactions = new List<Transaction> { new Transaction { Hash = "tx-3", FromAddress = "xA", ToAddress = "xB", Amount = 0M, TransactionType = TransactionType.TX, Timestamp = TimeUtil.GetTime() } },
+                });
+            }
+            StateTreiStatusService.SetFailed("Snapshot restore failed after wiping the state (restore to 5).");
+            StateTreiStatusService.SetRestoreDestroyed(true);
+            SnapshotRestoreUtility.RecallStateDestroyed();
+
+            var hits = 0;
+            StateData.TxApplyForTests = tx => { if (tx.Hash == "tx-3") { hits++; throw new System.IO.IOException("disk read failed"); } };
+            try
+            {
+                Assert.Single(BlockchainData.GetBlocks().FindOne(x => x.Height == 3).Transactions);
+                var rebuilt = await BlockRollbackUtility.ResetTreis();
+                Assert.Equal(1, hits);
+                Assert.False(rebuilt); // the transaction's state is missing: not the network's
+                Assert.True(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
+            }
+            finally { StateData.TxApplyForTests = null; }
+
+            // The same chain without the fault rebuilds and lifts the stop.
+            Assert.True(await BlockRollbackUtility.ResetTreis());
+            Assert.False(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
+        }
+
+        [Fact]
         public void TheStop_IsRecalledWhenTheDatabaseOpens_BeforeAnyBlockCanArrive()
         {
             StateTreiStatusService.SetFailed("Snapshot restore failed after wiping the state (restore to 48).");
