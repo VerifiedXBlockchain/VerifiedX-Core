@@ -244,6 +244,9 @@ namespace VerifiedXCore.Data
 
         internal static Action<long>? ApplyStepForTests;
 
+        /// <summary>Test seam: runs inside the validator-bond block-start step.</summary>
+        internal static Action<long>? BlockStartStepForTests;
+
         private static async Task<bool> UpdateTreisCore(Block block)
         {
             _applyStepFailed = false;
@@ -276,17 +279,20 @@ namespace VerifiedXCore.Data
             {
                 blockStartFailed = true;
                 BlockStartFailedAtHeight = block.Height;
+                NoteApplyStepFailed(block.Height, ex); // a fault of this node's storage is also reported as one (a rebuild keeps its stop)
                 ErrorLogUtility.LogError($"Block {block.Height}: the Bitcoin attestation block-start step failed: {ex}", "StateData.UpdateTreis() - block start");
             }
             try
             {
                 // Each step on its own: one that fails must not also skip the other for this block.
+                BlockStartStepForTests?.Invoke(block.Height);
                 VerifiedXCore.Services.ValidatorBond.OnBlockStart(block.Height); // validator bonds: active validators bonded at the bond height; funded stakes confirmed
             }
             catch (Exception ex)
             {
                 blockStartFailed = true;
                 BlockStartFailedAtHeight = block.Height;
+                NoteApplyStepFailed(block.Height, ex); // a fault of this node's storage is also reported as one (a rebuild keeps its stop)
                 ErrorLogUtility.LogError($"Block {block.Height}: the validator bond block-start step failed: {ex}", "StateData.UpdateTreis() - block start");
             }
             var txList = block.Transactions.ToList();
@@ -903,6 +909,7 @@ namespace VerifiedXCore.Data
             {
                 blockStartFailed = true;
                 BlockStartFailedAtHeight = block.Height;
+                NoteApplyStepFailed(block.Height, ex); // a fault of this node's storage is also reported as one (a rebuild keeps its stop)
                 ErrorLogUtility.LogError($"Block {block.Height}: fixing the block's withdrawals on coins failed: {ex}", "StateData.UpdateTreis() - block end");
             }
 

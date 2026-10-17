@@ -114,6 +114,17 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task ARebuildWhoseBlockStartStepHitsAStorageFault_KeepsTheDurableStop()
+        {
+            StoreBlockWithTx(1, "tx-1");
+            StateData.BlockStartStepForTests = h => { if (h == 1) throw new IOException("disk read failed"); };
+            try { Assert.False(await BlockRollbackUtility.ResetTreis()); }
+            finally { StateData.BlockStartStepForTests = null; }
+
+            Assert.True(StateTreiStatusService.GetStatus()?.RebuildInProgress);
+        }
+
+        [Fact]
         public async Task ARebuildEndingWithAFailureTheChainCauses_DoesNotStrandTheNode()
         {
             StoreBlockWithTx(1, "tx-1");
