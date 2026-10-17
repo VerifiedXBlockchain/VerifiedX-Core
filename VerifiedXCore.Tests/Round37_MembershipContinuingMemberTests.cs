@@ -92,6 +92,34 @@ namespace VerifiedXCore.Tests
         private static Task<RecordSignature?> Sign(CasterMembershipRecord candidate) =>
             CasterMembershipService.HandleSignRequestAsync(new MembershipSignRequest { Candidate = candidate, ProposerAddress = "xProposer" });
 
+        /// <summary>
+        /// C-012 (encoding): the signed payload joins fields with '|'. A record that folds the first member's fields into
+        /// its ChangedAddress and lists one member fewer has the same bytes, so the signatures on the honest record were
+        /// valid on it too, and it could install a committee nobody signed. A field holding '|' is refused at validation
+        /// (every append and catch-up), and an honest record is unchanged.
+        /// </summary>
+        [Fact]
+        public void ARecordWithTheSameBytesButOtherFields_IsRefused()
+        {
+            var honest = PromoteD(Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"));
+            var payload = CasterMembershipStore.CanonicalPayload(honest);
+            foreach (var signer in new[] { _a, _b })
+                honest.Signatures.Add(new RecordSignature { SignerAddress = signer.Address, Signature = SignatureService.CreateSignature(payload, signer.GetPrivKey, signer.PublicKey) });
+            Assert.True(CasterMembershipStore.ValidateSuccessor(_head, honest, out var why), why);
+
+            var first = honest.Casters[0];
+            var forged = new CasterMembershipRecord
+            {
+                RecordSeq = honest.RecordSeq, EffectiveFromHeight = honest.EffectiveFromHeight, PrevRecordHash = honest.PrevRecordHash,
+                ChangeType = honest.ChangeType, ChangedAddress = $"{honest.ChangedAddress}|{first.Address}|{first.PeerIP}|{first.PublicKey}",
+                Casters = honest.Casters.Skip(1).ToList(), Signatures = honest.Signatures,
+            };
+            forged.RecordHash = CasterMembershipStore.ComputeRecordHash(forged);
+            Assert.Equal(payload, CasterMembershipStore.CanonicalPayload(forged));                  // the same bytes, other fields
+            Assert.False(CasterMembershipStore.ValidateSuccessor(_head, forged, out why));
+            Assert.Contains("payload separator", why);
+        }
+
         [Fact]
         public async Task ARotationThatChangesAnotherMembersPeerIp_IsNotSigned()
         {
