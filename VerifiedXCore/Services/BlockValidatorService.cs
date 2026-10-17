@@ -313,6 +313,21 @@ namespace VerifiedXCore.Services
 
         internal enum CasterGate { Allow, HashMismatch, Pending, Uncertified }
 
+        /// <summary>How old this node's tip may be for the next block to count as the live edge.</summary>
+        internal const long LiveEdgeTipAgeSeconds = 120;
+
+        /// <summary>
+        /// Whether a block is the next one at the live edge: it extends our tip, and our tip is recent. There its
+        /// committee certificate is in hand (on the block, or in the attestation store and peers' for the retention
+        /// window), so the download path requires it too. A node catching up from an older tip fetches blocks whose
+        /// certificates no longer exist, and keeps the download exemption.
+        /// </summary>
+        internal static bool AtLiveEdge(long blockHeight, long tipHeight, long tipTimestamp, long now)
+            => blockHeight == tipHeight + 1 && now - tipTimestamp <= LiveEdgeTipAgeSeconds;
+
+        internal static bool AtLiveEdge(Block block)
+            => Globals.LastBlock != null && AtLiveEdge(block.Height, Globals.LastBlock.Height, Globals.LastBlock.Timestamp, TimeUtil.GetTime());
+
         /// <summary>
         /// A caster's commit rule (pure). With an agreed hash for the height, the block must match it — at the live tip
         /// even when the caller asked to skip the caster check (the download loop does). Without one, a live-tip block
@@ -370,6 +385,10 @@ namespace VerifiedXCore.Services
                         var ipAddress = competingBlocks.FirstOrDefault(b => b.block.Hash == block.Hash).IPAddress ?? "unknown";
 
                         var startupDownload = Globals.BlocksDownloadSlim.CurrentCount == 0 ? true : false;
+                        // At the live edge a downloaded block's certificate is required (ValidateBlock): complete a
+                        // missing or short one first, as the broadcast path does.
+                        if (startupDownload && AtLiveEdge(block))
+                            await ConsensusCertificateHelper.TryCompleteCertificateAsync(block);
                         var stopwatch1 = new Stopwatch();
                         stopwatch1.Start();
                         var result = await ValidateBlock(block, false, startupDownload, false, false, skipCasterCheck, source: $"BlockDict:{ipAddress}");
@@ -638,7 +657,9 @@ namespace VerifiedXCore.Services
                 // blockDownloads is exempt: certs are not part of the block hash and attestations are
                 // in-memory with a short retention window, so historical blocks fetched during sync can
                 // never have their certs re-verified (or repaired) — enforcement is live-broadcast only.
-                if (!validateOnly && !blockDownloads && !ConsensusCertificateVerifier.VerifyOrNotRequired(block))
+                // Except at the live edge: any peer could start a download on a synced node, and the next block then
+                // came in uncertified. There the certificate exists (ValidateBlocks tops it up first) and is required.
+                if (!validateOnly && (!blockDownloads || AtLiveEdge(block)) && !ConsensusCertificateVerifier.VerifyOrNotRequired(block))
                 {
                     DbContext.Rollback("BlockValidatorService.ValidateBlock()-cert");
                     return result;
