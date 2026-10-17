@@ -1325,6 +1325,9 @@ namespace VerifiedXCore.Services
         /// <summary>A block carries a move (Transfer() or Burn()) and a sale of the same contract.</summary>
         public const string NftMoveAndSaleInBlock = "An NFT transfer or burn and a sale of the same contract within block";
 
+        /// <summary>A block carries two moves (Transfer() or Burn()) of the same contract.</summary>
+        public const string NftMovedTwiceInBlock = "Two transfers or burns of the same contract within block";
+
         /// <summary>
         /// The transaction types StateData runs a contract's functions for (UpdateTreis' dispatch). Only these move a
         /// contract by Transfer() or Burn(); the same text in another transaction's Data (a plain payment) does nothing.
@@ -1352,14 +1355,17 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
-        /// From PathAuditRulesHeight one contract is either moved or sold within a block, not both. Each is judged against
+        /// From PathAuditRulesHeight one contract is either moved or sold within a block, not both, and from
+        /// OneMovePerContractHeight it is moved at most once. Each is judged against
         /// the owner before the block, so an owner's Transfer() to B and its own M_Sale_Start to an accomplice both passed
         /// in one block: B then owned an NFT locked into the sale A set up, at A's price. Honest blocks never pair them: a
         /// transfer or burn needs the contract unlocked, and a sale's completion or cancel needs it locked.
         /// </summary>
         public static string? RegisterNftStepInBlock(Transaction tx, NftStepState state, long height)
         {
-            if (height < Globals.PathAuditRulesHeight) return null;
+            var moveOrSale = height >= Globals.PathAuditRulesHeight;
+            var oneMove = height >= Globals.OneMovePerContractHeight;
+            if (!moveOrSale && !oneMove) return null;
             var (ok, _, uid, function, _) = TransactionUtility.GetSCTXFunctionAndUID(tx);
             if (!ok) return null;
             // A sale, like a move, is one the chain runs: an NFT_SALE carrying another function does nothing, and
@@ -1370,7 +1376,11 @@ namespace VerifiedXCore.Services
             // nothing, and registering it let anyone crowd an owner's sale out of a block.
             if (!isSale && (!ContractFunctionTypes.Contains(tx.TransactionType) || (function != "Transfer()" && function != "Burn()"))) return null;
             uid = SmartContractStateTrei.GetSmartContractState(uid)?.SmartContractUID ?? uid;
-            if ((isSale ? state.Moves : state.Sales).Contains(uid)) return $"{NftMoveAndSaleInBlock}: {uid}";
+            if (moveOrSale && (isSale ? state.Moves : state.Sales).Contains(uid)) return $"{NftMoveAndSaleInBlock}: {uid}";
+            // From OneMovePerContractHeight a contract is moved once per block: each move was judged against the owner
+            // before the block, so an owner's second Transfer() (or a Burn()) undid a confirmed one. The type-pair check
+            // in ValidateBlock missed pairs such as FTKN_TX beside FTKN_BURN.
+            if (!isSale && oneMove && state.Moves.Contains(uid)) return $"{NftMovedTwiceInBlock}: {uid}";
             (isSale ? state.Sales : state.Moves).Add(uid);
             return null;
         }

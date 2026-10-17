@@ -386,6 +386,13 @@ namespace VerifiedXCore
         public static long FeeBelowOneVfxHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height a block moves (Transfer() or Burn()) a contract at most once: each move was judged against the
+        /// owner before the block, so a second one undid a confirmed transfer (LedgerIntegrityRules.RegisterNftStepInBlock).
+        /// Not active yet.
+        /// </summary>
+        public static long OneMovePerContractHeight = 999_999_999_999;
+
+        /// <summary>
         /// From this height a smart contract's Update(), Transfer(), Burn(), Evolve(), Devolve() or
         /// ChangeEvolveStateSpecific() must carry its Data in the array form those applies read. Validation also accepted
         /// a single object, which every apply then skips, so the transaction was mined with no effect. Not active yet.
