@@ -477,6 +477,76 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        /// <summary>
+        /// C-206: the caster's collector checked the owner's remaining balance against the lock's amount, but the lock had
+        /// already been taken out of that balance (ApplyVBTCBridgeLock), so a lock of the whole balance - of more than half
+        /// of it - was never collected for. It now checks the lock row consensus holds: a lock of the whole balance is
+        /// collected for, and a record whose lock is not in state is not.
+        /// </summary>
+        [Fact]
+        public async Task ALockOfTheWholeBalance_IsCollectedFor_AndOneNotInStateIsNot()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            Assert.Equal(0.01M, await Spendable(vault.Uid, Minter));
+
+            var priorContract = VerifiedXCore.Bitcoin.Services.BaseBridgeService.ContractAddress;
+            var priorCastersOnly = Globals.BaseValidatorSetCastersOnly;
+            var priorFactory = Globals.HttpClientFactory;
+            var asked = new List<string>();
+            VerifiedXCore.Bitcoin.Services.BaseBridgeService.ContractAddress = "0x" + new string('b', 40);
+            Globals.BaseValidatorSetCastersOnly = false;
+            Globals.HttpClientFactory = new RecordingHttpClientFactory(asked);
+            try
+            {
+                BridgeLockRecord Recorded(string id, decimal amount) => new()
+                {
+                    LockId = id, SmartContractUID = vault.Uid, OwnerAddress = Minter.Address, Amount = amount, AmountSats = (long)(amount * 100_000_000M),
+                    EvmDestination = "0x" + new string('a', 40), Status = BridgeLockStatus.Locked, VfxLockConfirmedOnChain = true, VfxLockBlockHeight = Tip,
+                };
+
+                var whole = Guid.NewGuid().ToString("N");
+                await Lock(vault.Uid, 0.01M, id: whole);
+                Assert.Equal(0M, await Spendable(vault.Uid, Minter));
+                BridgeLockRecord.Save(Recorded(whole, 0.01M));
+                await VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.CollectMintAttestationsForLock(BridgeLockRecord.GetByLockId(whole)!, 2);
+                Assert.NotNull(VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.GetAttestationState(whole));
+                Assert.Equal(BridgeLockStatus.AttestationPending, BridgeLockRecord.GetByLockId(whole)!.Status);
+
+                asked.Clear();
+                var ghost = Guid.NewGuid().ToString("N");                                 // recorded here, never mined
+                BridgeLockRecord.Save(Recorded(ghost, 0.001M));
+                await VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.CollectMintAttestationsForLock(BridgeLockRecord.GetByLockId(ghost)!, 2);
+                Assert.Null(VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.GetAttestationState(ghost));
+                Assert.Empty(asked);
+            }
+            finally
+            {
+                VerifiedXCore.Bitcoin.Services.BaseBridgeService.ContractAddress = priorContract;
+                Globals.BaseValidatorSetCastersOnly = priorCastersOnly;
+                Globals.HttpClientFactory = priorFactory;
+            }
+        }
+
+        /// <summary>Answers every request at once with a refusal, recording where it was sent.</summary>
+        private sealed class RecordingHttpClientFactory : System.Net.Http.IHttpClientFactory
+        {
+            private readonly List<string> _asked;
+            public RecordingHttpClientFactory(List<string> asked) => _asked = asked;
+            public System.Net.Http.HttpClient CreateClient(string name) => new(new Handler(_asked));
+            private sealed class Handler : System.Net.Http.HttpMessageHandler
+            {
+                private readonly List<string> _asked;
+                public Handler(List<string> asked) => _asked = asked;
+                protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request, System.Threading.CancellationToken ct)
+                {
+                    lock (_asked) _asked.Add(request.RequestUri!.ToString());
+                    return Task.FromResult(new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new System.Net.Http.StringContent("{\"success\":false}") });
+                }
+            }
+        }
+
         [Fact]
         public async Task AnExit_IsPinnedInItsOwnBlock_BitcoinCompletesIt_AndTheOwnerIsChargedOnce()
         {

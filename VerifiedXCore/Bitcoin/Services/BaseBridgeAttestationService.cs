@@ -212,11 +212,17 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             if (!BaseBridgeService.IsBridgeConfigured || record == null) return;
 
-            // Pre-check: verify the owner actually has sufficient vBTC balance for this lock
-            var balCheck = await VBTCService.TryGetAvailableTransparentVbtcBalance(record.SmartContractUID, record.OwnerAddress);
-            if (balCheck.success && balCheck.availableBalance < record.Amount)
+            // The lock as consensus holds it (ApplyVBTCBridgeLock writes this row after the lock's debit; every validator checks
+            // the same row before it signs). The owner's remaining balance said nothing about this lock: the lock is already
+            // taken out of it, so a lock of more than half the balance - the whole of it, say - was never collected for.
+            var chainLock = VBTCBridgeLockState.GetByLockId(record.LockId);
+            if (chainLock == null
+                || !string.Equals(chainLock.LockId, record.LockId, StringComparison.Ordinal)
+                || chainLock.AmountSats != record.AmountSats
+                || !string.Equals(chainLock.OwnerAddress, record.OwnerAddress, StringComparison.Ordinal)
+                || !string.Equals(chainLock.SmartContractUID, record.SmartContractUID, StringComparison.Ordinal))
             {
-                LogUtility.Log($"[BaseBridgeAttestation] Owner {record.OwnerAddress} has insufficient vBTC balance ({balCheck.availableBalance}) for lock amount ({record.Amount}). Skipping attestation.", "BaseBridgeAttestationService");
+                LogUtility.Log($"[BaseBridgeAttestation] Lock {record.LockId} is not in consensus state as recorded here. Skipping attestation.", "BaseBridgeAttestationService");
                 return;
             }
 
