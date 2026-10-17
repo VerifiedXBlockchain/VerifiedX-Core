@@ -19,6 +19,23 @@ namespace VerifiedXCore.Privacy
     {
         public const string ResetBlockReason = "No private transaction is valid in the block that starts the proof-rules epoch.";
 
+        public const string ShieldSpendsNothingReason = "A shield spends no note: it carries no nullifier, fee-leg nullifier or spent position.";
+
+        /// <summary>
+        /// A shield turns transparent value into one new note and spends none, so it names no nullifier, fee-leg nullifier,
+        /// spent position or spent commitment. Its proof binds only the amount and the output, and the apply recorded
+        /// whatever it named: a nullifier seen in the mempool, attached to a shield, stranded that note for good, and a
+        /// named position marked an unrelated tree row spent. Null when the shield passes, or the transaction is not one.
+        /// </summary>
+        public static string? ShieldSpendsNothing(Transaction tx, PrivateTxPayload payload)
+        {
+            if (tx == null || payload == null || !PrivateTransactionTypes.IsTransparentShield(tx.TransactionType)) return null;
+            return payload.NullsB64?.Count > 0 || !string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64)
+                   || payload.SpentCommitmentTreePositions?.Count > 0 || payload.SpentCommitmentB64s?.Count > 0
+                ? ShieldSpendsNothingReason
+                : null;
+        }
+
         public static string? Check(Transaction tx, PrivateTxPayload payload, long height)
         {
             if (tx == null || payload == null || !PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType))

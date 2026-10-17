@@ -425,6 +425,12 @@ namespace VerifiedXCore
         public static long EvolveRulesHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height a shield carries no nullifier, fee-leg nullifier or spent position (PrivateTxProofRules.
+        /// ShieldSpendsNothing; admission refuses one at every height). Not active yet.
+        /// </summary>
+        public static long ShieldSpendsNothingHeight = 999_999_999_999;
+
+        /// <summary>
         /// From this height a smart contract's Update(), Transfer(), Burn(), Evolve(), Devolve() or
         /// ChangeEvolveStateSpecific() must carry its Data in the array form those applies read. Validation also accepted
         /// a single object, which every apply then skips, so the transaction was mined with no effect. Not active yet.

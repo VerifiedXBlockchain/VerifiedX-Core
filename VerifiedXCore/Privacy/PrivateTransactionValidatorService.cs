@@ -72,6 +72,10 @@ namespace VerifiedXCore.Privacy
             var proofShapeError = PrivateTxProofRules.Check(txRequest, payload, proofRulesHeight);
             if (proofShapeError != null)
                 return (false, proofShapeError);
+            // From ShieldSpendsNothingHeight in a block, and at admission at every height.
+            if ((proofRulesHeight >= Globals.ShieldSpendsNothingHeight || (blockHeight == null && !blockVerify && !blockDownloads))
+                && PrivateTxProofRules.ShieldSpendsNothing(txRequest, payload) is { } shieldSpends)
+                return (false, shieldSpends);
             if (proofRulesHeight >= Globals.PathAuditRulesHeight && EncodingRefusal(txRequest, payload) is { } encoding)
                 return (false, encoding);
             // At most two notes spent and two made. Before the proof rules nothing bounded them but the Data cap: a
