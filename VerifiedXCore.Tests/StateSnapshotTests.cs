@@ -569,6 +569,21 @@ namespace VerifiedXCore.Tests
             Assert.NotNull(Contracts().FindOne(x => x.SmartContractUID == "sc:keep"));
         }
 
+        /// <summary>The burned-UID retirements (C-169) are chain state: a snapshot holds them and a restore brings them back.</summary>
+        [Fact]
+        public async Task RetiredContractUids_AreSnapshot_AndRestored()
+        {
+            RetiredContractUid.Retire("abc:1", 35, "burn");
+            await StateSnapshotService.UpdateCycleAsync(40);
+            var slot = StateSnapshotService.PickSlotForRestore(40)!;
+            _live.GetCollection(RetiredContractUid.CollectionName).DeleteAll();
+            Assert.False(RetiredContractUid.IsRetired("abc:1"));
+
+            Assert.True(StateSnapshotService.RestoreSlotToLive(slot.SlotId));
+
+            Assert.True(RetiredContractUid.IsRetired("abc:1"));
+        }
+
         /// <summary>
         /// The Bitcoin attestation tables are chain state: a snapshot holds them as they stood at its height, and a
         /// restore brings exactly that back (a coin spent after the snapshot is unspent again, a later header is gone).

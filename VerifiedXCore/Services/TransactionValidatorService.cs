@@ -590,6 +590,11 @@ namespace VerifiedXCore.Services
                 if (watchedUidError != null)
                     return (txResult, watchedUidError);
 
+                // Nor under the UID of a contract burned from the path-audit rules.
+                var burnedUidError = LedgerIntegrityRules.CreatedUidWasNeverBurned(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1));
+                if (burnedUidError != null)
+                    return (txResult, burnedUidError);
+
                 // NEW-26: a vBTC V2 deposit address must be the validators' FROST key (height-gated; block height at
                 // verify, tip + 1 at admission). Runs after the signature check (it decompiles the body too).
                 var dkgAttestationError = LedgerIntegrityRules.VbtcV2DkgAttestation(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1));

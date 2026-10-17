@@ -517,6 +517,16 @@ namespace VerifiedXCore.Services
 
         private const string VaultCreatedBefore = "This vBTC V2 vault was created before; a vault's UID is never created twice.";
 
+        /// <summary>From Globals.PathAuditRulesHeight nothing is created under a UID a Burn() retired (RetiredContractUid).</summary>
+        public static string? CreatedUidWasNeverBurned(Transaction tx, long height)
+        {
+            if (height < Globals.PathAuditRulesHeight) return null;
+            var uid = CreatedContractUid(tx);
+            return uid != null && RetiredContractUid.IsRetired(uid)
+                ? $"Contract UID {uid} was burned; a burned contract's UID is never created again."
+                : null;
+        }
+
         /// <summary>
         /// No contract is created under the UID of a vault the chain watches or ever watched: its deposit script, its
         /// coins and its withdrawals are kept under that UID and are never deleted. Any creation, at any height (only

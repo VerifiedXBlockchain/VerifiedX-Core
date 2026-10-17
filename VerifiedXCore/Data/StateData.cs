@@ -490,7 +490,7 @@ namespace VerifiedXCore.Data
                                         TransferSmartContract(tx);
                                         break;
                                     case "Burn()":
-                                        BurnSmartContract(tx);
+                                        BurnSmartContract(tx, block.Height);
                                         break;
                                     case "Evolve()":
                                         EvolveSC(tx);
@@ -2138,7 +2138,7 @@ namespace VerifiedXCore.Data
             }
 
         }
-        private static void BurnSmartContract(Transaction tx)
+        private static void BurnSmartContract(Transaction tx, long height)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
             var scData = ArrayFormCall(tx);
@@ -2150,6 +2150,17 @@ namespace VerifiedXCore.Data
             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
             if (scStateTreiRec != null)
             {
+                // From the path-audit rules a burned UID is retired (as stored): nothing is created under it again.
+                if (height >= Globals.PathAuditRulesHeight)
+                {
+                    try { RetiredContractUid.Retire(scStateTreiRec.SmartContractUID, height, tx.Hash); }
+                    catch (Exception ex)
+                    {
+                        // Not written here while every other node has it: this node's state is flagged incomplete.
+                        ErrorLogUtility.LogError($"Retiring burned UID {scStateTreiRec.SmartContractUID} at {height} failed: {ex.Message}", "StateData.BurnSmartContract()");
+                        NoteApplyStepFailed(height, ex);
+                    }
+                }
                 SmartContractStateTrei.DeleteSmartContract(scStateTreiRec);
             }
 
