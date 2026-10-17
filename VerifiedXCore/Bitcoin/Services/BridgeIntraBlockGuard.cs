@@ -18,10 +18,14 @@ namespace VerifiedXCore.Bitcoin.Services
             public HashSet<string> LockIds { get; } = new(StringComparer.Ordinal);
         }
 
+        /// <summary>The reason a second failure of one exit in a block is refused (a producer's fault, not this node's state).</summary>
+        public const string ExitAlreadyFailedPrefix = "Bridge exit already failed within this block";
+
         public static bool AppliesTo(TransactionType type) =>
             type == TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK
             || type == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC
-            || type == TransactionType.VBTC_V2_BRIDGE_UNLOCK;
+            || type == TransactionType.VBTC_V2_BRIDGE_UNLOCK
+            || type == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL;
 
         /// <summary>
         /// Registers the burn hash and lock IDs a bridge transaction claims. Returns false (with a
@@ -38,6 +42,20 @@ namespace VerifiedXCore.Bitcoin.Services
             catch { return (true, ""); }
 
             var at = height ?? ((Globals.LastBlock?.Height ?? -1) + 1);
+
+            // One failure per exit per block, from the path-audit rules. Each failure is judged on the exit's plan as the
+            // block before left it; a second failure of the same part found the plan already trimmed by the first, so
+            // nothing matched, and apply failed the whole exit - its paid part then re-exited and was paid again.
+            if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL)
+            {
+                if (at < Globals.PathAuditRulesHeight) return (true, "");
+                var failed = NormalizeBurn(jobj["BaseBurnTxHash"]?.ToString());
+                if (failed.Length == 0) return (true, "");
+                if (!state.BurnHashes.Add("fail:" + failed))
+                    return (false, $"{ExitAlreadyFailedPrefix}: burn {failed} is failed by an earlier transaction of the block.");
+                return (true, "");
+            }
+
             var burn = NormalizeBurn(RedeemedBurn(tx.TransactionType, jobj, at));
             var lockIds = ExtractLockIds(jobj, asApply: at >= Globals.PathAuditRulesHeight);
 

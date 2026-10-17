@@ -812,6 +812,44 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// Two failures of the same part of an older exit in one block: each is judged on the plan the block before left,
+        /// so both passed, and applied together the second found the trimmed plan, matched nothing and failed the whole
+        /// exit - whose paid part could then be exited and paid again. The block takes one failure per exit; the second
+        /// is refused there, and in a later block it is refused because the part is no longer in the plan.
+        /// </summary>
+        [Fact]
+        public async Task TwoFailuresOfOnePartOfAnOlderExit_InOneBlock_TheSecondIsRefused()
+        {
+            var older = await CreateVault(H1 - 50);
+            await Start();
+            var first = await Lock(older.Uid, 0.002M);
+            var second = await Lock(older.Uid, 0.002M);
+            var burn = NewBurn();
+            var exit = await Mine(Exit(burn, BtcDest, (first, older.Uid, 0.001M), (second, older.Uid, 0.001M)));
+            var one = ExitFail(burn, exit, (second, older.Uid, 0.001M));
+            var two = ExitFail("0x" + burn[2..].ToUpperInvariant(), exit, (second, older.Uid, 0.001M));   // another spelling: another transaction
+            Assert.NotEqual(one.Hash, two.Hash);
+            Assert.True((await Verify(one, Tip + 1)).Ok);
+            Assert.True((await Verify(two, Tip + 1)).Ok);   // each alone passes on the block before's state
+
+            // The block's guard (BlockValidatorService.ValidateBlock and ProcessTxPool offer it every bridge transaction).
+            Assert.True(BridgeIntraBlockGuard.AppliesTo(two.TransactionType));
+            var guard = new BridgeIntraBlockGuard.State();
+            Assert.True(BridgeIntraBlockGuard.TryRegister(one, guard, Tip + 1).Ok);
+            var (ok, why) = BridgeIntraBlockGuard.TryRegister(two, guard, Tip + 1);
+            Assert.False(ok);
+            Assert.StartsWith(BridgeIntraBlockGuard.ExitAlreadyFailedPrefix, why);
+            Assert.False(VerifiedXCore.Services.BlockValidatorService.IsStateCorruptionSignal(why));   // a producer's fault: no restore or rebuild
+
+            await Apply(Tip + 1, one);
+            var record = Record(burn);
+            Assert.False(record.IsFailedRecord);                 // the paid part stays open for its completion
+            Assert.False(record.IsComplete);
+            Assert.Equal(first, Assert.Single(JsonConvert.DeserializeObject<List<PoolUnlockAllocation>>(record.AllocationsJson!)!).LockId);
+            await RefusedInBlock(two, "not part of this exit's plan");
+        }
+
+        /// <summary>
         /// The plan takes the oldest locks first and gave up when a vault's share came out under the smallest part an
         /// exit may have. One small lock at the front of the queue (a remnant of an earlier exit, or one made on purpose)
         /// then ended the plan for every exit that reached it. The vault is left out and the plan made without it.

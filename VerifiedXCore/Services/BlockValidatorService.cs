@@ -92,6 +92,8 @@ namespace VerifiedXCore.Services
                 return false;
             if (reason.StartsWith(SameBlockDebitGuard.ReasonPrefix, StringComparison.Ordinal))
                 return false;
+            if (reason.StartsWith(Bitcoin.Services.BridgeIntraBlockGuard.ExitAlreadyFailedPrefix, StringComparison.Ordinal))
+                return false;
             return true;
         }
 
