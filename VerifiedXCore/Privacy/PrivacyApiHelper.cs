@@ -59,6 +59,9 @@ namespace VerifiedXCore.Privacy
             try
             {
                 if (r32 == null || r32.Length != PlonkNative.ScalarSize) return false;
+                // Only an amount the chain's 8-decimal scale holds exactly: scaling truncates, so amounts that differ below
+                // the 8th decimal all matched one leaf, each was a different note to the wallet, and each was credited.
+                if (decimal.Round(amount, 8) != amount) return false;
                 if (!PrivacyPedersenAmount.TryToScaledU64(amount, out var scaled, out _)) return false;
                 if (!string.IsNullOrEmpty(rec.NoteHash))
                 {
