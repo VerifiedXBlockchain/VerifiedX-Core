@@ -350,6 +350,51 @@ namespace VerifiedXCore.Tests
         // ── Completions ─────────────────────────────────────────────────────────────────────────────────────
 
         /// <summary>
+        /// C-202: a vault created in a block is registered for watching as the block is applied. A decompile that failed
+        /// for a reason of this node (its disk: the interpreter's submissions folder, raced by two decompiles at once) was
+        /// answered "not a vault", so the vault stayed unwatched on this node alone and the block counted as applied. Such a
+        /// fault is now passed on: the block is not applied and is flagged. Code that fails on every node is still "not a
+        /// vault", without a flag (round 32: one cheap undecompilable mint must not mark every node's state failed).
+        /// </summary>
+        [Fact]
+        public async Task AVaultWhoseDecompileFailsOnThisNodesDisk_IsNotLeftUnwatched_TheBlockIsFlagged()
+        {
+            await Start();
+            var uid = VerifiedXCore.Bitcoin.FROST.FrostDkgAttestation.NewContractUid();
+            var body = VbtcTestContracts.VaultContractData(uid, Minter.Address, NewTaprootAddress());
+            var create = new VfxTx
+            {
+                Timestamp = TimeUtil.GetTime(), FromAddress = Minter.Address, ToAddress = Minter.Address, Amount = 0M, Fee = 0M, Nonce = 0,
+                TransactionType = TransactionType.VBTC_V2_CONTRACT_CREATE,
+                Data = JsonConvert.SerializeObject(new[] { new { Function = "Mint()", ContractUID = uid, Data = body, MD5List = "NA" } }),
+            };
+            create.Build();
+            var block = new VerifiedXCore.Models.Block { Height = Tip + 1, Hash = $"b{Tip + 1}", StateRoot = "root", Timestamp = TimeUtil.GetTime(), Transactions = new List<VfxTx> { create } };
+            var priorFailedAt = StateData.BlockStartFailedAtHeight;
+            VerifiedXCore.Models.SmartContracts.SmartContractMain.DecompileForTests = text =>
+            {
+                if (text == body) throw new System.Reflection.TargetInvocationException(new UnauthorizedAccessException("Access to the path 'Submissions' is denied."));
+            };
+            try
+            {
+                Assert.False(await StateData.UpdateTreis(block));
+                Assert.Equal(block.Height, StateData.BlockStartFailedAtHeight);
+                Assert.Null(BtcAttestStore.ScriptRowForVault(uid));
+
+                // The same fault answered by the code itself (it fails on every node) is "not a vault", and nothing throws.
+                VerifiedXCore.Models.SmartContracts.SmartContractMain.DecompileForTests = text => { if (text == body) throw new FormatException("not base64"); };
+                Assert.False(VBTCService.IsVbtcV2Contract(new SmartContractStateTrei { SmartContractUID = uid + "x", ContractData = body }));
+            }
+            finally
+            {
+                VerifiedXCore.Models.SmartContracts.SmartContractMain.DecompileForTests = null;
+                StateData.BlockStartFailedAtHeight = priorFailedAt;
+                VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests();
+            }
+            Assert.True(VBTCService.IsVbtcV2Contract(new SmartContractStateTrei { SmartContractUID = uid + "y", ContractData = body }));   // decompiles once the disk is free
+        }
+
+        /// <summary>
         /// C-187: a watched withdrawal's request row is gone only by a fault of this node's store, and Settle / Unsettle
         /// went on without it: the attested row was settled (or reopened) while the request row the owner's balance adds
         /// back was not, so this node alone judged the owner's debits wrongly. Either is now a storage fault: the block is

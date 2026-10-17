@@ -173,6 +173,23 @@ namespace VerifiedXCore.Bitcoin.Services
         internal static bool DecompileFailureSettled(string key) =>
             _decompileFailures.AddOrUpdate(key, 1, (_, n) => n + 1) >= 3;
 
+        /// <summary>
+        /// A decompile that failed for a reason of this node, not of the code: its disk. Every run resets the interpreter,
+        /// which creates and deletes its submissions folder, and two decompiles at once race on it (access denied, wrapped
+        /// by the meta-command's reflection call). Passed on rather than answered "not a vault", which left a vault created
+        /// in a block unwatched on this node alone, silently: in a block's apply the step fails and the block is flagged
+        /// (StateData.NoteApplyStepFailed); in validation the block is not taken now and is asked again. Code that fails on
+        /// every node (bad encoding, an interpreter error, running out of memory) is still answered "not a vault": flagging
+        /// it let one cheap transaction mark every node's state failed (round 32).
+        /// </summary>
+        internal static bool DecompileFaultIsNodeLocal(Exception? ex)
+        {
+            for (var e = ex; e != null; e = e.InnerException)
+                if ((e is System.IO.IOException && e is not System.IO.EndOfStreamException) || e is UnauthorizedAccessException)
+                    return true;
+            return false;
+        }
+
         public static bool IsVbtcV2Contract(SmartContractStateTrei? scState)
         {
             if (scState == null || string.IsNullOrEmpty(scState.SmartContractUID) || string.IsNullOrEmpty(scState.ContractData))
@@ -198,7 +215,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (isV2 && plain)
                     isV2 = VerifiedXCore.Services.LedgerIntegrityRules.VaultCodeIsPlain(scMain, scState.ContractData);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!DecompileFaultIsNodeLocal(ex))
             {
                 ErrorLogUtility.LogError($"IsVbtcV2Contract: contract {scState.SmartContractUID} could not be decompiled: {ex.Message}",
                     "VBTCService.IsVbtcV2Contract()");

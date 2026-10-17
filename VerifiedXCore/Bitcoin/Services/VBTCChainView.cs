@@ -54,7 +54,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     name = sc?.Name ?? "";
                     description = sc?.Description ?? "";
                 }
-                catch
+                catch (Exception ex) when (!VBTCService.DecompileFaultIsNodeLocal(ex))
                 {
                     if (!VBTCService.DecompileFailureSettled("view|" + state.SmartContractUID + "|" + digest))
                         return null; // not cached: asked again next time (round 28)
