@@ -580,6 +580,7 @@ namespace VerifiedXCore.Tests
                 Globals.ShieldedSupplyCorrections["VFX"] = 100M;
                 var pool = ShieldedPoolService.GetOrCreateState("VFX", Db);
                 pool.TotalShieldedSupply = -40M;
+                pool.LastUpdateHeight = Globals.ShieldedSupplyCorrectionsThroughHeight;   // written through the forged blocks
                 PrivacyDbContext.PoolState().Update(pool);
                 Assert.Equal(60M, PrivateTxSupplyRules.CommittedSupply("VFX", Height - 1));
                 Assert.Equal(-40M, PrivateTxSupplyRules.CommittedSupply("VFX", Height));

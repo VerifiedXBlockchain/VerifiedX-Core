@@ -100,15 +100,20 @@ namespace VerifiedXCore.Privacy
         public static decimal CommittedSupply(string asset, long height)
         {
             decimal recorded;
+            long lastWritten;
             try
             {
                 var row = ShieldedPoolService.GetState(asset);
                 if (row == null) return 0M;
                 recorded = row.TotalShieldedSupply;
+                lastWritten = row.LastUpdateHeight;
             }
             catch { return 0M; }
             // The correction undoes the forged debits in the pre-epoch counter; the epoch pool starts from zero.
             if (PrivacyEpoch.ProofRulesActive(height))
+                return recorded;
+            // Only a counter that went through the forged blocks holds the debits the correction undoes.
+            if (lastWritten < Globals.ShieldedSupplyCorrectionsThroughHeight)
                 return recorded;
             return recorded + (Globals.ShieldedSupplyCorrections.TryGetValue(asset ?? "", out var correction) ? correction : 0M);
         }

@@ -300,6 +300,13 @@ namespace VerifiedXCore
         };
 
         /// <summary>
+        /// The block of the last forged debit the correction adds back (7,257,080). A pool counter last written before it
+        /// does not hold those debits - a privacy rebuild that stopped early, or a row made again from nothing - and gets
+        /// no correction: added to it, the correction is supply that was never in the pool.
+        /// </summary>
+        public static long ShieldedSupplyCorrectionsThroughHeight = 7_257_080L;
+
+        /// <summary>
         /// Item 2: Sale_Complete / M_Sale_Complete naming a contract with no state record is refused (every sale check sat
         /// inside "if the record exists" with no else, so the apply credited the inner payment and debited the signer
         /// against no contract: VFX from nothing, or a negative inner amount draining any address), the inner-payment
