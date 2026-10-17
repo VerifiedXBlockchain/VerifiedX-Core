@@ -97,9 +97,9 @@ namespace VerifiedXCore.Privacy
         /// The identities earlier builds could have derived from this key, other than its current one. They derived from
         /// the stored bytes as they were, and a spelling other than exactly 32 bytes took the rehash fallback. Every
         /// spelling Core stores a key in is tried, not only the one stored here, because an export and import changes
-        /// it: an account stores the key's BigInteger hex (a "00" sign byte when the top bit is set, leading zero bytes
-        /// dropped), an HD account stores "00" + the child key's hex. The wallet keeps a row for each so notes paid to
-        /// them stay visible and spendable.
+        /// it: an account (and a restore) stores the key's BigInteger hex, which drops leading zero bytes and adds a
+        /// "00" sign byte when the top bit is set; BIP32 serialises a child key the same way and an HD account stores
+        /// "00" + that. The wallet keeps a row for each so notes paid to them stay visible and spendable.
         /// </summary>
         public static List<ShieldedKeyMaterial> DeriveLegacyIdentities(string privateKeyHex)
         {
@@ -108,9 +108,11 @@ namespace VerifiedXCore.Privacy
             var spellings = new List<byte[]> { raw };
             if (key.Length == 32)
             {
-                var minimal = key.SkipWhile(b => b == 0).ToArray();
-                spellings.Add(minimal);                                    // account, top bit clear
-                spellings.Add(new byte[] { 0 }.Concat(minimal).ToArray()); // account, top bit set; HD account
+                var account = AccountKeyBytes(new System.Numerics.BigInteger(key, isUnsigned: true, isBigEndian: true).ToString("x"));
+                spellings.Add(account);
+                // A BIP32 child key is at most 32 bytes as serialised (a longer one is trimmed to 32).
+                if (account.Length <= 32)
+                    spellings.Add(new byte[] { 0 }.Concat(account).ToArray());
             }
 
             var current = FromAccountKeyBytes(key).ZfxAddress;

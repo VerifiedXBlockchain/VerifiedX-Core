@@ -62,6 +62,36 @@ namespace VerifiedXCore.Tests
         private const string OldZfxLeadingZeroKey64 = "zfx_QjyvUiaWFQSXkCTN5ou4Dr764wkn5TU8PspJPxrUQweisP4TaCC1KhKpyiDLgHSYV3Hw3mRYvyc7SZHm9Em3nb48umLGHWL4S";
         private const string OldZfxLeadingZeroDropped = "zfx_Qjyvk1ksRMfV9YzBB5arMYDSn5ancEPmS86c9diPny7atP4Zy4Ce8UE14FRQRtrANGFjc1vt5mvAkbt7HPhCEKyqjcDjEiCAP";
 
+        // Real BIP32 children of seed 00..3f at m/44'/889'/0'/0'/i', and the identity the build before this rule derived
+        // from what RestoreHDAccount stores for them ("00" + the child key hex).
+        private const string Bip32Seed = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
+        public static readonly TheoryData<string, string, string> HdChildren = new()
+        {
+            // The child's serialisation keeps a sign byte: "00" + 31 bytes with the top bit set.
+            { "m/44'/889'/0'/0'/537'", "00eabca703fa1db0c164e5a7a527230d9fa5b1d13a51cb53cc809611f9b22fdf", "zfx_QjyvLrQNVuqw8c3kXUm1D4SdiXG6dDa3qM1FkR855BY9YBbRWf94C7SjnBBAFgZ4iWBsujy3j3imfX7GxJyD7rr55Q93vaLy3" },
+            { "m/44'/889'/0'/0'/1359'", "00a4c2d9557e11a214de90e409f19a82f458f9a5d0daa4bdd8f1e4655658192b", "zfx_Qjyvj4cz1cWh7PsSE5h3TDdXS7TXJqBf7jhEsmnv3FY8kv92TiziaGdi5NR1PmxKu3BkAp1YfKRCN9k1cPKx2pvngWqMUMVWG" },
+            { "m/44'/889'/0'/0'/1'", "0cd821464d177f941851e545945982c14a3b0c712fe93355f0816517c0a6d6c0", "zfx_QjyvuijWqXGLiD4AE3VJspAWqjjxX5LHpeU9kLATqYZyiBmWubip2Mvvy7kKtAzn1zRTfEfh6nFGtpB6JrXcV3Z2fo4bhmrZm" },
+        };
+
+        [Theory]
+        [MemberData(nameof(HdChildren))]
+        public void HdAccountKey_RestoredAsAPlainAccount_StillFindsTheHdIdentity(string path, string childHex, string oldHdZfx)
+        {
+            var child = new VerifiedXCore.BIP32.BIP32().DerivePath(path, Bip32Seed).Key;
+            Assert.Equal(childHex, Convert.ToHexString(child).ToLowerInvariant());
+
+            // What a restore of the exported key stores: the scalar's BigInteger hex.
+            var restored = System.Numerics.BigInteger.Parse("00" + childHex, System.Globalization.NumberStyles.AllowHexSpecifier).ToString("x");
+            Assert.Contains(oldHdZfx, Legacy(restored));
+            Assert.Contains(oldHdZfx, Legacy(childHex));
+            Assert.Contains(oldHdZfx, Legacy("00" + childHex));
+
+            ShieldedWalletService.UpsertFromAccountKey(restored, "xSource", "test-password", _db);
+            var row = ShieldedWalletService.FindByZfxAddress(oldHdZfx, _db);
+            Assert.NotNull(row);
+            Assert.True(PrivacyApiHelper.TryGetKeyMaterial(row!, "test-password", out _, out var error), error);
+        }
+
         private static List<string> Legacy(string keyHex) =>
             ShieldedHdDerivation.DeriveLegacyIdentities(keyHex).Select(m => m.ZfxAddress).OrderBy(z => z, StringComparer.Ordinal).ToList();
 
