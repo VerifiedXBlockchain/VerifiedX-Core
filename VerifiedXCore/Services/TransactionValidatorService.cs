@@ -566,6 +566,11 @@ namespace VerifiedXCore.Services
             if (royaltyRewriteError != null)
                 return (txResult, royaltyRewriteError);
 
+            // A sold NFT's body is rewritten by its minter only when it was made to evolve.
+            var evolutionError = LedgerIntegrityRules.EvolutionNeedsAnEvolvingContract(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (evolutionError != null)
+                return (txResult, evolutionError);
+
             // NEW-28: legacy V1 vBTC is retired and frozen (height-gated; block height at verify, tip + 1 at admission).
             var v1FrozenError = LedgerIntegrityRules.VbtcV1Frozen(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1));
             if (v1FrozenError != null)

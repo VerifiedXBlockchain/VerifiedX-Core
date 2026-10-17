@@ -690,6 +690,40 @@ namespace VerifiedXCore.Services
             return $"A contract's Royalty feature cannot be changed after creation (stored: {Describe(before)}; carried: {Describe(after)}).";
         }
 
+        /// <summary>The functions through which a contract's minter rewrites a sold NFT's body.</summary>
+        private static readonly HashSet<string> EvolutionFunctions = new(StringComparer.Ordinal) { "Evolve()", "Devolve()", "ChangeEvolveStateSpecific()" };
+
+        /// <summary>
+        /// From Globals.EvolveRulesHeight Evolve(), Devolve() and ChangeEvolveStateSpecific() apply only to a contract with
+        /// the Evolving feature, and carry a whole body that keeps it. They are the minter's, with no owner signature, and
+        /// the apply writes the carried body over the stored one: the minter of any NFT could replace or wipe what it had
+        /// sold. Null when the rule passes.
+        /// </summary>
+        public static string? EvolutionNeedsAnEvolvingContract(Transaction tx, long height)
+        {
+            if (tx?.Data == null || height < Globals.EvolveRulesHeight || !ContractFunctionTypes.Contains(tx.TransactionType)) return null;
+            var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+            if (payload.Function == null || !EvolutionFunctions.Contains(payload.Function) || string.IsNullOrEmpty(payload.ContractUID)) return null;
+            var stored = SmartContractStateTrei.GetSmartContractState(payload.ContractUID);
+            if (stored == null) return null; // the function's own rule refuses a contract that does not exist
+            if (!HasEvolvingFeature(stored.ContractData))
+                return "Only a contract with the Evolving feature can be evolved or devolved.";
+            if (!HasEvolvingFeature(payload.Data))
+                return "An evolution carries the contract's whole body, Evolving feature included.";
+            return null;
+        }
+
+        /// <summary>Whether a contract body decompiles with the Evolving feature. Never throws.</summary>
+        private static bool HasEvolvingFeature(string? body)
+        {
+            if (string.IsNullOrEmpty(body)) return false;
+            try
+            {
+                return SmartContractMain.GenerateSmartContractInMemory(body)?.Features?.Any(f => f != null && f.FeatureName == FeatureName.Evolving) == true;
+            }
+            catch (Exception) { return false; }
+        }
+
         private static string Describe((decimal Amount, string PayTo)? r) => r == null ? "none" : $"{r.Value.Amount} to {r.Value.PayTo}";
 
         /// <summary>The Royalty feature (amount, pay-to) a contract body decompiles to, or null when it has none. Never throws.</summary>

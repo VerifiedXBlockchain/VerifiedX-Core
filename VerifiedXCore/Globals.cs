@@ -419,6 +419,12 @@ namespace VerifiedXCore
         public static long LegacyNameReservedHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height Evolve(), Devolve() and ChangeEvolveStateSpecific() need a contract with the Evolving feature
+        /// and carry a body that keeps it (LedgerIntegrityRules.EvolutionNeedsAnEvolvingContract). Not active yet.
+        /// </summary>
+        public static long EvolveRulesHeight = 999_999_999_999;
+
+        /// <summary>
         /// From this height a smart contract's Update(), Transfer(), Burn(), Evolve(), Devolve() or
         /// ChangeEvolveStateSpecific() must carry its Data in the array form those applies read. Validation also accepted
         /// a single object, which every apply then skips, so the transaction was mined with no effect. Not active yet.
