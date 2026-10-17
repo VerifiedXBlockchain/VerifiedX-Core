@@ -88,16 +88,17 @@ namespace VerifiedXCore.Privacy
         }
 
         /// <summary>
-        /// Creates (or refreshes) the wallet row for a transparent account's key, and, when earlier builds derived a
-        /// different identity from how the key is stored, a row for that identity too, so its notes are still scanned
-        /// and spendable. Returns the key's identity.
+        /// Creates (or refreshes) the wallet row for a transparent account's key, and a row for each identity earlier
+        /// builds could have derived from the key (<see cref="ShieldedHdDerivation.DeriveLegacyIdentities"/>), so notes
+        /// paid to them are still scanned and spendable. An existing row keeps its notes and scan state. Returns the
+        /// key's identity.
         /// </summary>
         public static ShieldedKeyMaterial UpsertFromAccountKey(string accountKeyHex, string transparentSourceAddress, string? password, LiteDatabase? db = null)
         {
             var material = ShieldedHdDerivation.DeriveFromPrivateKey(accountKeyHex);
             Upsert(CreateFromKeyMaterial(material, transparentSourceAddress, password), db);
-            if (ShieldedHdDerivation.HasLegacyIdentity(accountKeyHex))
-                Upsert(CreateFromKeyMaterial(ShieldedHdDerivation.DeriveLegacyFromPrivateKey(accountKeyHex), transparentSourceAddress, password), db);
+            foreach (var legacy in ShieldedHdDerivation.DeriveLegacyIdentities(accountKeyHex))
+                Upsert(CreateFromKeyMaterial(legacy, transparentSourceAddress, password), db);
             return material;
         }
 
