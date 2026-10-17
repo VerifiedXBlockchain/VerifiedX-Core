@@ -42,6 +42,7 @@ namespace VerifiedXCore
             Globals.ReserveNonTransferAmountHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.ReserveNonTransferAmountHeight;
             Globals.FeeBelowOneVfxHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.FeeBelowOneVfxHeight;
             Globals.OneMovePerContractHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.OneMovePerContractHeight;
+            Globals.FractionalAmountRehashHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.FractionalAmountRehashHeight;
             Globals.ContractPayloadArrayHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.ContractPayloadArrayHeight;
             Globals.BtcNameOneRecordPerAddressHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.BtcNameOneRecordPerAddressHeight;
             Globals.BtcNameSignerOwnsAddressHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.BtcNameSignerOwnsAddressHeight;

@@ -393,6 +393,13 @@ namespace VerifiedXCore
         public static long OneMovePerContractHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height a transaction carrying a non-whole Amount must hash with that Amount: VerifyTX's re-hash
+        /// fallback read it as 0 and accepted a signature over "0" (TransactionValidatorService.StandardHashMatches).
+        /// Not active yet.
+        /// </summary>
+        public static long FractionalAmountRehashHeight = 999_999_999_999;
+
+        /// <summary>
         /// From this height a smart contract's Update(), Transfer(), Burn(), Evolve(), Devolve() or
         /// ChangeEvolveStateSpecific() must carry its Data in the array form those applies read. Validation also accepted
         /// a single object, which every apply then skips, so the transaction was mined with no effect. Not active yet.

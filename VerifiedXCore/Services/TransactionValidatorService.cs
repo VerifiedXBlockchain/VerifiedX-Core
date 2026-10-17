@@ -522,7 +522,7 @@ namespace VerifiedXCore.Services
             }
 
             //Hash Check
-            if (!StandardHashMatches(txRequest))
+            if (!StandardHashMatches(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)))
                 return (txResult, "This transactions hash is not equal to the original hash.");
 
             // The signature before any rule that parses or runs carried contract code: every transaction that reaches this
@@ -4557,7 +4557,10 @@ namespace VerifiedXCore.Services
         /// Whether a standard (non-private) transaction's carried Hash is the hash of its content. Accepts the legacy
         /// spellings VerifyTX always has: a whole-number Amount hashed as "N.0", and a zero Amount hashed as "0".
         /// </summary>
-        internal static bool StandardHashMatches(Transaction txRequest)
+        internal static bool StandardHashMatches(Transaction txRequest) => StandardHashMatches(txRequest, long.MaxValue);
+
+        /// <summary>As <see cref="StandardHashMatches(Transaction)"/>, judged for <paramref name="height"/>.</summary>
+        internal static bool StandardHashMatches(Transaction txRequest, long height)
         {
             var newTxn = new Transaction()
             {
@@ -4578,6 +4581,10 @@ namespace VerifiedXCore.Services
                 return true;
 
             var amountCheck = txRequest.Amount % 1 == 0;
+            // A non-whole amount has no other spelling. Re-hashed below as 0, it matched a signature over "0", so a relay
+            // could put any fraction on such a transaction; from FractionalAmountRehashHeight it gets no re-hash.
+            if (!amountCheck && height >= Globals.FractionalAmountRehashHeight)
+                return false;
             var amountFormat = 0M;
             if (amountCheck)
             {
