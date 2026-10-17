@@ -169,6 +169,12 @@ namespace VerifiedXCore.Services
                                 // A watched vault whose owner balance fell since the bid (round 30): not paid for automatically.
                                 SCLogUtility.Log($"Incoming Sale_Start for {scUID}: {shrank}", "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                             }
+                            else if (amountSoldFor.HasValue && Bid.HasLocalSentBid(toAddress ?? account.Address, keySign, amountSoldFor.Value, scUID)
+                                && Bid.ContentChangedSinceBid(toAddress ?? account.Address, keySign, scUID) is { } changed)
+                            {
+                                // The asset is not the one bid on (an Update() since the bid): not paid for automatically.
+                                SCLogUtility.Log($"Incoming Sale_Start for {scUID}: {changed}", "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            }
                             else if (amountSoldFor.HasValue && Bid.HasLocalSentBid(toAddress ?? account.Address, keySign, amountSoldFor.Value, scUID))
                             {
                                 //if you have a bid or buy now this should auto start the process.
