@@ -102,7 +102,11 @@ namespace VerifiedXCore.Privacy
                 VerifiedProofs[key] = 0;
                 return PlonkVerifyResult.Valid;
             }
-            if (code == 0)
+            // A proof the library refuses - it panicked on it (ErrPanic, where it used to abort the node) or could not
+            // read it (ErrCrypto) - is an invalid proof, as one that fails verification is: it says nothing about this
+            // node's state, so it is not taken for a sign of local corruption. Public inputs the library rejects are the
+            // node's own, and stay a native error.
+            if (code == 0 || code == PlonkNative.ErrPanic || code == PlonkNative.ErrCrypto)
                 return PlonkVerifyResult.Invalid;
             return PlonkVerifyResult.NativeError;
         }
