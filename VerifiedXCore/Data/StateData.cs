@@ -158,6 +158,9 @@ namespace VerifiedXCore.Data
         /// flagging it let anyone send one cheap request with an unreadable field and leave every node's state marked
         /// failed, its snapshots stopped and every later rebuild failing (fourth review, round 4).
         /// </remarks>
+        /// <summary>Test seam: runs at the start of each transaction's apply.</summary>
+        internal static Action<Transaction>? TxApplyForTests;
+
         public static void NoteApplyStepFailed(long height, Exception ex)
         {
             if (!IsNodeLocalFault(ex)) return;
@@ -251,6 +254,7 @@ namespace VerifiedXCore.Data
             {
                 try
                 {
+                    TxApplyForTests?.Invoke(tx);
                     if (block.Height == 0)
                     {
                         var acctStateTreiFrom = new AccountStateTrei
@@ -831,6 +835,10 @@ namespace VerifiedXCore.Data
                 catch(Exception ex)
                 {
                     txFailList.Add(tx);
+                    // A storage fault on this node (not what the transaction says) is reported like a failed block step, so a
+                    // rebuild that hits one does not count as complete. Faults the transaction's data causes are not: they
+                    // happen on every node alike, and some historical transactions do.
+                    NoteApplyStepFailed(block.Height, ex);
                     var txJson = JsonConvert.SerializeObject(tx);
                     ErrorLogUtility.LogError($"Error Updating State Treis. Error: {ex.ToString()}", "StateData.UpdateTreis() - Part 1");
                     ErrorLogUtility.LogError($"TX Info. TX: {txJson}", "StateData.UpdateTreis() - Part 2");
