@@ -38,6 +38,7 @@ namespace VerifiedXCore
             Globals.VaultBurnRuleHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.VaultBurnRuleHeight;
             Globals.PathAuditRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PathAuditRulesHeight;
             Globals.RecipientIsAddressHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.RecipientIsAddressHeight;
+            Globals.ReserveRecoverReadsEveryRowHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.ReserveRecoverReadsEveryRowHeight;
             Globals.ContractPayloadArrayHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.ContractPayloadArrayHeight;
             Globals.BtcNameOneRecordPerAddressHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.BtcNameOneRecordPerAddressHeight;
             Globals.BtcNameSignerOwnsAddressHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.BtcNameSignerOwnsAddressHeight;

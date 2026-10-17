@@ -1014,10 +1014,29 @@ namespace VerifiedXCore.Data
                         rtx.TransactionType == TransactionType.TKNZ_TX ||
                         rtx.TransactionType == TransactionType.SC_TX)
                     {
-                        var scDataArray = JsonConvert.DeserializeObject<JArray>(rtx.Data);
-                        var scData = scDataArray[0];
-                        var function = (string?)scData["Function"];
-                        var scUID = (string?)scData["ContractUID"];
+                        string? function, scUID;
+                        if ((asOf?.Height ?? -1) >= Globals.ReserveRecoverReadsEveryRowHeight)
+                        {
+                            // A call that cannot be read has no effect. It threw here, so the row stayed Pending and was
+                            // read again at every block for good.
+                            var call = ReserveRowCall(rtx.Data);
+                            if (!call.Readable)
+                            {
+                                ErrorLogUtility.LogError($"UpdateTreiFromReserve: contract call of {rtx.Hash} cannot be read; not applied.", "StateData.UpdateTreiFromReserve()");
+                                rtx.ReserveTransactionStatus = ReserveTransactionStatus.CalledBack;
+                                await Written(rtxDb.UpdateSafeAsync(rtx), "rtx");
+                                await TransactionData.UpdateTxStatusForAllByHash(rtx.Hash, TransactionStatus.Failed);
+                                continue;
+                            }
+                            (function, scUID) = (call.Function, call.ContractUID);
+                        }
+                        else
+                        {
+                            var scDataArray = JsonConvert.DeserializeObject<JArray>(rtx.Data);
+                            var scData = scDataArray[0];
+                            function = (string?)scData["Function"];
+                            scUID = (string?)scData["ContractUID"];
+                        }
 
                         if(function != null)
                         {
@@ -1431,6 +1450,24 @@ namespace VerifiedXCore.Data
         }
         /// <param name="keepTransfersPending">Only for the historical mainnet recovery in HistoricalTransactionExceptions:
         /// redirect as usual but leave the reserve rows Pending, as the network applied it.</param>
+        /// <summary>
+        /// A pending reserve contract row's call, read as the settlement and recovery read it (the first element of the
+        /// Data array). Readable is false where that read threw: Data that is not JSON, not an array, an empty array, a
+        /// first element that is not an object, or a Function or ContractUID that is not text.
+        /// </summary>
+        internal static (bool Readable, string? Function, string? ContractUID) ReserveRowCall(string? data)
+        {
+            try
+            {
+                var first = JsonConvert.DeserializeObject<JArray>(data!)![0];
+                return (true, (string?)first["Function"], (string?)first["ContractUID"]);
+            }
+            catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException or InvalidCastException or NullReferenceException)
+            {
+                return (false, null, null);
+            }
+        }
+
         private static async Task RecoverReserveAccountTx(string? _recoveryAddress, string _fromAddress, string stateRoot, bool keepTransfersPending = false, long height = 0, long blockTimestamp = 0)
         {
             try
@@ -1554,10 +1591,20 @@ namespace VerifiedXCore.Data
 
                         if (rTX.TransactionType == TransactionType.NFT_TX)
                         {
-                            var scDataArray = JsonConvert.DeserializeObject<JArray>(rTX.Data);
-                            var scData = scDataArray[0];
-                            var function = (string?)scData["Function"];
-                            var scUID = (string?)scData["ContractUID"];
+                            string? scUID;
+                            if (height >= Globals.ReserveRecoverReadsEveryRowHeight)
+                            {
+                                // A row whose call cannot be read names no contract to take back (the sweep below still
+                                // takes back what the reserve owns), and no longer stops the recovery of everything after it.
+                                scUID = ReserveRowCall(rTX.Data).ContractUID;
+                            }
+                            else
+                            {
+                                var scDataArray = JsonConvert.DeserializeObject<JArray>(rTX.Data);
+                                var scData = scDataArray[0];
+                                var function = (string?)scData["Function"];
+                                scUID = (string?)scData["ContractUID"];
+                            }
                             var recoveryAddress = stateTreiFrom?.RecoveryAccount;
 
                             if (scUID != null)

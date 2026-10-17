@@ -366,6 +366,13 @@ namespace VerifiedXCore
         public static long RecipientIsAddressHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
+        /// a row whose Data was not an array of objects made the recovery throw part-way, so every later row, the balance
+        /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Not active yet.
+        /// </summary>
+        public static long ReserveRecoverReadsEveryRowHeight = 999_999_999_999;
+
+        /// <summary>
         /// From this height a smart contract's Update(), Transfer(), Burn(), Evolve(), Devolve() or
         /// ChangeEvolveStateSpecific() must carry its Data in the array form those applies read. Validation also accepted
         /// a single object, which every apply then skips, so the transaction was mined with no effect. Not active yet.
