@@ -251,22 +251,32 @@ namespace VerifiedXCore.Bitcoin.Services
             }
 
             var (uid, approve, signedTxId) = ParseVote(tx);
-            VBTCWithdrawalCancellation.AddVote(uid!, tx.FromAddress, approve, tx.Hash);
-
-            var cancellation = VBTCWithdrawalCancellation.GetCancellation(uid!)!;
-            var activeVoters = ActiveVoters(cancellation.SmartContractUID, tx.Height - 1).Count;
+            // Read before the write (a read error is thrown, not answered "no"): the voters as of the block before the vote.
+            var activeVoters = ActiveVoters(VBTCWithdrawalCancellation.GetCancellation(uid!)!.SmartContractUID, tx.Height - 1).Count;
             var namesSignedTx = !approve && IsBtcTxId(signedTxId);
-            var outcome = Decide(cancellation.ApproveCount, cancellation.RejectCount, activeVoters, namesSignedTx);
+            var outcome = Outcome.Pending;
 
-            if (outcome == Outcome.Rejected)
+            // The vote and the decision it makes are one write: a vote counted without its decision was refused on replay
+            // as a second vote, and the cancellation stayed undecided.
+            var cancellation = VBTCWithdrawalCancellation.AddVoteAndDecide(uid!, tx.FromAddress, approve, tx.Hash, c =>
             {
-                VBTCWithdrawalCancellation.MarkAsProcessed(uid!, false, tx.Height, tx.Hash,
-                    namesSignedTx ? signedTxId!.ToLowerInvariant() : null, namesSignedTx ? tx.FromAddress : null);
+                outcome = Decide(c.ApproveCount, c.RejectCount, activeVoters, namesSignedTx);
+                return outcome switch
+                {
+                    Outcome.Rejected => new VBTCWithdrawalCancellation.VoteDecision(false, tx.Height, tx.Hash,
+                        namesSignedTx ? signedTxId!.ToLowerInvariant() : null, namesSignedTx ? tx.FromAddress : null),
+                    Outcome.Approved => new VBTCWithdrawalCancellation.VoteDecision(true, tx.Height, tx.Hash, null, null),
+                    _ => null,
+                };
+            });
+            if (cancellation == null)
+            {
+                ErrorLogUtility.LogError($"Vote {tx.Hash} from {tx.FromAddress} could not be recorded.", "VBTCCancellationVoting.ApplyVote()");
+                return new VoteResult { Applied = false };
             }
-            else if (outcome == Outcome.Approved)
-            {
-                VBTCWithdrawalCancellation.MarkAsProcessed(uid!, true, tx.Height, tx.Hash, null, null);
 
+            if (outcome == Outcome.Approved)
+            {
                 var request = VBTCWithdrawalRequest.GetByTransactionHash(cancellation.WithdrawalRequestHash, cancellation.SmartContractUID);
                 if (request != null && !(request.IsCompleted && request.Status == VBTCWithdrawalStatus.Completed))
                 {

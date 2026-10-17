@@ -432,6 +432,39 @@ namespace VerifiedXCore.Tests
             Assert.Null(VBTCCancellationVoting.RefundDueFor(deciding));
         }
 
+        /// <summary>
+        /// A deciding vote whose write to the store is partly lost (the first or the second write of the cancellation) is
+        /// still decided, by that vote, once it is applied again (a store rebuild replays it): the vote and the decision
+        /// are one write. Written apart, a vote counted without its decision was refused on replay as a second vote by
+        /// that validator, and the cancellation stayed undecided.
+        /// </summary>
+        [Theory]
+        [InlineData(1)]
+        [InlineData(2)]
+        public void ADecidingVoteWhoseWriteWasLost_IsDecidedByThatVoteOnReplay(int lostWrite)
+        {
+            var c = OpenCancellation();
+            VBTCCancellationVoting.ApplyVote(VoteTx(c.CancellationUID, "xVal1", true, CancelHeight + 1));
+            VBTCCancellationVoting.ApplyVote(VoteTx(c.CancellationUID, "xVal2", true, CancelHeight + 1));
+            var deciding = VoteTx(c.CancellationUID, "xVal3", true, CancelHeight + 2);
+            var writes = 0;
+            VBTCWithdrawalCancellation.FailWriteForTests = () => ++writes == lostWrite;
+            VBTCCancellationVoting.VoteResult first;
+            try { first = VBTCCancellationVoting.ApplyVote(deciding); }
+            finally { VBTCWithdrawalCancellation.FailWriteForTests = null; }
+            // One write now: losing it records nothing and the vote is not taken as applied; the second write of the
+            // old two-step order (vote, then decision) no longer exists.
+            if (lostWrite == 1) Assert.False(first.Applied);
+
+            VBTCCancellationVoting.ApplyVote(deciding);   // applied again
+            var after = VBTCWithdrawalCancellation.GetCancellation(c.CancellationUID)!;
+            Assert.True(after.IsProcessed);
+            Assert.True(after.IsApproved);
+            Assert.Equal(deciding.Hash, after.DecidedByTxHash);
+            Assert.Equal(3, after.ApproveCount);
+            Assert.Equal(VBTCWithdrawalStatus.Cancelled, VBTCWithdrawalRequest.GetByTransactionHash(RequestHash, Vault)!.Status);
+        }
+
         // ── The refund (StateData) ──────────────────────────────────────────────────────────────
 
         [Fact]

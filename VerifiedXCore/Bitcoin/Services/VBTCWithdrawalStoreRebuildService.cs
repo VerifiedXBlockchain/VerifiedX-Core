@@ -905,22 +905,19 @@ namespace VerifiedXCore.Bitcoin.Services
 
             if (VBTCWithdrawalCancellation.HasValidatorVoted(cancellationUID, tx.FromAddress)) { result.Skipped++; return; }
 
-            VBTCWithdrawalCancellation.AddVote(cancellationUID, tx.FromAddress, approve);
+            // The vote and the decision it makes are one write (see VBTCWithdrawalCancellation.AddVoteAndDecide).
+            var totalValidatorCount = voterSet.Count;
+            var approved = false;
+            cancellation = VBTCWithdrawalCancellation.AddVoteAndDecide(cancellationUID, tx.FromAddress, approve, null, c =>
+            {
+                approved = totalValidatorCount > 0 && (int)((double)c.ApproveCount / totalValidatorCount * 100) >= 75;
+                return approved ? new VBTCWithdrawalCancellation.VoteDecision(true, 0, null, null, null) : null;
+            });
+            if (cancellation == null) { result.Skipped++; return; }
             result.VotesApplied++;
 
-            var totalValidatorCount = voterSet.Count;
-            if (totalValidatorCount <= 0)
-                return;
-
-            cancellation = VBTCWithdrawalCancellation.GetCancellation(cancellationUID);
-            if (cancellation == null)
-                return;
-
-            var approvalPercentage = (int)((double)cancellation.ApproveCount / totalValidatorCount * 100);
-            if (approvalPercentage >= 75 && !cancellation.IsProcessed)
+            if (approved)
             {
-                VBTCWithdrawalCancellation.MarkAsProcessed(cancellationUID, true);
-
                 var row = VBTCWithdrawalRequest.GetByTransactionHash(cancellation.WithdrawalRequestHash, cancellation.SmartContractUID);
                 // Mirror of the completed-guard in StateData.VoteOnVBTCV2Cancellation, at the vote's height: from
                 // V2WithdrawalOwnerAddBackFixHeight a burn-backed Completed row never flips to Cancelled.
