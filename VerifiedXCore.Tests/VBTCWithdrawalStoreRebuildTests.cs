@@ -669,14 +669,16 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
-        /// Before WithdrawalUniqueIdRulesHeight a mined request reusing an earlier one's UniqueId (same requester and
-        /// contract) wrote over that request's row when saved with update. The store rebuild only adds what is missing:
-        /// the earlier, completed row stays completed and the later request gets its own row.
+        /// Below WithdrawalUniqueIdRulesHeight the released rule wrote a later request over an earlier request's row under
+        /// the same key, and every node applied it so. The store rebuild, which only adds what is missing, neither does
+        /// that (it reopened a completed withdrawal) nor guesses a row of its own (a row no other node holds): it reports
+        /// the reuse, the store needs the state rebuilt and blocks are held; the state rebuild then replays the block as
+        /// every node applied it, and the hold lifts.
         /// </summary>
         [Fact]
-        public async Task TheRebuild_NeverWritesARequestOverAnEarlierRequestsRow_BeforeTheUniqueIdHeight()
+        public async Task TheRebuild_ReportsAPreGateKeyReuse_AndTheStateRebuildReplaysItAsEveryNodeAppliedIt()
         {
-            Assert.True(2500 < Globals.WithdrawalUniqueIdRulesHeight);
+            Assert.True(2520 < Globals.WithdrawalUniqueIdRulesHeight);
             var first = RequestTx("rb25-req1", "xRequestorX", "rebuild:25", 0.1M, 2500);
             first.Data = first.Data!.TrimEnd('}') + ",\"UniqueId\":\"same-id\"}";
             var second = RequestTx("rb25-req2", "xRequestorX", "rebuild:25", 0.3M, 2520);
@@ -685,16 +687,33 @@ namespace VerifiedXCore.Tests
             InsertBlock(2510, CompleteTx("rb25-done1", "xRequestorX", "rebuild:25", "rb25-req1", 2510));
             InsertBlock(2520, second);
 
+            VBTCWithdrawalStoreRebuildService.ResetRetryForTests();
+            VerifiedXCore.Services.StateTreiStatusService.SetSynced(2520);
             var result = await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test");
-            Assert.True(result.Success, result.Message);
-            var earlier = VBTCWithdrawalRequest.GetByTransactionHash("rb25-req1", "rebuild:25");
-            Assert.NotNull(earlier);
-            Assert.True(earlier!.IsCompleted);
-            Assert.Equal(VBTCWithdrawalStatus.Completed, earlier.Status);
-            Assert.Equal(0.1M, earlier.Amount);
-            var later = VBTCWithdrawalRequest.GetByTransactionHash("rb25-req2", "rebuild:25");
-            Assert.NotNull(later);
-            Assert.Equal(0.3M, later!.Amount);
+            try
+            {
+                Assert.False(result.Success);
+                Assert.True(result.StateRebuildNeeded);
+                Assert.Equal(0, result.Errors);                                          // nothing a rebuild of the rows could retry
+                Assert.False(VerifiedXCore.Services.StateTreiStatusService.IsSynced()); // a restart restores the state
+                var earlier = VBTCWithdrawalRequest.GetByTransactionHash("rb25-req1", "rebuild:25");
+                Assert.NotNull(earlier);                                                 // neither written over...
+                Assert.Equal(VBTCWithdrawalStatus.Completed, earlier!.Status);
+                Assert.Equal(0.1M, earlier.Amount);
+                Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash("rb25-req2", "rebuild:25")); // ...nor given a row of its own
+                Assert.True(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+                Assert.Equal(0, VBTCWithdrawalStoreRebuildService.BlocksHeld);            // held for the state rebuild, no rows rebuild retried
+
+                Assert.True(await BlockRollbackUtility.ResetTreis());
+                // The released rule, as every node applied it: the later request was written over the earlier row.
+                Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash("rb25-req1", "rebuild:25"));
+                var later = VBTCWithdrawalRequest.GetByTransactionHash("rb25-req2", "rebuild:25");
+                Assert.NotNull(later);
+                Assert.Equal(VBTCWithdrawalStatus.Requested, later!.Status);
+                Assert.Equal(0.1M, later.Amount);                                        // the old amount kept, as the rule did
+                Assert.False(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+            }
+            finally { VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests(); }
         }
 
         [Fact]

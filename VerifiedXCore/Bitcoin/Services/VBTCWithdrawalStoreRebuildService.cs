@@ -273,6 +273,8 @@ namespace VerifiedXCore.Bitcoin.Services
             public int VotesApplied { get; set; }
             public int Skipped { get; set; }
             public int Errors { get; set; }
+            /// <summary>A pre-gate key reuse the rebuild does not decide: the state is rebuilt from the blocks (blocks are held until then).</summary>
+            public bool StateRebuildNeeded { get; set; }
             public long StartedUtc { get; set; }
             public long FinishedUtc { get; set; }
         }
@@ -457,13 +459,14 @@ namespace VerifiedXCore.Bitcoin.Services
                 meta.CompletionsApplied += result.CompletionsApplied;
                 GetMetaDb()?.Upsert(meta);
 
-                result.Success = result.Errors == 0;
+                result.Success = result.Errors == 0 && !result.StateRebuildNeeded;
                 result.FinishedUtc = TimeUtil.GetTime();
                 result.Message = $"Scanned {result.BlocksScanned} blocks to height {result.EndHeight}: " +
                                  $"{result.RequestsInserted} requests inserted, {result.RequestsAlreadyPresent} already present, " +
                                  $"{result.CompletionsApplied} completions applied, {result.AttestedOutcomesApplied} attested outcomes applied, {result.DecidedCancellationsApplied} decided cancellations applied, {result.CancellationsCreated} cancellations created, " +
                                  $"{result.VotesApplied} votes applied, {result.Skipped} skipped, {result.Errors} errors." +
-                                 (result.Errors > 0 ? " The store is left unfinished: withdrawal transactions are refused and nothing is signed from it until a rebuild finishes without errors." : "");
+                                 (result.Errors > 0 ? " The store is left unfinished: withdrawal transactions are refused and nothing is signed from it until a rebuild finishes without errors." : "") +
+                                 (result.StateRebuildNeeded ? " A request reused an earlier request's key below the UniqueId height, which this rebuild does not decide: blocks are held until the state is rebuilt from the blocks (a snapshot restore at restart, or \"rebuildstate\")." : "");
                 LogUtility.Log($"vBTC withdrawal store rebuild finished: {result.Message}", "VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync()");
             }
             catch (Exception ex)
@@ -543,8 +546,9 @@ namespace VerifiedXCore.Bitcoin.Services
                         {
                             if (missingOnly && VBTCWithdrawalRequest.GetByTransactionHash(row.TransactionHash, row.SmartContractUID) != null)
                                 continue; // this row is here: what it has become since its request is never written over
-                            // (Nor is the row of another mined request that carries the same UniqueId: Save never writes over it.)
-                            if (VBTCWithdrawalRequest.Save(row, update: true)) saved++;
+                            // (Nor is the row of another mined request that carries the same UniqueId: Save falls back to
+                            // that key, and used to write this request over it.)
+                            if (VBTCWithdrawalRequest.Save(row, update: true, neverOverAnotherRequest: missingOnly)) saved++;
                         }
 
                         if (saved == 0 && !missingOnly)
@@ -687,6 +691,26 @@ namespace VerifiedXCore.Bitcoin.Services
             return true;
         }
 
+        /// <summary>
+        /// Below WithdrawalUniqueIdRulesHeight the released rule wrote a later request over the row of an earlier request
+        /// under the same key (requester, UniqueId, contract), and every node applied it so. A rebuild that only adds what
+        /// is missing never does that (it reopened a completed withdrawal), and never guesses at what it did (its own row
+        /// would be a row no other node holds): the reuse is reported, the store needs the state rebuilt - blocks are held
+        /// - and the state rebuild replays the block as every node applied it.
+        /// </summary>
+        private static bool ReusesAnotherRequestsKeyBelowTheGate(VBTCWithdrawalRequest row, string requestTxHash)
+        {
+            if (row.RequestBlockHeight >= Globals.WithdrawalUniqueIdRulesHeight) return false;
+            var other = VBTCWithdrawalRequest.AnotherMinedRequestsRow(row);
+            if (other == null) return false;
+            var why = $"request {requestTxHash} on {row.SmartContractUID} (block {row.RequestBlockHeight}) reuses the key of request {other.TransactionHash} below the UniqueId height; what that did to the row is replayed by a state rebuild, not decided here";
+            MarkNeedsStateRebuild(why);
+            // The state is marked failed too, so a restart restores it (a snapshot restore replays the block through the
+            // same rule every node applied) instead of running this rebuild again to the same end.
+            try { VerifiedXCore.Services.StateTreiStatusService.SetFailed($"Withdrawal store: {why}."); } catch { }
+            return true;
+        }
+
         private static void ReplayRequest(Transaction tx, RebuildResult result)
         {
             if (!TryBuildRequestRows(tx, out var rows) || rows == null || rows.Count == 0)
@@ -717,9 +741,14 @@ namespace VerifiedXCore.Bitcoin.Services
                     continue;
                 }
 
-                // update:true matches live processing exactly (the same Save, the same rule): it upgrades an API node's
-                // local pre-registration row (same composite key, empty TransactionHash, no pins yet) and never writes
-                // over the row of another mined request.
+                if (ReusesAnotherRequestsKeyBelowTheGate(row, tx.Hash))
+                {
+                    result.StateRebuildNeeded = true;   // not an error of this scan: no rebuild of the rows can decide it
+                    continue;
+                }
+
+                // update:true matches live processing (the same Save, the same rule): it upgrades an API node's local
+                // pre-registration row (same composite key, empty TransactionHash, no pins yet).
                 if (VBTCWithdrawalRequest.Save(row, update: true))
                     result.RequestsInserted++;
                 else

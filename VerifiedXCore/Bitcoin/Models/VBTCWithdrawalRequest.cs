@@ -459,18 +459,41 @@ namespace VerifiedXCore.Bitcoin.Models
         /// </summary>
         /// <remarks>
         /// A row that belongs to a different mined request (same requester, UniqueId and contract, another transaction
-        /// hash) is never the one written to, at any height and by any writer (a block's apply, the store rebuild, the
-        /// chain recovery): the incoming row is inserted on its own. One rule, so a node that rebuilt its store holds
-        /// the same rows as one that applied the blocks live.
+        /// hash): from WithdrawalUniqueIdRulesHeight the incoming row is inserted on its own (validation refuses the
+        /// reuse from there); below it the released rule stands, as every node applied it, and the later request is
+        /// written over that row. A replay reproduces the chain's history either way. The store rebuild never applies
+        /// the released rule and never guesses at it: <see cref="AnotherMinedRequestsRow"/>.
         /// </remarks>
-        public static bool Save(VBTCWithdrawalRequest request, bool update = false)
+        /// <param name="neverOverAnotherRequest">A row that belongs to a different mined request (same requester,
+        /// UniqueId and contract, another transaction hash) is never the one written to, at any height: the incoming
+        /// row is inserted on its own. For the chain recovery from PathAuditRulesHeight, which must only add what is missing.</param>
+        public static bool Save(VBTCWithdrawalRequest request, bool update = false, bool neverOverAnotherRequest = false)
         {
             lock (RowWrite)
-                return SaveUnderRowLock(request, update);
+                return SaveUnderRowLock(request, update, neverOverAnotherRequest);
         }
 
         /// <summary>A write of a request row that the storage loses (a test's switch): counted as the wrapper would count it.</summary>
         internal static Func<bool>? FailWriteForTests;
+
+        /// <summary>
+        /// The row of a different mined request (another transaction hash) under <paramref name="request"/>'s key
+        /// (requester, UniqueId, contract), or null. Below WithdrawalUniqueIdRulesHeight a block's apply writes the
+        /// request over that row (the released rule, which a replay reproduces). The store rebuild, which only adds what
+        /// is missing, never does that and never guesses at what it did: it reports it and the state is rebuilt from the
+        /// blocks, which replays the block as every node applied it.
+        /// </summary>
+        public static VBTCWithdrawalRequest? AnotherMinedRequestsRow(VBTCWithdrawalRequest request)
+        {
+            var vwrDb = GetVBTCWithdrawalRequestDb();
+            if (vwrDb == null || string.IsNullOrEmpty(request.OriginalUniqueId) || string.IsNullOrEmpty(request.TransactionHash)) return null;
+            return vwrDb.Query().Where(x =>
+                    x.RequestorAddress == request.RequestorAddress &&
+                    x.OriginalUniqueId == request.OriginalUniqueId &&
+                    x.SmartContractUID == request.SmartContractUID)
+                .ToList().OrderBy(x => x.Id)
+                .FirstOrDefault(x => !string.IsNullOrEmpty(x.TransactionHash) && !string.Equals(x.TransactionHash, request.TransactionHash, StringComparison.Ordinal));
+        }
 
         /// <summary>
         /// Save, the completion record and UpdateLocalFields each look the row up and write it under this lock, so none
@@ -509,7 +532,7 @@ namespace VerifiedXCore.Bitcoin.Models
             }
         }
 
-        private static bool SaveUnderRowLock(VBTCWithdrawalRequest request, bool update)
+        private static bool SaveUnderRowLock(VBTCWithdrawalRequest request, bool update, bool neverOverAnotherRequest)
         {
             var vwrDb = GetVBTCWithdrawalRequestDb();
             if (vwrDb == null)
@@ -547,19 +570,18 @@ namespace VerifiedXCore.Bitcoin.Models
 
                 // Fund-loss audit item 6: a composite-key match upgrades only this node's local pre-registration row
                 // (no TransactionHash yet) or the same mined request. A row of a DIFFERENT mined request is that
-                // request's row - it used to be overwritten (status reset, old Amount and destination kept) by any later
-                // request reusing the UniqueId, which reopened a completed withdrawal. From WithdrawalUniqueIdRulesHeight
-                // such a request is refused by validation; here the later row is inserted on its own at any height, by
-                // every writer (no mined request on either chain has reused a UniqueId: it defaults to the request's own
-                // hash, so no row of the chain's history is written differently).
+                // request's row. From WithdrawalUniqueIdRulesHeight such a request is refused by validation, and here
+                // the later row is inserted on its own. Below it the released rule stands as every node applied it: the
+                // later request is written over the row (status reset, old Amount and destination kept), which a
+                // replay must reproduce (no mined request on either chain has reused a UniqueId: it defaults to the
+                // request's own hash). This node's own note of a request (no hash yet, inserted, not updated) is refused
+                // under a key a mined request holds, at any height, not left as a row nothing will upgrade.
                 if (existingRequest != null
                     && !string.IsNullOrEmpty(existingRequest.TransactionHash)
                     && !string.Equals(existingRequest.TransactionHash, request.TransactionHash, StringComparison.Ordinal))
                 {
-                    // A mined request is inserted on its own; this node's own note of a request (no hash yet, inserted,
-                    // not updated) is refused under a key a mined request holds, not left as a row nothing will upgrade.
                     if (!update) return false;
-                    existingRequest = null;
+                    if (request.RequestBlockHeight >= Globals.WithdrawalUniqueIdRulesHeight || neverOverAnotherRequest) existingRequest = null;
                 }
             }
 
