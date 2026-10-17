@@ -250,7 +250,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
             bool isV1;
             try { isV1 = DeclaresVbtcV1(SmartContractMain.GenerateSmartContractInMemory(scState.ContractData)); }
-            catch
+            catch (Exception ex) when (!DecompileFaultIsNodeLocal(ex)) // a fault of this node's disk is passed on, as for V2
             {
                 if (!DecompileFailureSettled("v1|" + scState.SmartContractUID + "|" + digest))
                     return false; // not cached: asked again next time (round 28)
