@@ -493,6 +493,34 @@ namespace VerifiedXCore.Tests
             Assert.Equal(0.001M, LedgerBalance(Vault, Requester));
         }
 
+        /// <summary>
+        /// The approving vote's block, applied while this node's storage fails to read the refund due: the block is not
+        /// taken as applied (it was, with no credit written), and the withdrawal store is marked to be rebuilt. A fault in
+        /// what the vote says still answers "no refund" and the block applies.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task StateData_ARefundThatCannotBeRead_FailsTheApprovingVotesBlock(bool localFault)
+        {
+            var c = OpenCancellation();
+            VBTCCancellationVoting.ApplyVote(VoteTx(c.CancellationUID, "xVal1", true, CancelHeight + 1));
+            VBTCCancellationVoting.ApplyVote(VoteTx(c.CancellationUID, "xVal2", true, CancelHeight + 1));
+            var deciding = VoteTx(c.CancellationUID, "xVal3", true, CancelHeight + 2);
+            Assert.Equal(VBTCCancellationVoting.Outcome.Approved, VBTCCancellationVoting.ApplyVote(deciding).Outcome);
+            var block = new Block { Height = CancelHeight + 2, Hash = "vote-block", PrevHash = "prev", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction> { deciding } };
+
+            VBTCCancellationVoting.RefundReadForTests = _ => throw (localFault ? new System.IO.IOException("disk") : new FormatException("data"));
+            bool applied;
+            try { applied = await StateData.UpdateTreis(block); }
+            finally { VBTCCancellationVoting.RefundReadForTests = null; }
+
+            Assert.Equal(!localFault, applied);
+            Assert.Equal(localFault, VBTCWithdrawalStoreRebuildService.IsUnfinished);
+            Assert.Equal(0.0006M, LedgerBalance(Vault, Requester));   // no credit either way; a failed block is not counted
+            if (localFault) VBTCWithdrawalStoreRebuildService.SetUnfinishedForTests(false);
+        }
+
         [Fact]
         public void StateData_RejectedCancellation_RefundsNothing()
         {

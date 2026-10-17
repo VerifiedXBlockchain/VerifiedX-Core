@@ -216,6 +216,7 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
+                RefundReadForTests?.Invoke(tx);
                 var (uid, _, _) = ParseVote(tx);
                 if (string.IsNullOrEmpty(uid))
                     return null;
@@ -229,8 +230,12 @@ namespace VerifiedXCore.Bitcoin.Services
                     return null; // completed with a burn: nothing to give back
                 return VBTCWithdrawalRequest.EscrowAppliesTo(request.RequestBlockHeight) ? request : null;
             }
-            catch { return null; }
+            // A fault of this node's storage is passed on: answered "no refund", the approving vote's block counted as
+            // applied without the requester's credit. The vote's apply reports it, and the block is not taken as applied.
+            catch (Exception ex) when (!VerifiedXCore.Data.StateData.IsNodeLocalFault(ex)) { return null; }
         }
+
+        internal static Action<Transaction>? RefundReadForTests;
 
         /// <summary>
         /// Counts a mined vote (tx.Height) and decides the cancellation when it can be. On approval the withdrawal row
