@@ -431,6 +431,13 @@ namespace VerifiedXCore
         public static long ShieldSpendsNothingHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height the Bitcoin-report signer set taken before the validator bonds' first look holds only the
+        /// grandfathered bonds (ValidatorBond.SignerEligible): a validator registered after the grandfather height
+        /// entered the epoch-zero set without waiting its age. Not active yet.
+        /// </summary>
+        public static long SignerAgeFromEpochZeroHeight = 999_999_999_999;
+
+        /// <summary>
         /// From this height a smart contract's Update(), Transfer(), Burn(), Evolve(), Devolve() or
         /// ChangeEvolveStateSpecific() must carry its Data in the array form those applies read. Validation also accepted
         /// a single object, which every apply then skips, so the transaction was mined with no effect. Not active yet.

@@ -308,7 +308,16 @@ namespace VerifiedXCore.Services
             var funded = VBTCValidatorRegistry.FundedOnly(active);
             if (!Active(height)) return funded;
             var marker = Rows(db).FindById(SeededMarker);
-            if (marker == null || marker.FundedSinceHeight == 0) return funded;
+            if (marker == null) return funded;
+            if (marker.FundedSinceHeight == 0)
+            {
+                // Before the first look only the grandfathered bonds count as aged (that look ages them alone); a
+                // validator that registered after the grandfather height entered the epoch-zero signer set unaged.
+                // From SignerAgeFromEpochZeroHeight it waits like any other.
+                return height >= Globals.SignerAgeFromEpochZeroHeight
+                    ? funded.Where(v => Row(v.ValidatorAddress, db)?.Grandfathered == true).ToList()
+                    : funded;
+            }
             return funded.Where(v => IsAged(v.ValidatorAddress, height, db)).ToList();
         }
 

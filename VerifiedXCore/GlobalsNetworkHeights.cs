@@ -48,6 +48,7 @@ namespace VerifiedXCore
             Globals.LegacyNameReservedHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.LegacyNameReservedHeight;
             Globals.EvolveRulesHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.EvolveRulesHeight;
             Globals.ShieldSpendsNothingHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.ShieldSpendsNothingHeight;
+            Globals.SignerAgeFromEpochZeroHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.SignerAgeFromEpochZeroHeight;
             Globals.ContractPayloadArrayHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.ContractPayloadArrayHeight;
             Globals.BtcNameOneRecordPerAddressHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.BtcNameOneRecordPerAddressHeight;
             Globals.BtcNameSignerOwnsAddressHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.BtcNameSignerOwnsAddressHeight;
