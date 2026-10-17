@@ -602,13 +602,12 @@ namespace VerifiedXCore.Bitcoin.Models
                 existingRequest.CompleteAfterBtcTxId = request.CompleteAfterBtcTxId;
                 existingRequest.DeferredSignedTxHex = request.DeferredSignedTxHex;
 
-                vwrDb.UpdateSafe(existingRequest);
-                return true;
+                return vwrDb.UpdateSafe(existingRequest);
             }
             else
             {
-                vwrDb.InsertSafe(request);
-                return true;
+                var id = vwrDb.InsertSafe(request);
+                return id != null && !id.IsNull;
             }
         }
         #endregion

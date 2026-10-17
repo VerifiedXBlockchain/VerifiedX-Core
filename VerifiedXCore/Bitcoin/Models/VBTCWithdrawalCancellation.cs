@@ -155,13 +155,23 @@ namespace VerifiedXCore.Bitcoin.Models
         /// the whole-request behavior (unchanged for single-contract withdrawals, whose only
         /// cancellation row is that contract's).
         /// </summary>
-        public static bool HasPendingCancellation(string withdrawalRequestHash, long nowSeconds, string? scUID)
+        public static bool HasPendingCancellation(string withdrawalRequestHash, long nowSeconds, string? scUID) =>
+            PendingCancellation(withdrawalRequestHash, nowSeconds, scUID, whenUnreadable: false);
+
+        /// <summary>
+        /// For a signer: as <see cref="HasPendingCancellation(string, long, string?)"/>, but a store that cannot be read
+        /// answers "pending", so no share is given for a withdrawal whose cancellation could not be ruled out.
+        /// </summary>
+        public static bool HasPendingCancellationOrUnreadable(string withdrawalRequestHash, long nowSeconds, string? scUID) =>
+            PendingCancellation(withdrawalRequestHash, nowSeconds, scUID, whenUnreadable: true);
+
+        private static bool PendingCancellation(string withdrawalRequestHash, long nowSeconds, string? scUID, bool whenUnreadable)
         {
             if (string.IsNullOrWhiteSpace(withdrawalRequestHash)) return false;
             try
             {
                 var db = GetDb();
-                if (db == null) return false;
+                if (db == null) return whenUnreadable;
                 var cutoff = nowSeconds - PENDING_CANCELLATION_MAX_AGE_SECONDS;
                 var height = Globals.LastBlock?.Height ?? 0;
                 // On-chain records only: a node-local leftover must not block signing on one validator.
@@ -175,7 +185,7 @@ namespace VerifiedXCore.Bitcoin.Models
                              ? IsVoteWindowOpen(x, Math.Max(height, x.RequestBlockHeight))
                              : !x.IsProcessed && x.RequestTime >= cutoff);
             }
-            catch { return false; }
+            catch { return whenUnreadable; }
         }
 
         /// <summary>
@@ -295,6 +305,7 @@ namespace VerifiedXCore.Bitcoin.Models
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError(ex.ToString(), "VBTCWithdrawalCancellation.SaveCancellation()");
+                Extensions.DbExtensions.NoteFailure(DbContext.RSRV_VBTC_V2_CANCELLATIONS);
             }
         }
 
@@ -360,6 +371,7 @@ namespace VerifiedXCore.Bitcoin.Models
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError(ex.ToString(), "VBTCWithdrawalCancellation.AddVote()");
+                Extensions.DbExtensions.NoteFailure(DbContext.RSRV_VBTC_V2_CANCELLATIONS);
             }
         }
 
@@ -392,6 +404,7 @@ namespace VerifiedXCore.Bitcoin.Models
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError(ex.ToString(), "VBTCWithdrawalCancellation.MarkAsProcessed()");
+                Extensions.DbExtensions.NoteFailure(DbContext.RSRV_VBTC_V2_CANCELLATIONS);
             }
         }
 
@@ -405,6 +418,7 @@ namespace VerifiedXCore.Bitcoin.Models
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError(ex.ToString(), "VBTCWithdrawalCancellation.DeleteCancellation()");
+                Extensions.DbExtensions.NoteFailure(DbContext.RSRV_VBTC_V2_CANCELLATIONS);
             }
         }
 

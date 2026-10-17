@@ -186,7 +186,17 @@ namespace VerifiedXCore.Data
             Globals.TreisUpdating = true;
             try
             {
-                return await UpdateTreisCore(block);
+                // A write to the withdrawal store the storage swallowed would leave this node's table unlike its peers':
+                // the block's apply fails, as for any other fault of this node's storage.
+                using var storeWrites = new Extensions.DbExtensions.FailureScope(Bitcoin.Services.VBTCWithdrawalStoreRebuildService.StoreCollections);
+                var applied = await UpdateTreisCore(block);
+                if (storeWrites.Count > 0)
+                {
+                    NoteApplyStepFailed(block.Height, new System.IO.IOException($"{storeWrites.Count} write(s) to the withdrawal store failed while block {block.Height} was applied."));
+                    ErrorLogUtility.LogError($"Block {block.Height}: {storeWrites.Count} write(s) to the withdrawal store failed; the block's apply is incomplete.", "StateData.UpdateTreis()");
+                    return false;
+                }
+                return applied;
             }
             finally
             {
@@ -196,9 +206,12 @@ namespace VerifiedXCore.Data
             }
         }
 
+        internal static Action<long>? ApplyStepForTests;
+
         private static async Task<bool> UpdateTreisCore(Block block)
         {
             _applyStepFailed = false;
+            ApplyStepForTests?.Invoke(block.Height);
             lock (_ownerChangesThisBlock) _ownerChangesThisBlock.Clear();
             StateWriteContext.SetHeight(block.Height); //stamp LastModifiedHeight on state writes for snapshot diffing
             LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13: every apply path uses the block's height

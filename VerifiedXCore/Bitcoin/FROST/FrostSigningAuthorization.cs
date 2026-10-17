@@ -181,7 +181,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     // cancellation filed against another vault's share would block this one.
                     if (WithdrawalNoLongerSignable(wrh, vaultUid) is { } notNow) return (false, notNow);
                     var wr = VBTCWithdrawalRequest.GetByTransactionHash(wrh, vaultUid);
-                    var pendingCancellation = VBTCWithdrawalCancellation.HasPendingCancellation(
+                    var pendingCancellation = VBTCWithdrawalCancellation.HasPendingCancellationOrUnreadable(
                         wrh, VerifiedXCore.Utilities.TimeUtil.GetTime(), vaultUid);
                     var (signable, signableReason) = IsWithdrawalSignable(wr, vaultUid, pendingCancellation);
                     if (!signable) return (false, signableReason);

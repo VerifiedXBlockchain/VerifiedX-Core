@@ -528,6 +528,7 @@ namespace VerifiedXCore.Utilities
             // signing keys, peer key backups, local bridge mint tracking, and the Base exit-scan
             // cursor, none of which can be rebuilt from the chain. The previous wipe-all loop
             // destroyed validator signing material on every rebuild.
+            var withdrawalStoreWipeFailed = false;
             try
             {
                 if (DbContext.DB_vBTC != null)
@@ -539,6 +540,7 @@ namespace VerifiedXCore.Utilities
             }
             catch (Exception ex)
             {
+                withdrawalStoreWipeFailed = true;   // the cancellations are part of the withdrawal store
                 Console.WriteLine($"[WipeChainDerivedState] Warning: Could not wipe DB_vBTC consensus collections: {ex.Message}");
             }
 
@@ -565,11 +567,12 @@ namespace VerifiedXCore.Utilities
                     // Consumed Base burns are chain-derived too. Left in place, a full replay would find
                     // every post-gate pool unlock "already consumed" and credit nothing (state divergence).
                     DbContext.DB_VBTCWithdrawalRequests.GetCollection(VBTCBridgeConsumedBurn.CollectionName).DeleteAll();
-                    WithdrawalStoreWiped = true;
+                    WithdrawalStoreWiped = !withdrawalStoreWipeFailed;
                 }
             }
             catch (Exception ex)
             {
+                withdrawalStoreWipeFailed = true;
                 Console.WriteLine($"[WipeChainDerivedState] Warning: Could not wipe DB_VBTCWithdrawalRequests: {ex.Message}");
             }
 
@@ -620,6 +623,15 @@ namespace VerifiedXCore.Utilities
             try { DbContext.DB_VBTCWithdrawalRequests?.Checkpoint(); } catch { }
             try { DbContext.DB_BtcAttest?.Checkpoint(); } catch { }
             try { DbContext.DB_Privacy?.Checkpoint(); } catch { }
+
+            // Withdrawal rows or cancellations left from before (a fork's, say) would be read with the replayed ones: a
+            // cancellation left behind kept the replayed chain's own from being recorded, and the withdrawal open here
+            // while its peers refunded it. The state rebuild or restore that asked for the wipe fails instead.
+            if (withdrawalStoreWipeFailed)
+            {
+                VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.MarkNeedsStateRebuild();
+                throw new System.IO.IOException("The vBTC withdrawal store could not be wiped; the state is not rebuilt on it.");
+            }
         }
 
         /// <summary>

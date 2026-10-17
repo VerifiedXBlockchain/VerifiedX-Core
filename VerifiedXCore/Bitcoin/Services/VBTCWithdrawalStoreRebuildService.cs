@@ -67,14 +67,22 @@ namespace VerifiedXCore.Bitcoin.Services
         public static bool HoldsBlocks()
         {
             bool unfinished;
-            try { unfinished = GetMeta()?.Unfinished == true; }
+            try
+            {
+                // No withdrawal store at all: every reader would judge from nothing.
+                if (DbContext.DB_VBTCWithdrawalRequests == null) throw new InvalidOperationException("the withdrawal store is not open");
+                // A store a state rebuild could not wipe: only a full state rebuild makes it whole.
+                if (_needsStateRebuild || GetMeta()?.NeedsStateRebuild == true)
+                    throw new InvalidOperationException("a state rebuild could not wipe it; it needs a full state rebuild");
+                unfinished = GetMeta()?.Unfinished == true;
+            }
             catch (Exception ex)
             {
                 var now = TimeUtil.GetTime();
                 var last = Interlocked.Read(ref _lastReadErrorLog);
                 if (now - last >= RetrySeconds && Interlocked.CompareExchange(ref _lastReadErrorLog, now, last) == last)
                 {
-                    var text = $"WITHDRAWAL STORE: its rebuild marker cannot be read ({ex.Message}), so blocks are held. Restart the node with \"rebuildstate\" (full state rebuild from the blocks).";
+                    var text = $"WITHDRAWAL STORE: {ex.Message}, so blocks are held. Restart the node with \"rebuildstate\" (full state rebuild from the blocks).";
                     ErrorLogUtility.LogError(text, "VBTCWithdrawalStoreRebuildService.HoldsBlocks()");
                     VerifiedXCore.Services.ConsoleWriterService.OutputMarked($"[red]{Spectre.Console.Markup.Escape(text)}[/]");
                 }
@@ -112,8 +120,34 @@ namespace VerifiedXCore.Bitcoin.Services
 
         private static bool Unfinished()
         {
-            try { return GetMeta()?.Unfinished == true; }
+            if (_needsStateRebuild) return true;
+            try { var meta = GetMeta(); return meta?.Unfinished == true || meta?.NeedsStateRebuild == true; }
             catch { return true; }
+        }
+
+        private static volatile bool _needsStateRebuild;
+
+        /// <summary>
+        /// A state rebuild or snapshot restore could not wipe this store (it may hold rows or cancellations from before,
+        /// a fork's, which a rebuild that only adds cannot remove). Until a full state rebuild wipes and replays it, the
+        /// store is treated as being rebuilt and blocks are held. Kept in memory too: the store may be the part that
+        /// cannot be written.
+        /// </summary>
+        public static void MarkNeedsStateRebuild()
+        {
+            _needsStateRebuild = true;
+            try
+            {
+                var db = GetMetaDb();
+                if (db == null) return;
+                var meta = GetMeta() ?? new RebuildMeta();
+                meta.NeedsStateRebuild = true;
+                db.Upsert(meta);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Withdrawal store: could not record that it needs a full state rebuild: {ex.Message}", "VBTCWithdrawalStoreRebuildService.MarkNeedsStateRebuild()");
+            }
         }
 
         private static bool SetUnfinished(bool unfinished)
@@ -142,7 +176,21 @@ namespace VerifiedXCore.Bitcoin.Services
         /// </summary>
         public static void StoreRewrittenFromChain()
         {
-            if (!BlockRollbackUtility.WithdrawalStoreWiped || SetUnfinished(false)) return;
+            if (!BlockRollbackUtility.WithdrawalStoreWiped) return;
+            _needsStateRebuild = false;
+            try
+            {
+                var db = GetMetaDb();
+                if (db != null)
+                {
+                    var meta = GetMeta() ?? new RebuildMeta();
+                    meta.Unfinished = false;
+                    meta.NeedsStateRebuild = false;
+                    db.Upsert(meta);
+                    return;
+                }
+            }
+            catch { }
             try { DbContext.DB_VBTCWithdrawalRequests?.DropCollection(REBUILD_META_COLLECTION); }
             catch (Exception ex) { ErrorLogUtility.LogError($"Withdrawal-store rebuild marker could not be cleared: {ex.Message}", "VBTCWithdrawalStoreRebuildService.StoreRewrittenFromChain()"); }
         }
@@ -158,6 +206,8 @@ namespace VerifiedXCore.Bitcoin.Services
             public int Id { get; set; } = 1;
             /// <summary>A rebuild began rewriting the store and has not finished (see IsRunning).</summary>
             public bool Unfinished { get; set; }
+            /// <summary>A state rebuild or restore could not wipe this store: only a full state rebuild that does makes it whole.</summary>
+            public bool NeedsStateRebuild { get; set; }
             public long LastScanHeight { get; set; }
             public long LastScanUtc { get; set; }
             public int RequestsInserted { get; set; }
@@ -274,6 +324,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
                 Interlocked.Exchange(ref _running, 1);
                 Interlocked.Increment(ref _started);
+                // Every write must land: one the storage swallowed (logged, a default returned) leaves the store unfinished.
+                using var storeWrites = new VerifiedXCore.Extensions.DbExtensions.FailureScope(StoreCollections.Append(REBUILD_META_COLLECTION).ToArray());
                 // Before the first row is written: a failure or a stop from here leaves it set until a rebuild (or a state
                 // rebuild or restore) finishes. Not recorded, nothing is written.
                 if (!SetUnfinished(true))
@@ -348,6 +400,11 @@ namespace VerifiedXCore.Bitcoin.Services
                 ApplyAttestedOutcomes(result);
                 ApplyDecidedCancellations(result);
 
+                if (storeWrites.Count > 0)
+                {
+                    result.Errors++;
+                    ErrorLogUtility.LogError($"Withdrawal-store rebuild: {storeWrites.Count} write(s) to the store failed; it stays unfinished and is rebuilt again.", "VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync()");
+                }
                 var meta = GetMeta() ?? new RebuildMeta();
                 // A row this scan could not write or reconcile may still read open: the store stays unfinished.
                 meta.Unfinished = result.Errors > 0;
@@ -384,6 +441,9 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         private static bool StateBeingRewritten() => BlockRollbackUtility.IsResetTreisRunning || SnapshotRestoreUtility.IsRestoreRunning;
+
+        /// <summary>The collections of the withdrawal store every reader judges from: requests and cancellations.</summary>
+        public static readonly string[] StoreCollections = { DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS, DbContext.RSRV_VBTC_V2_CANCELLATIONS };
 
         /// <summary>
         /// A state rebuild or snapshot restore, its own flag raised, waits here before it rewrites this store: a running
