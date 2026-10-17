@@ -1040,6 +1040,7 @@ namespace VerifiedXCore.Controllers
                             return JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Transaction was not admitted to the mempool: {admissionReason}" });
                         }
 
+                        VerifiedXCore.Models.DST.Bid.MarkUsedByCompletion(transaction);   // a sale completion sent raw uses this wallet's bid, as one built here does
                         await P2PClient.SendTXMempool(transaction);//send out to mempool
 
                         output = JsonConvert.SerializeObject(new { Result = "Success", Message = $"Transaction has been broadcasted.", Hash = transaction.Hash });

@@ -96,7 +96,8 @@ namespace VerifiedXCore.Tests
         {
             var uniqueId = Guid.NewGuid().ToString("N");
 
-            // Below the gate: the hole. A completed 1.0 withdrawal is reopened by a 0.0001 request under the same key.
+            // Below the gate: the released rule, which every node applied and a replay reproduces (the hole validation
+            // closes at the gate). A completed 1.0 withdrawal is reopened by a 0.0001 request under the same key.
             Assert.True(VBTCWithdrawalRequest.Save(MinedRow(uniqueId, "H1", 1.0M, Gate - 10, VBTCWithdrawalStatus.Completed)));
             Assert.True(VBTCWithdrawalRequest.Save(MinedRow(uniqueId, "H2", 0.0001M, Gate - 1, VBTCWithdrawalStatus.Requested), update: true));
             var reopened = VBTCWithdrawalRequest.GetByTransactionHash("H2", _vault);
@@ -130,6 +131,17 @@ namespace VerifiedXCore.Tests
             var row = Assert.Single(rows);
             Assert.Equal("H5", row.TransactionHash);
             Assert.Equal(Gate, row.RequestBlockHeight);
+        }
+
+        /// <summary>This node's note of a request (no hash yet) is refused under a key a mined request holds: a mined request is inserted on its own, a note is not.</summary>
+        [Fact]
+        public void LocalPreRegistration_UnderAKeyAMinedRequestHolds_IsRefused()
+        {
+            var uniqueId = Guid.NewGuid().ToString("N");
+            Assert.True(VBTCWithdrawalRequest.Save(MinedRow(uniqueId, "H9", 1.0M, Gate - 10, VBTCWithdrawalStatus.Completed)));
+            Assert.False(VBTCWithdrawalRequest.Save(MinedRow(uniqueId, "", 0.5M, 0, VBTCWithdrawalStatus.Requested)));
+            var row = Assert.Single(VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()!.Query().Where(x => x.OriginalUniqueId == uniqueId).ToList());
+            Assert.Equal("H9", row.TransactionHash);
         }
 
         [Fact]

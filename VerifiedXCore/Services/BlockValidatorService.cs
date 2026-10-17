@@ -92,6 +92,17 @@ namespace VerifiedXCore.Services
                 return false;
             if (reason.StartsWith(SameBlockDebitGuard.ReasonPrefix, StringComparison.Ordinal))
                 return false;
+            if (reason.StartsWith(Bitcoin.Services.BridgeIntraBlockGuard.ExitAlreadyFailedPrefix, StringComparison.Ordinal))
+                return false;
+            if (reason.StartsWith(LedgerIntegrityRules.NftMoveAndSaleInBlock, StringComparison.Ordinal))
+                return false;
+            // A private transaction's proof - missing, failing, or one this node cannot verify (no PLONK params) - says
+            // nothing about this node's state: a restore or rebuild would refuse the block the same way. (A Merkle root
+            // this node's pool does not hold may be its own tree going wrong, and stays a signal.)
+            if (reason == Privacy.PlonkProofVerifier.VerifierUnavailableReason
+                || reason.StartsWith(Privacy.PlonkProofVerifier.MissingProofReason, StringComparison.Ordinal)
+                || reason.StartsWith(Privacy.PlonkProofVerifier.FailedProofPrefix, StringComparison.Ordinal))
+                return false;
             return true;
         }
 
@@ -439,6 +450,12 @@ namespace VerifiedXCore.Services
                 return false;
             }
 
+            // Nor on a withdrawal store a rebuild left unfinished (it is rebuilt again meanwhile).
+            if (VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.HoldsBlocks())
+            {
+                return false;
+            }
+
             if ((Globals.IsResyncing || ForkRecoveryUtility.IsRecoveryInProgress)
                 && !ForkRecoveryUtility.IsInDownloadPhase)
             {
@@ -449,9 +466,11 @@ namespace VerifiedXCore.Services
 
             try
             {
-                // Double-check after acquiring semaphore (recovery may have started while waiting)
+                // Double-check after acquiring semaphore (recovery may have started while waiting, or a withdrawal-store
+                // rebuild held the lock and did not finish)
                 if (BlockRollbackUtility.IsResetTreisRunning || SnapshotRestoreUtility.IsRestoreRunning
-                    || SnapshotRestoreUtility.StateDestroyedByFailedRestore)
+                    || SnapshotRestoreUtility.StateDestroyedByFailedRestore
+                    || VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.HoldsBlocks())
                 {
                     return false;
                 }
@@ -952,6 +971,7 @@ namespace VerifiedXCore.Services
                         // NEW-07: one running debit per (ledger, contract, holder) across every debit-writing type.
                         var blockDebitState = new SameBlockDebitGuard.State { BlockHeight = block.Height };
                         var blockAttestState = new VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.State(); // one Bitcoin report per block
+                        var blockNftSteps = new LedgerIntegrityRules.NftStepState(); // D18: a contract moved or sold, not both
                         var uniqueAddresses = block.Transactions
                             .Where(x => x.FromAddress != "Coinbase_TrxFees" && x.FromAddress != "Coinbase_BlkRwd")
                             .Select(x => x.FromAddress)
@@ -1041,6 +1061,9 @@ namespace VerifiedXCore.Services
                                     if (duplicateCreation != null)
                                         effectiveTxResult = (false, duplicateCreation);
                                 }
+
+                                if (effectiveTxResult.Item1 && LedgerIntegrityRules.RegisterNftStepInBlock(blkTransaction, blockNftSteps, block.Height) is { } nftStep)
+                                    effectiveTxResult = (false, nftStep);
 
                                 // NEW-07: debits by one holder on one contract within the block may not exceed its balance.
                                 if (effectiveTxResult.Item1)
@@ -2049,6 +2072,7 @@ namespace VerifiedXCore.Services
                 var blockBridgeStateTask = new Bitcoin.Services.BridgeIntraBlockGuard.State();
                 var blockDebitStateTask = new SameBlockDebitGuard.State { BlockHeight = block.Height }; // NEW-07
                 var blockAttestStateTask = new VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.State(); // one Bitcoin report per block
+                var blockNftStepsTask = new LedgerIntegrityRules.NftStepState(); // D18: a contract moved or sold, not both
                 LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13
                 foreach (Transaction transaction in block.Transactions)
                 {
@@ -2077,6 +2101,8 @@ namespace VerifiedXCore.Services
                             var (attestOk, attestReason) = VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.TryRegister(transaction, blockAttestStateTask);
                             if (!attestOk) effectiveTxResult = (false, attestReason);
                         }
+                        if (effectiveTxResult.Item1 && LedgerIntegrityRules.RegisterNftStepInBlock(transaction, blockNftStepsTask, block.Height) is { } nftStepTask)
+                            effectiveTxResult = (false, nftStepTask);
                         rejectBlock = effectiveTxResult.Item1 == false ? rejectBlock = true : false;
                         if (rejectBlock)
                         {

@@ -265,16 +265,17 @@ namespace VerifiedXCore
         // mainnet height. Each rule keeps its own constant (so one can be moved alone if ever needed); all are set to
         // FundLossAuditHeight. Must be above the tip when every validator runs this build. Testnet values in Program.cs.
         /// <summary>
-        /// Shared mainnet activation height of the fund-loss audit rules. Reset 2026-10-13: the first value (7,472,000,
-        /// set 2026-10-08) passed before the build was on the network. Tip 7,496,705 on 2026-10-13 plus three days
-        /// (~6,300 blocks/day over the last five). The same height as <see cref="BitcoinAttestationRecordHeight"/>.
+        /// Shared mainnet activation height of the fund-loss audit rules. NOT SET: a placeholder far above the chain
+        /// until the release goes to mainnet, when it is set to the tip plus a few days (it was 7,517,000, reset
+        /// 2026-10-13, and the chain passed it on 2026-10-16 before the build was deployed). The same height as
+        /// <see cref="BitcoinAttestationRecordHeight"/>.
         /// </summary>
-        public const long FundLossAuditHeight = 7_517_000L;
+        public const long FundLossAuditHeight = 999_999_999L; // TODO set before the mainnet release: tip plus a few days
         /// <summary>
-        /// Testnet activation of the same rules (Program.cs / WardenService). Reset 2026-10-13 from 1,099,400: tip
-        /// 1,124,010 on 2026-10-13 plus three days (~6,300 blocks/day).
+        /// Testnet activation of the same rules (Program.cs / WardenService). Reset 2026-10-17 from 1,143,500, which the
+        /// chain had passed before the build was deployed: tip 1,151,481 on 2026-10-17 plus three days (~6,800 blocks/day).
         /// </summary>
-        public const long FundLossAuditTestnetHeight = 1_143_500L;
+        public const long FundLossAuditTestnetHeight = 1_172_000L;
 
         /// <summary>
         /// Item 1 (stage 1): a ZK-authorized private transaction (VFX/vBTC unshield, private transfer) may not take more
@@ -298,6 +299,13 @@ namespace VerifiedXCore
         {
             ["VFX"] = 100_033.000012M,
         };
+
+        /// <summary>
+        /// The block of the last forged debit the correction adds back (7,257,080). A pool counter last written before it
+        /// does not hold those debits - a privacy rebuild that stopped early, or a row made again from nothing - and gets
+        /// no correction: added to it, the correction is supply that was never in the pool.
+        /// </summary>
+        public static long ShieldedSupplyCorrectionsThroughHeight = 7_257_080L;
 
         /// <summary>
         /// Item 2: Sale_Complete / M_Sale_Complete naming a contract with no state record is refused (every sale check sat
@@ -490,7 +498,7 @@ namespace VerifiedXCore
         /// <summary>The three attestation heights on testnet (applied in Program.cs and WardenService): the tip of 2026-10-13, tip plus three days, and three days after that (plan 8.4).</summary>
         public const long BitcoinAttestationObserveTestnetHeight = 1_124_000L;
         public const long BitcoinAttestationRecordTestnetHeight = FundLossAuditTestnetHeight;
-        public const long BitcoinAttestationTestnetHeight = 1_163_000L;
+        public const long BitcoinAttestationTestnetHeight = 1_192_500L; // H1 plus three days (reset 2026-10-17 with H1)
         /// <summary>
         /// H1, recording: the Bitcoin report and rewind transactions are accepted and applied, and a vault created from
         /// this height on is watched: its deposit script is in state, its owner's balance is its attested coins, and its
@@ -505,10 +513,10 @@ namespace VerifiedXCore
         /// H2, enforcement: vaults created before H1 are frozen (nothing debits a balance on them, and no bridge exit or
         /// unlock draws on their locks), and the transactions only the earlier way of working needs (withdrawal
         /// completion, cancellation vote, bridge exit completion) are refused for every vault. The time between H1 and
-        /// H2 is for moving to a new vault: two weeks on mainnet, three days on testnet (plan 8.4). Set 2026-10-13:
-        /// H1 plus two weeks at ~6,400 blocks/day.
+        /// H2 is for moving to a new vault: two weeks on mainnet, three days on testnet (plan 8.4). H1 plus two weeks at
+        /// ~6,400 blocks/day; it follows H1, which is not set on mainnet yet.
         /// </summary>
-        public static long BitcoinAttestationHeight = 7_607_000L;
+        public static long BitcoinAttestationHeight = FundLossAuditHeight + 90_000L;
 
         /// <summary>The major version peers were required to run before this release.</summary>
         public const int PriorMajorVer = 8;
@@ -866,6 +874,8 @@ namespace VerifiedXCore
             && !Utilities.SnapshotRestoreUtility.IsRestoreRunning
             && !Utilities.SnapshotRestoreUtility.StateDestroyedByFailedRestore
             && !Services.BlockValidatorService.GetProbationStatus().Active
+            // It judges no block while its withdrawal store is rebuilt or left unfinished.
+            && !Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning
             // STALL-RESOLVE: a node whose tip has not moved while the network is ahead is
             // stranded on a dead branch — casters must not select it as a winner.
             && !Services.ForkDetectionService.IsStalled

@@ -320,6 +320,37 @@ namespace VerifiedXCore.Tests
             Assert.False(okAtGate);
         }
 
+        /// <summary>
+        /// A node whose pool counter is gone (its privacy store wiped and not rebuilt) judged the floor as the mainnet
+        /// correction alone, about 100,033 VFX, and accepted an unshield of that much on a downloaded block, where the
+        /// root check that would also refuse it is skipped. With no counter there is no supply: the unshield is refused,
+        /// and a pool row, however small, still gets its correction.
+        /// </summary>
+        [Fact]
+        public async Task MissingPoolCounter_IsNoSupply_TheCorrectionAloneDoesNotLetAnUnshieldThrough()
+        {
+            Globals.ShieldedSupplyCorrections["VFX"] = 100_033.000012M;
+            PrivacyDbContext.PoolState().DeleteAll();   // the startup rebuild's wipe with no replay after it
+            Assert.Equal(0M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate));
+
+            Globals.LastBlock = new Block { Height = Gate + 5 };
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 100_000M), blockDownloads: true, blockVerify: true, blockHeight: Gate);
+            Assert.False(ok);
+            Assert.StartsWith(PrivateTxSupplyRules.SupplyReasonPrefix, msg);
+
+            // A row made again from nothing (a status read creates one) or left by a rebuild that stopped before the forged
+            // blocks holds none of their debits: no correction. A counter that went through them is still corrected.
+            PrivacyDbContext.PoolState().Insert(new VerifiedXCore.Models.Privacy.ShieldedPoolState { AssetType = "VFX", TotalShieldedSupply = 1M, LastUpdateHeight = 0 });
+            Assert.Equal(1M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate));
+            var row = PrivacyDbContext.PoolState().FindOne(x => x.AssetType == "VFX");
+            row.LastUpdateHeight = Globals.ShieldedSupplyCorrectionsThroughHeight - 1;
+            PrivacyDbContext.PoolState().Update(row);
+            Assert.Equal(1M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate));
+            row.LastUpdateHeight = Globals.ShieldedSupplyCorrectionsThroughHeight;
+            PrivacyDbContext.PoolState().Update(row);
+            Assert.Equal(100_034.000012M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate));
+        }
+
         // ── Same block: two unshields are judged against one supply ───────────────────────────────────────────────
 
         [Fact]
@@ -360,6 +391,7 @@ namespace VerifiedXCore.Tests
                 // The mainnet shape: honest notes 4.099985 outstanding, counter 4.099985 - 100,033.000012.
                 var pool = ShieldedPoolService.GetOrCreateState("VFX");
                 pool.TotalShieldedSupply = 4.099985M - 100_033.000012M;
+                pool.LastUpdateHeight = Globals.ShieldedSupplyCorrectionsThroughHeight;   // written through the forged blocks, as mainnet's
                 PrivacyDbContext.PoolState().Update(pool);
                 TipAtGate();
 

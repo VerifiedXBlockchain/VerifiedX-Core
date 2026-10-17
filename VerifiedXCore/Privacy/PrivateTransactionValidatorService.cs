@@ -64,6 +64,10 @@ namespace VerifiedXCore.Privacy
             // Fund-loss audit item 1 (stage 2): the shape proofs require (nothing in the reset block; note hashes on every
             // output; two notes spent; the dummy note at most once). Block validation judges at the block's height.
             var proofRulesHeight = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
+            // A downloaded block skips the root and proof checks only before the proof-rules epoch, as history the validators
+            // of its time judged. In the epoch it is judged as a live block: a caster's catch-up block (tip + 1) and the
+            // download loop both pass blockDownloads, and one caster could have a proof-less, made-up-root unshield committed.
+            var skipHistoricalPrivacyChecks = blockDownloads && !PrivacyEpoch.ProofRulesActive(proofRulesHeight);
             var proofShapeError = PrivateTxProofRules.Check(txRequest, payload, proofRulesHeight);
             if (proofShapeError != null)
                 return (false, proofShapeError);
@@ -123,10 +127,10 @@ namespace VerifiedXCore.Privacy
                 var supplyRules = PrivateTxSupplyRules.Check(txRequest, payload!, judgedAt);
                 if (!supplyRules.ok)
                     return supplyRules;
-                var merkle = ValidatePayloadMerkleRootRecency(payload!, blockDownloads);
+                var merkle = ValidatePayloadMerkleRootRecency(payload!, skipHistoricalPrivacyChecks);
                 if (!merkle.ok)
                     return merkle;
-                var feeMerkle = ValidateVfxFeeTreeMerkleRootRecency(payload!, blockDownloads);
+                var feeMerkle = ValidateVfxFeeTreeMerkleRootRecency(payload!, skipHistoricalPrivacyChecks);
                 if (!feeMerkle.ok)
                     return feeMerkle;
             }
@@ -147,7 +151,7 @@ namespace VerifiedXCore.Privacy
 
             if (!skipPlonkProofVerification)
             {
-                var plonk = PlonkProofVerifier.TryValidatePrivateProofs(txRequest, payload!, blockDownloads, proofRulesHeight);
+                var plonk = PlonkProofVerifier.TryValidatePrivateProofs(txRequest, payload!, skipHistoricalPrivacyChecks, proofRulesHeight);
                 if (!plonk.ok)
                     return (false, plonk.message);
             }

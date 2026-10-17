@@ -346,12 +346,429 @@ namespace VerifiedXCore.Tests
             Assert.True(VBTCWithdrawalStoreRebuildService.IsRunning);
             Assert.True(VBTCWithdrawalStoreRebuildService.IsUnfinished);
             Assert.False(VBTCWithdrawalStoreRebuildService.InProgress);   // the operator can start the rebuild again
-            Assert.Equal(1, VerifiedXCore.Services.BlockValidatorService.ValidateBlockSemaphore.CurrentCount);   // block processing goes on, refusing withdrawal transactions
+            Assert.Equal(1, VerifiedXCore.Services.BlockValidatorService.ValidateBlockSemaphore.CurrentCount);   // the lock is released; blocks are held by BlockValidatorService.ValidateBlock
 
             await VBTCWithdrawalStoreRebuildService.MaybeAutoRebuildOnStartupAsync();
             Assert.False(VBTCWithdrawalStoreRebuildService.IsRunning);
             Assert.True(VBTCWithdrawalStoreRebuildService.LastResult!.Success, VBTCWithdrawalStoreRebuildService.LastResult.Message);
             Assert.NotNull(VBTCWithdrawalRequest.GetByTransactionHash("rb11-1104", "rebuild:11"));
+        }
+
+        /// <summary>
+        /// No block is judged or applied on a store a rebuild left unfinished (every check that reads the withdrawal table
+        /// would judge it on rows not yet brought to how their withdrawals ended). Block validation holds the block and
+        /// starts the rebuild again; once it finishes, blocks are no longer held.
+        /// </summary>
+        [Fact]
+        public async Task BlockValidation_HoldsBlocksWhileTheStoreIsUnfinished_AndRebuildsIt()
+        {
+            InsertBlock(1800, RequestTx("rb18-req", "xRequestorR", "rebuild:18", 0.1M, 1800));
+            VBTCWithdrawalStoreRebuildService.ResetRetryForTests();
+            VBTCWithdrawalStoreRebuildService.FailAtBlockForTests = _ => true;
+            try { Assert.False((await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test")).Success); }
+            finally { VBTCWithdrawalStoreRebuildService.FailAtBlockForTests = null; }
+            Assert.True(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+
+            var next = new Block { Height = 1801, Hash = "block-1801", PrevHash = "block-1800", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction>() };
+            Assert.False(await VerifiedXCore.Services.BlockValidatorService.ValidateBlock(next, true));
+            Assert.True(VBTCWithdrawalStoreRebuildService.BlocksHeld >= 1);
+
+            // The rebuild it started finishes; the store is whole again.
+            for (var i = 0; i < 200 && (VBTCWithdrawalStoreRebuildService.InProgress || VBTCWithdrawalStoreRebuildService.IsUnfinished); i++)
+                await Task.Delay(50);
+            Assert.False(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+            Assert.NotNull(VBTCWithdrawalRequest.GetByTransactionHash("rb18-req", "rebuild:18"));
+
+            var held = VBTCWithdrawalStoreRebuildService.BlocksHeld;
+            await VerifiedXCore.Services.BlockValidatorService.ValidateBlock(next, true);   // judged on (and refused for its own reasons)
+            Assert.Equal(held, VBTCWithdrawalStoreRebuildService.BlocksHeld);
+            VBTCWithdrawalStoreRebuildService.ResetRetryForTests();
+        }
+
+        [Fact]
+        public async Task WhileTheRebuildKeepsFailing_ItIsStartedAgainAtMostOncePerInterval()
+        {
+            InsertBlock(1900, RequestTx("rb19-req", "xRequestorS", "rebuild:19", 0.1M, 1900));
+            VBTCWithdrawalStoreRebuildService.ResetRetryForTests();
+            VBTCWithdrawalStoreRebuildService.FailAtBlockForTests = _ => true;
+            try
+            {
+                Assert.False((await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test")).Success);
+                var started = VBTCWithdrawalStoreRebuildService.RebuildsStarted;
+                var next = new Block { Height = 1901, Hash = "block-1901", PrevHash = "block-1900", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction>() };
+                Assert.False(await VerifiedXCore.Services.BlockValidatorService.ValidateBlock(next, true));
+                for (var i = 0; i < 200 && VBTCWithdrawalStoreRebuildService.RebuildsStarted == started; i++) await Task.Delay(50);
+                for (var i = 0; i < 200 && VBTCWithdrawalStoreRebuildService.InProgress; i++) await Task.Delay(50);
+                Assert.Equal(started + 1, VBTCWithdrawalStoreRebuildService.RebuildsStarted);   // started again, failed again
+
+                for (var k = 0; k < 3; k++) Assert.False(await VerifiedXCore.Services.BlockValidatorService.ValidateBlock(next, true));
+                await Task.Delay(300);
+                Assert.Equal(started + 1, VBTCWithdrawalStoreRebuildService.RebuildsStarted);   // not again within the interval
+                Assert.True(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+            }
+            finally
+            {
+                VBTCWithdrawalStoreRebuildService.FailAtBlockForTests = null;
+                VBTCWithdrawalStoreRebuildService.ResetRetryForTests();
+            }
+        }
+
+        /// <summary>
+        /// The SafeDB wrappers swallow a failed write (log it, return a default). A scope opened for the withdrawal store
+        /// counts such a failure in its own work, and not one in other work.
+        /// </summary>
+        [Fact]
+        public async Task ASwallowedWriteFailure_IsCountedByAScopeInTheSameWork_Only()
+        {
+            var requests = VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()!;
+            using var gate = new System.Threading.ManualResetEventSlim();
+            var elsewhere = Task.Run(() => { gate.Wait(5000); requests.InsertSafe<VBTCWithdrawalRequest>((VBTCWithdrawalRequest)null!); });   // other work, begun before the scope
+            using (var scope = new DbExtensions.FailureScope(VBTCWithdrawalStoreRebuildService.StoreCollections))
+            {
+                Assert.True(requests.InsertSafe<VBTCWithdrawalRequest>((VBTCWithdrawalRequest)null!) == null);   // fails inside the wrapper; swallowed
+                gate.Set();
+                await elsewhere;
+                Assert.Equal(1, scope.Count);
+            }
+        }
+
+        /// <summary>
+        /// Helpers that answer "not watched" or "not found" when this node's storage fails count that as a lost write to
+        /// the withdrawal store inside a block's apply (so the block is not taken as applied, and the store is marked);
+        /// outside one (transaction validation) the answer is as before and nothing is counted.
+        /// </summary>
+        [Fact]
+        public void AnAnswerGivenOnAStorageFault_CountsAsALostStoreWrite_InsideAnApplyOnly()
+        {
+            InsertBlock(2320, RequestTx("rb24-req", "xRequestorW", "rebuild:24", 0.1M, 2320));
+            var cancel = CompleteTx("rb24-cancel", "xRequestorW", "rebuild:24", "rb24-req", 2321);
+            cancel.TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_CANCEL;
+            var attest = DbContext.DB_BtcAttest;
+            var requests = DbContext.DB_VBTCWithdrawalRequests;
+            var closed = new LiteDB.LiteDatabase(new MemoryStream());
+            closed.Dispose();
+            try
+            {
+                DbContext.DB_BtcAttest = closed;
+                Assert.False(VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.IsWatched(cancel));   // validation: as before
+                using (var scope = new DbExtensions.FailureScope(VBTCWithdrawalStoreRebuildService.StoreCollections))
+                {
+                    Assert.False(VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.IsWatched(cancel));
+                    Assert.Equal(1, scope.Count);
+                }
+                DbContext.DB_BtcAttest = attest;
+
+                DbContext.DB_VBTCWithdrawalRequests = closed;
+                using (var scope = new DbExtensions.FailureScope(VBTCWithdrawalStoreRebuildService.StoreCollections))
+                {
+                    Assert.Null(VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain("rb24-req", 2321, "rebuild:24"));
+                    Assert.True(scope.Count >= 1);
+                }
+            }
+            finally
+            {
+                DbContext.DB_BtcAttest = attest;
+                DbContext.DB_VBTCWithdrawalRequests = requests;
+            }
+        }
+
+        /// <summary>A rebuild during which a write to the store was swallowed does not count as finished.</summary>
+        [Fact]
+        public async Task ARebuildDuringWhichAStoreWriteWasSwallowed_StaysUnfinished()
+        {
+            InsertBlock(2000, RequestTx("rb20-req", "xRequestorT", "rebuild:20", 0.1M, 2000));
+            VBTCWithdrawalStoreRebuildService.BlockScannedForTests = _ => DbExtensions.NoteFailure(DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS);
+            try
+            {
+                var result = await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test");
+                Assert.False(result.Success);
+                Assert.True(result.Errors > 0);
+                Assert.True(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+            }
+            finally { VBTCWithdrawalStoreRebuildService.BlockScannedForTests = null; }
+            Assert.True((await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test, again")).Success);
+            Assert.False(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+        }
+
+        /// <summary>
+        /// A block whose apply lost a write to the withdrawal store (swallowed by the storage) is not applied: this node's
+        /// table would otherwise differ from its peers' with nothing to show for it. A failure elsewhere is not counted.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task ABlockWhoseApplyLostAWithdrawalStoreWrite_IsNotApplied(bool inTheStore)
+        {
+            var block = new Block { Height = 2100, Hash = "block-2100", PrevHash = "block-2099", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction>() };
+            StateData.ApplyStepForTests = _ => DbExtensions.NoteFailure(inTheStore ? DbContext.RSRV_VBTC_V2_CANCELLATIONS : "some_other_collection");
+            try { Assert.Equal(!inTheStore, await StateData.UpdateTreis(block)); }
+            finally { StateData.ApplyStepForTests = null; }
+        }
+
+        /// <summary>
+        /// A state rebuild whose wipe of the withdrawal store fails (here the cancellations: their database cannot be
+        /// written) fails, rather than replaying onto rows left from before and clearing the unfinished mark.
+        /// </summary>
+        [Fact]
+        public async Task AStateRebuildThatCouldNotWipeTheWithdrawalStore_Fails_AndLeavesItUnfinished()
+        {
+            VBTCWithdrawalStoreRebuildService.SetUnfinishedForTests(true);
+            var vbtc = DbContext.DB_vBTC;
+            var brokenPath = Path.Combine(_tempRoot, "broken_vbtc.db");
+            var broken = new LiteDB.LiteDatabase(new LiteDB.ConnectionString { Filename = brokenPath, Connection = LiteDB.ConnectionType.Direct });
+            broken.Dispose();
+            try
+            {
+                DbContext.DB_vBTC = broken;
+                Assert.False(await BlockRollbackUtility.ResetTreis());
+            }
+            finally { DbContext.DB_vBTC = vbtc; }
+            Assert.False(BlockRollbackUtility.WithdrawalStoreWiped);
+            Assert.True(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+            // Blocks are held, and a rebuild that only adds rows does not lift that: only a full state rebuild does.
+            VBTCWithdrawalStoreRebuildService.ResetRetryForTests();
+            Assert.True(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+            Assert.Equal(0, VBTCWithdrawalStoreRebuildService.BlocksHeld);   // held for the state rebuild, no merge rebuild started
+            Assert.True((await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test")).Success);
+            Assert.True(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+            Assert.True(await BlockRollbackUtility.ResetTreis());
+            Assert.False(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+            Assert.False(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+        }
+
+        /// <summary>A signer that cannot read the cancellations answers "pending" (gives no share); other readers keep their answer.</summary>
+        [Fact]
+        public void ASignerThatCannotReadTheCancellations_TreatsOneAsPending()
+        {
+            var vbtc = DbContext.DB_vBTC;
+            var broken = new LiteDB.LiteDatabase(new LiteDB.ConnectionString { Filename = Path.Combine(_tempRoot, "broken_vbtc2.db"), Connection = LiteDB.ConnectionType.Direct });
+            broken.Dispose();
+            Assert.False(VBTCWithdrawalCancellation.HasPendingCancellationOrUnreadable("rb22-req", TimeUtil.GetTime(), "rebuild:22"));
+            try
+            {
+                DbContext.DB_vBTC = broken;
+                Assert.True(VBTCWithdrawalCancellation.HasPendingCancellationOrUnreadable("rb22-req", TimeUtil.GetTime(), "rebuild:22"));
+                Assert.False(VBTCWithdrawalCancellation.HasPendingCancellation("rb22-req", TimeUtil.GetTime(), "rebuild:22"));
+            }
+            finally { DbContext.DB_vBTC = vbtc; }
+        }
+
+        /// <summary>
+        /// End to end: a block's apply loses a write to the withdrawal store (a real write the storage wrapper swallowed).
+        /// The block's apply is incomplete and blocks are held. A rebuild of the store's rows does not lift that (the
+        /// block's other writes, such as an escrow debit, may be missing too); a full state rebuild does, and the request
+        /// rows are back.
+        /// </summary>
+        [Fact]
+        public async Task ALiveApplyThatLostAStoreWrite_HoldsBlocksUntilTheStateIsRebuilt()
+        {
+            InsertBlock(2200, RequestTx("rb22b-req", "xRequestorU", "rebuild:22", 0.1M, 2200));
+            VBTCWithdrawalStoreRebuildService.ResetRetryForTests();
+            var block = new Block { Height = 2201, Hash = "block-2201", PrevHash = "block-2200", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction>() };
+            VerifiedXCore.Services.StateTreiStatusService.SetSynced(2200);
+            StateData.ApplyStepForTests = _ => VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()!.InsertSafe<VBTCWithdrawalRequest>((VBTCWithdrawalRequest)null!);
+            try { Assert.False(await StateData.UpdateTreis(block)); }
+            finally { StateData.ApplyStepForTests = null; }
+            Assert.True(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+            Assert.False(VerifiedXCore.Services.StateTreiStatusService.IsSynced());   // so a restart restores the state
+
+            var next = new Block { Height = 2202, Hash = "block-2202", PrevHash = "block-2201", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction>() };
+            Assert.False(await VerifiedXCore.Services.BlockValidatorService.ValidateBlock(next, true));
+            Assert.True(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+            Assert.Equal(0, VBTCWithdrawalStoreRebuildService.BlocksHeld);   // held for a state rebuild: no rows-only rebuild started
+            Assert.True((await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test")).Success);
+            Assert.True(VBTCWithdrawalStoreRebuildService.HoldsBlocks());     // a rows-only rebuild does not lift it
+
+            Assert.True(await BlockRollbackUtility.ResetTreis());
+            Assert.False(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+            Assert.False(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+            Assert.NotNull(VBTCWithdrawalRequest.GetByTransactionHash("rb22b-req", "rebuild:22"));
+            VBTCWithdrawalStoreRebuildService.ResetRetryForTests();
+        }
+
+        /// <summary>
+        /// An apply that loses a store write and then throws (a later step's storage fails) still marks the store and the
+        /// state: the caller's own mark is skipped when the apply throws, and a restart must restore the state.
+        /// </summary>
+        [Fact]
+        public async Task AnApplyThatLostAStoreWriteAndThenThrew_StillMarksTheStoreAndTheState()
+        {
+            var block = new Block { Height = 2250, Hash = "block-2250", PrevHash = "block-2249", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction>() };
+            VerifiedXCore.Services.StateTreiStatusService.SetSynced(2249);
+            StateData.ApplyStepForTests = _ =>
+            {
+                VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()!.InsertSafe<VBTCWithdrawalRequest>((VBTCWithdrawalRequest)null!);
+                throw new System.IO.IOException("disk full");
+            };
+            try { await Assert.ThrowsAsync<System.IO.IOException>(() => StateData.UpdateTreis(block)); }
+            finally { StateData.ApplyStepForTests = null; }
+            Assert.True(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+            Assert.True(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+            Assert.False(VerifiedXCore.Services.StateTreiStatusService.IsSynced());
+            VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests();
+        }
+
+        /// <summary>
+        /// A fault of this node's storage in a step that writes the withdrawal store marks it. A fault of what a
+        /// transaction says does not, and neither does a local fault in a step that does not write the store (the block's
+        /// apply fails, as before, but no rebuild of a store it did not touch holds blocks).
+        /// </summary>
+        [Theory]
+        [InlineData(true, true, true)]
+        [InlineData(true, false, false)]
+        [InlineData(false, true, false)]
+        public async Task OnlyALocalFaultInAWithdrawalStoreStep_MarksTheStore(bool storeStep, bool localFault, bool marked)
+        {
+            var block = new Block { Height = 2300, Hash = "block-2300", PrevHash = "block-2299", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction>() };
+            Exception fault = localFault ? new System.IO.IOException("disk") : new FormatException("data");
+            StateData.ApplyStepForTests = h => { if (storeStep) StateData.NoteWithdrawalStoreStepFailed(h, fault); else StateData.NoteApplyStepFailed(h, fault); };
+            try { Assert.Equal(!localFault, await StateData.UpdateTreis(block)); }
+            finally { StateData.ApplyStepForTests = null; }
+            Assert.Equal(marked, VBTCWithdrawalStoreRebuildService.IsUnfinished);
+            VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests();
+        }
+
+        /// <summary>
+        /// A mined COMPLETE or CANCEL whose read of the withdrawal store fails on this node (here: the store is closed) was
+        /// caught and logged, and the block counted as applied with the row never written. Now the block's apply is
+        /// incomplete and the store is marked unfinished.
+        /// </summary>
+        [Theory]
+        [InlineData(TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE)]
+        [InlineData(TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)]
+        public async Task AWithdrawalStepThatCannotReadTheStore_FailsTheBlock_AndMarksTheStore(TransactionType type)
+        {
+            var tx = CompleteTx("rb23c-done", "xRequestorV", "rebuild:23", "rb23c-req", 2310);
+            tx.TransactionType = type;
+            var block = new Block { Height = 2310, Hash = "block-2310", PrevHash = "block-2309", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction> { tx } };
+            var store = DbContext.DB_VBTCWithdrawalRequests;
+            var closed = new LiteDB.LiteDatabase(new MemoryStream());
+            closed.Dispose();
+            DbContext.DB_VBTCWithdrawalRequests = closed;
+            bool applied;
+            try { applied = await StateData.UpdateTreis(block); }
+            finally { DbContext.DB_VBTCWithdrawalRequests = store; }
+            Assert.False(applied);
+            Assert.True(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+            VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests();
+        }
+
+        /// <summary>A state rebuild whose replay lost a write to the withdrawal store does not clear it; it stays unfinished.</summary>
+        [Fact]
+        public async Task AStateRebuildWhoseReplayLostAStoreWrite_LeavesItUnfinished()
+        {
+            for (long h = 2400; h < 2403; h++)
+                BlockchainData.GetBlocks().InsertSafe(new Block { Height = h, Hash = $"block-{h}", PrevHash = $"block-{h - 1}", Timestamp = 1_755_000_000L + h, Transactions = new List<Transaction>(), NumOfTx = 0 });
+            StateData.ApplyStepForTests = h => { if (h == 2401) DbExtensions.NoteFailure(DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS); };
+            try { Assert.False(await BlockRollbackUtility.ResetTreis()); }
+            finally { StateData.ApplyStepForTests = null; }
+            Assert.True(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+            Assert.True(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+            Assert.True(await BlockRollbackUtility.ResetTreis());   // a state rebuild that finishes lifts it
+            Assert.False(VBTCWithdrawalStoreRebuildService.IsUnfinished);
+        }
+
+        /// <summary>
+        /// Below WithdrawalUniqueIdRulesHeight the released rule wrote a later request over an earlier request's row under
+        /// the same key, and every node applied it so. The store rebuild, which only adds what is missing, neither does
+        /// that (it reopened a completed withdrawal) nor guesses a row of its own (a row no other node holds): it reports
+        /// the reuse, the store needs the state rebuilt and blocks are held; the state rebuild then replays the block as
+        /// every node applied it, and the hold lifts.
+        /// </summary>
+        [Fact]
+        public async Task TheRebuild_ReportsAPreGateKeyReuse_AndTheStateRebuildReplaysItAsEveryNodeAppliedIt()
+        {
+            Assert.True(2520 < Globals.WithdrawalUniqueIdRulesHeight);
+            var first = RequestTx("rb25-req1", "xRequestorX", "rebuild:25", 0.1M, 2500);
+            first.Data = first.Data!.TrimEnd('}') + ",\"UniqueId\":\"same-id\"}";
+            var second = RequestTx("rb25-req2", "xRequestorX", "rebuild:25", 0.3M, 2520);
+            second.Data = second.Data!.TrimEnd('}') + ",\"UniqueId\":\"same-id\"}";
+            InsertBlock(2500, first);
+            InsertBlock(2510, CompleteTx("rb25-done1", "xRequestorX", "rebuild:25", "rb25-req1", 2510));
+            InsertBlock(2520, second);
+
+            VBTCWithdrawalStoreRebuildService.ResetRetryForTests();
+            VerifiedXCore.Services.StateTreiStatusService.SetSynced(2520);
+            var result = await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test");
+            try
+            {
+                Assert.False(result.Success);
+                Assert.True(result.StateRebuildNeeded);
+                Assert.Equal(0, result.Errors);                                          // nothing a rebuild of the rows could retry
+                Assert.False(VerifiedXCore.Services.StateTreiStatusService.IsSynced()); // a restart restores the state
+                var earlier = VBTCWithdrawalRequest.GetByTransactionHash("rb25-req1", "rebuild:25");
+                Assert.NotNull(earlier);                                                 // neither written over...
+                Assert.Equal(VBTCWithdrawalStatus.Completed, earlier!.Status);
+                Assert.Equal(0.1M, earlier.Amount);
+                Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash("rb25-req2", "rebuild:25")); // ...nor given a row of its own
+                Assert.True(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+                Assert.Equal(0, VBTCWithdrawalStoreRebuildService.BlocksHeld);            // held for the state rebuild, no rows rebuild retried
+
+                Assert.True(await BlockRollbackUtility.ResetTreis());
+                // The released rule, as every node applied it: the later request was written over the earlier row.
+                Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash("rb25-req1", "rebuild:25"));
+                var later = VBTCWithdrawalRequest.GetByTransactionHash("rb25-req2", "rebuild:25");
+                Assert.NotNull(later);
+                Assert.Equal(VBTCWithdrawalStatus.Requested, later!.Status);
+                Assert.Equal(0.1M, later.Amount);                                        // the old amount kept, as the rule did
+                Assert.False(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+            }
+            finally { VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests(); }
+        }
+
+        /// <summary>
+        /// Below PathAuditRulesHeight a completion naming a request's hash under another contract had live processing
+        /// recover the request from the chain over its real row, reopening a paid withdrawal (the reopening this issue is
+        /// about, kept below the gate as every node applied it). The rebuild cannot reproduce that in order: it reports
+        /// it, the store needs the state rebuilt and blocks are held; the state rebuild then replays the block as every
+        /// node applied it - the row is open again - and the hold lifts. From the gate such a completion is skipped as
+        /// before (the recovery adds only what is missing; validation refuses it).
+        /// </summary>
+        [Fact]
+        public async Task TheRebuild_ReportsAPreGateCompletionTheRecoveryReopenedARowFor_AndTheStateRebuildReplaysIt()
+        {
+            Assert.True(2610 < Globals.PathAuditRulesHeight);
+            InsertBlock(2600, RequestTx("rb26-req", "xRequestorY", "rebuild:26", 0.1M, 2600));
+            InsertBlock(2605, CompleteTx("rb26-done", "xRequestorY", "rebuild:26", "rb26-req", 2605));
+            InsertBlock(2610, CompleteTx("rb26-foreign", "xRequestorY", "rebuild:other", "rb26-req", 2610));   // names the request under another contract
+            VBTCWithdrawalStoreRebuildService.ResetRetryForTests();
+            VerifiedXCore.Services.StateTreiStatusService.SetSynced(2610);
+
+            var result = await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test");
+            try
+            {
+                Assert.False(result.Success);
+                Assert.True(result.StateRebuildNeeded);
+                Assert.Equal(0, result.Errors);
+                var row = VBTCWithdrawalRequest.GetByTransactionHash("rb26-req", "rebuild:26");
+                Assert.NotNull(row);
+                Assert.Equal(VBTCWithdrawalStatus.Completed, row!.Status);                 // the rebuild changed nothing it could not reproduce
+                Assert.True(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+                Assert.Equal(0, VBTCWithdrawalStoreRebuildService.BlocksHeld);
+                Assert.False(VerifiedXCore.Services.StateTreiStatusService.IsSynced());
+
+                Assert.True(await BlockRollbackUtility.ResetTreis());
+                // As every node applied it below the gate: the recovery saved the request over its row, reopening it.
+                row = VBTCWithdrawalRequest.GetByTransactionHash("rb26-req", "rebuild:26");
+                Assert.NotNull(row);
+                Assert.Equal(VBTCWithdrawalStatus.Requested, row!.Status);
+                Assert.False(row.IsCompleted);
+                Assert.False(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+            }
+            finally { VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests(); }
+        }
+
+        [Fact]
+        public void WithNoWithdrawalStoreOpen_BlocksAreHeld()
+        {
+            var store = DbContext.DB_VBTCWithdrawalRequests;
+            try
+            {
+                DbContext.DB_VBTCWithdrawalRequests = null!;
+                Assert.True(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+            }
+            finally { DbContext.DB_VBTCWithdrawalRequests = store; }
+            Assert.False(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
         }
 
         /// <summary>A state rebuild that finishes rewrites the store from the chain: an unfinished withdrawal-store rebuild no longer holds it.</summary>
