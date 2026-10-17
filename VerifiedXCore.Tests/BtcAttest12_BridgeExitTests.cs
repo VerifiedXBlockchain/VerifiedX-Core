@@ -812,6 +812,43 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// C-059: before the path-audit height an exit on an older vault may name one lock twice, the second time by an
+        /// alias ("L1 "): both pass, the first draws the lock, the second draws nothing, and the plan records both. The
+        /// signer's payout cap summed the plan, twice what the lock gave up. Each part is now the lock as its own record
+        /// names it: an alias or a second naming leaves the exit unsigned (its FAIL and re-exit path stays open).
+        /// </summary>
+        [Fact]
+        public async Task AnOlderExitNamingOneLockTwice_BeforeThePathAuditHeight_IsNotSigned()
+        {
+            var older = await CreateVault(H1 - 50);
+            await Start();
+            var lockId = await Lock(older.Uid, 0.002M);
+            var gate = Globals.PathAuditRulesHeight;
+            Globals.PathAuditRulesHeight = long.MaxValue;   // mainnet today: exits are not yet held to exact lock names
+            try
+            {
+                var burn = NewBurn();
+                await Mine(Exit(burn, BtcDest, (lockId, older.Uid, 0.002M), (lockId + " ", older.Uid, 0.002M)));
+                Assert.True(VBTCBridgeLockState.GetByLockId(lockId)!.IsUnlocked);   // the lock gave up 0.002 BTC, once
+                Assert.Equal(2, JsonConvert.DeserializeObject<List<PoolUnlockAllocation>>(Record(burn).AllocationsJson!)!.Count);
+
+                var (exit, cap, why) = FrostSigningAuthorization.ResolveBtcExitForContract(BtcWithdrawals.ExitSigningReference(burn, older.Uid), older.Uid);
+                Assert.Null(exit);
+                Assert.Equal(0L, cap);
+                Assert.Contains("does not allocate", why);
+
+                // An exit that names its lock once, exactly, is still signed for what the lock gave up.
+                var honestLock = await Lock(older.Uid, 0.002M);
+                var honestBurn = NewBurn();
+                await Mine(Exit(honestBurn, BtcDest, (honestLock, older.Uid, 0.002M)));
+                var (honest, honestCap, _) = FrostSigningAuthorization.ResolveBtcExitForContract(BtcWithdrawals.ExitSigningReference(honestBurn, older.Uid), older.Uid);
+                Assert.NotNull(honest);
+                Assert.Equal(200_000L, honestCap);
+            }
+            finally { Globals.PathAuditRulesHeight = gate; }
+        }
+
+        /// <summary>
         /// Two failures of the same part of an older exit in one block: each is judged on the plan the block before left,
         /// so both passed, and applied together the second found the trimmed plan, matched nothing and failed the whole
         /// exit - whose paid part could then be exited and paid again. The block takes one failure per exit; the second
