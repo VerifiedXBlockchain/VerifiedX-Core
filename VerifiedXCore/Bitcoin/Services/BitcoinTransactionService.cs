@@ -345,9 +345,10 @@ namespace VerifiedXCore.Bitcoin.Services
                 // when those transactions confirm (or are reclaimed) — retryable, not a vault problem.
                 return $"{PinnedCoinsShortfallMarker} Not enough free coins right now: {excludedSats * SatoshiMultiplier:F8} BTC is held by other withdrawals in flight. Required: {amountToSend * SatoshiMultiplier:F8} BTC, free: {totalInputAmount * SatoshiMultiplier:F8} BTC. Try again once they confirm. {TransientUtxoErrorMarker}";
             }
+            // Held and unconfirmed coins together: a shortfall that both would cover frees up with time as well.
             var unconfirmedSats = (ulong)spendable.Where(u => u.Height <= 0).Sum(u => (decimal)u.Value);
-            if (unconfirmedSats > 0 && totalInputAmount + unconfirmedSats >= amountToSend)
-                return $"Not enough confirmed coins yet: {unconfirmedSats * SatoshiMultiplier:F8} BTC is waiting for its first confirmation. Required: {amountToSend * SatoshiMultiplier:F8} BTC, confirmed: {totalInputAmount * SatoshiMultiplier:F8} BTC. Try again once it confirms. {TransientUtxoErrorMarker}";
+            if (unconfirmedSats > 0 && totalInputAmount + excludedSats + unconfirmedSats >= amountToSend)
+                return $"Not enough confirmed, free coins yet: {unconfirmedSats * SatoshiMultiplier:F8} BTC is waiting for its first confirmation and {excludedSats * SatoshiMultiplier:F8} BTC is held by other withdrawals in flight. Required: {amountToSend * SatoshiMultiplier:F8} BTC, available now: {totalInputAmount * SatoshiMultiplier:F8} BTC. Try again once they confirm. {TransientUtxoErrorMarker}";
             return $"Insufficient funds. Required: {amountToSend * SatoshiMultiplier:F8} BTC, Available: {totalInputAmount * SatoshiMultiplier:F8} BTC";
         }
 

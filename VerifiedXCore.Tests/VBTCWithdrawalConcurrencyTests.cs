@@ -341,6 +341,13 @@ namespace VerifiedXCore.Tests
             var notEnough = BitcoinTransactionService.ShortfallReason(coins, coins, 20_000, 500_000);
             Assert.DoesNotContain(BitcoinTransactionService.TransientUtxoErrorMarker, notEnough);
             Assert.StartsWith("Insufficient funds", notEnough);
+
+            // Held (another withdrawal's pin) and unconfirmed together: neither alone covers it, both together do.
+            var held = Utxo("hh", 0, 30_000);
+            var all = new[] { Utxo("aa", 0, 20_000), held, new BlockchainScripthashListunspentResult { TxHash = "cc", TxPos = 1, Value = 30_000, Height = 0 } };
+            var free = all.Where(u => u.TxHash != "hh").ToArray();
+            var mixed = BitcoinTransactionService.ShortfallReason(all, free, 20_000, 75_000);
+            Assert.Contains(BitcoinTransactionService.TransientUtxoErrorMarker, mixed);
         }
 
         [Fact]
