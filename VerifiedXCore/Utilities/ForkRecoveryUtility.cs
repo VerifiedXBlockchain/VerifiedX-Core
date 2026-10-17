@@ -818,5 +818,12 @@ namespace VerifiedXCore.Utilities
             return true;
         }
         internal static void SetRecoveryInProgressForTests(bool running) => Interlocked.Exchange(ref _recoveryInProgress, running ? 1 : 0);
+
+        /// <summary>
+        /// For a rollback writer outside this class (the caster's self-heal): takes the interlock RecoverAsync,
+        /// ReorgToBranchAsync and DeepReorgAsync hold, so no two of them roll the same tip block back. False: another holds it.
+        /// </summary>
+        internal static bool TryEnterRecovery() => Interlocked.CompareExchange(ref _recoveryInProgress, 1, 0) == 0;
+        internal static void ExitRecovery() => Interlocked.Exchange(ref _recoveryInProgress, 0);
     }
 }

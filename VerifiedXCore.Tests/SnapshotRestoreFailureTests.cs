@@ -136,6 +136,47 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// D37: a caster's fork self-heal rolled the tip back on its own flag while a desync reconcile, a readiness recovery
+        /// or a fork-correction reorg on the same node held the recovery interlock; two writers that each read the tip
+        /// before either removed it reversed its payment twice in state (the sender refunded twice). The self-heal now
+        /// takes the same interlock: while another recovery holds it, it stands down and rolls nothing back.
+        /// </summary>
+        [Fact(Timeout = 60_000)]
+        public async Task CasterForkSelfHeal_WhileAnotherRecoveryHoldsTheInterlock_RollsNothingBack()
+        {
+            const string sender = "xSelfHealSender00000000000000000001";
+            const string recipient = "xSelfHealRecipient000000000000000001";
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = sender, Balance = 100M, Nonce = 1 });
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = recipient, Balance = 10M });
+            AddBlock(4);
+            var tip = new Block
+            {
+                Height = 5, Hash = "hash-5", PrevHash = "hash-4", StateRoot = "root-5", Timestamp = TimeUtil.GetTime(),
+                Transactions = new List<Transaction>
+                {
+                    new Transaction { Hash = "pay-1", FromAddress = sender, ToAddress = recipient, Amount = 10M, Fee = 0.0001M, TransactionType = TransactionType.TX, Height = 5 },
+                },
+            };
+            BlockchainData.GetBlocks().InsertSafe(tip);
+            Globals.LastBlock = tip;
+
+            ForkRecoveryUtility.SetRecoveryInProgressForTests(true);   // a RecoverAsync / ReorgToBranch is mid-rollback
+            try
+            {
+                var selfHeal = typeof(VerifiedXCore.Nodes.BlockcasterNode).GetMethod("ForkRecoveryAsync",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+                await (Task)selfHeal.Invoke(null, new object[] { 5L })!;
+                Assert.True(ForkRecoveryUtility.IsRecoveryInProgress);   // the holder's interlock is left as it was
+            }
+            finally { ForkRecoveryUtility.SetRecoveryInProgressForTests(false); }
+
+            Assert.Equal(100M, StateData.GetSpecificAccountStateTrei(sender)!.Balance);     // no refund from a second writer
+            Assert.Equal(10M, StateData.GetSpecificAccountStateTrei(recipient)!.Balance);
+            Assert.NotNull(BlockchainData.GetBlockByHeight(5));                             // the tip is left to the holder
+            Assert.Equal(5, Globals.LastBlock.Height);
+        }
+
+        /// <summary>
         /// While the withdrawal store is unfinished (blocks are held, so the node falls behind on purpose), fork recovery
         /// waits: rolling back or restoring then would stop the rebuild that makes the store whole. Afterwards it runs.
         /// </summary>
