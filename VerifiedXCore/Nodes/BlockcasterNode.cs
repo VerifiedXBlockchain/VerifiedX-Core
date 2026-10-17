@@ -4522,6 +4522,8 @@ namespace VerifiedXCore.Nodes
         {
             if (block == null || string.IsNullOrEmpty(producerIp))
                 return;
+            if (block.GetBlockHash() != block.Hash) // registered as the approval below
+                return;
 
             while (true)
             {
@@ -4795,6 +4797,12 @@ namespace VerifiedXCore.Nodes
         /// </summary>
         private static async Task<Block?> VerifyBlockHashAgreementAsync(Block block, long height, string terminalWinner)
         {
+            // The draft's hash is published and voted on as the round's approval: only for a block that is exactly that hash.
+            if (block == null || block.GetBlockHash() != block.Hash)
+            {
+                CasterLogUtility.Log($"HASH-AGREEMENT: the draft at {height} from {terminalWinner} is not its own hash; no agreement.", "CONSENSUS");
+                return null;
+            }
             // Wave 3: quorum N + eligible voters come from the membership committee when active.
             var (casters, committeeCount) = GetQuorumCasters(height);
             if (committeeCount <= 1)
