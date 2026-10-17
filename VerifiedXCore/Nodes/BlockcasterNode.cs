@@ -4453,6 +4453,20 @@ namespace VerifiedXCore.Nodes
         }
 
         /// <summary>
+        /// After an agreed block was validated at our tip and refused, its pin is withdrawn: left in place, the gossip gate
+        /// refused every other block at that height until the next agreement, and the tip stayed wedged. Without the pin a
+        /// block there still needs a majority attestation. A block not yet tried (we are behind and downloading) keeps its
+        /// pin, which admits it when the download reaches it; a pin since replaced by another hash is left alone.
+        /// </summary>
+        internal static void ReleaseRefusedCommitPin(long height, string? hash, bool triedAtTip)
+        {
+            if (!triedAtTip || string.IsNullOrEmpty(hash))
+                return;
+            if (Globals.CasterApprovedBlockHashDict.TryRemove(new KeyValuePair<long, string>(height, hash)))
+                CasterLogUtility.Log($"COMMIT-FAILED: h={height} agreed hash {hash[..Math.Min(16, hash.Length)]} withdrawn after validation refused it.", "ROUND");
+        }
+
+        /// <summary>
         /// MAJORITY-ADOPT decision (pure, tested): a block returned by a peer caster for the round's
         /// height that was produced by someone OTHER than the agreed winner is adoptable only when it
         /// extends our tip and carries a valid quorum certificate. Same-producer blocks are the
@@ -4626,6 +4640,7 @@ namespace VerifiedXCore.Nodes
                     $"hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}. Failure counters stay armed.",
                     "ROUND");
                 ProofUtility.TrackRoundFailure(currentHeight);
+                ReleaseRefusedCommitPin(currentHeight, block.Hash, triedAtTip: nextHeight == currentHeight);
                 return;
             }
 
