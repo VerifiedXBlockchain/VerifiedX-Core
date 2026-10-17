@@ -22,7 +22,9 @@ namespace VerifiedXCore.Models.DST
        
         public void Build()
         {
-            Id = RandomStringUtility.GetRandomString(8);
+            // Unguessable: a reply is matched to its request by this id alone, and an eight-character id from a
+            // non-cryptographic generator let a sender who guessed it have its datagram taken as the shop's reply.
+            Id = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
             SentTimestamp = TimeUtil.GetTime();
             IPAddress = P2PClient.MostLikelyIP();
             Port = Globals.DSTClientPort;
