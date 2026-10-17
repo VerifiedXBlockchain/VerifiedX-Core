@@ -96,6 +96,13 @@ namespace VerifiedXCore.Services
                 return false;
             if (reason.StartsWith(LedgerIntegrityRules.NftMoveAndSaleInBlock, StringComparison.Ordinal))
                 return false;
+            // A private transaction's proof - missing, failing, or one this node cannot verify (no PLONK params) - says
+            // nothing about this node's state: a restore or rebuild would refuse the block the same way. (A Merkle root
+            // this node's pool does not hold may be its own tree going wrong, and stays a signal.)
+            if (reason == Privacy.PlonkProofVerifier.VerifierUnavailableReason
+                || reason.StartsWith(Privacy.PlonkProofVerifier.MissingProofReason, StringComparison.Ordinal)
+                || reason.StartsWith(Privacy.PlonkProofVerifier.FailedProofPrefix, StringComparison.Ordinal))
+                return false;
             return true;
         }
 
