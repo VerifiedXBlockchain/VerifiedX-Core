@@ -3321,7 +3321,7 @@ namespace VerifiedXCore.Services
                             && !FrostKeyIsOwn(jobj["FrostPublicKey"], validatorAddress, required: true))
                             return (txResult, "FrostPublicKey must be the validator's own public key.");
 
-                        if (RegisteredBaseAddressRefusal(jobj, blockHeight) is { } baseRefusal)
+                        if (RegisteredBaseAddressRefusal(jobj, blockHeight, txRequest.Signature) is { } baseRefusal)
                             return (txResult, baseRefusal);
 
                         if (txRequest.Fee != 0M)
@@ -3458,7 +3458,7 @@ namespace VerifiedXCore.Services
                             && !FrostKeyIsOwn(jobj["FrostPublicKey"], validatorAddress, required: false))
                             return (txResult, "FrostPublicKey must be the validator's own public key.");
 
-                        if (RegisteredBaseAddressRefusal(jobj, blockHeight) is { } baseRefusal)
+                        if (RegisteredBaseAddressRefusal(jobj, blockHeight, txRequest.Signature) is { } baseRefusal)
                             return (txResult, baseRefusal);
 
                         if (txRequest.Fee != 0M)
@@ -4520,14 +4520,32 @@ namespace VerifiedXCore.Services
         /// be shaped into another contract message. Refused at admission at every height; in blocks from the path-audit
         /// height. Null when it passes.
         /// </summary>
-        internal static string? RegisteredBaseAddressRefusal(JObject data, long? blockHeight)
+        internal static string? RegisteredBaseAddressRefusal(JObject data, long? blockHeight, string? signature)
         {
             var named = data["BaseAddress"]?.ToObject<string>();
             if (string.IsNullOrEmpty(named) || (blockHeight != null && blockHeight.Value < Globals.PathAuditRulesHeight)) return null;
             var key = data["FrostPublicKey"]?.ToObject<string>();
+            // A heartbeat may leave its key out (the registry keeps the one it has): the key is then the one that signed
+            // this transaction, which the signature check has already tied to the validator's address. Every such
+            // heartbeat naming a BaseAddress was refused.
+            if (string.IsNullOrEmpty(key)) key = SignerPublicKey(signature);
             string? derived = null;
             try { derived = string.IsNullOrEmpty(key) ? null : Bitcoin.Services.ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(key); } catch { }
             return string.Equals(named.Trim(), derived, StringComparison.OrdinalIgnoreCase) ? null : RegisteredBaseAddressReason;
+        }
+        /// <summary>The public key a signature script carries ("04" + 128 hex), read as SignatureService.VerifySignature reads it; null if unreadable.</summary>
+        private static string? SignerPublicKey(string? sigScript)
+        {
+            try
+            {
+                var parts = (sigScript ?? "").Split('.', 2);
+                if (parts.Length < 2) return null;
+                var hex = HexByteUtility.ByteToHex(Base58Utility.Base58Decode(parts[1]));
+                if (hex.Length / 2 == 63) hex = "00" + hex;   // the same patch as VerifySignature
+                var pk = VerifiedXCore.EllipticCurve.PublicKey.fromString(HexByteUtility.HexToByte(hex));
+                return "04" + Convert.ToHexString(pk.toString()).ToLowerInvariant();
+            }
+            catch { return null; }
         }
         internal const string BridgeLockDestinationIsAdminTagReason = "A bridge lock's EvmDestination cannot begin with a Base admin message tag.";
         internal const string VotingEndDateNeedsOffsetReason = "A topic's voting end date must carry a UTC offset.";
