@@ -1052,6 +1052,20 @@ namespace VerifiedXCore.Services
             return null;
         }
 
+        /// <summary>
+        /// From Globals.FeeBelowOneVfxHeight a transaction's fee is below 1 VFX. Amount and Fee are joined in the hash with
+        /// no separator, so trailing amount digits can move into the fee's whole part ("1.2345" + "0.00000602" hashes like
+        /// "1.2" + "3450.00000602"): same hash and signature, and the sender's balance burned as fee. Every such variant
+        /// gives a fee of 1 VFX or more (a decimal is never written with a leading zero), while the fee calculator's fee
+        /// for the largest transaction is far below it. Private transactions hash otherwise. Null when the rule passes.
+        /// </summary>
+        public static string? FeeBelowOneVfx(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.FeeBelowOneVfxHeight) return null;
+            if (VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType)) return null;
+            return tx.Fee >= 1M ? "A transaction's fee must be below 1 VFX (ambiguous hash)." : null;
+        }
+
         // ── NEW-17: NFT sale amounts ─────────────────────────────────────────────────────────────────────────────
 
         /// <summary>

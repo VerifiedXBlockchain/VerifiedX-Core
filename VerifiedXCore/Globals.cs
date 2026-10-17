@@ -380,6 +380,12 @@ namespace VerifiedXCore
         public static long ReserveNonTransferAmountHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height a transaction's fee is below 1 VFX, so amount digits cannot move into it under the same hash
+        /// (LedgerIntegrityRules.FeeBelowOneVfx). Not active yet.
+        /// </summary>
+        public static long FeeBelowOneVfxHeight = 999_999_999_999;
+
+        /// <summary>
         /// From this height a smart contract's Update(), Transfer(), Burn(), Evolve(), Devolve() or
         /// ChangeEvolveStateSpecific() must carry its Data in the array form those applies read. Validation also accepted
         /// a single object, which every apply then skips, so the transaction was mined with no effect. Not active yet.
