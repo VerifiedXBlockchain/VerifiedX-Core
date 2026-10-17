@@ -460,8 +460,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                     // Estimate transaction size for Taproot (smaller than legacy/segwit)
                     // Taproot: ~57.5 vBytes per input, ~43 vBytes per output + 10.5 overhead
-                    int estimatedSize = (int)(57.5 * unspentCoins.Count + 43 * 2 + 10.5); // destination + change
-                    feeEstimate = (ulong)(estimatedSize * feeRateSatsPerVByte);
+                    feeEstimate = (ulong)WithdrawalFeeSats(unspentCoins.Count, feeRateSatsPerVByte);
 
                     // Fee is deducted from withdrawal amount, so UTXOs only need to cover the amount
                     if (totalInputAmount >= amountToSend)
@@ -824,6 +823,13 @@ namespace VerifiedXCore.Bitcoin.Services
         /// version returned 0 for every failure mode, making "Electrum is broken" indistinguishable
         /// from "tx not confirmed".
         /// </summary>
+        /// <summary>
+        /// The fee a vault withdrawal pays for <paramref name="inputCount"/> inputs at <paramref name="feeRate"/> sat/vB, as the
+        /// builder sets it (Taproot: ~57.5 vB per input, ~43 vB per output, destination and change, + 10.5). Signers bound an
+        /// unwatched vault's transaction by the same figure (FrostSigningAuthorization).
+        /// </summary>
+        public static long WithdrawalFeeSats(int inputCount, long feeRate) => (int)(57.5 * inputCount + 43 * 2 + 10.5) * feeRate;
+
         public static async Task<TxConfirmationLookup> GetTransactionConfirmationsResilient(string txHash)
         {
             var answers = new List<int>();

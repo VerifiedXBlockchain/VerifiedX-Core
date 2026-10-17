@@ -125,6 +125,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 string destination;
                 long maxDestinationSats;
                 bool leaderIsOwner = false;
+                long? maxFeeSats = null; // an unwatched vault: the builder's fee for this transaction (below)
                 bool isBridgeExit = false;
                 bool leaderIsVaultSignerOfPinned = false;
                 bool pinnedRelease = false;
@@ -145,6 +146,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     destination = exit.BtcDestination;
                     // Cap at THIS contract's share of the exit, never the whole exit amount.
                     maxDestinationSats = capSats;
+                    if (watchedKey == null) maxFeeSats = BitcoinTransactionService.WithdrawalFeeSats(inputCount, LegacyExitFeeRate);
 
                     // A vault the chain watches: only the transaction consensus pinned for this vault's part of the exit
                     // is signed, and any signer of the vault may lead (as for a withdrawal, below).
@@ -189,6 +191,11 @@ namespace VerifiedXCore.Bitcoin.FROST
                     destination = wr.BTCDestination;
                     maxDestinationSats = (long)(wr.Amount * 100_000_000M);
                     leaderIsOwner = string.Equals(wr.RequestorAddress, request.LeaderAddress, StringComparison.Ordinal);
+                    // An unwatched vault: any transaction within the bounds was signed, so one built from the same coins
+                    // that paid the destination a few sats burned the rest as fee (#188). It pays the fee the builder sets
+                    // at the request's rate (VBTCService.CompleteWithdrawal), and takes the whole amount from the vault.
+                    if (!Attestation.BtcAttestBalance.IsAttestedVault(wr.SmartContractUID))
+                        maxFeeSats = BitcoinTransactionService.WithdrawalFeeSats(inputCount, wr.FeeRate != 0 ? wr.FeeRate : 10);
 
                     // A vault the chain watches: consensus has fixed the one transaction that pays this withdrawal,
                     // before anyone signed. A share is given for that transaction and for no other, so "nothing is
@@ -235,7 +242,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 long inputSats = 0;
                 foreach (var so in spentOutputs) inputSats += so.Value.Satoshi;
 
-                var (boundsOk, boundsReason) = CheckSpendBounds(inputSats, destinationSats, changeSats, maxDestinationSats, pinnedRelease);
+                var (boundsOk, boundsReason) = CheckSpendBounds(inputSats, destinationSats, changeSats, maxDestinationSats, pinnedRelease, maxFeeSats);
                 if (!boundsOk) return (false, boundsReason);
 
                 // ── 5. Leader: the withdrawal owner for user withdrawals; a committee caster for exits ─
@@ -397,7 +404,10 @@ namespace VerifiedXCore.Bitcoin.FROST
 
         /// <param name="releaseToVault">The transaction is a release fixed by consensus for a watched vault: it pays
         /// nobody and returns everything but its fee to the vault. The fee is still held within the authorized amount.</param>
-        public static (bool Ok, string Reason) CheckSpendBounds(long inputSats, long destinationSats, long changeSats, long maxSats, bool releaseToVault = false)
+        /// <summary>The fee rate an unwatched vault's bridge exit is built at (BurnExitConsensusService: delegatedFeeRate).</summary>
+        public const long LegacyExitFeeRate = 10;
+
+        public static (bool Ok, string Reason) CheckSpendBounds(long inputSats, long destinationSats, long changeSats, long maxSats, bool releaseToVault = false, long? maxFeeSats = null)
         {
             if (maxSats <= 0) return (false, "No authorized amount");
             if (inputSats <= 0) return (false, "Transaction has no input value");
@@ -412,6 +422,16 @@ namespace VerifiedXCore.Bitcoin.FROST
             var vaultCost = inputSats - changeSats; // destination + fee
             if (vaultCost > maxSats + DUST_TOLERANCE_SATS)
                 return (false, $"Transaction spends {vaultCost} sats from the vault (destination {destinationSats} + fee {fee}) but only {maxSats} sats are authorized");
+
+            // An unwatched vault's transaction as its builder makes it: the fee its rate sets (change below dust falls to
+            // the fee), and the whole amount out of the vault, so the fee comes out of the payout and nothing else.
+            if (maxFeeSats is long feeCap)
+            {
+                if (fee > feeCap + DUST_TOLERANCE_SATS)
+                    return (false, $"Transaction pays {fee} sats fee; the withdrawal's fee rate allows {feeCap}");
+                if (vaultCost < maxSats)
+                    return (false, $"Transaction takes {vaultCost} sats from the vault for a {maxSats}-sat payment; the payout is short");
+            }
 
             return (true, "");
         }

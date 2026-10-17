@@ -334,7 +334,7 @@ namespace VerifiedXCore.Tests
             {
                 Timestamp = TimeUtil.GetTime(), FromAddress = Minter.Address, ToAddress = Minter.Address, Amount = 0.0M, Fee = 0, Nonce = 0,
                 TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
-                Data = JsonConvert.SerializeObject(new { Function = "VBTCWithdrawalRequest()", ContractUID = legacy.Uid, BTCAddress = BtcDest, Amount = 0.001M, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") }),
+                Data = JsonConvert.SerializeObject(new { Function = "VBTCWithdrawalRequest()", ContractUID = legacy.Uid, BTCAddress = BtcDest, Amount = 0.0005M, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") }),
             };
             tx.Fee = VerifiedXCore.Services.FeeCalcService.CalculateTXFee(tx);
             tx.Build();
@@ -342,7 +342,8 @@ namespace VerifiedXCore.Tests
             var parent = new uint256(RandomUtils.GetBytes(32));
             var built = Network.Main.CreateTransaction();
             built.Inputs.Add(new TxIn(new OutPoint(parent, 0)));
-            built.Outputs.Add(Money.Satoshis(70_000), BitcoinAddress.Create(BtcDest, Network.Main).ScriptPubKey);
+            built.Outputs.Add(Money.Satoshis(50_000 - VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.WithdrawalFeeSats(1, 10)), BitcoinAddress.Create(BtcDest, Network.Main).ScriptPubKey);
+            built.Outputs.Add(Money.Satoshis(77_777 - 50_000), legacy.Script);   // as the builder makes it: the fee out of the payout
 
             var priorSynced = Globals.IsChainSynced;
             var priorLookup = FrostSigningAuthorization.ParentConfirmations;
@@ -407,7 +408,7 @@ namespace VerifiedXCore.Tests
             {
                 Timestamp = TimeUtil.GetTime(), FromAddress = signer.Address, ToAddress = signer.Address, Amount = 0.0M, Fee = 0, Nonce = 0,
                 TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
-                Data = JsonConvert.SerializeObject(new { Function = "VBTCWithdrawalRequest()", ContractUID = legacy.Uid, BTCAddress = BtcDest, Amount = 0.001M, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") }),
+                Data = JsonConvert.SerializeObject(new { Function = "VBTCWithdrawalRequest()", ContractUID = legacy.Uid, BTCAddress = BtcDest, Amount = 0.0005M, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") }),
             };
             tx.Fee = VerifiedXCore.Services.FeeCalcService.CalculateTXFee(tx);
             tx.Build();
@@ -416,7 +417,8 @@ namespace VerifiedXCore.Tests
             // Any transaction within the bounds, built by the owner from coins only Bitcoin knows about.
             var built = Network.Main.CreateTransaction();
             built.Inputs.Add(new TxIn(new OutPoint(new uint256(RandomUtils.GetBytes(32)), 0)));
-            built.Outputs.Add(Money.Satoshis(70_000), BitcoinAddress.Create(BtcDest, Network.Main).ScriptPubKey);
+            built.Outputs.Add(Money.Satoshis(50_000 - VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.WithdrawalFeeSats(1, 10)), BitcoinAddress.Create(BtcDest, Network.Main).ScriptPubKey);
+            built.Outputs.Add(Money.Satoshis(77_777 - 50_000), legacy.Script);   // as the builder makes it: the fee out of the payout
             var (ok, why) = FrostSigningAuthorization.Authorize(Announce(legacy.Uid, legacy.Script, tx.Hash, built, Minter.Address));
             Assert.True(ok, why);
             (ok, why) = FrostSigningAuthorization.Authorize(Announce(legacy.Uid, legacy.Script, tx.Hash, built, Signers[0].Address));
@@ -429,6 +431,49 @@ namespace VerifiedXCore.Tests
             var watched = await CreateVault(Tip + 1, keyHolders: Signers);
             Assert.True(FrostSigningAuthorization.LedByRequester(Minter.Address, watched.Uid));
             Assert.False(FrostSigningAuthorization.LedByRequester(Signers[0].Address, watched.Uid));
+        }
+
+        /// <summary>
+        /// C-188: an unwatched vault's start is authorised by a signature that names no content, so whoever saw it could
+        /// send the same start with a transaction of its own over the same coins, paying the destination a few sats and
+        /// burning the rest as fee: anything within the authorized amount was signed. It is now signed only as the
+        /// builder makes it - the fee the request's rate sets, and the whole amount taken from the vault.
+        /// </summary>
+        [Fact]
+        public async Task AnOldVaultsTransaction_PaysTheBuildersFee_OutOfTheWholeAmount()
+        {
+            var legacy = await CreateVault(H1 - 50, keyHolders: Signers);
+            await Start();
+            using var electrum = new FakeElectrum(("a", true, 1M));
+            var tx = new VfxTx
+            {
+                Timestamp = TimeUtil.GetTime(), FromAddress = Minter.Address, ToAddress = Minter.Address, Amount = 0.0M, Fee = 0, Nonce = 0,
+                TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                Data = JsonConvert.SerializeObject(new { Function = "VBTCWithdrawalRequest()", ContractUID = legacy.Uid, BTCAddress = BtcDest, Amount = 0.0005M, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") }),
+            };
+            tx.Fee = VerifiedXCore.Services.FeeCalcService.CalculateTXFee(tx);
+            tx.Build();
+            await Apply(Tip + 1, tx);
+
+            var coin = new OutPoint(new uint256(RandomUtils.GetBytes(32)), 0);   // 77,777 sats (Announce)
+            var fee = VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.WithdrawalFeeSats(1, 10);
+            (bool Ok, string Why) Spend(long destination, long change)
+            {
+                var built = Network.Main.CreateTransaction();
+                built.Inputs.Add(new TxIn(coin));
+                built.Outputs.Add(Money.Satoshis(destination), BitcoinAddress.Create(BtcDest, Network.Main).ScriptPubKey);
+                built.Outputs.Add(Money.Satoshis(change), legacy.Script);
+                return FrostSigningAuthorization.Authorize(Announce(legacy.Uid, legacy.Script, tx.Hash, built, Minter.Address));
+            }
+
+            var honest = Spend(50_000 - fee, 27_777);
+            Assert.True(honest.Ok, honest.Why);
+            var burn = Spend(1_000, 27_777);                                     // the rest of the payout to the fee
+            Assert.False(burn.Ok);
+            Assert.Contains("fee rate allows", burn.Why);
+            var shortPay = Spend(1_000, 77_777 - 1_000 - fee);                   // the builder's fee, the payout kept in the vault
+            Assert.False(shortPay.Ok);
+            Assert.Contains("the payout is short", shortPay.Why);
         }
 
         /// <summary>
