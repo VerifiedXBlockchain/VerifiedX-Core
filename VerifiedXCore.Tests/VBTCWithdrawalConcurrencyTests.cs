@@ -566,6 +566,46 @@ namespace VerifiedXCore.Tests
             Assert.Equal("w1", only.WithdrawalRequestHash);
         }
 
+        /// <summary>
+        /// C-048: a contract pin (and every rival pin on its coins) was released as soon as one Electrum server said the
+        /// pinned transaction was in a block - one lying or on-path server freed the coins for another withdrawal's
+        /// transaction while the pinned one could still be unconfirmed. Two distinct hosts must now have it in a block.
+        /// </summary>
+        [Fact]
+        public async Task APin_IsReleasedOnItsOwnConfirmationOnlyWhenTwoHostsHaveIt()
+        {
+            ConcurrencyOn();
+            var priorServers = Globals.ClientSettings;
+            var priorQuery = BitcoinTransactionService.QueryConfirms;
+            async Task<bool> Released(params (string Host, int Port, bool Ok, int Confirms)[] answers)
+            {
+                FrostWithdrawalSigningTracker.ResetForTests();
+                Assert.True(FrostWithdrawalSigningTracker.RestorePin(ScUID, "w1", "btcA", new List<string> { "c1:0" }, TimeUtil.GetTime()));
+                Assert.True(FrostWithdrawalSigningTracker.RestorePin(ScUID, "w2", "btcB", new List<string> { "c1:0" }, TimeUtil.GetTime()));
+                Globals.ClientSettings = answers.Select(a => new VerifiedXCore.Bitcoin.ElectrumX.ClientSettings { Host = a.Host, Port = a.Port, UseSsl = true }).ToList();
+                BitcoinTransactionService.QueryConfirms = (server, txid) =>
+                {
+                    var a = answers.First(x => x.Host == server.Host && x.Port == server.Port);
+                    return Task.FromResult(txid == "btcA" ? (a.Ok, a.Confirms) : (false, 0));
+                };
+                await FrostStartup.TryReleaseContractPinIfObservedOnChain(ScUID);
+                return !FrostWithdrawalSigningTracker.GetContractPins(ScUID).Any(p => p.WithdrawalRequestHash is "w1" or "w2");
+            }
+            string Host(string name) => $"{name}-{Guid.NewGuid():N}";
+            try
+            {
+                Assert.False(await Released((Host("liar"), 50002, true, 3), (Host("b"), 50002, true, 0), (Host("c"), 50002, false, 0)));   // one host says confirmed
+                var one = Host("one");
+                Assert.False(await Released((one, 50001, true, 3), (one, 50002, true, 3)));                                                 // one host, two ports
+                Assert.True(await Released((Host("a"), 50002, true, 3), (Host("b"), 50002, true, 2)));                                      // two hosts: it and its rival go
+            }
+            finally
+            {
+                BitcoinTransactionService.QueryConfirms = priorQuery;
+                Globals.ClientSettings = priorServers;
+            }
+        }
+
         [Fact]
         public void Tracker_RestorePin_NeverReplacesALivePin()
         {

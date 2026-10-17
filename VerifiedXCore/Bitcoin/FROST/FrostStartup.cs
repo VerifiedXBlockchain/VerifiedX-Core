@@ -3854,15 +3854,18 @@ namespace VerifiedXCore.Bitcoin.FROST
             string txCheckDetail;
 
             // 1) Pinned tx confirmed? Multi-server lookup — the old single-server check meant one
-            // wedged Electrum connection held the pin forever after the tx had long confirmed.
+            // wedged Electrum connection held the pin forever after the tx had long confirmed. Released on its own
+            // confirmation only when two hosts have it in a block: one server's word (or a path to it; certificates are
+            // not checked) freed its coins, and its rivals' pins, for another withdrawal's transaction while it could
+            // still be unconfirmed.
             if (!string.IsNullOrEmpty(pin.BtcTxId))
             {
-                var lookup = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService
-                    .GetTransactionConfirmationsResilient(pin.BtcTxId);
-                if (lookup.Confirmations >= 1)
+                var seen = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService
+                    .GetTransactionConfirmationsCorroborated(pin.BtcTxId);
+                if (seen.Confirmed >= VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.ConfirmationAgreementRequired)
                 {
                     VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                        .ClearContractPin(scUID, pin.WithdrawalRequestHash, $"pinned tx confirmed with {lookup.Confirmations} confirmation(s)");
+                        .ClearContractPin(scUID, pin.WithdrawalRequestHash, $"pinned tx confirmed on {seen.Confirmed} hosts ({seen.MinConfirmations}+ confirmation(s))");
 
                     // Any other pinned tx spending one of these coins now conflicts with a confirmed tx.
                     foreach (var loser in VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.GetOverlappingPins(scUID, pin.WithdrawalRequestHash, pin.Outpoints))
@@ -3871,15 +3874,19 @@ namespace VerifiedXCore.Bitcoin.FROST
                     return;
                 }
 
-                if (lookup.Confirmations == 0)
+                if (seen.Known > 0 && seen.Confirmed == 0)
                 {
                     // Known but unconfirmed: the tx is alive in a mempool. Keep it.
-                    var aliveOutcome = $"kept: txlookup=unconfirmed/in-mempool ({lookup.ServersTried} server(s): {lookup.Detail})";
+                    var aliveOutcome = $"kept: txlookup=unconfirmed/in-mempool ({seen.Detail})";
                     VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.NotePinReleaseCheck(scUID, pin.WithdrawalRequestHash, aliveOutcome);
                     LogUtility.Log($"[FROST Dedup] Pin release check for {scUID} (tx {pin.BtcTxId}) — {aliveOutcome}", "FrostStartup.TryReleaseContractPinIfObservedOnChain");
                     return;
                 }
-                txCheckDetail = $"txlookup=UNKNOWN ({lookup.ServersTried} server(s): {lookup.Detail})";
+                // One host alone says it is in a block, or none knows it: only a proven confirmed spend of a pinned input
+                // (below, two servers with Merkle proofs) releases it.
+                txCheckDetail = seen.Confirmed > 0
+                    ? $"txlookup=UNCORROBORATED ({seen.Confirmed} of {VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.ConfirmationAgreementRequired} hosts: {seen.Detail})"
+                    : $"txlookup=UNKNOWN ({seen.Detail})";
             }
             else
             {
