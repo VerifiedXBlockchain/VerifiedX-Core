@@ -668,6 +668,35 @@ namespace VerifiedXCore.Tests
             Assert.False(VBTCWithdrawalStoreRebuildService.IsUnfinished);
         }
 
+        /// <summary>
+        /// Before WithdrawalUniqueIdRulesHeight a mined request reusing an earlier one's UniqueId (same requester and
+        /// contract) wrote over that request's row when saved with update. The store rebuild only adds what is missing:
+        /// the earlier, completed row stays completed and the later request gets its own row.
+        /// </summary>
+        [Fact]
+        public async Task TheRebuild_NeverWritesARequestOverAnEarlierRequestsRow_BeforeTheUniqueIdHeight()
+        {
+            Assert.True(2500 < Globals.WithdrawalUniqueIdRulesHeight);
+            var first = RequestTx("rb25-req1", "xRequestorX", "rebuild:25", 0.1M, 2500);
+            first.Data = first.Data!.TrimEnd('}') + ",\"UniqueId\":\"same-id\"}";
+            var second = RequestTx("rb25-req2", "xRequestorX", "rebuild:25", 0.3M, 2520);
+            second.Data = second.Data!.TrimEnd('}') + ",\"UniqueId\":\"same-id\"}";
+            InsertBlock(2500, first);
+            InsertBlock(2510, CompleteTx("rb25-done1", "xRequestorX", "rebuild:25", "rb25-req1", 2510));
+            InsertBlock(2520, second);
+
+            var result = await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test");
+            Assert.True(result.Success, result.Message);
+            var earlier = VBTCWithdrawalRequest.GetByTransactionHash("rb25-req1", "rebuild:25");
+            Assert.NotNull(earlier);
+            Assert.True(earlier!.IsCompleted);
+            Assert.Equal(VBTCWithdrawalStatus.Completed, earlier.Status);
+            Assert.Equal(0.1M, earlier.Amount);
+            var later = VBTCWithdrawalRequest.GetByTransactionHash("rb25-req2", "rebuild:25");
+            Assert.NotNull(later);
+            Assert.Equal(0.3M, later!.Amount);
+        }
+
         [Fact]
         public void WithNoWithdrawalStoreOpen_BlocksAreHeld()
         {

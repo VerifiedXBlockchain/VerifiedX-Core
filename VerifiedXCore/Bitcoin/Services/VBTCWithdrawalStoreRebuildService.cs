@@ -718,9 +718,11 @@ namespace VerifiedXCore.Bitcoin.Services
                     continue;
                 }
 
-                // update:true matches live processing — it upgrades an API node's local
-                // pre-registration row (same composite key, empty TransactionHash, no pins yet).
-                if (VBTCWithdrawalRequest.Save(row, update: true))
+                // update:true upgrades an API node's local pre-registration row (same composite key, empty
+                // TransactionHash, no pins yet). A row of another mined request is never written over, at any height: the
+                // rebuild only adds what is missing (before WithdrawalUniqueIdRulesHeight a request reusing a UniqueId
+                // used to overwrite an earlier one's row, reopening it).
+                if (VBTCWithdrawalRequest.Save(row, update: true, neverOverAnotherRequest: true))
                     result.RequestsInserted++;
                 else
                     result.Errors++;
