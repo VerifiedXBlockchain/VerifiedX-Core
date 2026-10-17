@@ -349,6 +349,54 @@ namespace VerifiedXCore.Tests
 
         // ── Completions ─────────────────────────────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// C-187: a watched withdrawal's request row is gone only by a fault of this node's store, and Settle / Unsettle
+        /// went on without it: the attested row was settled (or reopened) while the request row the owner's balance adds
+        /// back was not, so this node alone judged the owner's debits wrongly. Either is now a storage fault: the block is
+        /// not applied, and blocks are held until the state is rebuilt.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task ASettlementOrRewindWhoseRequestRowIsGone_IsNotApplied_AndHoldsBlocks(bool settling)
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var deposit = Pay(vault.Script, 150_000);
+            await MineAndReport(deposit);
+            var request = await Request(vault.Uid, 0.001M);
+            var paying = BtcTx.Parse(Assert.Single(Row(request, vault.Uid).Pins).TxHex, Network.Main);
+
+            VfxTx next;
+            if (settling)
+            {
+                var height = _btc.Mine(paying);
+                _btc.MineEmpty(Depth);
+                next = Signed(Assert.Single(BtcBlockScanner.BuildForward(_btc.Block(height), height, _btc.HeaderHexes(Meta.TipHeight + 1, height + Depth), BtcAttestRules.EpochOf(Tip + 1))));
+            }
+            else
+            {
+                var at = await MineAndReport(paying);
+                Assert.Equal(VaultWithdrawalState.Settled, Row(request, vault.Uid).State);
+                var branch = _btc.ForkAfter(at - 1);
+                branch.MineEmpty((int)(_btc.Tip - (at - 1)) + 2);
+                next = RewindTo(branch, at - 1);
+            }
+            var (ok, why) = await Verify(next, Tip + 1);
+            Assert.True(ok, why);                                                    // a healthy node takes it
+
+            VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()!.DeleteMany(x => x.TransactionHash == request.Hash);
+            StateTreiStatusService.SetSynced(Tip);
+            var block = new VerifiedXCore.Models.Block { Height = Tip + 1, Hash = $"b{Tip + 1}", StateRoot = "root", Timestamp = TimeUtil.GetTime(), Transactions = new List<VfxTx> { next } };
+            try
+            {
+                Assert.False(await StateData.UpdateTreis(block));
+                Assert.True(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+                Assert.False(StateTreiStatusService.IsSynced());
+            }
+            finally { VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests(); }
+        }
+
         [Fact]
         public async Task ACompletedWithdrawal_IsPinnedAgain_AndCompletedAgainByTheSameTransaction()
         {
