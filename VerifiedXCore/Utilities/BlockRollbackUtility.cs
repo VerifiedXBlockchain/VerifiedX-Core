@@ -738,6 +738,7 @@ namespace VerifiedXCore.Utilities
                 // at a time from disk, keeping memory usage flat regardless of chain length.
                 int processedCount = 0;
                 int failCount = 0;
+                int localFaultCount = 0; // the failures caused by this node's own storage, not by the chain
                 StateData.BlockStartFailedAtHeight = -1;
                 var rebuildStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
@@ -758,6 +759,7 @@ namespace VerifiedXCore.Utilities
                     if (liftsRestoreStop && block.Height != previousHeight + 1) // from genesis (height 0), then every height
                     {
                         failCount++;
+                        localFaultCount++;
                         ErrorLogUtility.LogError($"[ResetTreis] The block store has no block between heights {Math.Max(previousHeight, -1) + 1} and {block.Height - 1}; the failed restore's stop holds.", "BlockRollbackUtility.ResetTreis");
                     }
                     previousHeight = block.Height;
@@ -769,6 +771,8 @@ namespace VerifiedXCore.Utilities
                         // privacy/shielded TXs, bridge locks/unlocks, etc.
                         await StateData.UpdateTreis(block);
                         processedCount++;
+                        if (StateData.LastApplyHadNodeLocalFault)
+                            localFaultCount++;
                         // A block-start step that failed (see StateData.BlockStartFailedAtHeight): the rebuilt state is
                         // not the network's, and the replay is not a success.
                         if (StateData.BlockStartFailedAtHeight == block.Height)
@@ -797,7 +801,10 @@ namespace VerifiedXCore.Utilities
                                 {
                                     var maturedRows = pendingRows.Where(x => x.ConfirmTimestamp < block.Timestamp).ToList();
                                     if (maturedRows.Count > 0 && !await StateData.UpdateTreiFromReserve(maturedRows, block))
+                                    {
                                         failCount++; // a settlement this node could not write is a replay failure (round 7)
+                                        localFaultCount++; // it reports false only for a fault of this node's storage
+                                    }
                                 }
                             }
                         }
@@ -822,6 +829,8 @@ namespace VerifiedXCore.Utilities
                     catch (Exception ex)
                     {
                         failCount++;
+                        if (StateData.IsNodeLocalFault(ex))
+                            localFaultCount++;
                         ErrorLogUtility.LogError($"[ResetTreis] Error replaying block {block.Height}: {ex.Message}", "BlockRollbackUtility.ResetTreis");
                     }
                 }
@@ -942,8 +951,9 @@ namespace VerifiedXCore.Utilities
                 }
                 else
                 {
-                    StateTreiStatusService.SetFailed($"ResetTreis completed with {failCount} block replay failures.");
-                    Console.WriteLine($"[ResetTreis] Step 5: StateTreiStatus set to FAILED ({failCount} replay errors).");
+                    StateTreiStatusService.EndRebuildWithFailures($"ResetTreis completed with {failCount} block replay failures ({localFaultCount} from this node's storage).", localFaultCount > 0);
+                    Console.WriteLine($"[ResetTreis] Step 5: StateTreiStatus set to FAILED ({failCount} replay errors)." +
+                        (localFaultCount > 0 ? " This node's storage failed during the replay: resync the node, then run rebuildstate." : ""));
                 }
 
                 return failCount == 0;

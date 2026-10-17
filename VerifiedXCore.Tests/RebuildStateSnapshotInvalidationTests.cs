@@ -90,6 +90,48 @@ namespace VerifiedXCore.Tests
             Assert.NotEqual(true, StateTreiStatusService.GetStatus()?.RebuildInProgress); // the rebuild ended, so it is no longer in progress
         }
 
+        private static void StoreBlockWithTx(long height, string txHash) => BlockchainData.GetBlocks().InsertSafe(new Block
+        {
+            Height = height, Hash = $"hash-{height}", PrevHash = $"hash-{height - 1}", StateRoot = "root", Timestamp = TimeUtil.GetTime(),
+            Transactions = new List<Transaction> { new Transaction { Hash = txHash, FromAddress = "xA", ToAddress = "xB", Amount = 0M, TransactionType = TransactionType.TX, Timestamp = TimeUtil.GetTime() } },
+        });
+
+        [Fact]
+        public async Task ARebuildEndingWithAStorageFault_KeepsTheDurableStop_AcrossARestart()
+        {
+            StoreBlockWithTx(1, "tx-1");
+            StateData.TxApplyForTests = tx => { if (tx.Hash == "tx-1") throw new IOException("disk read failed"); };
+            try { Assert.False(await BlockRollbackUtility.ResetTreis()); }
+            finally { StateData.TxApplyForTests = null; }
+
+            Assert.True(StateTreiStatusService.GetStatus()?.RebuildInProgress); // replaying the same store cannot repair it
+            try
+            {
+                SnapshotRestoreUtility.RecallStateDestroyed(); // the next start
+                Assert.True(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
+            }
+            finally { SnapshotRestoreUtility.ClearStateDestroyed(); }
+        }
+
+        [Fact]
+        public async Task ARebuildEndingWithAFailureTheChainCauses_DoesNotStrandTheNode()
+        {
+            StoreBlockWithTx(1, "tx-1");
+            StateData.TxApplyForTests = tx => { if (tx.Hash == "tx-1") throw new ArgumentException("unreadable field"); }; // what the data causes, on every node
+            try { await BlockRollbackUtility.ResetTreis(); }
+            finally { StateData.TxApplyForTests = null; }
+
+            Assert.NotEqual(true, StateTreiStatusService.GetStatus()?.RebuildInProgress);
+        }
+
+        [Fact]
+        public void AFailureReportedDuringARebuild_DoesNotLiftItsStop()
+        {
+            StateTreiStatusService.SetRebuildStarted();
+            StateTreiStatusService.SetFailed("Reserve settlement failed on this node.");
+            Assert.True(StateTreiStatusService.GetStatus()?.RebuildInProgress);
+        }
+
         [Fact]
         public void ARebuildStillInProgressAtStartup_StopsTheNode_UntilARebuildCompletes()
         {

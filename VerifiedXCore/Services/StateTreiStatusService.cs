@@ -128,7 +128,11 @@ namespace VerifiedXCore.Services
             db.Checkpoint();
         }
 
-        /// <summary>Marks the state unsynced with a reason. Keeps a restore stop; a rebuild that ended is no longer in progress.</summary>
+        /// <summary>
+        /// Marks the state unsynced with a reason. Keeps a restore stop and a rebuild in progress: a fault reported while
+        /// a rebuild replays (a reserve settlement, the withdrawal store) used to clear the rebuild's durable stop
+        /// mid-replay. Only the rebuild's end decides it (<see cref="EndRebuildWithFailures"/>).
+        /// </summary>
         public static void SetFailed(string reason)
         {
             try
@@ -137,7 +141,8 @@ namespace VerifiedXCore.Services
                 if (db == null) return;
 
                 var col = db.GetCollection<StateTreiStatus>(COLLECTION_NAME);
-                var restoreDestroyed = col.FindOne(x => true)?.RestoreDestroyed; // a later failure does not lift the restore stop
+                var existing = col.FindOne(x => true);
+                var restoreDestroyed = existing?.RestoreDestroyed; // a later failure does not lift the restore stop
 
                 var status = new StateTreiStatus
                 {
@@ -146,7 +151,8 @@ namespace VerifiedXCore.Services
                     LastSyncedHeight = Globals.LastBlock?.Height ?? 0,
                     LastSyncTime = DateTime.UtcNow,
                     LastFailureReason = reason,
-                    RestoreDestroyed = restoreDestroyed
+                    RestoreDestroyed = restoreDestroyed,
+                    RebuildInProgress = existing?.RebuildInProgress,
                 };
 
                 // One write replaces the record: a delete then an insert left no record (and no restore stop) if
@@ -165,6 +171,30 @@ namespace VerifiedXCore.Services
                 // The missing record will trigger a rebuild on next startup anyway.
                 LogUtility.Log($"[StateTreiStatusService] Error setting failed status: {ex.Message}", "StateTreiStatusService.SetFailed");
             }
+        }
+
+        /// <summary>
+        /// A rebuild ended with replay failures. With a fault of this node's own storage among them the rebuilt state is
+        /// not the chain's, and replaying the same store again cannot repair it: the durable rebuild stop stays (no
+        /// validation, no probation, no snapshot) and the operator is told to resync. Failures the chain itself causes
+        /// strand no node: the stop is lifted, and the node continues on probation as before.
+        /// </summary>
+        public static void EndRebuildWithFailures(string reason, bool nodeLocalFault)
+        {
+            SetFailed(reason);
+            if (nodeLocalFault)
+            {
+                ErrorLogUtility.LogError($"{reason} This node's storage failed during the rebuild: resync the node (a fresh block store), then run rebuildstate.", "StateTreiStatusService.EndRebuildWithFailures");
+                return;
+            }
+            var db = DbContext.DB_AccountStateTrei;
+            if (db == null) return;
+            var col = db.GetCollection<StateTreiStatus>(COLLECTION_NAME);
+            var status = col.FindOne(x => true);
+            if (status == null) return;
+            status.RebuildInProgress = null;
+            col.Upsert(status);
+            db.Checkpoint();
         }
     }
 }

@@ -161,6 +161,9 @@ namespace VerifiedXCore.Data
         /// <summary>Test seam: runs at the start of each transaction's apply.</summary>
         internal static Action<Transaction>? TxApplyForTests;
 
+        /// <summary>Whether the block applied last hit a fault of this node's storage (<see cref="NoteApplyStepFailed"/>).</summary>
+        public static bool LastApplyHadNodeLocalFault => _applyStepFailed;
+
         public static void NoteApplyStepFailed(long height, Exception ex)
         {
             if (!IsNodeLocalFault(ex)) return;
