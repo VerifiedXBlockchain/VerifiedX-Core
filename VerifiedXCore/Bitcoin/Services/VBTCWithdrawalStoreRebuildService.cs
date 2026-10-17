@@ -466,7 +466,7 @@ namespace VerifiedXCore.Bitcoin.Services
                                  $"{result.CompletionsApplied} completions applied, {result.AttestedOutcomesApplied} attested outcomes applied, {result.DecidedCancellationsApplied} decided cancellations applied, {result.CancellationsCreated} cancellations created, " +
                                  $"{result.VotesApplied} votes applied, {result.Skipped} skipped, {result.Errors} errors." +
                                  (result.Errors > 0 ? " The store is left unfinished: withdrawal transactions are refused and nothing is signed from it until a rebuild finishes without errors." : "") +
-                                 (result.StateRebuildNeeded ? " A request reused an earlier request's key below the UniqueId height, which this rebuild does not decide: blocks are held until the state is rebuilt from the blocks (a snapshot restore at restart, or \"rebuildstate\")." : "");
+                                 (result.StateRebuildNeeded ? " A block below a rules height did to a row what this rebuild does not reproduce (a key reused, a completion recovered over its request's row): blocks are held until the state is rebuilt from the blocks (a snapshot restore at restart, or \"rebuildstate\")." : "");
                 LogUtility.Log($"vBTC withdrawal store rebuild finished: {result.Message}", "VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync()");
             }
             catch (Exception ex)
@@ -756,6 +756,27 @@ namespace VerifiedXCore.Bitcoin.Services
             }
         }
 
+        /// <summary>
+        /// Below PathAuditRulesHeight a completion that named a request's hash under another contract (no row there)
+        /// had live processing recover the request from the chain, which saved every row of the request over what the
+        /// store held: a paid or cancelled withdrawal became open again (the reopening this issue is about, kept below
+        /// the gate as every node applied it; from the gate the recovery adds only what is missing and validation
+        /// refuses the completion). A merge rebuild cannot reproduce that in order (it reconciles decided outcomes at
+        /// the end), so, like a pre-gate key reuse, it reports it and the state is rebuilt from the blocks, which
+        /// replays the block as every node applied it. True when live processing's recovery would have found the
+        /// request (TryRecoverRequestRowFromChain scans RECOVERY_SCAN_BLOCKS below the completion).
+        /// </summary>
+        private static bool ReopenedByTheRecoveryBelowTheGate(Transaction tx, string withdrawalRequestHash)
+        {
+            if (tx.Height >= Globals.PathAuditRulesHeight) return false;
+            var real = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, null);
+            if (real == null || real.RequestBlockHeight < tx.Height - RECOVERY_SCAN_BLOCKS || real.RequestBlockHeight > tx.Height) return false;
+            var why = $"completion {tx.Hash} (block {tx.Height}) names request {withdrawalRequestHash} under a contract it is not on; below the path-audit height live processing recovered the request over its row ({real.SmartContractUID}), which a rebuild of the rows does not reproduce - a state rebuild replays it as every node applied it";
+            MarkNeedsStateRebuild(why);
+            try { VerifiedXCore.Services.StateTreiStatusService.SetFailed($"Withdrawal store: {why}."); } catch { }
+            return true;
+        }
+
         private static void ReplayComplete(Transaction tx, RebuildResult result)
         {
             if (string.IsNullOrEmpty(tx.Data)) { result.Skipped++; return; }
@@ -769,6 +790,11 @@ namespace VerifiedXCore.Bitcoin.Services
             var row = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, completeScUID);
             if (row == null)
             {
+                if (ReopenedByTheRecoveryBelowTheGate(tx, withdrawalRequestHash))
+                {
+                    result.StateRebuildNeeded = true;   // not an error of this scan: no rebuild of the rows can reproduce it
+                    return;
+                }
                 // REQUEST replays before COMPLETE in the same ascending scan; a miss means the
                 // request tx itself was malformed. Nothing to converge on (live processing found no row either).
                 result.Skipped++;

@@ -716,6 +716,48 @@ namespace VerifiedXCore.Tests
             finally { VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests(); }
         }
 
+        /// <summary>
+        /// Below PathAuditRulesHeight a completion naming a request's hash under another contract had live processing
+        /// recover the request from the chain over its real row, reopening a paid withdrawal (the reopening this issue is
+        /// about, kept below the gate as every node applied it). The rebuild cannot reproduce that in order: it reports
+        /// it, the store needs the state rebuilt and blocks are held; the state rebuild then replays the block as every
+        /// node applied it - the row is open again - and the hold lifts. From the gate such a completion is skipped as
+        /// before (the recovery adds only what is missing; validation refuses it).
+        /// </summary>
+        [Fact]
+        public async Task TheRebuild_ReportsAPreGateCompletionTheRecoveryReopenedARowFor_AndTheStateRebuildReplaysIt()
+        {
+            Assert.True(2610 < Globals.PathAuditRulesHeight);
+            InsertBlock(2600, RequestTx("rb26-req", "xRequestorY", "rebuild:26", 0.1M, 2600));
+            InsertBlock(2605, CompleteTx("rb26-done", "xRequestorY", "rebuild:26", "rb26-req", 2605));
+            InsertBlock(2610, CompleteTx("rb26-foreign", "xRequestorY", "rebuild:other", "rb26-req", 2610));   // names the request under another contract
+            VBTCWithdrawalStoreRebuildService.ResetRetryForTests();
+            VerifiedXCore.Services.StateTreiStatusService.SetSynced(2610);
+
+            var result = await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test");
+            try
+            {
+                Assert.False(result.Success);
+                Assert.True(result.StateRebuildNeeded);
+                Assert.Equal(0, result.Errors);
+                var row = VBTCWithdrawalRequest.GetByTransactionHash("rb26-req", "rebuild:26");
+                Assert.NotNull(row);
+                Assert.Equal(VBTCWithdrawalStatus.Completed, row!.Status);                 // the rebuild changed nothing it could not reproduce
+                Assert.True(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+                Assert.Equal(0, VBTCWithdrawalStoreRebuildService.BlocksHeld);
+                Assert.False(VerifiedXCore.Services.StateTreiStatusService.IsSynced());
+
+                Assert.True(await BlockRollbackUtility.ResetTreis());
+                // As every node applied it below the gate: the recovery saved the request over its row, reopening it.
+                row = VBTCWithdrawalRequest.GetByTransactionHash("rb26-req", "rebuild:26");
+                Assert.NotNull(row);
+                Assert.Equal(VBTCWithdrawalStatus.Requested, row!.Status);
+                Assert.False(row.IsCompleted);
+                Assert.False(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+            }
+            finally { VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests(); }
+        }
+
         [Fact]
         public void WithNoWithdrawalStoreOpen_BlocksAreHeld()
         {
