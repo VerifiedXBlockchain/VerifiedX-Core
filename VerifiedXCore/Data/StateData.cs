@@ -651,6 +651,8 @@ namespace VerifiedXCore.Data
                                     {
                                         topic.Id = 0;//save new
                                         topic.BlockHeight = tx.Height;
+                                        if (block.Height >= Globals.VoteTopicRulesHeight)
+                                            NormalizeNewTopic(topic, tx, block.Height);
                                         TopicTrei.SaveTopic(topic);
                                         if(topic.VoteTopicCategory == VoteTopicCategories.AdjVoteIn)
                                             AdjVoteInQueue.SaveToQueue(topic);
@@ -1978,6 +1980,20 @@ namespace VerifiedXCore.Data
             {
                 ErrorLogUtility.LogError($"Failed to delete BTC ADNR at state level! Error: {ex}", "StateData.DeleteBTCAdnr()");
             }
+        }
+
+        /// <summary>
+        /// From Globals.VoteTopicRulesHeight a new topic's system fields come from the chain, not its creator: no votes yet,
+        /// owned by its sender, created at its transaction's time, and counted against the validators active at the block
+        /// before. The creator's own values (a forged owner or tally, a chosen denominator) were stored as given.
+        /// </summary>
+        internal static void NormalizeNewTopic(TopicTrei topic, Transaction tx, long blockHeight)
+        {
+            topic.VoteYes = 0;
+            topic.VoteNo = 0;
+            topic.TopicOwnerAddress = tx.FromAddress;
+            topic.TopicCreateDate = DateTimeOffset.FromUnixTimeSeconds(tx.Timestamp).UtcDateTime;
+            topic.ValidatorCount = VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidatorsAt(blockHeight - 1).Count;
         }
 
         /// <summary>

@@ -406,6 +406,13 @@ namespace VerifiedXCore
         public static long RecipientNetworkByteHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height a VOTE_TOPIC's Function is TopicAdd() (admission refuses another at every height), and a new
+        /// topic's owner, tally, creation time and validator count are set by the apply (StateData.NormalizeNewTopic), not
+        /// taken from its creator. Not active yet.
+        /// </summary>
+        public static long VoteTopicRulesHeight = 999_999_999_999;
+
+        /// <summary>
         /// From this height a smart contract's Update(), Transfer(), Burn(), Evolve(), Devolve() or
         /// ChangeEvolveStateSpecific() must carry its Data in the array form those applies read. Validation also accepted
         /// a single object, which every apply then skips, so the transaction was mined with no effect. Not active yet.

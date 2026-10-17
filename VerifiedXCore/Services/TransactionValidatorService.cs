@@ -2365,6 +2365,11 @@ namespace VerifiedXCore.Services
                                 if (topic != null && topic.VotingEndDate.Kind == DateTimeKind.Unspecified
                                     && (blockHeight == null || blockHeight.Value >= Globals.PathAuditRulesHeight))
                                     return (txResult, VotingEndDateNeedsOffsetReason);
+                                // The apply stores the topic whatever the function, and every rule below is a TopicAdd()'s: one
+                                // carrying another function mined a topic with any owner, counts and end date. From the height,
+                                // and at admission at every height.
+                                if (function != "TopicAdd()" && (blockHeight == null || blockHeight.Value >= Globals.VoteTopicRulesHeight))
+                                    return (txResult, VoteTopicIsTopicAddReason);
                                 if (function == "TopicAdd()")
                                 {
                                     if (topic == null)
@@ -4532,6 +4537,8 @@ namespace VerifiedXCore.Services
         }
         internal const string BridgeLockDestinationIsAdminTagReason = "A bridge lock's EvmDestination cannot begin with a Base admin message tag.";
         internal const string VotingEndDateNeedsOffsetReason = "A topic's voting end date must carry a UTC offset.";
+
+        internal const string VoteTopicIsTopicAddReason = "A voting topic transaction creates a topic: its Function is TopicAdd().";
         internal const string TopicEndDateWithoutOffsetReason = "This topic's voting end date was written without a UTC offset; it cannot be voted on.";
 
         /// <summary>
