@@ -5,7 +5,11 @@ using System.Threading.Tasks;
 using Newtonsoft.Json;
 using VerifiedXCore;
 using VerifiedXCore.Data;
+using VerifiedXCore.EllipticCurve;
+using VerifiedXCore.Extensions;
 using VerifiedXCore.Models;
+using VerifiedXCore.Services;
+using VerifiedXCore.Utilities;
 using Xunit;
 
 namespace VerifiedXCore.Tests
@@ -83,6 +87,33 @@ namespace VerifiedXCore.Tests
             await Apply(V4 - 5, Create("bob", "xBob"));
 
             Assert.Equal("bob.rbx", StoredName("xBob"));
+        }
+
+        [Fact]
+        public async Task AfterARebuild_ASecondRegistrationOfTheSameName_IsStillRefused()
+        {
+            // Replayed with the tip unset, as ResetTreis does, then judged at the next block as every synced node judges it.
+            Globals.LastBlock = new Block { Height = -1 };
+            await Apply(V4 + 5, Create("alice", "xAlice"));
+            Globals.LastBlock = new Block { Height = V4 + 5 };
+
+            var key = new PrivateKey("secp256k1");
+            var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+            var from = AccountData.GetHumanAddress(pub);
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = from, Balance = 100M, Nonce = 0 });
+            var second = new Transaction
+            {
+                Timestamp = TimeUtil.GetTime(), FromAddress = from, ToAddress = "Adnr_Base", Amount = 5.0M, Nonce = 0,
+                TransactionType = TransactionType.ADNR, Data = JsonConvert.SerializeObject(new { Function = "AdnrCreate()", Name = "alice" }),
+            };
+            second.Fee = FeeCalcService.CalculateTXFee(second);
+            second.Build();
+            second.Signature = SignatureService.CreateSignature(second.Hash, key, pub);
+
+            var (ok, why) = await TransactionValidatorService.VerifyTX(second, false, true, false, null, false, V4 + 6);
+
+            Assert.False(ok);
+            Assert.Contains("already been taken", why);
         }
     }
 }
