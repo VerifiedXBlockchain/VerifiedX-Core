@@ -859,6 +859,49 @@ namespace VerifiedXCore.Tests
             Assert.True(VBTCBridgeConsumedBurn.IsConsumed(burn));
         }
 
+        /// <summary>
+        /// C-179: an exit drawn on two vaults, one part paid (the burn used), the other voided - its coin spent by
+        /// another transaction. The voided part's locks were taken out of use and the exit left open, neither failed nor
+        /// complete, so the burner's vBTC was burned on Base and that part never paid. It is now fixed again on its own
+        /// vault's free coins in the same report, paid, and the exit completes; its locks stay drawn.
+        /// </summary>
+        [Fact]
+        public async Task AVoidedPartOfAnExitAlreadyPartlyPaid_IsFixedAgainOnItsVault_AndTheExitCompletes()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var other = await CreateVault(H1 + 2);
+            await Deposit(vault.Script, 1_000_000);
+            var otherDeposit = await Deposit(other.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.004M);
+            var otherLock = await Lock(other.Uid, 0.004M);
+            var burn = NewBurn();
+            await Mine(Exit(burn, BtcDest, (lockId, vault.Uid, 0.004M), (otherLock, other.Uid, 0.004M)));
+            Assert.Equal(VaultWithdrawalState.Pinned, Part(burn, vault.Uid).State);
+            Assert.Equal(VaultWithdrawalState.Pinned, Part(burn, other.Uid).State);
+
+            await SignAndConfirm(Part(burn, vault.Uid).Pins[0]);                    // one part paid: the burn is used
+            Assert.Equal(VaultWithdrawalState.Settled, Part(burn, vault.Uid).State);
+            Assert.True(VBTCBridgeConsumedBurn.IsConsumed(burn));
+
+            // The other part's coin leaves in a transaction that is not the pinned one, with change back to its vault.
+            await Report(_btc.Mine(Pay(new[] { new OutPoint(otherDeposit, 0) }, (Elsewhere(), 20_000), (other.Script, 979_000))));
+
+            var part = Part(burn, other.Uid);
+            Assert.Equal(VaultWithdrawalState.Pinned, part.State);                   // fixed again, in the same report
+            Assert.Equal(2, part.Pins.Count);
+            Assert.True(part.Pins[0].Dead);
+            Assert.False(part.Pins[1].Dead);
+            Assert.False(VBTCBridgeLockState.GetByLockId(otherLock)!.IsBlacklisted);
+            Assert.False(Record(burn).IsComplete);
+            Assert.False(Record(burn).IsFailedRecord);
+
+            await SignAndConfirm(part.Pins[1]);
+            Assert.Equal(VaultWithdrawalState.Settled, Part(burn, other.Uid).State);
+            Assert.True(Record(burn).IsComplete);
+            Assert.False(Record(burn).IsFailedRecord);
+        }
+
         // ── What an exit may draw on ────────────────────────────────────────────────────────────────────────
 
         [Fact]
