@@ -414,6 +414,20 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
+        /// From Globals.ReserveNonTransferAmountHeight a reserve (xRBX) sender's transaction other than a TX carries no
+        /// Amount. The apply debits a non-TX amount at once without locking it, and CallBack() and Recover() return only
+        /// TX amounts, so a stolen vault key destroyed the balance the recovery key exists to save. Register() still pays
+        /// the registration cost: it is sent before the reserve has a recovery address. Null when the rule passes.
+        /// </summary>
+        public static string? ReserveMovesVfxOnlyByTransfer(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.ReserveNonTransferAmountHeight) return null;
+            if (!(tx.FromAddress ?? "").StartsWith("xRBX") || tx.TransactionType == TransactionType.TX || tx.Amount == 0M) return null;
+            if (tx.TransactionType == TransactionType.RESERVE && DispatchedCall(tx.Data).Function == "Register()") return null;
+            return "A reserve account sends VFX only in a TX: its other transactions carry no amount.";
+        }
+
+        /// <summary>
         /// From Globals.RecipientIsAddressHeight no transaction (other than a private one, which has its own address rules)
         /// is addressed to a registered name: the applies credit or assign the ToAddress as written. Null when the rule passes.
         /// </summary>

@@ -373,6 +373,13 @@ namespace VerifiedXCore
         public static long ReserveRecoverReadsEveryRowHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height a reserve's transaction other than a TX (or its Register()) carries no Amount: the apply burned
+        /// it at once and CallBack()/Recover() return only TX amounts (LedgerIntegrityRules.ReserveMovesVfxOnlyByTransfer).
+        /// Not active yet.
+        /// </summary>
+        public static long ReserveNonTransferAmountHeight = 999_999_999_999;
+
+        /// <summary>
         /// From this height a smart contract's Update(), Transfer(), Burn(), Evolve(), Devolve() or
         /// ChangeEvolveStateSpecific() must carry its Data in the array form those applies read. Validation also accepted
         /// a single object, which every apply then skips, so the transaction was mined with no effect. Not active yet.

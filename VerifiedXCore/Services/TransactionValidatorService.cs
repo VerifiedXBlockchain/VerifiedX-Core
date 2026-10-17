@@ -311,6 +311,8 @@ namespace VerifiedXCore.Services
                 ?? LedgerIntegrityRules.TokenDocumentLimits(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                 // Nothing is addressed to a name: the applies credit the ToAddress as written.
                 ?? LedgerIntegrityRules.RecipientIsNotAName(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // A reserve moves VFX only in a TX, which CallBack() and Recover() can return.
+                ?? LedgerIntegrityRules.ReserveMovesVfxOnlyByTransfer(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                 // A contract call is in the shape its apply reads.
                 ?? LedgerIntegrityRules.ContractCallIsArrayForm(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
             if (vaultInTransitError != null)
