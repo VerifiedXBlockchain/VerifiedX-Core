@@ -1185,6 +1185,14 @@ namespace VerifiedXCore.Services
                 return;
             }
 
+            var refusal = CasterSeatService.DemotionNoticeRefusal(demotion.DemotedAddress, demotion.DemoterAddress, demotion.BlockHeight,
+                Globals.LastBlock?.Height ?? 0, CasterMembershipStore.RecordEraActive, CasterMembershipStore.GetCurrent());
+            if (refusal != null)
+            {
+                CasterLogUtility.Log($"DEMOTE: notice for {demotion.DemotedAddress} from {demotion.DemoterAddress} ignored — {refusal}.", "DEMOTE");
+                return;
+            }
+
             var casterList = Globals.BlockCasters.ToList();
             if (!casterList.Any(c => c.ValidatorAddress == demotion.DemotedAddress))
                 return; // Already removed

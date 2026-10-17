@@ -151,6 +151,55 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ADemotionNotice_CountsOnlyNearOurTip_OncePerDemoter_AndInTheRecordEraOnlyOnceTheRecordDroppedTheMember()
+        {
+            var stillListed = Head(changeType: "Promotion", changed: "RFzuJ");
+            var dropped = Head(changeType: "Demotion", changed: "RK28y");
+            dropped.Casters.RemoveAll(c => c.Address == "RK28y");
+
+            Assert.NotNull(CasterSeatService.DemotionNoticeRefusal("RK28y", "RBQT6", 900, 1_000, false, null));        // an old copy
+            Assert.NotNull(CasterSeatService.DemotionNoticeRefusal("RK28y", "RBQT6", 999, 1_000, true, stillListed)); // our record keeps it
+            Assert.Null(CasterSeatService.DemotionNoticeRefusal("RK28y", "RBQT6", 999, 1_000, true, dropped));
+            Assert.NotNull(CasterSeatService.DemotionNoticeRefusal("RK28y", "RBQT6", 999, 1_001, true, dropped));      // the same notice again
+            Assert.Null(CasterSeatService.DemotionNoticeRefusal("RK28y", "RH9XA", 999, 1_001, true, dropped));         // another demoter's
+            Assert.Null(CasterSeatService.DemotionNoticeRefusal("RH9XA", "RBQT6", 1_000, 1_000, false, null));         // legacy era: fresh is enough
+        }
+
+        [Fact]
+        public async System.Threading.Tasks.Task AReplayedDemotionNotice_DoesNotRemoveTheMember()
+        {
+            var key = new VerifiedXCore.EllipticCurve.PrivateKey("secp256k1");
+            var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+            var demoter = VerifiedXCore.Data.AccountData.GetHumanAddress(pub);
+            CasterDemotionNotice NoticeAt(long height) => new()
+            {
+                DemotedAddress = "RK28y", DemoterAddress = demoter, BlockHeight = height,
+                DemotionSignature = SignatureService.CreateSignature($"DEMOTE|RK28y|{height}|{demoter}", key, pub),
+            };
+            var priorTip = Globals.LastBlock;
+            var priorCasters = Globals.BlockCasters;
+            try
+            {
+                Globals.LastBlock = new Block { Height = 5_000 };
+                Globals.BlockCasters = new System.Collections.Concurrent.ConcurrentBag<Peers>(new[]
+                {
+                    new Peers { ValidatorAddress = demoter, PeerIP = "10.0.0.9" },
+                    new Peers { ValidatorAddress = "RK28y", PeerIP = "10.0.0.8" },
+                });
+                Assert.False(CasterMembershipStore.RecordEraActive);
+
+                await CasterDiscoveryService.HandleDemotion(NoticeAt(4_000)); // signed long ago, replayed now
+
+                Assert.Contains(Globals.BlockCasters, c => c.ValidatorAddress == "RK28y");
+            }
+            finally
+            {
+                Globals.LastBlock = priorTip;
+                Globals.BlockCasters = priorCasters;
+            }
+        }
+
+        [Fact]
         public void APromotionThatNeverTook_CanBeRolledBack()
         {
             var head = Head(changeType: "Promotion", changed: "RFzuJ");
