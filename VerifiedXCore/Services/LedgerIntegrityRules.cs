@@ -414,18 +414,22 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
-        /// From Globals.RecipientIsAddressHeight no transaction (other than a private one, which has its own address rules)
-        /// is addressed to a registered name: the applies credit or assign the ToAddress as written. Null when the rule passes.
+        /// From Globals.PathAuditRulesHeight no transaction (other than a private one, which has its own address rules) is
+        /// addressed to a registered name: validation resolved the name through the node's own name table and accepted it,
+        /// but every apply credits or assigns the ToAddress as written, so the VFX, token, NFT or name went to the literal
+        /// string, and the verdict depended on the local table. Null when the rule passes.
         /// </summary>
+        public const string RecipientIsANameReason = "A transaction is addressed to the address a name resolves to, not to the name.";
+
         public static string? RecipientIsNotAName(Transaction tx, long height)
         {
-            if (tx == null || height < Globals.RecipientIsAddressHeight) return null;
+            if (tx == null || height < Globals.PathAuditRulesHeight) return null;
             if (VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType)) return null;
             var to = tx.ToAddress ?? "";
             if (PlaceholderRecipients.Contains(to)) return null;
             var looksLikeName = to.Contains(".vfx", StringComparison.OrdinalIgnoreCase) || to.Contains(".rbx", StringComparison.OrdinalIgnoreCase);
             return looksLikeName && !AddressValidateUtility.ValidateRBXAddress(to)
-                ? "A transaction is addressed to the address a name resolves to, not to the name."
+                ? RecipientIsANameReason
                 : null;
         }
 
