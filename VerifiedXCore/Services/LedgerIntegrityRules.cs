@@ -1294,6 +1294,35 @@ namespace VerifiedXCore.Services
             return null;
         }
 
+        /// <summary>A block carries a move (Transfer() or Burn()) and a sale of the same contract.</summary>
+        public const string NftMoveAndSaleInBlock = "An NFT transfer or burn and a sale of the same contract within block";
+
+        /// <summary>Per-block register of the contracts a block moves (Transfer(), Burn()) and sells (NFT_SALE).</summary>
+        public sealed class NftStepState
+        {
+            public readonly HashSet<string> Moves = new(StringComparer.OrdinalIgnoreCase);
+            public readonly HashSet<string> Sales = new(StringComparer.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// From PathAuditRulesHeight one contract is either moved or sold within a block, not both. Each is judged against
+        /// the owner before the block, so an owner's Transfer() to B and its own M_Sale_Start to an accomplice both passed
+        /// in one block: B then owned an NFT locked into the sale A set up, at A's price. Honest blocks never pair them: a
+        /// transfer or burn needs the contract unlocked, and a sale's completion or cancel needs it locked.
+        /// </summary>
+        public static string? RegisterNftStepInBlock(Transaction tx, NftStepState state, long height)
+        {
+            if (height < Globals.PathAuditRulesHeight) return null;
+            var (ok, _, uid, function, _) = TransactionUtility.GetSCTXFunctionAndUID(tx);
+            if (!ok) return null;
+            var isSale = tx.TransactionType == TransactionType.NFT_SALE;
+            if (!isSale && function != "Transfer()" && function != "Burn()") return null;
+            uid = SmartContractStateTrei.GetSmartContractState(uid)?.SmartContractUID ?? uid;
+            if ((isSale ? state.Moves : state.Sales).Contains(uid)) return $"{NftMoveAndSaleInBlock}: {uid}";
+            (isSale ? state.Sales : state.Moves).Add(uid);
+            return null;
+        }
+
         #region Time in block validation
 
         /// <summary>
