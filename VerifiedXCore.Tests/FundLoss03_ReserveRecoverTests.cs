@@ -157,6 +157,32 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// C-183: a reserve registers its recovery account once, but the check reads committed state, so two Register() of
+        /// one reserve in a block both passed and the last applied replaced the first's recovery account. From the
+        /// path-audit rules the block's guard (both block validators, the producer, admission) takes the first; the
+        /// producer keeps the first for the block. Below the rules, history replays unchanged.
+        /// </summary>
+        [Fact]
+        public void TwoRegistersOfOneReserveInABlock_OnlyTheFirstIsTaken()
+        {
+            var height = Math.Max(Globals.PathAuditRulesHeight, Gate);
+            var first = Recover(new { Function = "Register()", RecoveryAddress = _recoveryAddress });
+            var second = Recover(new { Function = "Register()", RecoveryAddress = AccountData.GetHumanAddress(NewKey().Pub) });
+            Assert.NotEqual(first.Hash, second.Hash);
+
+            var state = new SameBlockDebitGuard.State { BlockHeight = height };
+            Assert.True(SameBlockDebitGuard.TryRegister(first, state).Ok);
+            var (ok, why) = SameBlockDebitGuard.TryRegister(second, state);
+            Assert.False(ok);
+            Assert.Contains("registers its recovery account more than once", why);
+            Assert.False(BlockValidatorService.IsStateCorruptionSignal(why));   // a producer's fault: no restore or rebuild
+
+            var below = new SameBlockDebitGuard.State { BlockHeight = height - 1 };
+            Assert.True(SameBlockDebitGuard.TryRegister(first, below).Ok);
+            Assert.True(SameBlockDebitGuard.TryRegister(second, below).Ok);
+        }
+
+        /// <summary>
         /// From the path-audit rules a reserve moves no token, and Recover() did not move them either: a reserve's token
         /// balances, and its token contracts' owner powers, were frozen for good (round 28). They go to the recovery address.
         /// </summary>
