@@ -175,6 +175,8 @@ namespace VerifiedXCore.Services
         /// </summary>
         internal static string? TransactionIntegrityError(Block block)
         {
+            // Validation measures and applies each transaction at its block's height (tx.Height is in no hash); so does this.
+            LedgerIntegrityRules.NormalizeTransactionHeights(block);
             foreach (var tx in block.Transactions)
             {
                 // Validation skips an honored whitelist entry; so does this.
@@ -191,6 +193,10 @@ namespace VerifiedXCore.Services
                 {
                     if (!RewardHashMatches(tx))
                         return $"transaction {tx.Hash} does not hash to its carried hash.";
+                    // The recipient and amount are joined in the hash: digits could move between them unless the recipient
+                    // is a whole address, and between amount and fee unless the fee is written as validation requires.
+                    if (!AddressValidateUtility.ValidateAddress(tx.ToAddress) || LedgerIntegrityRules.CanonicalPreimage(tx) != null)
+                        return $"reward {tx.Hash} does not read one way.";
                     continue;
                 }
                 if (VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(tx.TransactionType))
@@ -200,11 +206,16 @@ namespace VerifiedXCore.Services
                     var envelopeError = VerifiedXCore.Bitcoin.Attestation.BtcAttestTxValidator.EnvelopeError(tx);
                     if (envelopeError != null)
                         return $"transaction {tx.Hash}: {envelopeError}";
+                    if (!TransactionValidatorService.VerifyTXSize(tx, VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.MaxReportTxBytes))
+                        return $"transaction {tx.Hash} is larger than validation allows.";
                     continue;
                 }
 
                 if (VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType))
                 {
+                    if (!TransactionValidatorService.VerifyTXSize(tx, LedgerIntegrityRules.DefaultMaxTxSizeBytes))
+                        return $"private transaction {tx.Hash} is larger than validation allows.";
+
                     if (!VerifiedXCore.Privacy.PrivateTransactionValidatorService.VerifyPrivateHash(tx, block.Height))
                         return $"private transaction {tx.Hash} does not hash to its carried hash.";
                     var signatureOk = VerifiedXCore.Privacy.PrivateTransactionTypes.IsTransparentShield(tx.TransactionType)
@@ -220,6 +231,9 @@ namespace VerifiedXCore.Services
                     {
                         if (tx.ToAddress != VerifiedXCore.Privacy.PrivacyConstants.ShieldedPoolAddress)
                             return $"private transaction {tx.Hash} is a shield not sent to the shielded pool.";
+                        // Below ShieldFeeSignedHeight the fee is outside the hash: held to the shield validator's rule.
+                        if (tx.Fee <= 0 || (Globals.LastBlock.Height > Globals.TXHeightRule2 && tx.Fee < Globals.MinFeePerKB))
+                            return $"private transaction {tx.Hash} is a shield without the fee validation requires.";
                     }
                     else
                     {
@@ -238,6 +252,15 @@ namespace VerifiedXCore.Services
 
                 if (!HashMatchesStrictly(tx))
                     return $"transaction {tx.Hash} does not hash to its carried hash.";
+                // The recipient and amount are joined in the hash: a whole recipient keeps digits from moving between them.
+                if (TransactionValidatorService.RecipientError(tx) is { } recipientError)
+                    return $"transaction {tx.Hash}: {recipientError}";
+                if (!TransactionValidatorService.VerifyTXSize(tx, LargestSizeCap(tx, block.Height)))
+                    return $"transaction {tx.Hash} is larger than validation allows."; // whitespace inside the signature's Base64 still verifies
+                // A delayed reserve send's settlement time: with none, its digits could have moved into Data (the preimage
+                // joins them). Reserve control transactions (Register, CallBack, Recover) carry none.
+                if ((tx.FromAddress ?? "").StartsWith("xRBX") && tx.TransactionType != TransactionType.RESERVE && tx.UnlockTime == null)
+                    return $"reserve transaction {tx.Hash} has no unlock time.";
                 var signatureError = TransactionValidatorService.SignatureError(tx);
                 if (signatureError != null)
                     return $"transaction {tx.Hash}: {signatureError}";
@@ -264,6 +287,30 @@ namespace VerifiedXCore.Services
         /// places (32, 0) reads 32.0 and 0.0 once the block has crossed the wire, so each of Amount and Fee is also tried
         /// without trailing zeros: the same values, never another one.
         /// </summary>
+        /// <summary>
+        /// The largest size validation can allow this transaction, without reading state: the state in hand before a
+        /// rollback is the branch being replaced, and MaxTxSizeBytes reads the vault a transfer moves. From
+        /// VbtcVaultTxSizeHeight a vault creation, or a TKNZ/NFT Transfer() that carries a contract's code (the shape
+        /// MaxTxSizeBytes then compares with the stored vault), may be as large as a vault; anything else is 30 KB.
+        /// </summary>
+        private static int LargestSizeCap(Transaction tx, long height)
+        {
+            if (height < Globals.VbtcVaultTxSizeHeight)
+                return LedgerIntegrityRules.DefaultMaxTxSizeBytes;
+            if (tx.TransactionType == TransactionType.VBTC_V2_CONTRACT_CREATE)
+                return Globals.MaxVbtcVaultTxSizeBytes;
+            if ((tx.TransactionType != TransactionType.TKNZ_TX && tx.TransactionType != TransactionType.NFT_TX) || tx.Data == null)
+                return LedgerIntegrityRules.DefaultMaxTxSizeBytes;
+            try
+            {
+                var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+                return payload.Function == "Transfer()" && !string.IsNullOrEmpty(payload.ContractUID) && !string.IsNullOrEmpty(payload.Data)
+                    ? Globals.MaxVbtcVaultTxSizeBytes
+                    : LedgerIntegrityRules.DefaultMaxTxSizeBytes;
+            }
+            catch { return LedgerIntegrityRules.DefaultMaxTxSizeBytes; }
+        }
+
         private static bool RewardHashMatches(Transaction tx)
         {
             foreach (var amount in new[] { tx.Amount, tx.Amount / 1.000000000000000000000000000000000m })

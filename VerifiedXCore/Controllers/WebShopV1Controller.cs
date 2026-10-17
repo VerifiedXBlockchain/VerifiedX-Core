@@ -248,7 +248,8 @@ namespace VerifiedXCore.Controllers
 
                         var thirdPartyBid = bidPayload.BidStatus == BidStatus.Accepted || bidPayload.BidStatus == BidStatus.Rejected ? true : false;
 
-                        var bidBuild = bidPayload.Build(thirdPartyBid);
+                        Globals.MultiDecShopData.TryGetValue(shopURL, out var targetShopData); // the contract is read from this shop alone
+                        var bidBuild = bidPayload.Build(thirdPartyBid, targetShopData);
 
                         if (bidBuild == false)
                             return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to build bid." });
@@ -323,7 +324,8 @@ namespace VerifiedXCore.Controllers
 
                         var thirdPartyBid = bidPayload.BidStatus == BidStatus.Accepted || bidPayload.BidStatus == BidStatus.Rejected ? true : false;
 
-                        var bidBuild = bidPayload.Build(thirdPartyBid);
+                        Globals.MultiDecShopData.TryGetValue(shopURL, out var targetShopData); // the contract is read from this shop alone
+                        var bidBuild = bidPayload.Build(thirdPartyBid, targetShopData);
 
                         if (bidPayload.IsBuyNow != true)
                             return JsonConvert.SerializeObject(new { Success = false, Message = "IsBuyNow must be set to 'true'." });

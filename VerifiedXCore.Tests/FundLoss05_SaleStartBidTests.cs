@@ -142,6 +142,27 @@ namespace VerifiedXCore.Tests
         // ── Wallet-local: complete only a sale this wallet bid on ─────────────────────────────────────────────────
 
         [Fact]
+        public void ABidSavedBeforeTheTargetShopRule_IsNotCompletedAutomatically_EvenWithAContract()
+        {
+            var nft = ListedNft();
+            // A bid row from an earlier build: its contract may have been read from another cached shop.
+            Bid.SaveBid(new Bid
+            {
+                Id = Guid.NewGuid(), BidAddress = _victim.Address, PurchaseKey = "key-legacy", BidAmount = 500M, MaxBidAmount = 500M,
+                BidStatus = BidStatus.Sent, BidSendReceive = BidSendReceive.Sent, BidSendTime = TimeUtil.GetTime(), ListingId = 40, CollectionId = 1,
+                SmartContractUID = nft,
+            });
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-legacy", 500M, nft));
+
+            // The same bid made now, through Build with the shop it is sent to, is.
+            var shop = new DecShopData { Listings = new System.Collections.Generic.List<Listing> { new Listing { Id = 41, PurchaseKey = "key-new", SmartContractUID = nft } } };
+            var fresh = new Bid { BidAddress = _victim.Address, PurchaseKey = "key-new", BidAmount = 500M, ListingId = 41, CollectionId = 1, RawBid = true };
+            Assert.True(fresh.Build(targetShop: shop));
+            Bid.SaveBid(fresh);
+            Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-new", 500M, nft));
+        }
+
+        [Fact]
         public void IncomingSale_WithoutALocalBid_IsNotCompleted()
         {
             var nft = ListedNft();
@@ -151,7 +172,7 @@ namespace VerifiedXCore.Tests
             {
                 Id = Guid.NewGuid(), BidAddress = _victim.Address, PurchaseKey = "key-7", BidAmount = 500M, MaxBidAmount = 500M,
                 BidStatus = BidStatus.Sent, BidSendReceive = BidSendReceive.Sent, BidSendTime = TimeUtil.GetTime(), ListingId = 1, CollectionId = 1,
-                SmartContractUID = nft,
+                SmartContractUID = nft, ContractFromTargetShop = true,
             });
             Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-7", 500M, nft));
             Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-7", 499M, nft));   // sold for less than the bid ceiling
@@ -174,7 +195,7 @@ namespace VerifiedXCore.Tests
             {
                 Id = Guid.NewGuid(), BidAddress = _victim.Address, PurchaseKey = "key-9", BidAmount = 500M, MaxBidAmount = 500M,
                 BidStatus = BidStatus.Sent, BidSendReceive = BidSendReceive.Sent, BidSendTime = TimeUtil.GetTime(), ListingId = 9, CollectionId = 1,
-                SmartContractUID = bidOn,
+                SmartContractUID = bidOn, ContractFromTargetShop = true,
             });
             Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-9", 500M, bidOn));
             Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-9", 500M, other)); // the replay
@@ -210,16 +231,33 @@ namespace VerifiedXCore.Tests
                 Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-10", 500M, nft));
                 Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-10", 500M, other));
 
-                // Build() records the contract on a new bid from the shop listing when the client did not send it.
-                Assert.Equal(nft, Bid.ListingContractFor(10, "key-10"));
-                Assert.Null(Bid.ListingContractFor(11, "key-11"));
-                // Round 31: by purchase key only (listing ids repeat from shop to shop), and not when shops disagree.
-                Assert.Null(Bid.ListingContractFor(10, "another-shops-key"));
-                Globals.MultiDecShopData["copycat"] = new DecShopData { Listings = new System.Collections.Generic.List<Listing> { new Listing { Id = 3, PurchaseKey = "key-10", SmartContractUID = other } } };
-                Assert.Null(Bid.ListingContractFor(10, "key-10"));
-                Globals.MultiDecShopData.TryRemove("copycat", out _);
+                // Build() records the contract on a new bid from the listing of the shop it is sent to, when the client did
+                // not send it: that listing's id and purchase key, in that shop's data alone.
+                var target = Globals.DecShopData;
+                Assert.Equal(nft, Bid.ListingContractFor(target, 10, "key-10"));
+                Assert.Null(Bid.ListingContractFor(target, 11, "key-11"));
+                Assert.Null(Bid.ListingContractFor(target, 10, "another-shops-key"));
+                Assert.Null(Bid.ListingContractFor(target, 3, "key-10")); // the key under another listing id
+
+                // Another cached shop that serves a listing with the key the buyer bid with does not decide the contract:
+                // neither for a bid to the shop that lists it, nor for a bid to a shop whose data does not name it.
+                var copycat = new DecShopData { Listings = new System.Collections.Generic.List<Listing> { new Listing { Id = 10, PurchaseKey = "key-10", SmartContractUID = other } } };
+                Globals.MultiDecShopData["copycat"] = copycat;
+                try
+                {
+                    Assert.Equal(nft, Bid.ListingContractFor(target, 10, "key-10"));
+                    Assert.Null(Bid.ListingContractFor(new DecShopData { Listings = new System.Collections.Generic.List<Listing>() }, 10, "key-10"));
+                    // A bid to a web shop whose data does not name the listing, with only the copycat's data cached as well.
+                    Globals.DecShopData = null;
+                    var toAnotherShop = new Bid { BidAddress = _victim.Address, PurchaseKey = "key-10", BidAmount = 500M, ListingId = 10, CollectionId = 1, RawBid = true };
+                    Assert.True(toAnotherShop.Build(targetShop: new DecShopData { Listings = new System.Collections.Generic.List<Listing>() }));
+                    Assert.Null(toAnotherShop.SmartContractUID); // not the copycat's contract; never completed automatically
+                    Globals.DecShopData = target;
+                }
+                finally { Globals.MultiDecShopData.TryRemove("copycat", out _); }
+
                 var built = new Bid { BidAddress = _victim.Address, PurchaseKey = "key-10", BidAmount = 500M, ListingId = 10, CollectionId = 1, RawBid = true };
-                Assert.True(built.Build());
+                Assert.True(built.Build(targetShop: target));
                 Assert.Equal(nft, built.SmartContractUID);
                 Bid.SaveBid(built);
                 Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-10", 500M, nft));
@@ -239,7 +277,7 @@ namespace VerifiedXCore.Tests
             {
                 Id = Guid.NewGuid(), BidAddress = _victim.Address, PurchaseKey = key, BidAmount = 500M, MaxBidAmount = 500M,
                 BidStatus = status, BidSendReceive = BidSendReceive.Sent, BidSendTime = sendTime, ListingId = 20, CollectionId = 1,
-                SmartContractUID = nft, AutoCompleteUntil = autoCompleteUntil,
+                SmartContractUID = nft, ContractFromTargetShop = true, AutoCompleteUntil = autoCompleteUntil,
             };
             Bid.SaveBid(bid);
             return bid;
@@ -402,7 +440,7 @@ namespace VerifiedXCore.Tests
             {
                 Id = Guid.NewGuid(), BidAddress = _victim.Address, PurchaseKey = "key-recv", BidAmount = 500M, MaxBidAmount = 500M,
                 BidStatus = BidStatus.Received, BidSendReceive = BidSendReceive.Received, BidSendTime = now, ListingId = 30, CollectionId = 1,
-                SmartContractUID = nft,
+                SmartContractUID = nft, ContractFromTargetShop = true,
             };
             Bid.SaveBid(received);
             Bid.ApplyShopResponse(received.Id, BidStatus.Accepted);

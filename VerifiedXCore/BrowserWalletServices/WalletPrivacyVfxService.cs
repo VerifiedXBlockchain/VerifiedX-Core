@@ -46,9 +46,7 @@ namespace VerifiedXCore.BrowserWalletServices
             if (string.IsNullOrWhiteSpace(accountKey))
                 return new { success = false, message = "Cannot access account private key. Is the wallet locked?" };
 
-            var keyMat = ShieldedHdDerivation.DeriveFromPrivateKey(accountKey);
-            var wallet = ShieldedWalletService.CreateFromKeyMaterial(keyMat, address, password);
-            ShieldedWalletService.Upsert(wallet);
+            var keyMat = ShieldedWalletService.UpsertFromAccountKey(accountKey, address, password);
 
             return new { success = true, zfxAddress = keyMat.ZfxAddress, transparentSourceAddress = address };
         }

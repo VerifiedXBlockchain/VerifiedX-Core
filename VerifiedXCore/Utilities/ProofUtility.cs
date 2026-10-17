@@ -1043,6 +1043,12 @@ namespace VerifiedXCore.Utilities
                                 CasterLogUtility.Log($"BlockFetch reason: {winningAddress} at {cleanIP} — VerifyBlock {nextBlock} body did not deserialize to a block ({blockJson.Length} chars).", "BLOCKFETCH");
                                 return (false, null);
                             }
+                            // The round registers this draft's hash as the approval: only a block that is exactly that hash.
+                            if (block.GetBlockHash() != block.Hash)
+                            {
+                                CasterLogUtility.Log($"BlockFetch reason: {winningAddress} at {cleanIP} — VerifyBlock {nextBlock} served a block that is not its own hash.", "BLOCKFETCH");
+                                return (false, null);
+                            }
 
                             return (true, block);
                         }

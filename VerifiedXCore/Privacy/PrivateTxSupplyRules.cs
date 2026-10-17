@@ -1,5 +1,6 @@
 using VerifiedXCore.Models;
 using VerifiedXCore.Models.Privacy;
+using VerifiedXCore.Utilities;
 
 namespace VerifiedXCore.Privacy
 {
@@ -90,32 +91,51 @@ namespace VerifiedXCore.Privacy
             return null;
         }
 
+        public const string UnreadableStoreReason = SupplyReasonPrefix + ": privacy store unreadable; rebuild.";
+
         /// <summary>
         /// Committed shielded supply of an asset as the floor judges it at <paramref name="height"/>: the pool row's
         /// TotalShieldedSupply plus, before the proof-rules epoch, the asset's entry in Globals.ShieldedSupplyCorrections,
-        /// which adds back what the forged mainnet unshields subtracted from the counter. No row, or a row that cannot be
-        /// read, is no supply at all: the correction corrects a counter, and with none it used to stand on its own as
-        /// about 100,033 VFX the pool could pay out (a node whose privacy store was wiped and not rebuilt).
+        /// which adds back what the forged mainnet unshields subtracted from the counter; only a counter that went through
+        /// the forged blocks gets it. 0 when the store cannot be judged (see <see cref="TryCommittedSupply"/>), so no debit
+        /// passes: no row, or a row that cannot be read, is no supply at all (the correction alone used to stand as about
+        /// 100,033 VFX the pool could pay out on a node whose privacy store was wiped and not rebuilt).
         /// </summary>
-        public static decimal CommittedSupply(string asset, long height)
+        public static decimal CommittedSupply(string asset, long height) =>
+            TryCommittedSupply(asset, height, out var supply) ? supply : 0M;
+
+        /// <summary>
+        /// False when the pool row cannot be read, or is missing while a correction applies to the asset. The correction
+        /// only makes sense on top of the chain's counter: added to a missing or unreadable row it would let the floor
+        /// pass the whole corrected amount, so the floor refuses instead and the node needs a rebuild.
+        /// </summary>
+        public static bool TryCommittedSupply(string asset, long height, out decimal supply)
         {
-            decimal recorded;
-            long lastWritten;
-            try
+            supply = 0M;
+            ShieldedPoolState? row;
+            try { row = ShieldedPoolService.GetState(asset); }
+            catch (Exception ex)
             {
-                var row = ShieldedPoolService.GetState(asset);
-                if (row == null) return 0M;
-                recorded = row.TotalShieldedSupply;
-                lastWritten = row.LastUpdateHeight;
+                ErrorLogUtility.LogError($"{UnreadableStoreReason} Reading the {asset} pool row failed: {ex.Message}", "PrivateTxSupplyRules.TryCommittedSupply()");
+                return false;
             }
-            catch { return 0M; }
             // The correction undoes the forged debits in the pre-epoch counter; the epoch pool starts from zero.
             if (PrivacyEpoch.ProofRulesActive(height))
-                return recorded;
-            // Only a counter that went through the forged blocks holds the debits the correction undoes.
-            if (lastWritten < Globals.ShieldedSupplyCorrectionsThroughHeight)
-                return recorded;
-            return recorded + (Globals.ShieldedSupplyCorrections.TryGetValue(asset ?? "", out var correction) ? correction : 0M);
+            {
+                supply = row?.TotalShieldedSupply ?? 0M;
+                return true;
+            }
+            var corrected = Globals.ShieldedSupplyCorrections.TryGetValue(asset ?? "", out var correction);
+            if (row == null && corrected)
+            {
+                ErrorLogUtility.LogError($"{UnreadableStoreReason} The {asset} pool row is missing.", "PrivateTxSupplyRules.TryCommittedSupply()");
+                return false;
+            }
+            // Only a counter that went through the forged blocks holds the debits the correction undoes: a row made again
+            // from nothing, or left by a rebuild that stopped before them, gets none.
+            var applies = corrected && row != null && row.LastUpdateHeight >= Globals.ShieldedSupplyCorrectionsThroughHeight;
+            supply = (row?.TotalShieldedSupply ?? 0M) + (applies ? correction : 0M);
+            return true;
         }
 
         /// <summary>All rules of this stage for one transaction at <paramref name="height"/>; (true, "") when inert or passing.</summary>
@@ -126,7 +146,11 @@ namespace VerifiedXCore.Privacy
             var structure = StructureError(tx, payload);
             if (structure != null)
                 return (false, structure);
-            var supply = SupplyError(tx, payload, CommittedSupply(payload.Asset, height));
+            if (PoolDebit(tx, payload) <= 0M)
+                return (true, "");
+            if (!TryCommittedSupply(payload.Asset, height, out var committed))
+                return (false, UnreadableStoreReason);
+            var supply = SupplyError(tx, payload, committed);
             if (supply != null)
                 return (false, supply);
             return (true, "");

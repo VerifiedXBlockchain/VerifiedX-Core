@@ -414,9 +414,7 @@ namespace VerifiedXCore.Controllers
                 if (string.IsNullOrWhiteSpace(accountKey))
                     return Task.FromResult(Fail("Cannot access account private key. Is the wallet locked?"));
 
-                var keyMat = ShieldedHdDerivation.DeriveFromPrivateKey(accountKey);
-                var wallet = ShieldedWalletService.CreateFromKeyMaterial(keyMat, req.TransparentAddress, req.WalletPassword);
-                ShieldedWalletService.Upsert(wallet);
+                var keyMat = ShieldedWalletService.UpsertFromAccountKey(accountKey, req.TransparentAddress, req.WalletPassword);
 
                 return Task.FromResult(Ok(new
                 {

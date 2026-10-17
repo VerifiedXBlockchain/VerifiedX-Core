@@ -449,6 +449,27 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task ATransactionJustUnderTheCapAtAdmission_ButOverItInABlock_IsRefusedAtAdmission()
+        {
+            // Pad the Data until the transaction, as admission sees it (no Height, no stored Id), is just under the cap.
+            var tx = Send(1M, data: JsonConvert.SerializeObject(new[] { "" }));
+            var padding = LedgerIntegrityRules.DefaultMaxTxSizeBytes - JsonConvert.SerializeObject(tx).Length - 30;
+            tx = Send(1M, data: JsonConvert.SerializeObject(new[] { new string('p', padding) }));
+            Assert.True(TransactionValidatorService.VerifyTXSize(tx, LedgerIntegrityRules.DefaultMaxTxSizeBytes)); // fits as admitted
+            Assert.False(TransactionValidatorService.VerifyTXSize(TransactionValidatorService.AsCarriedInABlock(tx), LedgerIntegrityRules.DefaultMaxTxSizeBytes)); // not in a block
+
+            var (_, why) = await TransactionValidatorService.VerifyTX(tx);
+            Assert.Contains("too large", why);
+        }
+
+        [Fact]
+        public async Task AnOrdinaryTransaction_IsNotRefusedForSize()
+        {
+            var (_, why) = await TransactionValidatorService.VerifyTX(Send(1M));
+            Assert.DoesNotContain("too large", why ?? "");
+        }
+
+        [Fact]
         public void AnInsertThatFails_EvictsNothing()
         {
             var pool = TransactionData.GetPool();
