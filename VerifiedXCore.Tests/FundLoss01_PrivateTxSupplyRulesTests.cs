@@ -386,6 +386,68 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        // ── A store the floor cannot judge: refused, not judged against the correction alone ─────────────────────
+
+        [Fact]
+        public async Task MissingPoolRow_WhileACorrectionApplies_RefusesTheUnshield()
+        {
+            PrivacyDbContext.PoolState().DeleteMany(x => x.AssetType == "VFX");
+            Globals.ShieldedSupplyCorrections["VFX"] = 100_033.000012M;
+            TipAtGate();
+
+            Assert.False(PrivateTxSupplyRules.TryCommittedSupply("VFX", Gate, out _));
+            Assert.Equal(0M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate)); // what the same-block guard sums against
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 1M));
+            Assert.False(ok);
+            Assert.Equal(PrivateTxSupplyRules.UnreadableStoreReason, msg);
+        }
+
+        [Fact]
+        public void UnreadablePrivacyStore_RefusesTheUnshield()
+        {
+            Globals.ShieldedSupplyCorrections["VFX"] = 100_033.000012M;
+            var tx = Unshield(NewAddress(), 1M);
+            Assert.True(PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out var error), error);
+            var live = DbContext.DB_Privacy;
+            try
+            {
+                DbContext.DB_Privacy = null!;
+                Assert.False(PrivateTxSupplyRules.TryCommittedSupply("VFX", Gate, out _));
+                Assert.Equal(0M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate));
+                Assert.Equal((false, PrivateTxSupplyRules.UnreadableStoreReason), PrivateTxSupplyRules.Check(tx, payload, Gate));
+            }
+            finally
+            {
+                DbContext.DB_Privacy = live;
+            }
+        }
+
+        [Fact]
+        public async Task MissingPoolRow_WithoutACorrection_IsAnEmptyPool()
+        {
+            PrivacyDbContext.PoolState().DeleteMany(x => x.AssetType == "VFX");
+            TipAtGate();
+
+            Assert.True(PrivateTxSupplyRules.TryCommittedSupply("VFX", Gate, out var supply));
+            Assert.Equal(0M, supply);
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 1M));
+            Assert.False(ok);
+            Assert.StartsWith(PrivateTxSupplyRules.SupplyReasonPrefix, msg);
+            Assert.NotEqual(PrivateTxSupplyRules.UnreadableStoreReason, msg);
+        }
+
+        [Fact]
+        public void ReadablePoolRow_WithTheCorrection_IsJudgedAsBefore()
+        {
+            Globals.ShieldedSupplyCorrections["VFX"] = 100M;
+            var tx = Unshield(NewAddress(), 100M);
+            Assert.True(PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out var error), error);
+
+            Assert.True(PrivateTxSupplyRules.TryCommittedSupply("VFX", Gate, out var supply));
+            Assert.Equal(100.5M, supply);
+            Assert.Equal((true, ""), PrivateTxSupplyRules.Check(tx, payload, Gate));
+        }
+
         [Fact]
         public void TheMainnetCorrection_IsTheSumOfTheFourForgedDebits()
         {
