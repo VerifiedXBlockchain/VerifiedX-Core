@@ -121,6 +121,42 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// C-199: a call-back whose pending row cannot be read on this node (its storage fails) was read as "no such row":
+        /// the call-back was skipped, the block counted as applied, and the row later settled to its payee here while every
+        /// other node had refunded the sender. The apply's read (GetTransactionsForApply, which the call-back uses) takes
+        /// nothing but the hash, so any failure of it - LiteDB's own exceptions (a corrupt page) included - is passed on as a
+        /// storage fault, and the call-back's apply reports it (StateData.CallBackReserveAccountTx: NoteApplyStepFailed).
+        /// Validation's read is unchanged.
+        /// </summary>
+        [Fact]
+        public async Task APendingRowThatCannotBeReadOnThisNode_IsAFault_NotANoSuchRow()
+        {
+            var hash = new string('c', 64);
+            ReserveTransactions.GetReserveTransactionsDb()!.Insert(new ReserveTransactions
+            {
+                Id = Guid.NewGuid(), Hash = hash, FromAddress = _reserve, ToAddress = _recoveryAddress, Amount = 100M,
+                TransactionType = TransactionType.TX, ReserveTransactionStatus = ReserveTransactionStatus.Pending,
+                ConfirmTimestamp = TimeUtil.GetTime() + 86_400, UnlockTime = TimeUtil.GetTime() + 86_400, Signature = "s", Height = 1,
+            });
+            try
+            {
+                ReserveTransactions.TestReadFault = () => throw new IOException("reserve store unreadable");
+                Assert.Throws<IOException>(() => ReserveTransactions.GetTransactionsForApply(hash));
+                ReserveTransactions.TestReadFault = () => throw new LiteDB.LiteException(0, "ENSURE: page corrupt");
+                Assert.Throws<IOException>(() => ReserveTransactions.GetTransactionsForApply(hash));
+
+                // The call-back's apply itself (the production call site): the fault is reported for the block.
+                StateData.BlockStartFailedAtHeight = -1;
+                var callBack = typeof(StateData).GetMethod("CallBackReserveAccountTx", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+                await (Task)callBack.Invoke(null, new object[] { hash, false, 777L })!;
+                Assert.Equal(777L, StateData.BlockStartFailedAtHeight);
+            }
+            finally { ReserveTransactions.TestReadFault = null; }
+            Assert.NotNull(ReserveTransactions.GetTransactionsForApply(hash));   // read as before when nothing fails
+            Assert.NotNull(ReserveTransactions.GetTransactions(hash));
+        }
+
+        /// <summary>
         /// From the path-audit rules a reserve moves no token, and Recover() did not move them either: a reserve's token
         /// balances, and its token contracts' owner powers, were frozen for good (round 28). They go to the recovery address.
         /// </summary>

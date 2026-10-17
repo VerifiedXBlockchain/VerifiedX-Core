@@ -432,6 +432,39 @@ namespace VerifiedXCore.Tests
             Assert.Null(VBTCCancellationVoting.RefundDueFor(deciding));
         }
 
+        /// <summary>
+        /// A deciding vote whose write to the store is partly lost (the first or the second write of the cancellation) is
+        /// still decided, by that vote, once it is applied again (a store rebuild replays it): the vote and the decision
+        /// are one write. Written apart, a vote counted without its decision was refused on replay as a second vote by
+        /// that validator, and the cancellation stayed undecided.
+        /// </summary>
+        [Theory]
+        [InlineData(1)]
+        [InlineData(2)]
+        public void ADecidingVoteWhoseWriteWasLost_IsDecidedByThatVoteOnReplay(int lostWrite)
+        {
+            var c = OpenCancellation();
+            VBTCCancellationVoting.ApplyVote(VoteTx(c.CancellationUID, "xVal1", true, CancelHeight + 1));
+            VBTCCancellationVoting.ApplyVote(VoteTx(c.CancellationUID, "xVal2", true, CancelHeight + 1));
+            var deciding = VoteTx(c.CancellationUID, "xVal3", true, CancelHeight + 2);
+            var writes = 0;
+            VBTCWithdrawalCancellation.FailWriteForTests = () => ++writes == lostWrite;
+            VBTCCancellationVoting.VoteResult first;
+            try { first = VBTCCancellationVoting.ApplyVote(deciding); }
+            finally { VBTCWithdrawalCancellation.FailWriteForTests = null; }
+            // One write now: losing it records nothing and the vote is not taken as applied; the second write of the
+            // old two-step order (vote, then decision) no longer exists.
+            if (lostWrite == 1) Assert.False(first.Applied);
+
+            VBTCCancellationVoting.ApplyVote(deciding);   // applied again
+            var after = VBTCWithdrawalCancellation.GetCancellation(c.CancellationUID)!;
+            Assert.True(after.IsProcessed);
+            Assert.True(after.IsApproved);
+            Assert.Equal(deciding.Hash, after.DecidedByTxHash);
+            Assert.Equal(3, after.ApproveCount);
+            Assert.Equal(VBTCWithdrawalStatus.Cancelled, VBTCWithdrawalRequest.GetByTransactionHash(RequestHash, Vault)!.Status);
+        }
+
         // ── The refund (StateData) ──────────────────────────────────────────────────────────────
 
         [Fact]
@@ -491,6 +524,34 @@ namespace VerifiedXCore.Tests
             StateDataApply("VoteOnVBTCV2Cancellation", deciding);
 
             Assert.Equal(0.001M, LedgerBalance(Vault, Requester));
+        }
+
+        /// <summary>
+        /// The approving vote's block, applied while this node's storage fails to read the refund due: the block is not
+        /// taken as applied (it was, with no credit written), and the withdrawal store is marked to be rebuilt. A fault in
+        /// what the vote says still answers "no refund" and the block applies.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task StateData_ARefundThatCannotBeRead_FailsTheApprovingVotesBlock(bool localFault)
+        {
+            var c = OpenCancellation();
+            VBTCCancellationVoting.ApplyVote(VoteTx(c.CancellationUID, "xVal1", true, CancelHeight + 1));
+            VBTCCancellationVoting.ApplyVote(VoteTx(c.CancellationUID, "xVal2", true, CancelHeight + 1));
+            var deciding = VoteTx(c.CancellationUID, "xVal3", true, CancelHeight + 2);
+            Assert.Equal(VBTCCancellationVoting.Outcome.Approved, VBTCCancellationVoting.ApplyVote(deciding).Outcome);
+            var block = new Block { Height = CancelHeight + 2, Hash = "vote-block", PrevHash = "prev", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction> { deciding } };
+
+            VBTCCancellationVoting.RefundReadForTests = _ => throw (localFault ? new System.IO.IOException("disk") : new FormatException("data"));
+            bool applied;
+            try { applied = await StateData.UpdateTreis(block); }
+            finally { VBTCCancellationVoting.RefundReadForTests = null; }
+
+            Assert.Equal(!localFault, applied);
+            Assert.Equal(localFault, VBTCWithdrawalStoreRebuildService.IsUnfinished);
+            Assert.Equal(0.0006M, LedgerBalance(Vault, Requester));   // no credit either way; a failed block is not counted
+            VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests();
         }
 
         [Fact]

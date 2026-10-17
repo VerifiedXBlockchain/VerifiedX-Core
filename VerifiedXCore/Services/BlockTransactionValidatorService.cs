@@ -1571,6 +1571,11 @@ namespace VerifiedXCore.Services
                             if (function == "Sale_Complete()" || function == "M_Sale_Complete()")
                             {
                                 var localFromAddress = AccountData.GetSingleAccount(tx.FromAddress);
+                                // This wallet's completion, mined: its bid is used, whatever route the completion took (sent
+                                // from this node, signed elsewhere, or relayed by another node), so a re-minted UID cannot
+                                // have it paid again.
+                                if (localFromAddress != null)
+                                    VerifiedXCore.Models.DST.Bid.MarkUsedByCompletion(tx);
 
                                 var scUID = (string?)jobj["ContractUID"];
                                 if(scUID != null)

@@ -899,6 +899,9 @@ namespace VerifiedXCore.Services
 
             scTx.Signature = signature;
 
+            // The bid this completion pays is used (as in CompleteSaleSmartContractTX): a re-minted UID cannot have it paid again.
+            Bid.MarkAutoCompleted(account.Address, keySign, scUID);
+
             try
             {
                 if (scTx.TransactionRating == null)
@@ -2006,6 +2009,11 @@ namespace VerifiedXCore.Services
                 return (null, "Failed to create signature."); //TX sig failed
 
             scTx.Signature = signature;
+
+            // This wallet's bid is used once it pays it, by hand as automatically (the automatic path marks it first too):
+            // a burned and re-minted UID clears the chain's purchase keys, so the same bid signature verifies again in a
+            // new sale start, and a bid still marked unused would be paid automatically a second time.
+            Bid.MarkAutoCompleted(account.Address, keySign, scUID);
 
             try
             {

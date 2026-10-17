@@ -125,6 +125,70 @@ namespace VerifiedXCore.Tests
         private Transaction PendingNftTransfer(string uid) => Signed(_holder, _owner.Address, TransactionType.NFT_TX,
             new[] { new { Function = "Transfer()", ContractUID = uid, ToAddress = _owner.Address, Data = "" } }, 0);
 
+        /// <summary>
+        /// D18: an owner's Transfer() of an NFT and its own sale start of the same NFT, in one block, each passed against
+        /// the owner before the block; applied together the new owner held an NFT locked into the old owner's sale. From
+        /// PathAuditRulesHeight a block moves or sells a contract, not both (either order); below it history replays as it was.
+        /// </summary>
+        [Fact]
+        public async Task D18_ATransferAndASaleOfOneNft_InOneBlock_TheSecondIsRefused()
+        {
+            SeedNft(Nft);
+            var transfer = PendingNftTransfer(Nft);
+            var sale = SaleStart(Nft);
+            Assert.True((await TransactionValidatorService.VerifyTX(transfer, blockDownloads: false, blockVerify: true)).Item1);
+            Assert.True((await TransactionValidatorService.VerifyTX(sale, blockDownloads: false, blockVerify: true)).Item1);
+
+            foreach (var (first, second) in new[] { (transfer, sale), (sale, transfer) })
+            {
+                var steps = new LedgerIntegrityRules.NftStepState();
+                Assert.Null(LedgerIntegrityRules.RegisterNftStepInBlock(first, steps, Globals.PathAuditRulesHeight));
+                var refused = LedgerIntegrityRules.RegisterNftStepInBlock(second, steps, Globals.PathAuditRulesHeight);
+                Assert.NotNull(refused);
+                Assert.StartsWith(LedgerIntegrityRules.NftMoveAndSaleInBlock, refused);
+                Assert.False(BlockValidatorService.IsStateCorruptionSignal(refused));   // a producer's fault: no restore or rebuild
+            }
+            // The producer keeps them apart the same way (ProcessTxPool's final pass): one goes in this block, the other waits.
+            var tip = Globals.LastBlock;
+            Globals.LastBlock = new Block { Height = Globals.PathAuditRulesHeight - 1 };
+            try
+            {
+                Assert.Equal(new[] { sale.Hash }, TransactionData.DropDuplicateContractCreations(new List<Transaction> { sale, transfer }).Select(x => x.Hash));
+                Assert.Equal(new[] { transfer.Hash }, TransactionData.DropDuplicateContractCreations(new List<Transaction> { transfer, sale }).Select(x => x.Hash));
+            }
+            finally { Globals.LastBlock = tip; }
+
+            // A plain payment whose Data only carries a Transfer() of the NFT moves nothing: it does not crowd the sale out.
+            var lookalike = new Transaction
+            {
+                FromAddress = _other.Address, ToAddress = _owner.Address, Amount = 1M, Fee = 0.00001M, Nonce = 0, Timestamp = TimeUtil.GetTime(),
+                TransactionType = TransactionType.TX, Data = JsonConvert.SerializeObject(new[] { new { Function = "Transfer()", ContractUID = Nft, ToAddress = _owner.Address } }),
+            };
+            var withLookalike = new LedgerIntegrityRules.NftStepState();
+            Assert.Null(LedgerIntegrityRules.RegisterNftStepInBlock(lookalike, withLookalike, Globals.PathAuditRulesHeight));
+            Assert.Null(LedgerIntegrityRules.RegisterNftStepInBlock(sale, withLookalike, Globals.PathAuditRulesHeight));
+            // Nor does an NFT_SALE carrying a function the chain does not run: it does not crowd the owner's transfer out.
+            var noOpSale = new Transaction
+            {
+                FromAddress = _other.Address, ToAddress = _other.Address, Amount = 0M, Fee = 0.00001M, Nonce = 0, Timestamp = TimeUtil.GetTime(),
+                TransactionType = TransactionType.NFT_SALE, Data = JsonConvert.SerializeObject(new { Function = "Nothing()", ContractUID = Nft }),
+            };
+            var withNoOp = new LedgerIntegrityRules.NftStepState();
+            Assert.Null(LedgerIntegrityRules.RegisterNftStepInBlock(noOpSale, withNoOp, Globals.PathAuditRulesHeight));
+            Assert.Null(LedgerIntegrityRules.RegisterNftStepInBlock(transfer, withNoOp, Globals.PathAuditRulesHeight));
+
+            var below = new LedgerIntegrityRules.NftStepState();
+            Assert.Null(LedgerIntegrityRules.RegisterNftStepInBlock(transfer, below, Globals.PathAuditRulesHeight - 1));
+            Assert.Null(LedgerIntegrityRules.RegisterNftStepInBlock(sale, below, Globals.PathAuditRulesHeight - 1));
+
+            // What the guard keeps out: applied together, the new owner holds an NFT locked into the old owner's sale.
+            await StateData.UpdateTreis(new Block { Height = 5, StateRoot = "root", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction> { transfer, sale } });
+            var record = SmartContractStateTrei.GetSmartContractState(Nft)!;
+            Assert.Equal(_owner.Address, record.OwnerAddress);
+            Assert.True(record.IsLocked);
+            Assert.Equal(_other.Address, record.NextOwner);
+        }
+
         [Fact]
         public async Task NEW08_FollowUp_NftSale_BlockVerificationIgnoresTheLocalMempool()
         {

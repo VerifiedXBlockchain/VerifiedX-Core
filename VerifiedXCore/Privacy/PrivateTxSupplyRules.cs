@@ -95,9 +95,11 @@ namespace VerifiedXCore.Privacy
 
         /// <summary>
         /// Committed shielded supply of an asset as the floor judges it at <paramref name="height"/>: the pool row's
-        /// TotalShieldedSupply (0 when there is no row yet) plus, before the proof-rules epoch, the asset's entry in
-        /// Globals.ShieldedSupplyCorrections, which adds back what the forged mainnet unshields subtracted from the counter.
-        /// 0 when the store cannot be judged (see <see cref="TryCommittedSupply"/>), so no debit passes.
+        /// TotalShieldedSupply plus, before the proof-rules epoch, the asset's entry in Globals.ShieldedSupplyCorrections,
+        /// which adds back what the forged mainnet unshields subtracted from the counter; only a counter that went through
+        /// the forged blocks gets it. 0 when the store cannot be judged (see <see cref="TryCommittedSupply"/>), so no debit
+        /// passes: no row, or a row that cannot be read, is no supply at all (the correction alone used to stand as about
+        /// 100,033 VFX the pool could pay out on a node whose privacy store was wiped and not rebuilt).
         /// </summary>
         public static decimal CommittedSupply(string asset, long height) =>
             TryCommittedSupply(asset, height, out var supply) ? supply : 0M;
@@ -129,7 +131,10 @@ namespace VerifiedXCore.Privacy
                 ErrorLogUtility.LogError($"{UnreadableStoreReason} The {asset} pool row is missing.", "PrivateTxSupplyRules.TryCommittedSupply()");
                 return false;
             }
-            supply = (row?.TotalShieldedSupply ?? 0M) + (corrected ? correction : 0M);
+            // Only a counter that went through the forged blocks holds the debits the correction undoes: a row made again
+            // from nothing, or left by a rebuild that stopped before them, gets none.
+            var applies = corrected && row != null && row.LastUpdateHeight >= Globals.ShieldedSupplyCorrectionsThroughHeight;
+            supply = (row?.TotalShieldedSupply ?? 0M) + (applies ? correction : 0M);
             return true;
         }
 

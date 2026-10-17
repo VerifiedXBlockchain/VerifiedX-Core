@@ -94,6 +94,110 @@ namespace VerifiedXCore.Tests
             Assert.False(await BlockValidatorService.ValidateBlock(onStoredTip, true));
         }
 
+        /// <summary>
+        /// A restore brings the withdrawal store back as the slot held it: it does not clear a rebuild left unfinished
+        /// (blocks stay held until a rebuild finishes).
+        /// </summary>
+        [Fact]
+        public async Task SuccessfulRestore_LeavesAnUnfinishedWithdrawalStoreRebuildUnfinished()
+        {
+            await ChainWithSlotAt45_ThatFailsToReplay();
+            Globals.ValidatorBondHeight = _priorBondHeight;
+            BlockchainData.GetBlocks().DeleteManySafe(x => x.Height > 45);
+            for (long h = 46; h <= 48; h++) AddBlock(h);
+            VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.SetUnfinishedForTests(true);
+            Assert.True(await SnapshotRestoreUtility.TryRestoreAsync(48));
+            Assert.True(VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsUnfinished);
+            VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.SetUnfinishedForTests(false);
+        }
+
+        /// <summary>
+        /// A store a block's apply lost a write to needs the state rebuilt with it. A restore that wipes both, copies them
+        /// back from one slot and replays every block above it lifts that; one whose replay fails does not.
+        /// </summary>
+        [Fact]
+        public async Task SuccessfulRestore_RebuildsAStoreThatNeededTheStateRebuilt_AFailedOneDoesNot()
+        {
+            await ChainWithSlotAt45_ThatFailsToReplay();
+            VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.MarkNeedsStateRebuild("test");
+            try
+            {
+                Assert.False(await SnapshotRestoreUtility.TryRestoreAsync(48));
+                Assert.True(VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsUnfinished);
+
+                Globals.ValidatorBondHeight = _priorBondHeight;
+                BlockchainData.GetBlocks().DeleteManySafe(x => x.Height > 45);
+                for (long h = 46; h <= 48; h++) AddBlock(h);
+                Assert.True(await SnapshotRestoreUtility.TryRestoreAsync(48));
+                Assert.False(VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsUnfinished);
+                Assert.False(VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+            }
+            finally { VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests(); }
+        }
+
+        /// <summary>
+        /// D37: a caster's fork self-heal rolled the tip back on its own flag while a desync reconcile, a readiness recovery
+        /// or a fork-correction reorg on the same node held the recovery interlock; two writers that each read the tip
+        /// before either removed it reversed its payment twice in state (the sender refunded twice). The self-heal now
+        /// takes the same interlock: while another recovery holds it, it stands down and rolls nothing back.
+        /// </summary>
+        [Fact(Timeout = 60_000)]
+        public async Task CasterForkSelfHeal_WhileAnotherRecoveryHoldsTheInterlock_RollsNothingBack()
+        {
+            const string sender = "xSelfHealSender00000000000000000001";
+            const string recipient = "xSelfHealRecipient000000000000000001";
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = sender, Balance = 100M, Nonce = 1 });
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = recipient, Balance = 10M });
+            AddBlock(4);
+            var tip = new Block
+            {
+                Height = 5, Hash = "hash-5", PrevHash = "hash-4", StateRoot = "root-5", Timestamp = TimeUtil.GetTime(),
+                Transactions = new List<Transaction>
+                {
+                    new Transaction { Hash = "pay-1", FromAddress = sender, ToAddress = recipient, Amount = 10M, Fee = 0.0001M, TransactionType = TransactionType.TX, Height = 5 },
+                },
+            };
+            BlockchainData.GetBlocks().InsertSafe(tip);
+            Globals.LastBlock = tip;
+
+            ForkRecoveryUtility.SetRecoveryInProgressForTests(true);   // a RecoverAsync / ReorgToBranch is mid-rollback
+            try
+            {
+                var selfHeal = typeof(VerifiedXCore.Nodes.BlockcasterNode).GetMethod("ForkRecoveryAsync",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+                await (Task)selfHeal.Invoke(null, new object[] { 5L })!;
+                Assert.True(ForkRecoveryUtility.IsRecoveryInProgress);   // the holder's interlock is left as it was
+            }
+            finally { ForkRecoveryUtility.SetRecoveryInProgressForTests(false); }
+
+            Assert.Equal(100M, StateData.GetSpecificAccountStateTrei(sender)!.Balance);     // no refund from a second writer
+            Assert.Equal(10M, StateData.GetSpecificAccountStateTrei(recipient)!.Balance);
+            Assert.NotNull(BlockchainData.GetBlockByHeight(5));                             // the tip is left to the holder
+            Assert.Equal(5, Globals.LastBlock.Height);
+        }
+
+        /// <summary>
+        /// While the withdrawal store is unfinished (blocks are held, so the node falls behind on purpose), fork recovery
+        /// waits: rolling back or restoring then would stop the rebuild that makes the store whole. Afterwards it runs.
+        /// </summary>
+        [Fact]
+        public async Task ForkRecovery_WaitsWhileTheWithdrawalStoreIsUnfinished()
+        {
+            for (long h = 1; h <= 5; h++) AddBlock(h);
+            Globals.LastBlock = BlockchainData.GetBlocks().FindOne(x => x.Height == 5);
+            VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.SetUnfinishedForTests(true);
+            try
+            {
+                Assert.False(await ForkRecoveryUtility.RecoverAsync(5, "test"));
+                Assert.False(await ForkRecoveryUtility.ReorgToBranchAsync(5, "other-5", "127.0.0.1", "test"));
+                Assert.False(await ForkRecoveryUtility.DeepReorgAsync(5, "other-5", "127.0.0.1", "test"));
+                Assert.Equal(5, Globals.LastBlock.Height);
+                Assert.NotNull(BlockchainData.GetBlocks().FindOne(x => x.Height == 5));   // nothing rolled back
+                Assert.False(ForkRecoveryUtility.IsRecoveryInProgress);
+            }
+            finally { VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.SetUnfinishedForTests(false); }
+        }
+
         [Fact]
         public async Task ARestoreThatStopsAfterRemovingBlocks_HasAlreadyDroppedTheirDeletionRecords()
         {

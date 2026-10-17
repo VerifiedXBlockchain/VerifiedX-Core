@@ -42,14 +42,18 @@ namespace VerifiedXCore.Bitcoin.Attestation
             // flagged (a rewind taken back half-way is state no other node has). It does not stop the chain.
             try
             {
+                RewindStepForTests?.Invoke(vfxHeight);
                 TakeBack(bitcoinHeight, rewind, vfxHeight, db);
             }
             catch (Exception ex)
             {
+                VerifiedXCore.Data.StateData.NoteWithdrawalStoreStepFailed(vfxHeight, ex); // taking back writes the request rows
                 ErrorLogUtility.LogError($"Bitcoin rewind to {bitcoinHeight} ({rewind?.Hash}) failed part-way: {ex}", "BtcWithdrawals.OnRewind()");
                 throw;
             }
         }
+
+        internal static Action<long>? RewindStepForTests;
 
         private static void TakeBack(long bitcoinHeight, Transaction rewind, long vfxHeight, LiteDatabase? db)
         {

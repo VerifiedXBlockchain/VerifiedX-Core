@@ -305,7 +305,10 @@ namespace VerifiedXCore.Bitcoin.Services
             IEnumerable<BlockchainScripthashListunspentResult> utxos, ulong amountSats,
             HashSet<string>? preferredOutpoints, bool smallestSufficientFirst)
         {
-            var sorted = SortUtxosDeterministic(utxos);
+            // Only confirmed coins fund a withdrawal (Electrum height 0 is the mempool, -1 an unconfirmed parent). A coin
+            // still in the mempool can be replaced by its sender, which voids the payout built on it - after the COMPLETE
+            // that burned the holder's vBTC was already sent.
+            var sorted = SortUtxosDeterministic(utxos.Where(u => u.Height > 0));
             bool IsPreferred(BlockchainScripthashListunspentResult u) =>
                 preferredOutpoints is { Count: > 0 } && preferredOutpoints.Contains($"{u.TxHash}:{u.TxPos}".ToLowerInvariant());
 
@@ -324,6 +327,29 @@ namespace VerifiedXCore.Bitcoin.Services
             }
 
             return preferred.Concat(rest).ToList();
+        }
+
+        /// <summary>
+        /// Why the coins selected for a withdrawal fall short of its amount. Coins other withdrawals' signed transactions
+        /// hold, and coins not yet confirmed (never selected: their sender could replace them), free up with time: such a
+        /// shortfall is marked transient, so a caller retries instead of treating the vault as unable to pay (a bridge exit
+        /// blacklisted a vault for a day while its own change from the last payout waited for one confirmation).
+        /// </summary>
+        internal static string ShortfallReason(IEnumerable<BlockchainScripthashListunspentResult> utxos,
+            IEnumerable<BlockchainScripthashListunspentResult> spendable, ulong totalInputAmount, ulong amountToSend)
+        {
+            var excludedSats = (ulong)utxos.Sum(u => (decimal)u.Value) - (ulong)spendable.Sum(u => (decimal)u.Value);
+            if (excludedSats > 0 && totalInputAmount + excludedSats >= amountToSend)
+            {
+                // Enough coins exist, but other withdrawals' signed transactions hold them. They free up
+                // when those transactions confirm (or are reclaimed) — retryable, not a vault problem.
+                return $"{PinnedCoinsShortfallMarker} Not enough free coins right now: {excludedSats * SatoshiMultiplier:F8} BTC is held by other withdrawals in flight. Required: {amountToSend * SatoshiMultiplier:F8} BTC, free: {totalInputAmount * SatoshiMultiplier:F8} BTC. Try again once they confirm. {TransientUtxoErrorMarker}";
+            }
+            // Held and unconfirmed coins together: a shortfall that both would cover frees up with time as well.
+            var unconfirmedSats = (ulong)spendable.Where(u => u.Height <= 0).Sum(u => (decimal)u.Value);
+            if (unconfirmedSats > 0 && totalInputAmount + excludedSats + unconfirmedSats >= amountToSend)
+                return $"Not enough confirmed, free coins yet: {unconfirmedSats * SatoshiMultiplier:F8} BTC is waiting for its first confirmation and {excludedSats * SatoshiMultiplier:F8} BTC is held by other withdrawals in flight. Required: {amountToSend * SatoshiMultiplier:F8} BTC, available now: {totalInputAmount * SatoshiMultiplier:F8} BTC. Try again once they confirm. {TransientUtxoErrorMarker}";
+            return $"Insufficient funds. Required: {amountToSend * SatoshiMultiplier:F8} BTC, Available: {totalInputAmount * SatoshiMultiplier:F8} BTC";
         }
 
         /// <summary>
@@ -443,18 +469,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
 
                 if (totalInputAmount < amountToSend)
-                {
-                    var excludedSats = (ulong)utxos.Sum(u => (decimal)u.Value) - (ulong)spendable.Sum(u => (decimal)u.Value);
-                    if (excludedSats > 0 && totalInputAmount + excludedSats >= amountToSend)
-                    {
-                        // Enough coins exist, but other withdrawals' signed transactions hold them. They free up
-                        // when those transactions confirm (or are reclaimed) — retryable, not a vault problem.
-                        return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(),
-                            $"{PinnedCoinsShortfallMarker} Not enough free coins right now: {excludedSats * SatoshiMultiplier:F8} BTC is held by other withdrawals in flight. Required: {amountToSend * SatoshiMultiplier:F8} BTC, free: {totalInputAmount * SatoshiMultiplier:F8} BTC. Try again once they confirm. {TransientUtxoErrorMarker}");
-                    }
                     return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(),
-                        $"Insufficient funds. Required: {amountToSend * SatoshiMultiplier:F8} BTC, Available: {totalInputAmount * SatoshiMultiplier:F8} BTC");
-                }
+                        ShortfallReason(utxos, spendable, totalInputAmount, amountToSend));
 
                 // Safety check: the payout left after the fee must be a relayable output.
                 if (feeEstimate >= amountToSend || amountToSend - feeEstimate < (ulong)VBTCService.TaprootDustSats)

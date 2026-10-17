@@ -4706,8 +4706,22 @@ namespace VerifiedXCore.Nodes
             if (Interlocked.CompareExchange(ref _forkRecoveryInProgress, 1, 0) != 0)
                 return;
 
+            var holdsRecovery = false;
             try
             {
+                // One rollback writer at a time. A desync reconcile, a readiness recovery or a fork-correction reorg on
+                // this node holds the same interlock; two writers that each read the tip before either removed it
+                // reversed its transactions twice in state (a payment refunded twice). This self-heal stands down for the
+                // round and the next stuck round tries again. It holds the interlock for its rollback only: block
+                // validation drops blocks while a recovery holds it outside a download phase, so the resync below runs
+                // without it, as before.
+                if (!ForkRecoveryUtility.TryEnterRecovery())
+                {
+                    CasterLogUtility.Log($"FORK-RECOVERY: another recovery or reorg is running at height {stuckHeight}; this self-heal stands down.", "FORK-RECOVERY");
+                    return;
+                }
+                holdsRecovery = true;
+
                 CasterLogUtility.Log(
                     $"FORK-RECOVERY: Initiating self-heal at height {stuckHeight}. " +
                     $"Stuck for {_forkStuckRounds} rounds. Hash sync failed {_hashSyncFailCount} times.",
@@ -4722,7 +4736,13 @@ namespace VerifiedXCore.Nodes
                 // Step 2: Roll back the bad block using fast incremental path
                 CasterLogUtility.Log($"FORK-RECOVERY: Rolling back 1 block from height {stuckHeight} (fast path)...", "FORK-RECOVERY");
                 var preRecoveryHash = Globals.LastBlock.Hash;
-                var rollbackResult = await BlockRollbackUtility.RollbackBlocksFast(1);
+                bool rollbackResult;
+                try { rollbackResult = await BlockRollbackUtility.RollbackBlocksFast(1); }
+                finally
+                {
+                    ForkRecoveryUtility.ExitRecovery();
+                    holdsRecovery = false;
+                }
                 if (rollbackResult)
                 {
                     ForkRecoveryUtility.DropApprovalOfRolledBack(stuckHeight, preRecoveryHash);
@@ -4783,6 +4803,7 @@ namespace VerifiedXCore.Nodes
             }
             finally
             {
+                if (holdsRecovery) ForkRecoveryUtility.ExitRecovery();
                 Interlocked.Exchange(ref _forkRecoveryInProgress, 0);
             }
         }

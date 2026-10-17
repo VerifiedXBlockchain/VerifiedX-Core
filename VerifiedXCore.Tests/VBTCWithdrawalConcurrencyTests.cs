@@ -304,6 +304,52 @@ namespace VerifiedXCore.Tests
             Assert.Equal(new[] { "aa", "cc", "dd" }, ordered.Skip(1).Select(u => u.TxHash));
         }
 
+        /// <summary>
+        /// C-060: a coin still in the mempool (Electrum height 0) or with an unconfirmed parent (-1) never funds a
+        /// withdrawal: its sender could replace it and void the payout after the COMPLETE burned the holder's vBTC.
+        /// Before, it was ordered like any other coin, and a deposit just above the amount was picked first.
+        /// </summary>
+        [Fact]
+        public void Selection_UnconfirmedCoinsNeverFundAWithdrawal()
+        {
+            var replaceable = new BlockchainScripthashListunspentResult { TxHash = "ee", TxPos = 0, Value = 55_000, Height = 0 };
+            var unconfirmedParent = new BlockchainScripthashListunspentResult { TxHash = "ff", TxPos = 0, Value = 2_000_000, Height = -1 };
+            var utxos = new[] { Utxo("aa", 0, 1_000_000), replaceable, unconfirmedParent, Utxo("bb", 0, 60_000) };
+
+            foreach (var active in new[] { true, false })
+            {
+                var ordered = BitcoinTransactionService.OrderUtxosForSelection(utxos, 50_000, null, smallestSufficientFirst: active);
+                Assert.DoesNotContain(ordered, u => u.Height <= 0);
+                Assert.Equal(active ? new[] { "bb", "aa" } : new[] { "aa", "bb" }, ordered.Select(u => u.TxHash));
+            }
+        }
+
+        /// <summary>
+        /// A shortfall that only coins still waiting for their first confirmation would cover is transient (the caller
+        /// retries; a bridge exit must not blacklist the vault for a day while its change confirms). One that no coin
+        /// covers is plain insufficient funds.
+        /// </summary>
+        [Fact]
+        public void Shortfall_CoveredOnlyByUnconfirmedCoins_IsTransient()
+        {
+            var change = new BlockchainScripthashListunspentResult { TxHash = "cc", TxPos = 1, Value = 90_000, Height = 0 };
+            var coins = new[] { Utxo("aa", 0, 20_000), change };
+            var waiting = BitcoinTransactionService.ShortfallReason(coins, coins, 20_000, 50_000);
+            Assert.Contains(BitcoinTransactionService.TransientUtxoErrorMarker, waiting);
+            Assert.Contains("confirmation", waiting);
+
+            var notEnough = BitcoinTransactionService.ShortfallReason(coins, coins, 20_000, 500_000);
+            Assert.DoesNotContain(BitcoinTransactionService.TransientUtxoErrorMarker, notEnough);
+            Assert.StartsWith("Insufficient funds", notEnough);
+
+            // Held (another withdrawal's pin) and unconfirmed together: neither alone covers it, both together do.
+            var held = Utxo("hh", 0, 30_000);
+            var all = new[] { Utxo("aa", 0, 20_000), held, new BlockchainScripthashListunspentResult { TxHash = "cc", TxPos = 1, Value = 30_000, Height = 0 } };
+            var free = all.Where(u => u.TxHash != "hh").ToArray();
+            var mixed = BitcoinTransactionService.ShortfallReason(all, free, 20_000, 75_000);
+            Assert.Contains(BitcoinTransactionService.TransientUtxoErrorMarker, mixed);
+        }
+
         [Fact]
         public void Selection_Active_NoSingleCoinCovers_LargestFirst()
         {

@@ -1291,6 +1291,7 @@ namespace VerifiedXCore.Data
         public static List<Transaction> DropDuplicateContractCreations(List<Transaction> approved)
         {
             var created = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // LiteDB lookups ignore case
+            var nftSteps = new LedgerIntegrityRules.NftStepState();               // D18: a contract moved or sold, not both
             var blockedSenders = new HashSet<string>(StringComparer.Ordinal);
             var result = new List<Transaction>();
             foreach (var tx in approved)
@@ -1301,7 +1302,11 @@ namespace VerifiedXCore.Data
                 // Globals.PathAuditRulesHeight one per vault deposit address), so a proposal never carries what its own
                 // validation refuses: two such creations in the mempool would otherwise have every producer build a
                 // block it then rejects, for as long as both sat there.
-                var duplicate = LedgerIntegrityRules.RegisterCreationInBlock(tx, created, (Globals.LastBlock?.Height ?? 0) + 1);
+                var nextHeight = (Globals.LastBlock?.Height ?? 0) + 1;
+                // Likewise a transfer or burn and a sale of one NFT: an owner who lists an NFT and then sends it has both
+                // admitted; the later one waits for the next block instead of making every producer's block refused.
+                var duplicate = LedgerIntegrityRules.RegisterCreationInBlock(tx, created, nextHeight)
+                                ?? LedgerIntegrityRules.RegisterNftStepInBlock(tx, nftSteps, nextHeight);
                 if (duplicate != null)
                 {
                     if (tx.FromAddress != null) blockedSenders.Add(tx.FromAddress);

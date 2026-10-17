@@ -283,6 +283,103 @@ namespace VerifiedXCore.Tests
             return bid;
         }
 
+        /// <summary>
+        /// D18: a buyer who completes a sale by hand uses the bid as the automatic completion does. Otherwise a burn and
+        /// re-mint of the same UID (which clears the chain's purchase keys) let the old bid signature start a new sale that
+        /// this wallet paid automatically, a second time.
+        /// </summary>
+        [Fact]
+        public async Task ManualCompletion_UsesTheBid_SoARecycledUidCannotAutoPayItAgain()
+        {
+            TipAtGate();
+            AccountData.GetAccounts().InsertSafe(new Account { Address = _victim.Address, PublicKey = _victim.Pub, PrivateKey = "0" + _victim.Key.secret.ToString("x") });
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = _victim.Address, Balance = 1000M, Nonce = 0 });
+            var nft = ListedNft();
+            var state = SmartContractStateTrei.GetSmartContractState(nft)!;
+            state.IsLocked = true;
+            state.NextOwner = _victim.Address;
+            state.PurchaseAmount = 500M;
+            SmartContractStateTrei.UpdateSmartContract(state);
+            SaveSentBid("key-manual", nft, BidStatus.Accepted, TimeUtil.GetTime());
+            Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-manual", 500M, nft));
+
+            // The buyer completes by hand (DSTV1Controller.CompleteNFTPurchase's call).
+            await SmartContractService.CompleteSaleSmartContractTX(nft, _seller.Address, 500M, "key-manual");
+
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-manual", 500M, nft));
+        }
+
+        /// <summary>
+        /// The other completions use the bid too: a Sale_Complete or M_Sale_Complete this wallet sends raw (signed
+        /// elsewhere), marked by Bid.MarkUsedByCompletion on the raw send path, and the controller's transfer-sale
+        /// completion. Another sale transaction, or another purchase key, leaves the bid as it is.
+        /// </summary>
+        [Fact]
+        public void ACompletionSentRaw_UsesTheBid_AnotherSaleTransactionDoesNot()
+        {
+            var nft = ListedNft();
+            SaveSentBid("key-raw", nft, BidStatus.Accepted, TimeUtil.GetTime());
+            Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-raw", 500M, nft));
+            Transaction Sale(string function, string key) => new Transaction
+            {
+                FromAddress = _victim.Address, ToAddress = _seller.Address, TransactionType = TransactionType.NFT_SALE,
+                Data = JsonConvert.SerializeObject(new { Function = function, ContractUID = nft, KeySign = key }),
+            };
+
+            Bid.MarkUsedByCompletion(Sale("Sale_Cancel()", "key-raw"));
+            Bid.MarkUsedByCompletion(Sale("M_Sale_Complete()", "another-key"));
+            Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-raw", 500M, nft));
+
+            Bid.MarkUsedByCompletion(Sale("M_Sale_Complete()", "key-raw"));
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-raw", 500M, nft));
+        }
+
+        /// <summary>
+        /// A completion this wallet sent, mined in a block, uses its bid whatever route it took (from this node, signed
+        /// elsewhere, or relayed by another node): the wallet's processing of its own mined transactions marks it.
+        /// </summary>
+        [Fact]
+        public async Task AMinedCompletionFromThisWallet_UsesItsBid_WhateverRouteItTook()
+        {
+            AccountData.GetAccounts().InsertSafe(new Account { Address = _victim.Address, PublicKey = _victim.Pub, PrivateKey = "0" + _victim.Key.secret.ToString("x") });
+            var nft = ListedNft();
+            SaveSentBid("key-mined", nft, BidStatus.Accepted, TimeUtil.GetTime());
+            Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-mined", 500M, nft));
+            var completion = new Transaction
+            {
+                Hash = "mined-completion", FromAddress = _victim.Address, ToAddress = _seller.Address, Amount = 0M, Fee = 0M, Nonce = 0,
+                Timestamp = TimeUtil.GetTime(), TransactionType = TransactionType.NFT_SALE,
+                Data = JsonConvert.SerializeObject(new { Function = "Sale_Complete()", ContractUID = nft, KeySign = "key-mined", Transactions = new List<Transaction>() }),
+            };
+            await BlockTransactionValidatorService.ProcessOutgoingTransaction(completion, AccountData.GetSingleAccount(_victim.Address)!, Gate);
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-mined", 500M, nft));
+        }
+
+        /// <summary>
+        /// A completion this wallet sent that is replayed rather than processed live - a full state rebuild here, as also a
+        /// snapshot restore's replay or an account import's rescan - uses its bid too.
+        /// </summary>
+        [Fact]
+        public async Task AReplayedCompletionFromThisWallet_UsesItsBid()
+        {
+            AccountData.GetAccounts().InsertSafe(new Account { Address = _victim.Address, PublicKey = _victim.Pub, PrivateKey = "0" + _victim.Key.secret.ToString("x") });
+            var nft = ListedNft();
+            SaveSentBid("key-replayed", nft, BidStatus.Accepted, TimeUtil.GetTime());
+            Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-replayed", 500M, nft));
+            var completion = new Transaction
+            {
+                Hash = "replayed-completion", FromAddress = _victim.Address, ToAddress = _seller.Address, Amount = 0M, Fee = 0M, Nonce = 0,
+                Timestamp = TimeUtil.GetTime(), TransactionType = TransactionType.NFT_SALE,
+                Data = JsonConvert.SerializeObject(new { Function = "Sale_Complete()", ContractUID = nft, KeySign = "key-replayed", Transactions = new List<Transaction>() }),
+            };
+            BlockchainData.GetBlocks().InsertSafe(new Block { Height = 0, Hash = "g0", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction>() });
+            BlockchainData.GetBlocks().InsertSafe(new Block { Height = 1, Hash = "b1", PrevHash = "g0", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction> { completion } });
+
+            await VerifiedXCore.Utilities.BlockRollbackUtility.ResetTreis();
+
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-replayed", 500M, nft));
+        }
+
         [Fact]
         public void IncomingSale_FromARejectedOrExpiredOrUsedBid_IsNotCompleted()
         {

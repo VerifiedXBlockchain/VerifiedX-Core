@@ -4044,6 +4044,12 @@ namespace VerifiedXCore.Services
                         return (txResult, "ExitBurnTxHash must be a 32-byte hex string (optionally 0x-prefixed).");
 
                     var unlockGateHeight = blockHeight ?? (Globals.LastBlock.Height + 1);
+                    // From the path-audit height a lock is named by its own id exactly, as an exit names it: the lookup trims
+                    // and ignores case, and the block's guard compares ids as written, so an unlock under an alias ("L1 ")
+                    // and an exit under the real id drew the same lock in one block.
+                    if (unlockGateHeight >= Globals.PathAuditRulesHeight && VBTCBridgeLockState.GetByLockId(lockId) is { } named
+                        && !string.Equals(lockId, named.LockId, StringComparison.Ordinal))
+                        return (txResult, $"Bridge unlock must name the lock by its own id ({named.LockId}).");
                     var unlockStrict = unlockGateHeight >= Globals.BridgeBurnBindingHeight;
                     if (unlockStrict)
                     {
@@ -4492,6 +4498,7 @@ namespace VerifiedXCore.Services
         /// </summary>
         private static void ReportWithdrawalStoreGap(string? requestHash, string? scUID, Transaction tx)
         {
+            if (ReportedWithdrawalStoreGaps.Count >= 1_000) ReportedWithdrawalStoreGaps.Clear();   // logging only: bounded
             if (!ReportedWithdrawalStoreGaps.TryAdd($"{requestHash}|{scUID}", 0)) return;
             var text = $"WITHDRAWAL STORE: block transaction {tx.Hash} ({tx.TransactionType}) names withdrawal request {requestHash} on contract {scUID}, " +
                        "which this node's withdrawal table does not hold. The block is refused. If other nodes accept it, this node's withdrawal store is " +

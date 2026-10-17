@@ -119,6 +119,9 @@ namespace VerifiedXCore.Utilities
         /// <returns>True if recovery succeeded, false otherwise</returns>
         public static async Task<bool> RecoverAsync(long stuckHeight, string caller = "ForkRecovery", int blocksToRollback = ROLLBACK_DEPTH)
         {
+            if (WaitsForWithdrawalStore(caller, "FORK-RECOVERY"))
+                return false;
+
             // Prevent concurrent recovery attempts
             if (Interlocked.CompareExchange(ref _recoveryInProgress, 1, 0) != 0)
             {
@@ -416,6 +419,9 @@ namespace VerifiedXCore.Utilities
                 return false;
             }
 
+            if (WaitsForWithdrawalStore(caller, "REORG"))
+                return false;
+
             if (Interlocked.CompareExchange(ref _recoveryInProgress, 1, 0) != 0)
             {
                 LogUtility.Log($"[{caller}] REORG: recovery already in progress, skipping.", $"{caller}.Reorg");
@@ -546,6 +552,9 @@ namespace VerifiedXCore.Utilities
                 LogUtility.Log($"[{caller}] DEEP-REORG-REFUSED: invalid depth {depth} (divergence {divergenceHeight}, tip {myHeight}).", $"{caller}.DeepReorg");
                 return false;
             }
+
+            if (WaitsForWithdrawalStore(caller, "DEEP-REORG"))
+                return false;
 
             if (Interlocked.CompareExchange(ref _recoveryInProgress, 1, 0) != 0)
             {
@@ -816,6 +825,25 @@ namespace VerifiedXCore.Utilities
         /// Returns true if a recovery operation is currently in progress.
         /// </summary>
         public static bool IsRecoveryInProgress => Volatile.Read(ref _recoveryInProgress) != 0;
+
+        /// <summary>
+        /// While this node's withdrawal store is being rebuilt or left unfinished, block validation holds every block
+        /// (BlockValidatorService.ValidateBlock), so the node falls behind on purpose. Recovering then would roll back or
+        /// restore under the rebuild and stop it, over and over: recovery waits until the store is whole.
+        /// </summary>
+        private static bool WaitsForWithdrawalStore(string caller, string what)
+        {
+            if (!VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning) return false;
+            LogUtility.Log($"[{caller}] {what}: the withdrawal store is being rebuilt (blocks are held until it is whole); recovery waits.", $"{caller}.ForkRecovery");
+            return true;
+        }
         internal static void SetRecoveryInProgressForTests(bool running) => Interlocked.Exchange(ref _recoveryInProgress, running ? 1 : 0);
+
+        /// <summary>
+        /// For a rollback writer outside this class (the caster's self-heal): takes the interlock RecoverAsync,
+        /// ReorgToBranchAsync and DeepReorgAsync hold, so no two of them roll the same tip block back. False: another holds it.
+        /// </summary>
+        internal static bool TryEnterRecovery() => Interlocked.CompareExchange(ref _recoveryInProgress, 1, 0) == 0;
+        internal static void ExitRecovery() => Interlocked.Exchange(ref _recoveryInProgress, 0);
     }
 }

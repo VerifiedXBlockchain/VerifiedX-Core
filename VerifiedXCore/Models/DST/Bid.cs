@@ -461,6 +461,23 @@ namespace VerifiedXCore.Models.DST
             }
         }
 
+        /// <summary>
+        /// A sale completion this wallet sends (Sale_Complete or M_Sale_Complete, built here or signed elsewhere and sent
+        /// raw) pays the bid under its purchase key: that bid is used, so a re-minted UID cannot have it paid again.
+        /// </summary>
+        public static void MarkUsedByCompletion(Transaction? tx)
+        {
+            if (tx?.TransactionType != TransactionType.NFT_SALE || string.IsNullOrEmpty(tx.Data)) return;
+            try
+            {
+                var jobj = Newtonsoft.Json.Linq.JObject.Parse(tx.Data);
+                var function = jobj["Function"]?.ToObject<string?>();
+                if (function != "Sale_Complete()" && function != "M_Sale_Complete()") return;
+                MarkAutoCompleted(tx.FromAddress, jobj["KeySign"]?.ToObject<string?>(), jobj["ContractUID"]?.ToObject<string?>());
+            }
+            catch { }
+        }
+
         private static List<Bid> MatchingSentBids(string? bidderAddress, string? purchaseKey, string? smartContractUID) =>
             (GetAllBids(BidSendReceive.Sent) ?? new List<Bid>()).Where(b => b != null
                 && string.Equals(b.BidAddress, bidderAddress, StringComparison.Ordinal)

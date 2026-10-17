@@ -78,6 +78,31 @@ namespace VerifiedXCore.Models
         #endregion
 
         #region Get ReserveTransactions transaction
+        /// <summary>Tests only: runs as the row is read for a block's apply (a fault of this node's storage).</summary>
+        internal static Action? TestReadFault;
+
+        /// <summary>
+        /// The row a call-back names, for a block's apply. A fault of this node's storage is passed on, not read as "no
+        /// such row": a call-back that found no row was skipped, the block counted as applied, and the row later settled
+        /// to its payee here while peers refunded the sender. The apply catches it and reports the block's apply
+        /// incomplete. The read takes nothing from the transaction but the hash, so any failure of it - a lock timeout, a
+        /// corrupt page (LiteDB's own exceptions included) - is this node's storage, and is passed on as one.
+        /// (Validation and the API keep GetTransactions, which reads any fault as "no such row" and so refuses.)
+        /// </summary>
+        public static ReserveTransactions? GetTransactionsForApply(string hash)
+        {
+            var db = GetReserveTransactionsDb() ?? throw new System.IO.IOException("The reserve transactions store is not open.");
+            try
+            {
+                TestReadFault?.Invoke();
+                return db.Query().Where(x => x.Hash == hash).FirstOrDefault();
+            }
+            catch (Exception ex) when (ex is not System.IO.IOException)
+            {
+                throw new System.IO.IOException($"Reserve transaction {hash} could not be read: {ex.Message}", ex);
+            }
+        }
+
         public static ReserveTransactions? GetTransactions(string hash)
         {
             try

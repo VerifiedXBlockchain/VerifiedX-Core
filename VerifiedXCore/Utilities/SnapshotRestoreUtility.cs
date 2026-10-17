@@ -206,6 +206,8 @@ namespace VerifiedXCore.Utilities
                             {
                                 if (walletAddresses.Contains(tx.ToAddress) || walletAddresses.Contains(tx.FromAddress))
                                 {
+                                    // A sale completion this wallet sent uses its bid, as when it was first mined.
+                                    if (walletAddresses.Contains(tx.FromAddress)) VerifiedXCore.Models.DST.Bid.MarkUsedByCompletion(tx);
                                     var existing = walletTxs.FindOne(x => x.Hash == tx.Hash);
                                     if (existing == null)
                                     {
@@ -271,13 +273,14 @@ namespace VerifiedXCore.Utilities
 
                 // 8) State is verified consistent up to the target (slots above it were invalidated at step 4).
                 StateTreiStatusService.SetSynced(targetHeight);
+                // The withdrawal store was wiped, restored and replayed with the rest of the state.
+                VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.StateRestoredFromSnapshot();
 
                 sw.Stop();
                 Console.WriteLine($"[SnapshotRestore] SUCCESS: restored to height {targetHeight} (replayed {replayed} block(s), {walletTxInserts} wallet TX(s)) in {sw.Elapsed.TotalSeconds:F1}s.");
                 LogUtility.Log($"[SnapshotRestore] Success: slot={slot.SlotId} target={targetHeight} replayed={replayed} in {sw.ElapsedMilliseconds} ms", "SnapshotRestoreUtility");
                 restored = true;
                 _stateDestroyed = false;
-                VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.StoreRewrittenFromChain();
                 return true;
             }
             catch (Exception ex)
