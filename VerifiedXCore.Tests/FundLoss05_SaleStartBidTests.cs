@@ -245,6 +245,32 @@ namespace VerifiedXCore.Tests
             return bid;
         }
 
+        /// <summary>
+        /// D18: a buyer who completes a sale by hand uses the bid as the automatic completion does. Otherwise a burn and
+        /// re-mint of the same UID (which clears the chain's purchase keys) let the old bid signature start a new sale that
+        /// this wallet paid automatically, a second time.
+        /// </summary>
+        [Fact]
+        public async Task ManualCompletion_UsesTheBid_SoARecycledUidCannotAutoPayItAgain()
+        {
+            TipAtGate();
+            AccountData.GetAccounts().InsertSafe(new Account { Address = _victim.Address, PublicKey = _victim.Pub, PrivateKey = "0" + _victim.Key.secret.ToString("x") });
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = _victim.Address, Balance = 1000M, Nonce = 0 });
+            var nft = ListedNft();
+            var state = SmartContractStateTrei.GetSmartContractState(nft)!;
+            state.IsLocked = true;
+            state.NextOwner = _victim.Address;
+            state.PurchaseAmount = 500M;
+            SmartContractStateTrei.UpdateSmartContract(state);
+            SaveSentBid("key-manual", nft, BidStatus.Accepted, TimeUtil.GetTime());
+            Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-manual", 500M, nft));
+
+            // The buyer completes by hand (DSTV1Controller.CompleteNFTPurchase's call).
+            await SmartContractService.CompleteSaleSmartContractTX(nft, _seller.Address, 500M, "key-manual");
+
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-manual", 500M, nft));
+        }
+
         [Fact]
         public void IncomingSale_FromARejectedOrExpiredOrUsedBid_IsNotCompleted()
         {
