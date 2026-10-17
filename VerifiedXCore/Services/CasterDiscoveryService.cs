@@ -1502,8 +1502,14 @@ namespace VerifiedXCore.Services
                 ErrorLogUtility.LogError($"Invalid departure signature for {departure.DepartingAddress}", "CasterDiscoveryService");
                 return;
             }
-            // SEAT-HEAL: signers sign a Departure removal only on the member's own signed notice.
-            CasterSeatService.NoteDeparture(departure.DepartingAddress);
+            // SEAT-HEAL: signers sign a Departure removal only on the member's own signed notice, and a copy of an old
+            // one is not a departure: it neither counts as that evidence nor removes the member.
+            var staleNotice = CasterSeatService.NoteDepartureNotice(departure.DepartingAddress, departure.BlockHeight, Globals.LastBlock?.Height ?? 0);
+            if (staleNotice != null)
+            {
+                CasterLogUtility.Log($"DEPART: notice from {departure.DepartingAddress} ignored — {staleNotice}.", "DEPART");
+                return;
+            }
 
             var casterList = Globals.BlockCasters.ToList();
             if (!casterList.Any(c => c.ValidatorAddress == departure.DepartingAddress))

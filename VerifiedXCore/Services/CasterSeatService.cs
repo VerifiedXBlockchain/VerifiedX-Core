@@ -49,6 +49,9 @@ namespace VerifiedXCore.Services
         private static readonly ConcurrentDictionary<string, Absence> _absent = new(StringComparer.Ordinal);
         private static readonly ConcurrentDictionary<string, long> _maintenanceUntil = new(StringComparer.Ordinal);
         private static readonly ConcurrentDictionary<string, long> _departures = new(StringComparer.Ordinal);
+        /// <summary>Member → height of the last departure notice of its honored here.</summary>
+        private static readonly ConcurrentDictionary<string, long> _departureNoticeHeights = new(StringComparer.Ordinal);
+        private static readonly object _departureNoticeLock = new();
         private static readonly ConcurrentDictionary<string, long> _outdated = new(StringComparer.Ordinal);
         /// <summary>Member → (record seq, unix) of a removal we signed / a resume we approved. Mutual exclusion (C.3d).</summary>
         private static readonly ConcurrentDictionary<string, (long Seq, long At)> _removalSigned = new(StringComparer.Ordinal);
@@ -164,7 +167,7 @@ namespace VerifiedXCore.Services
 
         internal static void ResetForTests()
         {
-            _absent.Clear(); _maintenanceUntil.Clear(); _departures.Clear(); _outdated.Clear();
+            _absent.Clear(); _maintenanceUntil.Clear(); _departures.Clear(); _outdated.Clear(); _departureNoticeHeights.Clear();
             _removalSigned.Clear(); _resumeApproved.Clear();
             ResumeConfirmed = false; HeldByRecord = false; MaintenanceAnnounced = false;
             _lastRemovalAttempt = 0; _lastPromotionAttempt = 0; _lastResumeAttempt = 0;
@@ -237,6 +240,28 @@ namespace VerifiedXCore.Services
         // ── Signer rules ────────────────────────────────────────────────────────────────────────────
 
         public static void NoteDeparture(string address) => _departures[address] = TimeUtil.GetTime();
+
+        /// <summary>How far behind our tip a departure notice's height may be. Blocks are 12 s apart.</summary>
+        public const long DepartureNoticeMaxAgeBlocks = 10;
+
+        /// <summary>
+        /// Takes a member's verified departure notice as departure evidence, or says why not. The notice is signed over
+        /// its height alone, so a copy could be replayed at any time: it counts only near our tip, and once per member
+        /// (a notice at or below the height of one already honored is a copy).
+        /// </summary>
+        public static string? NoteDepartureNotice(string address, long noticeHeight, long tip)
+        {
+            if (noticeHeight > tip + 2 || tip - noticeHeight > DepartureNoticeMaxAgeBlocks)
+                return $"notice height {noticeHeight} is not within {DepartureNoticeMaxAgeBlocks} blocks of our tip {tip}";
+            lock (_departureNoticeLock)
+            {
+                if (_departureNoticeHeights.TryGetValue(address, out var honored) && noticeHeight <= honored)
+                    return $"a notice at height {honored} was already honored";
+                _departureNoticeHeights[address] = noticeHeight;
+            }
+            NoteDeparture(address);
+            return null;
+        }
         public static void NoteOutdated(string address) => _outdated[address] = TimeUtil.GetTime();
 
         /// <summary>

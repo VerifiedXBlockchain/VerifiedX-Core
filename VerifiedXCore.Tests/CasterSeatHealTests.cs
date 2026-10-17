@@ -111,6 +111,46 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ADepartureNotice_CountsOnlyNearOurTip_AndOnlyOnce()
+        {
+            var head = Head(changeType: "Demotion", changed: "RX");
+            Assert.NotNull(CasterSeatService.NoteDepartureNotice("RK28y", 1_000 - CasterSeatService.DepartureNoticeMaxAgeBlocks - 1, 1_000)); // an old copy
+            Assert.NotNull(CasterSeatService.NoteDepartureNotice("RK28y", 1_003, 1_000));                                                  // from ahead of the chain
+            Assert.NotNull(CasterSeatService.RemovalRefusal("Departure", "RK28y", head, TimeUtilNow()));
+
+            Assert.Null(CasterSeatService.NoteDepartureNotice("RK28y", 998, 1_000));
+            Assert.Null(CasterSeatService.RemovalRefusal("Departure", "RK28y", head, TimeUtilNow()));
+            Assert.NotNull(CasterSeatService.NoteDepartureNotice("RK28y", 998, 1_001));  // the same notice again
+            Assert.NotNull(CasterSeatService.NoteDepartureNotice("RK28y", 997, 1_001));  // an earlier one
+            Assert.Null(CasterSeatService.NoteDepartureNotice("RK28y", 1_001, 1_001));   // a later departure of the member
+        }
+
+        [Fact]
+        public async System.Threading.Tasks.Task AReplayedDepartureNotice_IsNotTakenAsADeparture()
+        {
+            var key = new VerifiedXCore.EllipticCurve.PrivateKey("secp256k1");
+            var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+            var address = VerifiedXCore.Data.AccountData.GetHumanAddress(pub);
+            CasterDepartureNotice NoticeAt(long height) => new()
+            {
+                DepartingAddress = address, BlockHeight = height,
+                DepartureSignature = SignatureService.CreateSignature($"DEPART|{address}|{height}", key, pub),
+            };
+            var head = Head(changeType: "Demotion", changed: "RX");
+            var priorTip = Globals.LastBlock;
+            try
+            {
+                Globals.LastBlock = new Block { Height = 5_000 };
+                await CasterDiscoveryService.HandleDeparture(NoticeAt(4_000)); // signed long ago, replayed now
+                Assert.NotNull(CasterSeatService.RemovalRefusal("Departure", address, head, TimeUtilNow()));
+
+                await CasterDiscoveryService.HandleDeparture(NoticeAt(4_999)); // the member leaving now
+                Assert.Null(CasterSeatService.RemovalRefusal("Departure", address, head, TimeUtilNow()));
+            }
+            finally { Globals.LastBlock = priorTip; }
+        }
+
+        [Fact]
         public void APromotionThatNeverTook_CanBeRolledBack()
         {
             var head = Head(changeType: "Promotion", changed: "RFzuJ");
