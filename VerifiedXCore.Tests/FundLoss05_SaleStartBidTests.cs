@@ -317,6 +317,31 @@ namespace VerifiedXCore.Tests
             Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-mined", 500M, nft));
         }
 
+        /// <summary>
+        /// A completion this wallet sent that is replayed rather than processed live - a full state rebuild here, as also a
+        /// snapshot restore's replay or an account import's rescan - uses its bid too.
+        /// </summary>
+        [Fact]
+        public async Task AReplayedCompletionFromThisWallet_UsesItsBid()
+        {
+            AccountData.GetAccounts().InsertSafe(new Account { Address = _victim.Address, PublicKey = _victim.Pub, PrivateKey = "0" + _victim.Key.secret.ToString("x") });
+            var nft = ListedNft();
+            SaveSentBid("key-replayed", nft, BidStatus.Accepted, TimeUtil.GetTime());
+            Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-replayed", 500M, nft));
+            var completion = new Transaction
+            {
+                Hash = "replayed-completion", FromAddress = _victim.Address, ToAddress = _seller.Address, Amount = 0M, Fee = 0M, Nonce = 0,
+                Timestamp = TimeUtil.GetTime(), TransactionType = TransactionType.NFT_SALE,
+                Data = JsonConvert.SerializeObject(new { Function = "Sale_Complete()", ContractUID = nft, KeySign = "key-replayed", Transactions = new List<Transaction>() }),
+            };
+            BlockchainData.GetBlocks().InsertSafe(new Block { Height = 0, Hash = "g0", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction>() });
+            BlockchainData.GetBlocks().InsertSafe(new Block { Height = 1, Hash = "b1", PrevHash = "g0", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction> { completion } });
+
+            await VerifiedXCore.Utilities.BlockRollbackUtility.ResetTreis();
+
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-replayed", 500M, nft));
+        }
+
         [Fact]
         public void IncomingSale_FromARejectedOrExpiredOrUsedBid_IsNotCompleted()
         {

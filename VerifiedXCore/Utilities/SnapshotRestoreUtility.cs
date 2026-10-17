@@ -206,6 +206,8 @@ namespace VerifiedXCore.Utilities
                             {
                                 if (walletAddresses.Contains(tx.ToAddress) || walletAddresses.Contains(tx.FromAddress))
                                 {
+                                    // A sale completion this wallet sent uses its bid, as when it was first mined.
+                                    if (walletAddresses.Contains(tx.FromAddress)) VerifiedXCore.Models.DST.Bid.MarkUsedByCompletion(tx);
                                     var existing = walletTxs.FindOne(x => x.Hash == tx.Hash);
                                     if (existing == null)
                                     {

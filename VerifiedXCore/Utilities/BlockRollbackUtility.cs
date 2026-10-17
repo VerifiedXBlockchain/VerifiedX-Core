@@ -888,6 +888,8 @@ namespace VerifiedXCore.Utilities
                             bool isRelevant = walletAddresses.Contains(tx.ToAddress) || walletAddresses.Contains(tx.FromAddress);
                             if (isRelevant)
                             {
+                                // A sale completion this wallet sent uses its bid, as when it was first mined.
+                                if (walletAddresses.Contains(tx.FromAddress)) VerifiedXCore.Models.DST.Bid.MarkUsedByCompletion(tx);
                                 var existing = txData.FindOne(x => x.Hash == tx.Hash);
                                 if (existing == null)
                                 {
