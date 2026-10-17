@@ -313,6 +313,14 @@ namespace VerifiedXCore.Services
 
         internal enum CasterGate { Allow, HashMismatch, Pending, Uncertified }
 
+        /// <summary>
+        /// The order block validation reads a block's transactions in: by sender, then nonce. The per-block guards (debits,
+        /// bridge state, nullifiers, one report per block) keep running state, so their verdicts depend on this order, and
+        /// a producer that judged its transactions in another order could build a block every receiver refuses.
+        /// </summary>
+        public static List<Transaction> InValidationOrder(IEnumerable<Transaction> transactions)
+            => transactions.OrderBy(x => x.FromAddress).ThenBy(x => x.Nonce).ToList();
+
         /// <summary>How old this node's tip may be for the next block to count as the live edge.</summary>
         internal const long LiveEdgeTipAgeSeconds = 120;
 
@@ -1039,10 +1047,7 @@ namespace VerifiedXCore.Services
                         // Process transactions ordered by nonce to ensure sequential validation
                         // NEW-13: the apply and the guard read tx.Height, which no hash covers - use the block's height.
                         LedgerIntegrityRules.NormalizeTransactionHeights(block);
-                        var orderedTransactions = block.Transactions
-                            .OrderBy(x => x.FromAddress)
-                            .ThenBy(x => x.Nonce)
-                            .ToList();
+                        var orderedTransactions = InValidationOrder(block.Transactions);
                         
                         // Each vBTC transfer's outflows read once for the block: the same-sender check below read every sibling's
                         // data again for each transfer, so one sender's 1,400 transfers were about 2 million parses on every
@@ -2133,7 +2138,9 @@ namespace VerifiedXCore.Services
                 var blockAttestStateTask = new VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.State(); // one Bitcoin report per block
                 var blockNftStepsTask = new LedgerIntegrityRules.NftStepState(); // D18: a contract moved or sold, not both
                 LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13
-                foreach (Transaction transaction in block.Transactions)
+                // In the order receivers validate it (ValidateBlock): the running per-block guards give their verdicts in
+                // that order, and the producer checks its own block with this method.
+                foreach (Transaction transaction in InValidationOrder(block.Transactions))
                 {
                     if (transaction.FromAddress != "Coinbase_TrxFees" && transaction.FromAddress != "Coinbase_BlkRwd")
                     {

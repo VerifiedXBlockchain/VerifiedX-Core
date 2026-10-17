@@ -1287,7 +1287,17 @@ namespace VerifiedXCore.Data
             // NEW-07: likewise for debits that together overspend a holder's balance on one contract.
             // ... and for a Transfer() or Burn() that shares its contract with another of the sender's contract
             // transactions in the block, which block validation refuses whatever their order.
-            return DropContractSiblingConflicts(VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.KeepOnePerBlock(SameBlockDebitGuard.DropSameBlockOverspends(DropDuplicateContractCreations(approvedMemPoolList))));
+            return ClosingPasses(approvedMemPoolList);
+        }
+
+        /// <summary>
+        /// The proposal's closing passes, run in the order block validation reads a block (by sender, then nonce), so what
+        /// they keep is what every receiver's running per-block guards accept.
+        /// </summary>
+        public static List<Transaction> ClosingPasses(List<Transaction> approved)
+        {
+            var inValidationOrder = BlockValidatorService.InValidationOrder(approved);
+            return DropContractSiblingConflicts(VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.KeepOnePerBlock(SameBlockDebitGuard.DropSameBlockOverspends(DropDuplicateContractCreations(inValidationOrder))));
         }
 
         /// <summary>The types BlockValidatorService.ValidateBlock does not read as a contract call (besides attestations).</summary>
