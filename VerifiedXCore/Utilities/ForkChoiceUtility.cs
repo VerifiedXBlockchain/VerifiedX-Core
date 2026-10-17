@@ -44,7 +44,7 @@ namespace VerifiedXCore.Utilities
                 return Outcome.LocalWins;
 
             // Rule 1: certificate weight (both sides must be cert-era).
-            if (local.CertRuleApplicable && remote.CertRuleApplicable && local.CertWeight != remote.CertWeight)
+            if (DecidedOnCertWeight(local, remote))
                 return local.CertWeight > remote.CertWeight ? Outcome.LocalWins : Outcome.RemoteWins;
 
             // Rule 2: height.
@@ -56,6 +56,12 @@ namespace VerifiedXCore.Utilities
                 ? Outcome.LocalWins
                 : Outcome.RemoteWins;
         }
+
+        /// <summary>Whether <see cref="CompareBranches"/> decides between two distinct branches on rule 1, certificate weight.</summary>
+        public static bool DecidedOnCertWeight(BranchSummary local, BranchSummary remote)
+            => local != null && remote != null
+               && !string.Equals(local.HashAtDivergence, remote.HashAtDivergence, StringComparison.Ordinal)
+               && local.CertRuleApplicable && remote.CertRuleApplicable && local.CertWeight != remote.CertWeight;
 
         /// <summary>
         /// Counts VALID attestations on a block's certificate: signer in the committee for the

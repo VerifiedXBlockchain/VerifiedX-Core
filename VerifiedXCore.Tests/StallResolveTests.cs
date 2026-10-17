@@ -165,9 +165,48 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void StallOverride_OnlyWhenStalledAndMajorityFarAhead()
         {
-            Assert.False(ShouldOverrideLocalWin(stalled: false, localTip: 100, remoteTip: 10_000));
-            Assert.False(ShouldOverrideLocalWin(stalled: true, localTip: 100, remoteTip: 100 + ForkChoiceUtility.MAX_REORG_DEPTH));
-            Assert.True(ShouldOverrideLocalWin(stalled: true, localTip: 100, remoteTip: 100 + ForkChoiceUtility.MAX_REORG_DEPTH + 1));
+            Assert.False(ShouldOverrideLocalWin(stalled: false, localTip: 100, remoteTip: 10_000, decidedOnCertWeight: false));
+            Assert.False(ShouldOverrideLocalWin(stalled: true, localTip: 100, remoteTip: 100 + ForkChoiceUtility.MAX_REORG_DEPTH, decidedOnCertWeight: false));
+            Assert.True(ShouldOverrideLocalWin(stalled: true, localTip: 100, remoteTip: 100 + ForkChoiceUtility.MAX_REORG_DEPTH + 1, decidedOnCertWeight: false));
+        }
+
+        [Fact]
+        public void StallOverride_NeverOverturnsALocalWinOnCertificateWeight()
+        {
+            Assert.False(ShouldOverrideLocalWin(stalled: true, localTip: 100, remoteTip: 10_000, decidedOnCertWeight: true));
+
+            // Local block carries more valid attestations; the majority is far ahead on a lighter block.
+            var local = new ForkChoiceUtility.BranchSummary { TipHeight = 100, HashAtDivergence = "zzz", CertWeight = 3, CertRuleApplicable = true };
+            var remote = new ForkChoiceUtility.BranchSummary { TipHeight = 10_000, HashAtDivergence = "aaa", CertWeight = 2, CertRuleApplicable = true };
+            Assert.Equal(ForkChoiceUtility.Outcome.LocalWins, ForkChoiceUtility.CompareBranches(local, remote));
+            Assert.True(ForkChoiceUtility.DecidedOnCertWeight(local, remote));
+            Assert.False(ShouldOverrideLocalWin(true, local.TipHeight, remote.TipHeight, ForkChoiceUtility.DecidedOnCertWeight(local, remote)));
+        }
+
+        [Fact]
+        public void StallOverride_StillFollowsTheMajority_WhenTheLocalWinIsNotOnCertificateWeight()
+        {
+            // Pre-cert blocks: a majority more than a reorg window ahead wins on height, so the dead branch is abandoned
+            // by the rule itself, and a local win on hash order is not one on weight.
+            var local = new ForkChoiceUtility.BranchSummary { TipHeight = 100, HashAtDivergence = "aaa" };
+            var remote = new ForkChoiceUtility.BranchSummary { TipHeight = 100 + ForkChoiceUtility.MAX_REORG_DEPTH + 1, HashAtDivergence = "zzz" };
+            Assert.Equal(ForkChoiceUtility.Outcome.RemoteWins, ForkChoiceUtility.CompareBranches(local, remote));
+            remote.TipHeight = 100;
+            Assert.Equal(ForkChoiceUtility.Outcome.LocalWins, ForkChoiceUtility.CompareBranches(local, remote));
+            Assert.False(ForkChoiceUtility.DecidedOnCertWeight(local, remote));
+
+            // Cert-era blocks of equal weight: decided on height or hash, not weight.
+            local.CertRuleApplicable = remote.CertRuleApplicable = true;
+            local.CertWeight = remote.CertWeight = 2;
+            Assert.False(ForkChoiceUtility.DecidedOnCertWeight(local, remote));
+
+            // One side not cert-era: weight is not compared.
+            remote.CertRuleApplicable = false;
+            local.CertWeight = 3;
+            Assert.False(ForkChoiceUtility.DecidedOnCertWeight(local, remote));
+
+            // The same block is no fork.
+            Assert.False(ForkChoiceUtility.DecidedOnCertWeight(local, new ForkChoiceUtility.BranchSummary { HashAtDivergence = "aaa", CertWeight = 0, CertRuleApplicable = true }));
         }
 
         [Fact]

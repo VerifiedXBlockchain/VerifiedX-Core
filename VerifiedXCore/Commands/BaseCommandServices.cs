@@ -1868,6 +1868,7 @@ namespace VerifiedXCore.Commands
                     Console.WriteLine("\nRecovery Address:\n{0}", rInfo.RecoveryAddress);
                     Console.WriteLine("\nPrivate Key:\n{0}", rInfo.PrivateKey);
                     Console.WriteLine("\nRecovery Private Key:\n{0}", rInfo.RecoveryPrivateKey);
+                    Console.WriteLine("\nWARNING: {0}", ReserveAccount.CrossNetworkKeyWarning);
                     Console.WriteLine("\nRestore Code:\n{0}", rInfo.RestoreCode);
                     Console.WriteLine("\n - - - - - - - - - - - - - - - - - - - - - - ");
                     Console.WriteLine("*** Be sure to save private key and Restore Code!                  ***");

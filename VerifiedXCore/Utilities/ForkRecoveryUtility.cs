@@ -474,6 +474,7 @@ namespace VerifiedXCore.Utilities
                         // Full consensus validation — header, proof, signature, every TX — same as a live block.
                         if (winningBlock != null && winningBlock.Hash == expectedHash && winningBlock.Height == divergenceHeight)
                         {
+                            DropApprovalOtherThan(divergenceHeight, expectedHash);
                             ApproveIfCertified(winningBlock);
                             await BlockValidatorService.ValidateBlock(winningBlock, false, false, false);
                         }
@@ -620,6 +621,7 @@ namespace VerifiedXCore.Utilities
                             var winningBlock = prefetched ?? await FetchCommittedBlockAsync(sourceIP, divergenceHeight);
                             if (winningBlock != null && winningBlock.Hash == expectedHash && winningBlock.Height == divergenceHeight)
                             {
+                                DropApprovalOtherThan(divergenceHeight, expectedHash);
                                 ApproveIfCertified(winningBlock);
                                 await BlockValidatorService.ValidateBlock(winningBlock, false, false, false);
                             }
@@ -697,6 +699,8 @@ namespace VerifiedXCore.Utilities
                 return $"the block at {height} does not hash to its hash.";
             if (replacement.Height > 0 && !SignatureService.VerifySignature(replacement.Validator, replacement.Hash, replacement.ValidatorSignature))
                 return $"the block at {height} does not carry its producer's signature.";
+            if (height >= Globals.CertEnforceHeight && !Services.ForkCorrectionService.HasValidCertificate(replacement))
+                return $"the block at {height} carries no valid committee certificate.";
             if (replacement.Transactions == null || replacement.NumOfTx != replacement.Transactions.Count
                 || replacement.MerkleRootOf() != replacement.MerkleRoot)
                 return $"the block at {height} carries transactions its header does not.";
@@ -709,6 +713,16 @@ namespace VerifiedXCore.Utilities
         /// dropped, so the replacement is judged as any block at the live tip without an agreement (it needs a valid
         /// certificate) instead of being refused against the block just removed. An approval of another hash stays.
         /// </summary>
+        /// <summary>
+        /// In a reorg onto the expected block at <paramref name="height"/>: an approval of another hash there named a block
+        /// the reorg replaced, and is dropped so the expected block is judged without it (with or without a certificate).
+        /// </summary>
+        internal static void DropApprovalOtherThan(long height, string expectedHash)
+        {
+            if (Globals.CasterApprovedBlockHashDict.TryGetValue(height, out var approved) && approved != expectedHash)
+                Globals.CasterApprovedBlockHashDict.TryRemove(height, out _);
+        }
+
         internal static void DropApprovalOfRolledBack(long height, string? rolledBackHash)
         {
             if (!string.IsNullOrEmpty(rolledBackHash)
@@ -732,6 +746,12 @@ namespace VerifiedXCore.Utilities
         /// </summary>
         internal static void ApproveIfCertified(Models.Block replacement)
         {
+            // Only a block that is its own hash (exactly, as computed) and carries its producer's signature: the approval
+            // stored here is what every later block at the height is held to.
+            if (replacement.GetBlockHash() != replacement.Hash)
+                return;
+            if (replacement.Height > 0 && !SignatureService.VerifySignature(replacement.Validator, replacement.Hash, replacement.ValidatorSignature))
+                return;
             if (Services.ForkCorrectionService.HasValidCertificate(replacement))
                 Services.ForkCorrectionService.ApproveCertified(replacement);
         }

@@ -3495,8 +3495,10 @@ namespace VerifiedXCore.Nodes
                     {
                         // A4 FIX: mid-round accept now requires a majority of casters to have attested
                         // this exact block — never a blind accept.
-                        var attested = await ConsensusCertificateHelper.TryGetMajorityAttestationsAsync(
-                            nextBlock.Height, nextBlock.Hash, nextBlock.Validator, nextBlock.PrevHash);
+                        // Its hash is registered as the agreed one on acceptance: only for a block that is exactly that hash.
+                        var attested = nextBlock.GetBlockHash() == nextBlock.Hash
+                            && await ConsensusCertificateHelper.TryGetMajorityAttestationsAsync(
+                                nextBlock.Height, nextBlock.Hash, nextBlock.Validator, nextBlock.PrevHash);
                         if (!attested)
                         {
                             ConsoleWriterService.OutputValCaster($"[Consensus Gate] Mid-round REJECT: height {nextBlock.Height} — no agreement after {spin.ElapsedMilliseconds}ms spin and no majority attestation quorum. Round retry will resolve.");
@@ -3516,8 +3518,10 @@ namespace VerifiedXCore.Nodes
                 {
                     // Case 3: No CasterRoundDict entry — we missed/haven't started this round.
                     // A4 FIX: require a majority attestation quorum instead of trusting the broadcast.
-                    var attested = await ConsensusCertificateHelper.TryGetMajorityAttestationsAsync(
-                        nextBlock.Height, nextBlock.Hash, nextBlock.Validator, nextBlock.PrevHash);
+                    // Its hash is registered as the agreed one on acceptance: only for a block that is exactly that hash.
+                    var attested = nextBlock.GetBlockHash() == nextBlock.Hash
+                        && await ConsensusCertificateHelper.TryGetMajorityAttestationsAsync(
+                            nextBlock.Height, nextBlock.Hash, nextBlock.Validator, nextBlock.PrevHash);
                     if (!attested)
                     {
                         ConsoleWriterService.OutputValCaster($"[Consensus Gate] No-round REJECT: height {nextBlock.Height} — no majority attestation quorum for peer broadcast. Reconcile will resolve.");
@@ -4439,6 +4443,10 @@ namespace VerifiedXCore.Nodes
             }
         }
 
+        /// <summary>Whether <paramref name="hash"/> is spelled as a block hash is computed: 64 lowercase hex characters.</summary>
+        internal static bool IsBlockHashSpelling(string? hash) =>
+            hash != null && hash.Length == 64 && hash.All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
+
         private static void ClearPendingCasterBlockHash(long height)
         {
             Globals.CasterApprovedBlockHashDict.TryRemove(height, out _);
@@ -4491,6 +4499,12 @@ namespace VerifiedXCore.Nodes
             }
 
             var hasRoundEntry = Globals.CasterRoundDict.ContainsKey(block.Height);
+            // Its hash is registered as the agreed one below: only for a block that is exactly that hash.
+            if (block.GetBlockHash() != block.Hash)
+            {
+                CasterLogUtility.Log($"GOSSIP-GATE REFUSE: h={block.Height} hash={shortHash} from {source} — the block is not its own hash.", "GOSSIP-GATE");
+                return false;
+            }
             var attested = await ConsensusCertificateHelper.TryGetMajorityAttestationsAsync(block.Height, block.Hash, block.Validator, block.PrevHash);
             if (attested)
             {
@@ -4512,6 +4526,13 @@ namespace VerifiedXCore.Nodes
         {
             if (block == null || string.IsNullOrEmpty(producerIp))
                 return;
+            if (block.GetBlockHash() != block.Hash) // registered as the approval below
+            {
+                // Not adopted: an approval already published for this hash (by the agreement) is withdrawn, not left to hold out the real block.
+                if (Globals.CasterApprovedBlockHashDict.TryGetValue(block.Height, out var published) && published == block.Hash)
+                    ClearPendingCasterBlockHash(block.Height);
+                return;
+            }
 
             while (true)
             {
@@ -4806,6 +4827,12 @@ namespace VerifiedXCore.Nodes
         /// </summary>
         private static async Task<Block?> VerifyBlockHashAgreementAsync(Block block, long height, string terminalWinner)
         {
+            // The draft's hash is published and voted on as the round's approval: only for a block that is exactly that hash.
+            if (block == null || block.GetBlockHash() != block.Hash)
+            {
+                CasterLogUtility.Log($"HASH-AGREEMENT: the draft at {height} from {terminalWinner} is not its own hash; no agreement.", "CONSENSUS");
+                return null;
+            }
             // Wave 3: quorum N + eligible voters come from the membership committee when active.
             var (casters, committeeCount) = GetQuorumCasters(height);
             if (committeeCount <= 1)
@@ -4866,7 +4893,8 @@ namespace VerifiedXCore.Nodes
 
                 foreach (var r in results)
                 {
-                    if (r.hash != null)
+                    // A block hash has one spelling (64 lowercase hex): a vote for any other names no block.
+                    if (r.hash != null && IsBlockHashSpelling(r.hash))
                     {
                         if (!hashVotes.ContainsKey(r.hash))
                             hashVotes[r.hash] = 0;
@@ -4915,7 +4943,9 @@ namespace VerifiedXCore.Nodes
                     new Peers { PeerIP = sourceIP },
                     height,
                     terminalWinner);
-                if (peerBlock != null && peerBlock.Hash == majorityHash && IsVoteForWinner(peerBlock.Validator, terminalWinner))
+                if (peerBlock != null && peerBlock.Hash == majorityHash && peerBlock.GetBlockHash() == peerBlock.Hash
+                    && SignatureService.VerifySignature(peerBlock.Validator, peerBlock.Hash, peerBlock.ValidatorSignature)
+                    && IsVoteForWinner(peerBlock.Validator, terminalWinner))
                 {
                     CasterRoundAudit?.AddStep($"[BlockHashAgreement] Replaced local block with majority block from {sourceIP}.", true);
                     _consecutiveMajorityBlockFetchFailures = 0;
