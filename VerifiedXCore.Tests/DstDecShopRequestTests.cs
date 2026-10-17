@@ -106,15 +106,42 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public void CollectionsReply_CarriesEveryLiveCollection()
+        public void CollectionsReply_CarriesEveryLiveCollection_WhenTheyFitOneDatagram()
         {
-            // Clients ask for collections once and take the reply as complete, so the reply is not paged.
+            // Clients ask for collections once and take the reply as complete.
             for (var i = 1; i <= 60; i++)
                 Collection.GetCollectionDb()!.InsertSafe(new Collection { Id = i, Name = $"c{i}", Description = "", CollectionLive = i <= 57 });
 
             var reply = JsonConvert.DeserializeObject<System.Collections.Generic.List<Collection>>(DecShopMessageService.ProcessMessage(Request("Collections"))!.Data)!;
 
             Assert.Equal(57, reply.Count);
+        }
+
+        [Fact]
+        public void CollectionsReply_StaysWithinOneDatagram_AndKeepsTheFirstCollections()
+        {
+            var description = new string('"', 2_000); // escaped as \" in the message: the budget counts it as sent
+            for (var i = 1; i <= 40; i++)
+                Collection.GetCollectionDb()!.InsertSafe(new Collection { Id = i, Name = $"c{i}", Description = description, CollectionLive = true });
+
+            var replyMessage = DecShopMessageService.ProcessMessage(Request("Collections"))!;
+            var reply = JsonConvert.DeserializeObject<System.Collections.Generic.List<Collection>>(replyMessage.Data)!;
+
+            Assert.InRange(reply.Count, 1, 39);
+            Assert.Equal(Enumerable.Range(1, reply.Count).ToArray(), reply.Select(c => c.Id).ToArray());
+            Assert.True(DecShopMessageService.ReplyDataBytes(replyMessage.Data) <= DecShopMessageService.MaxReplyDataBytes);
+            Assert.True(System.Text.Encoding.UTF8.GetByteCount(MessageService.GenerateMessage(replyMessage, false)) <= 65_507);
+        }
+
+        [Fact]
+        public void UpdateReply_TooLargeForOneDatagram_IsNotSentCutShort()
+        {
+            Collection.GetCollectionDb()!.InsertBulk(Enumerable.Range(1, 12_000).Select(i => new Collection { Id = i, Name = $"c{i}", Description = "", CollectionLive = true }));
+            Assert.Null(DecShopMessageService.ProcessMessage(Request("Update")));
+
+            Collection.GetCollectionDb()!.DeleteMany(c => c.Id > 100);
+            var update = JsonConvert.DeserializeObject<DecShopUpdateData>(DecShopMessageService.ProcessMessage(Request("Update"))!.Data)!;
+            Assert.Equal(100, update.CollectionList!.Count);
         }
 
         [Fact]
