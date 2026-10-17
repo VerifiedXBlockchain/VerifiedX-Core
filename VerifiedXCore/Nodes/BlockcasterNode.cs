@@ -3473,6 +3473,7 @@ namespace VerifiedXCore.Nodes
                 // Case 3: No agreed hash + no CasterRoundDict entry → accept ONLY with majority attestations (A4)
                 // Case 4: No agreed hash + CasterRoundDict entry exists → spin-wait, then accept ONLY with majority attestations (A4)
                 string? agreedHashForGate = null;
+                var pinnedHere = false; // the hash was registered here, for this broadcast (cases 3 and 4)
                 Globals.CasterApprovedBlockHashDict.TryGetValue(nextBlock.Height, out agreedHashForGate);
 
                 bool hasCasterRoundEntry = Globals.CasterRoundDict.ContainsKey(nextBlock.Height);
@@ -3511,6 +3512,7 @@ namespace VerifiedXCore.Nodes
                         // SPLIT-GUARD: publish the attested hash so ValidateBlock's caster gate (which now
                         // refuses a live commit with NO agreed hash) sees this as the agreed block.
                         RegisterPendingCasterBlockHash(nextBlock.Height, nextBlock.Hash);
+                        pinnedHere = true;
                     }
                 }
                 else if (Globals.IsBlockCaster && nextBlock.Height == lastBlockHeight + 1
@@ -3533,6 +3535,7 @@ namespace VerifiedXCore.Nodes
                     CasterLogUtility.Log($"MSG7 case3 ACCEPT (attested): h={nextBlock.Height} hash={nextBlock.Hash?[..Math.Min(16, nextBlock.Hash?.Length ?? 0)]} by {nextBlock.Validator} from {senderIp}.", "MSG7");
                     // SPLIT-GUARD: see mid-round accept above.
                     RegisterPendingCasterBlockHash(nextBlock.Height, nextBlock.Hash);
+                    pinnedHere = true;
                 }
 
                 // Case 2: Agreed hash exists but doesn't match → reject (actual fork)
@@ -3605,6 +3608,10 @@ namespace VerifiedXCore.Nodes
                 {
                     // Validation failed — reset _acceptedHeight so the correct block can try
                     Interlocked.CompareExchange(ref _acceptedHeight, currentAccepted, nextBlock.Height);
+                    // The pin this broadcast earned above goes with it, or the gate would refuse every other block at
+                    // the height. A pin from our own round's agreement is the commit path's to withdraw.
+                    if (pinnedHere)
+                        ReleaseRefusedCommitPin(nextBlock.Height, nextBlock.Hash, triedAtTip: true);
                 }
             }
         }
