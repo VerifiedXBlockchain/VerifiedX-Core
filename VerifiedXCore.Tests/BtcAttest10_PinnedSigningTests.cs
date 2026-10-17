@@ -317,6 +317,85 @@ namespace VerifiedXCore.Tests
             Assert.Contains("already completed", why);
         }
 
+        /// <summary>
+        /// C-060: a coin whose transaction is not confirmed on Bitcoin can be replaced away (RBF), and the payment with it,
+        /// after the withdrawal settled. The builder no longer picks one, but a build saved before that, or a transaction
+        /// the owner built itself, still reached the signers of a vault the chain does not watch. Each signer now asks
+        /// whether every input's transaction is confirmed, once the leader's signature checks, and refuses otherwise
+        /// (no answer included). A watched vault's inputs are attested coins and are not asked about.
+        /// </summary>
+        [Fact]
+        public async Task AnOldVaultsSigningStart_OverAnUnconfirmedCoin_IsRefused()
+        {
+            var legacy = await CreateVault(H1 - 50, keyHolders: Signers);
+            await Start();
+            using var electrum = new FakeElectrum(("a", true, 1M));
+            var tx = new VfxTx
+            {
+                Timestamp = TimeUtil.GetTime(), FromAddress = Minter.Address, ToAddress = Minter.Address, Amount = 0.0M, Fee = 0, Nonce = 0,
+                TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                Data = JsonConvert.SerializeObject(new { Function = "VBTCWithdrawalRequest()", ContractUID = legacy.Uid, BTCAddress = BtcDest, Amount = 0.001M, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") }),
+            };
+            tx.Fee = VerifiedXCore.Services.FeeCalcService.CalculateTXFee(tx);
+            tx.Build();
+            await Apply(Tip + 1, tx);
+            var parent = new uint256(RandomUtils.GetBytes(32));
+            var built = Network.Main.CreateTransaction();
+            built.Inputs.Add(new TxIn(new OutPoint(parent, 0)));
+            built.Outputs.Add(Money.Satoshis(70_000), BitcoinAddress.Create(BtcDest, Network.Main).ScriptPubKey);
+
+            var priorSynced = Globals.IsChainSynced;
+            var priorLookup = FrostSigningAuthorization.ParentConfirmations;
+            var asked = new List<string>();
+            int? answer = 0;
+            Globals.IsChainSynced = true;
+            FrostSigningAuthorization.ParentConfirmations = txid => { lock (asked) asked.Add(txid); return Task.FromResult(answer); };
+            try
+            {
+                using var server = new TestServer(new WebHostBuilder().UseStartup<FrostStartup>());
+                var client = server.CreateClient();
+                async Task<(System.Net.HttpStatusCode Code, string Body)> Post(FrostSigningStartRequest start)
+                {
+                    var r = await client.PostAsync("/frost/sign/start", new System.Net.Http.StringContent(JsonConvert.SerializeObject(start), System.Text.Encoding.UTF8, "application/json"));
+                    return (r.StatusCode, await r.Content.ReadAsStringAsync());
+                }
+                FrostSigningStartRequest Begin()
+                {
+                    var start = Announce(legacy.Uid, legacy.Script, tx.Hash, built, Minter.Address);
+                    start.SignerAddresses = Signers.Select(s => s.Address).ToList();
+                    start.RequiredThreshold = 51;
+                    start.LeaderSignature = VerifiedXCore.Services.SignatureService.CreateSignature($"{start.SessionId}.{Minter.Address}.{start.Timestamp}", Minter.Key, Minter.Pub);
+                    return start;
+                }
+
+                var unconfirmed = await Post(Begin());
+                Assert.True(unconfirmed.Code == System.Net.HttpStatusCode.Conflict, unconfirmed.Body);
+                Assert.Contains("is not confirmed on Bitcoin yet", unconfirmed.Body);
+                Assert.Equal(parent.ToString(), Assert.Single(asked));
+
+                answer = null;                                                        // no Electrum answer: refused too
+                Assert.Contains("could not establish that input transaction", (await Post(Begin())).Body);
+
+                answer = 1;
+                Assert.DoesNotContain("confirmed on Bitcoin", (await Post(Begin())).Body);   // passes this check
+
+                asked.Clear();                                                        // nobody else makes it ask
+                var forged = Begin();
+                forged.LeaderSignature = VerifiedXCore.Services.SignatureService.CreateSignature($"{forged.SessionId}.{Minter.Address}.{forged.Timestamp}", Signers[0].Key, Signers[0].Pub);
+                Assert.Equal(System.Net.HttpStatusCode.Forbidden, (await Post(forged)).Code);
+                Assert.Empty(asked);
+
+                var watched = await CreateVault(Tip + 1, keyHolders: Signers);
+                Assert.Null(await FrostSigningAuthorization.UnconfirmedInputToSign(watched.Uid, new[] { $"{parent}:0" }));
+                Assert.Empty(asked);
+            }
+            finally
+            {
+                FrostSigningAuthorization.ParentConfirmations = priorLookup;
+                Globals.IsChainSynced = priorSynced;
+            }
+        }
+
         [Fact]
         public async Task AnOldVault_KeepsItsOwnerLedSigning()
         {

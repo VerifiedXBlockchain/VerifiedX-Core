@@ -2636,6 +2636,17 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // Every input of a vault the chain does not watch spends a confirmed coin. Asked only for a start
+                            // whose leader signed it, recently, with room here, so no caller (nor an old start sent again) makes
+                            // this validator query Electrum. Nothing is recorded before this point for such a vault.
+                            if (await FrostSigningAuthorization.UnconfirmedInputToSign(request.SmartContractUID, request.TxInputOutpoints) is { } unconfirmedInput)
+                            {
+                                LogUtility.Log($"[FROST] sign/start refused for {request.SmartContractUID} / {request.WithdrawalRequestHash}: {unconfirmedInput}", "FrostStartup.SignStart");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = unconfirmedInput }));
+                                return;
+                            }
+
                             // FIND-024 Fix: Load this validator's key package and generate nonces
                             var myAddr = Globals.ValidatorAddress;
 

@@ -276,6 +276,40 @@ namespace VerifiedXCore.Bitcoin.FROST
             return leaderIsOwner ? (true, "") : (false, "Withdrawal signing must be led by the withdrawal owner");
         }
 
+        /// <summary>Confirmations of a Bitcoin transaction (null: no Electrum server answered). Replaced in tests.</summary>
+        public static Func<string, Task<int?>> ParentConfirmations { get; set; } =
+            async txid => (await BitcoinTransactionService.GetTransactionConfirmationsResilient(txid)).Confirmations;
+
+        /// <summary>
+        /// Why this validator does not give a share now because an input of a vault the chain does not watch spends a coin
+        /// whose transaction is not confirmed on Bitcoin, or null. Such a coin can be replaced away (RBF), and the payment
+        /// with it, after the withdrawal is settled. The builder no longer picks one, but a build saved before that, or a
+        /// transaction its leader built itself, still reached the signers. A watched vault's inputs are attested coins.
+        /// No answer is a refusal; the leader asks again on its next attempt.
+        /// </summary>
+        public static async Task<string?> UnconfirmedInputToSign(string? scUID, IReadOnlyList<string>? outpoints)
+        {
+            if (string.IsNullOrEmpty(scUID) || Attestation.BtcVaultKeys.KeyRow(scUID) != null || Attestation.BtcAttestBalance.IsAttestedVault(scUID))
+                return null;
+            if (outpoints == null || outpoints.Count == 0)
+                return "the transaction names no inputs";
+            foreach (var parent in outpoints.Select(o => (o ?? "").Split(':')[0]).Distinct(StringComparer.Ordinal))
+            {
+                int? confirmations;
+                try { confirmations = await ParentConfirmations(parent); }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Confirmation lookup for {parent} failed: {ex.Message}", "FrostSigningAuthorization.UnconfirmedInputToSign()");
+                    confirmations = null;
+                }
+                if (confirmations == null)
+                    return $"could not establish that input transaction {parent} is confirmed on Bitcoin (no Electrum server knows it, or none answered)";
+                if (confirmations < 1)
+                    return $"input transaction {parent} is not confirmed on Bitcoin yet; a withdrawal spends confirmed coins only";
+            }
+            return null;
+        }
+
         /// <summary>
         /// Why this validator is not to give a share now for a vault the chain does not watch, or null. What it signs is
         /// judged from its own withdrawal store, cancellations and exits, which are only as current as its chain: after a
