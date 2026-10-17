@@ -165,6 +165,20 @@ namespace VerifiedXCore.Data
             BlockStartFailedAtHeight = height;
         }
 
+        /// <summary>A step writing the withdrawal store (requests, cancellations) failed on this node (cleared as each block starts).</summary>
+        private static bool _withdrawalStoreStepFailed;
+
+        /// <summary>
+        /// As <see cref="NoteApplyStepFailed"/>, for a step that writes the withdrawal store: a fault of this node's
+        /// storage there may have left it without what the chain wrote, so the store is also marked unfinished (blocks
+        /// held, store rebuilt; see <see cref="UpdateTreis"/>). Faults elsewhere in the apply do not mark it.
+        /// </summary>
+        public static void NoteWithdrawalStoreStepFailed(long height, Exception ex)
+        {
+            if (IsNodeLocalFault(ex)) _withdrawalStoreStepFailed = true;
+            NoteApplyStepFailed(height, ex);
+        }
+
         /// <summary>Whether an exception comes from this node's storage or process (not from what a transaction says).</summary>
         public static bool IsNodeLocalFault(Exception? ex)
         {
@@ -189,7 +203,18 @@ namespace VerifiedXCore.Data
                 // A write to the withdrawal store the storage swallowed would leave this node's table unlike its peers':
                 // the block's apply fails, as for any other fault of this node's storage.
                 using var storeWrites = new Extensions.DbExtensions.FailureScope(Bitcoin.Services.VBTCWithdrawalStoreRebuildService.StoreCollections);
-                var applied = await UpdateTreisCore(block);
+                bool applied;
+                try { applied = await UpdateTreisCore(block); }
+                finally
+                {
+                    // A lost store write, or a fault of this node's storage in a step that writes the store (also when the
+                    // apply then threw): it may not hold what the chain wrote, so it is marked unfinished - blocks are held
+                    // and it is rebuilt - rather than read until the next restart.
+                    if (storeWrites.Count > 0 || _withdrawalStoreStepFailed)
+                        Bitcoin.Services.VBTCWithdrawalStoreRebuildService.MarkUnfinished(storeWrites.Count > 0
+                            ? $"{storeWrites.Count} write(s) to it failed while block {block.Height} was applied"
+                            : $"a fault of this node's storage interrupted a withdrawal step of block {block.Height}");
+                }
                 if (storeWrites.Count > 0)
                 {
                     NoteApplyStepFailed(block.Height, new System.IO.IOException($"{storeWrites.Count} write(s) to the withdrawal store failed while block {block.Height} was applied."));
@@ -211,6 +236,7 @@ namespace VerifiedXCore.Data
         private static async Task<bool> UpdateTreisCore(Block block)
         {
             _applyStepFailed = false;
+            _withdrawalStoreStepFailed = false;
             ApplyStepForTests?.Invoke(block.Height);
             lock (_ownerChangesThisBlock) _ownerChangesThisBlock.Clear();
             StateWriteContext.SetHeight(block.Height); //stamp LastModifiedHeight on state writes for snapshot diffing
@@ -4240,7 +4266,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
-                NoteApplyStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
+                NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
                 ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal error: {ex.Message}", "StateData.RequestVBTCV2Withdrawal()");
             }
         }
@@ -4348,7 +4374,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
-                NoteApplyStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
+                NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
                 ErrorLogUtility.LogError($"RequestVBTCV2WithdrawalMulti error: {ex.Message}", "StateData.RequestVBTCV2WithdrawalMulti()");
             }
         }
@@ -4468,6 +4494,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only (a data fault stays a no-op everywhere)
                 ErrorLogUtility.LogError($"CompleteVBTCV2Withdrawal error: {ex.Message}", "StateData.CompleteVBTCV2Withdrawal()");
             }
         }
@@ -4572,6 +4599,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only (a data fault stays a no-op everywhere)
                 ErrorLogUtility.LogError($"CancelVBTCV2Withdrawal error: {ex.Message}", "StateData.CancelVBTCV2Withdrawal()");
             }
         }
@@ -4761,7 +4789,7 @@ namespace VerifiedXCore.Data
             {
                 // A vote this node could not judge (the validator set is read from committed blocks and a read error is
                 // thrown, not answered "no") leaves its state unlike its peers': marked, so a restart rebuilds state.
-                NoteApplyStepFailed(tx.Height, ex);
+                NoteWithdrawalStoreStepFailed(tx.Height, ex);
                 ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation error: {ex.Message}", "StateData.VoteOnVBTCV2Cancellation()");
             }
         }

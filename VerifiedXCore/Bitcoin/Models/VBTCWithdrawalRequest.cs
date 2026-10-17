@@ -632,6 +632,7 @@ namespace VerifiedXCore.Bitcoin.Models
             }
             catch (Exception ex)
             {
+                VerifiedXCore.Extensions.DbExtensions.NoteFailure(DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS);
                 ErrorLogUtility.LogError($"Completion record for withdrawal {transactionHash} on {scUID} could not be written: {ex.Message}", "VBTCWithdrawalRequest.SaveCompletionRecord()");
             }
         }

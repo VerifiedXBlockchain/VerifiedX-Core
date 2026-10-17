@@ -127,6 +127,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
             catch (Exception ex)
             {
+                // Applied, this answer skips the cancel: a fault of this node's storage counts as a lost write to the
+                // withdrawal store, so the block is not taken as applied (validation, which only refuses, is unchanged).
+                if (StateData.IsNodeLocalFault(ex)) VerifiedXCore.Extensions.DbExtensions.NoteFailure(DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS);
                 return $"The withdrawal transaction could not be read: {ex.Message}";
             }
         }
@@ -199,7 +202,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 && tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
                 return false;
             try { return BtcAttestBalance.IsAttestedVault(Stored(JObject.Parse(tx.Data)["ContractUID"]?.ToObject<string?>())); }
-            catch { return false; }
+            catch (Exception ex)
+            {
+                // "Not watched" on a fault of this node's storage sends a block's apply down the other vault kind's path:
+                // counted as a lost write to the withdrawal store, so that block is not taken as applied.
+                if (StateData.IsNodeLocalFault(ex)) VerifiedXCore.Extensions.DbExtensions.NoteFailure(DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS);
+                return false;
+            }
         }
 
         /// <summary>The contract's UID as state holds it (a lookup ignores case; the tables here are keyed by the stored spelling).</summary>
@@ -324,7 +333,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
             catch (Exception ex)
             {
-                VerifiedXCore.Data.StateData.NoteApplyStepFailed(vfxHeight, ex);
+                VerifiedXCore.Data.StateData.NoteWithdrawalStoreStepFailed(vfxHeight, ex); // settling writes the request rows
                 ErrorLogUtility.LogError($"Settling withdrawals after Bitcoin report {report?.Hash} failed: {ex}", "BtcWithdrawals.OnCoinsChanged()");
             }
         }
@@ -377,6 +386,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             {
                 // Passed on: what this does is consensus state, and a failure here counts against the block's
                 // application (it used to be swallowed, leaving this node with other withdrawals than its peers).
+                VerifiedXCore.Data.StateData.NoteWithdrawalStoreStepFailed(vfxHeight, ex); // closing writes the request rows
                 ErrorLogUtility.LogError($"Expiring unpinned withdrawals at {vfxHeight} failed: {ex}", "BtcWithdrawals.OnBlockStart()");
                 throw;
             }
@@ -399,7 +409,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
             catch (Exception ex)
             {
-                VerifiedXCore.Data.StateData.NoteApplyStepFailed(vfxHeight, ex);
+                VerifiedXCore.Data.StateData.NoteWithdrawalStoreStepFailed(vfxHeight, ex); // closing writes the request row
                 ErrorLogUtility.LogError($"Cancelling a withdrawal ({tx.Hash}) failed: {ex}", "BtcWithdrawals.ApplyCancel()");
             }
             return true;

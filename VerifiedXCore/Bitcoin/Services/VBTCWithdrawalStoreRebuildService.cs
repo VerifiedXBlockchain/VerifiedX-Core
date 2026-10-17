@@ -74,7 +74,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 // A store a state rebuild could not wipe: only a full state rebuild makes it whole.
                 if (_needsStateRebuild || GetMeta()?.NeedsStateRebuild == true)
                     throw new InvalidOperationException("a state rebuild could not wipe it; it needs a full state rebuild");
-                unfinished = GetMeta()?.Unfinished == true;
+                unfinished = _unfinishedInMemory || GetMeta()?.Unfinished == true;
             }
             catch (Exception ex)
             {
@@ -118,9 +118,24 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>A rebuild began rewriting the store and none has finished since (read error: taken as unfinished).</summary>
         public static bool IsUnfinished => Unfinished();
 
+        private static volatile bool _unfinishedInMemory;
+
+        /// <summary>
+        /// The store may not hold what the chain wrote to it: a block's apply (live, or a state rebuild's or restore's
+        /// replay) lost a write to it or hit a fault of this node's storage. It is marked unfinished, so blocks are held
+        /// and it is rebuilt (BlockValidatorService.ValidateBlock, HoldsBlocks). If the mark cannot be written (the store
+        /// may be what fails), it is kept in memory.
+        /// </summary>
+        public static void MarkUnfinished(string why)
+        {
+            var text = $"WITHDRAWAL STORE: {why}; blocks are held until it is rebuilt.";
+            ErrorLogUtility.LogError(text, "VBTCWithdrawalStoreRebuildService.MarkUnfinished()");
+            if (!SetUnfinished(true)) _unfinishedInMemory = true;
+        }
+
         private static bool Unfinished()
         {
-            if (_needsStateRebuild) return true;
+            if (_needsStateRebuild || _unfinishedInMemory) return true;
             try { var meta = GetMeta(); return meta?.Unfinished == true || meta?.NeedsStateRebuild == true; }
             catch { return true; }
         }
@@ -178,6 +193,7 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             if (!BlockRollbackUtility.WithdrawalStoreWiped) return;
             _needsStateRebuild = false;
+            _unfinishedInMemory = false;
             try
             {
                 var db = GetMetaDb();
@@ -195,7 +211,7 @@ namespace VerifiedXCore.Bitcoin.Services
             catch (Exception ex) { ErrorLogUtility.LogError($"Withdrawal-store rebuild marker could not be cleared: {ex.Message}", "VBTCWithdrawalStoreRebuildService.StoreRewrittenFromChain()"); }
         }
 
-        internal static void SetUnfinishedForTests(bool unfinished) => SetUnfinished(unfinished);
+        internal static void SetUnfinishedForTests(bool unfinished) { if (!unfinished) _unfinishedInMemory = false; SetUnfinished(unfinished); }
         internal static void SetRunningForTests(bool running) => Interlocked.Exchange(ref _running, running ? 1 : 0);
         internal static Func<long, bool>? FailAtBlockForTests;
         internal static Action<long>? BlockScannedForTests;
@@ -408,6 +424,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 var meta = GetMeta() ?? new RebuildMeta();
                 // A row this scan could not write or reconcile may still read open: the store stays unfinished.
                 meta.Unfinished = result.Errors > 0;
+                if (result.Errors == 0) _unfinishedInMemory = false;
                 meta.LastScanHeight = result.EndHeight;
                 meta.LastScanUtc = TimeUtil.GetTime();
                 meta.RequestsInserted += result.RequestsInserted;
@@ -519,6 +536,8 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             catch (Exception ex)
             {
+                // The completion that asked is skipped: a fault of this node's storage counts as a lost store write.
+                if (StateData.IsNodeLocalFault(ex)) VerifiedXCore.Extensions.DbExtensions.NoteFailure(DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS);
                 ErrorLogUtility.LogError($"Request-row recovery failed for {requestTxHash}: {ex.Message}", "VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain()");
                 return null;
             }

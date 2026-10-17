@@ -46,6 +46,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
             catch (Exception ex)
             {
+                VerifiedXCore.Data.StateData.NoteWithdrawalStoreStepFailed(vfxHeight, ex); // taking back writes the request rows
                 ErrorLogUtility.LogError($"Bitcoin rewind to {bitcoinHeight} ({rewind?.Hash}) failed part-way: {ex}", "BtcWithdrawals.OnRewind()");
                 throw;
             }
