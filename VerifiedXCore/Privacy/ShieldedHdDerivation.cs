@@ -87,8 +87,27 @@ namespace VerifiedXCore.Privacy
         /// <summary>
         /// Derive shielded key material directly from an account's private key (hex).
         /// Works for both single accounts and HD-derived accounts — no HD wallet seed required.
+        /// The key is read as a 32-byte scalar whatever its stored spelling (HD accounts store a sign byte,
+        /// "00" + 64 hex; a leading zero can be dropped), so one key has one shielded identity on every install.
         /// </summary>
-        public static ShieldedKeyMaterial DeriveFromPrivateKey(string privateKeyHex)
+        public static ShieldedKeyMaterial DeriveFromPrivateKey(string privateKeyHex) =>
+            FromAccountKeyBytes(NormalizeAccountKey(AccountKeyBytes(privateKeyHex)));
+
+        /// <summary>
+        /// The identity earlier builds derived from the key's stored bytes as they were: a key not stored as exactly
+        /// 32 bytes took the rehash fallback. The wallet keeps a row for it so notes paid to it stay visible and spendable.
+        /// </summary>
+        public static ShieldedKeyMaterial DeriveLegacyFromPrivateKey(string privateKeyHex) =>
+            FromAccountKeyBytes(AccountKeyBytes(privateKeyHex));
+
+        /// <summary>Whether earlier builds derived a different identity from this key (see <see cref="DeriveLegacyFromPrivateKey"/>).</summary>
+        public static bool HasLegacyIdentity(string privateKeyHex)
+        {
+            var raw = AccountKeyBytes(privateKeyHex);
+            return !raw.AsSpan().SequenceEqual(NormalizeAccountKey(raw));
+        }
+
+        private static byte[] AccountKeyBytes(string privateKeyHex)
         {
             if (string.IsNullOrWhiteSpace(privateKeyHex))
                 throw new ArgumentException("Private key hex is required.", nameof(privateKeyHex));
@@ -97,7 +116,27 @@ namespace VerifiedXCore.Privacy
             if (privateKeyHex.Length % 2 != 0)
                 privateKeyHex = "0" + privateKeyHex;
 
-            var rawBytes = Convert.FromHexString(privateKeyHex);
+            return Convert.FromHexString(privateKeyHex);
+        }
+
+        /// <summary>
+        /// The big-endian 32-byte form of a key: leading zero bytes beyond 32 dropped, a shorter key left-padded.
+        /// A key with non-zero bytes beyond 32 is returned as it is (it is no secp256k1 scalar; the fallback rehashes it).
+        /// </summary>
+        public static byte[] NormalizeAccountKey(byte[] raw)
+        {
+            var start = 0;
+            while (raw.Length - start > 32 && raw[start] == 0)
+                start++;
+            if (raw.Length - start > 32)
+                return raw;
+            var key = new byte[32];
+            Buffer.BlockCopy(raw, start, key, 32 - (raw.Length - start), raw.Length - start);
+            return key;
+        }
+
+        private static ShieldedKeyMaterial FromAccountKeyBytes(byte[] rawBytes)
+        {
             var spendingKey = ToValidNbitcoinKey(rawBytes, SpendFixDomain);
             var spendBytes = spendingKey.ToBytes();
 
