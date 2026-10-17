@@ -251,6 +251,13 @@ namespace VerifiedXCore.Services
                     fields.Add(Read(() => j["DecShop"]?.ToObject<DecShop>()?.DecShopURL));
                     break;
                 case TransactionType.FTKN_TX:
+                // The token functions run by Data.Function for every contract-call type (VerifyTX's contract switch and
+                // UpdateTreis' dispatch), not for FTKN_TX alone: a vote under any of them is a real vote.
+                case TransactionType.NFT_TX: case TransactionType.NFT_MINT: case TransactionType.NFT_BURN:
+                case TransactionType.FTKN_MINT: case TransactionType.FTKN_BURN:
+                case TransactionType.TKNZ_TX: case TransactionType.TKNZ_MINT: case TransactionType.TKNZ_BURN:
+                case TransactionType.SC_TX: case TransactionType.SC_MINT: case TransactionType.SC_BURN:
+                case TransactionType.TKNZ_WD_ARB: case TransactionType.TKNZ_WD_OWNER:
                     // Token votes and transfers (round 27): a topic id is checked against votes through the collation,
                     // and a transfer's own recipient and sender are looked up through it.
                     fields.Add(Read(() => j["TopicUID"]?.ToString()));
