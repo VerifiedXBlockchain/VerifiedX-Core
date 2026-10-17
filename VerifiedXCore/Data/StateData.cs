@@ -610,7 +610,7 @@ namespace VerifiedXCore.Data
                                     switch (function)
                                     {
                                         case "AdnrCreate()":
-                                            AddNewAdnr(tx);
+                                            AddNewAdnr(tx, block.Height);
                                             break;
                                         case "AdnrTransfer()":
                                             await TransferAdnr(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
@@ -1930,7 +1930,12 @@ namespace VerifiedXCore.Data
             }
         }
 
-        private static void AddNewAdnr(Transaction tx)
+        /// <summary>
+        /// Registers a name with the suffix of the block's era: ".rbx" below V4Height, ".vfx" from it. The block's own
+        /// height decides it, as live apply (which sets the tip to the block first) always did, so a rebuild or replay
+        /// stores the same name.
+        /// </summary>
+        internal static void AddNewAdnr(Transaction tx, long blockHeight)
         {
             try
             {
@@ -1940,7 +1945,7 @@ namespace VerifiedXCore.Data
 
                 adnr.Address = tx.FromAddress;
                 adnr.Timestamp = tx.Timestamp;
-                adnr.Name = Globals.V4Height > Globals.LastBlock.Height ? name + ".rbx" : name + ".vfx";
+                adnr.Name = Globals.V4Height > blockHeight ? name + ".rbx" : name + ".vfx";
                 adnr.TxHash = tx.Hash;
 
                 Adnr.SaveAdnr(adnr);
