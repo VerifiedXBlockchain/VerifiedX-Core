@@ -29,10 +29,17 @@ namespace VerifiedXCore.Models.DST
         /// <summary>
         /// Re-audit (9 Oct 2026): the contract the listing sells. The bid signature covers purchase key, amount and bidder
         /// only, so the wallet records which contract it bid on and completes a sale only for that contract
-        /// (<see cref="HasLocalSentBid"/>). Filled by <see cref="Build"/> from the connected shop's listing when the client
-        /// did not send it; null on rows from before this field existed.
+        /// (<see cref="HasLocalSentBid"/>). Filled by <see cref="Build"/> from the listing of the shop the bid is sent to
+        /// when the client did not send it; null when that shop's data does not name it, and on rows from before this field.
         /// </summary>
         public string? SmartContractUID { get; set; }
+
+        /// <summary>
+        /// Whether <see cref="SmartContractUID"/> was recorded under the current rule: named by the client, or read from the
+        /// shop the bid was sent to. A bid saved before that rule may carry a contract read from another cached shop, and
+        /// is not completed automatically (null on those rows).
+        /// </summary>
+        public bool? ContractFromTargetShop { get; set; }
 
         /// <summary>
         /// For a vBTC vault the chain watches: the owner's spendable vBTC when the bid was made. A sale is completed from
@@ -105,7 +112,8 @@ namespace VerifiedXCore.Models.DST
                 : null;
         }
 
-        public bool Build(bool thirdParty = false)
+        /// <param name="targetShop">The data of the shop this bid is sent to; the contract is read from it alone.</param>
+        public bool Build(bool thirdParty = false, DecShopData? targetShop = null)
         {
             if (BidAmount < Globals.BidMinimum)
                 return false;
@@ -120,7 +128,8 @@ namespace VerifiedXCore.Models.DST
             MaxBidAmount = BidAmount;
             BidSendReceive = BidSendReceive.Sent;
             if (string.IsNullOrWhiteSpace(SmartContractUID))
-                SmartContractUID = ListingContractFor(ListingId, PurchaseKey);
+                SmartContractUID = ListingContractFor(targetShop, ListingId, PurchaseKey);
+            ContractFromTargetShop = !string.IsNullOrWhiteSpace(SmartContractUID);
             VaultOwnerBalanceAtBid = VaultOwnerFigure(SmartContractUID);
             AutoCompleteUntil = Math.Max(ListingEndFor(PurchaseKey) ?? BidSendTime, BidSendTime) + AutoCompleteGraceSeconds;
 
@@ -452,11 +461,29 @@ namespace VerifiedXCore.Models.DST
             }
         }
 
+        /// <summary>
+        /// A sale completion this wallet sends (Sale_Complete or M_Sale_Complete, built here or signed elsewhere and sent
+        /// raw) pays the bid under its purchase key: that bid is used, so a re-minted UID cannot have it paid again.
+        /// </summary>
+        public static void MarkUsedByCompletion(Transaction? tx)
+        {
+            if (tx?.TransactionType != TransactionType.NFT_SALE || string.IsNullOrEmpty(tx.Data)) return;
+            try
+            {
+                var jobj = Newtonsoft.Json.Linq.JObject.Parse(tx.Data);
+                var function = jobj["Function"]?.ToObject<string?>();
+                if (function != "Sale_Complete()" && function != "M_Sale_Complete()") return;
+                MarkAutoCompleted(tx.FromAddress, jobj["KeySign"]?.ToObject<string?>(), jobj["ContractUID"]?.ToObject<string?>());
+            }
+            catch { }
+        }
+
         private static List<Bid> MatchingSentBids(string? bidderAddress, string? purchaseKey, string? smartContractUID) =>
             (GetAllBids(BidSendReceive.Sent) ?? new List<Bid>()).Where(b => b != null
                 && string.Equals(b.BidAddress, bidderAddress, StringComparison.Ordinal)
                 && string.Equals(b.PurchaseKey, purchaseKey, StringComparison.Ordinal)
-                && string.Equals(b.SmartContractUID, smartContractUID, StringComparison.Ordinal)) // no fallback: shop data is the seller's (re-audit)
+                && string.Equals(b.SmartContractUID, smartContractUID, StringComparison.Ordinal) // no fallback: shop data is the seller's (re-audit)
+                && b.ContractFromTargetShop == true) // a contract bound before the target-shop rule may be another shop's
                 .ToList();
 
         /// <summary>
@@ -482,21 +509,19 @@ namespace VerifiedXCore.Models.DST
         }
 
         /// <summary>
-        /// The contract a listing sells, from the shop data this node holds (the connected shop and any multi-shop
-        /// sessions), by purchase key only, and only when every shop holding that key names one contract. Listing ids
-        /// repeat from shop to shop and a key can be copied: a bid sent to one shop was bound to another shop's contract,
-        /// whose owner could then start a sale of it under the bid's signature (fifth review, round 31). Null when unknown.
+        /// The contract a listing sells, from the data of the shop the bid is sent to only: the listing with this id and
+        /// this purchase key there, when it names one contract. Any other shop's data is the other shop's to serve: read
+        /// from every shop this node had cached, a shop that served a listing with the key the buyer bid with bound the bid
+        /// to its own contract, whose owner could then start a sale of it under the bid's signature. Null when unknown,
+        /// and a bid without a contract is never completed automatically.
         /// </summary>
-        public static string? ListingContractFor(int listingId, string? purchaseKey)
+        public static string? ListingContractFor(DecShopData? targetShop, int listingId, string? purchaseKey)
         {
             try
             {
-                if (string.IsNullOrEmpty(purchaseKey)) return null;
-                var sources = new List<IEnumerable<Listing>?> { Globals.DecShopData?.Listings };
-                foreach (var shop in Globals.MultiDecShopData.Values)
-                    sources.Add(shop?.Listings);
-                var contracts = sources.Where(s => s != null)
-                    .SelectMany(s => s!.Where(l => l != null && string.Equals(l.PurchaseKey, purchaseKey, StringComparison.Ordinal)))
+                if (targetShop?.Listings == null || string.IsNullOrEmpty(purchaseKey)) return null;
+                var contracts = targetShop.Listings
+                    .Where(l => l != null && l.Id == listingId && string.Equals(l.PurchaseKey, purchaseKey, StringComparison.Ordinal))
                     .Select(l => l.SmartContractUID).Where(uid => !string.IsNullOrWhiteSpace(uid))
                     .Distinct(StringComparer.Ordinal).ToList();
                 return contracts.Count == 1 ? contracts[0] : null;

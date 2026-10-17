@@ -119,6 +119,9 @@ namespace VerifiedXCore.Utilities
         /// <returns>True if recovery succeeded, false otherwise</returns>
         public static async Task<bool> RecoverAsync(long stuckHeight, string caller = "ForkRecovery", int blocksToRollback = ROLLBACK_DEPTH)
         {
+            if (WaitsForWithdrawalStore(caller, "FORK-RECOVERY"))
+                return false;
+
             // Prevent concurrent recovery attempts
             if (Interlocked.CompareExchange(ref _recoveryInProgress, 1, 0) != 0)
             {
@@ -416,6 +419,9 @@ namespace VerifiedXCore.Utilities
                 return false;
             }
 
+            if (WaitsForWithdrawalStore(caller, "REORG"))
+                return false;
+
             if (Interlocked.CompareExchange(ref _recoveryInProgress, 1, 0) != 0)
             {
                 LogUtility.Log($"[{caller}] REORG: recovery already in progress, skipping.", $"{caller}.Reorg");
@@ -468,6 +474,7 @@ namespace VerifiedXCore.Utilities
                         // Full consensus validation — header, proof, signature, every TX — same as a live block.
                         if (winningBlock != null && winningBlock.Hash == expectedHash && winningBlock.Height == divergenceHeight)
                         {
+                            DropApprovalOtherThan(divergenceHeight, expectedHash);
                             ApproveIfCertified(winningBlock);
                             await BlockValidatorService.ValidateBlock(winningBlock, false, false, false);
                         }
@@ -546,6 +553,9 @@ namespace VerifiedXCore.Utilities
                 return false;
             }
 
+            if (WaitsForWithdrawalStore(caller, "DEEP-REORG"))
+                return false;
+
             if (Interlocked.CompareExchange(ref _recoveryInProgress, 1, 0) != 0)
             {
                 LogUtility.Log($"[{caller}] DEEP-REORG: recovery already in progress, skipping.", $"{caller}.DeepReorg");
@@ -611,6 +621,7 @@ namespace VerifiedXCore.Utilities
                             var winningBlock = prefetched ?? await FetchCommittedBlockAsync(sourceIP, divergenceHeight);
                             if (winningBlock != null && winningBlock.Hash == expectedHash && winningBlock.Height == divergenceHeight)
                             {
+                                DropApprovalOtherThan(divergenceHeight, expectedHash);
                                 ApproveIfCertified(winningBlock);
                                 await BlockValidatorService.ValidateBlock(winningBlock, false, false, false);
                             }
@@ -688,6 +699,8 @@ namespace VerifiedXCore.Utilities
                 return $"the block at {height} does not hash to its hash.";
             if (replacement.Height > 0 && !SignatureService.VerifySignature(replacement.Validator, replacement.Hash, replacement.ValidatorSignature))
                 return $"the block at {height} does not carry its producer's signature.";
+            if (height >= Globals.CertEnforceHeight && !Services.ForkCorrectionService.HasValidCertificate(replacement))
+                return $"the block at {height} carries no valid committee certificate.";
             if (replacement.Transactions == null || replacement.NumOfTx != replacement.Transactions.Count
                 || replacement.MerkleRootOf() != replacement.MerkleRoot)
                 return $"the block at {height} carries transactions its header does not.";
@@ -700,6 +713,16 @@ namespace VerifiedXCore.Utilities
         /// dropped, so the replacement is judged as any block at the live tip without an agreement (it needs a valid
         /// certificate) instead of being refused against the block just removed. An approval of another hash stays.
         /// </summary>
+        /// <summary>
+        /// In a reorg onto the expected block at <paramref name="height"/>: an approval of another hash there named a block
+        /// the reorg replaced, and is dropped so the expected block is judged without it (with or without a certificate).
+        /// </summary>
+        internal static void DropApprovalOtherThan(long height, string expectedHash)
+        {
+            if (Globals.CasterApprovedBlockHashDict.TryGetValue(height, out var approved) && approved != expectedHash)
+                Globals.CasterApprovedBlockHashDict.TryRemove(height, out _);
+        }
+
         internal static void DropApprovalOfRolledBack(long height, string? rolledBackHash)
         {
             if (!string.IsNullOrEmpty(rolledBackHash)
@@ -723,6 +746,12 @@ namespace VerifiedXCore.Utilities
         /// </summary>
         internal static void ApproveIfCertified(Models.Block replacement)
         {
+            // Only a block that is its own hash (exactly, as computed) and carries its producer's signature: the approval
+            // stored here is what every later block at the height is held to.
+            if (replacement.GetBlockHash() != replacement.Hash)
+                return;
+            if (replacement.Height > 0 && !SignatureService.VerifySignature(replacement.Validator, replacement.Hash, replacement.ValidatorSignature))
+                return;
             if (Services.ForkCorrectionService.HasValidCertificate(replacement))
                 Services.ForkCorrectionService.ApproveCertified(replacement);
         }
@@ -796,6 +825,25 @@ namespace VerifiedXCore.Utilities
         /// Returns true if a recovery operation is currently in progress.
         /// </summary>
         public static bool IsRecoveryInProgress => Volatile.Read(ref _recoveryInProgress) != 0;
+
+        /// <summary>
+        /// While this node's withdrawal store is being rebuilt or left unfinished, block validation holds every block
+        /// (BlockValidatorService.ValidateBlock), so the node falls behind on purpose. Recovering then would roll back or
+        /// restore under the rebuild and stop it, over and over: recovery waits until the store is whole.
+        /// </summary>
+        private static bool WaitsForWithdrawalStore(string caller, string what)
+        {
+            if (!VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning) return false;
+            LogUtility.Log($"[{caller}] {what}: the withdrawal store is being rebuilt (blocks are held until it is whole); recovery waits.", $"{caller}.ForkRecovery");
+            return true;
+        }
         internal static void SetRecoveryInProgressForTests(bool running) => Interlocked.Exchange(ref _recoveryInProgress, running ? 1 : 0);
+
+        /// <summary>
+        /// For a rollback writer outside this class (the caster's self-heal): takes the interlock RecoverAsync,
+        /// ReorgToBranchAsync and DeepReorgAsync hold, so no two of them roll the same tip block back. False: another holds it.
+        /// </summary>
+        internal static bool TryEnterRecovery() => Interlocked.CompareExchange(ref _recoveryInProgress, 1, 0) == 0;
+        internal static void ExitRecovery() => Interlocked.Exchange(ref _recoveryInProgress, 0);
     }
 }

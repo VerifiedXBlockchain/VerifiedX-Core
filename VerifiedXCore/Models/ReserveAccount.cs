@@ -408,6 +408,13 @@ namespace VerifiedXCore.Models
         #endregion
 
         #region Create New Reserve Account
+        /// <summary>
+        /// Said whenever a reserve key is restored. A reserve address is the same on mainnet and testnet and a reserve
+        /// transaction's signature names no network, so a transaction signed on one can be replayed on the other.
+        /// </summary>
+        public const string CrossNetworkKeyWarning =
+            "Never use this reserve key on both mainnet and testnet: a reserve address is the same on both networks, and a reserve transaction signed on one can be replayed on the other.";
+
         public static ReserveAccountInfo CreateNewReserveAccount(string encryptionPassword, bool storeRecoveryKey = false, bool skipSave = false, string privKey = "")
         {
             ReserveAccount rAccount = new ReserveAccount();

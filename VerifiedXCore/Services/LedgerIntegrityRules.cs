@@ -1294,6 +1294,59 @@ namespace VerifiedXCore.Services
             return null;
         }
 
+        /// <summary>A block carries a move (Transfer() or Burn()) and a sale of the same contract.</summary>
+        public const string NftMoveAndSaleInBlock = "An NFT transfer or burn and a sale of the same contract within block";
+
+        /// <summary>
+        /// The transaction types StateData runs a contract's functions for (UpdateTreis' dispatch). Only these move a
+        /// contract by Transfer() or Burn(); the same text in another transaction's Data (a plain payment) does nothing.
+        /// </summary>
+        private static readonly HashSet<TransactionType> ContractFunctionTypes = new()
+        {
+            TransactionType.NFT_TX, TransactionType.NFT_MINT, TransactionType.NFT_BURN,
+            TransactionType.FTKN_MINT, TransactionType.FTKN_TX, TransactionType.FTKN_BURN,
+            TransactionType.TKNZ_MINT, TransactionType.TKNZ_TX, TransactionType.TKNZ_BURN,
+            TransactionType.SC_MINT, TransactionType.SC_TX, TransactionType.SC_BURN,
+            TransactionType.VBTC_V2_CONTRACT_CREATE, TransactionType.TKNZ_WD_ARB, TransactionType.TKNZ_WD_OWNER,
+        };
+
+        /// <summary>The sale functions StateData runs for an NFT_SALE (UpdateTreis' sale dispatch); any other function does nothing.</summary>
+        private static readonly HashSet<string> SaleFunctions = new(StringComparer.Ordinal)
+        {
+            "Sale_Start()", "M_Sale_Start()", "Sale_Complete()", "M_Sale_Complete()", "Sale_Cancel()",
+        };
+
+        /// <summary>Per-block register of the contracts a block moves (Transfer(), Burn()) and sells (NFT_SALE).</summary>
+        public sealed class NftStepState
+        {
+            public readonly HashSet<string> Moves = new(StringComparer.OrdinalIgnoreCase);
+            public readonly HashSet<string> Sales = new(StringComparer.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// From PathAuditRulesHeight one contract is either moved or sold within a block, not both. Each is judged against
+        /// the owner before the block, so an owner's Transfer() to B and its own M_Sale_Start to an accomplice both passed
+        /// in one block: B then owned an NFT locked into the sale A set up, at A's price. Honest blocks never pair them: a
+        /// transfer or burn needs the contract unlocked, and a sale's completion or cancel needs it locked.
+        /// </summary>
+        public static string? RegisterNftStepInBlock(Transaction tx, NftStepState state, long height)
+        {
+            if (height < Globals.PathAuditRulesHeight) return null;
+            var (ok, _, uid, function, _) = TransactionUtility.GetSCTXFunctionAndUID(tx);
+            if (!ok) return null;
+            // A sale, like a move, is one the chain runs: an NFT_SALE carrying another function does nothing, and
+            // registering it let anyone crowd an owner's transfer or burn out of a block.
+            var isSale = tx.TransactionType == TransactionType.NFT_SALE;
+            if (isSale && !SaleFunctions.Contains(function)) return null;
+            // A move is a Transfer() or Burn() the chain runs: a payment that only carries that text in its Data moves
+            // nothing, and registering it let anyone crowd an owner's sale out of a block.
+            if (!isSale && (!ContractFunctionTypes.Contains(tx.TransactionType) || (function != "Transfer()" && function != "Burn()"))) return null;
+            uid = SmartContractStateTrei.GetSmartContractState(uid)?.SmartContractUID ?? uid;
+            if ((isSale ? state.Moves : state.Sales).Contains(uid)) return $"{NftMoveAndSaleInBlock}: {uid}";
+            (isSale ? state.Sales : state.Moves).Add(uid);
+            return null;
+        }
+
         #region Time in block validation
 
         /// <summary>

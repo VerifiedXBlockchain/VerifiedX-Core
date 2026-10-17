@@ -181,7 +181,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     // cancellation filed against another vault's share would block this one.
                     if (WithdrawalNoLongerSignable(wrh, vaultUid) is { } notNow) return (false, notNow);
                     var wr = VBTCWithdrawalRequest.GetByTransactionHash(wrh, vaultUid);
-                    var pendingCancellation = VBTCWithdrawalCancellation.HasPendingCancellation(
+                    var pendingCancellation = VBTCWithdrawalCancellation.HasPendingCancellationOrUnreadable(
                         wrh, VerifiedXCore.Utilities.TimeUtil.GetTime(), vaultUid);
                     var (signable, signableReason) = IsWithdrawalSignable(wr, vaultUid, pendingCancellation);
                     if (!signable) return (false, signableReason);
@@ -514,13 +514,17 @@ namespace VerifiedXCore.Bitcoin.FROST
                 if (allocs == null) return 0;
 
                 decimal sum = 0M;
+                var drawn = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var a in allocs)
                 {
                     if (a == null || a.UnlockAmount <= 0M) continue;
-                    var allocContract = a.SmartContractUID;
-                    if (string.IsNullOrEmpty(allocContract) && !string.IsNullOrEmpty(a.LockId))
-                        allocContract = VBTCBridgeLockState.GetByLockId(a.LockId)?.SmartContractUID ?? "";
-                    if (string.Equals(allocContract, scUID, StringComparison.Ordinal))
+                    // Each part is a lock as its own record names it, and its vault is the lock's. A lock named by an
+                    // alias ("L1 ", "l1": the lookup trims and ignores case) or named twice drew nothing the second time
+                    // when the exit was applied, so the exit asks for more than its locks gave up: it is not signed.
+                    var held = VBTCBridgeLockState.GetByLockId(a.LockId ?? "");
+                    if (held == null || !string.Equals(a.LockId, held.LockId, StringComparison.Ordinal) || !drawn.Add(held.LockId))
+                        return 0;
+                    if (string.Equals(held.SmartContractUID, scUID, StringComparison.Ordinal))
                         sum += a.UnlockAmount;
                 }
                 var sats = (long)(sum * 100_000_000M);

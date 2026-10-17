@@ -320,6 +320,37 @@ namespace VerifiedXCore.Tests
             Assert.False(okAtGate);
         }
 
+        /// <summary>
+        /// A node whose pool counter is gone (its privacy store wiped and not rebuilt) judged the floor as the mainnet
+        /// correction alone, about 100,033 VFX, and accepted an unshield of that much on a downloaded block, where the
+        /// root check that would also refuse it is skipped. With no counter there is no supply: the unshield is refused,
+        /// and a pool row, however small, still gets its correction.
+        /// </summary>
+        [Fact]
+        public async Task MissingPoolCounter_IsNoSupply_TheCorrectionAloneDoesNotLetAnUnshieldThrough()
+        {
+            Globals.ShieldedSupplyCorrections["VFX"] = 100_033.000012M;
+            PrivacyDbContext.PoolState().DeleteAll();   // the startup rebuild's wipe with no replay after it
+            Assert.Equal(0M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate));
+
+            Globals.LastBlock = new Block { Height = Gate + 5 };
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 100_000M), blockDownloads: true, blockVerify: true, blockHeight: Gate);
+            Assert.False(ok);
+            Assert.StartsWith(PrivateTxSupplyRules.SupplyReasonPrefix, msg);
+
+            // A row made again from nothing (a status read creates one) or left by a rebuild that stopped before the forged
+            // blocks holds none of their debits: no correction. A counter that went through them is still corrected.
+            PrivacyDbContext.PoolState().Insert(new VerifiedXCore.Models.Privacy.ShieldedPoolState { AssetType = "VFX", TotalShieldedSupply = 1M, LastUpdateHeight = 0 });
+            Assert.Equal(1M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate));
+            var row = PrivacyDbContext.PoolState().FindOne(x => x.AssetType == "VFX");
+            row.LastUpdateHeight = Globals.ShieldedSupplyCorrectionsThroughHeight - 1;
+            PrivacyDbContext.PoolState().Update(row);
+            Assert.Equal(1M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate));
+            row.LastUpdateHeight = Globals.ShieldedSupplyCorrectionsThroughHeight;
+            PrivacyDbContext.PoolState().Update(row);
+            Assert.Equal(100_034.000012M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate));
+        }
+
         // ── Same block: two unshields are judged against one supply ───────────────────────────────────────────────
 
         [Fact]
@@ -360,6 +391,7 @@ namespace VerifiedXCore.Tests
                 // The mainnet shape: honest notes 4.099985 outstanding, counter 4.099985 - 100,033.000012.
                 var pool = ShieldedPoolService.GetOrCreateState("VFX");
                 pool.TotalShieldedSupply = 4.099985M - 100_033.000012M;
+                pool.LastUpdateHeight = Globals.ShieldedSupplyCorrectionsThroughHeight;   // written through the forged blocks, as mainnet's
                 PrivacyDbContext.PoolState().Update(pool);
                 TipAtGate();
 
@@ -384,6 +416,72 @@ namespace VerifiedXCore.Tests
                 Globals.ShieldedSupplyCorrections.Clear();
                 foreach (var (k, v) in prior) Globals.ShieldedSupplyCorrections[k] = v;
             }
+        }
+
+        // ── A store the floor cannot judge: refused, not judged against the correction alone ─────────────────────
+
+        [Fact]
+        public async Task MissingPoolRow_WhileACorrectionApplies_RefusesTheUnshield()
+        {
+            PrivacyDbContext.PoolState().DeleteMany(x => x.AssetType == "VFX");
+            Globals.ShieldedSupplyCorrections["VFX"] = 100_033.000012M;
+            TipAtGate();
+
+            Assert.False(PrivateTxSupplyRules.TryCommittedSupply("VFX", Gate, out _));
+            Assert.Equal(0M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate)); // what the same-block guard sums against
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 1M));
+            Assert.False(ok);
+            Assert.Equal(PrivateTxSupplyRules.UnreadableStoreReason, msg);
+        }
+
+        [Fact]
+        public void UnreadablePrivacyStore_RefusesTheUnshield()
+        {
+            Globals.ShieldedSupplyCorrections["VFX"] = 100_033.000012M;
+            var tx = Unshield(NewAddress(), 1M);
+            Assert.True(PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out var error), error);
+            var live = DbContext.DB_Privacy;
+            try
+            {
+                DbContext.DB_Privacy = null!;
+                Assert.False(PrivateTxSupplyRules.TryCommittedSupply("VFX", Gate, out _));
+                Assert.Equal(0M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate));
+                Assert.Equal((false, PrivateTxSupplyRules.UnreadableStoreReason), PrivateTxSupplyRules.Check(tx, payload, Gate));
+            }
+            finally
+            {
+                DbContext.DB_Privacy = live;
+            }
+        }
+
+        [Fact]
+        public async Task MissingPoolRow_WithoutACorrection_IsAnEmptyPool()
+        {
+            PrivacyDbContext.PoolState().DeleteMany(x => x.AssetType == "VFX");
+            TipAtGate();
+
+            Assert.True(PrivateTxSupplyRules.TryCommittedSupply("VFX", Gate, out var supply));
+            Assert.Equal(0M, supply);
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 1M));
+            Assert.False(ok);
+            Assert.StartsWith(PrivateTxSupplyRules.SupplyReasonPrefix, msg);
+            Assert.NotEqual(PrivateTxSupplyRules.UnreadableStoreReason, msg);
+        }
+
+        [Fact]
+        public void ReadablePoolRow_WithTheCorrection_IsJudgedAsBefore()
+        {
+            Globals.ShieldedSupplyCorrections["VFX"] = 100M;
+            // A counter written through the forged blocks, as mainnet's is: only such a row gets the correction.
+            var pool = ShieldedPoolService.GetOrCreateState("VFX");
+            pool.LastUpdateHeight = Globals.ShieldedSupplyCorrectionsThroughHeight;
+            PrivacyDbContext.PoolState().Update(pool);
+            var tx = Unshield(NewAddress(), 100M);
+            Assert.True(PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out var error), error);
+
+            Assert.True(PrivateTxSupplyRules.TryCommittedSupply("VFX", Gate, out var supply));
+            Assert.Equal(100.5M, supply);
+            Assert.Equal((true, ""), PrivateTxSupplyRules.Check(tx, payload, Gate));
         }
 
         [Fact]

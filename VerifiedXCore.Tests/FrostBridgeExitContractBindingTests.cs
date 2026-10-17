@@ -65,6 +65,10 @@ namespace VerifiedXCore.Tests
                 AllocationsJson = allocations == null ? null : JsonConvert.SerializeObject(allocations),
             };
             Assert.True(VBTCBridgeBtcExitState.TryInsert(rec));
+            // The locks a plan draws exist on chain (applying the exit drew them); the signer reads each part from its lock.
+            foreach (var a in allocations ?? new List<PoolUnlockAllocation>())
+                if (VBTCBridgeLockState.GetByLockId(a.LockId) == null)
+                    VBTCBridgeLockState.GetCollection().Insert(new VBTCBridgeLockState { LockId = a.LockId, SmartContractUID = a.SmartContractUID, OwnerAddress = "xO", Amount = a.UnlockAmount, AmountSats = (long)(a.UnlockAmount * 100_000_000M), EvmDestination = "0xabc", LockTxHash = "lt-" + a.LockId, LockTimestamp = 1 });
             return rec;
         }
 

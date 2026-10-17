@@ -73,6 +73,45 @@ namespace VerifiedXCore.Tests
             try { Directory.Delete(_tempRoot, recursive: true); } catch { }
         }
 
+        /// <summary>
+        /// C-027: a bridge exit has one signing reference, the one the casters send (BtcWithdrawals.ExitSigningReference:
+        /// the burn's first 16 characters and the vault's first 8). Every other spelling the resolver would also find
+        /// (the whole hash, without 0x, another case, a shorter burn prefix, the whole vault UID, surrounding whitespace)
+        /// is refused as non-canonical before anything is keyed on it, so one exit cannot be signed under two keys.
+        /// </summary>
+        [Fact]
+        public void ABridgeExit_IsSignedUnderItsOneReference_EveryOtherSpellingIsRefused()
+        {
+            const string burn = "0x9c2e4b7a1d3f5e6c8b0a2d4f6e8c1a3b5d7f9e0c2a4b6d8f1e3c5a7b9d0f2e4c";
+            VBTCBridgeLockState.GetCollection().Insert(new VBTCBridgeLockState { LockId = "L27", SmartContractUID = _vault, OwnerAddress = Owner, Amount = Amount, AmountSats = (long)(Amount * 100_000_000M), EvmDestination = "0xabc", LockTxHash = "lt27", LockTimestamp = 1 });
+            Assert.True(VBTCBridgeBtcExitState.TryInsert(new VBTCBridgeBtcExitState
+            {
+                BaseBurnTxHash = burn, LockId = "L27", SmartContractUID = _vault, OwnerAddress = "xCaster", Amount = Amount,
+                AmountSats = (long)(Amount * 100_000_000M), BtcDestination = _destAddr.ToString(), ExitTxHash = "exit-tx-27", CreatedTimestamp = 1,
+                AllocationsJson = Newtonsoft.Json.JsonConvert.SerializeObject(new List<PoolUnlockAllocation> { new() { LockId = "L27", SmartContractUID = _vault, UnlockAmount = Amount } }),
+            }));
+
+            var canonical = VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.ExitSigningReference(burn, _vault);
+            Assert.NotEqual(FrostSigningAuthorization.NonCanonicalReference, FrostSigningAuthorization.Authorize(Request(canonical)).Reason);
+
+            foreach (var spelling in new[]
+            {
+                $"btcexit_{burn}_{_vault[..8]}",                              // the whole hash
+                $"btcexit_{burn[2..18]}_{_vault[..8]}",                       // without 0x
+                $"BTCEXIT_{burn[..16]}_{_vault[..8]}",                        // the prefix in another case
+                $"btcexit_{burn[..16].ToUpperInvariant()}_{_vault[..8]}",     // the burn in another case
+                $"btcexit_{burn[..10]}_{_vault[..8]}",                        // a shorter burn prefix
+                $"btcexit_{burn[..16]}_{_vault}",                             // the whole vault UID
+                " " + canonical,                                              // surrounding whitespace
+                canonical + " ",
+            })
+            {
+                var (ok, reason) = FrostSigningAuthorization.Authorize(Request(spelling));
+                Assert.False(ok, spelling);
+                Assert.Equal(FrostSigningAuthorization.NonCanonicalReference, reason);
+            }
+        }
+
         /// <summary>One vault coin in; the destination gets the amount less the fee; change back to the vault.</summary>
         private FrostSigningStartRequest Request(string withdrawalRequestHash)
         {

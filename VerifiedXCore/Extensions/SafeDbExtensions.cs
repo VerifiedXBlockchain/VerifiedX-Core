@@ -7,6 +7,45 @@ namespace VerifiedXCore.Extensions
 {
     public static class DbExtensions
     {
+        /// <summary>
+        /// Counts the failures these wrappers swallow (logged, a default returned) in the named collections, within the
+        /// work that opened it (it flows with that work's awaits and tasks, not to other threads). A caller whose writes
+        /// must all land (a block's apply, the withdrawal-store rebuild) opens one and checks Count when done.
+        /// </summary>
+        public sealed class FailureScope : IDisposable
+        {
+            private static readonly AsyncLocal<FailureScope?> CurrentScope = new();
+            private readonly FailureScope? _outer;
+            private readonly HashSet<string> _collections;
+            private int _count;
+
+            public FailureScope(params string[] collections)
+            {
+                _collections = new HashSet<string>(collections, StringComparer.Ordinal);
+                _outer = CurrentScope.Value;
+                CurrentScope.Value = this;
+            }
+
+            public int Count => Volatile.Read(ref _count);
+
+            public void Dispose() => CurrentScope.Value = _outer;
+
+            internal static void Note(string? collection)
+            {
+                if (collection == null) return;
+                for (var scope = CurrentScope.Value; scope != null; scope = scope._outer)
+                    if (scope._collections.Contains(collection))
+                        Interlocked.Increment(ref scope._count);
+            }
+        }
+
+        /// <summary>Reports a failure swallowed elsewhere (a catch around this collection's writes) to the open scopes.</summary>
+        public static void NoteFailure(string? collection) => FailureScope.Note(collection);
+
+        private static void NoteFailure<T>(ILiteCollection<T>? col)
+        {
+            try { FailureScope.Note(col?.Name); } catch { }
+        }
         private static ConcurrentDictionary<string, SemaphoreSlim> DbSemaphores = new ConcurrentDictionary<string, SemaphoreSlim>();        
 
         private static SemaphoreSlim GetSlim<T>(this ILiteCollection<T> col)
@@ -34,7 +73,8 @@ namespace VerifiedXCore.Extensions
             }
             catch (Exception ex)
             {
-                ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "SafeDBExtensions.Command()-1");                
+                ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "SafeDBExtensions.Command()-1");
+                NoteFailure(col);                
             }
 
             try { slim.Release(); } catch { }            
@@ -53,6 +93,7 @@ namespace VerifiedXCore.Extensions
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "SafeDBExtensions.Command()-2");
+                NoteFailure(col);
             }
 
             try { slim.Release(); } catch { }            
@@ -72,7 +113,8 @@ namespace VerifiedXCore.Extensions
             }
             catch (Exception ex)
             {
-                ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "SafeDBExtensions.CommandAsync()-1");                
+                ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "SafeDBExtensions.CommandAsync()-1");
+                NoteFailure(col);                
             }
 
             try { slim?.Release(); } catch { }            
@@ -91,6 +133,7 @@ namespace VerifiedXCore.Extensions
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "SafeDBExtensions.CommandAsync()-2");
+                NoteFailure(col);
             }
 
             try { slim?.Release(); } catch { }            

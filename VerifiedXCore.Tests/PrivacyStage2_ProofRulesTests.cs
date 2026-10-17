@@ -229,6 +229,42 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// D12: in the epoch a downloaded block, or a caster's catch-up block (both validated with blockDownloads, as
+        /// BlockValidatorService does for them), is judged as a live one: a proof-less unshield is refused, and so is one
+        /// whose Merkle root is not a root of the pool. Before the epoch downloaded history still skips both, as before.
+        /// </summary>
+        [Fact]
+        public async Task InTheEpoch_ADownloadedOrCatchUpBlock_StillNeedsTheProofAndARealRoot()
+        {
+            TipInEpoch();
+            var forged = Unshield(1M);
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(forged, blockDownloads: true, blockVerify: true,
+                skipPrivatePlonkProofVerification: false, blockHeight: Height + 1, blockTimestamp: forged.Timestamp);
+            Assert.False(ok);
+            Assert.Contains("must carry a PLONK proof", msg);
+            // A block refused for its proof does not count as this node's state going wrong (no restore or rebuild).
+            Assert.False(BlockValidatorService.IsStateCorruptionSignal(msg));
+            Assert.False(BlockValidatorService.IsStateCorruptionSignal(PlonkProofVerifier.VerifierUnavailableReason));
+            Assert.False(BlockValidatorService.IsStateCorruptionSignal(PlonkProofVerifier.FailedProofPrefix + " (unshield)."));
+
+            PrivateTxPayloadCodec.TryDecode(forged.Data, out var p, out _);
+            p!.MerkleRootB64 = Convert.ToBase64String(new byte[32]);   // a tree of the forger's own
+            forged.Data = PrivateTxPayloadCodec.SerializeToJson(p);
+            forged.BuildPrivate();
+            (ok, msg) = await TransactionValidatorService.VerifyTX(forged, blockDownloads: true, blockVerify: true,
+                skipPrivatePlonkProofVerification: false, blockHeight: Height + 1, blockTimestamp: forged.Timestamp);
+            Assert.False(ok);
+            Assert.Contains("merkle_root", msg);
+
+            // Before the epoch downloaded history skips them, as before.
+            TipBelow();
+            var old = Unshield(1M, new[] { RealNullifier() }, Array.Empty<PrivateShieldedOutput>());
+            var (okOld, whyOld) = await TransactionValidatorService.VerifyTX(old, blockDownloads: true, blockVerify: true,
+                skipPrivatePlonkProofVerification: false, blockHeight: Height - 1, blockTimestamp: old.Timestamp);
+            Assert.True(okOld, whyOld);
+        }
+
+        /// <summary>
         /// The public dummy's nullifier recorded before the epoch (a pre-epoch transaction carried it) does not refuse the
         /// epoch's single-note spends, which all spend the dummy (round 32): the spend is judged on, here up to its proof.
         /// </summary>

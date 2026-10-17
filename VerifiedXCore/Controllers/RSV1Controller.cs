@@ -560,7 +560,7 @@ namespace VerifiedXCore.Controllers
                     var result = await ReserveAccount.RestoreReserveAccount(rsrvAccountPayload.RestoreCode, rsrvAccountPayload.Password, rsrvAccountPayload.StoreRecoveryAccount, rsrvAccountPayload.RescanForTx);
                     if (result != null)
                     {
-                        output = JsonConvert.SerializeObject(new { Success = true, Message = "Reserve Account Restored", ReserveAccount = result });
+                        output = JsonConvert.SerializeObject(new { Success = true, Message = "Reserve Account Restored", ReserveAccount = result, Warning = ReserveAccount.CrossNetworkKeyWarning });
                         return output;
                     }
                 }

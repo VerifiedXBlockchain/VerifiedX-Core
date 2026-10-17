@@ -2999,7 +2999,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // withdrawal whose escrow validators - possibly this one - are voting to refund.
                             if (!string.IsNullOrEmpty(session.WithdrawalRequestHash)
                                 && !session.WithdrawalRequestHash.StartsWith(FrostSigningAuthorization.BtcExitPrefix, StringComparison.OrdinalIgnoreCase)
-                                && VerifiedXCore.Bitcoin.Models.VBTCWithdrawalCancellation.HasPendingCancellation(
+                                && !VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.IsSweepReference(session.WithdrawalRequestHash)
+                                && VerifiedXCore.Bitcoin.Models.VBTCWithdrawalCancellation.HasPendingCancellationOrUnreadable(
                                     session.WithdrawalRequestHash, TimeUtil.GetTime(), session.SmartContractUID))
                             {
                                 LogUtility.Log($"[FROST] Sign Round 2 REFUSED for session {sessionId}: a cancellation of withdrawal {session.WithdrawalRequestHash} is being voted on.", "FrostStartup.SignRound2");

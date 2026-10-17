@@ -19,6 +19,8 @@ namespace VerifiedXCore.Privacy
     /// </summary>
     public static class PlonkProofVerifier
     {
+        public const string MissingProofReason = "A private transaction must carry a PLONK proof (proof_b64).";
+        public const string FailedProofPrefix = "PLONK proof verification failed";
         public const string VerifierUnavailableReason = "This node cannot verify PLONK proofs (VXPLNK06 params not loaded or the native library lacks the v2 owner-bound circuits); private transactions are refused until it can.";
 
         /// <summary>Replaceable for tests: whether this node can verify v1 proofs against version-2 public inputs.</summary>
@@ -136,7 +138,7 @@ namespace VerifiedXCore.Privacy
                 return (true, "");
 
             if (string.IsNullOrWhiteSpace(payload.ProofB64))
-                return (false, "A private transaction must carry a PLONK proof (proof_b64).");
+                return (false, MissingProofReason);
             if (PlonkCircuitHelper.UsesFeeProof(tx.TransactionType) && string.IsNullOrWhiteSpace(payload.FeeProofB64))
                 return (false, "A vBTC private transaction must carry its VFX fee-leg proof (fee_proof_b64).");
 
@@ -167,7 +169,7 @@ namespace VerifiedXCore.Privacy
 
         private static string Describe(PlonkVerifyResult r, string which) => r switch
         {
-            PlonkVerifyResult.Invalid => $"PLONK proof verification failed ({which}).",
+            PlonkVerifyResult.Invalid => $"{FailedProofPrefix} ({which}).",
             PlonkVerifyResult.NotImplemented => VerifierUnavailableReason,
             _ => $"PLONK verifier returned an error ({which}).",
         };

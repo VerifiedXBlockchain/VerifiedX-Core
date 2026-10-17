@@ -1,3 +1,4 @@
+using System.Numerics;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -7,6 +8,7 @@ using VerifiedXCore;
 using VerifiedXCore.Data;
 using VerifiedXCore.EllipticCurve;
 using VerifiedXCore.Models;
+using VerifiedXCore.Nodes;
 using VerifiedXCore.Services;
 using Xunit;
 
@@ -93,14 +95,30 @@ namespace VerifiedXCore.Tests
             Assert.Empty(_reorgs);
         }
 
-        private static Transaction SignedTransfer(decimal amount = 2.5M, long? unlockTime = null)
+        private static Transaction SignedReserveSend()
+        {
+            BigInteger scalar = 1;
+            while (!ReserveAccount.ReserveAddressOf(scalar).StartsWith("xRBX")) scalar++;
+            var key = new PrivateKey("secp256k1", scalar);
+            var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+            var tx = new Transaction
+            {
+                Timestamp = 1_700_000_000, FromAddress = ReserveAccount.ReserveAddressOf(scalar), ToAddress = Producer, Amount = 2.5M,
+                Fee = 0.00001M, Nonce = 0, TransactionType = TransactionType.TX, Data = "[]", UnlockTime = 1_700_090_000,
+            };
+            tx.Build();
+            tx.Signature = SignatureService.CreateSignature(tx.Hash, key, pub);
+            return tx;
+        }
+
+        private static Transaction SignedTransfer(decimal amount = 2.5M, long? unlockTime = null, string? data = null, string? to = null)
         {
             var key = new PrivateKey("secp256k1");
             var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
             var tx = new Transaction
             {
-                Timestamp = 1_700_000_000, FromAddress = AccountData.GetHumanAddress(pub), ToAddress = "xRecipient", Amount = amount,
-                Fee = 0.00001M, Nonce = 0, TransactionType = TransactionType.TX, UnlockTime = unlockTime,
+                Timestamp = 1_700_000_000, FromAddress = AccountData.GetHumanAddress(pub), ToAddress = to ?? Producer, Amount = amount,
+                Fee = 0.00001M, Nonce = 0, TransactionType = TransactionType.TX, UnlockTime = unlockTime, Data = data,
             };
             tx.Build();
             tx.Signature = SignatureService.CreateSignature(tx.Hash, key, pub);
@@ -110,7 +128,7 @@ namespace VerifiedXCore.Tests
         /// <summary>A certified-looking block at <paramref name="height"/> holding a block reward and <paramref name="tx"/>.</summary>
         private static Block SignedBlockWith(long height, Transaction tx, Action<Transaction>? alterAfterSigning = null)
         {
-            var reward = new Transaction { Timestamp = 1_700_000_000, FromAddress = "Coinbase_BlkRwd", ToAddress = "xProducer", Amount = 32M, TransactionType = TransactionType.TX };
+            var reward = new Transaction { Timestamp = 1_700_000_000, FromAddress = "Coinbase_BlkRwd", ToAddress = Producer, Amount = 32M, TransactionType = TransactionType.TX };
             reward.Build();
             alterAfterSigning?.Invoke(tx); // the carried hash, and so the merkle root and block hash, stay those of the signed body
             var key = new PrivateKey("secp256k1");
@@ -179,9 +197,11 @@ namespace VerifiedXCore.Tests
             return tx;
         }
 
+        private static readonly string Producer = AccountData.GetHumanAddress("04" + Convert.ToHexString(new PrivateKey("secp256k1").publicKey().toString()).ToLowerInvariant());
+
         private static Transaction FeeReward()
         {
-            var tx = new Transaction { Timestamp = 1_700_000_000, FromAddress = "Coinbase_TrxFees", ToAddress = "xProducer", Amount = 0M, Fee = 0.00M, TransactionType = TransactionType.TX }; // as BlockchainData builds it
+            var tx = new Transaction { Timestamp = 1_700_000_000, FromAddress = "Coinbase_TrxFees", ToAddress = Producer, Amount = 32M, Fee = 0.00M, TransactionType = TransactionType.TX }; // as BlockchainData builds it
             tx.Build();
             return tx;
         }
@@ -200,6 +220,104 @@ namespace VerifiedXCore.Tests
             return tx;
         }
 
+        [Fact]
+        public void AVaultSizedTransfer_IsNotRefusedForSize_WithoutTheVaultStateInHand()
+        {
+            var prior = Globals.VbtcVaultTxSizeHeight;
+            try
+            {
+                Globals.VbtcVaultTxSizeHeight = 1;
+                // Larger than 30 KB, within a vault's cap; the vault it moves is in no state this node has before the rollback.
+                var key = new PrivateKey("secp256k1");
+                var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+                var tx = new Transaction
+                {
+                    Timestamp = 1_700_000_000, FromAddress = AccountData.GetHumanAddress(pub), ToAddress = Producer, Amount = 0.0M, Fee = 0.00001M,
+                    TransactionType = TransactionType.TKNZ_TX,
+                    Data = JsonConvert.SerializeObject(new[] { new { Function = "Transfer()", ContractUID = "vault:1", Data = new string('c', 40 * 1024) } }),
+                };
+                tx.Build();
+                tx.Signature = SignatureService.CreateSignature(tx.Hash, key, pub);
+                var block = JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(SignedBlockWith(100, tx)))!;
+
+                Assert.Null(ForkCorrectionService.TransactionIntegrityError(block));
+
+                // An ordinary transfer of the same size, not shaped as a vault transfer, is over the 30 KB cap.
+                var plain = new Transaction
+                {
+                    Timestamp = 1_700_000_000, FromAddress = AccountData.GetHumanAddress(pub), ToAddress = Producer, Amount = 0.0M, Fee = 0.00001M,
+                    TransactionType = TransactionType.NFT_TX, Data = JsonConvert.SerializeObject(new[] { new { Function = "Transfer()", Pad = new string('c', 40 * 1024) } }),
+                };
+                plain.Build();
+                plain.Signature = SignatureService.CreateSignature(plain.Hash, key, pub);
+                Assert.NotNull(ForkCorrectionService.TransactionIntegrityError(JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(SignedBlockWith(100, plain)))!));
+            }
+            finally { Globals.VbtcVaultTxSizeHeight = prior; }
+        }
+
+        [Fact]
+        public void AnAttestationOverItsCap_IsRefusedBeforeRollingBack()
+        {
+            var big = VerifiedXCore.Bitcoin.Attestation.BtcAttestTxValidator.Create(TransactionType.VBTC_V2_BTC_REPORT,
+                JsonConvert.SerializeObject(new { pad = new string('r', VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.MaxReportTxBytes) }), 1_700_000_000);
+            var block = JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(SignedBlockWith(100, big)))!;
+
+            Assert.NotNull(ForkCorrectionService.TransactionIntegrityError(block));
+        }
+
+        [Fact]
+        public void AReorgOntoTheExpectedBlock_DropsAnApprovalOfAnotherHashThere()
+        {
+            var prior = new System.Collections.Generic.Dictionary<long, string>(Globals.CasterApprovedBlockHashDict);
+            try
+            {
+                Globals.CasterApprovedBlockHashDict[95] = "replaced-95";
+                Globals.CasterApprovedBlockHashDict[96] = "expected-96";
+                VerifiedXCore.Utilities.ForkRecoveryUtility.DropApprovalOtherThan(95, "expected-95");
+                VerifiedXCore.Utilities.ForkRecoveryUtility.DropApprovalOtherThan(96, "expected-96");
+                Assert.False(Globals.CasterApprovedBlockHashDict.ContainsKey(95));
+                Assert.Equal("expected-96", Globals.CasterApprovedBlockHashDict[96]);
+            }
+            finally
+            {
+                Globals.CasterApprovedBlockHashDict.Clear();
+                foreach (var kv in prior) Globals.CasterApprovedBlockHashDict[kv.Key] = kv.Value;
+            }
+        }
+
+        [Fact]
+        public void ABlockHashVote_CountsOnlyInTheSpellingABlockHashHas()
+        {
+            var hash = SignedBlock(95).Hash;
+            Assert.True(BlockcasterNode.IsBlockHashSpelling(hash));
+            Assert.False(BlockcasterNode.IsBlockHashSpelling(hash.ToUpperInvariant()));
+            Assert.False(BlockcasterNode.IsBlockHashSpelling(hash + " "));
+            Assert.False(BlockcasterNode.IsBlockHashSpelling(null));
+        }
+
+        [Theory]
+        [InlineData("Register()")]
+        [InlineData("CallBack()")]
+        [InlineData("Recover()")]
+        public void AReserveControlTransactionWithoutAnUnlockTime_IsNotRefused(string function)
+        {
+            BigInteger scalar = 1;
+            while (!ReserveAccount.ReserveAddressOf(scalar).StartsWith("xRBX")) scalar++;
+            var key = new PrivateKey("secp256k1", scalar);
+            var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+            var tx = new Transaction
+            {
+                Timestamp = 1_700_000_000, FromAddress = ReserveAccount.ReserveAddressOf(scalar), ToAddress = ReserveAccount.ReserveAddressOf(scalar),
+                Amount = 0.0M, Fee = 0.00001M, Nonce = 0, TransactionType = TransactionType.RESERVE,
+                Data = JsonConvert.SerializeObject(new { Function = function }),
+            };
+            tx.Build();
+            tx.Signature = SignatureService.CreateSignature(tx.Hash, key, pub);
+            var block = JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(SignedBlockWith(100, tx)))!;
+
+            Assert.Null(ForkCorrectionService.TransactionIntegrityError(block));
+        }
+
         [Theory]
         [InlineData("zero-amount")]
         [InlineData("attestation-signature")]
@@ -209,6 +327,11 @@ namespace VerifiedXCore.Tests
         [InlineData("unshield-amount")]
         [InlineData("data-unlock-resplit")]
         [InlineData("fee-reward-amount")]
+        [InlineData("reward-recipient-split")]
+        [InlineData("shield-fee")]
+        [InlineData("reserve-unlock-collapse")]
+        [InlineData("signature-padding")]
+        [InlineData("recipient-amount-split")]
         public async Task AFieldOutsideTheHash_ChangedInACertifiedCorrection_IsRefusedBeforeAnyRollback(string field)
         {
             ForkCorrectionService.HasValidCertificate = _ => true;
@@ -216,7 +339,11 @@ namespace VerifiedXCore.Tests
             {
                 "zero-amount" => SignedTransfer(amount: 0M), // VerifyTX re-hashes a carried fraction as 0
                 "attestation-signature" => VerifiedXCore.Bitcoin.Attestation.BtcAttestTxValidator.Create(TransactionType.VBTC_V2_BTC_REPORT, "{}", 1_700_000_000),
-                "fee-reward-amount" => FeeReward(),
+                "fee-reward-amount" or "reward-recipient-split" => FeeReward(),
+                "shield-fee" => SignedShield(),
+                "reserve-unlock-collapse" => SignedReserveSend(),
+                "signature-padding" => SignedTransfer(data: new string('a', LedgerIntegrityRules.DefaultMaxTxSizeBytes - 1_000)),
+                "recipient-amount-split" => SignedTransfer(amount: 32.0M, to: Producer),
                 "unshield-reserve-recipient" or "unshield-recipient" or "unshield-amount" => Unshield(),
                 "data-unlock-resplit" => SignedTransfer(unlockTime: 1790390189),
                 _ => SignedShield(),
@@ -231,7 +358,13 @@ namespace VerifiedXCore.Tests
                 "unshield-amount" => t => t.Amount = 2.0M,
                 // Same preimage, hash and signature: digits moved from UnlockTime into Data.
                 "data-unlock-resplit" => t => { t.Data = "1"; t.UnlockTime = 790390189; },
-                "fee-reward-amount" => t => t.Amount = 0.5M, // no signature covers a reward; VerifyTX's zero re-hash would pass it
+                "fee-reward-amount" => t => t.Amount = 32.5M, // no signature covers a reward's amount
+                "reward-recipient-split" => t => { t.ToAddress += "3"; t.Amount = 2M; }, // "...3" + "2" hashes like "..." + "32"
+                "shield-fee" => t => t.Fee = 0M, // outside the hash below the shield-fee height
+                "reserve-unlock-collapse" => t => { t.Data = (t.Data ?? "") + t.UnlockTime; t.UnlockTime = null; }, // same preimage
+                // Whitespace inside the Base64 part still decodes and verifies; it pushes the transaction over the cap.
+                "signature-padding" => t => t.Signature = t.Signature.Replace(".", new string(' ', 2_000) + "."),
+                "recipient-amount-split" => t => { t.ToAddress += "3"; t.Amount = 2.0M; }, // "...3" + "2.0" hashes like "..." + "32.0"
                 _ => t => t.ToAddress = "xSomewhereElse",
             };
             var asSigned = JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(SignedBlockWith(100, AsSigned())))!;
@@ -317,6 +450,31 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ACertifiedBlockThatIsNotExactlyItsOwnHash_IsNotApproved()
+        {
+            var prior = new System.Collections.Generic.Dictionary<long, string>(Globals.CasterApprovedBlockHashDict);
+            try
+            {
+                ForkCorrectionService.HasValidCertificate = _ => true;
+                Globals.CasterApprovedBlockHashDict.Clear();
+                var recased = SignedBlock(95);
+                recased.Hash = recased.Hash.ToUpperInvariant(); // the same hash spelled otherwise
+                VerifiedXCore.Utilities.ForkRecoveryUtility.ApproveIfCertified(recased);
+                Assert.False(Globals.CasterApprovedBlockHashDict.ContainsKey(95));
+
+                var unsigned = SignedBlock(95);
+                unsigned.ValidatorSignature = SignedBlock(95).ValidatorSignature; // another key's signature
+                VerifiedXCore.Utilities.ForkRecoveryUtility.ApproveIfCertified(unsigned);
+                Assert.False(Globals.CasterApprovedBlockHashDict.ContainsKey(95));
+            }
+            finally
+            {
+                Globals.CasterApprovedBlockHashDict.Clear();
+                foreach (var kv in prior) Globals.CasterApprovedBlockHashDict[kv.Key] = kv.Value;
+            }
+        }
+
+        [Fact]
         public void ACastersRollbackOfItsOwnBlock_DropsOnlyTheApprovalThatNamedIt()
         {
             var prior = new System.Collections.Generic.Dictionary<long, string>(Globals.CasterApprovedBlockHashDict);
@@ -351,6 +509,18 @@ namespace VerifiedXCore.Tests
             var unsigned = SignedBlockWith(100, SignedTransfer());
             unsigned.ValidatorSignature = SignedBlockWith(100, SignedTransfer()).ValidatorSignature;
             Assert.NotNull(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(unsigned, 100, unsigned.Hash));
+
+            // Nor, once certificates are enforced, one without a valid certificate.
+            var priorEnforce = Globals.CertEnforceHeight;
+            try
+            {
+                Globals.CertEnforceHeight = 1;
+                ForkCorrectionService.HasValidCertificate = _ => false;
+                Assert.NotNull(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(intact, 100, intact.Hash));
+                ForkCorrectionService.HasValidCertificate = _ => true;
+                Assert.Null(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(intact, 100, intact.Hash));
+            }
+            finally { Globals.CertEnforceHeight = priorEnforce; }
 
             // A source that cannot serve the expected block does not start a reorg either.
             Assert.NotNull(VerifiedXCore.Utilities.ForkRecoveryUtility.ReplacementRefusal(null, 100, intact.Hash));

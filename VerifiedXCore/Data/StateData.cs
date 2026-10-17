@@ -158,11 +158,28 @@ namespace VerifiedXCore.Data
         /// flagging it let anyone send one cheap request with an unreadable field and leave every node's state marked
         /// failed, its snapshots stopped and every later rebuild failing (fourth review, round 4).
         /// </remarks>
+        /// <summary>Test seam: runs at the start of each transaction's apply.</summary>
+        internal static Action<Transaction>? TxApplyForTests;
+
         public static void NoteApplyStepFailed(long height, Exception ex)
         {
             if (!IsNodeLocalFault(ex)) return;
             _applyStepFailed = true;
             BlockStartFailedAtHeight = height;
+        }
+
+        /// <summary>A step writing the withdrawal store (requests, cancellations) failed on this node (cleared as each block starts).</summary>
+        private static bool _withdrawalStoreStepFailed;
+
+        /// <summary>
+        /// As <see cref="NoteApplyStepFailed"/>, for a step that writes the withdrawal store: a fault of this node's
+        /// storage there may have left it without what the chain wrote, so the store is also marked unfinished (blocks
+        /// held, store rebuilt; see <see cref="UpdateTreis"/>). Faults elsewhere in the apply do not mark it.
+        /// </summary>
+        public static void NoteWithdrawalStoreStepFailed(long height, Exception ex)
+        {
+            if (IsNodeLocalFault(ex)) _withdrawalStoreStepFailed = true;
+            NoteApplyStepFailed(height, ex);
         }
 
         /// <summary>Whether an exception comes from this node's storage or process (not from what a transaction says).</summary>
@@ -186,7 +203,33 @@ namespace VerifiedXCore.Data
             Globals.TreisUpdating = true;
             try
             {
-                return await UpdateTreisCore(block);
+                // A write to the withdrawal store the storage swallowed would leave this node's table unlike its peers':
+                // the block's apply fails, as for any other fault of this node's storage.
+                using var storeWrites = new Extensions.DbExtensions.FailureScope(Bitcoin.Services.VBTCWithdrawalStoreRebuildService.StoreCollections);
+                bool applied;
+                try { applied = await UpdateTreisCore(block); }
+                finally
+                {
+                    // A lost store write, or a fault of this node's storage in a step that writes the store (also when the
+                    // apply then threw): neither the store nor the block's other writes (an escrow debit, a refund) may hold
+                    // what the chain wrote. Blocks are held until the state is rebuilt, the store with it. The state is
+                    // marked failed here too (the caller's mark is skipped when the apply throws), so a restart restores it.
+                    if (storeWrites.Count > 0 || _withdrawalStoreStepFailed)
+                    {
+                        var why = storeWrites.Count > 0
+                            ? $"{storeWrites.Count} write(s) to it failed while block {block.Height} was applied"
+                            : $"a fault of this node's storage interrupted a withdrawal step of block {block.Height}";
+                        Bitcoin.Services.VBTCWithdrawalStoreRebuildService.MarkNeedsStateRebuild(why);
+                        try { VerifiedXCore.Services.StateTreiStatusService.SetFailed($"Withdrawal store: {why}."); } catch { }
+                    }
+                }
+                if (storeWrites.Count > 0)
+                {
+                    NoteApplyStepFailed(block.Height, new System.IO.IOException($"{storeWrites.Count} write(s) to the withdrawal store failed while block {block.Height} was applied."));
+                    ErrorLogUtility.LogError($"Block {block.Height}: {storeWrites.Count} write(s) to the withdrawal store failed; the block's apply is incomplete.", "StateData.UpdateTreis()");
+                    return false;
+                }
+                return applied;
             }
             finally
             {
@@ -196,9 +239,13 @@ namespace VerifiedXCore.Data
             }
         }
 
+        internal static Action<long>? ApplyStepForTests;
+
         private static async Task<bool> UpdateTreisCore(Block block)
         {
             _applyStepFailed = false;
+            _withdrawalStoreStepFailed = false;
+            ApplyStepForTests?.Invoke(block.Height);
             lock (_ownerChangesThisBlock) _ownerChangesThisBlock.Clear();
             StateWriteContext.SetHeight(block.Height); //stamp LastModifiedHeight on state writes for snapshot diffing
             LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13: every apply path uses the block's height
@@ -251,6 +298,7 @@ namespace VerifiedXCore.Data
             {
                 try
                 {
+                    TxApplyForTests?.Invoke(tx);
                     if (block.Height == 0)
                     {
                         var acctStateTreiFrom = new AccountStateTrei
@@ -831,6 +879,10 @@ namespace VerifiedXCore.Data
                 catch(Exception ex)
                 {
                     txFailList.Add(tx);
+                    // A storage fault on this node (not what the transaction says) is reported like a failed block step, so a
+                    // rebuild that hits one does not count as complete. Faults the transaction's data causes are not: they
+                    // happen on every node alike, and some historical transactions do.
+                    NoteApplyStepFailed(block.Height, ex);
                     var txJson = JsonConvert.SerializeObject(tx);
                     ErrorLogUtility.LogError($"Error Updating State Treis. Error: {ex.ToString()}", "StateData.UpdateTreis() - Part 1");
                     ErrorLogUtility.LogError($"TX Info. TX: {txJson}", "StateData.UpdateTreis() - Part 2");
@@ -1178,7 +1230,7 @@ namespace VerifiedXCore.Data
             {
                 if(callBackHash != null)
                 {
-                    var rTX = ReserveTransactions.GetTransactions(callBackHash);
+                    var rTX = ReserveTransactions.GetTransactionsForApply(callBackHash);
                     if (rTX != null)
                     {
                         // HAL-070 Fix: Idempotence guard - skip if already processed
@@ -4227,7 +4279,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
-                NoteApplyStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
+                NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
                 ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal error: {ex.Message}", "StateData.RequestVBTCV2Withdrawal()");
             }
         }
@@ -4335,7 +4387,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
-                NoteApplyStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
+                NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
                 ErrorLogUtility.LogError($"RequestVBTCV2WithdrawalMulti error: {ex.Message}", "StateData.RequestVBTCV2WithdrawalMulti()");
             }
         }
@@ -4455,6 +4507,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only (a data fault stays a no-op everywhere)
                 ErrorLogUtility.LogError($"CompleteVBTCV2Withdrawal error: {ex.Message}", "StateData.CompleteVBTCV2Withdrawal()");
             }
         }
@@ -4559,6 +4612,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only (a data fault stays a no-op everywhere)
                 ErrorLogUtility.LogError($"CancelVBTCV2Withdrawal error: {ex.Message}", "StateData.CancelVBTCV2Withdrawal()");
             }
         }
@@ -4748,7 +4802,7 @@ namespace VerifiedXCore.Data
             {
                 // A vote this node could not judge (the validator set is read from committed blocks and a read error is
                 // thrown, not answered "no") leaves its state unlike its peers': marked, so a restart rebuilds state.
-                NoteApplyStepFailed(tx.Height, ex);
+                NoteWithdrawalStoreStepFailed(tx.Height, ex);
                 ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation error: {ex.Message}", "StateData.VoteOnVBTCV2Cancellation()");
             }
         }
