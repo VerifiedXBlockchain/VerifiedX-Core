@@ -413,6 +413,24 @@ namespace VerifiedXCore.Services
                 try { ValidateBlocksSemaphore.Release(); } catch { }
             }
         }
+        /// <summary>
+        /// Applies a committed block to the state. A throw counts as an incomplete apply (false), so the caller flags the
+        /// state; before, it escaped to the outer catch, which only logged, and the node went on (and snapshotted) on state
+        /// missing part of the block.
+        /// </summary>
+        internal static async Task<bool> ApplyStateAsync(Block block)
+        {
+            try
+            {
+                return await StateData.UpdateTreis(block);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"[ValidateBlock] Applying block {block.Height} to the state threw: {ex.Message}", "BlockValidatorService.ApplyStateAsync()");
+                return false;
+            }
+        }
+
         public static async Task<bool> ValidateBlock(Block block, bool ignoreAdjSignatures, bool blockDownloads = false, bool validateOnly = false, bool updateCLI = false, bool skipCasterCheck = false, string? source = null)
         {
             // ═══════════════════════════════════════════════════════════════
@@ -446,6 +464,8 @@ namespace VerifiedXCore.Services
             }
 
             await ValidateBlockSemaphore.WaitAsync();
+
+            long? committedHeight = null; // set once the block is written: from then on a failure leaves the state behind it
 
             try
             {
@@ -506,7 +526,8 @@ namespace VerifiedXCore.Services
                     //Genesis Block
                     result = true;
                     await BlockchainData.AddBlock(block);
-                    await StateData.UpdateTreis(block);
+                    committedHeight = block.Height;
+                    await ApplyStateAsync(block);
                     foreach (Transaction transaction in block.Transactions)
                     {
                         //Adds receiving TX to wallet
@@ -1499,12 +1520,13 @@ namespace VerifiedXCore.Services
                         //}
 
                         await BlockchainData.AddBlock(block, updateCLI);//add block to chain.
+                        committedHeight = block.Height;
                         Nodes.BlockcasterNode.NoteBlockCommitted(); // DESYNC-CLOCK-FIX: every commit path (message 7, gossip, HeightSync, download) refreshes the stall clock
                         UpdateMemBlocks(block);//update mem blocks
                         UpdateMemBlocksHashes(block);
                         CleanupMempoolAfterBlock(block);//cleanup duplicate withdrawal requests from mempool
 
-                        var stateApplied = await StateData.UpdateTreis(block); //update treis
+                        var stateApplied = await ApplyStateAsync(block); //update treis
                         if (!stateApplied)
                         {
                             // ROOT-CAUSE GUARD: The block was just committed to the chain DB, but one or
@@ -1933,7 +1955,9 @@ namespace VerifiedXCore.Services
                     //Genesis Block
                     result = true;
                     await BlockchainData.AddBlock(block);
-                    await StateData.UpdateTreis(block);
+                    committedHeight = block.Height;
+                    if (!await ApplyStateAsync(block))
+                        StateTreiStatusService.SetFailed($"Incomplete state application at block {block.Height}.");
                     DbContext.Commit();
                     return result;
                 }
@@ -1943,6 +1967,13 @@ namespace VerifiedXCore.Services
             catch (Exception ex) {
                 DbContext.Rollback("BlockValidatorService.ValidateBlock()-14");
                 Console.WriteLine($"Error: {ex.ToString()}");
+                // The block and the state are separate stores: a failure after the block was written leaves the state behind
+                // it. Flagged, so it is not snapshotted or trusted as synced.
+                if (committedHeight != null)
+                {
+                    ErrorLogUtility.LogError($"[ValidateBlock] An error after block {committedHeight} was committed: {ex.Message}. Flagging the state trie.", "BlockValidatorService.ValidateBlock()");
+                    StateTreiStatusService.SetFailed($"An error after block {committedHeight} was committed: {ex.Message}");
+                }
             }
             finally
             {
