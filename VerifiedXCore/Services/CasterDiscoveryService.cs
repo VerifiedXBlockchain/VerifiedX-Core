@@ -1185,6 +1185,14 @@ namespace VerifiedXCore.Services
                 return;
             }
 
+            // Outside the record era no quorum stands behind a removal, so one caster's notice only hastens what this node
+            // sees itself: the member outdated or past its absence grace by our observation, or failing our own audit.
+            if (!CasterMembershipStore.RecordEraActive && !LegacyDemotionEvidence(demotion.DemotedAddress))
+            {
+                CasterLogUtility.Log($"DEMOTE: notice for {demotion.DemotedAddress} from {demotion.DemoterAddress} ignored — no evidence of our own for the removal.", "DEMOTE");
+                return;
+            }
+
             var refusal = CasterSeatService.DemotionNoticeRefusal(demotion.DemotedAddress, demotion.DemoterAddress, demotion.BlockHeight,
                 Globals.LastBlock?.Height ?? 0, CasterMembershipStore.RecordEraActive, CasterMembershipStore.GetCurrent());
             if (refusal != null)
@@ -1214,6 +1222,11 @@ namespace VerifiedXCore.Services
 
             await OnCasterRemoved(demotion.DemotedAddress).ConfigureAwait(false);
         }
+
+        /// <summary>This node's own evidence for a legacy-era demotion: seat evidence, or a failed audit of ours.</summary>
+        internal static bool LegacyDemotionEvidence(string address) =>
+            CasterSeatService.HasOwnRemovalEvidence(address, TimeUtil.GetTime())
+            || (_auditFailCounts.TryGetValue(address, out var failures) && failures > 0);
 
         public static async Task OnCasterRemoved(string removedAddress)
         {

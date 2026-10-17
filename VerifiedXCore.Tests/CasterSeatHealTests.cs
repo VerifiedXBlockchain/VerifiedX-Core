@@ -189,8 +189,14 @@ namespace VerifiedXCore.Tests
                 Assert.False(CasterMembershipStore.RecordEraActive);
 
                 await CasterDiscoveryService.HandleDemotion(NoticeAt(4_000)); // signed long ago, replayed now
-
                 Assert.Contains(Globals.BlockCasters, c => c.ValidatorAddress == "RK28y");
+
+                // Legacy era: a fresh notice alone is one caster's word; it removes the member only on our own evidence.
+                await CasterDiscoveryService.HandleDemotion(NoticeAt(4_999));
+                Assert.Contains(Globals.BlockCasters, c => c.ValidatorAddress == "RK28y");
+                CasterSeatService.NoteOutdated("RK28y");
+                await CasterDiscoveryService.HandleDemotion(NoticeAt(5_000));
+                Assert.DoesNotContain(Globals.BlockCasters, c => c.ValidatorAddress == "RK28y");
             }
             finally
             {

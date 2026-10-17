@@ -288,6 +288,11 @@ namespace VerifiedXCore.Services
         }
         public static void NoteOutdated(string address) => _outdated[address] = TimeUtil.GetTime();
 
+        /// <summary>This node's own evidence for removing a member: past its absence grace by our timer, or seen outdated by us.</summary>
+        internal static bool HasOwnRemovalEvidence(string address, long nowUnix) =>
+            PastGrace(address, nowUnix, TimerToleranceSeconds)
+            || (_outdated.TryGetValue(address, out var seen) && nowUnix - seen <= MaintenanceGraceSeconds);
+
         /// <summary>
         /// Why this node will not sign removing <paramref name="address"/>, or null. A removal needs this node's own
         /// evidence: the member's signed departure, its absence past the grace period by our timer, an outdated version
