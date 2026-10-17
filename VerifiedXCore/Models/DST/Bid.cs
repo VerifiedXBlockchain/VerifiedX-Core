@@ -35,6 +35,13 @@ namespace VerifiedXCore.Models.DST
         public string? SmartContractUID { get; set; }
 
         /// <summary>
+        /// Whether <see cref="SmartContractUID"/> was recorded under the current rule: named by the client, or read from the
+        /// shop the bid was sent to. A bid saved before that rule may carry a contract read from another cached shop, and
+        /// is not completed automatically (null on those rows).
+        /// </summary>
+        public bool? ContractFromTargetShop { get; set; }
+
+        /// <summary>
         /// For a vBTC vault the chain watches: the owner's spendable vBTC when the bid was made. A sale is completed from
         /// this wallet's balance automatically when the seller starts it, and the seller could empty the vault's owner
         /// balance before (or with) its Sale_Start: the buyer paid in full for an empty vault (fifth review, round 30).
@@ -122,6 +129,7 @@ namespace VerifiedXCore.Models.DST
             BidSendReceive = BidSendReceive.Sent;
             if (string.IsNullOrWhiteSpace(SmartContractUID))
                 SmartContractUID = ListingContractFor(targetShop, ListingId, PurchaseKey);
+            ContractFromTargetShop = !string.IsNullOrWhiteSpace(SmartContractUID);
             VaultOwnerBalanceAtBid = VaultOwnerFigure(SmartContractUID);
             AutoCompleteUntil = Math.Max(ListingEndFor(PurchaseKey) ?? BidSendTime, BidSendTime) + AutoCompleteGraceSeconds;
 
@@ -457,7 +465,8 @@ namespace VerifiedXCore.Models.DST
             (GetAllBids(BidSendReceive.Sent) ?? new List<Bid>()).Where(b => b != null
                 && string.Equals(b.BidAddress, bidderAddress, StringComparison.Ordinal)
                 && string.Equals(b.PurchaseKey, purchaseKey, StringComparison.Ordinal)
-                && string.Equals(b.SmartContractUID, smartContractUID, StringComparison.Ordinal)) // no fallback: shop data is the seller's (re-audit)
+                && string.Equals(b.SmartContractUID, smartContractUID, StringComparison.Ordinal) // no fallback: shop data is the seller's (re-audit)
+                && b.ContractFromTargetShop == true) // a contract bound before the target-shop rule may be another shop's
                 .ToList();
 
         /// <summary>
