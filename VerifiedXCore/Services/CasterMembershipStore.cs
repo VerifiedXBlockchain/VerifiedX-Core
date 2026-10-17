@@ -77,6 +77,18 @@ namespace VerifiedXCore.Services
             return Math.Max(headEffectiveFromHeight + 1, quantized);
         }
 
+        /// <summary>How many blocks a proposer's tip may lead ours and still have its record's effective height signed here.</summary>
+        public const int MaxProposerTipLead = RotationHeightWindow;
+
+        /// <summary>
+        /// Whether a successor's EffectiveFromHeight is one an honest proposer near our tip builds (rotations and bootstrap
+        /// resets both take it from the tip). Only a lower bound was checked, so one signed record far in the future
+        /// blocked every later rotation: each successor must be later still. Signer-side only: what a node appends does not
+        /// depend on its tip.
+        /// </summary>
+        public static bool EffectiveHeightWithinReach(long candidateEffective, long headEffective, long tip)
+            => candidateEffective <= ComputeRotationEffectiveHeight(headEffective, tip + MaxProposerTipLead);
+
         /// <summary>Identity of a record's caster SET: sorted addresses only — independent of
         /// EffectiveFromHeight, PeerIP, PublicKey and signatures.</summary>
         public static string ComputeCasterSetHash(CasterMembershipRecord r)

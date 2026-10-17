@@ -27,6 +27,7 @@ namespace VerifiedXCore.Tests
         private readonly bool _priorEncrypted = Globals.IsWalletEncrypted;
         private readonly SecureString _priorPassword = Globals.EncryptPassword;
         private readonly string _priorValidatorAddress = Globals.ValidatorAddress;
+        private readonly Block _priorLastBlock = Globals.LastBlock;
         private readonly Account _a, _b, _c, _d;
         private readonly CasterMembershipRecord _head;
 
@@ -50,6 +51,8 @@ namespace VerifiedXCore.Tests
             _head = Record(5, 1000, "prev", "Promotion", _c.Address, Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"));
             DbContext.DB_Config.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Insert(_head.RecordSeq, _head);
             CasterMembershipStore.InvalidateCache();
+            // The successors below take effect at 1,100: a proposer at this tip builds that height.
+            Globals.LastBlock = new Block { Height = 1_095 };
 
             // D is a validator this node knows and would promote: at 10.0.0.4, holding the caster balance, long seen.
             Globals.NetworkValidators.Clear();
@@ -60,6 +63,7 @@ namespace VerifiedXCore.Tests
         public void Dispose()
         {
             Globals.NetworkValidators.Clear();
+            Globals.LastBlock = _priorLastBlock;
             Globals.IsWalletEncrypted = _priorEncrypted;
             Globals.EncryptPassword = _priorPassword;
             Globals.ValidatorAddress = _priorValidatorAddress;
@@ -161,6 +165,20 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task ARotationTakingEffectFarBeyondOurTip_IsNotSigned()
+        {
+            // Signed, it would block every later rotation: each successor must take effect later still.
+            var farOff = Record(_head.RecordSeq + 1, 999_999_999, _head.RecordHash, "Promotion", _d.Address,
+                Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"), Member(_d, "10.0.0.4"));
+            Assert.Null(await Sign(farOff));
+
+            // What a proposer whose tip leads ours by the allowed margin builds is still signed.
+            var leading = Record(_head.RecordSeq + 1, CasterMembershipStore.ComputeRotationEffectiveHeight(_head.EffectiveFromHeight, Globals.LastBlock.Height + CasterMembershipStore.MaxProposerTipLead),
+                _head.RecordHash, "Promotion", _d.Address, Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"), Member(_d, "10.0.0.4"));
+            Assert.NotNull(await Sign(leading));
+        }
+
+        [Fact]
         public void AnHonestDemotion_PassesTheSignersRecordChecks()
         {
             // The record checks alone (the demotion's evidence rule runs before them in the async route).
@@ -207,7 +225,7 @@ namespace VerifiedXCore.Tests
                 DbContext.DB_Config.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Insert(head.RecordSeq, head);
                 CasterMembershipStore.InvalidateCache();
 
-                var demote = Record(head.RecordSeq + 1, head.EffectiveFromHeight + 100, head.RecordHash, "Demotion", e.Address,
+                var demote = Record(head.RecordSeq + 1, head.EffectiveFromHeight + 10, head.RecordHash, "Demotion", e.Address,
                     Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"));
                 Assert.Null(await Sign(demote));
 

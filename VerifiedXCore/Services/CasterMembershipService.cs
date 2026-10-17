@@ -388,6 +388,11 @@ namespace VerifiedXCore.Services
             if (candidate.RecordSeq != head.RecordSeq + 1) return null;
             if (!string.Equals(candidate.PrevRecordHash, head.RecordHash, StringComparison.OrdinalIgnoreCase)) return null;
             if (candidate.EffectiveFromHeight <= head.EffectiveFromHeight) return null;
+            if (!CasterMembershipStore.EffectiveHeightWithinReach(candidate.EffectiveFromHeight, head.EffectiveFromHeight, Globals.LastBlock?.Height ?? 0))
+            {
+                CasterLogUtility.Log($"MEMBERSHIP: REFUSED to sign seq {candidate.RecordSeq} — effective height {candidate.EffectiveFromHeight} is beyond what a proposer near our tip builds. Proposer={request.ProposerAddress}", "MEMBERSHIP");
+                return null;
+            }
             if (candidate.Casters == null || candidate.Casters.Count < CasterMembershipStore.MinCommitteeSize) return null;
             // SEAT-HEAL: the append rejects a set above the cap, so signing one only locks our sequence (Sep 30).
             if (candidate.Casters.Count > CasterDiscoveryService.MaxCasters)
@@ -471,6 +476,8 @@ namespace VerifiedXCore.Services
             if (candidate.RecordSeq != head.RecordSeq + 1) return null;
             if (!string.Equals(candidate.PrevRecordHash, head.RecordHash, StringComparison.OrdinalIgnoreCase)) return null;
             if (candidate.EffectiveFromHeight <= head.EffectiveFromHeight) return null;
+            if (!CasterMembershipStore.EffectiveHeightWithinReach(candidate.EffectiveFromHeight, head.EffectiveFromHeight, Globals.LastBlock?.Height ?? 0))
+                return null;
             if (CasterMembershipStore.ComputeRecordHash(candidate) != candidate.RecordHash) return null;
 
             // Same set + stale-tip rule the append path enforces (signatures are checked at append).
