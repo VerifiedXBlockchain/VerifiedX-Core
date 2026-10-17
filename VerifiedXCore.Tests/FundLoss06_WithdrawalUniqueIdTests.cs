@@ -92,31 +92,27 @@ namespace VerifiedXCore.Tests
         // ── Row store ─────────────────────────────────────────────────────────────────────────────────────────────
 
         [Fact]
-        public void LaterRequestWithTheSameKey_OverwroteTheMinedRowBelowGate_IsItsOwnRowAtGate()
+        public void LaterRequestWithTheSameKey_IsItsOwnRow_BelowTheGateAndAtIt()
         {
-            var uniqueId = Guid.NewGuid().ToString("N");
-
-            // Below the gate: the hole. A completed 1.0 withdrawal is reopened by a 0.0001 request under the same key.
-            Assert.True(VBTCWithdrawalRequest.Save(MinedRow(uniqueId, "H1", 1.0M, Gate - 10, VBTCWithdrawalStatus.Completed)));
-            Assert.True(VBTCWithdrawalRequest.Save(MinedRow(uniqueId, "H2", 0.0001M, Gate - 1, VBTCWithdrawalStatus.Requested), update: true));
-            var reopened = VBTCWithdrawalRequest.GetByTransactionHash("H2", _vault);
-            Assert.NotNull(reopened);
-            Assert.Equal(VBTCWithdrawalStatus.Requested, reopened!.Status);
-            Assert.Equal(1.0M, reopened.Amount); // the OLD amount, now Requested again: refundable and payable
-            Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash("H1", _vault)); // the Completed row (and its owner add-back) is gone
-
-            // At the gate: the mined row stays as it is; the later request gets its own row.
-            var uniqueId2 = Guid.NewGuid().ToString("N");
-            Assert.True(VBTCWithdrawalRequest.Save(MinedRow(uniqueId2, "H3", 1.0M, Gate - 10, VBTCWithdrawalStatus.Completed)));
-            Assert.True(VBTCWithdrawalRequest.Save(MinedRow(uniqueId2, "H4", 0.0001M, Gate, VBTCWithdrawalStatus.Requested), update: true));
-            var old = VBTCWithdrawalRequest.GetByTransactionHash("H3", _vault);
-            var later = VBTCWithdrawalRequest.GetByTransactionHash("H4", _vault);
-            Assert.NotNull(old);
-            Assert.Equal(VBTCWithdrawalStatus.Completed, old!.Status);
-            Assert.Equal(1.0M, old.Amount);
-            Assert.NotNull(later);
-            Assert.Equal(0.0001M, later!.Amount);
-            Assert.Equal(VBTCWithdrawalStatus.Requested, later.Status);
+            // The store's rule does not depend on the height (validation's refusal does): a completed 1.0 withdrawal
+            // used to be reopened, below the gate, by a 0.0001 request under the same key - the old row's status reset
+            // with its old amount kept, refundable and payable, and the Completed row (its owner add-back) gone. Now the
+            // mined row stays as it is and the later request gets its own row, below the gate as at it, so a node that
+            // rebuilt its store from the chain holds the same rows as one that applied the blocks live.
+            foreach (var (height, tag) in new[] { (Gate - 1, "below"), (Gate, "at") })
+            {
+                var uniqueId = Guid.NewGuid().ToString("N");
+                Assert.True(VBTCWithdrawalRequest.Save(MinedRow(uniqueId, "H1" + tag, 1.0M, Gate - 10, VBTCWithdrawalStatus.Completed)));
+                Assert.True(VBTCWithdrawalRequest.Save(MinedRow(uniqueId, "H2" + tag, 0.0001M, height, VBTCWithdrawalStatus.Requested), update: true));
+                var old = VBTCWithdrawalRequest.GetByTransactionHash("H1" + tag, _vault);
+                var later = VBTCWithdrawalRequest.GetByTransactionHash("H2" + tag, _vault);
+                Assert.NotNull(old);
+                Assert.Equal(VBTCWithdrawalStatus.Completed, old!.Status);
+                Assert.Equal(1.0M, old.Amount);
+                Assert.NotNull(later);
+                Assert.Equal(0.0001M, later!.Amount);
+                Assert.Equal(VBTCWithdrawalStatus.Requested, later.Status);
+            }
         }
 
         [Fact]
@@ -130,6 +126,17 @@ namespace VerifiedXCore.Tests
             var row = Assert.Single(rows);
             Assert.Equal("H5", row.TransactionHash);
             Assert.Equal(Gate, row.RequestBlockHeight);
+        }
+
+        /// <summary>This node's note of a request (no hash yet) is refused under a key a mined request holds: a mined request is inserted on its own, a note is not.</summary>
+        [Fact]
+        public void LocalPreRegistration_UnderAKeyAMinedRequestHolds_IsRefused()
+        {
+            var uniqueId = Guid.NewGuid().ToString("N");
+            Assert.True(VBTCWithdrawalRequest.Save(MinedRow(uniqueId, "H9", 1.0M, Gate - 10, VBTCWithdrawalStatus.Completed)));
+            Assert.False(VBTCWithdrawalRequest.Save(MinedRow(uniqueId, "", 0.5M, 0, VBTCWithdrawalStatus.Requested)));
+            var row = Assert.Single(VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()!.Query().Where(x => x.OriginalUniqueId == uniqueId).ToList());
+            Assert.Equal("H9", row.TransactionHash);
         }
 
         [Fact]

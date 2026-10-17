@@ -543,9 +543,8 @@ namespace VerifiedXCore.Bitcoin.Services
                         {
                             if (missingOnly && VBTCWithdrawalRequest.GetByTransactionHash(row.TransactionHash, row.SmartContractUID) != null)
                                 continue; // this row is here: what it has become since its request is never written over
-                            // (Nor is the row of another mined request that carries the same UniqueId: Save falls back to
-                            // that key, and used to write this request over it.)
-                            if (VBTCWithdrawalRequest.Save(row, update: true, neverOverAnotherRequest: missingOnly)) saved++;
+                            // (Nor is the row of another mined request that carries the same UniqueId: Save never writes over it.)
+                            if (VBTCWithdrawalRequest.Save(row, update: true)) saved++;
                         }
 
                         if (saved == 0 && !missingOnly)
@@ -718,11 +717,10 @@ namespace VerifiedXCore.Bitcoin.Services
                     continue;
                 }
 
-                // update:true upgrades an API node's local pre-registration row (same composite key, empty
-                // TransactionHash, no pins yet). A row of another mined request is never written over, at any height: the
-                // rebuild only adds what is missing (before WithdrawalUniqueIdRulesHeight a request reusing a UniqueId
-                // used to overwrite an earlier one's row, reopening it).
-                if (VBTCWithdrawalRequest.Save(row, update: true, neverOverAnotherRequest: true))
+                // update:true matches live processing exactly (the same Save, the same rule): it upgrades an API node's
+                // local pre-registration row (same composite key, empty TransactionHash, no pins yet) and never writes
+                // over the row of another mined request.
+                if (VBTCWithdrawalRequest.Save(row, update: true))
                     result.RequestsInserted++;
                 else
                     result.Errors++;

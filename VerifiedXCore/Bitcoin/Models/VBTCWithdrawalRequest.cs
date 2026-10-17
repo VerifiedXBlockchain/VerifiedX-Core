@@ -457,14 +457,20 @@ namespace VerifiedXCore.Bitcoin.Models
         /// FIND-005 FIX: Use composite key (RequestorAddress, OriginalUniqueId, SmartContractUID) for uniqueness
         /// Also supports lookup by TransactionHash for FIND-002 multi-user tracking
         /// </summary>
-        /// <param name="neverOverAnotherRequest">A row that belongs to a different mined request (same requester,
-        /// UniqueId and contract, another transaction hash) is never the one written to, at any height: the incoming
-        /// row is inserted on its own. For the chain recovery, which must only add what is missing.</param>
-        public static bool Save(VBTCWithdrawalRequest request, bool update = false, bool neverOverAnotherRequest = false)
+        /// <remarks>
+        /// A row that belongs to a different mined request (same requester, UniqueId and contract, another transaction
+        /// hash) is never the one written to, at any height and by any writer (a block's apply, the store rebuild, the
+        /// chain recovery): the incoming row is inserted on its own. One rule, so a node that rebuilt its store holds
+        /// the same rows as one that applied the blocks live.
+        /// </remarks>
+        public static bool Save(VBTCWithdrawalRequest request, bool update = false)
         {
             lock (RowWrite)
-                return SaveUnderRowLock(request, update, neverOverAnotherRequest);
+                return SaveUnderRowLock(request, update);
         }
+
+        /// <summary>A write of a request row that the storage loses (a test's switch): counted as the wrapper would count it.</summary>
+        internal static Func<bool>? FailWriteForTests;
 
         /// <summary>
         /// Save, the completion record and UpdateLocalFields each look the row up and write it under this lock, so none
@@ -503,12 +509,17 @@ namespace VerifiedXCore.Bitcoin.Models
             }
         }
 
-        private static bool SaveUnderRowLock(VBTCWithdrawalRequest request, bool update, bool neverOverAnotherRequest)
+        private static bool SaveUnderRowLock(VBTCWithdrawalRequest request, bool update)
         {
             var vwrDb = GetVBTCWithdrawalRequestDb();
             if (vwrDb == null)
             {
                 ErrorLogUtility.LogError("GetVBTCWithdrawalRequestDb() returned a null value.", "VBTCWithdrawalRequest.Save()");
+                return false;
+            }
+            if (FailWriteForTests?.Invoke() == true)
+            {
+                Extensions.DbExtensions.NoteFailure(DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS);
                 return false;
             }
 
@@ -537,13 +548,19 @@ namespace VerifiedXCore.Bitcoin.Models
                 // Fund-loss audit item 6: a composite-key match upgrades only this node's local pre-registration row
                 // (no TransactionHash yet) or the same mined request. A row of a DIFFERENT mined request is that
                 // request's row - it used to be overwritten (status reset, old Amount and destination kept) by any later
-                // request reusing the UniqueId. From the height such a request is refused by validation; here the
-                // later row is inserted on its own either way.
+                // request reusing the UniqueId, which reopened a completed withdrawal. From WithdrawalUniqueIdRulesHeight
+                // such a request is refused by validation; here the later row is inserted on its own at any height, by
+                // every writer (no mined request on either chain has reused a UniqueId: it defaults to the request's own
+                // hash, so no row of the chain's history is written differently).
                 if (existingRequest != null
-                    && (request.RequestBlockHeight >= Globals.WithdrawalUniqueIdRulesHeight || neverOverAnotherRequest)
                     && !string.IsNullOrEmpty(existingRequest.TransactionHash)
                     && !string.Equals(existingRequest.TransactionHash, request.TransactionHash, StringComparison.Ordinal))
+                {
+                    // A mined request is inserted on its own; this node's own note of a request (no hash yet, inserted,
+                    // not updated) is refused under a key a mined request holds, not left as a row nothing will upgrade.
+                    if (!update) return false;
                     existingRequest = null;
+                }
             }
 
             if (existingRequest != null)
