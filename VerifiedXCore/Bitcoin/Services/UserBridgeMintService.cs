@@ -181,10 +181,25 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>
         /// Collect attestation signatures from active validators.
         /// </summary>
+        /// <summary>Waits (bounded) until the lock's block is deep enough that validators will sign for it.</summary>
+        private static async Task WaitPastReorgWindow(string? lockId)
+        {
+            var limit = DateTime.UtcNow.AddSeconds((VerifiedXCore.Utilities.ForkChoiceUtility.MAX_REORG_DEPTH + 5) * Math.Max(1, Globals.BlockTime / 1000) + 60);
+            while (DateTime.UtcNow < limit)
+            {
+                var row = string.IsNullOrEmpty(lockId) ? null : VBTCBridgeLockState.GetByLockId(lockId);
+                if (row == null || !BaseBridgeAttestationService.InsideReorgWindow(row)) return;
+                await Task.Delay(5_000);
+            }
+        }
+
         private static async Task<Dictionary<string, string>?> CollectValidatorSignatures(
             BridgeLockRecord record, long nonce, long chainId, string contractAddress, int requiredSigs)
         {
             var signatures = new Dictionary<string, string>();
+            // Validators sign only once the lock's block is past the reorg window (BaseBridgeAttestationService): wait for
+            // that here rather than spend the short retry rounds below on refusals.
+            await WaitPastReorgWindow(record.LockId);
             var validators = BaseValidatorSyncService.SelectAttestingValidators();
             if (validators == null || validators.Count == 0)
             {

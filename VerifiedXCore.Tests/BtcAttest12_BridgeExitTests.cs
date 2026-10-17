@@ -323,6 +323,43 @@ namespace VerifiedXCore.Tests
         /// minted one lock again (fourth review, round 12). Only the lock's own id is signed.
         /// </summary>
         [Fact]
+        public async Task AMintAttestation_IsGivenOnlyForALockBeyondTheReorgWindow()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.004M);
+            Assert.Equal(Tip, VBTCBridgeLockState.GetByLockId(lockId)!.LockBlockHeight);   // the block that carried it
+            var priorValidator = Globals.ValidatorAddress;
+            var priorCastersOnly = Globals.BaseValidatorSetCastersOnly;
+            Globals.ValidatorAddress = "xNotLoadedHere";
+            Globals.BaseValidatorSetCastersOnly = false;
+            try
+            {
+                async Task<string?> Ask() => (await VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.HandleMintAttestationRequest(new()
+                {
+                    LockId = lockId, EvmDestination = "0x" + new string('a', 40), AmountSats = 400_000, Nonce = 1,
+                    ChainId = Globals.BaseEvmChainId, ContractAddress = "0x" + new string('b', 40),
+                })).Item3;
+                Assert.Equal(VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.LockInsideReorgWindowReason, await Ask());   // depth one
+                for (var i = 0; i < VerifiedXCore.Utilities.ForkChoiceUtility.MAX_REORG_DEPTH - 1; i++) await Apply(Tip + 1);
+                Assert.Equal(VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.LockInsideReorgWindowReason, await Ask());   // still reorganisable
+                await Apply(Tip + 1);
+                Assert.NotEqual(VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.LockInsideReorgWindowReason, await Ask()); // goes on to the signing key
+            }
+            finally
+            {
+                Globals.ValidatorAddress = priorValidator;
+                Globals.BaseValidatorSetCastersOnly = priorCastersOnly;
+            }
+        }
+
+        /// <summary>A lock written before its block height was recorded (0) is not held back: it predates the rule.</summary>
+        [Fact]
+        public void ALockRowWithoutItsBlockHeight_IsNotHeldBack() =>
+            Assert.False(VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.InsideReorgWindow(new VBTCBridgeLockState { LockId = "old", LockBlockHeight = 0 }));
+
+        [Fact]
         public async Task AMintAttestation_IsGivenOnlyForTheLocksOwnId()
         {
             await Start();

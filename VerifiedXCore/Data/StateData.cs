@@ -783,7 +783,7 @@ namespace VerifiedXCore.Data
 
                         if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_LOCK)
                         {
-                            ApplyVBTCBridgeLock(tx);
+                            ApplyVBTCBridgeLock(tx, block.Height);
                         }
 
                         if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_UNLOCK)
@@ -3554,7 +3554,7 @@ namespace VerifiedXCore.Data
         /// <summary>
         /// vBTC Base bridge lock: deduct transparent balance chain-wide (same ledger pattern as withdrawal burn).
         /// </summary>
-        private static void ApplyVBTCBridgeLock(Transaction tx)
+        private static void ApplyVBTCBridgeLock(Transaction tx, long blockHeight = 0)
         {
             try
             {
@@ -3611,7 +3611,7 @@ namespace VerifiedXCore.Data
 
                 SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
 
-                if (!VBTCBridgeLockState.TryInsertFromLockTx(tx, scUID, lockId, amount.Value, amountSats.Value, evmDestination))
+                if (!VBTCBridgeLockState.TryInsertFromLockTx(tx, scUID, lockId, amount.Value, amountSats.Value, evmDestination, blockHeight))
                 {
                     ErrorLogUtility.LogError($"ApplyVBTCBridgeLock: failed to persist VBTCBridgeLockState for {lockId}", "StateData.ApplyVBTCBridgeLock()");
                     LogUtility.Log($"[BridgeAttest] CONSENSUS STATE: FAILED to insert VBTCBridgeLockState. lockId={lockId}, txHash={tx.Hash}", "StateData.ApplyVBTCBridgeLock");

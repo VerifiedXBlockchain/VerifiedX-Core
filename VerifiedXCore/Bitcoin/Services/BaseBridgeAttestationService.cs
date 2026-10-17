@@ -51,6 +51,17 @@ namespace VerifiedXCore.Bitcoin.Services
             string.IsNullOrEmpty(lockId) ? null : Pending.TryGetValue(lockId.Trim(), out var s) ? s : null;
 
         /// <summary>Validator node: verify lock and return hex signature (0x + 130 hex) for mint message.</summary>
+        public const string LockInsideReorgWindowReason = "Bridge lock is still inside the reorg window; ask again once its block is deeper";
+
+        /// <summary>
+        /// Whether the block that carried <paramref name="chainLock"/> can still be replaced by an automatic reorganisation
+        /// (fewer than MAX_REORG_DEPTH blocks on top of it). A row written before the block height was recorded (0) is
+        /// not held back: it predates this rule and is long buried.
+        /// </summary>
+        public static bool InsideReorgWindow(VBTCBridgeLockState chainLock) =>
+            chainLock.LockBlockHeight > 0
+            && (Globals.LastBlock?.Height ?? 0) - chainLock.LockBlockHeight < VerifiedXCore.Utilities.ForkChoiceUtility.MAX_REORG_DEPTH;
+
         public static Task<(bool success, string? signatureHex, string? error)> HandleMintAttestationRequest(MintAttestationRequest request)
         {
             const string TAG = "BaseBridgeAttestationService.HandleMintAttestationRequest";
@@ -88,6 +99,15 @@ namespace VerifiedXCore.Bitcoin.Services
                 {
                     LogUtility.Log($"[BridgeAttest] REJECT: lock id {request.LockId} is not the stored id {chainLock.LockId}", TAG);
                     return Task.FromResult<(bool, string?, string?)>((false, null, "Lock id must be the lock's own id exactly"));
+                }
+
+                // C-066: vBTCb is minted on Base for good, while the block that carried the lock can still be replaced by
+                // an automatic reorganisation (up to ForkChoiceUtility.MAX_REORG_DEPTH blocks): a lock signed at depth one
+                // and dropped by a reorg left vBTCb with no lock behind it. No attestation until the lock is that deep.
+                if (InsideReorgWindow(chainLock))
+                {
+                    LogUtility.Log($"[BridgeAttest] REJECT: lock {chainLock.LockId} at block {chainLock.LockBlockHeight} is inside the reorg window (tip {Globals.LastBlock?.Height}).", TAG);
+                    return Task.FromResult<(bool, string?, string?)>((false, null, LockInsideReorgWindowReason));
                 }
 
                 if (!string.Equals(chainLock.EvmDestination?.Trim(), request.EvmDestination?.Trim(), StringComparison.OrdinalIgnoreCase))
