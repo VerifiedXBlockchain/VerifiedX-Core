@@ -320,6 +320,28 @@ namespace VerifiedXCore.Tests
             Assert.False(okAtGate);
         }
 
+        /// <summary>
+        /// A node whose pool counter is gone (its privacy store wiped and not rebuilt) judged the floor as the mainnet
+        /// correction alone, about 100,033 VFX, and accepted an unshield of that much on a downloaded block, where the
+        /// root check that would also refuse it is skipped. With no counter there is no supply: the unshield is refused,
+        /// and a pool row, however small, still gets its correction.
+        /// </summary>
+        [Fact]
+        public async Task MissingPoolCounter_IsNoSupply_TheCorrectionAloneDoesNotLetAnUnshieldThrough()
+        {
+            Globals.ShieldedSupplyCorrections["VFX"] = 100_033.000012M;
+            PrivacyDbContext.PoolState().DeleteAll();   // the startup rebuild's wipe with no replay after it
+            Assert.Equal(0M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate));
+
+            Globals.LastBlock = new Block { Height = Gate + 5 };
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 100_000M), blockDownloads: true, blockVerify: true, blockHeight: Gate);
+            Assert.False(ok);
+            Assert.StartsWith(PrivateTxSupplyRules.SupplyReasonPrefix, msg);
+
+            PrivacyDbContext.PoolState().Insert(new VerifiedXCore.Models.Privacy.ShieldedPoolState { AssetType = "VFX", TotalShieldedSupply = 1M });
+            Assert.Equal(100_034.000012M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate));   // a counter is still corrected
+        }
+
         // ── Same block: two unshields are judged against one supply ───────────────────────────────────────────────
 
         [Fact]

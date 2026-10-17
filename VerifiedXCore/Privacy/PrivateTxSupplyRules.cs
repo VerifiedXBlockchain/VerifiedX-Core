@@ -92,14 +92,21 @@ namespace VerifiedXCore.Privacy
 
         /// <summary>
         /// Committed shielded supply of an asset as the floor judges it at <paramref name="height"/>: the pool row's
-        /// TotalShieldedSupply (0 when there is no row yet) plus, before the proof-rules epoch, the asset's entry in
-        /// Globals.ShieldedSupplyCorrections, which adds back what the forged mainnet unshields subtracted from the counter.
+        /// TotalShieldedSupply plus, before the proof-rules epoch, the asset's entry in Globals.ShieldedSupplyCorrections,
+        /// which adds back what the forged mainnet unshields subtracted from the counter. No row, or a row that cannot be
+        /// read, is no supply at all: the correction corrects a counter, and with none it used to stand on its own as
+        /// about 100,033 VFX the pool could pay out (a node whose privacy store was wiped and not rebuilt).
         /// </summary>
         public static decimal CommittedSupply(string asset, long height)
         {
             decimal recorded;
-            try { recorded = ShieldedPoolService.GetState(asset)?.TotalShieldedSupply ?? 0M; }
-            catch { recorded = 0M; }
+            try
+            {
+                var row = ShieldedPoolService.GetState(asset);
+                if (row == null) return 0M;
+                recorded = row.TotalShieldedSupply;
+            }
+            catch { return 0M; }
             // The correction undoes the forged debits in the pre-epoch counter; the epoch pool starts from zero.
             if (PrivacyEpoch.ProofRulesActive(height))
                 return recorded;
