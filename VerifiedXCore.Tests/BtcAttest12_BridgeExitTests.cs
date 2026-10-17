@@ -849,6 +849,31 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// C-059 (unlock): from the path-audit height a single-lock unlock names the lock by its own id, as an exit does.
+        /// The lookup trims and ignores case and the block's guard compares ids as written, so an unlock under an alias
+        /// ("L1 ") and an exit under the real id drew the same lock in one block, the exit then signed for a lock the
+        /// unlock had freed. An alias is refused; the lock's own id is not refused for its spelling.
+        /// </summary>
+        [Fact]
+        public async Task ASingleLockUnlock_NamesTheLockByItsOwnId()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.002M);
+            VfxTx Unlock(string named) => SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_BRIDGE_UNLOCK, new
+            {
+                Function = "VBTCBridgeUnlock()", ContractUID = vault.Uid, LockId = named, Amount = 0.002M, AmountSats = 200_000L,
+                ExitBurnTxHash = "0x" + new string('e', 64),
+            }, free: true);
+
+            foreach (var alias in new[] { lockId + " ", " " + lockId, lockId.ToUpperInvariant() == lockId ? lockId.ToLowerInvariant() : lockId.ToUpperInvariant() })
+                await RefusedInBlock(Unlock(alias), "by its own id");
+            var (_, why) = await Verify(Unlock(lockId), Tip + 1);
+            Assert.DoesNotContain("by its own id", why ?? "");
+        }
+
+        /// <summary>
         /// Two failures of the same part of an older exit in one block: each is judged on the plan the block before left,
         /// so both passed, and applied together the second found the trimmed plan, matched nothing and failed the whole
         /// exit - whose paid part could then be exited and paid again. The block takes one failure per exit; the second

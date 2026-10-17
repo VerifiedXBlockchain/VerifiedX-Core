@@ -4054,6 +4054,12 @@ namespace VerifiedXCore.Services
                         return (txResult, "ExitBurnTxHash must be a 32-byte hex string (optionally 0x-prefixed).");
 
                     var unlockGateHeight = blockHeight ?? (Globals.LastBlock.Height + 1);
+                    // From the path-audit height a lock is named by its own id exactly, as an exit names it: the lookup trims
+                    // and ignores case, and the block's guard compares ids as written, so an unlock under an alias ("L1 ")
+                    // and an exit under the real id drew the same lock in one block.
+                    if (unlockGateHeight >= Globals.PathAuditRulesHeight && VBTCBridgeLockState.GetByLockId(lockId) is { } named
+                        && !string.Equals(lockId, named.LockId, StringComparison.Ordinal))
+                        return (txResult, $"Bridge unlock must name the lock by its own id ({named.LockId}).");
                     var unlockStrict = unlockGateHeight >= Globals.BridgeBurnBindingHeight;
                     if (unlockStrict)
                     {
