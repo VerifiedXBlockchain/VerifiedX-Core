@@ -400,6 +400,12 @@ namespace VerifiedXCore
         public static long FractionalAmountRehashHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height a transaction's ToAddress carries this network's version byte (LedgerIntegrityRules.
+        /// RecipientIsThisNetworks; admission refuses another network's address at every height). Not active yet.
+        /// </summary>
+        public static long RecipientNetworkByteHeight = 999_999_999_999;
+
+        /// <summary>
         /// From this height a smart contract's Update(), Transfer(), Burn(), Evolve(), Devolve() or
         /// ChangeEvolveStateSpecific() must carry its Data in the array form those applies read. Validation also accepted
         /// a single object, which every apply then skips, so the transaction was mined with no effect. Not active yet.

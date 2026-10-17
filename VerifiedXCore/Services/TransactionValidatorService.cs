@@ -311,6 +311,8 @@ namespace VerifiedXCore.Services
                 ?? LedgerIntegrityRules.TokenDocumentLimits(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                 // Nothing is addressed to a name: the applies credit the ToAddress as written.
                 ?? LedgerIntegrityRules.RecipientIsNotAName(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // The recipient is this network's (at admission at every height).
+                ?? LedgerIntegrityRules.RecipientIsThisNetworks(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1), admission: blockHeight == null && !blockVerify && !blockDownloads)
                 // The fee reads one way in the hash: amount digits cannot move into it.
                 ?? LedgerIntegrityRules.FeeBelowOneVfx(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                 // A reserve moves VFX only in a TX, which CallBack() and Recover() can return.

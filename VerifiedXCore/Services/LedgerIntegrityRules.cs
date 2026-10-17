@@ -435,6 +435,25 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
+        /// A transaction's ToAddress is this network's: from Globals.RecipientNetworkByteHeight in a block, and at every
+        /// height at admission (a node does not admit what would strand the sender's funds). Validation checked only an
+        /// address's length, Base58 form and checksum, so a testnet address on mainnet, or a Bitcoin-style version-0 one,
+        /// was credited and nobody could ever spend it. Base sentinels, reserve (xRBX) and shielded addresses and names
+        /// keep their own rules; private transactions other than unshields have their own address rules. Null when it passes.
+        /// </summary>
+        public static string? RecipientIsThisNetworks(Transaction tx, long height, bool admission)
+        {
+            if (tx == null || (!admission && height < Globals.RecipientNetworkByteHeight)) return null;
+            if (VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType)
+                && tx.TransactionType != TransactionType.VFX_UNSHIELD && tx.TransactionType != TransactionType.VBTC_V2_UNSHIELD)
+                return null;
+            if (PlaceholderRecipients.Contains(tx.ToAddress ?? "")) return null;
+            return AddressValidateUtility.IsOtherNetworksAddress(tx.ToAddress)
+                ? "The recipient is an address of another network: nothing sent there could ever be spent."
+                : null;
+        }
+
+        /// <summary>
         /// From Globals.RecipientIsAddressHeight no transaction (other than a private one, which has its own address rules)
         /// is addressed to a registered name: the applies credit or assign the ToAddress as written. Null when the rule passes.
         /// </summary>

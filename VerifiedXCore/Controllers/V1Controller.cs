@@ -1311,7 +1311,8 @@ namespace VerifiedXCore.Controllers
         {
             string output = "";
 
-            var result = AddressValidateUtility.ValidateAddress(address);
+            // Another network's address is well formed but nothing sent to it could be spent here.
+            var result = AddressValidateUtility.ValidateAddress(address) && !AddressValidateUtility.IsOtherNetworksAddress(address);
 
             output = result.ToString();
 
