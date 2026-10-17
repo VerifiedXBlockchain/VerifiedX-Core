@@ -410,6 +410,18 @@ namespace VerifiedXCore.Services
             };
             if (!validChange) return null;
 
+            // The request is unauthenticated: a promotion is signed only for a candidate this node would itself promote.
+            if (candidate.ChangeType == "Promotion")
+            {
+                var addedEntry = candidate.Casters.First(c => string.Equals(c.Address, candidate.ChangedAddress, StringComparison.Ordinal));
+                var refusal = CasterDiscoveryService.PromotionSigningRefusal(addedEntry, Globals.LastBlock?.Height ?? 0, TimeUtil.GetTime());
+                if (refusal != null)
+                {
+                    CasterLogUtility.Log($"MEMBERSHIP: REFUSED to sign Promotion of {candidate.ChangedAddress} at seq {candidate.RecordSeq} — {refusal}. Proposer={request.ProposerAddress}", "MEMBERSHIP");
+                    return null;
+                }
+            }
+
             // Every continuing member keeps its entry exactly: a rotation adds or removes one member and changes no one
             // else's PeerIP or PublicKey (ProposeRotationAsync copies them from the head).
             foreach (var c in candidate.Casters)

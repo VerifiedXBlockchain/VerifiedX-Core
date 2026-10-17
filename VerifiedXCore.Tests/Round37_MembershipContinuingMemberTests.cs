@@ -6,6 +6,7 @@ using System.Security;
 using System.Threading.Tasks;
 using VerifiedXCore;
 using VerifiedXCore.Data;
+using VerifiedXCore.Extensions;
 using VerifiedXCore.Models;
 using VerifiedXCore.Services;
 using Xunit;
@@ -49,10 +50,16 @@ namespace VerifiedXCore.Tests
             _head = Record(5, 1000, "prev", "Promotion", _c.Address, Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"));
             DbContext.DB_Config.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Insert(_head.RecordSeq, _head);
             CasterMembershipStore.InvalidateCache();
+
+            // D is a validator this node knows and would promote: at 10.0.0.4, holding the caster balance, long seen.
+            Globals.NetworkValidators.Clear();
+            Globals.NetworkValidators[_d.Address] = new NetworkValidator { Address = _d.Address, IPAddress = "10.0.0.4", PublicKey = _d.PublicKey, FirstSeenAtHeight = 0, FirstSeenAt = 1 };
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = _d.Address, Balance = CasterDiscoveryService.MinCasterBalance, Nonce = 0 });
         }
 
         public void Dispose()
         {
+            Globals.NetworkValidators.Clear();
             Globals.IsWalletEncrypted = _priorEncrypted;
             Globals.EncryptPassword = _priorPassword;
             Globals.ValidatorAddress = _priorValidatorAddress;
@@ -112,6 +119,45 @@ namespace VerifiedXCore.Tests
             var sig = await Sign(PromoteD(Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3")));
             Assert.NotNull(sig);
             Assert.Equal(_a.Address, sig!.SignerAddress);
+        }
+
+        [Fact]
+        public async Task APromotionOfAnAddressThisNodeDoesNotKnowAsAValidator_IsNotSigned()
+        {
+            Globals.NetworkValidators.Clear();
+            Assert.Null(await Sign(PromoteD(Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"))));
+        }
+
+        [Fact]
+        public async Task APromotionOfAValidatorWithoutTheCasterBalance_IsNotSigned()
+        {
+            var state = StateData.GetAccountStateTrei().FindOne(x => x.Key == _d.Address);
+            state.Balance = CasterDiscoveryService.MinCasterBalance - 1;
+            StateData.GetAccountStateTrei().UpdateSafe(state);
+            Assert.Null(await Sign(PromoteD(Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"))));
+        }
+
+        [Fact]
+        public async Task APromotionOfAValidatorFirstSeenJustNow_IsNotSigned()
+        {
+            Globals.NetworkValidators[_d.Address].FirstSeenAtHeight = Globals.LastBlock?.Height > 0 ? Globals.LastBlock.Height : 1;
+            Globals.NetworkValidators[_d.Address].FirstSeenAt = VerifiedXCore.Utilities.TimeUtil.GetTime();
+            Assert.Null(await Sign(PromoteD(Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"))));
+        }
+
+        [Fact]
+        public async Task APromotionSeatingAValidatorAtAnotherIpOrUnderAnotherKey_IsNotSigned()
+        {
+            var continuing = new[] { Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3") };
+            var otherIp = Record(_head.RecordSeq + 1, _head.EffectiveFromHeight + 100, _head.RecordHash, "Promotion", _d.Address,
+                continuing.Append(Member(_d, "203.0.113.9")).ToArray());
+            Assert.Null(await Sign(otherIp));
+
+            var otherKey = Member(_d, "10.0.0.4");
+            otherKey.PublicKey = _b.PublicKey;
+            var withOtherKey = Record(_head.RecordSeq + 1, _head.EffectiveFromHeight + 100, _head.RecordHash, "Promotion", _d.Address,
+                continuing.Append(otherKey).ToArray());
+            Assert.Null(await Sign(withOtherKey));
         }
 
         [Fact]

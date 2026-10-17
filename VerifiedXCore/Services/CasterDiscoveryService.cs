@@ -1696,6 +1696,34 @@ namespace VerifiedXCore.Services
         /// Runs the same gates locally (balance, maturity, port, version) and returns accept/reject.
         /// Called from ValidatorController.ProposePromotion endpoint.
         /// </summary>
+        /// <summary>
+        /// Why this node will not sign a membership record that seats <paramref name="added"/>, or null when it will. The
+        /// sign request names no one this node can verify, so the seat is judged on this node's own view, with the state
+        /// gates EvaluatePromotionProposal applies: a validator it knows, at the address it knows, whose key is the
+        /// address's, holding the caster balance, and mature. No outbound check runs for an unauthenticated request.
+        /// </summary>
+        internal static string? PromotionSigningRefusal(CasterInfo? added, long currentHeight, long nowUnix)
+        {
+            if (added == null || string.IsNullOrEmpty(added.Address))
+                return "no added caster";
+            if (!Globals.NetworkValidators.TryGetValue(added.Address, out var validator) || validator == null)
+                return "candidate not in NetworkValidators";
+            string? keyAddress = null;
+            try { keyAddress = string.IsNullOrEmpty(added.PublicKey) ? null : AccountData.GetHumanAddress(added.PublicKey); }
+            catch (Exception) { keyAddress = null; }
+            if (!string.Equals(keyAddress, added.Address, StringComparison.Ordinal))
+                return "public key is not the candidate's";
+            var knownIp = (validator.IPAddress ?? "").Replace("::ffff:", "");
+            if (string.IsNullOrEmpty(knownIp) || !string.Equals((added.PeerIP ?? "").Replace("::ffff:", ""), knownIp, StringComparison.Ordinal))
+                return $"peer IP is not the candidate's known {knownIp}";
+            var balance = AccountStateTrei.GetAccountBalance(added.Address);
+            if (balance < MinCasterBalance)
+                return $"balance {balance} < {MinCasterBalance}";
+            if (!IsMatureCandidate(validator, currentHeight, nowUnix, out var maturityDetail))
+                return $"maturity {maturityDetail}";
+            return null;
+        }
+
         public static async Task<PromotionProposalResponse> EvaluatePromotionProposal(PromotionProposalRequest proposal)
         {
             var response = new PromotionProposalResponse { ResponderAddress = Globals.ValidatorAddress };
