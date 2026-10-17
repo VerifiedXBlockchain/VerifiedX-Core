@@ -307,7 +307,8 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static string? TokenDocumentLimits(Transaction tx, long height)
         {
-            if (tx == null || height < Globals.PathAuditRulesHeight || tx.TransactionType != TransactionType.FTKN_TX || string.IsNullOrEmpty(tx.Data))
+            // Every type the token functions run for, not FTKN_TX alone: VerifyTX and UpdateTreis dispatch them by Function.
+            if (tx == null || height < Globals.PathAuditRulesHeight || !ContractFunctionTypes.Contains(tx.TransactionType) || string.IsNullOrEmpty(tx.Data))
                 return null;
             JObject j;
             try { j = JObject.Parse(tx.Data); }
