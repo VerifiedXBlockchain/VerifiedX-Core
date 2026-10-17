@@ -209,6 +209,8 @@ namespace VerifiedXCore.Services
 
                 if (VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType))
                 {
+                    if (!TransactionValidatorService.VerifyTXSize(tx, LedgerIntegrityRules.DefaultMaxTxSizeBytes))
+                        return $"private transaction {tx.Hash} is larger than validation allows.";
 
                     if (!VerifiedXCore.Privacy.PrivateTransactionValidatorService.VerifyPrivateHash(tx, block.Height))
                         return $"private transaction {tx.Hash} does not hash to its carried hash.";
@@ -246,8 +248,11 @@ namespace VerifiedXCore.Services
 
                 if (!HashMatchesStrictly(tx))
                     return $"transaction {tx.Hash} does not hash to its carried hash.";
-                // A reserve send's settlement time: with none, its digits could have moved into Data (the preimage joins them).
-                if ((tx.FromAddress ?? "").StartsWith("xRBX") && tx.UnlockTime == null)
+                if (!TransactionValidatorService.VerifyTXSize(tx, LedgerIntegrityRules.MaxTxSizeBytes(tx, block.Height)))
+                    return $"transaction {tx.Hash} is larger than validation allows."; // whitespace inside the signature's Base64 still verifies
+                // A delayed reserve send's settlement time: with none, its digits could have moved into Data (the preimage
+                // joins them). Reserve control transactions (Register, CallBack, Recover) carry none.
+                if ((tx.FromAddress ?? "").StartsWith("xRBX") && tx.TransactionType != TransactionType.RESERVE && tx.UnlockTime == null)
                     return $"reserve transaction {tx.Hash} has no unlock time.";
                 var signatureError = TransactionValidatorService.SignatureError(tx);
                 if (signatureError != null)

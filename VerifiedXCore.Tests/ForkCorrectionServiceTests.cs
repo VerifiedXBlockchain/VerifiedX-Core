@@ -110,14 +110,14 @@ namespace VerifiedXCore.Tests
             return tx;
         }
 
-        private static Transaction SignedTransfer(decimal amount = 2.5M, long? unlockTime = null)
+        private static Transaction SignedTransfer(decimal amount = 2.5M, long? unlockTime = null, string? data = null)
         {
             var key = new PrivateKey("secp256k1");
             var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
             var tx = new Transaction
             {
                 Timestamp = 1_700_000_000, FromAddress = AccountData.GetHumanAddress(pub), ToAddress = "xRecipient", Amount = amount,
-                Fee = 0.00001M, Nonce = 0, TransactionType = TransactionType.TX, UnlockTime = unlockTime,
+                Fee = 0.00001M, Nonce = 0, TransactionType = TransactionType.TX, UnlockTime = unlockTime, Data = data,
             };
             tx.Build();
             tx.Signature = SignatureService.CreateSignature(tx.Hash, key, pub);
@@ -220,6 +220,29 @@ namespace VerifiedXCore.Tests
         }
 
         [Theory]
+        [InlineData("Register()")]
+        [InlineData("CallBack()")]
+        [InlineData("Recover()")]
+        public void AReserveControlTransactionWithoutAnUnlockTime_IsNotRefused(string function)
+        {
+            BigInteger scalar = 1;
+            while (!ReserveAccount.ReserveAddressOf(scalar).StartsWith("xRBX")) scalar++;
+            var key = new PrivateKey("secp256k1", scalar);
+            var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+            var tx = new Transaction
+            {
+                Timestamp = 1_700_000_000, FromAddress = ReserveAccount.ReserveAddressOf(scalar), ToAddress = ReserveAccount.ReserveAddressOf(scalar),
+                Amount = 0.0M, Fee = 0.00001M, Nonce = 0, TransactionType = TransactionType.RESERVE,
+                Data = JsonConvert.SerializeObject(new { Function = function }),
+            };
+            tx.Build();
+            tx.Signature = SignatureService.CreateSignature(tx.Hash, key, pub);
+            var block = JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(SignedBlockWith(100, tx)))!;
+
+            Assert.Null(ForkCorrectionService.TransactionIntegrityError(block));
+        }
+
+        [Theory]
         [InlineData("zero-amount")]
         [InlineData("attestation-signature")]
         [InlineData("shield-recipient")]
@@ -231,6 +254,7 @@ namespace VerifiedXCore.Tests
         [InlineData("reward-recipient-split")]
         [InlineData("shield-fee")]
         [InlineData("reserve-unlock-collapse")]
+        [InlineData("signature-padding")]
         public async Task AFieldOutsideTheHash_ChangedInACertifiedCorrection_IsRefusedBeforeAnyRollback(string field)
         {
             ForkCorrectionService.HasValidCertificate = _ => true;
@@ -241,6 +265,7 @@ namespace VerifiedXCore.Tests
                 "fee-reward-amount" or "reward-recipient-split" => FeeReward(),
                 "shield-fee" => SignedShield(),
                 "reserve-unlock-collapse" => SignedReserveSend(),
+                "signature-padding" => SignedTransfer(data: new string('a', LedgerIntegrityRules.DefaultMaxTxSizeBytes - 1_000)),
                 "unshield-reserve-recipient" or "unshield-recipient" or "unshield-amount" => Unshield(),
                 "data-unlock-resplit" => SignedTransfer(unlockTime: 1790390189),
                 _ => SignedShield(),
@@ -259,6 +284,8 @@ namespace VerifiedXCore.Tests
                 "reward-recipient-split" => t => { t.ToAddress += "3"; t.Amount = 2M; }, // "...3" + "2" hashes like "..." + "32"
                 "shield-fee" => t => t.Fee = 0M, // outside the hash below the shield-fee height
                 "reserve-unlock-collapse" => t => { t.Data = (t.Data ?? "") + t.UnlockTime; t.UnlockTime = null; }, // same preimage
+                // Whitespace inside the Base64 part still decodes and verifies; it pushes the transaction over the cap.
+                "signature-padding" => t => t.Signature = t.Signature.Replace(".", new string(' ', 2_000) + "."),
                 _ => t => t.ToAddress = "xSomewhereElse",
             };
             var asSigned = JsonConvert.DeserializeObject<Block>(JsonConvert.SerializeObject(SignedBlockWith(100, AsSigned())))!;
