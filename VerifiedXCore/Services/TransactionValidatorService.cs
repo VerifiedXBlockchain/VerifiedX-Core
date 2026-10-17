@@ -2102,6 +2102,14 @@ namespace VerifiedXCore.Services
                                         {
                                             return (txResult, "Name has already been taken.");
                                         }
+                                        // A name registered before V4Height is stored "label.rbx", and "label.vfx" was free to
+                                        // take: one label then had two owners. From the height the legacy spelling holds the label.
+                                        var legacyName = name.ToLower() + ".rbx";
+                                        if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.LegacyNameReservedHeight
+                                            && adnrList.FindOne(x => x.Name == legacyName) != null)
+                                        {
+                                            return (txResult, "Name has already been taken.");
+                                        }
                                     }
                                     
                                     var addressCheck = adnrList.FindOne(x => x.Address == txRequest.FromAddress);

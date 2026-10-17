@@ -413,6 +413,12 @@ namespace VerifiedXCore
         public static long VoteTopicRulesHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height AdnrCreate() of a label is refused while the label's legacy "label.rbx" (registered before
+        /// V4Height) exists: the duplicate check matched only the bare label and "label.vfx". Not active yet.
+        /// </summary>
+        public static long LegacyNameReservedHeight = 999_999_999_999;
+
+        /// <summary>
         /// From this height a smart contract's Update(), Transfer(), Burn(), Evolve(), Devolve() or
         /// ChangeEvolveStateSpecific() must carry its Data in the array form those applies read. Validation also accepted
         /// a single object, which every apply then skips, so the transaction was mined with no effect. Not active yet.

@@ -115,5 +115,38 @@ namespace VerifiedXCore.Tests
             Assert.False(ok);
             Assert.Contains("already been taken", why);
         }
+
+        [Fact]
+        public async Task FromTheRule_ALabelHeldByItsLegacyRbxName_CannotBeRegisteredAgain()
+        {
+            var prior = Globals.LegacyNameReservedHeight;
+            try
+            {
+                Globals.LastBlock = new Block { Height = V4 - 5 };
+                await Apply(V4 - 5, Create("legacy", "xOldOwner")); // stored "legacy.rbx"
+                Globals.LastBlock = new Block { Height = V4 + 100 };
+                Globals.LegacyNameReservedHeight = V4 + 101;
+
+                var key = new PrivateKey("secp256k1");
+                var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+                var from = AccountData.GetHumanAddress(pub);
+                StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = from, Balance = 100M, Nonce = 0 });
+                var claim = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(), FromAddress = from, ToAddress = "Adnr_Base", Amount = 5.0M, Nonce = 0,
+                    TransactionType = TransactionType.ADNR, Data = JsonConvert.SerializeObject(new { Function = "AdnrCreate()", Name = "legacy" }),
+                };
+                claim.Fee = FeeCalcService.CalculateTXFee(claim);
+                claim.Build();
+                claim.Signature = SignatureService.CreateSignature(claim.Hash, key, pub);
+
+                var (atRule, why) = await TransactionValidatorService.VerifyTX(claim, false, true, false, null, false, V4 + 101);
+                Assert.False(atRule);
+                Assert.Contains("already been taken", why);
+                var (belowRule, belowWhy) = await TransactionValidatorService.VerifyTX(claim, false, true, false, null, false, V4 + 100);
+                Assert.True(belowRule, belowWhy); // as the previous release judged it
+            }
+            finally { Globals.LegacyNameReservedHeight = prior; }
+        }
     }
 }
