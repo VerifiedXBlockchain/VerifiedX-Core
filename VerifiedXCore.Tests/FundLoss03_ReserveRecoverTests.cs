@@ -123,12 +123,13 @@ namespace VerifiedXCore.Tests
         /// <summary>
         /// C-199: a call-back whose pending row cannot be read on this node (its storage fails) was read as "no such row":
         /// the call-back was skipped, the block counted as applied, and the row later settled to its payee here while every
-        /// other node had refunded the sender. The apply's read (GetTransactionsForApply, which the call-back uses) passes a
-        /// fault of this node's storage on (StateData.CallBackReserveAccountTx catches it into NoteApplyStepFailed), while a
-        /// fault in what the data says is still read as "no such row". Validation's read is unchanged.
+        /// other node had refunded the sender. The apply's read (GetTransactionsForApply, which the call-back uses) takes
+        /// nothing but the hash, so any failure of it - LiteDB's own exceptions (a corrupt page) included - is passed on as a
+        /// storage fault, and the call-back's apply reports it (StateData.CallBackReserveAccountTx: NoteApplyStepFailed).
+        /// Validation's read is unchanged.
         /// </summary>
         [Fact]
-        public void APendingRowThatCannotBeReadOnThisNode_IsAFault_NotANoSuchRow()
+        public async Task APendingRowThatCannotBeReadOnThisNode_IsAFault_NotANoSuchRow()
         {
             var hash = new string('c', 64);
             ReserveTransactions.GetReserveTransactionsDb()!.Insert(new ReserveTransactions
@@ -141,8 +142,14 @@ namespace VerifiedXCore.Tests
             {
                 ReserveTransactions.TestReadFault = () => throw new IOException("reserve store unreadable");
                 Assert.Throws<IOException>(() => ReserveTransactions.GetTransactionsForApply(hash));
-                ReserveTransactions.TestReadFault = () => throw new InvalidOperationException("data");
-                Assert.Null(ReserveTransactions.GetTransactionsForApply(hash));
+                ReserveTransactions.TestReadFault = () => throw new LiteDB.LiteException(0, "ENSURE: page corrupt");
+                Assert.Throws<IOException>(() => ReserveTransactions.GetTransactionsForApply(hash));
+
+                // The call-back's apply itself (the production call site): the fault is reported for the block.
+                StateData.BlockStartFailedAtHeight = -1;
+                var callBack = typeof(StateData).GetMethod("CallBackReserveAccountTx", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+                await (Task)callBack.Invoke(null, new object[] { hash, false, 777L })!;
+                Assert.Equal(777L, StateData.BlockStartFailedAtHeight);
             }
             finally { ReserveTransactions.TestReadFault = null; }
             Assert.NotNull(ReserveTransactions.GetTransactionsForApply(hash));   // read as before when nothing fails
