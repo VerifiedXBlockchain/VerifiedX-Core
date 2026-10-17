@@ -157,6 +157,34 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task ACertifiedCorrectionToANameThisBranchDoesNotHold_StillRollsBack()
+        {
+            // The name table in hand is the losing branch's; the common ancestor may still hold the name.
+            ForkCorrectionService.HasValidCertificate = _ => true;
+            Assert.Null(Adnr.GetAdnr()!.FindOne(x => x.Name == "gone.vfx"));
+            var block = SignedBlockWith(100, SignedTransfer(to: "gone.vfx"));
+
+            await ForkCorrectionService.HandleForkCorrectionAsync(100, JsonConvert.SerializeObject(block), "1.2.3.4");
+
+            Assert.Single(_reorgs);
+        }
+
+        [Fact]
+        public void FromTheAddressOnlyHeight_ANameRecipient_IsRefusedBeforeAnyRollback()
+        {
+            var prior = Globals.RecipientIsAddressHeight;
+            try
+            {
+                var block = SignedBlockWith(100, SignedTransfer(to: "gone.vfx"));
+                Globals.RecipientIsAddressHeight = 101;
+                Assert.Null(ForkCorrectionService.TransactionIntegrityError(block));
+                Globals.RecipientIsAddressHeight = 100;
+                Assert.NotNull(ForkCorrectionService.TransactionIntegrityError(block));
+            }
+            finally { Globals.RecipientIsAddressHeight = prior; }
+        }
+
+        [Fact]
         public async Task ACertifiedCorrectionWithAnAlteredTransactionBody_IsRefusedBeforeAnyRollback()
         {
             ForkCorrectionService.HasValidCertificate = _ => true;
