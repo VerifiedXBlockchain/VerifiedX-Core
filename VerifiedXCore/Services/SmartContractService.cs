@@ -899,6 +899,9 @@ namespace VerifiedXCore.Services
 
             scTx.Signature = signature;
 
+            // The bid this completion pays is used (as in CompleteSaleSmartContractTX): a re-minted UID cannot have it paid again.
+            Bid.MarkAutoCompleted(account.Address, keySign, scUID);
+
             try
             {
                 if (scTx.TransactionRating == null)

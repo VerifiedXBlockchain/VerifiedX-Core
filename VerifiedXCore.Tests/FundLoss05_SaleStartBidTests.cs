@@ -271,6 +271,31 @@ namespace VerifiedXCore.Tests
             Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-manual", 500M, nft));
         }
 
+        /// <summary>
+        /// The other completions use the bid too: a Sale_Complete or M_Sale_Complete this wallet sends raw (signed
+        /// elsewhere), marked by Bid.MarkUsedByCompletion on the raw send path, and the controller's transfer-sale
+        /// completion. Another sale transaction, or another purchase key, leaves the bid as it is.
+        /// </summary>
+        [Fact]
+        public void ACompletionSentRaw_UsesTheBid_AnotherSaleTransactionDoesNot()
+        {
+            var nft = ListedNft();
+            SaveSentBid("key-raw", nft, BidStatus.Accepted, TimeUtil.GetTime());
+            Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-raw", 500M, nft));
+            Transaction Sale(string function, string key) => new Transaction
+            {
+                FromAddress = _victim.Address, ToAddress = _seller.Address, TransactionType = TransactionType.NFT_SALE,
+                Data = JsonConvert.SerializeObject(new { Function = function, ContractUID = nft, KeySign = key }),
+            };
+
+            Bid.MarkUsedByCompletion(Sale("Sale_Cancel()", "key-raw"));
+            Bid.MarkUsedByCompletion(Sale("M_Sale_Complete()", "another-key"));
+            Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-raw", 500M, nft));
+
+            Bid.MarkUsedByCompletion(Sale("M_Sale_Complete()", "key-raw"));
+            Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-raw", 500M, nft));
+        }
+
         [Fact]
         public void IncomingSale_FromARejectedOrExpiredOrUsedBid_IsNotCompleted()
         {
