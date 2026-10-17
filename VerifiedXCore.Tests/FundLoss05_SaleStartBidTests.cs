@@ -210,16 +210,33 @@ namespace VerifiedXCore.Tests
                 Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-10", 500M, nft));
                 Assert.False(Bid.HasLocalSentBid(_victim.Address, "key-10", 500M, other));
 
-                // Build() records the contract on a new bid from the shop listing when the client did not send it.
-                Assert.Equal(nft, Bid.ListingContractFor(10, "key-10"));
-                Assert.Null(Bid.ListingContractFor(11, "key-11"));
-                // Round 31: by purchase key only (listing ids repeat from shop to shop), and not when shops disagree.
-                Assert.Null(Bid.ListingContractFor(10, "another-shops-key"));
-                Globals.MultiDecShopData["copycat"] = new DecShopData { Listings = new System.Collections.Generic.List<Listing> { new Listing { Id = 3, PurchaseKey = "key-10", SmartContractUID = other } } };
-                Assert.Null(Bid.ListingContractFor(10, "key-10"));
-                Globals.MultiDecShopData.TryRemove("copycat", out _);
+                // Build() records the contract on a new bid from the listing of the shop it is sent to, when the client did
+                // not send it: that listing's id and purchase key, in that shop's data alone.
+                var target = Globals.DecShopData;
+                Assert.Equal(nft, Bid.ListingContractFor(target, 10, "key-10"));
+                Assert.Null(Bid.ListingContractFor(target, 11, "key-11"));
+                Assert.Null(Bid.ListingContractFor(target, 10, "another-shops-key"));
+                Assert.Null(Bid.ListingContractFor(target, 3, "key-10")); // the key under another listing id
+
+                // Another cached shop that serves a listing with the key the buyer bid with does not decide the contract:
+                // neither for a bid to the shop that lists it, nor for a bid to a shop whose data does not name it.
+                var copycat = new DecShopData { Listings = new System.Collections.Generic.List<Listing> { new Listing { Id = 10, PurchaseKey = "key-10", SmartContractUID = other } } };
+                Globals.MultiDecShopData["copycat"] = copycat;
+                try
+                {
+                    Assert.Equal(nft, Bid.ListingContractFor(target, 10, "key-10"));
+                    Assert.Null(Bid.ListingContractFor(new DecShopData { Listings = new System.Collections.Generic.List<Listing>() }, 10, "key-10"));
+                    // A bid to a web shop whose data does not name the listing, with only the copycat's data cached as well.
+                    Globals.DecShopData = null;
+                    var toAnotherShop = new Bid { BidAddress = _victim.Address, PurchaseKey = "key-10", BidAmount = 500M, ListingId = 10, CollectionId = 1, RawBid = true };
+                    Assert.True(toAnotherShop.Build(targetShop: new DecShopData { Listings = new System.Collections.Generic.List<Listing>() }));
+                    Assert.Null(toAnotherShop.SmartContractUID); // not the copycat's contract; never completed automatically
+                    Globals.DecShopData = target;
+                }
+                finally { Globals.MultiDecShopData.TryRemove("copycat", out _); }
+
                 var built = new Bid { BidAddress = _victim.Address, PurchaseKey = "key-10", BidAmount = 500M, ListingId = 10, CollectionId = 1, RawBid = true };
-                Assert.True(built.Build());
+                Assert.True(built.Build(targetShop: target));
                 Assert.Equal(nft, built.SmartContractUID);
                 Bid.SaveBid(built);
                 Assert.True(Bid.HasLocalSentBid(_victim.Address, "key-10", 500M, nft));
