@@ -395,6 +395,11 @@ namespace VerifiedXCore.Services
                         stopwatch1.Stop();
                         if (!result && block.Height == Globals.LastBlock.Height + 1)
                         {
+                            // A pin naming the block just refused at our tip is withdrawn, whichever path pinned it (the
+                            // gossip gate, our round's agreement): left, it made the gate refuse every other block at the
+                            // height until the next agreement. Without it a block there needs a majority attestation.
+                            if (Globals.IsBlockCaster)
+                                Nodes.BlockcasterNode.ReleaseRefusedCommitPin(block.Height, block.Hash, triedAtTip: true);
                             if (Globals.AdjudicateAccount != null)
                                 continue;
                             //TESTING! Removing ban logic for now.

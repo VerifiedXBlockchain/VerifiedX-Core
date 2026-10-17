@@ -94,6 +94,32 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Gate.HashMismatch, BlockValidatorService.LiveTipCasterGate(Agreed, Stale, liveTip: false, skipCasterCheck: false, blockDownloads: false, () => true));
         }
 
+        [Fact]
+        public async System.Threading.Tasks.Task ABlockRefusedAtOurTip_DoesNotKeepItsPin_WhicheverPathPinnedIt()
+        {
+            // The gossip gate pinned an attested tip+1 hash; the staged block then fails validation (it is not its hash).
+            Globals.IsBlockCaster = true;
+            Globals.CasterApprovedBlockHashDict[H] = Agreed;
+            Assert.True(BlockStaging.Stage(B(Agreed), "2.2.2.2"));
+
+            await BlockValidatorService.ValidateBlocks();
+
+            Assert.Equal(H - 1, Globals.LastBlock.Height);
+            Assert.False(Globals.CasterApprovedBlockHashDict.ContainsKey(H)); // the gate no longer refuses every other block at H
+        }
+
+        [Fact]
+        public async System.Threading.Tasks.Task APinForAnotherHash_IsLeftWhenADifferentBlockIsRefused()
+        {
+            Globals.IsBlockCaster = true;
+            Globals.CasterApprovedBlockHashDict[H] = Agreed;
+            Assert.True(BlockStaging.Stage(B(Stale), "1.1.1.1"));
+
+            await BlockValidatorService.ValidateBlocks();
+
+            Assert.Equal(Agreed, Globals.CasterApprovedBlockHashDict[H]);
+        }
+
         // ── The queue's choice between competing blocks ───────────────────────────────────────────────
 
         [Fact]
