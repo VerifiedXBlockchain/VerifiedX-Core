@@ -98,13 +98,13 @@ namespace VerifiedXCore.Privacy
                     // epoch on (fifth review, round 32).
                     if (PrivacyEpoch.ProofRulesActive(proofRulesHeight) && PrivacyEpoch.IsDummyNullifier(n))
                         continue;
-                    if (NullifierService.IsNullifierSpentInDb(n, payload.Asset))
+                    if (NullifierService.IsNullifierSpentInDb(n, payload.Asset, height: proofRulesHeight))
                         return (false, "Nullifier already spent on-chain.");
                 }
             }
 
             if (!string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64)
-                && NullifierService.IsNullifierSpentInDb(payload.FeeInputNullifierB64, "VFX"))
+                && NullifierService.IsNullifierSpentInDb(payload.FeeInputNullifierB64, "VFX", height: proofRulesHeight))
                 return (false, "VFX fee nullifier already spent on-chain.");
 
             if (!string.IsNullOrWhiteSpace(payload.Kind) && !ExpectedKindMatches(txRequest.TransactionType, payload.Kind))

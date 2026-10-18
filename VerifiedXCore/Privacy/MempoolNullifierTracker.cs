@@ -27,8 +27,9 @@ namespace VerifiedXCore.Privacy
             return pool == null || pool.Exists(x => x.Hash == txHash);
         }
 
-        public static string MakeKey(string assetType, string nullifierBase64) =>
-            $"{assetType}\u001d{nullifierBase64}";
+        /// <summary>The claim key of a nullifier judged at <paramref name="height"/> (the next block when null); see <see cref="NullifierService.SpentSetKey"/>.</summary>
+        public static string MakeKey(string assetType, string nullifierBase64, long? height = null) =>
+            $"{assetType}\u001d{NullifierService.SpentSetKey(nullifierBase64, height ?? (Globals.LastBlock?.Height ?? 0) + 1)}";
 
         /// <summary>
         /// Releases the claims a verification registered for a transaction that did not enter the mempool: dry runs
@@ -101,7 +102,8 @@ namespace VerifiedXCore.Privacy
             error = null;
             // The dummy is passed over only where the proof rules make it the shared placeholder; before them it is a
             // nullifier like any other, as 8.x nodes judge it (round 35).
-            var dummyShared = PrivacyEpoch.ProofRulesActive(height ?? (Globals.LastBlock?.Height ?? 0) + 1);
+            var judgedAt = height ?? (Globals.LastBlock?.Height ?? 0) + 1;
+            var dummyShared = PrivacyEpoch.ProofRulesActive(judgedAt);
             bool Shared(string n) => dummyShared && PrivacyEpoch.IsDummyNullifier(n);
             if (string.IsNullOrEmpty(txHash) || nullifiersB64 == null || nullifiersB64.Count == 0)
                 return true;
@@ -113,7 +115,7 @@ namespace VerifiedXCore.Privacy
                 // round 19). Not a change to any block's verdict.
                 var own = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var n in nullifiersB64)
-                    if (!string.IsNullOrWhiteSpace(n) && !Shared(n) && !own.Add(n))
+                    if (!string.IsNullOrWhiteSpace(n) && !Shared(n) && !own.Add(NullifierService.SpentSetKey(n, judgedAt)))
                     {
                         error = "This transaction spends one nullifier twice.";
                         return false;
@@ -128,7 +130,7 @@ namespace VerifiedXCore.Privacy
                     // Stage 2: the public dummy note's nullifier is shared by every single-note spend; it never conflicts.
                     if (Shared(n))
                         continue;
-                    var key = MakeKey(assetType, n);
+                    var key = MakeKey(assetType, n, judgedAt);
                     if (Globals.MempoolNullifiers.TryGetValue(key, out var holder) && holder != txHash)
                     {
                         if (!IsStaleClaim(holder))
@@ -144,7 +146,7 @@ namespace VerifiedXCore.Privacy
                 {
                     if (Shared(n))
                         continue;
-                    var key = MakeKey(assetType, n);
+                    var key = MakeKey(assetType, n, judgedAt);
                     Globals.MempoolNullifiers[key] = txHash;
                 }
                 ClaimedAtUtc[txHash] = DateTime.UtcNow;
@@ -161,17 +163,23 @@ namespace VerifiedXCore.Privacy
         public static bool TryAddBlockScopedNullifiers(Transaction tx, ISet<string> blockNullifierKeys, out string? error, long? height = null)
         {
             error = null;
-            var dummyShared = PrivacyEpoch.ProofRulesActive(height ?? (Globals.LastBlock?.Height ?? 0) + 1);
+            var judgedAt = height ?? (Globals.LastBlock?.Height ?? 0) + 1;
+            var dummyShared = PrivacyEpoch.ProofRulesActive(judgedAt);
             if (!PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType))
                 return true;
             if (!PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _) || payload == null)
                 return true;
+            if (dummyShared && PrivateTxProofRules.NullifierIdentityError(payload) is { } identity)
+            {
+                error = identity;
+                return false;
+            }
 
             foreach (var n in payload.NullsB64)
             {
                 if (dummyShared && PrivacyEpoch.IsDummyNullifier(n))
                     continue; // stage 2: shared by every single-note spend in the block
-                var key = MakeKey(payload.Asset, n);
+                var key = MakeKey(payload.Asset, n, judgedAt);
                 if (!blockNullifierKeys.Add(key))
                 {
                     error = "Duplicate nullifier within block.";
@@ -182,7 +190,7 @@ namespace VerifiedXCore.Privacy
             if (!string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64)
                 && (tx.TransactionType == TransactionType.VBTC_V2_UNSHIELD || tx.TransactionType == TransactionType.VBTC_V2_PRIVATE_TRANSFER))
             {
-                var feeKey = MakeKey("VFX", payload.FeeInputNullifierB64);
+                var feeKey = MakeKey("VFX", payload.FeeInputNullifierB64, judgedAt);
                 if (!blockNullifierKeys.Add(feeKey))
                 {
                     error = "Duplicate nullifier within block (VFX fee leg).";

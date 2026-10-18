@@ -11,7 +11,9 @@ namespace VerifiedXCore.Privacy
     /// <item>every output carries a canonical note hash (the circuits bind note hashes, not Pedersen commitments);</item>
     /// <item>a shield has one output; an unshield spends exactly two notes and has one change output (amount may be
     /// zero); a private transfer spends exactly two notes and has two outputs;</item>
-    /// <item>the public dummy note's nullifier appears at most once, and a real nullifier is never the dummy's.</item>
+    /// <item>the public dummy note's nullifier appears at most once, and a real nullifier is never the dummy's;</item>
+    /// <item>every nullifier (the fee leg's included) is the one Base64 spelling of a canonical field element, and no
+    /// note is named twice (<see cref="NullifierIdentityError"/>).</item>
     /// </list>
     /// Null when the rules do not apply (before the height) or pass.
     /// </summary>
@@ -77,7 +79,27 @@ namespace VerifiedXCore.Privacy
             if (dummies > 1) return "The public dummy note can be spent only once per transaction.";
             if (!string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64) && PrivacyEpoch.IsDummyNullifier(payload.FeeInputNullifierB64))
                 return "The VFX fee leg must spend a real note.";
-            return null;
+            return NullifierIdentityError(payload);
+        }
+
+        public const string NonCanonicalNullifierReason = "Every nullifier is the one Base64 spelling of a canonical 32-byte field element.";
+
+        public const string RepeatedNullifierReason = "A private transaction spends each note once.";
+
+        /// <summary>
+        /// A nullifier is its 32 bytes, which is what the proof binds and every spelling of them decodes to. So each one the
+        /// transaction names (its spends and its fee leg) is in its canonical spelling, and no two of them are the same note;
+        /// the public dummy, shared by every single-note spend, may stand beside a real one. Null when they pass.
+        /// </summary>
+        public static string? NullifierIdentityError(PrivateTxPayload payload)
+        {
+            var named = new List<string>(payload.NullsB64 ?? new List<string>());
+            if (!string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64))
+                named.Add(payload.FeeInputNullifierB64);
+            if (named.Any(n => !NullifierService.IsCanonicalNullifier(n)))
+                return NonCanonicalNullifierReason;
+            var real = named.Where(n => !PrivacyEpoch.IsDummyNullifier(n)).ToList();
+            return real.Count != real.Distinct(StringComparer.Ordinal).Count() ? RepeatedNullifierReason : null;
         }
     }
 }
