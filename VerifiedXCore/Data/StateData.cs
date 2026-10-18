@@ -191,7 +191,7 @@ namespace VerifiedXCore.Data
             for (var e = ex; e != null; e = e.InnerException)
             {
                 if (e is System.IO.IOException || e is UnauthorizedAccessException || e is ObjectDisposedException
-                    || e is TimeoutException || e is OutOfMemoryException)
+                    || e is TimeoutException || e is OutOfMemoryException || e is NodeStateFaultException)
                     return true;
                 if (e is LiteDB.LiteException lite && (lite.ErrorCode == LiteDB.LiteException.LOCK_TIMEOUT || lite.ErrorCode == LiteDB.LiteException.DATABASE_SHUTDOWN
                         || lite.ErrorCode == LiteDB.LiteException.FILE_NOT_FOUND || lite.ErrorCode == LiteDB.LiteException.INVALID_DATABASE
@@ -277,9 +277,10 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
-                blockStartFailed = true;
-                BlockStartFailedAtHeight = block.Height;
-                NoteApplyStepFailed(block.Height, ex); // a fault of this node's storage is also reported as one (a rebuild keeps its stop)
+                // Only a fault of this node (its storage, or its own state found missing) flags the block; a throw caused by
+                // the block's data happens on every node alike and is logged.
+                if (IsNodeLocalFault(ex)) blockStartFailed = true;
+                NoteApplyStepFailed(block.Height, ex); // marks BlockStartFailedAtHeight for those same faults (a rebuild keeps its stop)
                 ErrorLogUtility.LogError($"Block {block.Height}: the Bitcoin attestation block-start step failed: {ex}", "StateData.UpdateTreis() - block start");
             }
             try
@@ -290,9 +291,10 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
-                blockStartFailed = true;
-                BlockStartFailedAtHeight = block.Height;
-                NoteApplyStepFailed(block.Height, ex); // a fault of this node's storage is also reported as one (a rebuild keeps its stop)
+                // Only a fault of this node (its storage, or its own state found missing) flags the block; a throw caused by
+                // the block's data happens on every node alike and is logged.
+                if (IsNodeLocalFault(ex)) blockStartFailed = true;
+                NoteApplyStepFailed(block.Height, ex); // marks BlockStartFailedAtHeight for those same faults (a rebuild keeps its stop)
                 ErrorLogUtility.LogError($"Block {block.Height}: the validator bond block-start step failed: {ex}", "StateData.UpdateTreis() - block start");
             }
             var txList = block.Transactions.ToList();
@@ -907,9 +909,10 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
-                blockStartFailed = true;
-                BlockStartFailedAtHeight = block.Height;
-                NoteApplyStepFailed(block.Height, ex); // a fault of this node's storage is also reported as one (a rebuild keeps its stop)
+                // Only a fault of this node (its storage, or its own state found missing) flags the block; a throw caused by
+                // the block's data happens on every node alike and is logged.
+                if (IsNodeLocalFault(ex)) blockStartFailed = true;
+                NoteApplyStepFailed(block.Height, ex); // marks BlockStartFailedAtHeight for those same faults (a rebuild keeps its stop)
                 ErrorLogUtility.LogError($"Block {block.Height}: fixing the block's withdrawals on coins failed: {ex}", "StateData.UpdateTreis() - block end");
             }
 

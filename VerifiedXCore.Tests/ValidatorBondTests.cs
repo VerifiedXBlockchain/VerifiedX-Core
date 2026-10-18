@@ -651,7 +651,7 @@ namespace VerifiedXCore.Tests
             BlockchainData.GetBlocks().InsertSafe(block);
             Assert.False(await StateData.UpdateTreis(block));
             Assert.Null(ValidatorBond.Row(_old[0].Address));
-            Assert.Throws<InvalidOperationException>(() => ValidatorBond.OnBlockStart(Rule + 6));
+            Assert.Throws<NodeStateFaultException>(() => ValidatorBond.OnBlockStart(Rule + 6));
             Assert.Equal(Rule + 5, StateData.BlockStartFailedAtHeight);
         }
 

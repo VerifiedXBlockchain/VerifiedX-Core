@@ -281,7 +281,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     ErrorLogUtility.LogError($"Fixing withdrawal {requested.Ref} on coins at block {vfxHeight} failed: {ex}", "BtcWithdrawals.OnBlockTransactionsApplied()");
                 }
             }
-            if (failed != null) throw new InvalidOperationException($"a withdrawal requested in block {vfxHeight} could not be fixed on coins", failed);
+            if (failed != null) throw new VerifiedXCore.Data.NodeStateFaultException($"a withdrawal requested in block {vfxHeight} could not be fixed on coins", failed);
         }
 
         /// <summary>

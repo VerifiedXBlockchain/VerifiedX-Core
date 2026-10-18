@@ -215,6 +215,7 @@ namespace VerifiedXCore.Bitcoin.Models
             }
             catch (Exception ex)
             {
+                StateData.NoteApplyStepFailed(StateWriteContext.StampHeight, ex); // a fault of this node's storage stops it as a failed apply
                 ErrorLogUtility.LogError($"ApplyPartialUnlock error: {ex.Message}", "VBTCBridgeLockState.ApplyPartialUnlock");
                 return false;
             }
@@ -235,8 +236,10 @@ namespace VerifiedXCore.Bitcoin.Models
                 GetCollection().Update(rec);
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                StateData.NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage stops it as a failed apply
+                ErrorLogUtility.LogError($"TryFinalizeUnlock: lock {rec.LockId} not written: {ex.Message}", "VBTCBridgeLockState.TryFinalizeUnlock");
                 return false;
             }
         }
