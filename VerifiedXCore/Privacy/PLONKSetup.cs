@@ -14,6 +14,32 @@ namespace VerifiedXCore.Privacy
         private static int _v1ProveProbe = -1;
         private static int _vfxPi2Probe = -1;
         private static int _v2CircuitsProbe = -1;
+        private static int _circuitPinnedProbe = -1;
+        private static uint _lastReportedUnpinnedCaps;
+
+        /// <summary>
+        /// Every capability bit this build knows (<see cref="PlonkNative"/>, bits 0–6). The verifier keys come from the
+        /// SHA-256-pinned params file, but the verify logic and public-input layout come from the library; a library that
+        /// reports a bit outside this set is a later circuit generation than the one this build pins, and this node does
+        /// not verify proofs with it (<see cref="IsCircuitVersionPinned"/>).
+        /// </summary>
+        public const uint KnownCapabilities = PlonkNative.CapVerifyV1 | PlonkNative.CapParsePublicInputsV1 | PlonkNative.CapProveV1
+            | PlonkNative.CapV1Circuits | PlonkNative.CapV1Prove | PlonkNative.CapVfxPi2Verify | PlonkNative.CapV2Circuits;
+
+        /// <summary>Replaceable for tests: the native library's capability bits.</summary>
+        internal static Func<uint> Capabilities = () => PlonkNative.plonk_capabilities();
+
+        /// <summary>Why <paramref name="caps"/> is not the circuit generation this build pins, or null when it is.</summary>
+        public static string? CircuitVersionMismatch(uint caps)
+        {
+            var unknown = caps & ~KnownCapabilities;
+            return unknown == 0
+                ? null
+                : $"The native PLONK library reports capabilities (0x{unknown:X}) from a circuit generation this build does not pin; proofs are not verified with it. Run the library that ships with this release.";
+        }
+
+        /// <summary>Whether the loaded library is the circuit generation this build pins (no capability bit it does not know).</summary>
+        public static bool IsCircuitVersionPinned => _circuitPinnedProbe == 1;
 
         /// <summary>Whether the loaded library carries the v2 owner-bound circuits (<see cref="PlonkNative.CapV2Circuits"/>, VXPLNK06). The proof-rules epoch requires it.</summary>
         public static bool IsV2CircuitsAvailable => _v2CircuitsProbe == 1;
@@ -35,7 +61,15 @@ namespace VerifiedXCore.Privacy
         {
             try
             {
-                var caps = PlonkNative.plonk_capabilities();
+                var caps = Capabilities();
+                var mismatch = CircuitVersionMismatch(caps);
+                _circuitPinnedProbe = mismatch == null ? 1 : 0;
+                if (mismatch != null && caps != _lastReportedUnpinnedCaps)
+                {
+                    _lastReportedUnpinnedCaps = caps;
+                    ErrorLogUtility.LogError(mismatch, "PLONKSetup.RefreshVerificationCapability()");
+                    Console.WriteLine($"PLONKSetup: {mismatch}");
+                }
                 _verificationProbe = (caps & PlonkNative.CapVerifyV1) != 0 ? 1 : 0;
                 _proveProbe = (caps & PlonkNative.CapProveV1) != 0 ? 1 : 0;
                 _v1CircuitsProbe = (caps & PlonkNative.CapV1Circuits) != 0 ? 1 : 0;
@@ -45,6 +79,7 @@ namespace VerifiedXCore.Privacy
             }
             catch
             {
+                _circuitPinnedProbe = 0;
                 _verificationProbe = 0;
                 _proveProbe = 0;
                 _v1CircuitsProbe = 0;
@@ -124,7 +159,7 @@ namespace VerifiedXCore.Privacy
                 RefreshVerificationCapability();
                 if (loaded)
                 {
-                    LogUtility.Log($"PLONK params loaded (attempt {attempt}); v2 circuits available: {IsV2CircuitsAvailable}, proving: {IsV1ProvingAvailable}.", "PLONKSetup.EnsureLoadedAsync()");
+                    LogUtility.Log($"PLONK params loaded (attempt {attempt}); v2 circuits available: {IsV2CircuitsAvailable}, circuit version pinned: {IsCircuitVersionPinned}, proving: {IsV1ProvingAvailable}.", "PLONKSetup.EnsureLoadedAsync()");
                     return true;
                 }
                 if (attempt >= maxAttempts)
