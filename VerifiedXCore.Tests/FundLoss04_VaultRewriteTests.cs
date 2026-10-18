@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
@@ -332,14 +333,56 @@ namespace VerifiedXCore.Tests
             Assert.True(FrostKeyShareBinding.BindByOperator(shareB.Id, vaultB).Ok);     // already there
         }
 
-        /// <summary>An attested key-ceremony proof made for <paramref name="madeFor"/>.</summary>
-        private string AttestedProof(string madeFor, string groupKey) =>
-            FrostDkgAttestation.BuildProof(madeFor, groupKey, VictimDeposit, _owner.Address, 2, new[] { "xA", "xB", "xC" }, new List<FrostDkgAttestation.Attestation>());
+        /// <summary>Three validators registered at block 1 (the height the test vaults' proofs name), and the chain past it.</summary>
+        private List<(PrivateKey Key, string Pub, string Address)> RegisterValidators()
+        {
+            var validators = Enumerable.Range(0, 3).Select(_ => NewKey()).ToList();
+            BlockchainData.GetBlocks().InsertSafe(new Block
+            {
+                Height = 1, Hash = "h1-" + Guid.NewGuid().ToString("N"),
+                Transactions = validators.Select((v, i) => new Transaction
+                {
+                    TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = v.Address, ToAddress = v.Address, Hash = "r" + i,
+                    Data = JsonConvert.SerializeObject(new { ValidatorAddress = v.Address, IPAddress = "10.0.0.1", FrostPublicKey = v.Pub, IsS3C = false }),
+                }).ToList(),
+            });
+            Globals.LastBlock = new Block { Height = 10 };
+            return validators;
+        }
+
+        /// <summary>A real group key and its deposit address.</summary>
+        private static (string GroupKey, string Address) NewGroupKey()
+        {
+            var groupKey = Convert.ToHexString(new NBitcoin.Key().PubKey.ToBytes()[1..]).ToLowerInvariant();
+            return (groupKey, FrostDkgAttestation.DeriveTaprootAddress(groupKey, FrostDkgAttestation.ConsensusNetwork)!);
+        }
+
+        /// <summary>A key-ceremony proof for <paramref name="madeFor"/>, each participant signing it.</summary>
+        private string CeremonyProof(string madeFor, (string GroupKey, string Address) key, List<(PrivateKey Key, string Pub, string Address)> signers)
+        {
+            var participants = FrostDkgAttestation.Canonical(signers.Select(v => v.Address));
+            var threshold = FrostDkgAttestation.Required(participants.Count);
+            var message = FrostDkgAttestation.Message(madeFor, key.GroupKey, key.Address, _owner.Address, threshold, participants);
+            return FrostDkgAttestation.BuildProof(madeFor, key.GroupKey, key.Address, _owner.Address, threshold, participants,
+                signers.Select(v => new FrostDkgAttestation.Attestation { ValidatorAddress = v.Address, Signature = SignatureService.CreateSignature(message, v.Key, v.Pub) }));
+        }
+
+        /// <summary>A contract carrying <paramref name="key"/> at its own deposit address, with the proof given (none when null).</summary>
+        private string Carrier((string GroupKey, string Address) key, List<(PrivateKey Key, string Pub, string Address)> snapshot, string? uid = null, Func<string, string?>? proof = null)
+        {
+            uid ??= Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
+            {
+                SmartContractUID = uid, MinterAddress = _owner.Address, OwnerAddress = _owner.Address, IsLocked = false, Nonce = 0,
+                ContractData = VbtcTestContracts.VaultContractData(uid, _owner.Address, key.Address, key.GroupKey, snapshot: snapshot.Select(v => v.Address), dkgProof: proof?.Invoke(uid)),
+            });
+            return uid;
+        }
 
         /// <summary>
         /// An operator resolving an ambiguous share is told which carrier is the vault, and the bind takes only that one: the
-        /// carrier attested for its own UID, or, when none is attested, the one created first. A copy of the key, made
-        /// before or after the vault and carrying the vault's own proof, is refused.
+        /// carrier whose key-ceremony proof checks out for it, or, when none does, the one created first. A copy of the key,
+        /// made before or after the vault, carrying the vault's own proof or a proof it signed itself, is refused.
         /// </summary>
         [Fact]
         public void AnAmbiguousShare_BindsOnlyToTheAttestedCarrier_OrWithNoneAttestedToTheFirstCreated()
@@ -349,18 +392,24 @@ namespace VerifiedXCore.Tests
             try
             {
                 Globals.IsChainSynced = true;
-                // A copy made before the vault, a vault whose body holds the proof made for it, and a copy carrying that proof.
-                var earlyCopy = LegacyVault(Key('g'), proof: null);
-                var vaultUid = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
-                var vault = LegacyVault(Key('g'), uid: vaultUid, proof: AttestedProof(vaultUid, Key('g')));
-                var proofCopy = LegacyVault(Key('g'), proof: AttestedProof(vaultUid, Key('g')));
-                var share = Share(Guid.NewGuid().ToString(), Key('g'));
+                var validators = RegisterValidators();
+                var strangers = Enumerable.Range(0, 3).Select(_ => NewKey()).ToList();
+                var key = NewGroupKey();
+                // Before the vault: a copy with no proof, and one whose proof names its own UID, signed by keys that are not
+                // validators. Then the vault, attested by the validators, and a copy carrying the vault's proof.
+                var earlyCopy = Carrier(key, validators);
+                var selfSigned = Carrier(key, strangers, proof: uid => CeremonyProof(uid, key, strangers));
+                var vault = Carrier(key, validators, proof: uid => CeremonyProof(uid, key, validators));
+                var vaultProof = VerifiedXCore.Bitcoin.Services.VBTCChainView.GetVault(vault)!.Feature.DKGProof;
+                var proofCopy = Carrier(key, validators, proof: _ => vaultProof);
+                Assert.True(FrostDkgGuard.ContractHasAttestedDkgProof(selfSigned));   // its proof has the attested form...
+                var share = Share(Guid.NewGuid().ToString(), key.GroupKey);
                 Assert.Equal(0, FrostKeyShareBinding.BindSessionShares().Bound);
 
                 var row = FrostKeyShareBinding.Report(Me).Keys.Single(k => k.Id == share.Id);
                 Assert.Equal(FrostKeyShareBinding.StateSessionAmbiguous, row.State);
-                Assert.Equal(new[] { earlyCopy, vault, proofCopy }, row.Carriers.Select(c => c.SmartContractUID));
-                Assert.Equal(new[] { false, true, false }, row.Carriers.Select(c => c.Attested));
+                Assert.Equal(new[] { earlyCopy, selfSigned, vault, proofCopy }, row.Carriers.Select(c => c.SmartContractUID));
+                Assert.Equal(new[] { false, false, true, false }, row.Carriers.Select(c => c.Attested)); // ...but does not check out
                 Assert.Equal(vault, row.BindTo);
                 var verdict = FrostKeyShareBinding.Report(Me).Verdict;
                 Assert.Contains($"{vault} (attested: yes", verdict);
@@ -370,14 +419,16 @@ namespace VerifiedXCore.Tests
                 var (ok, why) = FrostKeyShareBinding.BindByOperator(share.Id, earlyCopy);
                 Assert.False(ok);
                 Assert.Contains($"{vault} is the attested carrier", why);
+                Assert.False(FrostKeyShareBinding.BindByOperator(share.Id, selfSigned).Ok);
                 Assert.False(FrostKeyShareBinding.BindByOperator(share.Id, proofCopy).Ok);
                 Assert.True(FrostKeyShareBinding.BindByOperator(share.Id, vault).Ok);
                 Assert.Equal(vault, FrostValidatorKeyStore.GetAllKeyPackages().Single(x => x.Id == share.Id).SmartContractUID);
 
-                // Vaults from before attestation: the first created is the vault; a later copy is refused.
-                var older = LegacyVault(Key('h'));
-                var laterCopy = LegacyVault(Key('h'), proof: null);
-                var legacyShare = Share(Guid.NewGuid().ToString(), Key('h'));
+                // Vaults from before attestation: the first created is the vault; a later copy, even one signing itself, is refused.
+                var oldKey = NewGroupKey();
+                var older = Carrier(oldKey, validators);
+                var laterCopy = Carrier(oldKey, strangers, proof: uid => CeremonyProof(uid, oldKey, strangers));
+                var legacyShare = Share(Guid.NewGuid().ToString(), oldKey.GroupKey);
                 var legacyRow = FrostKeyShareBinding.Report(Me).Keys.Single(k => k.Id == legacyShare.Id);
                 Assert.Equal(older, legacyRow.BindTo);
                 Assert.All(legacyRow.Carriers, c => Assert.False(c.Attested));
@@ -386,15 +437,14 @@ namespace VerifiedXCore.Tests
                 Assert.Contains($"none is attested and {older} was created first", why);
                 Assert.True(FrostKeyShareBinding.BindByOperator(legacyShare.Id, older).Ok);
 
-                // Two carriers attested for themselves: fail closed, neither is bound.
-                var uidA = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
-                var uidB = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
-                LegacyVault(Key('i'), uid: uidA, proof: AttestedProof(uidA, Key('i')));
-                LegacyVault(Key('i'), uid: uidB, proof: AttestedProof(uidB, Key('i')));
-                var twice = Share(Guid.NewGuid().ToString(), Key('i'));
+                // Two carriers each attested for itself: fail closed, neither is bound.
+                var twiceKey = NewGroupKey();
+                var a = Carrier(twiceKey, validators, proof: uid => CeremonyProof(uid, twiceKey, validators));
+                var b = Carrier(twiceKey, validators, proof: uid => CeremonyProof(uid, twiceKey, validators));
+                var twice = Share(Guid.NewGuid().ToString(), twiceKey.GroupKey);
                 Assert.Null(FrostKeyShareBinding.Report(Me).Keys.Single(k => k.Id == twice.Id).BindTo);
-                Assert.False(FrostKeyShareBinding.BindByOperator(twice.Id, uidA).Ok);
-                Assert.False(FrostKeyShareBinding.BindByOperator(twice.Id, uidB).Ok);
+                Assert.False(FrostKeyShareBinding.BindByOperator(twice.Id, a).Ok);
+                Assert.False(FrostKeyShareBinding.BindByOperator(twice.Id, b).Ok);
             }
             finally
             {

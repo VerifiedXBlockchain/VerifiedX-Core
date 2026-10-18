@@ -202,14 +202,23 @@ namespace VerifiedXCore.Bitcoin.FROST
         }
 
         /// <summary>
-        /// Whether a contract's body holds an attested key-ceremony proof made for it. The proof names the contract UID its
-        /// ceremony ran for, so a body that copies another vault's proof is not attested for itself.
+        /// Whether a contract's body holds a key-ceremony proof that checks out now: made for this contract's UID and creator,
+        /// its deposit address the group key's, and attested by each participant, every one a validator active at the
+        /// block the proof names (<see cref="FrostDkgAttestation.Validate"/>, the rule a creation is judged by). The proof
+        /// is re-checked rather than trusted: a contract created before the chain checked proofs could carry any text.
         /// </summary>
         private static bool AttestedFor(string scUid)
         {
-            if (!FrostDkgGuard.ContractHasAttestedDkgProof(scUid)) return false;
-            var proof = FrostDkgAttestation.ParseProof(VBTCChainView.GetVault(scUid)?.Feature.DKGProof);
-            return proof != null && string.Equals(proof.ContractUID, scUid, StringComparison.Ordinal);
+            try
+            {
+                if (!FrostDkgGuard.ContractHasAttestedDkgProof(scUid)) return false;
+                var vault = VBTCChainView.GetVault(scUid);
+                if (vault == null) return false;
+                var proofHeight = vault.Feature.ProofBlockHeight;
+                if (proofHeight <= 0 || proofHeight > (Globals.LastBlock?.Height ?? 0)) return false;
+                return FrostDkgAttestation.Validate(vault.Feature, scUid, vault.State.MinterAddress, () => VBTCValidatorRegistry.GetActiveValidatorsAt(proofHeight)) == null;
+            }
+            catch { return false; } // not shown to be attested: the bind falls back to the first created
         }
 
         /// <summary>
