@@ -106,7 +106,7 @@ namespace VerifiedXCore.DST
                                         ConnectedShopServer = shopEndPoint;
                                         IsConnected = true;
                                     }
-                                    else
+                                    else if (!DstSessionAuth.AnswerCookie(receivedData, payload, udpClient, shopEndPoint)) // the shop asked for its cookie: the helo went again
                                     {
                                         IsConnected = false;
                                     }
@@ -250,7 +250,7 @@ namespace VerifiedXCore.DST
                                         ConnectedShopServerAssets = shopEndPoint;
                                         IsConnected = true;
                                     }
-                                    else
+                                    else if (!DstSessionAuth.AnswerCookie(receivedData, payload, udpAssets, shopEndPoint)) // the shop asked for its cookie: the helo went again
                                     {
                                         IsConnected = false;
                                     }

@@ -72,7 +72,7 @@ namespace VerifiedXCore.Tests
             using var shop = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
             using var client = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
             var clientEndPoint = (IPEndPoint)client.Client.LocalEndPoint!;
-            MessageService.ShopConnect(new Message { Type = MessageType.KeepAlive, Data = "helo", IPAddress = clientEndPoint.ToString() }, clientEndPoint, shop);
+            MessageService.ShopConnect(new Message { Type = MessageType.KeepAlive, Data = "helo", IPAddress = clientEndPoint.ToString(), Auth = DstSessionAuth.Cookie(clientEndPoint.ToString(), TimeUtil.GetTime()) }, clientEndPoint, shop);
             Assert.True(Globals.ConnectedClients.ContainsKey(clientEndPoint.ToString()));
             await ReceiveOrNull(client); // the handshake's echo
             Globals.ClientMessageDict.Clear();
@@ -194,9 +194,13 @@ namespace VerifiedXCore.Tests
                 // A datagram from no STUN server, naming a third party: nothing is sent.
                 Assert.Null(await Punch(t => MessageService.PunchClient(new Message { Data = t.ToString() }, strangerEp, node)));
 
-                // From the STUN server this node registered with: the punch goes out.
+                // From the STUN server this node registered with, unsigned: nothing is sent; signed with the secret it
+                // issued at registration: the punch goes out.
                 Globals.STUNServer = new DSTConnection { IPAddress = strangerEp.ToString() };
-                Assert.Equal("ack", await Punch(t => MessageService.PunchClient(new Message { Data = t.ToString() }, strangerEp, node)));
+                Assert.Null(await Punch(t => MessageService.PunchClient(new Message { Data = t.ToString() }, strangerEp, node)));
+                var secret = DstSessionAuth.NewSecret();
+                DstSessionAuth.StunSecrets[strangerEp.ToString()] = secret;
+                Assert.Equal("ack", await Punch(t => MessageService.PunchClient(DstSessionAuth.SignedPunch(secret, t.ToString()), strangerEp, node)));
 
                 // An asset punch only for a sender that completed the handshake.
                 Assert.Null(await Punch(t => MessageService.AssetPunchClient(new Message { Data = t.Port.ToString() }, strangerEp, node)));
@@ -207,7 +211,7 @@ namespace VerifiedXCore.Tests
                 MessageService.PunchClient(new Message { Data = "not an endpoint" }, strangerEp, node);
                 MessageService.AssetPunchClient(new Message { Data = "99999" }, strangerEp, node);
             }
-            finally { Globals.STUNServer = priorStun; }
+            finally { Globals.STUNServer = priorStun; DstSessionAuth.StunSecrets.Clear(); }
         }
     }
 }

@@ -19,6 +19,9 @@ namespace VerifiedXCore.Models.DST
         public bool ResponseMessage { get; set; }
         public string ResponseMessageId { get; set; }
 
+        /// <summary>A punch's HMAC or a helo's cookie (DstSessionAuth). Not part of Hash.</summary>
+        public string? Auth { get; set; }
+
        
         public void Build()
         {
@@ -142,7 +145,10 @@ namespace VerifiedXCore.Models.DST
         AssetReq,
         AssetReqRec,
         AssetPunchClient,
-        Ping
+        Ping,
+        STUNSecret,
+        STUNSecretConfirm,
+        ShopCookie
     }
 
     public enum DecShopRequestOptions

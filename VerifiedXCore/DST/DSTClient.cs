@@ -108,6 +108,10 @@ namespace VerifiedXCore.DST
                                             ConnectedStunServer = stunEndPoint;
                                             IsConnected = true;
                                         }
+                                        else if (TryTakeStunSecret(receivedData, remoteEP))
+                                        {
+                                            // the registration secret overtook the "echo": kept, still waiting for the echo
+                                        }
                                         else
                                         {
                                             badList.Add(stunServer);
@@ -171,6 +175,18 @@ namespace VerifiedXCore.DST
             }
         }
 
+        /// <summary>Takes a STUN server's registration secret (DstSessionAuth) read by the registration loop instead of the listener.</summary>
+        private static bool TryTakeStunSecret(byte[] receivedData, IPEndPoint from)
+        {
+            Message? message;
+            try { message = JsonConvert.DeserializeObject<Message>(Encoding.UTF8.GetString(receivedData)); }
+            catch (JsonException) { return false; }
+            if (message?.Type != MessageType.STUNSecret)
+                return false;
+            MessageService.ReceiveStunSecret(message, from, udpShop);
+            return true;
+        }
+
         public static async Task<bool> ConnectToShop(IPEndPoint shopEndPoint, string shopServer, string address = "NA", string shopURL = "NA")
         {
             ListenerThread?.Interrupt();
@@ -224,7 +240,7 @@ namespace VerifiedXCore.DST
                                 ConnectedShopServer = shopEndPoint;
                                 IsConnected = true;
                             }
-                            else
+                            else if (!DstSessionAuth.AnswerCookie(receivedData, payload, udpClient, shopEndPoint)) // the shop asked for its cookie: the helo went again
                             {
                                 IsConnected = false;
                             }
@@ -363,7 +379,7 @@ namespace VerifiedXCore.DST
                                         ConnectedShopServer = shopEndPoint;
                                         IsConnected = true;
                                     }
-                                    else
+                                    else if (!DstSessionAuth.AnswerCookie(receivedData, payload, udpClient, shopEndPoint)) // the shop asked for its cookie: the helo went again
                                     {
                                         IsConnected = false;
                                     }
@@ -495,7 +511,7 @@ namespace VerifiedXCore.DST
                                         ConnectedShopServerAssets = shopEndPoint;
                                         IsConnected = true;
                                     }
-                                    else
+                                    else if (!DstSessionAuth.AnswerCookie(receivedData, payload, udpAssets, shopEndPoint)) // the shop asked for its cookie: the helo went again
                                     {
                                         IsConnected = false;
                                     }
