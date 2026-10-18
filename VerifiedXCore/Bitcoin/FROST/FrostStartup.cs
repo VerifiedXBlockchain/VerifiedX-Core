@@ -629,6 +629,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                 {
                     try
                     {
+                        // A node whose FROST library has not passed its check cannot take part (FrostLibraryGate).
+                        if (!FrostLibraryGate.Ready)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = FrostLibraryGate.Unavailable }));
+                            return;
+                        }
+
                         // FIND-0013 Fix: Opportunistic cleanup to prevent unbounded session growth
                         FrostSessionStorage.CleanupOldSessions();
 
@@ -2337,6 +2345,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                 {
                     try
                     {
+                        // A node whose FROST library has not passed its check cannot take part (FrostLibraryGate).
+                        if (!FrostLibraryGate.Ready)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = FrostLibraryGate.Unavailable }));
+                            return;
+                        }
+
                         // FIND-0013 Fix: Opportunistic cleanup
                         FrostSessionStorage.CleanupOldSessions();
 

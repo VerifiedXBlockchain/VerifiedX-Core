@@ -428,6 +428,7 @@ namespace VerifiedXCore
                     {
                         Console.WriteLine("[FROST FFI] Health check FAILED — see logs for details");
                         ErrorLogUtility.LogError($"FROST FFI check failed: {string.Join("; ", frostResult.Errors)}", "FrostFFICheck");
+                        Bitcoin.FROST.FrostLibraryGate.ReportCheckFailed(string.Join("; ", frostResult.Errors));
                     }
                 }
                 catch (Exception ex)
@@ -436,6 +437,7 @@ namespace VerifiedXCore
                     Globals.FrostFFICheckSummary = $"FROST FFI check error: {ex.Message}";
                     ErrorLogUtility.LogError($"FROST FFI check error: {ex}", "FrostFFICheck");
                     Console.WriteLine($"[FROST FFI] Health check ERROR: {ex.Message}");
+                    Bitcoin.FROST.FrostLibraryGate.ReportCheckFailed(ex.Message);
                 }
             });
 

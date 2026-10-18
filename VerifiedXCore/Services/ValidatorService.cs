@@ -434,6 +434,13 @@ namespace VerifiedXCore.Services
         {
             try
             {
+                // Nor while the FROST library has not passed its check: peers would pick this validator (FrostLibraryGate).
+                if (!Bitcoin.FROST.FrostLibraryGate.Ready)
+                {
+                    LogUtility.Log($"Cannot send vBTC V2 reactivation - {Bitcoin.FROST.FrostLibraryGate.Unavailable}.", "ValidatorService.SendVBTCV2ReactivationTx()");
+                    return;
+                }
+
                 // Don't send reactivation TX if ports aren't verified open
                 if (!Globals.PortsOpened)
                 {

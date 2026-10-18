@@ -32,8 +32,9 @@ namespace VerifiedXCore.Tests
         private readonly long _now = TimeUtil.GetTime();
         private readonly List<DKGSession> _sessions = new();
 
-        public PathAudit3_CeremonyStartTests() { FrostSessionStorage.ForgetDkgStarts(); }
-        public void Dispose() { FrostSessionStorage.ForgetDkgStarts(); }
+        private readonly bool _priorLibrary = Globals.FrostFFIAvailable;
+        public PathAudit3_CeremonyStartTests() { FrostSessionStorage.ForgetDkgStarts(); Globals.FrostFFIAvailable = true; }
+        public void Dispose() { FrostSessionStorage.ForgetDkgStarts(); Globals.FrostFFIAvailable = _priorLibrary; }
 
         /// <summary>A session started <paramref name="secondsAgo"/>, whose last step (Round 2 made) was <paramref name="lastStepAgo"/> seconds ago, if any.</summary>
         private DKGSession Open(string leader, string? source = null, long secondsAgo = 0, long? lastStepAgo = null, bool completed = false, string? rekeyOf = null)
