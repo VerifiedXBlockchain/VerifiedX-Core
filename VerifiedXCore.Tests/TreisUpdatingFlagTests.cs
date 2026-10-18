@@ -134,6 +134,46 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task AStorageFaultSwallowedOnTheShieldedPool_MakesTheApplyIncomplete()
+        {
+            var (applied, failedAt) = await ApplyWithSwallowedWrite(
+                () => VerifiedXCore.Privacy.PrivacyDbContext.Nullifiers().Command<bool, VerifiedXCore.Models.Privacy.NullifierRecord>(() => throw new IOException("disk")), 12);
+            Assert.False(applied);
+            Assert.Equal(12, failedAt);
+        }
+
+        /// <summary>Reserve settlement runs outside UpdateTreis and counts the same faults on its own.</summary>
+        private static async Task<bool> SettleWithSwallowedWrite(Action write)
+        {
+            var row = new ReserveTransactions
+            {
+                Id = Guid.NewGuid(), Hash = $"r{Guid.NewGuid():N}", FromAddress = "xRBXsender", ToAddress = "xB", Amount = 1M, Height = 20,
+                ConfirmTimestamp = 1, TransactionType = TransactionType.TX, ReserveTransactionStatus = ReserveTransactionStatus.Pending,
+            };
+            ReserveTransactions.GetReserveTransactionsDb()!.Insert(row);
+            try
+            {
+                StateData.SettleRowForTests = _ => write();
+                return await StateData.UpdateTreiFromReserve(new List<ReserveTransactions> { row }, new Block { Height = 21, Timestamp = 100 });
+            }
+            finally { StateData.SettleRowForTests = null; }
+        }
+
+        [Fact]
+        public async Task ReserveSettlement_AStorageFaultSwallowedOnTheState_MarksItIncomplete()
+        {
+            Assert.False(await SettleWithSwallowedWrite(() => StateData.GetAccountStateTrei().Command<bool, AccountStateTrei>(() => throw new IOException("disk"))));
+            Assert.True(StateTreiStatusService.NeedsRepair());
+        }
+
+        [Fact]
+        public async Task ReserveSettlement_ADataFault_MarksNothing()
+        {
+            Assert.True(await SettleWithSwallowedWrite(() => StateData.GetAccountStateTrei().Command<bool, AccountStateTrei>(() => throw new InvalidOperationException("what the row says"))));
+            Assert.False(StateTreiStatusService.NeedsRepair());
+        }
+
+        [Fact]
         public async Task NormalApply_ReturnsTrue_AndClearsTreisUpdating()
         {
             var block = new Block { Height = 5, StateRoot = "sr", Transactions = new List<Transaction>() };

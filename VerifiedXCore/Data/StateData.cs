@@ -214,7 +214,13 @@ namespace VerifiedXCore.Data
                 DbContext.RSRV_TOPIC_TREI, DbContext.RSRV_VOTE, DbContext.RSRV_TOKEN_VOTE, DbContext.RSRV_DNR, DbContext.RSRV_BITCOIN_ADNR,
                 DbContext.RSRV_RESERVE_TRANSACTIONS, DbContext.RSRV_RESERVE_TRANSACTIONS_CALLED_BACK,
                 DbContext.RSRV_VBTC_V2_CONTRACTS, DbContext.RSRV_VBTC_V2_VALIDATORS, DbContext.RSRV_TOKENIZED_WITHDRAWALS,
+                // The shielded pool's chain state (the wallets' own notes are local).
+                PrivacyDbContext.PRIV_COMMITMENTS, PrivacyDbContext.PRIV_NULLIFIERS, PrivacyDbContext.PRIV_POOL_STATE, PrivacyDbContext.PRIV_MERKLE_NODES,
+                // Bridge lock and exit state and consumed burns.
+                Bitcoin.Models.VBTCBridgeLockState.CollectionName, Bitcoin.Models.VBTCBridgeBtcExitState.CollectionName, Bitcoin.Models.VBTCBridgeConsumedBurn.CollectionName,
             };
+            // Bitcoin attestation and validator bonds.
+            names.UnionWith(Bitcoin.Attestation.BtcAttestStore.AllCollections);
             // Every collection of the contract and shop state databases, as the wipe takes them.
             foreach (var db in new[] { DbContext.DB_SmartContractStateTrei, DbContext.DB_DecShopStateTrei })
             {
@@ -975,6 +981,9 @@ namespace VerifiedXCore.Data
         }
 
         /// <param name="asOf">The block whose timestamp made these transfers fall due: contract code is read as of it.</param>
+        /// <summary>Test seam: runs as each due reserve row is settled.</summary>
+        internal static Action<ReserveTransactions>? SettleRowForTests;
+
         public static async Task<bool> UpdateTreiFromReserve(List<ReserveTransactions> txList, Block? asOf = null)
         {
             using var contractClock = asOf != null ? ContractClock.ForBlock(asOf.Timestamp, asOf.Height + 1) : null;
@@ -1004,6 +1013,8 @@ namespace VerifiedXCore.Data
                         ErrorLogUtility.LogError($"UpdateTreiFromReserve skipped for hash {rtx.Hash} - status {(currentRow?.ReserveTransactionStatus.ToString() ?? "missing")}, not Pending", "StateData.UpdateTreiFromReserve()");
                         continue;
                     }
+
+                    SettleRowForTests?.Invoke(rtx);
 
                     if(rtx.TransactionType == TransactionType.TX)
                     {
