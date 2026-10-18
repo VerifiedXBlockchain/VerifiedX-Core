@@ -407,6 +407,12 @@ namespace VerifiedXCore
         public const long VrfAnchorLagBlocks = 100;
 
         /// <summary>
+        /// From this height the recent-transaction-hash replay guard holds every block within the transaction time window
+        /// of the newest block, by block timestamp, and never fewer than 400 blocks (TxHashGuard). Not active yet.
+        /// </summary>
+        public static long TxHashGuardByTimeHeight = 999_999_999_999;
+
+        /// <summary>
         /// From this height a transaction carrying a non-whole Amount must hash with that Amount: VerifyTX's re-hash
         /// fallback read it as 0 and accepted a signature over "0" (TransactionValidatorService.StandardHashMatches).
         /// Not active yet.

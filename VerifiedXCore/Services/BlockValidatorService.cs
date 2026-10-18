@@ -156,17 +156,7 @@ namespace VerifiedXCore.Services
             return (!StateTreiStatusService.IsSynced(), _cleanBlockStreak);
         }
 
-        public static void UpdateMemBlocks(Block block)
-        {
-            foreach (var trans in block.Transactions)
-                Globals.MemBlocks[trans.Hash] = block.Height;
-
-            var HeightDiff = Globals.LastBlock.Height - 400;
-            foreach(var pair in Globals.MemBlocks.Where(x => x.Value <= HeightDiff))
-            {
-                Globals.MemBlocks.TryRemove(pair.Key, out _);
-            }            
-        }
+        public static void UpdateMemBlocks(Block block) => TxHashGuard.Add(block, Globals.LastBlock);
 
         public static void UpdateMemMultiTransfers(Block block)
         {
