@@ -413,6 +413,15 @@ namespace VerifiedXCore
         public static long VoteTopicRulesHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height a TopicAdd() is judged only on what every node holds alike (TransactionValidatorService.
+        /// TopicAddRefusal): the signature, the validator balance, one open topic per owner at the block's time, and an
+        /// AdjVoteIn topic's specs, in live apply and in a rebuild or replay alike. The sender need not have crafted a
+        /// recent block, and the topic's height need not be in the node's recent-block window: both read node-local state.
+        /// Not active yet.
+        /// </summary>
+        public static long TopicAddDeterministicHeight = 999_999_999_999;
+
+        /// <summary>
         /// From this height AdnrCreate() of a label is refused while the label's legacy "label.rbx" (registered before
         /// V4Height) exists: the duplicate check matched only the bare label and "label.vfx". Not active yet.
         /// </summary>

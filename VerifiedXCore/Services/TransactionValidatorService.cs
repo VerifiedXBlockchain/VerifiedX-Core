@@ -2400,7 +2400,13 @@ namespace VerifiedXCore.Services
                                         var isTopicSigValid = SignatureService.VerifySignature(txRequest.FromAddress, topic.TopicUID, topicSig);
                                         if(isTopicSigValid)
                                         {
-                                            if(!blockDownloads)
+                                            if ((blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.TopicAddDeterministicHeight)
+                                            {
+                                                var topicRefusal = TopicAddRefusal(txRequest, topic, blockTime, admission: blockHeight == null);
+                                                if (topicRefusal != null)
+                                                    return (txResult, topicRefusal);
+                                            }
+                                            else if(!blockDownloads)
                                             {
                                                 //checks if topic height is within realm of mem blocks
                                                 if (!Globals.MemBlocks.Values.Where(x => x == topic.BlockHeight).Any())
@@ -4550,6 +4556,50 @@ namespace VerifiedXCore.Services
         }
         internal const string BridgeLockDestinationIsAdminTagReason = "A bridge lock's EvmDestination cannot begin with a Base admin message tag.";
         internal const string VotingEndDateNeedsOffsetReason = "A topic's voting end date must carry a UTC offset.";
+
+        internal const string TopicOwnerHasActiveTopicReason = "Only one active topic per address is allowed.";
+        internal const string TopicAdjVoteInMissingReason = "Topic description was missing the Adj Vote in Requirements.";
+
+        /// <summary>
+        /// A signed TopicAdd()'s rules from TopicAddDeterministicHeight: each reads only the transaction, the state and the
+        /// block's timestamp, so live apply, a rebuild and a replay reach the same verdict (they run in block downloads too).
+        /// Under a Validator topic the sender keeps the validator balance after paying; the sender holds no other topic whose
+        /// voting is still open at the block's time; an AdjVoteIn topic meets its specs and the 2,800-character limit. Whether
+        /// the sender is in this node's adjudicator pool is node-local, so it is judged at admission only. Who has crafted a
+        /// block lately and the node's recent-block window are node-local too, and are not rules from the height.
+        /// </summary>
+        internal static string? TopicAddRefusal(Transaction tx, TopicTrei topic, long? blockTime, bool admission)
+        {
+            if (topic.VoterType == TopicVoterType.Validator)
+            {
+                var stAcct = StateData.GetSpecificAccountStateTrei(tx.FromAddress);
+                if (stAcct == null)
+                    return "Could not locate account in state trei.";
+                if (stAcct.Balance - (tx.Amount + tx.Fee) < ValidatorService.ValidatorRequiredAmount())
+                    return $"Balance is under {ValidatorService.ValidatorRequiredAmount()}. Topic will not be allowed.";
+            }
+            if (topic.VoterType == TopicVoterType.Adjudicator && admission && !Globals.AdjNodes.Values.Any(x => x.Address == tx.FromAddress))
+                return $"The from addesss ({tx.FromAddress}) is not in the adjudicator pool.";
+
+            var now = DateTimeOffset.FromUnixTimeSeconds(LedgerIntegrityRules.NowForAgeRules(blockTime)).UtcDateTime;
+            var owned = TopicTrei.GetSpecificTopicByAddress(tx.FromAddress);
+            if (owned != null && owned.Any(t => t.VotingEndDate.ToUniversalTime() >= now))
+                return TopicOwnerHasActiveTopicReason;
+
+            if (topic.VoteTopicCategory == VoteTopicCategories.AdjVoteIn)
+            {
+                AdjVoteInReqs? adjVoteReq;
+                try { adjVoteReq = JsonConvert.DeserializeObject<AdjVoteInReqs>(topic.TopicDescription ?? ""); }
+                catch (JsonException) { adjVoteReq = null; }
+                if (adjVoteReq == null)
+                    return TopicAdjVoteInMissingReason;
+                if (!VoteValidatorService.ValidateAdjVoteIn(adjVoteReq))
+                    return "You did not meet the required specs or information was not completed. This topic has been cancelled.";
+                if ((topic.TopicDescription?.Length ?? 0) + (topic.TopicName?.Length ?? 0) > 2800)
+                    return "Topic is larger than the 2800 limit.";
+            }
+            return null;
+        }
 
         internal const string VoteTopicIsTopicAddReason = "A voting topic transaction creates a topic: its Function is TopicAdd().";
         internal const string TopicEndDateWithoutOffsetReason = "This topic's voting end date was written without a UTC offset; it cannot be voted on.";

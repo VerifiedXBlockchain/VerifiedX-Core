@@ -45,6 +45,7 @@ namespace VerifiedXCore
             Globals.FractionalAmountRehashHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.FractionalAmountRehashHeight;
             Globals.RecipientNetworkByteHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.RecipientNetworkByteHeight;
             Globals.VoteTopicRulesHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.VoteTopicRulesHeight;
+            Globals.TopicAddDeterministicHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.TopicAddDeterministicHeight;
             Globals.LegacyNameReservedHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.LegacyNameReservedHeight;
             Globals.EvolveRulesHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.EvolveRulesHeight;
             Globals.ShieldSpendsNothingHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.ShieldSpendsNothingHeight;
