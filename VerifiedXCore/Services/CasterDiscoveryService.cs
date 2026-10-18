@@ -2260,6 +2260,59 @@ namespace VerifiedXCore.Services
         internal static void SetObservedPeerHeadsForTests(params long[] heads) => LastObservedPeerHeads = heads;
 
         /// <summary>
+        /// The lowest seq above <paramref name="localHeadSeq"/> at which two responders return records with different
+        /// hashes, or null when none does. Sync applies a finalized record without the live effective-height check, so a
+        /// record whose proposer withheld it while its signers went on to sign another set can still reach a lagging node;
+        /// when the responders disagree at a seq, that node cannot tell which record its peers hold.
+        /// </summary>
+        internal static long? ContestedSeq(long localHeadSeq, IEnumerable<(string Ip, long HeadSeq, List<CasterMembershipRecord> Records)> responses)
+        {
+            long? lowest = null;
+            foreach (var group in responses
+                         .SelectMany(r => r.Records)
+                         .Where(rec => rec != null && rec.RecordSeq > localHeadSeq)
+                         .GroupBy(rec => rec.RecordSeq))
+            {
+                if (group.Select(rec => rec.RecordHash).Distinct(StringComparer.Ordinal).Count() > 1
+                    && (lowest == null || group.Key < lowest))
+                    lowest = group.Key;
+            }
+            return lowest;
+        }
+
+        /// <summary>
+        /// Applies the responders' records, longest chain first (every record is fully validated on append). Nothing is
+        /// adopted at or above a contested seq (<see cref="ContestedSeq"/>): that is logged and raised to the operator as
+        /// a membership fork, and the next pull asks again. Returns the number of records applied.
+        /// </summary>
+        internal static int AdoptResponses(long localHeadSeq, List<(string Ip, long HeadSeq, List<CasterMembershipRecord> Records)> responses)
+        {
+            var contested = ContestedSeq(localHeadSeq, responses);
+            if (contested is { } seq)
+            {
+                var holders = responses
+                    .Where(r => r.Records.Any(rec => rec?.RecordSeq == seq))
+                    .Select(r => $"{r.Ip}={r.Records.First(rec => rec?.RecordSeq == seq).RecordHash}");
+                var line = $"MEMBERSHIP FORK: peers hold different records at seq {seq} ({string.Join(", ", holders)}); nothing at or above it is adopted from this pull.";
+                CasterLogUtility.Log(line, "MEMBERSHIP");
+                ErrorLogUtility.LogError(line, "CasterDiscoveryService.AdoptResponses()");
+                ConsoleWriterService.Output(line);
+            }
+
+            var total = 0;
+            foreach (var r in responses.OrderByDescending(x => x.HeadSeq))
+            {
+                var records = contested is { } floor ? r.Records.Where(rec => rec != null && rec.RecordSeq < floor).ToList() : r.Records;
+                if (records.Count == 0) continue;
+                var applied = CasterMembershipStore.TryAppendChain(records);
+                total += applied;
+                if (applied > 0)
+                    CasterLogUtility.Log($"MEMBERSHIP: adopted {applied} record(s) from {r.Ip} (their head {r.HeadSeq}).", "MEMBERSHIP");
+            }
+            return total;
+        }
+
+        /// <summary>
         /// Wave 3: record-era adoption. Pulls membership records after our head from up to 10 peers
         /// in parallel, verifies each chain locally (TryAppendChain runs full successor validation),
         /// adopts the highest valid seq, heals stragglers by pushing them the records they miss,
@@ -2295,14 +2348,7 @@ namespace VerifiedXCore.Services
             if (observeHeads && !responses.IsEmpty)
                 LastObservedPeerHeads = responses.Select(x => x.HeadSeq).ToList();
 
-            // Apply the longest chains first — every record is fully validated on append.
-            foreach (var r in responses.OrderByDescending(x => x.HeadSeq))
-            {
-                if (r.Records.Count == 0) continue;
-                var applied = CasterMembershipStore.TryAppendChain(r.Records);
-                if (applied > 0)
-                    CasterLogUtility.Log($"MEMBERSHIP: adopted {applied} record(s) from {r.Ip} (their head {r.HeadSeq}).", "MEMBERSHIP");
-            }
+            AdoptResponses(localHeadSeq, responses.ToList());
 
             var head = CasterMembershipStore.GetCurrent();
             if (head == null)
