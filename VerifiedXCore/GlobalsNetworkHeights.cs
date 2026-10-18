@@ -44,6 +44,7 @@ namespace VerifiedXCore
             Globals.OneMovePerContractHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.OneMovePerContractHeight;
             Globals.VrfSeedHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.VrfSeedHeight;
             Globals.TxHashGuardByTimeHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.TxHashGuardByTimeHeight;
+            Globals.DataOwnerBoundHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.DataOwnerBoundHeight;
             Globals.FractionalAmountRehashHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.FractionalAmountRehashHeight;
             Globals.RecipientNetworkByteHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.RecipientNetworkByteHeight;
             Globals.VoteTopicRulesHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.VoteTopicRulesHeight;

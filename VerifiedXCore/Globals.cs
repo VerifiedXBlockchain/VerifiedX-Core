@@ -413,6 +413,13 @@ namespace VerifiedXCore
         public static long TxHashGuardByTimeHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height owner fields carried in a transaction's Data are bound to the signed transaction: a
+        /// DecShopCreate()'s owner is its sender, and a TokenContractOwnerChange()'s new owner is its recipient
+        /// (TransactionValidatorService.DecShopOwnerRefusal, TokenOwnerChangeRefusal). Not active yet.
+        /// </summary>
+        public static long DataOwnerBoundHeight = 999_999_999_999;
+
+        /// <summary>
         /// From this height a transaction carrying a non-whole Amount must hash with that Amount: VerifyTX's re-hash
         /// fallback read it as 0 and accepted a signature over "0" (TransactionValidatorService.StandardHashMatches).
         /// Not active yet.
