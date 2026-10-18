@@ -76,7 +76,11 @@ namespace VerifiedXCore.Services
                 if (saleError != null)
                     Add("NEW-17 sale amounts", saleError);
 
-                if (LedgerIntegrityRules.VaultCodeUnchanged(tx) is string vaultCodeError) // NEW-26 (follow-up)
+                // A call the reader cannot read (a non-text MD5List, say) reads as no call to VaultCodeUnchanged while the
+                // dispatcher still runs it, so it is a violation, judged as the readability rule judges a block today.
+                if (LedgerIntegrityRules.ContractCallIsReadable(tx, Math.Max(height, Globals.PathAuditRulesHeight)) is string unreadable)
+                    Add("contract call unreadable", unreadable);
+                else if (LedgerIntegrityRules.VaultCodeUnchanged(tx) is string vaultCodeError) // NEW-26 (follow-up)
                     Add("NEW-26 vault code changed", vaultCodeError);
 
                 var coinbaseError = LedgerIntegrityRules.CoinbaseShape(tx); // NEW-16

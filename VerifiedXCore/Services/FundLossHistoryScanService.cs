@@ -46,6 +46,8 @@ namespace VerifiedXCore.Services
             public bool IsVault;
             public (decimal Amount, string PayTo)? Royalty;
             public string? Body;
+            /// <summary>An unreadable rewrite replaced the body with one the scan could not read.</summary>
+            public bool BodyLost;
         }
 
         private static readonly string[] RewritingFunctions = { "Update()", "Transfer()", "Evolve()", "Devolve()", "ChangeEvolveStateSpecific()" };
@@ -81,6 +83,18 @@ namespace VerifiedXCore.Services
             r.FinalVfxShieldedSupply = vfxSupply;
             progress?.Invoke($"done at height {r.TipHeight}: {r.Hits.Count} hit(s), VFX shielded supply {vfxSupply}");
             return r;
+        }
+
+        /// <summary>The body text a contract call carries in its "Data" field (array or single-object shape), or null when it is not text.</summary>
+        private static string? CarriedBody(string txData)
+        {
+            try
+            {
+                var root = JToken.Parse(txData);
+                var call = root is JArray arr ? (arr.Count > 0 ? arr[0] as JObject : null) : root as JObject;
+                return call?["Data"] is JValue { Type: JTokenType.String } data ? (string?)data : null;
+            }
+            catch (Newtonsoft.Json.JsonException) { return null; }
         }
 
         private static void Count(Result r, string key)
@@ -174,7 +188,28 @@ namespace VerifiedXCore.Services
             }
 
             // ── Items 4 and 9: body rewrites ──────────────────────────────────────────────────────────────────
-            if (createdUid == null && !string.IsNullOrEmpty(tx.Data))
+            // A rewrite the reader cannot read (a non-text MD5List, say) yields no function below, while the dispatcher
+            // still runs it and writes its body: it is a violation, judged as the readability rule judges a block today,
+            // and the body it carries is still judged and tracked, so later rewrites of that contract are judged against it.
+            if (createdUid == null && !string.IsNullOrEmpty(tx.Data)
+                && LedgerIntegrityRules.ContractCallIsReadable(tx, Math.Max(height, Globals.PathAuditRulesHeight)) is string unreadable)
+            {
+                var call = LedgerIntegrityRules.DispatchedCall(tx.Data);
+                if (call.Function != null && RewritingFunctions.Contains(call.Function))
+                {
+                    Count(r, "rewrites.unreadable");
+                    Add("4/9 unreadable rewrite", $"{call.Function} on {call.ContractUID} from {tx.FromAddress}: {unreadable}");
+                    if (!string.IsNullOrEmpty(call.ContractUID) && contracts.TryGetValue(call.ContractUID, out var tracked))
+                    {
+                        var carriedBody = CarriedBody(tx.Data);
+                        if (carriedBody != null)
+                            JudgeRewrite(call.Function, call.ContractUID, carriedBody, tracked);
+                        else
+                            tracked.BodyLost = true; // what the apply wrote is not known: the next rewrite is reported
+                    }
+                }
+            }
+            else if (createdUid == null && !string.IsNullOrEmpty(tx.Data))
             {
                 var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
                 if (payload.Function != null && RewritingFunctions.Contains(payload.Function) && !string.IsNullOrEmpty(payload.ContractUID))
@@ -186,25 +221,38 @@ namespace VerifiedXCore.Services
                         if (payload.Function != "Transfer()") // transfers of unknown contracts are a separate, older story
                             Add("2/9 rewrite of a contract never created", $"{payload.Function} on {payload.ContractUID} from {tx.FromAddress}");
                     }
-                    else if (!string.IsNullOrEmpty(payload.Data) && !string.Equals(payload.Data, stored.Body, StringComparison.Ordinal))
+                    else if (!string.IsNullOrEmpty(payload.Data))
                     {
-                        Count(r, "rewrites.body_changed");
-                        var carried = Describe(payload.Data);
-                        if (carried.IsVault && !stored.IsVault)
-                        {
-                            Count(r, "item4.vault_added_by_rewrite");
-                            Add("4 rewrite adds TokenizationV2 to a non-vault", $"{payload.Function} on {payload.ContractUID} from {tx.FromAddress}");
-                        }
-                        if (!RoyaltyEquals(carried.Royalty, stored.Royalty))
-                        {
-                            Count(r, "item9.royalty_changed_by_rewrite");
-                            Add("9 rewrite changes the Royalty feature", $"{payload.Function} on {payload.ContractUID} from {tx.FromAddress}: {Fmt(stored.Royalty)} -> {Fmt(carried.Royalty)}");
-                        }
-                        stored.Body = payload.Data;
-                        stored.IsVault = carried.IsVault || stored.IsVault; // a vault stays a vault for later comparisons
-                        stored.Royalty = carried.Royalty;
+                        JudgeRewrite(payload.Function, payload.ContractUID, payload.Data, stored);
                     }
                 }
+            }
+
+            void JudgeRewrite(string function, string uid, string body, ContractInfo stored)
+            {
+                if (stored.BodyLost)
+                {
+                    Count(r, "rewrites.after_lost_body");
+                    Add("4/9 rewrite of a contract whose body an unreadable rewrite replaced", $"{function} on {uid} from {tx.FromAddress}");
+                }
+                else if (string.Equals(body, stored.Body, StringComparison.Ordinal))
+                    return;
+                Count(r, "rewrites.body_changed");
+                var carried = Describe(body);
+                if (carried.IsVault && !stored.IsVault)
+                {
+                    Count(r, "item4.vault_added_by_rewrite");
+                    Add("4 rewrite adds TokenizationV2 to a non-vault", $"{function} on {uid} from {tx.FromAddress}");
+                }
+                if (!RoyaltyEquals(carried.Royalty, stored.Royalty))
+                {
+                    Count(r, "item9.royalty_changed_by_rewrite");
+                    Add("9 rewrite changes the Royalty feature", $"{function} on {uid} from {tx.FromAddress}: {Fmt(stored.Royalty)} -> {Fmt(carried.Royalty)}");
+                }
+                stored.Body = body;
+                stored.IsVault = carried.IsVault || stored.IsVault; // a vault stays a vault for later comparisons
+                stored.Royalty = carried.Royalty;
+                stored.BodyLost = false;
             }
 
             // ── Item 6: withdrawal UniqueId reuse ─────────────────────────────────────────────────────────────

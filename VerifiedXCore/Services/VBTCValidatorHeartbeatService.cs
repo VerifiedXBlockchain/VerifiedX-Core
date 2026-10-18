@@ -214,7 +214,7 @@ namespace VerifiedXCore.Services
                 var sTreiAcct = StateData.GetSpecificAccountStateTrei(validator.Address);
                 if (sTreiAcct == null) return false;
 
-                var ipAddress = Globals.ReportedIP;
+                var ipAddress = P2PClient.ValidatorReportedIP();
                 if (string.IsNullOrEmpty(ipAddress))
                 {
                     LogUtility.Log("Cannot send heartbeat TX - IP address not reported yet",

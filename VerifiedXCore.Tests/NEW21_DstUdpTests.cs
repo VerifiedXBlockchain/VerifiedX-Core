@@ -33,13 +33,13 @@ namespace VerifiedXCore.Tests
             {
                 using var udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
                 var self = (IPEndPoint)udp.Client.LocalEndPoint!;
-                MessageService.ShopConnect(new Message { Type = MessageType.KeepAlive, Data = "helo", IPAddress = self.ToString() }, self, udp);
+                MessageService.ShopConnect(new Message { Type = MessageType.KeepAlive, Data = "helo", IPAddress = self.ToString(), Auth = DstSessionAuth.Cookie(self.ToString(), VerifiedXCore.Utilities.TimeUtil.GetTime()) }, self, udp);
                 Assert.True(Globals.ConnectedClients.ContainsKey(self.ToString()));               // control
 
                 for (int i = Globals.ConnectedClients.Count; i < MessageService.MaxDstConnections; i++)
                     Globals.ConnectedClients[$"203.0.113.1:{i}"] = new DSTConnection { IPAddress = $"203.0.113.1:{i}" };
                 var extra = new IPEndPoint(IPAddress.Loopback, 1);
-                MessageService.ShopConnect(new Message { Data = "helo", IPAddress = extra.ToString() }, extra, udp);
+                MessageService.ShopConnect(new Message { Data = "helo", IPAddress = extra.ToString(), Auth = DstSessionAuth.Cookie(extra.ToString(), VerifiedXCore.Utilities.TimeUtil.GetTime()) }, extra, udp);
                 Assert.False(Globals.ConnectedClients.ContainsKey(extra.ToString()));
             }
             finally { Globals.ConnectedClients.Clear(); }

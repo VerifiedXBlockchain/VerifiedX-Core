@@ -153,6 +153,7 @@ namespace VerifiedXCore.Services
                     LastFailureReason = reason,
                     RestoreDestroyed = restoreDestroyed,
                     RebuildInProgress = existing?.RebuildInProgress,
+                    IncompleteApply = existing?.IncompleteApply, // a later failure does not repair the omitted writes
                 };
 
                 // One write replaces the record: a delete then an insert left no record (and no restore stop) if
@@ -172,6 +173,36 @@ namespace VerifiedXCore.Services
                 LogUtility.Log($"[StateTreiStatusService] Error setting failed status: {ex.Message}", "StateTreiStatusService.SetFailed");
             }
         }
+
+        /// <summary>
+        /// A block was committed with some of its state writes not applied: the state is marked failed, and
+        /// <see cref="StateTreiStatus.IncompleteApply"/> keeps probation from marking it synced until a rebuild or a snapshot
+        /// restore repairs the omitted writes.
+        /// </summary>
+        public static void SetIncompleteApply(string reason)
+        {
+            SetFailed(reason);
+            try
+            {
+                var db = DbContext.DB_AccountStateTrei;
+                if (db == null) return;
+                var col = db.GetCollection<StateTreiStatus>(COLLECTION_NAME);
+                var status = col.FindOne(x => true);
+                if (status == null) return;
+                status.IncompleteApply = true;
+                col.Upsert(status);
+                db.Checkpoint();
+                ErrorLogUtility.LogError($"{reason} Blocks that apply cleanly afterwards do not restore the writes it omitted: run rebuildstate, or restore a snapshot, to repair the state.",
+                    "StateTreiStatusService.SetIncompleteApply");
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Could not record the incomplete state application: {ex.Message}", "StateTreiStatusService.SetIncompleteApply");
+            }
+        }
+
+        /// <summary>Whether the state is missing writes that only a rebuild or a snapshot restore repairs.</summary>
+        public static bool NeedsRepair() => GetStatus()?.IncompleteApply == true;
 
         /// <summary>
         /// A rebuild ended with replay failures. With a fault of this node's own storage among them the rebuilt state is

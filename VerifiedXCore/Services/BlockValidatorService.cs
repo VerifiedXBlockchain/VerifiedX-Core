@@ -156,17 +156,59 @@ namespace VerifiedXCore.Services
             return (!StateTreiStatusService.IsSynced(), _cleanBlockStreak);
         }
 
-        public static void UpdateMemBlocks(Block block)
+        /// <summary>
+        /// STATE PROBATION: with automatic rebuilds removed, a dirty-flagged node keeps running on its existing state. Each
+        /// cleanly applied block is evidence of consistency; after a clean streak, re-mark synced so snapshots resume.
+        /// </summary>
+        internal static void AdvanceProbation(Block block, bool stateApplied)
         {
-            foreach (var trans in block.Transactions)
-                Globals.MemBlocks[trans.Hash] = block.Height;
+            if (_stateStatusVerified)
+                return;
 
-            var HeightDiff = Globals.LastBlock.Height - 400;
-            foreach(var pair in Globals.MemBlocks.Where(x => x.Value <= HeightDiff))
+            if (StateTreiStatusService.IsSynced())
             {
-                Globals.MemBlocks.TryRemove(pair.Key, out _);
-            }            
+                _stateStatusVerified = true;
+            }
+            else if (!stateApplied)
+            {
+                _cleanBlockStreak = 0;
+            }
+            // State built under other attestation settings stays marked failed until it is rebuilt: blocks that
+            // apply without an error do not make its bonds and signer sets the network's (fourth review, round 5).
+            else if (VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.BuiltUnderOtherSettings(block.Height) != null)
+            {
+                _cleanBlockStreak = 0;
+            }
+            // Writes a block omitted are missing until a rebuild or a restore: clean blocks after it do not bring them back.
+            else if (StateTreiStatusService.NeedsRepair())
+            {
+                _cleanBlockStreak = 0;
+            }
+            // A failed restore's stop is lifted only by a restore that succeeds or a rebuild, never by a
+            // clean streak on the wiped state.
+            else if (SnapshotRestoreUtility.StateDestroyedByFailedRestore || StateTreiStatusService.GetStatus() is { } st && (st.RestoreDestroyed == true || st.RebuildInProgress == true))
+            {
+                _cleanBlockStreak = 0;
+            }
+            else if (++_cleanBlockStreak >= STATE_PROBATION_BLOCKS)
+            {
+                StateTreiStatusService.SetSynced(block.Height);
+                _stateStatusVerified = true;
+                LogUtility.Log(
+                    $"[ValidateBlock] STATE-PROBATION-PASSED: {STATE_PROBATION_BLOCKS} consecutive blocks applied cleanly on an " +
+                    $"unverified state trie — marking synced at height {block.Height}. Snapshot protection resumes.",
+                    "BlockValidatorService");
+            }
         }
+
+        /// <summary>Test seam: forgets the probation streak and verdict.</summary>
+        internal static void ResetProbationForTests()
+        {
+            _cleanBlockStreak = 0;
+            _stateStatusVerified = false;
+        }
+
+        public static void UpdateMemBlocks(Block block) => TxHashGuard.Add(block, Globals.LastBlock);
 
         public static void UpdateMemMultiTransfers(Block block)
         {
@@ -592,7 +634,7 @@ namespace VerifiedXCore.Services
                     await BlockchainData.AddBlock(block);
                     committedHeight = block.Height;
                     if (!await ApplyStateAsync(block))
-                        StateTreiStatusService.SetFailed($"Incomplete state application at block {block.Height}.");
+                        StateTreiStatusService.SetIncompleteApply($"Incomplete state application at block {block.Height}.");
                     foreach (Transaction transaction in block.Transactions)
                     {
                         //Adds receiving TX to wallet
@@ -1607,45 +1649,11 @@ namespace VerifiedXCore.Services
                                 $"[ValidateBlock] STATE-APPLY-INCOMPLETE: Block {block.Height} committed but not all " +
                                 $"transactions applied to the state trie. Flagging state trie for rebuild.",
                                 "BlockValidatorService.ValidateBlock()");
-                            StateTreiStatusService.SetFailed($"Incomplete state application at block {block.Height}.");
+                            StateTreiStatusService.SetIncompleteApply($"Incomplete state application at block {block.Height}.");
                         }
                         await ReserveService.Run(); //updates treis for reserve pending txs
 
-                        // STATE PROBATION: with automatic rebuilds removed, a dirty-flagged node keeps
-                        // running on its existing state. Each cleanly applied block is evidence of
-                        // consistency; after a clean streak, re-mark synced so snapshots resume.
-                        if (!_stateStatusVerified)
-                        {
-                            if (StateTreiStatusService.IsSynced())
-                            {
-                                _stateStatusVerified = true;
-                            }
-                            else if (!stateApplied)
-                            {
-                                _cleanBlockStreak = 0;
-                            }
-                            // State built under other attestation settings stays marked failed until it is rebuilt: blocks that
-                            // apply without an error do not make its bonds and signer sets the network's (fourth review, round 5).
-                            else if (VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.BuiltUnderOtherSettings(block.Height) != null)
-                            {
-                                _cleanBlockStreak = 0;
-                            }
-                            // A failed restore's stop is lifted only by a restore that succeeds or a rebuild, never by a
-                            // clean streak on the wiped state.
-                            else if (SnapshotRestoreUtility.StateDestroyedByFailedRestore || StateTreiStatusService.GetStatus() is { } st && (st.RestoreDestroyed == true || st.RebuildInProgress == true))
-                            {
-                                _cleanBlockStreak = 0;
-                            }
-                            else if (++_cleanBlockStreak >= STATE_PROBATION_BLOCKS)
-                            {
-                                StateTreiStatusService.SetSynced(block.Height);
-                                _stateStatusVerified = true;
-                                LogUtility.Log(
-                                    $"[ValidateBlock] STATE-PROBATION-PASSED: {STATE_PROBATION_BLOCKS} consecutive blocks applied cleanly on an " +
-                                    $"unverified state trie — marking synced at height {block.Height}. Snapshot protection resumes.",
-                                    "BlockValidatorService");
-                            }
-                        }
+                        AdvanceProbation(block, stateApplied);
 
                         // Process vBTC V2 validator registration/exit transactions
                         if (block.Transactions.Count() > 0)
@@ -2024,7 +2032,7 @@ namespace VerifiedXCore.Services
                     await BlockchainData.AddBlock(block);
                     committedHeight = block.Height;
                     if (!await ApplyStateAsync(block))
-                        StateTreiStatusService.SetFailed($"Incomplete state application at block {block.Height}.");
+                        StateTreiStatusService.SetIncompleteApply($"Incomplete state application at block {block.Height}.");
                     DbContext.Commit();
                     return result;
                 }

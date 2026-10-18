@@ -319,6 +319,7 @@ namespace VerifiedXCore.Utilities
                 if (Globals.MemBlocks.TryRemove(txHash, out _))
                     removed++;
             }
+            Services.TxHashGuard.ForgetAbove(targetHeight);
             return removed;
         }
 

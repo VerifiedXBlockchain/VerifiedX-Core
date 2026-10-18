@@ -807,6 +807,9 @@ namespace VerifiedXCore.Services
                                             if (scStateTreiRec.NextOwner != null)
                                                 return (txResult, "You are attempting to transfer a Smart contract that has a new owner assigned to it.");
 
+                                            if (TokenOwnerChangeRefusal(txRequest, toAddress, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) is { } ownerChange)
+                                                return (txResult, ownerChange);
+
                                             break;
                                         }
 
@@ -2677,6 +2680,8 @@ namespace VerifiedXCore.Services
 
                                     if (function == "DecShopCreate()")
                                     {
+                                        if (DecShopOwnerRefusal(txRequest, decshop, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) is { } shopOwner)
+                                            return (txResult, shopOwner);
                                         if (txRequest.Amount < Globals.DecShopRequiredRBX)
                                             return (txResult, $"There must be at least {Globals.DecShopRequiredRBX} VFX to create a Auction House.");
 
@@ -4555,6 +4560,23 @@ namespace VerifiedXCore.Services
         /// be shaped into another contract message. Refused at admission at every height; in blocks from the path-audit
         /// height. Null when it passes.
         /// </summary>
+        internal const string DecShopOwnerReason = "A new shop is owned by the address that sends its creation.";
+        internal const string TokenOwnerChangeReason = "A token contract's new owner in the data is the transaction's recipient.";
+
+        /// <summary>
+        /// From DataOwnerBoundHeight a DecShopCreate()'s Data.OwnerAddress is its sender: the owner is stored from the data,
+        /// which the sender's signature covers but no rule tied to the sender, so a shop could be created in another's name.
+        /// </summary>
+        internal static string? DecShopOwnerRefusal(Transaction tx, DecShop decshop, long height) =>
+            height >= Globals.DataOwnerBoundHeight && decshop.OwnerAddress != tx.FromAddress ? DecShopOwnerReason : null;
+
+        /// <summary>
+        /// From DataOwnerBoundHeight a TokenContractOwnerChange()'s new owner in the data is the transaction's ToAddress: one
+        /// apply path stores the data's owner and the other the recipient, so the two had to be the same address.
+        /// </summary>
+        internal static string? TokenOwnerChangeRefusal(Transaction tx, string? dataToAddress, long height) =>
+            height >= Globals.DataOwnerBoundHeight && dataToAddress != tx.ToAddress ? TokenOwnerChangeReason : null;
+
         internal static string? RegisteredBaseAddressRefusal(JObject data, long? blockHeight, string? signature)
         {
             var named = data["BaseAddress"]?.ToObject<string>();

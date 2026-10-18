@@ -176,6 +176,34 @@ namespace VerifiedXCore.Services
             ConsoleWriterService.OutputValCaster($"[BOOTSTRAP-RESET] {msg}");
         }
 
+        /// <summary>
+        /// The proposer's own signature over its reset candidate, or null when signing failed; the mark taken for the
+        /// candidate is then released, as on every other exit that does not propose it.
+        /// </summary>
+        internal static string? SignOrReleaseMark(CasterMembershipRecord candidate, Func<string, string> sign)
+        {
+            var signature = sign(CasterMembershipStore.CanonicalPayload(candidate));
+            if (signature != "ERROR")
+                return signature;
+            CasterLogUtility.Log($"BOOTSTRAP-RESET: could not sign the candidate for seq {candidate.RecordSeq}; releasing mark.", "BOOTSTRAP-RESET");
+            CasterMembershipStore.ReleaseSignedMark(candidate.RecordSeq, CasterMembershipStore.ComputeCasterSetHash(candidate));
+            return null;
+        }
+
+        /// <summary>
+        /// Appends the proposer's reset candidate; when the append is refused, releases the proposer's own mark on its seq,
+        /// as the ordinary proposer does, so the next window (or another rotation) is not held off by a record that was
+        /// never appended.
+        /// </summary>
+        internal static bool AppendOrReleaseMark(CasterMembershipRecord candidate)
+        {
+            if (CasterMembershipStore.TryAppend(candidate, out var reason))
+                return true;
+            CasterLogUtility.Log($"BOOTSTRAP-RESET: append refused — {reason}; releasing mark, next window retries.", "BOOTSTRAP-RESET");
+            CasterMembershipStore.ReleaseSignedMark(candidate.RecordSeq, CasterMembershipStore.ComputeCasterSetHash(candidate));
+            return false;
+        }
+
         private static async Task ProposeAsync(CasterMembershipRecord head, NetworkStallSurvey.Result evidence)
         {
             var account = AccountData.GetLocalValidator();
@@ -206,8 +234,9 @@ namespace VerifiedXCore.Services
                 return;
             }
             var payload = CasterMembershipStore.CanonicalPayload(candidate);
-            var selfSig = SignatureService.CreateSignature(payload, account.GetPrivKey, account.PublicKey);
-            if (selfSig == "ERROR") return;
+            var selfSig = SignOrReleaseMark(candidate, p => SignatureService.CreateSignature(p, account.GetPrivKey, account.PublicKey));
+            if (selfSig == null)
+                return;
             candidate.Signatures.Add(new RecordSignature { SignerAddress = Globals.ValidatorAddress, Signature = selfSig });
 
             CasterLogUtility.Log(
@@ -245,11 +274,8 @@ namespace VerifiedXCore.Services
                 return;
             }
 
-            if (!CasterMembershipStore.TryAppend(candidate, out var reason))
-            {
-                CasterLogUtility.Log($"BOOTSTRAP-RESET: append refused — {reason}.", "BOOTSTRAP-RESET");
+            if (!AppendOrReleaseMark(candidate))
                 return;
-            }
 
             _live.ForceUntilUnix = 0;
             ConsoleWriterService.OutputValCaster($"[BOOTSTRAP-RESET] Committee reset INSTALLED (seq {candidate.RecordSeq}): casters are now the seed set. Production resumes on the next round.");
