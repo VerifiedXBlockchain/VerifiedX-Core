@@ -420,6 +420,12 @@ namespace VerifiedXCore
         public static long DataOwnerBoundHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height a token transfer writes the recipient's record first and debits the sender only once that write
+        /// succeeded (StateData.TokenTransferRecipientFirst). Not active yet.
+        /// </summary>
+        public static long TokenTransferRecipientFirstHeight = 999_999_999_999;
+
+        /// <summary>
         /// From this height a transaction carrying a non-whole Amount must hash with that Amount: VerifyTX's re-hash
         /// fallback read it as 0 and accepted a signature over "0" (TransactionValidatorService.StandardHashMatches).
         /// Not active yet.

@@ -2678,6 +2678,11 @@ namespace VerifiedXCore.Data
             var fromAddress = jobj["FromAddress"]?.ToObject<string?>();
 
             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+            if (scStateTreiRec != null && scStateTreiRec.TokenDetails != null && block.Height >= Globals.TokenTransferRecipientFirstHeight)
+            {
+                await TokenTransferRecipientFirst(tx, block, stDB, scStateTreiRec, scUID, toAddress, fromAddress, amount!.Value);
+                return;
+            }
             if (scStateTreiRec != null)
             {
                 if(scStateTreiRec.TokenDetails != null)
@@ -2765,6 +2770,60 @@ namespace VerifiedXCore.Data
                 //}
             }
 
+        }
+
+        /// <summary>The write of a token transfer's recipient record. Test seam.</summary>
+        internal static Func<LiteDB.ILiteCollection<AccountStateTrei>, AccountStateTrei, Task<bool>> TokenRecipientWrite =
+            (col, account) => col.UpdateSafeAsync(account);
+
+        /// <summary>
+        /// A token transfer from TokenTransferRecipientFirstHeight: the recipient's record is written first, and the sender
+        /// is debited (re-read, so a transfer to oneself nets to nothing) only once that write succeeded. A failed write left
+        /// the debit in place before, and the tokens were gone from every balance.
+        /// </summary>
+        private static async Task TokenTransferRecipientFirst(Transaction tx, Block block, LiteDB.ILiteCollection<AccountStateTrei> stDB,
+            SmartContractStateTrei scStateTreiRec, string? scUID, string? toAddress, string? fromAddress, decimal amount)
+        {
+            var toAccount = GetSpecificAccountStateTrei(toAddress);
+            if (toAccount == null)
+            {
+                toAccount = new AccountStateTrei { Key = tx.ToAddress, Nonce = 0, Balance = 0.0M, StateRoot = block.StateRoot };
+                if (!tx.FromAddress.StartsWith("xRBX"))
+                    toAccount.Balance += tx.Amount;
+                else
+                    toAccount.LockedBalance += tx.Amount;
+                await stDB.InsertSafeAsync(toAccount);
+            }
+
+            var tokenAccountTo = toAccount.TokenAccounts?.FirstOrDefault(x => x.SmartContractUID == scUID);
+            if (tokenAccountTo == null)
+            {
+                var created = TokenAccount.CreateTokenAccount(scUID, scStateTreiRec.TokenDetails.TokenName, scStateTreiRec.TokenDetails.TokenTicker,
+                    amount, scStateTreiRec.TokenDetails.DecimalPlaces);
+                toAccount.TokenAccounts ??= new List<TokenAccount>();
+                toAccount.TokenAccounts.Add(created);
+            }
+            else
+            {
+                tokenAccountTo.Balance += amount;
+            }
+
+            if (!await TokenRecipientWrite(stDB, toAccount))
+            {
+                ErrorLogUtility.LogError($"Token transfer {tx.Hash} at block {block.Height}: the recipient {toAddress}'s record could not be written; the sender {fromAddress} is not debited.",
+                    "StateData.TokenTransferRecipientFirst()");
+                return;
+            }
+
+            var fromAccount = GetSpecificAccountStateTrei(fromAddress);
+            var tokenAccountFrom = fromAccount?.TokenAccounts?.FirstOrDefault(x => x.SmartContractUID == scUID);
+            if (fromAccount != null && tokenAccountFrom != null)
+            {
+                tokenAccountFrom.Balance -= amount;
+                if (!await stDB.UpdateSafeAsync(fromAccount))
+                    ErrorLogUtility.LogError($"Token transfer {tx.Hash} at block {block.Height}: the sender {fromAddress}'s debit could not be written.",
+                        "StateData.TokenTransferRecipientFirst()");
+            }
         }
 
         private static async Task TokenBurn(Transaction tx)
