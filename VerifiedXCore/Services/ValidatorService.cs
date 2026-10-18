@@ -243,6 +243,16 @@ namespace VerifiedXCore.Services
         {
             try
             {
+                // A validator whose FROST library has not passed its check neither registers nor reactivates: peers would
+                // pick it for ceremonies it cannot take part in (FrostLibraryGate). This runs once at startup, so it waits
+                // for the check, which runs alongside.
+                await Bitcoin.FROST.FrostLibraryGate.WaitForCheckAsync(TimeSpan.FromMinutes(2));
+                if (!Bitcoin.FROST.FrostLibraryGate.Ready)
+                {
+                    LogUtility.Log($"Cannot send vBTC V2 registration - {Bitcoin.FROST.FrostLibraryGate.Unavailable}.", "ValidatorService.SendVBTCV2RegistrationTx()");
+                    return;
+                }
+
                 // Wait for ports to be verified open before sending any registration/heartbeat TXs
                 var portWaitAttempts = 0;
                 while (!Globals.PortsOpened && portWaitAttempts < 30)

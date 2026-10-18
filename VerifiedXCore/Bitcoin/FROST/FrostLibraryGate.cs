@@ -13,6 +13,14 @@ namespace VerifiedXCore.Bitcoin.FROST
 
         public static bool Ready => Globals.FrostFFIAvailable;
 
+        private static readonly TaskCompletionSource CheckDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>The startup check has finished, passed or not.</summary>
+        public static void CheckFinished() => CheckDone.TrySetResult();
+
+        /// <summary>Waits for the startup check to finish, at most <paramref name="timeout"/>; <see cref="Ready"/> then holds its result.</summary>
+        public static Task WaitForCheckAsync(TimeSpan timeout) => Task.WhenAny(CheckDone.Task, Task.Delay(timeout));
+
         /// <summary>Logged once when the startup check fails.</summary>
         public static void ReportCheckFailed(string summary)
         {

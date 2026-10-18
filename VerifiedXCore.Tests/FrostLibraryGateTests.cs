@@ -71,6 +71,22 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task WithoutAWorkingLibrary_AValidatorDoesNotRegister()
+        {
+            var priorPorts = Globals.PortsOpened;
+            try
+            {
+                Globals.FrostFFIAvailable = false;
+                FrostLibraryGate.CheckFinished();          // the startup check has run, and failed
+                Globals.ValidatorAddress = "xValidatorWithoutFrost";
+                Globals.PortsOpened = false;               // the registration would otherwise wait for its ports first
+                var register = (Task)typeof(ValidatorService).GetMethod("SendVBTCV2RegistrationTx", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.Invoke(null, null)!;
+                Assert.Same(register, await Task.WhenAny(register, Task.Delay(TimeSpan.FromSeconds(20))));   // refused at once
+            }
+            finally { Globals.PortsOpened = priorPorts; }
+        }
+
+        [Fact]
         public async Task WithoutAWorkingLibrary_NoValidatorHeartbeatIsSent()
         {
             Globals.FrostFFIAvailable = false;
