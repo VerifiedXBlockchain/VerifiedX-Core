@@ -174,7 +174,19 @@ namespace VerifiedXCore.Services
             }
 
             // ── Items 4 and 9: body rewrites ──────────────────────────────────────────────────────────────────
-            if (createdUid == null && !string.IsNullOrEmpty(tx.Data))
+            // A rewrite the reader cannot read (a non-text MD5List, say) yields no function below, while the dispatcher
+            // still runs it and writes its body: it is a violation, judged as the readability rule judges a block today.
+            if (createdUid == null && !string.IsNullOrEmpty(tx.Data)
+                && LedgerIntegrityRules.ContractCallIsReadable(tx, Math.Max(height, Globals.PathAuditRulesHeight)) is string unreadable)
+            {
+                var call = LedgerIntegrityRules.DispatchedCall(tx.Data);
+                if (call.Function != null && RewritingFunctions.Contains(call.Function))
+                {
+                    Count(r, "rewrites.unreadable");
+                    Add("4/9 unreadable rewrite", $"{call.Function} on {call.ContractUID} from {tx.FromAddress}: {unreadable}");
+                }
+            }
+            else if (createdUid == null && !string.IsNullOrEmpty(tx.Data))
             {
                 var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
                 if (payload.Function != null && RewritingFunctions.Contains(payload.Function) && !string.IsNullOrEmpty(payload.ContractUID))
