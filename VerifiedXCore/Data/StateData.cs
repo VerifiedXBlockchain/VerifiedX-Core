@@ -3680,6 +3680,17 @@ namespace VerifiedXCore.Data
                     return;
                 }
 
+                // The lock row first, then the debit: a debit with no row would take the holder's vBTC with nothing to
+                // mint or unlock against it. A row already there is a replay (the debit was applied with it); a storage
+                // fault has been reported as a failed apply and nothing is debited.
+                var inserted = VBTCBridgeLockState.InsertFromLockTx(tx, scUID, lockId, amount.Value, amountSats.Value, evmDestination);
+                if (inserted != VBTCBridgeLockState.LockInsert.Inserted)
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeLock: lock {lockId} not applied ({inserted})", "StateData.ApplyVBTCBridgeLock()");
+                    LogUtility.Log($"[BridgeAttest] CONSENSUS STATE: FAILED to insert VBTCBridgeLockState ({inserted}). lockId={lockId}, txHash={tx.Hash}", "StateData.ApplyVBTCBridgeLock");
+                    return;
+                }
+
                 var tknTxList = new List<SmartContractStateTreiTokenizationTX>
                 {
                     new SmartContractStateTreiTokenizationTX
@@ -3697,16 +3708,8 @@ namespace VerifiedXCore.Data
 
                 SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
 
-                if (!VBTCBridgeLockState.TryInsertFromLockTx(tx, scUID, lockId, amount.Value, amountSats.Value, evmDestination))
-                {
-                    ErrorLogUtility.LogError($"ApplyVBTCBridgeLock: failed to persist VBTCBridgeLockState for {lockId}", "StateData.ApplyVBTCBridgeLock()");
-                    LogUtility.Log($"[BridgeAttest] CONSENSUS STATE: FAILED to insert VBTCBridgeLockState. lockId={lockId}, txHash={tx.Hash}", "StateData.ApplyVBTCBridgeLock");
-                }
-                else
-                {
-                    BridgeLockRecord.TryMarkVfxLockConfirmed(lockId, tx.Hash, tx.Height);
-                    LogUtility.Log($"[BridgeAttest] CONSENSUS STATE: Bridge lock CONFIRMED on-chain. lockId={lockId}, owner={tx.FromAddress}, amount={amount.Value} BTC, amountSats={amountSats.Value}, evmDest={evmDestination}, txHash={tx.Hash}, blockHeight={tx.Height}, scUID={scUID}. Balance deducted from owner. Validators can now sign attestation requests for this lockId.", "StateData.ApplyVBTCBridgeLock");
-                }
+                BridgeLockRecord.TryMarkVfxLockConfirmed(lockId, tx.Hash, tx.Height);
+                LogUtility.Log($"[BridgeAttest] CONSENSUS STATE: Bridge lock CONFIRMED on-chain. lockId={lockId}, owner={tx.FromAddress}, amount={amount.Value} BTC, amountSats={amountSats.Value}, evmDest={evmDestination}, txHash={tx.Hash}, blockHeight={tx.Height}, scUID={scUID}. Balance deducted from owner. Validators can now sign attestation requests for this lockId.", "StateData.ApplyVBTCBridgeLock");
 
                 SCLogUtility.Log($"ApplyVBTCBridgeLock: lockId={lockId}, amount={amount.Value} BTC, owner={tx.FromAddress}, scUID={scUID}",
                     "StateData.ApplyVBTCBridgeLock()");

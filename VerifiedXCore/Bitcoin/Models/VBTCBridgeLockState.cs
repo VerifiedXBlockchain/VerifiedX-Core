@@ -135,14 +135,24 @@ namespace VerifiedXCore.Bitcoin.Models
             return locks.Sum(x => x.RemainingAmount);
         }
 
-        /// <summary>Insert when a bridge lock TX is applied in <see cref="StateData"/>.</summary>
-        public static bool TryInsertFromLockTx(Transaction tx, string scUID, string lockId, decimal amount, long amountSats, string evmDestination)
+        public enum LockInsert { Inserted, AlreadyPresent, Failed }
+
+        /// <summary>Runs just before a lock row is inserted; a test throws from it to stand for a storage fault.</summary>
+        internal static Action<VBTCBridgeLockState>? InsertStepForTests;
+
+        /// <summary>
+        /// Inserts the lock row when a bridge lock TX is applied in <see cref="StateData"/>. A row already under the lock id is
+        /// a replay (<see cref="LockInsert.AlreadyPresent"/>); a storage fault is reported through
+        /// <see cref="StateData.NoteApplyStepFailed"/>, so this node stops as a failed apply, and returns
+        /// <see cref="LockInsert.Failed"/>.
+        /// </summary>
+        public static LockInsert InsertFromLockTx(Transaction tx, string scUID, string lockId, decimal amount, long amountSats, string evmDestination)
         {
             try
             {
                 lockId = lockId.Trim();
                 if (GetByLockId(lockId) != null)
-                    return false;
+                    return LockInsert.AlreadyPresent;
 
                 var rec = new VBTCBridgeLockState
                 {
@@ -158,14 +168,21 @@ namespace VerifiedXCore.Bitcoin.Models
                     LockTimestamp = tx.Timestamp,
                     IsUnlocked = false
                 };
+                InsertStepForTests?.Invoke(rec);
                 GetCollection().Insert(rec);
-                return true;
+                return LockInsert.Inserted;
             }
-            catch
+            catch (Exception ex)
             {
-                return false;
+                StateData.NoteApplyStepFailed(tx.Height, ex);
+                ErrorLogUtility.LogError($"InsertFromLockTx: lock {lockId} not written: {ex.Message}", "VBTCBridgeLockState.InsertFromLockTx");
+                return LockInsert.Failed;
             }
         }
+
+        /// <summary>Insert when a bridge lock TX is applied in <see cref="StateData"/>; true only when the row was written now.</summary>
+        public static bool TryInsertFromLockTx(Transaction tx, string scUID, string lockId, decimal amount, long amountSats, string evmDestination) =>
+            InsertFromLockTx(tx, scUID, lockId, amount, amountSats, evmDestination) == LockInsert.Inserted;
 
         /// <summary>
         /// Apply a partial or full unlock to this lock record (pool-based unlock).
