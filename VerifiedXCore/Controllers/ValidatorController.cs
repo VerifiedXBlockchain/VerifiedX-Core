@@ -1706,13 +1706,16 @@ namespace VerifiedXCore.Controllers
                 if (activeValidators == null || activeValidators.Count == 0)
                     return Ok(JsonConvert.SerializeObject(new { success = false, error = "No active validators found" }));
 
-                var recoveredCount = await Bitcoin.Services.FrostKeyBackupService.RecoverKeysFromPeers(
+                var recovery = await Bitcoin.Services.FrostKeyBackupService.RecoverKeysFromPeersWithRetry(
                     Globals.ValidatorAddress, activeValidators);
+                var recoveredCount = recovery.Restored;
 
                 return Ok(JsonConvert.SerializeObject(new
                 {
                     success = recoveredCount > 0,
                     recoveredKeyPackages = recoveredCount,
+                    peersAsked = recovery.PeersAsked,
+                    peersUnanswered = recovery.PeersFailed,
                     message = recoveredCount > 0
                         ? $"Successfully recovered {recoveredCount} FROST key package(s) from peers"
                         : "No FROST key backups found on any peer"

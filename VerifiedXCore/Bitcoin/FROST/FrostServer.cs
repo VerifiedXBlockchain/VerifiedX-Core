@@ -106,8 +106,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                     return;
 
                 Console.WriteLine("[FROST Backup] Auto-recovery: No local FROST key packages found but this is an active validator. Attempting peer recovery...");
-                var recoveredCount = await VerifiedXCore.Bitcoin.Services.FrostKeyBackupService.RecoverKeysFromPeers(
-                    Globals.ValidatorAddress, activeValidators);
+                var recoveredCount = (await VerifiedXCore.Bitcoin.Services.FrostKeyBackupService.RecoverKeysFromPeersWithRetry(
+                    Globals.ValidatorAddress, activeValidators)).Restored;
 
                 if (recoveredCount > 0)
                     Console.WriteLine($"[FROST Backup] Auto-recovery: Successfully recovered {recoveredCount} FROST key package(s) from peers!");
