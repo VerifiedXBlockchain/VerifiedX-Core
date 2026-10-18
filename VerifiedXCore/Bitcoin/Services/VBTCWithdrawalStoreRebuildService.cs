@@ -279,6 +279,19 @@ namespace VerifiedXCore.Bitcoin.Services
             public long FinishedUtc { get; set; }
         }
 
+        /// <summary>
+        /// Marks a copy of the withdrawal store (a chain snapshot's) as holding a rebuild that did not finish, so the node
+        /// that boots from it rebuilds requests, cancellations and votes from the chain before it judges anything against
+        /// them: the cancellations live in another file, which a chain snapshot does not carry (it also holds key shares).
+        /// </summary>
+        internal static void MarkUnfinishedIn(LiteDB.LiteDatabase copy)
+        {
+            var col = copy.GetCollection<RebuildMeta>(REBUILD_META_COLLECTION);
+            var meta = col.FindById(1) ?? new RebuildMeta();
+            meta.Unfinished = true;
+            col.Upsert(meta);
+        }
+
         private static LiteDB.ILiteCollection<RebuildMeta>? GetMetaDb()
         {
             try
