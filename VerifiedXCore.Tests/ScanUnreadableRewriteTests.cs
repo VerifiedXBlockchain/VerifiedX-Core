@@ -75,6 +75,44 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void HistoryScan_TracksTheBodyAnUnreadableRewriteCarried()
+        {
+            var mint = Call(TransactionType.NFT_MINT, "Mint()", "plain:3", VbtcTestContracts.PlainNftContractData, "NA");
+            var unreadable = Call(TransactionType.NFT_TX, "Transfer()", "plain:3", VbtcTestContracts.VbtcV2ContractData, new[] { "x" });
+            var resend = Call(TransactionType.NFT_TX, "Transfer()", "plain:3", VbtcTestContracts.VbtcV2ContractData, "NA");
+            var result = FundLossHistoryScanService.Scan(new List<Block>
+            {
+                new() { Height = 1, Transactions = new List<Transaction> { mint } },
+                new() { Height = 2, Transactions = new List<Transaction> { unreadable } },
+                new() { Height = 3, Transactions = new List<Transaction> { resend } },
+            });
+            // The vault code the unreadable rewrite carried is judged there, once; the readable resend matches the tracked body.
+            Assert.Single(result.Hits, h => h.Item.StartsWith("4 rewrite adds TokenizationV2"));
+            Assert.Contains(result.Hits, h => h.Item.StartsWith("4 rewrite adds TokenizationV2") && h.Height == 2);
+            Assert.DoesNotContain(result.Hits, h => h.Height == 3);
+        }
+
+        [Fact]
+        public void HistoryScan_ReportsARewriteAfterAnUnreadableBody()
+        {
+            var mint = Call(TransactionType.NFT_MINT, "Mint()", "plain:4", VbtcTestContracts.PlainNftContractData, "NA");
+            var lost = new Transaction
+            {
+                TransactionType = TransactionType.NFT_TX, FromAddress = Owner, ToAddress = Owner, Hash = Guid.NewGuid().ToString("N"),
+                Data = JsonConvert.SerializeObject(new[] { new { Function = "Transfer()", ContractUID = "plain:4", Data = new { Body = "not text" }, MD5List = "NA" } }),
+            };
+            var later = Call(TransactionType.NFT_TX, "Transfer()", "plain:4", VbtcTestContracts.PlainNftContractData, "NA");
+            var result = FundLossHistoryScanService.Scan(new List<Block>
+            {
+                new() { Height = 1, Transactions = new List<Transaction> { mint } },
+                new() { Height = 2, Transactions = new List<Transaction> { lost } },
+                new() { Height = 3, Transactions = new List<Transaction> { later } },
+            });
+            Assert.Contains(result.Hits, h => h.Item == "4/9 unreadable rewrite" && h.Height == 2);
+            Assert.Contains(result.Hits, h => h.Item.StartsWith("4/9 rewrite of a contract whose body") && h.Height == 3);
+        }
+
+        [Fact]
         public void HistoryScan_PassesAReadableTransferThatResendsTheBody()
         {
             var mint = Call(TransactionType.NFT_MINT, "Mint()", "plain:2", VbtcTestContracts.PlainNftContractData, "NA");
