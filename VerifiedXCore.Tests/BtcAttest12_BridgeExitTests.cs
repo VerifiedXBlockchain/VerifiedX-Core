@@ -902,6 +902,54 @@ namespace VerifiedXCore.Tests
             Assert.False(Record(burn).IsFailedRecord);
         }
 
+        /// <summary>
+        /// C-200: a part fixed again after its transactions were voided keeps them, dead, and they counted toward the
+        /// eight payment transactions a part may have: a part whose fee had been raised seven times was fixed again at
+        /// 10 sat/vB as its eighth and could never be raised again. Only live transactions count now.
+        /// </summary>
+        [Fact]
+        public async Task APartFixedAgainAfterManyRaises_CanStillHaveItsFeeRaised()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var other = await CreateVault(H1 + 2);
+            await Deposit(vault.Script, 1_000_000);
+            var otherDeposit = await Deposit(other.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.004M);
+            var otherLock = await Lock(other.Uid, 0.004M);
+            var burn = NewBurn();
+            await Mine(Exit(burn, BtcDest, (lockId, vault.Uid, 0.004M), (otherLock, other.Uid, 0.004M)));
+            await SignAndConfirm(Part(burn, vault.Uid).Pins[0]);                    // one part paid
+
+            // The other part has had its fee raised seven times (eight transactions on the same coin), as the rule does.
+            var raised = Part(burn, other.Uid);
+            var first = raised.Pins[0];
+            for (var i = 1; i < BtcWithdrawals.MaxPins; i++)
+            {
+                var copy = JsonConvert.DeserializeObject<VaultPin>(JsonConvert.SerializeObject(first))!;
+                copy.Txid = Convert.ToHexString(RandomUtils.GetBytes(32)).ToLowerInvariant();
+                copy.FeeRate = first.FeeRate << i;
+                raised.Pins.Add(copy);
+            }
+            BtcAttestStore.SaveWithdrawal(raised);
+
+            // Its coin leaves in another transaction: every one of them is dead, and the part is fixed again.
+            await Report(_btc.Mine(Pay(new[] { new OutPoint(otherDeposit, 0) }, (Elsewhere(), 20_000), (other.Script, 979_000))));
+            var part = Part(burn, other.Uid);
+            Assert.Equal(VaultWithdrawalState.Pinned, part.State);
+            Assert.Equal(BtcWithdrawals.MaxPins + 1, part.Pins.Count);
+            Assert.Equal(BtcWithdrawals.MaxPins, part.Pins.Count(p => p.Dead));
+            var live = part.Pins.Last();
+            Assert.Equal(BtcWithdrawals.ExitFeeRate, live.FeeRate);
+
+            // Not confirming, its fee is raised by the rule as any part's.
+            long Looks(long from) => from % BtcAttestRules.TakeRetryBlocks == 0 ? from : from + BtcAttestRules.TakeRetryBlocks - from % BtcAttestRules.TakeRetryBlocks;
+            await AdvanceTo(Looks(live.PinnedAtVfxHeight + BtcAttestRules.StuckPinBlocks));
+            part = Part(burn, other.Uid);
+            Assert.Equal(BtcWithdrawals.MaxPins + 2, part.Pins.Count);
+            Assert.Equal(BtcWithdrawals.ExitFeeRate * 2, part.Pins.Last().FeeRate);
+        }
+
         // ── What an exit may draw on ────────────────────────────────────────────────────────────────────────
 
         [Fact]
