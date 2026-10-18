@@ -454,6 +454,22 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// Which carrier was created first: the recorded creation block when every carrier has one, else the order the
+        /// state records were inserted in (the chain's order on every node).
+        /// </summary>
+        [Fact]
+        public void TheFirstCreatedCarrier_IsReadFromTheRecordedBlockWhenEveryCarrierHasOne()
+        {
+            FrostKeyShareBinding.Carrier C(string uid, long order, long? height) => new() { SmartContractUID = uid, CreationOrder = order, CreatedAtHeight = height };
+            // Both recorded: the block decides, whatever the record order.
+            Assert.Equal(new[] { "b", "a" }, FrostKeyShareBinding.OrderByCreation(new[] { C("a", 1, 900), C("b", 2, 800) }).Select(c => c.SmartContractUID));
+            // One not recorded (created before recording): the record order decides for all.
+            Assert.Equal(new[] { "a", "b" }, FrostKeyShareBinding.OrderByCreation(new[] { C("b", 2, 800), C("a", 1, null) }).Select(c => c.SmartContractUID));
+            // Same block: the record order, then the UID.
+            Assert.Equal(new[] { "y", "x" }, FrostKeyShareBinding.OrderByCreation(new[] { C("x", 5, 700), C("y", 4, 700) }).Select(c => c.SmartContractUID));
+        }
+
+        /// <summary>
         /// Fifth review: after an upgrade each validator checks its key store. The answer is one line. "Nothing under a
         /// session id" is not the test: a share whose ceremony never produced a contract stays there and is normal. The
         /// test is nothing ambiguous and nothing still waiting to be bound.

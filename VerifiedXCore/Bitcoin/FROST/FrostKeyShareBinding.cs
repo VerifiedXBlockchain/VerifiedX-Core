@@ -171,15 +171,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                 $"{SmartContractUID} (attested: {(Attested ? "yes" : "no")}, created {(CreatedAtHeight is long h ? $"at block {h}" : "before recording")}, creation order {CreationOrder})";
         }
 
-        /// <summary>
-        /// The contracts carrying <paramref name="groupKey"/>, oldest first. A contract's state record is inserted when the
-        /// block creating it is applied, in chain order, so its record id orders contracts by creation on every node.
-        /// </summary>
+        /// <summary>The contracts carrying <paramref name="groupKey"/>, oldest first (<see cref="OrderByCreation"/>).</summary>
         public static List<Carrier> CarriersOf(string? groupKey, List<(string ScUid, string GroupKey)> vaultKeys)
         {
             var wanted = NormalizeKey(groupKey);
             if (wanted.Length == 0) return new List<Carrier>();
-            return vaultKeys
+            return OrderByCreation(vaultKeys
                 .Where(v => NormalizeKey(v.GroupKey) == wanted)
                 .Select(v => v.ScUid)
                 .Distinct(StringComparer.Ordinal)
@@ -189,8 +186,22 @@ namespace VerifiedXCore.Bitcoin.FROST
                     Attested = AttestedFor(uid),
                     CreationOrder = SmartContractStateTrei.GetSmartContractState(uid)?.Id ?? long.MaxValue,
                     CreatedAtHeight = CreatedAtHeight(uid),
-                })
-                .OrderBy(c => c.CreationOrder)
+                }));
+        }
+
+        /// <summary>
+        /// Oldest first. When the chain recorded the block that created every carrier (vaults from the recording height
+        /// on), that height decides. Otherwise the state record's id does: the record is inserted when the creating block
+        /// is applied, blocks are applied in chain order on every node and in every state rebuild, and a snapshot restore
+        /// copies the records with their ids, so the order is the chain's on every node. The UID breaks a tie.
+        /// </summary>
+        public static List<Carrier> OrderByCreation(IEnumerable<Carrier> carriers)
+        {
+            var list = carriers.ToList();
+            var byHeight = list.Count > 0 && list.All(c => c.CreatedAtHeight.HasValue);
+            return list
+                .OrderBy(c => byHeight ? c.CreatedAtHeight!.Value : c.CreationOrder)
+                .ThenBy(c => c.CreationOrder)
                 .ThenBy(c => c.SmartContractUID, StringComparer.Ordinal)
                 .ToList();
         }
@@ -198,7 +209,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         private static long? CreatedAtHeight(string scUid)
         {
             try { return VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.ScriptRowsForVault(scUid).FirstOrDefault()?.CreatedAtVfxHeight; }
-            catch { return null; } // shown only; the order above decides
+            catch { return null; } // not recorded: the state record's order decides (OrderByCreation)
         }
 
         /// <summary>
