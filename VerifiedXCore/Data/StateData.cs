@@ -987,6 +987,10 @@ namespace VerifiedXCore.Data
             // the batch left, so two rows competing for one balance or one place on a ledger came out differently on
             // different nodes (fourth review, round 7).
             var appliedCleanly = true;
+            // Settlement runs outside UpdateTreis: a write to the state that this node's storage swallowed is counted here,
+            // as UpdateTreis counts the block's own.
+            using var stateWrites = new Extensions.DbExtensions.FailureScope(IsNodeLocalFault, StateCollections());
+            var settlementFaults = 0;
             foreach (var rtx in txList.OrderBy(x => x.ConfirmTimestamp).ThenBy(x => x.Height).ThenBy(x => x.Hash, StringComparer.Ordinal))
             {
                 try
@@ -1122,7 +1126,7 @@ namespace VerifiedXCore.Data
                                             VBTCContractV2.UpdateContract(vbtcContract);
                                         }
                                     }
-                                    catch { }
+                                    catch (Exception ex) { if (IsNodeLocalFault(ex)) settlementFaults++; }
                                 }
                             }
 
@@ -1223,6 +1227,13 @@ namespace VerifiedXCore.Data
                         StateTreiStatusService.SetFailed($"Reserve settlement {rtx.Hash} failed on this node: {ex.Message}");
                     }
                 }
+            }
+            if (stateWrites.Count > 0 || settlementFaults > 0)
+            {
+                // Writes the settlement omitted are missing until a rebuild or a restore (a rebuild counts the false as a
+                // fault of this node's storage).
+                appliedCleanly = false;
+                StateTreiStatusService.SetIncompleteApply($"Reserve settlement at block {asOf?.Height ?? Globals.LastBlock?.Height}: {stateWrites.Count + settlementFaults} write(s) to the state failed on this node's storage.");
             }
             return appliedCleanly;
         }
