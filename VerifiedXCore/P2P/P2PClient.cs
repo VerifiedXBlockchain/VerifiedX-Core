@@ -274,6 +274,32 @@ namespace VerifiedXCore.P2P
             LogUtility.Log($"Auto-discovered IP address: {best.Key}", "P2PClient.TryAutoUpdateReportedIP()");
         }
 
+        /// <summary>Peer confirmations a validator's own address needs before its registration and heartbeat carry it.</summary>
+        public const int ValidatorIpConfirmations = 3;
+
+        private static int _validatorIpHintLogged;
+
+        /// <summary>
+        /// The address a validator registers and heartbeats with: the configured one (<c>ipaddress=</c>), else the
+        /// auto-discovered <see cref="Globals.ReportedIP"/> only while at least <see cref="ValidatorIpConfirmations"/> peers
+        /// confirm it, else null. Two peers the node happens to dial are enough to set ReportedIP for its other uses; they
+        /// are not enough to publish it on chain as the address FROST and caster traffic is sent to.
+        /// </summary>
+        public static string? ValidatorReportedIP()
+        {
+            var ip = Globals.ReportedIP;
+            if (string.IsNullOrEmpty(ip))
+                return null;
+            if (Globals.ReportedIPManuallySet)
+                return ip;
+            if (Globals.ReportedIPs.TryGetValue(ip, out var votes) && votes >= ValidatorIpConfirmations)
+                return ip;
+            if (System.Threading.Interlocked.Exchange(ref _validatorIpHintLogged, 1) == 0)
+                LogUtility.Log($"This validator's address {ip} has {votes} peer confirmation(s); it registers and heartbeats once {ValidatorIpConfirmations} peers confirm it. To run with fewer peers, set it with ipaddress=.",
+                    "P2PClient.ValidatorReportedIP()");
+            return null;
+        }
+
         public static string MostLikelyIP()
         {
             return Globals.ReportedIPs.Count != 0 ?
