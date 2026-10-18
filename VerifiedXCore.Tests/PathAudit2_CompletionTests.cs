@@ -192,6 +192,53 @@ namespace VerifiedXCore.Tests
             finally { Globals.IsChainSynced = priorSynced; }
         }
 
+        /// <summary>
+        /// C-244: validation let an active validator complete a withdrawal it did not request, while apply and the store
+        /// rebuild honour only the requester's completion: the validator's was mined and changed nothing. From the path-audit
+        /// rules only the requester completes, in a block and at admission; below them history is judged as before, and the
+        /// requester's own completion still completes the row.
+        /// </summary>
+        [Fact]
+        public async Task FromThePathAuditRules_OnlyTheRequesterCompletesAWithdrawal()
+        {
+            Assert.True(VBTCWithdrawalRequest.Save(new VBTCWithdrawalRequest
+            {
+                RequestorAddress = _requester.Address, SmartContractUID = _vault, Amount = 0.25M, BTCDestination = "tb1q066af78la3rqmnchc396keujllva6turs52749",
+                FeeRate = 10, Timestamp = 1_755_000_150, TransactionHash = _requestHash, Status = VBTCWithdrawalStatus.Requested, RequestBlockHeight = 150,
+            }));
+            var validator = NewKey();
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = validator.Address, Balance = 10M, Nonce = 0 });
+            BlockchainData.GetBlocks().InsertSafe(new Block
+            {
+                Height = 250, Hash = $"h250-{Guid.NewGuid():N}",
+                Transactions = new List<Transaction>
+                {
+                    new Transaction
+                    {
+                        TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = validator.Address, ToAddress = validator.Address, Hash = "r250",
+                        Data = JsonConvert.SerializeObject(new { ValidatorAddress = validator.Address, IPAddress = "10.0.0.1", FrostPublicKey = "pk-" + validator.Address, IsS3C = false }),
+                    },
+                },
+            });
+            const string Requester = "Only the original requester";
+            var byValidator = Complete(validator, _vault, new string('c', 64));
+
+            var (atRule, atRuleWhy) = await VerifyInBlock(byValidator, Rule + 10);
+            Assert.False(atRule);
+            Assert.Contains("can complete this withdrawal", atRuleWhy);
+            Assert.DoesNotContain("or an active vBTC validator", atRuleWhy);
+            Globals.LastBlock = new Block { Height = Rule + 9 };
+            var (admitted, admittedWhy) = await TransactionValidatorService.VerifyTX(Complete(validator, _vault, new string('c', 64)));
+            Assert.False(admitted);
+            Assert.Contains(Requester, admittedWhy);
+
+            var (_, belowWhy) = await VerifyInBlock(Complete(validator, _vault, new string('c', 64)), Rule - 1);
+            Assert.DoesNotContain(Requester, belowWhy);                                    // history: a validator passed this check
+
+            var (_, ownWhy) = await VerifyInBlock(Complete(_requester, _vault, new string('d', 64)), Rule + 10);
+            Assert.DoesNotContain(Requester, ownWhy);                                      // the requester still completes
+        }
+
         [Theory]
         [InlineData(VBTCWithdrawalStatus.Completed)]
         [InlineData(VBTCWithdrawalStatus.Cancelled)]

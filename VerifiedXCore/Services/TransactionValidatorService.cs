@@ -3791,6 +3791,12 @@ namespace VerifiedXCore.Services
                             // FIND-002 + FIND-028 FIX: Allow the original requester OR an active vBTC validator
                             if (withdrawalRequest.RequestorAddress != txRequest.FromAddress)
                             {
+                                // From the path-audit rules only the requester completes: apply (StateData.CompleteVBTCV2Withdrawal)
+                                // and the store rebuild (ReplayComplete) have only ever honoured the requester's completion, so a
+                                // validator's was mined and then changed nothing.
+                                if (completeHeight >= Globals.PathAuditRulesHeight)
+                                    return (txResult, $"Only the original requester ({withdrawalRequest.RequestorAddress}) can complete this withdrawal. Received from: {txRequest.FromAddress}");
+
                                 var completingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidatorAt(txRequest.FromAddress, Bitcoin.Services.VBTCValidatorRegistry.SetHeightFor(blockHeight));
                                 if (completingValidator == null || !completingValidator.IsActive)
                                     return (txResult, $"Only the original requester ({withdrawalRequest.RequestorAddress}) or an active vBTC validator can complete this withdrawal. Received from: {txRequest.FromAddress}");
