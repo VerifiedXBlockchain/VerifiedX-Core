@@ -356,6 +356,17 @@ namespace VerifiedXCore.Services
             return hasValidCertificate() ? CasterGate.Allow : CasterGate.Uncertified;
         }
 
+        /// <summary>How far past this node's clock a block's timestamp may be.</summary>
+        internal const int FutureBlockAllowanceSeconds = 60;
+
+        /// <summary>
+        /// A block stamped more than FutureBlockAllowanceSeconds past this node's clock is refused. No deterministic "now"
+        /// exists to judge it by, so it reads the local clock; the refusal is not sticky (ValidateBlocks drops the block with
+        /// no ban and remembers nothing), so a node whose clock is behind accepts the block once its clock passes it. A wider
+        /// allowance would loosen every window that reads the block's timestamp.
+        /// </summary>
+        internal static bool IsAheadOfClock(long blockTimestamp, long now) => blockTimestamp > now + FutureBlockAllowanceSeconds;
+
         public static async Task ValidateBlocks(bool skipCasterCheck = false)
         {
             try
@@ -682,8 +693,7 @@ namespace VerifiedXCore.Services
                 if (block.Height != 0)
                 {
                     var prevTimestamp = Globals.LastBlock.Timestamp;
-                    var currentTimestamp = TimeUtil.GetTime(60);
-                    if (prevTimestamp > block.Timestamp || block.Timestamp > currentTimestamp)
+                    if (prevTimestamp > block.Timestamp || IsAheadOfClock(block.Timestamp, TimeUtil.GetTime()))
                     {
                         DbContext.Rollback("BlockValidatorService.ValidateBlock()-9");
                         return result;
@@ -2062,8 +2072,7 @@ namespace VerifiedXCore.Services
             {
                 //ensures the timestamps being produced are correct
                 var prevTimestamp = Globals.LastBlock.Timestamp;
-                var currentTimestamp = TimeUtil.GetTime(60);
-                if (prevTimestamp > block.Timestamp || block.Timestamp > currentTimestamp)
+                if (prevTimestamp > block.Timestamp || IsAheadOfClock(block.Timestamp, TimeUtil.GetTime()))
                 {
                     return result;
                 }
