@@ -3853,57 +3853,15 @@ namespace VerifiedXCore.Bitcoin.FROST
         {
             string txCheckDetail;
 
-            // 1) Pinned tx confirmed? Multi-server lookup — the old single-server check meant one
-            // wedged Electrum connection held the pin forever after the tx had long confirmed. Released on its own
-            // confirmation only when two hosts have it in a block: one server's word (or a path to it; certificates are
-            // not checked) freed its coins, and its rivals' pins, for another withdrawal's transaction while it could
-            // still be unconfirmed.
-            // Once the validators attest Bitcoin's headers, the pinned tx's own confirmation is not asked of Electrum at
-            // all: its hosts are not authenticated (certificates are not checked), so a path to them can speak for any
-            // two. Step 2 releases it instead: the pinned tx is itself the confirmed spender of its inputs, proven by
-            // Merkle branches to attested, buried headers, and so are its rivals. Before then step 2 proves nothing, and
-            // the two-host answer is all there is. (The attestation's own row says so too right after a restart, before
-            // the tip is loaded.)
-            var headersAttested = VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(Globals.LastBlock?.Height ?? 0)
-                || VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.GetMeta() != null;
-            if (!string.IsNullOrEmpty(pin.BtcTxId) && headersAttested)
-            {
-                txCheckDetail = "txlookup=skipped (Bitcoin headers attested: released only on a proven confirmed spend)";
-            }
-            else if (!string.IsNullOrEmpty(pin.BtcTxId))
-            {
-                var seen = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService
-                    .GetTransactionConfirmationsCorroborated(pin.BtcTxId);
-                if (seen.Confirmed >= VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.ConfirmationAgreementRequired)
-                {
-                    VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                        .ClearContractPin(scUID, pin.WithdrawalRequestHash, $"pinned tx confirmed on {seen.Confirmed} hosts ({seen.MinConfirmations}+ confirmation(s))");
-
-                    // Any other pinned tx spending one of these coins now conflicts with a confirmed tx.
-                    foreach (var loser in VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.GetOverlappingPins(scUID, pin.WithdrawalRequestHash, pin.Outpoints))
-                        VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                            .ClearContractPin(scUID, loser.WithdrawalRequestHash, $"conflicts with confirmed tx {pin.BtcTxId} (withdrawal {pin.WithdrawalRequestHash})");
-                    return;
-                }
-
-                if (seen.Known > 0 && seen.Confirmed == 0)
-                {
-                    // Known but unconfirmed: the tx is alive in a mempool. Keep it.
-                    var aliveOutcome = $"kept: txlookup=unconfirmed/in-mempool ({seen.Detail})";
-                    VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.NotePinReleaseCheck(scUID, pin.WithdrawalRequestHash, aliveOutcome);
-                    LogUtility.Log($"[FROST Dedup] Pin release check for {scUID} (tx {pin.BtcTxId}) — {aliveOutcome}", "FrostStartup.TryReleaseContractPinIfObservedOnChain");
-                    return;
-                }
-                // One host alone says it is in a block, or none knows it: only a proven confirmed spend of a pinned input
-                // (below, two servers with Merkle proofs) releases it.
-                txCheckDetail = seen.Confirmed > 0
-                    ? $"txlookup=UNCORROBORATED ({seen.Confirmed} of {VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.ConfirmationAgreementRequired} hosts: {seen.Detail})"
-                    : $"txlookup=UNKNOWN ({seen.Detail})";
-            }
-            else
-            {
-                txCheckDetail = "txlookup=skipped (no BtcTxId on pin)";
-            }
+            // 1) The pinned tx's own confirmation is not asked of Electrum: its hosts are not authenticated (certificates
+            // are not checked), so a path to them could speak for any of them and free the pin, and its rivals', while the
+            // pinned tx was unconfirmed. Step 2 releases it instead: the pinned tx is itself the confirmed spender of its
+            // inputs, proven by Merkle branches to attested, buried headers, and so are its rivals. Before the validators
+            // attest Bitcoin's headers step 2 proves nothing and the pin stays: under withdrawal concurrency a pin holds
+            // only its own coins, which its confirmed tx has spent, so nothing else waits on it.
+            txCheckDetail = string.IsNullOrEmpty(pin.BtcTxId)
+                ? "txlookup=skipped (no BtcTxId on pin)"
+                : "txlookup=not asked (released only on a proven confirmed spend)";
 
             // 2) One of the pinned inputs spent by a confirmed tx?
             string utxoCheckDetail;
