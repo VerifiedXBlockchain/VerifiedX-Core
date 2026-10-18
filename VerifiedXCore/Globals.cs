@@ -438,6 +438,12 @@ namespace VerifiedXCore
         public static long SignerAgeFromEpochZeroHeight = 999_999_999_999;
 
         /// <summary>
+        /// The addresses whose signature over a release asset's SHA-256 lets self-update install it (Utilities.ReleaseSignature).
+        /// A dedicated release key, never a validator key. Empty: self-update refuses and says to download manually.
+        /// </summary>
+        public static string[] ReleaseSignerAddresses = Array.Empty<string>();
+
+        /// <summary>
         /// From this height a smart contract's Update(), Transfer(), Burn(), Evolve(), Devolve() or
         /// ChangeEvolveStateSpecific() must carry its Data in the array form those applies read. Validation also accepted
         /// a single object, which every apply then skips, so the transaction was mined with no effect. Not active yet.
