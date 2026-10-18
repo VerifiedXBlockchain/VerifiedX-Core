@@ -104,5 +104,25 @@ namespace VerifiedXCore.Tests
             Assert.Equal(HeadSeq + 1, CasterMembershipStore.GetCurrent()!.RecordSeq);
             Assert.False(CasterMembershipStore.TryMarkSigned(record.RecordSeq, "other-hash", "other-set", Effective + 1));
         }
+
+        [Fact]
+        public void AFailedSelfSignature_ReleasesTheProposersMark_AndASignatureKeepsIt()
+        {
+            TipAt(Effective - 5);
+            var reset = new CasterMembershipRecord
+            {
+                RecordSeq = HeadSeq + 1, EffectiveFromHeight = Effective, PrevRecordHash = _head.RecordHash,
+                ChangeType = CasterMembershipStore.BootstrapResetChangeType, ChangedAddress = "", Casters = _head.Casters.Take(1).ToList(),
+            };
+            reset.RecordHash = CasterMembershipStore.ComputeRecordHash(reset);
+            var setHash = CasterMembershipStore.ComputeCasterSetHash(reset);
+
+            Assert.True(CasterMembershipStore.TryMarkSigned(reset.RecordSeq, reset.RecordHash, setHash, reset.EffectiveFromHeight));
+            Assert.Equal("sig", BootstrapResetService.SignOrReleaseMark(reset, _ => "sig"));
+            Assert.False(CasterMembershipStore.TryMarkSigned(reset.RecordSeq, "other-hash", "other-set", Effective + 1));
+
+            Assert.Null(BootstrapResetService.SignOrReleaseMark(reset, _ => "ERROR"));
+            Assert.True(CasterMembershipStore.TryMarkSigned(reset.RecordSeq, "other-hash", "other-set", Effective + 1));
+        }
     }
 }

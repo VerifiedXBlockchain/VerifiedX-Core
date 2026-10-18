@@ -177,6 +177,20 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
+        /// The proposer's own signature over its reset candidate, or null when signing failed; the mark taken for the
+        /// candidate is then released, as on every other exit that does not propose it.
+        /// </summary>
+        internal static string? SignOrReleaseMark(CasterMembershipRecord candidate, Func<string, string> sign)
+        {
+            var signature = sign(CasterMembershipStore.CanonicalPayload(candidate));
+            if (signature != "ERROR")
+                return signature;
+            CasterLogUtility.Log($"BOOTSTRAP-RESET: could not sign the candidate for seq {candidate.RecordSeq}; releasing mark.", "BOOTSTRAP-RESET");
+            CasterMembershipStore.ReleaseSignedMark(candidate.RecordSeq, CasterMembershipStore.ComputeCasterSetHash(candidate));
+            return null;
+        }
+
+        /// <summary>
         /// Appends the proposer's reset candidate; when the append is refused, releases the proposer's own mark on its seq,
         /// as the ordinary proposer does, so the next window (or another rotation) is not held off by a record that was
         /// never appended.
@@ -220,8 +234,9 @@ namespace VerifiedXCore.Services
                 return;
             }
             var payload = CasterMembershipStore.CanonicalPayload(candidate);
-            var selfSig = SignatureService.CreateSignature(payload, account.GetPrivKey, account.PublicKey);
-            if (selfSig == "ERROR") return;
+            var selfSig = SignOrReleaseMark(candidate, p => SignatureService.CreateSignature(p, account.GetPrivKey, account.PublicKey));
+            if (selfSig == null)
+                return;
             candidate.Signatures.Add(new RecordSignature { SignerAddress = Globals.ValidatorAddress, Signature = selfSig });
 
             CasterLogUtility.Log(
