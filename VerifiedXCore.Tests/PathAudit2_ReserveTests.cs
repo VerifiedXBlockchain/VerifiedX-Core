@@ -443,5 +443,94 @@ namespace VerifiedXCore.Tests
             Assert.Equal(ReserveTransactionStatus.CalledBack, StatusOf(leftover));
             Assert.Equal(_later.Address, Vault.OwnerAddress);
         }
-    }
+    
+        // ── The legacy freeze (BitcoinAttestationHeight): what a reserve's settlements still move on a frozen vault ──
+
+        private Transaction FromHolder((PrivateKey Key, string Pub, string Address) holder, TransactionType type, string to, object data)
+        {
+            var tx = new Transaction
+            {
+                Timestamp = _now, FromAddress = holder.Address, ToAddress = to, Amount = 0.0M, Fee = 0, Nonce = 0,
+                TransactionType = type, Data = JsonConvert.SerializeObject(data),
+            };
+            tx.Fee = FeeCalcService.CalculateTXFee(tx);
+            tx.Build();
+            tx.Signature = SignatureService.CreateSignature(tx.Hash, holder.Key, holder.Pub);
+            return tx;
+        }
+
+        /// <summary>Every debit a holder could make on the vault is refused once it is frozen.</summary>
+        private async Task NothingLeavesTheFrozenVaultFrom((PrivateKey Key, string Pub, string Address) holder)
+        {
+            foreach (var tx in new[]
+            {
+                FromHolder(holder, TransactionType.VBTC_V2_TRANSFER, _firstBuyer.Address, new { Function = "TransferVBTCV2()", ContractUID = _vault, FromAddress = holder.Address, ToAddress = _firstBuyer.Address, Amount = 0.1M }),
+                FromHolder(holder, TransactionType.VBTC_V2_WITHDRAWAL_REQUEST, holder.Address, new { Function = "VBTCWithdrawalRequest()", ContractUID = _vault, BTCAddress = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", Amount = 0.1M, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") }),
+                FromHolder(holder, TransactionType.VBTC_V2_BRIDGE_LOCK, holder.Address, new { Function = "VBTCBridgeLock()", ContractUID = _vault, LockId = Guid.NewGuid().ToString("N"), Amount = 0.1M, AmountSats = 10_000_000L, EvmDestination = "0x" + new string('a', 40) }),
+            })
+                Assert.Contains("has been frozen", await Refusal(tx));
+        }
+
+        private decimal VaultTotal() => Vault.SCStateTreiTokenizationTXes?.Sum(x => x.Amount) ?? 0M;
+
+        /// <summary>
+        /// A reserve's delayed vBTC send mined before the freeze and due after it settles to its recipient on the older vault:
+        /// a move inside the vault, whose total is unchanged; the recipient can then take nothing off it.
+        /// </summary>
+        [Fact]
+        public async Task ADelayedSendDueAfterTheFreeze_SettlesInsideTheFrozenVault_AndItsRecipientCanMoveNothing()
+        {
+            var (priorFreeze, priorEscrow) = (Globals.BitcoinAttestationHeight, Globals.WithdrawalEscrowHeight);
+            Globals.WithdrawalEscrowHeight = 1;   // a request holds its vBTC (both networks are past this height)
+            try
+            {
+                var send = SendVbtc(_recipient.Address, 1.0M, 30);
+                await Mine(0, send);
+                var total = VaultTotal();
+                Globals.BitcoinAttestationHeight = _height + 1;   // frozen from the next block
+                Assert.True(VerifiedXCore.Bitcoin.Attestation.BtcLegacyFreeze.IsLegacyVault(_vault));
+
+                await Mine(31);
+                Assert.Equal(ReserveTransactionStatus.Confirmed, StatusOf(send));
+                Assert.Equal(1.0M, Held(_recipient.Address));
+                Assert.Equal(total, VaultTotal());
+                await NothingLeavesTheFrozenVaultFrom(_recipient);
+            }
+            finally { (Globals.BitcoinAttestationHeight, Globals.WithdrawalEscrowHeight) = (priorFreeze, priorEscrow); }
+        }
+
+        /// <summary>
+        /// A Recover() at the freeze height moves the reserve's vBTC on the older vault to its recovery address: a move inside
+        /// the vault, whose total is unchanged; the recovery address can then take nothing off it.
+        /// </summary>
+        [Fact]
+        public async Task ARecoverAtTheFreeze_MovesTheReservesVbtcInsideTheFrozenVault_AndTheRecoveryAddressCanMoveNothing()
+        {
+            var (priorFreeze, priorEscrow) = (Globals.BitcoinAttestationHeight, Globals.WithdrawalEscrowHeight);
+            Globals.WithdrawalEscrowHeight = 1;   // a request holds its vBTC (both networks are past this height)
+            try
+            {
+                var contract = Vault;
+                contract.SCStateTreiTokenizationTXes = new List<SmartContractStateTreiTokenizationTX>
+                {
+                    new SmartContractStateTreiTokenizationTX { Amount = 1.5M, FromAddress = "+", ToAddress = _reserve.Address },
+                };
+                SmartContractStateTrei.UpdateSmartContract(contract);
+                var total = VaultTotal();
+                Globals.BitcoinAttestationHeight = _height + 1;
+
+                var recover = FromReserve(TransactionType.RESERVE, "Reserve_Base", new
+                {
+                    Function = "Recover()", RecoveryAddress = _later.Address,
+                    RecoverySigScript = SignatureService.CreateSignature($"{_now}{_later.Address}", _later.Key, _later.Pub), SignatureTime = _now,
+                }, null);
+                await Mine(1, recover);
+                Assert.Equal(1.5M, Held(_later.Address));
+                Assert.Equal(0M, Held(_reserve.Address));
+                Assert.Equal(total, VaultTotal());
+                await NothingLeavesTheFrozenVaultFrom(_later);
+            }
+            finally { (Globals.BitcoinAttestationHeight, Globals.WithdrawalEscrowHeight) = (priorFreeze, priorEscrow); }
+        }
+}
 }
