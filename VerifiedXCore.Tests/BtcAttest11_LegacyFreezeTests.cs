@@ -72,6 +72,36 @@ namespace VerifiedXCore.Tests
             Assert.Contains("has been frozen since block " + H2, why);
         }
 
+        /// <summary>
+        /// C-202 (residual): a bridge exit or unlock drawing on a frozen vault is refused by the vault the lock names, and
+        /// that check sat in a catch-all, so a fault of this node's disk while the vault was decompiled read as "not
+        /// frozen" and the transaction passed here alone. The fault is passed on (the block is not taken now); what the
+        /// transaction says that cannot be read is still no vault.
+        /// </summary>
+        [Fact]
+        public async Task ABridgeUnlockOnAFrozenVault_IsNotPassedOnAFaultOfThisNodesDisk()
+        {
+            var legacy = await CreateVault(H1 - 50);
+            await Start();
+            var body = SmartContractStateTrei.GetSmartContractState(legacy.Uid)!.ContractData;
+            var uid = legacy.Uid + "0";                                                     // the same vault, not yet decompiled here
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei { SmartContractUID = uid, ContractData = body, MinterAddress = Minter.Address, OwnerAddress = Minter.Address });
+            var unlock = SignedBy(_holder, _holder.Address, TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK,
+                new { Function = "VBTCBridgePoolUnlock()", ContractUID = uid, Amount = 0.001M, Allocations = new object[0] });
+            try
+            {
+                VerifiedXCore.Models.SmartContracts.SmartContractMain.DecompileForTests = text =>
+                {
+                    if (text == body) throw new System.Reflection.TargetInvocationException(new UnauthorizedAccessException("Access to the path 'Submissions' is denied."));
+                };
+                Assert.ThrowsAny<Exception>(() => BtcLegacyFreeze.Refusal(unlock, H2));            // not "not frozen"
+            }
+            finally { VerifiedXCore.Models.SmartContracts.SmartContractMain.DecompileForTests = null; }
+            Assert.Contains("has been frozen since block " + H2, BtcLegacyFreeze.Refusal(unlock, H2));
+            var garbled = SignedBy(_holder, _holder.Address, TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK, "not an object");
+            Assert.Null(BtcLegacyFreeze.Refusal(garbled, H2));                                 // unreadable data: no vault here
+        }
+
         [Fact]
         public async Task FromTheEnforcementHeight_NothingDebitsAVaultCreatedBeforeTheRecordingHeight()
         {

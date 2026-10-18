@@ -506,10 +506,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
             var request = VBTCWithdrawalRequest.GetByTransactionHash(row.RequestHash, row.SmartContractUID);
             if (request == null)
-            {
-                ErrorLogUtility.LogError($"Withdrawal {row.Ref} settled by {txid} but its request row is missing.", "BtcWithdrawals.Settle()");
-                return;
-            }
+                // Every withdrawal recorded here was recorded from its request's row (OnRequestApplied), and that row is never
+                // deleted: it is gone only by a fault of this node's store. Settled without it, the owner's add-back was
+                // missing here alone and this node judged the owner's debits apart from its peers. A storage fault:
+                // OnCoinsChanged reports it, the block is not applied and blocks are held until the state is rebuilt.
+                throw new System.IO.IOException($"Withdrawal {row.Ref} settled by {txid} but its request row is missing.");
             // Completed is what the owner's balance adds back (VBTCWithdrawalRequest.GetCompletedWithdrawalAmount): the
             // Bitcoin has left the vault's coins in this same block, so the two always move together.
             request.Status = VBTCWithdrawalStatus.Completed;

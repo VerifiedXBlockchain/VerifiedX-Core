@@ -8,8 +8,9 @@ using VerifiedXCore.Utilities;
 namespace VerifiedXCore.Tests
 {
     /// <summary>
-    /// From Globals.RecipientIsAddressHeight no transaction is addressed to a registered name: every apply credits or
-    /// assigns the ToAddress as written.
+    /// C-123: from Globals.PathAuditRulesHeight no transaction is addressed to a registered name: every apply credits or
+    /// assigns the ToAddress as written, so a name accepted by validation (resolved through the node's own table) left the
+    /// VFX, token, NFT or name on the literal string.
     /// </summary>
     [Collection("DbContextSequential")]
     public class RecipientIsNotANameTests
@@ -27,13 +28,13 @@ namespace VerifiedXCore.Tests
 
         private static void AtHeight(Action check)
         {
-            var prior = Globals.RecipientIsAddressHeight;
+            var prior = Globals.PathAuditRulesHeight;
             try
             {
-                Globals.RecipientIsAddressHeight = Height;
+                Globals.PathAuditRulesHeight = Height;
                 check();
             }
-            finally { Globals.RecipientIsAddressHeight = prior; }
+            finally { Globals.PathAuditRulesHeight = prior; }
         }
 
         [Theory]
@@ -76,10 +77,42 @@ namespace VerifiedXCore.Tests
             Assert.Null(LedgerIntegrityRules.RecipientIsNotAName(To("alice.vfx", TransactionType.VFX_PRIVATE_TRANSFER), Height));
         });
 
-        [Fact]
-        public void TheRuleShipsNotActive_UntilAHeightIsChosen()
+        /// <summary>Through VerifyTX, as block validation (at the block's height) and admission (at tip + 1) judge it.</summary>
+        [Theory]
+        [InlineData(TransactionType.NFT_TX)]
+        [InlineData(TransactionType.ADNR)]
+        [InlineData(TransactionType.FTKN_TX)]
+        public async Task VerifyTX_RefusesANameAsRecipient_FromThePathAuditRules(TransactionType type)
         {
-            Assert.Equal(999_999_999_999, Globals.RecipientIsAddressHeight);
+            var root = Path.Combine(Path.GetTempPath(), $"recipname_{Guid.NewGuid():N}") + Path.DirectorySeparatorChar;
+            Directory.CreateDirectory(root);
+            var priorPath = Globals.CustomPath;
+            var priorTip = Globals.LastBlock;
+            var priorGate = Globals.PathAuditRulesHeight;
+            Globals.CustomPath = root;
+            DbContext.Initialize();
+            Globals.PathAuditRulesHeight = Height;
+            Globals.LastBlock = new Block { Height = Height - 1, Timestamp = TimeUtil.GetTime() };
+            try
+            {
+                var tx = To("averyveryverylongregisteredname1.vfx", type);
+                var (blockOk, blockWhy) = await TransactionValidatorService.VerifyTX(tx, false, true, false, null, false, Height);
+                Assert.False(blockOk);
+                Assert.Equal(LedgerIntegrityRules.RecipientIsANameReason, blockWhy);
+                var (admitted, admissionWhy) = await TransactionValidatorService.VerifyTX(tx);
+                Assert.False(admitted);
+                Assert.Equal(LedgerIntegrityRules.RecipientIsANameReason, admissionWhy);
+                var (_, belowWhy) = await TransactionValidatorService.VerifyTX(tx, false, true, false, null, false, Height - 1);
+                Assert.NotEqual(LedgerIntegrityRules.RecipientIsANameReason, belowWhy);   // history replays as it was
+            }
+            finally
+            {
+                try { DbContext.CloseDB(); } catch { }
+                Globals.PathAuditRulesHeight = priorGate;
+                Globals.LastBlock = priorTip;
+                Globals.CustomPath = priorPath;
+                try { Directory.Delete(root, recursive: true); } catch { }
+            }
         }
     }
 }

@@ -281,5 +281,46 @@ namespace VerifiedXCore.Tests
             Assert.False(CasterMembershipStore.ValidateBootstrapReset(candidate, CasterMembershipStore.BootstrapResetMinStallSeconds - 1, out var reason));
             Assert.Contains("not stalled here", reason);
         }
+
+        /// <summary>
+        /// C-012: a reset was judged on the seeds' addresses alone, so it could install a seed with another PeerIP or
+        /// PublicKey (and its co-signers check no entry). Each seed's entry must be the hardcoded one, as the proposer
+        /// builds it.
+        /// </summary>
+        [Fact]
+        public void ResetRecord_RefusedWhenItChangesASeedsEntry()
+        {
+            var seeds = SeedNodeService.GetBootstrapSeedPeers().Where(p => !string.IsNullOrEmpty(p.ValidatorAddress))
+                .Select(p => new CasterInfo { Address = p.ValidatorAddress!, PeerIP = (p.PeerIP ?? "").Replace("::ffff:", ""), PublicKey = p.ValidatorPublicKey ?? "" })
+                .OrderBy(c => c.Address, StringComparer.Ordinal).ToList();
+            CasterMembershipRecord Reset(List<CasterInfo> casters)
+            {
+                var r = new CasterMembershipRecord
+                {
+                    RecordSeq = 16, EffectiveFromHeight = 975534, PrevRecordHash = "prev", ChangeType = CasterMembershipStore.BootstrapResetChangeType,
+                    ChangedAddress = "", Casters = casters, Signatures = new List<RecordSignature>(),
+                };
+                r.RecordHash = CasterMembershipStore.ComputeRecordHash(r);
+                return r;
+            }
+
+            Assert.False(CasterMembershipStore.ValidateBootstrapReset(Reset(seeds), Stale, out var reason));
+            Assert.Contains("signatures", reason);                                    // the entries pass; unsigned here
+
+            var movedIp = seeds.Select(c => new CasterInfo { Address = c.Address, PeerIP = c.PeerIP, PublicKey = c.PublicKey }).ToList();
+            movedIp[0].PeerIP = "203.0.113.9";
+            Assert.False(CasterMembershipStore.ValidateBootstrapReset(Reset(movedIp), Stale, out reason));
+            Assert.Contains("entry from the hardcoded one", reason);
+
+            var otherKey = seeds.Select(c => new CasterInfo { Address = c.Address, PeerIP = c.PeerIP, PublicKey = c.PublicKey }).ToList();
+            otherKey[^1].PublicKey = "04" + new string('a', 128);
+            Assert.False(CasterMembershipStore.ValidateBootstrapReset(Reset(otherKey), Stale, out reason));
+            Assert.Contains("entry from the hardcoded one", reason);
+
+            var twice = seeds.Select(c => new CasterInfo { Address = c.Address, PeerIP = c.PeerIP, PublicKey = c.PublicKey }).ToList();
+            twice.Add(new CasterInfo { Address = seeds[0].Address, PeerIP = "203.0.113.9", PublicKey = seeds[0].PublicKey });   // the hardcoded entry first
+            Assert.False(CasterMembershipStore.ValidateBootstrapReset(Reset(twice), Stale, out reason));
+            Assert.Contains("lists a seed twice", reason);
+        }
     }
 }

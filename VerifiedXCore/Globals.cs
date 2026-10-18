@@ -357,15 +357,6 @@ namespace VerifiedXCore
         public static long PathAuditRulesHeight = FundLossAuditHeight;
 
         /// <summary>
-        /// From this height no transaction's ToAddress may be a registered name (".vfx" or ".rbx"): validation resolved
-        /// the name through the node's own name table and accepted it, but every apply credits or assigns the ToAddress as
-        /// written, so the VFX, token, NFT or name went to the literal string and nobody could use it, and the verdict
-        /// depended on the local table. PathAuditRulesHeight already refuses it for VFX sends and unshields; this covers
-        /// every other type. Not active yet.
-        /// </summary>
-        public static long RecipientIsAddressHeight = 999_999_999_999;
-
-        /// <summary>
         /// From this height a smart contract's Update(), Transfer(), Burn(), Evolve(), Devolve() or
         /// ChangeEvolveStateSpecific() must carry its Data in the array form those applies read. Validation also accepted
         /// a single object, which every apply then skips, so the transaction was mined with no effect. Not active yet.

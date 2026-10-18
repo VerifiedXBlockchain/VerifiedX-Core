@@ -35,6 +35,8 @@ namespace VerifiedXCore.Bitcoin.Models
         public string EvmDestination { get; set; } = string.Empty;
         public string LockTxHash { get; set; } = string.Empty;
         public long LockTimestamp { get; set; }
+        /// <summary>The block that carried the lock (0 for a row written before this was recorded).</summary>
+        public long LockBlockHeight { get; set; }
 
         /// <summary>True when fully consumed (UnlockedAmount >= Amount).</summary>
         public bool IsUnlocked { get; set; }
@@ -136,7 +138,7 @@ namespace VerifiedXCore.Bitcoin.Models
         }
 
         /// <summary>Insert when a bridge lock TX is applied in <see cref="StateData"/>.</summary>
-        public static bool TryInsertFromLockTx(Transaction tx, string scUID, string lockId, decimal amount, long amountSats, string evmDestination)
+        public static bool TryInsertFromLockTx(Transaction tx, string scUID, string lockId, decimal amount, long amountSats, string evmDestination, long blockHeight = 0)
         {
             try
             {
@@ -156,6 +158,7 @@ namespace VerifiedXCore.Bitcoin.Models
                     EvmDestination = evmDestination.Trim(),
                     LockTxHash = tx.Hash,
                     LockTimestamp = tx.Timestamp,
+                    LockBlockHeight = blockHeight,
                     IsUnlocked = false
                 };
                 GetCollection().Insert(rec);

@@ -147,10 +147,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
             var request = VBTCWithdrawalRequest.GetByTransactionHash(row.RequestHash, row.SmartContractUID);
             if (request == null)
-            {
-                ErrorLogUtility.LogError($"Withdrawal {row.Ref} was un-completed by a Bitcoin rewind but its request row is missing.", "BtcWithdrawals.Unsettle()");
-                return;
-            }
+                // As in Settle: gone only by a fault of this node's store. OnRewind reports it and passes it on.
+                throw new System.IO.IOException($"Withdrawal {row.Ref} was un-completed by a Bitcoin rewind but its request row is missing.");
             request.Status = VBTCWithdrawalStatus.Requested;
             request.IsCompleted = false;
             request.BTCTxHash = null;

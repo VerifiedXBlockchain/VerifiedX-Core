@@ -81,7 +81,8 @@ namespace VerifiedXCore.Tests
         public void TheApply_SkipsTheObjectFormWithoutThrowing(string method, string function)
         {
             var apply = typeof(StateData).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Static)!;
-            var ex = Record.Exception(() => apply.Invoke(null, new object[] { Tx(Call(function)) }));
+            var args = apply.GetParameters().Select((p, i) => i == 0 ? Tx(Call(function)) : (object)Height).ToArray();   // Burn also takes the block height
+            var ex = Record.Exception(() => apply.Invoke(null, args));
             Assert.Null(ex);
         }
 

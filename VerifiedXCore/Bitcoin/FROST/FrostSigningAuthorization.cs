@@ -125,6 +125,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 string destination;
                 long maxDestinationSats;
                 bool leaderIsOwner = false;
+                long? maxFeeSats = null; // an unwatched vault: the builder's fee for this transaction (below)
                 bool isBridgeExit = false;
                 bool leaderIsVaultSignerOfPinned = false;
                 bool pinnedRelease = false;
@@ -145,6 +146,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     destination = exit.BtcDestination;
                     // Cap at THIS contract's share of the exit, never the whole exit amount.
                     maxDestinationSats = capSats;
+                    if (watchedKey == null) maxFeeSats = BitcoinTransactionService.WithdrawalFeeSats(inputCount, LegacyExitFeeRate);
 
                     // A vault the chain watches: only the transaction consensus pinned for this vault's part of the exit
                     // is signed, and any signer of the vault may lead (as for a withdrawal, below).
@@ -189,6 +191,11 @@ namespace VerifiedXCore.Bitcoin.FROST
                     destination = wr.BTCDestination;
                     maxDestinationSats = (long)(wr.Amount * 100_000_000M);
                     leaderIsOwner = string.Equals(wr.RequestorAddress, request.LeaderAddress, StringComparison.Ordinal);
+                    // An unwatched vault: any transaction within the bounds was signed, so one built from the same coins
+                    // that paid the destination a few sats burned the rest as fee (#188). It pays the fee the builder sets
+                    // at the request's rate (VBTCService.CompleteWithdrawal), and takes the whole amount from the vault.
+                    if (!Attestation.BtcAttestBalance.IsAttestedVault(wr.SmartContractUID))
+                        maxFeeSats = BitcoinTransactionService.WithdrawalFeeSats(inputCount, wr.FeeRate != 0 ? wr.FeeRate : 10);
 
                     // A vault the chain watches: consensus has fixed the one transaction that pays this withdrawal,
                     // before anyone signed. A share is given for that transaction and for no other, so "nothing is
@@ -235,7 +242,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 long inputSats = 0;
                 foreach (var so in spentOutputs) inputSats += so.Value.Satoshi;
 
-                var (boundsOk, boundsReason) = CheckSpendBounds(inputSats, destinationSats, changeSats, maxDestinationSats, pinnedRelease);
+                var (boundsOk, boundsReason) = CheckSpendBounds(inputSats, destinationSats, changeSats, maxDestinationSats, pinnedRelease, maxFeeSats);
                 if (!boundsOk) return (false, boundsReason);
 
                 // ── 5. Leader: the withdrawal owner for user withdrawals; a committee caster for exits ─
@@ -276,6 +283,40 @@ namespace VerifiedXCore.Bitcoin.FROST
             return leaderIsOwner ? (true, "") : (false, "Withdrawal signing must be led by the withdrawal owner");
         }
 
+        /// <summary>Confirmations of a Bitcoin transaction (null: no Electrum server answered). Replaced in tests.</summary>
+        public static Func<string, Task<int?>> ParentConfirmations { get; set; } =
+            async txid => (await BitcoinTransactionService.GetTransactionConfirmationsResilient(txid)).Confirmations;
+
+        /// <summary>
+        /// Why this validator does not give a share now because an input of a vault the chain does not watch spends a coin
+        /// whose transaction is not confirmed on Bitcoin, or null. Such a coin can be replaced away (RBF), and the payment
+        /// with it, after the withdrawal is settled. The builder no longer picks one, but a build saved before that, or a
+        /// transaction its leader built itself, still reached the signers. A watched vault's inputs are attested coins.
+        /// No answer is a refusal; the leader asks again on its next attempt.
+        /// </summary>
+        public static async Task<string?> UnconfirmedInputToSign(string? scUID, IReadOnlyList<string>? outpoints)
+        {
+            if (string.IsNullOrEmpty(scUID) || Attestation.BtcVaultKeys.KeyRow(scUID) != null || Attestation.BtcAttestBalance.IsAttestedVault(scUID))
+                return null;
+            if (outpoints == null || outpoints.Count == 0)
+                return "the transaction names no inputs";
+            foreach (var parent in outpoints.Select(o => (o ?? "").Split(':')[0]).Distinct(StringComparer.Ordinal))
+            {
+                int? confirmations;
+                try { confirmations = await ParentConfirmations(parent); }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Confirmation lookup for {parent} failed: {ex.Message}", "FrostSigningAuthorization.UnconfirmedInputToSign()");
+                    confirmations = null;
+                }
+                if (confirmations == null)
+                    return $"could not establish that input transaction {parent} is confirmed on Bitcoin (no Electrum server knows it, or none answered)";
+                if (confirmations < 1)
+                    return $"input transaction {parent} is not confirmed on Bitcoin yet; a withdrawal spends confirmed coins only";
+            }
+            return null;
+        }
+
         /// <summary>
         /// Why this validator is not to give a share now for a vault the chain does not watch, or null. What it signs is
         /// judged from its own withdrawal store, cancellations and exits, which are only as current as its chain: after a
@@ -289,6 +330,12 @@ namespace VerifiedXCore.Bitcoin.FROST
         {
             if (string.IsNullOrEmpty(scUID) || Attestation.BtcVaultKeys.KeyRow(scUID) != null || Attestation.BtcAttestBalance.IsAttestedVault(scUID))
                 return null;
+            return NodeNotAtNetworkHeight();
+        }
+
+        /// <summary>Why this node is not at the network's height (see <see cref="NotAtNetworkHeightToSign"/>), or null.</summary>
+        public static string? NodeNotAtNetworkHeight()
+        {
             string? why = null;
             var tip = Globals.LastBlock;
             if (!Globals.IsChainSynced) why = "chain not synced";
@@ -357,7 +404,10 @@ namespace VerifiedXCore.Bitcoin.FROST
 
         /// <param name="releaseToVault">The transaction is a release fixed by consensus for a watched vault: it pays
         /// nobody and returns everything but its fee to the vault. The fee is still held within the authorized amount.</param>
-        public static (bool Ok, string Reason) CheckSpendBounds(long inputSats, long destinationSats, long changeSats, long maxSats, bool releaseToVault = false)
+        /// <summary>The fee rate an unwatched vault's bridge exit is built at (BurnExitConsensusService: delegatedFeeRate).</summary>
+        public const long LegacyExitFeeRate = 10;
+
+        public static (bool Ok, string Reason) CheckSpendBounds(long inputSats, long destinationSats, long changeSats, long maxSats, bool releaseToVault = false, long? maxFeeSats = null)
         {
             if (maxSats <= 0) return (false, "No authorized amount");
             if (inputSats <= 0) return (false, "Transaction has no input value");
@@ -372,6 +422,16 @@ namespace VerifiedXCore.Bitcoin.FROST
             var vaultCost = inputSats - changeSats; // destination + fee
             if (vaultCost > maxSats + DUST_TOLERANCE_SATS)
                 return (false, $"Transaction spends {vaultCost} sats from the vault (destination {destinationSats} + fee {fee}) but only {maxSats} sats are authorized");
+
+            // An unwatched vault's transaction as its builder makes it: the fee its rate sets (change below dust falls to
+            // the fee), and the whole amount out of the vault, so the fee comes out of the payout and nothing else.
+            if (maxFeeSats is long feeCap)
+            {
+                if (fee > feeCap + DUST_TOLERANCE_SATS)
+                    return (false, $"Transaction pays {fee} sats fee; the withdrawal's fee rate allows {feeCap}");
+                if (vaultCost < maxSats)
+                    return (false, $"Transaction takes {vaultCost} sats from the vault for a {maxSats}-sat payment; the payout is short");
+            }
 
             return (true, "");
         }

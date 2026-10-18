@@ -53,6 +53,7 @@ namespace VerifiedXCore.Tests
 
         public void Dispose()
         {
+            Globals.NetworkValidators.TryRemove(_d.Address, out _);
             Globals.IsWalletEncrypted = _priorEncrypted;
             Globals.EncryptPassword = _priorPassword;
             Globals.ValidatorAddress = _priorValidatorAddress;
@@ -92,6 +93,34 @@ namespace VerifiedXCore.Tests
         private static Task<RecordSignature?> Sign(CasterMembershipRecord candidate) =>
             CasterMembershipService.HandleSignRequestAsync(new MembershipSignRequest { Candidate = candidate, ProposerAddress = "xProposer" });
 
+        /// <summary>
+        /// C-012 (encoding): the signed payload joins fields with '|'. A record that folds the first member's fields into
+        /// its ChangedAddress and lists one member fewer has the same bytes, so the signatures on the honest record were
+        /// valid on it too, and it could install a committee nobody signed. A field holding '|' is refused at validation
+        /// (every append and catch-up), and an honest record is unchanged.
+        /// </summary>
+        [Fact]
+        public void ARecordWithTheSameBytesButOtherFields_IsRefused()
+        {
+            var honest = PromoteD(Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"));
+            var payload = CasterMembershipStore.CanonicalPayload(honest);
+            foreach (var signer in new[] { _a, _b })
+                honest.Signatures.Add(new RecordSignature { SignerAddress = signer.Address, Signature = SignatureService.CreateSignature(payload, signer.GetPrivKey, signer.PublicKey) });
+            Assert.True(CasterMembershipStore.ValidateSuccessor(_head, honest, out var why), why);
+
+            var first = honest.Casters[0];
+            var forged = new CasterMembershipRecord
+            {
+                RecordSeq = honest.RecordSeq, EffectiveFromHeight = honest.EffectiveFromHeight, PrevRecordHash = honest.PrevRecordHash,
+                ChangeType = honest.ChangeType, ChangedAddress = $"{honest.ChangedAddress}|{first.Address}|{first.PeerIP}|{first.PublicKey}",
+                Casters = honest.Casters.Skip(1).ToList(), Signatures = honest.Signatures,
+            };
+            forged.RecordHash = CasterMembershipStore.ComputeRecordHash(forged);
+            Assert.Equal(payload, CasterMembershipStore.CanonicalPayload(forged));                  // the same bytes, other fields
+            Assert.False(CasterMembershipStore.ValidateSuccessor(_head, forged, out why));
+            Assert.Contains("payload separator", why);
+        }
+
         [Fact]
         public async Task ARotationThatChangesAnotherMembersPeerIp_IsNotSigned()
         {
@@ -109,9 +138,40 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task AnHonestPromotion_IsSigned()
         {
+            SeeD("10.0.0.4");
             var sig = await Sign(PromoteD(Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3")));
             Assert.NotNull(sig);
             Assert.Equal(_a.Address, sig!.SignerAddress);
+        }
+
+        /// <summary>This node's view of D, the validator being promoted (NetworkValidators, where the proposer reads it too).</summary>
+        private void SeeD(string ip, string? publicKey = null) =>
+            Globals.NetworkValidators[_d.Address] = new NetworkValidator { Address = _d.Address, IPAddress = "::ffff:" + ip, PublicKey = publicKey ?? _d.PublicKey };
+
+        /// <summary>
+        /// C-012: the promoted member's PeerIP is where it is probed, and it is demoted on that address's silence. A record
+        /// naming another address for it - proposed so, or as a lower-hash sibling of the honest one - was signed, as was
+        /// one naming another key. A signer now signs a promotion only for the entry it sees for that validator itself.
+        /// </summary>
+        [Fact]
+        public async Task APromotionNamingAnotherAddressOrKeyForTheNewMember_IsNotSigned()
+        {
+            var continuing = new[] { Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3") };
+            try
+            {
+                Globals.NetworkValidators.TryRemove(_d.Address, out _);
+                Assert.Null(await Sign(PromoteD(continuing)));                       // a validator this node does not know
+
+                SeeD("198.51.100.7");
+                Assert.Null(await Sign(PromoteD(continuing)));                       // the record says 10.0.0.4
+
+                SeeD("10.0.0.4", publicKey: _c.PublicKey);
+                Assert.Null(await Sign(PromoteD(continuing)));                       // another key
+
+                SeeD("10.0.0.4");
+                Assert.NotNull(await Sign(PromoteD(continuing)));                    // as this node sees it
+            }
+            finally { Globals.NetworkValidators.TryRemove(_d.Address, out _); }
         }
 
         [Fact]
