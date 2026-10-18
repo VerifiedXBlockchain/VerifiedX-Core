@@ -322,6 +322,9 @@ namespace VerifiedXCore.Services
 
         // ── Resume (approver side) ──────────────────────────────────────────────────────────────────
 
+        /// <summary>How long after signing a member's removal this node refuses to approve its resume.</summary>
+        internal const long RemovalSignedHoldSeconds = 600;
+
         internal static string ResumeRequestMessage(CasterResumeRequest r) => $"RESUME|{r.Address}|{r.RecordSeq}|{r.RecordHash}|{r.Timestamp}";
         internal static string ResumeApprovalMessage(string address, long seq, string hash, long requestTimestamp) => $"RESUME-OK|{address}|{seq}|{hash}|{requestTimestamp}";
         internal static string MaintenanceMessage(string address, long ts) => $"MAINT|{address}|{ts}";
@@ -341,7 +344,7 @@ namespace VerifiedXCore.Services
             if (!head.Casters.Any(c => c.Address == req.Address)) return "not in the record";
             if (string.IsNullOrEmpty(self) || !head.Casters.Any(c => c.Address == self)) return "we are not a member";
             if (PastGrace(req.Address, nowUnix)) return $"absent {AbsentSeconds(req.Address, nowUnix)}s, past the {GraceFor(req.Address)}s grace period";
-            if (_removalSigned.TryGetValue(req.Address, out var r) && r.Seq == head.RecordSeq + 1 && nowUnix - r.At < CasterMembershipStore.SignedMarkExpirySeconds)
+            if (_removalSigned.TryGetValue(req.Address, out var r) && r.Seq == head.RecordSeq + 1 && nowUnix - r.At < RemovalSignedHoldSeconds)
                 return "we signed its removal";
             return null;
         }

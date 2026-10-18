@@ -200,7 +200,7 @@ namespace VerifiedXCore.Services
             };
             candidate.RecordHash = CasterMembershipStore.ComputeRecordHash(candidate);
 
-            if (!CasterMembershipStore.TryMarkSigned(candidate.RecordSeq, candidate.RecordHash, CasterMembershipStore.ComputeCasterSetHash(candidate)))
+            if (!CasterMembershipStore.TryMarkSigned(candidate.RecordSeq, candidate.RecordHash, CasterMembershipStore.ComputeCasterSetHash(candidate), candidate.EffectiveFromHeight))
             {
                 CasterLogUtility.Log($"BOOTSTRAP-RESET: refusing to propose — already signed a different set at seq {candidate.RecordSeq}.", "BOOTSTRAP-RESET");
                 return;

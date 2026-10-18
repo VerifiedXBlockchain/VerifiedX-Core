@@ -84,7 +84,7 @@ namespace VerifiedXCore.Services
                 var account = AccountData.GetLocalValidator();
                 if (account?.GetPrivKey != null && !string.IsNullOrEmpty(Globals.ValidatorAddress) && prevSet.Contains(Globals.ValidatorAddress))
                 {
-                    if (!CasterMembershipStore.TryMarkSigned(candidate.RecordSeq, candidate.RecordHash, CasterMembershipStore.ComputeCasterSetHash(candidate)))
+                    if (!CasterMembershipStore.TryMarkSigned(candidate.RecordSeq, candidate.RecordHash, CasterMembershipStore.ComputeCasterSetHash(candidate), candidate.EffectiveFromHeight))
                     {
                         CasterLogUtility.Log($"MEMBERSHIP: rotation aborted — already signed a DIFFERENT caster set at seq {candidate.RecordSeq} (equivocation guard).", "MEMBERSHIP");
                         return false;
@@ -445,7 +445,7 @@ namespace VerifiedXCore.Services
             if (!headSet.Contains(Globals.ValidatorAddress)) return null;
 
             // Equivocation guard: never sign two different caster SETS at the same seq.
-            if (!CasterMembershipStore.TryMarkSigned(candidate.RecordSeq, candidate.RecordHash, CasterMembershipStore.ComputeCasterSetHash(candidate)))
+            if (!CasterMembershipStore.TryMarkSigned(candidate.RecordSeq, candidate.RecordHash, CasterMembershipStore.ComputeCasterSetHash(candidate), candidate.EffectiveFromHeight))
             {
                 CasterLogUtility.Log($"MEMBERSHIP: REFUSED double-sign at seq {candidate.RecordSeq} (different caster set). Proposer={request.ProposerAddress}", "MEMBERSHIP");
                 return null;
@@ -493,7 +493,7 @@ namespace VerifiedXCore.Services
 
             var account = AccountData.GetLocalValidator();
             if (account?.GetPrivKey == null) return null;
-            if (!CasterMembershipStore.TryMarkSigned(candidate.RecordSeq, candidate.RecordHash, CasterMembershipStore.ComputeCasterSetHash(candidate)))
+            if (!CasterMembershipStore.TryMarkSigned(candidate.RecordSeq, candidate.RecordHash, CasterMembershipStore.ComputeCasterSetHash(candidate), candidate.EffectiveFromHeight))
             {
                 CasterLogUtility.Log($"MEMBERSHIP: REFUSED bootstrap-reset double-sign at seq {candidate.RecordSeq}. Proposer={request.ProposerAddress}", "MEMBERSHIP");
                 return null;
@@ -527,7 +527,7 @@ namespace VerifiedXCore.Services
             if (account?.GetPrivKey == null)
                 return null;
 
-            if (!CasterMembershipStore.TryMarkSigned(0, candidate.RecordHash, candidate.RecordHash /* genesis identity stays the full hash */))
+            if (!CasterMembershipStore.TryMarkSigned(0, candidate.RecordHash, candidate.RecordHash /* genesis identity stays the full hash */, candidate.EffectiveFromHeight))
             {
                 CasterLogUtility.Log($"MEMBERSHIP: REFUSED genesis double-sign (different hash at seq 0). Proposer={request.ProposerAddress}", "MEMBERSHIP");
                 return null;
