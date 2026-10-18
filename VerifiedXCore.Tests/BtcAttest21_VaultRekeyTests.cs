@@ -320,6 +320,51 @@ namespace VerifiedXCore.Tests
             Assert.True((bool)view["Keys"]![1]!["Current"]!);
         }
 
+        [Fact]
+        public async Task AReKeyAndAValidatorLeaving_LeaveTheVaultsKeySharesWhereTheyAre()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Deposit(vault.Script, 200_000);
+            var oldGroup = BtcAttestStore.ScriptRowForVault(vault.Uid)!.GroupKeyHex;
+            // Each holder's share of the vault's first key, as its node keeps it.
+            FrostValidatorKeyStore Share(string uid, V holder, string group) => new()
+            {
+                SmartContractUID = uid, ValidatorAddress = holder.Address, KeyPackage = $"kp|{uid}|{holder.Address}", PubkeyPackage = "pkp|" + uid,
+                GroupPublicKey = group, CreatedTimestamp = TimeUtil.GetTime(),
+            };
+            foreach (var s in Signers)
+                Assert.True(FrostValidatorKeyStore.SaveKeyPackage(Share(vault.Uid, s, oldGroup)));
+
+            // A holder leaves, the key falls due, and the vault moves to a new key made by those still here.
+            var stillHere = Signers.Take(3).ToList();
+            await ToNextEpoch(stillHere, leaving: Signers.Skip(3));
+            var ceremony = Ceremony(vault.Uid, stillHere, 2, Signers[0].Address);
+            var newGroup = FrostDkgAttestation.ParseProof(ceremony.Proof)!.GroupPublicKey;
+            var (ok, why) = await Verify(RekeyTx(vault.Uid, ceremony.Proof), Tip + 1);
+            Assert.True(ok, why);
+            await Apply(Tip + 1, RekeyTx(vault.Uid, ceremony.Proof));
+            Assert.Equal(Tip, BtcAttestStore.ScriptRowsForVault(vault.Uid)[0].RetiredAtVfxHeight);
+
+            // The new key's shares are kept under the new key's UID, beside the old ones.
+            foreach (var s in stillHere)
+                Assert.True(FrostValidatorKeyStore.SaveKeyPackage(Share(ceremony.KeyUid, s, newGroup)));
+            // Neither a save nor a relabel puts the new key over the vault's own shares.
+            Assert.False(FrostValidatorKeyStore.SaveKeyPackage(Share(vault.Uid, Signers[0], newGroup)));
+            Assert.False(FrostValidatorKeyStore.UpdateSmartContractUID(FrostValidatorKeyStore.GetKeyPackage(ceremony.KeyUid, Signers[0].Address)!.Id, vault.Uid));
+
+            // Every share of the retired key is still there, the departed holder's included: its coins can still be
+            // signed out by hand while they are kept.
+            foreach (var s in Signers)
+            {
+                var kept = FrostValidatorKeyStore.GetKeyPackage(vault.Uid, s.Address);
+                Assert.NotNull(kept);
+                Assert.Equal($"kp|{vault.Uid}|{s.Address}", kept!.KeyPackage);
+                Assert.Equal(oldGroup, kept.GroupPublicKey);
+            }
+            Assert.Equal(Signers.Count + stillHere.Count, FrostValidatorKeyStore.GetAllKeyPackages().Count);
+        }
+
         private static string BuildWithUid(FrostDkgAttestation.Proof template, string uid, IEnumerable<V> participants)
         {
             var list = participants.ToList();
