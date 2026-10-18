@@ -197,9 +197,22 @@ namespace VerifiedXCore.Data
                         || lite.ErrorCode == LiteDB.LiteException.FILE_NOT_FOUND || lite.ErrorCode == LiteDB.LiteException.INVALID_DATABASE
                         || lite.ErrorCode == LiteDB.LiteException.FILE_SIZE_EXCEEDED || lite.ErrorCode == LiteDB.LiteException.ALREADY_OPEN_DATAFILE))
                     return true;
+                if (IsLiteDbIntegrityFailure(e))
+                    return true;
             }
             return false;
         }
+
+        /// <summary>The message prefix of LiteDB's internal consistency check (ENSURE) in the bundled 5.0.15.</summary>
+        internal const string LiteDbEnsurePrefix = "LiteDB ENSURE: ";
+
+        /// <summary>
+        /// LiteDB's page-integrity check fails with a plain <see cref="Exception"/> whose message starts "LiteDB ENSURE: "
+        /// (not a LiteException with an error code): its data file is damaged or inconsistent on this node. Matched on that
+        /// exact type and prefix only, so no other plain exception counts.
+        /// </summary>
+        internal static bool IsLiteDbIntegrityFailure(Exception e) =>
+            e.GetType() == typeof(Exception) && e.Message.StartsWith(LiteDbEnsurePrefix, StringComparison.Ordinal);
 
         /// <summary>
         /// The collections the chain's state lives in, apart from the withdrawal store's (its own scope reports those): what

@@ -532,10 +532,12 @@ namespace VerifiedXCore.Tests
         /// what the vote says still answers "no refund" and the block applies.
         /// </summary>
         [Theory]
-        [InlineData(true)]
-        [InlineData(false)]
-        public async Task StateData_ARefundThatCannotBeRead_FailsTheApprovingVotesBlock(bool localFault)
+        [InlineData("io")]
+        [InlineData("ensure")]
+        [InlineData("data")]
+        public async Task StateData_ARefundThatCannotBeRead_FailsTheApprovingVotesBlock(string fault)
         {
+            var localFault = fault != "data";
             var c = OpenCancellation();
             VBTCCancellationVoting.ApplyVote(VoteTx(c.CancellationUID, "xVal1", true, CancelHeight + 1));
             VBTCCancellationVoting.ApplyVote(VoteTx(c.CancellationUID, "xVal2", true, CancelHeight + 1));
@@ -543,7 +545,13 @@ namespace VerifiedXCore.Tests
             Assert.Equal(VBTCCancellationVoting.Outcome.Approved, VBTCCancellationVoting.ApplyVote(deciding).Outcome);
             var block = new Block { Height = CancelHeight + 2, Hash = "vote-block", PrevHash = "prev", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction> { deciding } };
 
-            VBTCCancellationVoting.RefundReadForTests = _ => throw (localFault ? new System.IO.IOException("disk") : new FormatException("data"));
+            // "ensure": LiteDB 5.0.15's page-integrity check, a plain Exception with this prefix.
+            VBTCCancellationVoting.RefundReadForTests = _ => throw (fault switch
+            {
+                "io" => new System.IO.IOException("disk"),
+                "ensure" => new Exception(StateData.LiteDbEnsurePrefix + "page type must be data page"),
+                _ => new FormatException("data"),
+            });
             bool applied;
             try { applied = await StateData.UpdateTreis(block); }
             finally { VBTCCancellationVoting.RefundReadForTests = null; }
