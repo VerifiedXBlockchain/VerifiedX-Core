@@ -16,8 +16,8 @@ namespace VerifiedXCore.Tests
 {
     /// <summary>
     /// From Globals.VbtcEnvelopeRulesHeight a vBTC V2 transfer sent as a contract call (Function "TransferVBTCV2()"
-    /// under TKNZ_TX and the other contract-call types) is judged like the typed VBTC_V2_TRANSFER. Below the height it
-    /// is judged as before.
+    /// under TKNZ_TX and the other contract-call types) is judged like the typed VBTC_V2_TRANSFER: its Data names each key
+    /// once, and the recipient it names is the one the apply credits. Below the height it is judged as before.
     /// </summary>
     [Collection("DbContextSequential")]
     public class VbtcEnvelopeTransferRulesTests : IDisposable
@@ -116,6 +116,29 @@ namespace VerifiedXCore.Tests
                 var (ok, why) = await TransactionValidatorService.VerifyTX(tx);
                 Assert.True(ok, why);
             }
+        }
+
+        [Fact]
+        public async Task AnEnvelopeTransferWhoseDataNamesAnotherRecipient_IsRefusedFromTheHeight()
+        {
+            // The apply credits the transaction's ToAddress; Data names a third address.
+            var (_, _, third) = NewKey();
+            var tx = Signed(_holder, _other.Address, TransactionType.TKNZ_TX, Call("\"Amount\":0.5", dataTo: third));
+
+            RuleInForce(false);
+            var (ok, why) = await TransactionValidatorService.VerifyTX(tx);
+            Assert.True(ok, "below the height the envelope transfer is judged as before: " + why);
+
+            RuleInForce(true);
+            (ok, why) = await TransactionValidatorService.VerifyTX(tx);
+            Assert.False(ok);
+            Assert.Contains("To address in data must match transaction ToAddress", why);
+
+            // The comparison is exact: a recipient spelled in another case is another recipient.
+            tx = Signed(_holder, _other.Address, TransactionType.TKNZ_TX, Call("\"Amount\":0.5", dataTo: _other.Address.ToUpperInvariant()));
+            (ok, why) = await TransactionValidatorService.VerifyTX(tx);
+            Assert.False(ok);
+            Assert.Contains("To address in data must match transaction ToAddress", why);
         }
 
         [Fact]
