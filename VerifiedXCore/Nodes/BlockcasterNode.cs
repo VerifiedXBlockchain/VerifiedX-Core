@@ -4502,6 +4502,34 @@ namespace VerifiedXCore.Nodes
         /// validator gate sees it as agreed. Non-casters and non-live heights are always admitted
         /// (the download / gap paths own those).
         /// </summary>
+        /// <summary>Pins this gate registered for a gossiped block (height → hash), so a refused staging can withdraw them.</summary>
+        private static readonly ConcurrentDictionary<long, string> _gossipPins = new();
+
+        /// <summary>
+        /// Stages an admitted gossip block (pre-checks, then the capped staging). When staging refuses it and no copy of it
+        /// is staged, the pin the gossip gate registered for it is withdrawn: it was set before the block was known to
+        /// reach validation, so a block refused by the staging cap left the gate refusing every other block at the height
+        /// until the next agreement. A pin from our own round's agreement is left alone.
+        /// </summary>
+        /// <summary>Registers the hash of an attested gossip block as the agreed one, remembered as the gossip gate's.</summary>
+        internal static void RegisterGossipPin(long height, string hash)
+        {
+            RegisterPendingCasterBlockHash(height, hash);
+            _gossipPins[height] = hash;
+        }
+
+        internal static bool StageGossipOrWithdrawPin(Block block, string sourceIp)
+        {
+            if (BlockStaging.PassesGossipPreChecks(block, out _) && BlockStaging.TryStageGossip(block, sourceIp))
+                return true;
+            if (string.IsNullOrEmpty(block.Hash) || BlockStaging.IsStaged(block))
+                return false;
+            if (_gossipPins.TryRemove(new KeyValuePair<long, string>(block.Height, block.Hash))
+                && Globals.CasterApprovedBlockHashDict.TryRemove(new KeyValuePair<long, string>(block.Height, block.Hash)))
+                CasterLogUtility.Log($"GOSSIP-GATE: h={block.Height} pin {block.Hash[..Math.Min(16, block.Hash.Length)]} withdrawn — the block was not staged.", "GOSSIP-GATE");
+            return false;
+        }
+
         internal static async Task<bool> TryAdmitLiveBlockAsCasterAsync(Block? block, string source)
         {
             if (block == null || !Globals.IsBlockCaster)
@@ -4529,7 +4557,7 @@ namespace VerifiedXCore.Nodes
             var attested = await ConsensusCertificateHelper.TryGetMajorityAttestationsAsync(block.Height, block.Hash, block.Validator, block.PrevHash);
             if (attested)
             {
-                RegisterPendingCasterBlockHash(block.Height, block.Hash);
+                RegisterGossipPin(block.Height, block.Hash!);
                 CasterLogUtility.Log($"GOSSIP-GATE ADMIT (attested): h={block.Height} hash={shortHash} by {block.Validator} from {source} — majority attestations verified; hash registered. roundEntry={hasRoundEntry}.", "GOSSIP-GATE");
                 return true;
             }

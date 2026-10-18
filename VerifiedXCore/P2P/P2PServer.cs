@@ -252,7 +252,7 @@ namespace VerifiedXCore.P2P
 
                             // VX-19: header hash, signature, version, local size and known producer; then de-duplicated,
                             // capped staging. A block that fails is neither staged nor re-gossiped.
-                            if (!BlockStaging.PassesGossipPreChecks(nextBlock, out _) || !BlockStaging.TryStageGossip(nextBlock, IP))
+                            if (!BlockcasterNode.StageGossipOrWithdrawPin(nextBlock, IP))
                                 return false;
 
                             await BlockValidatorService.ValidateBlocks();

@@ -421,7 +421,7 @@ namespace VerifiedXCore.P2P
                                 _ = BlockDownloadService.GetAllBlocks();
                                 return false;
                             }
-                            if (!BlockStaging.PassesGossipPreChecks(nextBlock, out _) || !BlockStaging.TryStageGossip(nextBlock, IP))
+                            if (!BlockcasterNode.StageGossipOrWithdrawPin(nextBlock, IP))
                                 return false;
 
                             await Task.Delay(2000);

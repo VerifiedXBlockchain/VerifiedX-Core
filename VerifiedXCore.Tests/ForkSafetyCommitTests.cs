@@ -120,6 +120,33 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Agreed, Globals.CasterApprovedBlockHashDict[H]);
         }
 
+        [Fact]
+        public void AGossipPin_IsWithdrawnWhenItsBlockIsNotStaged_ButNotWhileACopyIsStaged()
+        {
+            Globals.IsBlockCaster = true;
+            // Refused by staging (here: the pre-checks, as the staging cap would): its gossip pin goes.
+            BlockcasterNode.RegisterGossipPin(H, Agreed);
+            Assert.False(BlockcasterNode.StageGossipOrWithdrawPin(B(Agreed), "2.2.2.2"));
+            Assert.False(Globals.CasterApprovedBlockHashDict.ContainsKey(H));
+
+            // A copy already staged (the second arrival is refused as a duplicate): the pin stays for it.
+            Assert.True(BlockStaging.Stage(B(Agreed), "1.1.1.1"));
+            BlockcasterNode.RegisterGossipPin(H, Agreed);
+            Assert.False(BlockcasterNode.StageGossipOrWithdrawPin(B(Agreed), "2.2.2.2"));
+            Assert.Equal(Agreed, Globals.CasterApprovedBlockHashDict[H]);
+        }
+
+        [Fact]
+        public void APinFromOurOwnAgreement_IsNotWithdrawnByARefusedGossipCopy()
+        {
+            Globals.IsBlockCaster = true;
+            Globals.CasterApprovedBlockHashDict[H] = Agreed; // our round's agreement, not the gossip gate's
+
+            Assert.False(BlockcasterNode.StageGossipOrWithdrawPin(B(Agreed), "2.2.2.2"));
+
+            Assert.Equal(Agreed, Globals.CasterApprovedBlockHashDict[H]);
+        }
+
         // ── The queue's choice between competing blocks ───────────────────────────────────────────────
 
         [Fact]
