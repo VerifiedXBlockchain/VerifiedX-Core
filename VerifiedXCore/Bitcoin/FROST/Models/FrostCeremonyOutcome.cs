@@ -27,7 +27,12 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// <summary>Unhandled exception in the coordinator.</summary>
         CoordinatorException,
         /// <summary>This node's FROST library has not passed its startup check: it coordinates nothing (retryable after a restart).</summary>
-        LibraryUnavailable
+        LibraryUnavailable,
+        /// <summary>
+        /// Holders gave a Round 1 commitment and no Round 2 share. Every share is made over the whole commitment set, so
+        /// the set can never be aggregated; a new session without them can (<see cref="FrostCeremonyOutcome.Withholders"/>).
+        /// </summary>
+        Round2SharesWithheld
     }
 
     /// <summary>
@@ -60,6 +65,8 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public int Total { get; set; }
         public List<FrostValidatorFailure> ValidatorFailures { get; set; } = new();
         public string Detail { get; set; } = "";
+        /// <summary>On <see cref="FrostCeremonyFailureCode.Round2SharesWithheld"/>: who committed in Round 1 and gave no share.</summary>
+        public List<string> Withholders { get; set; } = new();
 
         public bool Success => Result != null;
 
@@ -72,7 +79,10 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
             || FailureCode == FrostCeremonyFailureCode.Round1InsufficientNonces
             || FailureCode == FrostCeremonyFailureCode.Round2InsufficientShares
             || FailureCode == FrostCeremonyFailureCode.LibraryUnavailable
-            || FailureCode == FrostCeremonyFailureCode.InputCountMismatch;
+            || FailureCode == FrostCeremonyFailureCode.InputCountMismatch
+            // A holder that withholds its share says nothing about the contract: blacklisting it for a day let one holder
+            // hold up every exit drawing on it.
+            || FailureCode == FrostCeremonyFailureCode.Round2SharesWithheld;
 
         /// <summary>
         /// Compact operator-facing description: code, detail, session and response counts.
