@@ -201,6 +201,30 @@ namespace VerifiedXCore.Data
             return false;
         }
 
+        /// <summary>
+        /// The collections the chain's state lives in, apart from the withdrawal store's (its own scope reports those): what
+        /// a state rebuild wipes and replays (BlockRollbackUtility.WipeChainDerivedState), and nothing it keeps (wallet,
+        /// keystore, local transactions, mempool, DST, beacons, peers, FROST keys, bridge mint tracking).
+        /// </summary>
+        public static string[] StateCollections()
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal)
+            {
+                DbContext.RSRV_ASTATE_TREI, DbContext.RSRV_WSTATE_TREI, DbContext.RSRV_SCSTATE_TREI, DbContext.RSRV_DECSHOPSTATE_TREI,
+                DbContext.RSRV_TOPIC_TREI, DbContext.RSRV_VOTE, DbContext.RSRV_TOKEN_VOTE, DbContext.RSRV_DNR, DbContext.RSRV_BITCOIN_ADNR,
+                DbContext.RSRV_RESERVE_TRANSACTIONS, DbContext.RSRV_RESERVE_TRANSACTIONS_CALLED_BACK,
+                DbContext.RSRV_VBTC_V2_CONTRACTS, DbContext.RSRV_VBTC_V2_VALIDATORS, DbContext.RSRV_TOKENIZED_WITHDRAWALS,
+            };
+            // Every collection of the contract and shop state databases, as the wipe takes them.
+            foreach (var db in new[] { DbContext.DB_SmartContractStateTrei, DbContext.DB_DecShopStateTrei })
+            {
+                try { if (db != null) names.UnionWith(db.GetCollectionNames()); }
+                catch (Exception ex) { ErrorLogUtility.LogError($"Could not list a state database's collections: {ex.Message}", "StateData.StateCollections()"); }
+            }
+            names.ExceptWith(Bitcoin.Services.VBTCWithdrawalStoreRebuildService.StoreCollections);
+            return names.ToArray();
+        }
+
         public static async Task<bool> UpdateTreis(Block block)
         {
             Globals.TreisUpdating = true;
@@ -209,6 +233,10 @@ namespace VerifiedXCore.Data
                 // A write to the withdrawal store the storage swallowed would leave this node's table unlike its peers':
                 // the block's apply fails, as for any other fault of this node's storage.
                 using var storeWrites = new Extensions.DbExtensions.FailureScope(Bitcoin.Services.VBTCWithdrawalStoreRebuildService.StoreCollections);
+                // A write to any other collection of the state that this node's storage swallowed leaves it unlike its
+                // peers' too: the block's apply is incomplete. Only faults of this node's storage count; a throw the
+                // transaction's data causes happens on every node alike and flags nothing.
+                using var stateWrites = new Extensions.DbExtensions.FailureScope(IsNodeLocalFault, StateCollections());
                 bool applied;
                 try { applied = await UpdateTreisCore(block); }
                 finally
@@ -230,6 +258,12 @@ namespace VerifiedXCore.Data
                 {
                     NoteApplyStepFailed(block.Height, new System.IO.IOException($"{storeWrites.Count} write(s) to the withdrawal store failed while block {block.Height} was applied."));
                     ErrorLogUtility.LogError($"Block {block.Height}: {storeWrites.Count} write(s) to the withdrawal store failed; the block's apply is incomplete.", "StateData.UpdateTreis()");
+                    return false;
+                }
+                if (stateWrites.Count > 0)
+                {
+                    NoteApplyStepFailed(block.Height, new System.IO.IOException($"{stateWrites.Count} write(s) to the state failed on this node's storage while block {block.Height} was applied."));
+                    ErrorLogUtility.LogError($"Block {block.Height}: {stateWrites.Count} write(s) to the state failed on this node's storage; the block's apply is incomplete.", "StateData.UpdateTreis()");
                     return false;
                 }
                 return applied;
@@ -1250,7 +1284,7 @@ namespace VerifiedXCore.Data
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { NoteApplyStepFailed(tx.Height, ex); }
         }
 
         /// <param name="keepTransferPending">Only for the historical mainnet callbacks in
@@ -1423,7 +1457,7 @@ namespace VerifiedXCore.Data
                                             VBTCContractV2.UpdateContract(vbtcContract);
                                         }
                                     }
-                                    catch { }
+                                    catch (Exception ex) { NoteApplyStepFailed(height, ex); }
                                 }
                             }
                           }
@@ -1826,7 +1860,7 @@ namespace VerifiedXCore.Data
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { NoteApplyStepFailed(tx.Height, ex); }
         }
         private static void UpdateDecShop(Transaction tx)
         {
@@ -1850,7 +1884,7 @@ namespace VerifiedXCore.Data
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { NoteApplyStepFailed(tx.Height, ex); }
         }
 
         private static async Task DeleteDecShop(Transaction tx)
@@ -1878,7 +1912,7 @@ namespace VerifiedXCore.Data
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { NoteApplyStepFailed(tx.Height, ex); }
         }
         private static void AddNewBTCAdnr(Transaction tx)
         {
@@ -1949,7 +1983,7 @@ namespace VerifiedXCore.Data
                 adnr.TxHash = tx.Hash;
                 await adnrs!.UpdateSafeAsync(adnr);
             }
-            catch { }
+            catch (Exception ex) { NoteApplyStepFailed(height, ex); }
         }
 
         /// <summary>
@@ -2166,7 +2200,7 @@ namespace VerifiedXCore.Data
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { NoteApplyStepFailed(tx.Height, ex); }
             
         }
         /// <summary>
