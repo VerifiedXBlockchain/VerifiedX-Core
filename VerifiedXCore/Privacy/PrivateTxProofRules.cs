@@ -67,6 +67,7 @@ namespace VerifiedXCore.Privacy
                 case TransactionType.VBTC_V2_UNSHIELD:
                     if (payload.NullsB64.Count != 2) return "An unshield spends exactly two notes (a single-note spend carries the public dummy note as its second input).";
                     if (payload.Outs.Count != 1) return "An unshield carries exactly one change output (its amount may be zero).";
+                    if (UnshieldAmountPastEighthDecimal(tx, payload)) return UnshieldAmountDecimalsReason;
                     break;
                 case TransactionType.VFX_PRIVATE_TRANSFER:
                 case TransactionType.VBTC_V2_PRIVATE_TRANSFER:
@@ -80,6 +81,20 @@ namespace VerifiedXCore.Privacy
             if (!string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64) && PrivacyEpoch.IsDummyNullifier(payload.FeeInputNullifierB64))
                 return "The VFX fee leg must spend a real note.";
             return NullifierIdentityError(payload);
+        }
+
+        public const string UnshieldAmountDecimalsReason = "An unshield's amount has at most 8 decimal places, the precision its proof binds.";
+
+        /// <summary>
+        /// The proof binds an unshield's amount scaled by 10^8 (Globals.ToCircuitAmount truncates the rest), while the
+        /// transparent credit is the full decimal: digits past the eighth were credited unproven.
+        /// </summary>
+        public static bool UnshieldAmountPastEighthDecimal(Transaction tx, PrivateTxPayload payload)
+        {
+            foreach (var amount in new decimal?[] { tx.Amount, payload.TransparentAmount, payload.VbtcTransparentAmount })
+                if (amount is { } a && a != Math.Round(a, 8))
+                    return true;
+            return false;
         }
 
         public const string NonCanonicalNullifierReason = "Every nullifier is the one Base64 spelling of a canonical 32-byte field element.";
