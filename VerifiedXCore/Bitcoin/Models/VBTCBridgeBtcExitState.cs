@@ -94,6 +94,9 @@ namespace VerifiedXCore.Bitcoin.Models
             var p = burnHashPrefix.Trim().ToLowerInvariant();
             if (p.StartsWith("0x")) p = p.Substring(2);
             if (p.Length == 0) return new List<VBTCBridgeBtcExitState>();
+            // One of several burns in a transaction is named with its position (BaseBridgeService.BurnSigningPrefix):
+            // the hash's prefix and that exact position must both match, and a bare prefix names a bare hash.
+            var (prefixHash, prefixPosition) = VerifiedXCore.Bitcoin.Services.BaseBridgeService.SplitBurnId(p);
             try
             {
                 return GetCollection().FindAll()
@@ -101,7 +104,8 @@ namespace VerifiedXCore.Bitcoin.Models
                     {
                         var h = (x.BaseBurnTxHash ?? "").ToLowerInvariant();
                         if (h.StartsWith("0x")) h = h.Substring(2);
-                        return h.StartsWith(p);
+                        var (hash, position) = VerifiedXCore.Bitcoin.Services.BaseBridgeService.SplitBurnId(h);
+                        return hash.StartsWith(prefixHash) && position == prefixPosition;
                     })
                     .ToList();
             }

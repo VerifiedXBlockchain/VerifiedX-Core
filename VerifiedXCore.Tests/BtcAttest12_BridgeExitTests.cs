@@ -317,6 +317,53 @@ namespace VerifiedXCore.Tests
             Assert.Equal(one.Hash, Record(burn).ExitTxHash);
         }
 
+        /// <summary>
+        /// #277: two bridge burns in one Base transaction were keyed on its hash alone, so the second was taken for the
+        /// first and never redeemed. From the path-audit rules each is named by its position ("{hash}:{n}") and redeemed on
+        /// its own; neither is redeemed twice, under its position or under the transaction's hash, in the same block or a
+        /// later one; and each exit's signing reference names its own record.
+        /// </summary>
+        [Fact]
+        public async Task TwoBurnsInOneBaseTransaction_AreEachRedeemedOnce_UnderTheirPositions()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            var first = await Lock(vault.Uid, 0.002M);
+            var second = await Lock(vault.Uid, 0.002M);
+            var spare = await Lock(vault.Uid, 0.002M);
+            var baseTx = NewBurn();
+
+            await RefusedInBlock(Exit($"{baseTx}:1", BtcDest, (second, vault.Uid, 0.002M)), "BaseBurnTxHash must be", Globals.PathAuditRulesHeight - 1);
+            await RefusedInBlock(Exit($"{baseTx}:01", BtcDest, (second, vault.Uid, 0.002M)), "BaseBurnTxHash must be"); // one spelling per position
+
+            var guard = new BridgeIntraBlockGuard.State();
+            Assert.True(BridgeIntraBlockGuard.TryRegister(Exit($"{baseTx}:0", BtcDest, (first, vault.Uid, 0.002M)), guard, Tip + 1).Ok);
+            Assert.True(BridgeIntraBlockGuard.TryRegister(Exit($"{baseTx}:1", BtcDest, (second, vault.Uid, 0.002M)), guard, Tip + 1).Ok);
+            var (sameBlockOk, sameBlockWhy) = BridgeIntraBlockGuard.TryRegister(Exit(baseTx, BtcDest, (spare, vault.Uid, 0.002M)), guard, Tip + 1);
+            Assert.False(sameBlockOk);                                                    // the transaction's hash is the same burns
+            Assert.Contains("Duplicate Base burn", sameBlockWhy);
+
+            await Mine(Exit($"{baseTx}:0", BtcDest, (first, vault.Uid, 0.002M)));
+            await Mine(Exit($"{baseTx}:1", BtcDest, (second, vault.Uid, 0.002M)));
+            Assert.NotNull(VBTCBridgeBtcExitState.GetByBurnHash($"{baseTx}:0"));
+            Assert.NotNull(VBTCBridgeBtcExitState.GetByBurnHash($"{baseTx}:1"));
+
+            await RefusedInBlock(Exit($"{baseTx}:1", BtcDest, (spare, vault.Uid, 0.002M)), "Duplicate Base burn");
+            await RefusedInBlock(Exit(baseTx, BtcDest, (spare, vault.Uid, 0.002M)), "Duplicate Base burn");
+            var plain = NewBurn();
+            await Mine(Exit(plain, BtcDest, (spare, vault.Uid, 0.002M)));                 // a transaction's only burn keeps its hash
+            Assert.False(Verify(Exit($"{plain}:0", BtcDest, (spare, vault.Uid, 0.002M)), Tip + 1).Result.Ok);
+
+            foreach (var id in new[] { $"{baseTx}:0", $"{baseTx}:1" })
+            {
+                var reference = $"btcexit_{BaseBridgeService.BurnSigningPrefix(id)}_{vault.Uid[..8]}";
+                var (exit, _, why) = FrostSigningAuthorization.ResolveBtcExitForContract(reference, vault.Uid);
+                Assert.True(exit != null, why);
+                Assert.Equal(id, exit!.BaseBurnTxHash);
+            }
+        }
+
         /// <summary>A bridge lock whose id is blank or has spaces around it is refused: it was debited and stored where no look-up finds it (round 17).</summary>
         [Fact]
         public async Task ABridgeLockId_IsNotBlank_AndHasNoSpacesAroundIt()
