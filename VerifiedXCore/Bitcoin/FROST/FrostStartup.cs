@@ -925,6 +925,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 SourceIp = dkgSource,
                                 RekeyOf = string.IsNullOrEmpty(request.RekeyOf) ? null : request.RekeyOf,
                                 LeaderSigned = leaderSignedStart,
+                                StartRemoteIp = FrostSigningAuthorization.NormalizeRemoteIp(context.Connection.RemoteIpAddress),
                                 StartBodyHash = startBodyHash,
                                 MyParticipantIndex = myParticipantId,
                                 Round1SecretPackage = secretPackage,
@@ -1276,6 +1277,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                             {
                                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This session's Round 2 set is signed by its leader." }));
+                                return;
+                            }
+                            if (!FromStartEndpoint(session, context))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This session's Round 2 set comes from the endpoint that started it." }));
                                 return;
                             }
 
@@ -1646,6 +1653,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                         {
                             context.Response.StatusCode = StatusCodes.Status403Forbidden;
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This session's shares are sent by its leader, signed." }));
+                            return;
+                        }
+                        if (!FromStartEndpoint(session, context))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This session's shares come from the endpoint that started it." }));
                             return;
                         }
                         // A batch for another validator is refused before the lock: it reads only the body (round 16).
@@ -3780,6 +3793,15 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// mempool spend can be evicted or replaced, after which the first tx can still confirm, and a
         /// second signed tx for the same withdrawal would then pay it twice.
         /// </summary>
+        /// <summary>
+        /// A key ceremony its leader did not sign in full (a web wallet's vault creation: the wallet signs only the start)
+        /// takes its Round 2 set and share batches from the endpoint its start came from, as a signing session does. Those
+        /// bodies were authenticated by nothing but the start's own signature, which every participant holds: one could fix
+        /// another's Round 2 set, or send it a garbage batch that made it report and refuse the leader's real one.
+        /// </summary>
+        internal static bool FromStartEndpoint(DKGSession session, HttpContext context) =>
+            session.LeaderSigned || FrostSigningAuthorization.SameLeaderEndpoint(session.StartRemoteIp, FrostSigningAuthorization.NormalizeRemoteIp(context.Connection.RemoteIpAddress));
+
         internal static async Task<(bool Ok, string Reason)> CheckPriorSignedTransactionAsync(string scUID, string withdrawalRequestHash, string? requestedTxId)
         {
             try

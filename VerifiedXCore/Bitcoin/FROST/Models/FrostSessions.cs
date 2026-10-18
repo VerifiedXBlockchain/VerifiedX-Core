@@ -23,6 +23,11 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public string? RekeyOf { get; set; }
         /// <summary>The leader signed the start in full (<see cref="FrostDkgLeaderAuth"/>): its Round 2 set and share batch must be signed too.</summary>
         public bool LeaderSigned { get; set; }
+        /// <summary>
+        /// The exact address the start came from (FrostSigningAuthorization.NormalizeRemoteIp). A session its leader did not
+        /// sign in full (a web wallet's creation) takes its Round 2 set and share batches from that endpoint only.
+        /// </summary>
+        public string? StartRemoteIp { get; set; }
         /// <summary>The hash of the start this session was opened by: the same start sent again is answered, not refused.</summary>
         public string? StartBodyHash { get; set; }
         
