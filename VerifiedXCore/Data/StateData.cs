@@ -657,7 +657,7 @@ namespace VerifiedXCore.Data
                                     {
                                         topic.Id = 0;//save new
                                         topic.BlockHeight = tx.Height;
-                                        if (block.Height >= Globals.VoteTopicRulesHeight)
+                                        if (NormalizesNewTopic(block.Height))
                                             NormalizeNewTopic(topic, tx, block.Height);
                                         TopicTrei.SaveTopic(topic);
                                         if(topic.VoteTopicCategory == VoteTopicCategories.AdjVoteIn)
@@ -1994,6 +1994,14 @@ namespace VerifiedXCore.Data
         /// owned by its sender, created at its transaction's time, and counted against the validators active at the block
         /// before. The creator's own values (a forged owner or tally, a chosen denominator) were stored as given.
         /// </summary>
+        /// <summary>
+        /// Whether a new topic's system fields are set by the apply at <paramref name="blockHeight"/>: from
+        /// VoteTopicRulesHeight, and from TopicAddDeterministicHeight, whose TopicAdd() is judged on what every node holds
+        /// alike and so is applied the same way.
+        /// </summary>
+        internal static bool NormalizesNewTopic(long blockHeight) =>
+            blockHeight >= Math.Min(Globals.VoteTopicRulesHeight, Globals.TopicAddDeterministicHeight);
+
         internal static void NormalizeNewTopic(TopicTrei topic, Transaction tx, long blockHeight)
         {
             topic.VoteYes = 0;
