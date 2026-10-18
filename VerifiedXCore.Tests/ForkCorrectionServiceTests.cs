@@ -170,18 +170,18 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public void FromTheAddressOnlyHeight_ANameRecipient_IsRefusedBeforeAnyRollback()
+        public void FromThePathAuditHeight_ANameRecipient_IsRefusedBeforeAnyRollback()
         {
-            var prior = Globals.RecipientIsAddressHeight;
+            var prior = Globals.PathAuditRulesHeight;
             try
             {
                 var block = SignedBlockWith(100, SignedTransfer(to: "gone.vfx"));
-                Globals.RecipientIsAddressHeight = 101;
+                Globals.PathAuditRulesHeight = 101;
                 Assert.Null(ForkCorrectionService.TransactionIntegrityError(block));
-                Globals.RecipientIsAddressHeight = 100;
+                Globals.PathAuditRulesHeight = 100;
                 Assert.NotNull(ForkCorrectionService.TransactionIntegrityError(block));
             }
-            finally { Globals.RecipientIsAddressHeight = prior; }
+            finally { Globals.PathAuditRulesHeight = prior; }
         }
 
         [Fact]

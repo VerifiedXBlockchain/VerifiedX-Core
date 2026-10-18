@@ -35,6 +35,8 @@ namespace VerifiedXCore.Bitcoin.Models
         public string EvmDestination { get; set; } = string.Empty;
         public string LockTxHash { get; set; } = string.Empty;
         public long LockTimestamp { get; set; }
+        /// <summary>The block that carried the lock (0 for a row written before this was recorded).</summary>
+        public long LockBlockHeight { get; set; }
 
         /// <summary>True when fully consumed (UnlockedAmount >= Amount).</summary>
         public bool IsUnlocked { get; set; }
@@ -146,7 +148,7 @@ namespace VerifiedXCore.Bitcoin.Models
         /// <see cref="StateData.NoteApplyStepFailed"/>, so this node stops as a failed apply, and returns
         /// <see cref="LockInsert.Failed"/>.
         /// </summary>
-        public static LockInsert InsertFromLockTx(Transaction tx, string scUID, string lockId, decimal amount, long amountSats, string evmDestination)
+        public static LockInsert InsertFromLockTx(Transaction tx, string scUID, string lockId, decimal amount, long amountSats, string evmDestination, long blockHeight = 0)
         {
             try
             {
@@ -166,6 +168,7 @@ namespace VerifiedXCore.Bitcoin.Models
                     EvmDestination = evmDestination.Trim(),
                     LockTxHash = tx.Hash,
                     LockTimestamp = tx.Timestamp,
+                    LockBlockHeight = blockHeight,
                     IsUnlocked = false
                 };
                 InsertStepForTests?.Invoke(rec);
@@ -181,8 +184,8 @@ namespace VerifiedXCore.Bitcoin.Models
         }
 
         /// <summary>Insert when a bridge lock TX is applied in <see cref="StateData"/>; true only when the row was written now.</summary>
-        public static bool TryInsertFromLockTx(Transaction tx, string scUID, string lockId, decimal amount, long amountSats, string evmDestination) =>
-            InsertFromLockTx(tx, scUID, lockId, amount, amountSats, evmDestination) == LockInsert.Inserted;
+        public static bool TryInsertFromLockTx(Transaction tx, string scUID, string lockId, decimal amount, long amountSats, string evmDestination, long blockHeight = 0) =>
+            InsertFromLockTx(tx, scUID, lockId, amount, amountSats, evmDestination, blockHeight) == LockInsert.Inserted;
 
         /// <summary>
         /// Apply a partial or full unlock to this lock record (pool-based unlock).

@@ -300,6 +300,8 @@ namespace VerifiedXCore.Services
             internal HashSet<string> Senders { get; } = new(StringComparer.Ordinal);
             internal HashSet<string> Hashes { get; } = new(StringComparer.Ordinal);
             internal HashSet<string> Swept { get; } = new(StringComparer.Ordinal);
+            /// <summary>Reserves with a Register() already in this block (from PathAuditRulesHeight).</summary>
+            internal HashSet<string> Registered { get; } = new(StringComparer.Ordinal);
             private readonly Dictionary<DebitKey, decimal?> _balances = new();
 
             /// <summary>The height of the block being validated; null at admission and proposal (NEW-27).</summary>
@@ -383,6 +385,13 @@ namespace VerifiedXCore.Services
             if (isSweep && state.Senders.Contains(sender))
                 return (false, $"{ReasonPrefix}: Recover() must be the only transaction from {sender} in its block.");
 
+            // A reserve registers its recovery account once: the check reads committed state, so two Register() of one
+            // reserve in a block both passed and the last applied replaced the first's recovery account. From the
+            // path-audit rules a block carries one Register() per reserve (the producer keeps the first).
+            var isRegister = IsReserveRegister(tx) && (state.BlockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.PathAuditRulesHeight;
+            if (isRegister && state.Registered.Contains(sender))
+                return (false, $"{ReasonPrefix}: {sender} registers its recovery account more than once in this block.");
+
             // A registration or heartbeat that starts a bond: what its sender has already sent in this block must
             // have left the stake, and what it sends after is judged against what is above the stake.
             if (!state.BondStarting.Contains(sender) && ValidatorBond.StartsBond(tx, state.BlockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)))
@@ -401,6 +410,7 @@ namespace VerifiedXCore.Services
             {
                 state.Senders.Add(sender);
                 if (isSweep) state.Swept.Add(sender);
+                if (isRegister) state.Registered.Add(sender);
                 return (true, "");
             }
 
@@ -427,6 +437,7 @@ namespace VerifiedXCore.Services
             }
             state.Senders.Add(sender);
             if (isSweep) state.Swept.Add(sender);
+            if (isRegister) state.Registered.Add(sender);
             return (true, "");
         }
 
@@ -464,6 +475,14 @@ namespace VerifiedXCore.Services
             }
             catch { }
             return paid;
+        }
+
+        public static bool IsReserveRegister(Transaction tx)
+        {
+            if (tx?.TransactionType != TransactionType.RESERVE || string.IsNullOrEmpty(tx.Data))
+                return false;
+            try { return JObject.Parse(tx.Data)["Function"]?.ToObject<string?>() == "Register()"; }
+            catch { return false; }
         }
 
         public static bool IsReserveRecover(Transaction tx)

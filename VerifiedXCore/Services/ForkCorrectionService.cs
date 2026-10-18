@@ -254,7 +254,7 @@ namespace VerifiedXCore.Services
                     return $"transaction {tx.Hash} does not hash to its carried hash.";
                 // The recipient and amount are joined in the hash: a whole recipient keeps digits from moving between them.
                 // A name resolves against chain state, and the state in hand is the branch being replaced, so a name is
-                // left to full validation (from RecipientIsAddressHeight a name is refused outright, without state).
+                // left to full validation (from PathAuditRulesHeight a name is refused outright, without state).
                 if (LedgerIntegrityRules.RecipientIsNotAName(tx, block.Height) is { } nameError)
                     return $"transaction {tx.Hash}: {nameError}";
                 if (!IsNameRecipient(tx.ToAddress) && TransactionValidatorService.RecipientError(tx) is { } recipientError)

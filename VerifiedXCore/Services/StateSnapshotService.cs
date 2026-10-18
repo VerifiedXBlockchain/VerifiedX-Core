@@ -57,6 +57,7 @@ namespace VerifiedXCore.Services
         {
             new SnapColl { Tag = "astate", SourceDb = () => DbContext.DB_AccountStateTrei, SourceColl = DbContext.RSRV_ASTATE_TREI, DiffTracked = true, KeyField = "Key", TombstoneTag = StateTombstone.COLL_ASTATE },
             new SnapColl { Tag = "scstate", SourceDb = () => DbContext.DB_SmartContractStateTrei, SourceColl = DbContext.RSRV_SCSTATE_TREI, DiffTracked = true, KeyField = "SmartContractUID", TombstoneTag = StateTombstone.COLL_SCSTATE },
+            new SnapColl { Tag = "scretired", SourceDb = () => DbContext.DB_SmartContractStateTrei, SourceColl = RetiredContractUid.CollectionName },
             new SnapColl { Tag = "wstate", SourceDb = () => DbContext.DB_WorldStateTrei, SourceColl = DbContext.RSRV_WSTATE_TREI },
             new SnapColl { Tag = "decshop", SourceDb = () => DbContext.DB_DecShopStateTrei, SourceColl = DbContext.RSRV_DECSHOPSTATE_TREI },
             new SnapColl { Tag = "dnr", SourceDb = () => DbContext.DB_DNR, SourceColl = DbContext.RSRV_DNR },

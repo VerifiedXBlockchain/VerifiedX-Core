@@ -136,6 +136,62 @@ namespace VerifiedXCore.Tests
             Globals.LastBlock = block;
         }
 
+        /// <summary>
+        /// C-062: a completion sent by a validator (not the requester) was judged against the validator set scanned from
+        /// this node's own tip, and that set is empty while the node is not synced: a node downloading the block refused a
+        /// completion every synced node had accepted, and stopped there. The sender is judged against the set as it stood
+        /// before the block (VBTCValidatorRegistry.GetValidatorAt), so every node gives the same verdict for the block,
+        /// synced or not, and a validator registered in the block itself does not count yet.
+        /// </summary>
+        [Fact]
+        public async Task AValidatorsCompletion_IsJudgedByTheSetBeforeTheBlock_SyncedOrNot()
+        {
+            const string Refused = "or an active vBTC validator can complete this withdrawal";
+            Assert.True(VBTCWithdrawalRequest.Save(new VBTCWithdrawalRequest
+            {
+                RequestorAddress = _requester.Address, SmartContractUID = _vault, Amount = 0.25M, BTCDestination = "tb1q066af78la3rqmnchc396keujllva6turs52749",
+                FeeRate = 10, Timestamp = 1_755_000_150, TransactionHash = _requestHash, Status = VBTCWithdrawalStatus.Requested, RequestBlockHeight = 150,
+            }));
+            var validator = NewKey();
+            var late = NewKey();
+            foreach (var who in new[] { validator, late })
+                StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = who.Address, Balance = 10M, Nonce = 0 });
+            void Register(string address, long height) => BlockchainData.GetBlocks().InsertSafe(new Block
+            {
+                Height = height, Hash = $"h{height}-{Guid.NewGuid():N}",
+                Transactions = new List<Transaction>
+                {
+                    new Transaction
+                    {
+                        TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = address, ToAddress = address, Hash = "r" + height,
+                        Data = JsonConvert.SerializeObject(new { ValidatorAddress = address, IPAddress = "10.0.0.1", FrostPublicKey = "pk-" + address, IsS3C = false }),
+                    },
+                },
+            });
+            Register(validator.Address, 250);
+            Register(late.Address, 260);
+
+            var priorSynced = Globals.IsChainSynced;
+            try
+            {
+                foreach (var synced in new[] { false, true })
+                {
+                    Globals.IsChainSynced = synced;
+                    var (_, byValidator) = await VerifyInBlock(Complete(validator, _vault, new string('c', 64)), 260);
+                    Assert.DoesNotContain(Refused, byValidator);                         // a validator before the block
+
+                    var (anyoneOk, byAnyone) = await VerifyInBlock(Complete(_anyone, _vault, new string('c', 64)), 260);
+                    Assert.False(anyoneOk);
+                    Assert.Contains(Refused, byAnyone);
+
+                    var (lateOk, byLate) = await VerifyInBlock(Complete(late, _vault, new string('c', 64)), 260);
+                    Assert.False(lateOk);
+                    Assert.Contains(Refused, byLate);                                   // registered in the block itself
+                }
+            }
+            finally { Globals.IsChainSynced = priorSynced; }
+        }
+
         [Theory]
         [InlineData(VBTCWithdrawalStatus.Completed)]
         [InlineData(VBTCWithdrawalStatus.Cancelled)]

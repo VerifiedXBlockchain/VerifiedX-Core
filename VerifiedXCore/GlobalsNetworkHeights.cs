@@ -37,7 +37,6 @@ namespace VerifiedXCore
             Globals.VaultRewriteRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.VaultRewriteRulesHeight;
             Globals.VaultBurnRuleHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.VaultBurnRuleHeight;
             Globals.PathAuditRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PathAuditRulesHeight;
-            Globals.RecipientIsAddressHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.RecipientIsAddressHeight;
             Globals.ReserveRecoverReadsEveryRowHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.ReserveRecoverReadsEveryRowHeight;
             Globals.VbtcEnvelopeRulesHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.VbtcEnvelopeRulesHeight;
             Globals.ReserveNonTransferAmountHeight = Globals.IsTestNet ? 999_999_999_999 : Globals.ReserveNonTransferAmountHeight;

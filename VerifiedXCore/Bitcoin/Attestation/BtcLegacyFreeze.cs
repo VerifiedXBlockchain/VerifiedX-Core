@@ -79,7 +79,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     foreach (var vault in vaults)
                         if (IsLegacyVault(vault)) return Frozen(vault!);
                 }
-                catch { }
+                // What the transaction says that cannot be read is no vault here; a fault of this node's disk while a
+                // vault is decompiled is passed on (VBTCService.DecompileFaultIsNodeLocal), not read as "not frozen".
+                catch (Exception ex) when (!VBTCService.DecompileFaultIsNodeLocal(ex)) { }
             }
 
             if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)

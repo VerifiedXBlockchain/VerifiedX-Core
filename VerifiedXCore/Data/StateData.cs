@@ -505,7 +505,7 @@ namespace VerifiedXCore.Data
                                         TransferSmartContract(tx);
                                         break;
                                     case "Burn()":
-                                        BurnSmartContract(tx);
+                                        BurnSmartContract(tx, block.Height);
                                         break;
                                     case "Evolve()":
                                         EvolveSC(tx);
@@ -800,7 +800,7 @@ namespace VerifiedXCore.Data
 
                         if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_LOCK)
                         {
-                            ApplyVBTCBridgeLock(tx);
+                            ApplyVBTCBridgeLock(tx, block.Height);
                         }
 
                         if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_UNLOCK)
@@ -963,7 +963,7 @@ namespace VerifiedXCore.Data
                     // HAL-070 Fix + reserve-vBTC hardening: re-read the row's CURRENT status from
                     // the DB (not the caller's snapshot) — real idempotence against re-entry and
                     // replay. Anything not Pending has already been finalized/cancelled/recovered.
-                    var currentRow = rtxDb.Query().Where(x => x.Id == rtx.Id).FirstOrDefault();
+                    var currentRow = ReserveTransactions.GetRowForApply(rtxDb, rtx.Id);
                     if (currentRow == null || currentRow.ReserveTransactionStatus != ReserveTransactionStatus.Pending)
                     {
                         ErrorLogUtility.LogError($"UpdateTreiFromReserve skipped for hash {rtx.Hash} - status {(currentRow?.ReserveTransactionStatus.ToString() ?? "missing")}, not Pending", "StateData.UpdateTreiFromReserve()");
@@ -1169,7 +1169,7 @@ namespace VerifiedXCore.Data
                         }
                     }
 
-                    var rtxRec = rtxDb.Query().Where(x => x.Id == rtx.Id).FirstOrDefault();
+                    var rtxRec = ReserveTransactions.GetRowForApply(rtxDb, rtx.Id);
                     var hash = rtx.Hash;
 
                     if (rtxRec != null)
@@ -2227,7 +2227,7 @@ namespace VerifiedXCore.Data
             }
 
         }
-        private static void BurnSmartContract(Transaction tx)
+        private static void BurnSmartContract(Transaction tx, long height)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
             var scData = ArrayFormCall(tx);
@@ -2239,6 +2239,17 @@ namespace VerifiedXCore.Data
             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
             if (scStateTreiRec != null)
             {
+                // From the path-audit rules a burned UID is retired (as stored): nothing is created under it again.
+                if (height >= Globals.PathAuditRulesHeight)
+                {
+                    try { RetiredContractUid.Retire(scStateTreiRec.SmartContractUID, height, tx.Hash); }
+                    catch (Exception ex)
+                    {
+                        // Not written here while every other node has it: this node's state is flagged incomplete.
+                        ErrorLogUtility.LogError($"Retiring burned UID {scStateTreiRec.SmartContractUID} at {height} failed: {ex.Message}", "StateData.BurnSmartContract()");
+                        NoteApplyStepFailed(height, ex);
+                    }
+                }
                 SmartContractStateTrei.DeleteSmartContract(scStateTreiRec);
             }
 
@@ -3643,7 +3654,7 @@ namespace VerifiedXCore.Data
         /// <summary>
         /// vBTC Base bridge lock: deduct transparent balance chain-wide (same ledger pattern as withdrawal burn).
         /// </summary>
-        private static void ApplyVBTCBridgeLock(Transaction tx)
+        private static void ApplyVBTCBridgeLock(Transaction tx, long blockHeight = 0)
         {
             try
             {
@@ -3686,7 +3697,7 @@ namespace VerifiedXCore.Data
                 // The lock row first, then the debit: a debit with no row would take the holder's vBTC with nothing to
                 // mint or unlock against it. A row already there is a replay (the debit was applied with it); a storage
                 // fault has been reported as a failed apply and nothing is debited.
-                var inserted = VBTCBridgeLockState.InsertFromLockTx(tx, scUID, lockId, amount.Value, amountSats.Value, evmDestination);
+                var inserted = VBTCBridgeLockState.InsertFromLockTx(tx, scUID, lockId, amount.Value, amountSats.Value, evmDestination, blockHeight);
                 if (inserted != VBTCBridgeLockState.LockInsert.Inserted)
                 {
                     ErrorLogUtility.LogError($"ApplyVBTCBridgeLock: lock {lockId} not applied ({inserted})", "StateData.ApplyVBTCBridgeLock()");

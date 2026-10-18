@@ -105,8 +105,6 @@ namespace VerifiedXCore.Bitcoin.Services
                     continue;
                 if (passOverDust && lockRec.RemainingAmount < PlanDustBtc)
                     continue;
-                if (allocations.Count >= MaxPlanAllocations)
-                    return null; // more locks than one transaction can name
 
                 // Whole satoshis, as consensus takes them from the path-audit rules: a lock made before amounts were held
                 // to 8 places (VX-01) is drawn down to its last whole satoshi (round 16).
@@ -119,6 +117,11 @@ namespace VerifiedXCore.Bitcoin.Services
                     UnlockAmount = useAmount,
                     SmartContractUID = lockRec.SmartContractUID
                 });
+                // More than one transaction can carry: measured as it is carried (the size cap is consensus's only
+                // limit). A flat count of 100 refused a burn that needed more locks than that while they fit, and that
+                // burn was never paid.
+                if (allocations.Count > MaxPlanAllocations && PlanBytes(allocations) > MaxPlanBytes)
+                    return null;
 
                 remaining -= useAmount;
             }

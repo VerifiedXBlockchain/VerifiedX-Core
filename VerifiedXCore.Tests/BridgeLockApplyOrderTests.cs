@@ -60,7 +60,7 @@ namespace VerifiedXCore.Tests
         };
 
         private static void Apply(Transaction tx) =>
-            typeof(StateData).GetMethod("ApplyVBTCBridgeLock", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, new object[] { tx });
+            typeof(StateData).GetMethod("ApplyVBTCBridgeLock", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, new object[] { tx, tx.Height });
 
         private static decimal Balance() =>
             SmartContractStateTrei.GetSmartContractState(Vault)!.SCStateTreiTokenizationTXes!
