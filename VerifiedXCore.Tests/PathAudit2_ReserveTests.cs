@@ -392,6 +392,37 @@ namespace VerifiedXCore.Tests
             Assert.Equal(_reserve.Address, Vault.OwnerAddress);
         }
 
+        private Transaction TransferVaultAs(TransactionType type, string to, long unlockInHours) =>
+            FromReserve(type, to, new[] { new { Function = "Transfer()", ContractUID = _vault, ToAddress = to, Data = Vault.ContractData, MD5List = "NA" } }, unlockInHours);
+
+        /// <summary>
+        /// The dispatcher runs a reserve's Transfer() under any contract type, and it locks the contract with the
+        /// recipient as NextOwner. From ReserveRecoverReadsEveryRowHeight a call-back unlocks it under every such type;
+        /// below it only NFT_TX, TKNZ_TX and SC_TX were unlocked.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task ATransferCarriedAsFtknTx_IsUnlockedByItsCallBack_FromTheRecoverRulesHeight(bool fromTheHeight)
+        {
+            var prior = Globals.ReserveRecoverReadsEveryRowHeight;
+            try
+            {
+                Globals.ReserveRecoverReadsEveryRowHeight = fromTheHeight ? Rule : long.MaxValue;
+                var transfer = TransferVaultAs(TransactionType.FTKN_TX, _firstBuyer.Address, 25);
+                await Mine(0, transfer);
+                Assert.True(Vault.IsLocked);
+                Assert.Equal(_firstBuyer.Address, Vault.NextOwner);
+
+                await Mine(1, CallBack(transfer));
+                Assert.Equal(ReserveTransactionStatus.CalledBack, StatusOf(transfer));
+                Assert.Equal(!fromTheHeight, Vault.IsLocked);
+                Assert.Equal(fromTheHeight ? null : _firstBuyer.Address, Vault.NextOwner);
+                Assert.Equal(_reserve.Address, Vault.OwnerAddress);
+            }
+            finally { Globals.ReserveRecoverReadsEveryRowHeight = prior; }
+        }
+
         /// <summary>
         /// A call-back naming a pending transaction's hash with a space in it found no row, then (in a block) the chain
         /// search took the spaces out, found the transaction and saved a second pending row under the spaced text: the
