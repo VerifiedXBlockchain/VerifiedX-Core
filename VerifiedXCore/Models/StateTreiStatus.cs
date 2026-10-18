@@ -42,5 +42,12 @@ namespace VerifiedXCore.Models
         /// the rebuild was interrupted and the state is partial, so it stops this node as <see cref="RestoreDestroyed"/> does.
         /// </summary>
         public bool? RebuildInProgress { get; set; }
+
+        /// <summary>
+        /// Set when a block was committed with some of its state writes not applied. Those writes are missing until the
+        /// state is rebuilt or restored from a snapshot, so blocks that apply cleanly afterwards do not clear it: only a
+        /// rebuild (which starts a new record) or a state marked synced (a completed rebuild or restore) does.
+        /// </summary>
+        public bool? IncompleteApply { get; set; }
     }
 }
