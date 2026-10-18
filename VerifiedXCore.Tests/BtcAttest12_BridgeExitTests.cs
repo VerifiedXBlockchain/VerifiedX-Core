@@ -980,6 +980,42 @@ namespace VerifiedXCore.Tests
             Assert.Equal(VaultWithdrawalState.Pinned, Part(singleBurn, single.Uid).State);
         }
 
+        /// <summary>
+        /// C-245: an exit is signed for its vault up to that vault's part of the plan, but the plan was not checked against
+        /// what applying the exit drew: the single-lock shape draws no lock at all, so an older vault's signers would pay
+        /// its Bitcoin with no lock drawn behind it (and the lock could be planned again). What was drawn is now recorded
+        /// with the exit, and signed for only.
+        /// </summary>
+        [Fact]
+        public async Task AnOlderVaultsSingleLockExit_DrawsNoLock_AndIsNotSigned()
+        {
+            var older = await CreateVault(H1 - 50);
+            await Start();
+            var lockId = await Lock(older.Uid, 0.002M);
+            var priorRecord = Globals.BitcoinAttestationRecordHeight;
+            var priorRules = Globals.PathAuditRulesHeight;
+            Globals.BitcoinAttestationRecordHeight = long.MaxValue;                   // as on mainnet before the rules
+            Globals.PathAuditRulesHeight = long.MaxValue;
+            try
+            {
+                var burn = NewBurn();
+                await Mine(SignedBy(Caster, Caster.Address, TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC, new
+                {
+                    Function = "VBTCBridgeExitToBTC()", ContractUID = older.Uid, LockId = lockId, Amount = 0.002M, AmountSats = 200_000L,
+                    BtcDestination = BtcDest, BaseBurnTxHash = burn,
+                }, free: true));
+                Assert.Equal(0M, VBTCBridgeLockState.GetByLockId(lockId)!.UnlockedAmount);   // no lock was drawn
+                Assert.Equal("[]", Record(burn).DrawnAllocationsJson);
+                var (_, cap, _) = FrostSigningAuthorization.ResolveBtcExitForContract(BtcWithdrawals.ExitSigningReference(burn, older.Uid), older.Uid);
+                Assert.Equal(0, cap);
+            }
+            finally
+            {
+                Globals.BitcoinAttestationRecordHeight = priorRecord;
+                Globals.PathAuditRulesHeight = priorRules;
+            }
+        }
+
         // ── What an exit may draw on ────────────────────────────────────────────────────────────────────────
 
         [Fact]

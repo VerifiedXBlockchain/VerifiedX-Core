@@ -92,6 +92,7 @@ namespace VerifiedXCore.Tests
                 BaseBurnTxHash = burn, LockId = "L27", SmartContractUID = _vault, OwnerAddress = "xCaster", Amount = Amount,
                 AmountSats = (long)(Amount * 100_000_000M), BtcDestination = _destAddr.ToString(), ExitTxHash = "exit-tx-27", CreatedTimestamp = 1,
                 AllocationsJson = Newtonsoft.Json.JsonConvert.SerializeObject(new List<PoolUnlockAllocation> { new() { LockId = "L27", SmartContractUID = _vault, UnlockAmount = Amount } }),
+                DrawnAllocationsJson = Newtonsoft.Json.JsonConvert.SerializeObject(new List<PoolUnlockAllocation> { new() { LockId = "L27", SmartContractUID = _vault, UnlockAmount = Amount } }),
             }));
 
             var canonical = VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.ExitSigningReference(burn, _vault);

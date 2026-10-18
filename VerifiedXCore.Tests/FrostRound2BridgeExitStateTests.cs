@@ -44,6 +44,7 @@ namespace VerifiedXCore.Tests
                 BaseBurnTxHash = _burn, SmartContractUID = _vault, Amount = 0.01M, AmountSats = 1_000_000, BtcDestination = "tb1qexitdestination",
                 ExitVfxHeight = 450, CreatedTimestamp = TimeUtil.GetTime(),
                 AllocationsJson = JsonConvert.SerializeObject(new List<PoolUnlockAllocation> { new() { LockId = "lock-1", UnlockAmount = 0.01M, SmartContractUID = _vault } }),
+                DrawnAllocationsJson = JsonConvert.SerializeObject(new List<PoolUnlockAllocation> { new() { LockId = "lock-1", UnlockAmount = 0.01M, SmartContractUID = _vault } }),
             }));
         }
 

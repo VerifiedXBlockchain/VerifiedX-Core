@@ -587,6 +587,24 @@ namespace VerifiedXCore.Bitcoin.FROST
                 catch { return 0; }
                 if (allocs == null) return 0;
 
+                // A part is signed only for what applying this exit drew from its lock: the single-lock shape drew nothing,
+                // and a part whose lock was gone or already freed (an alias unlock in the same block, below the path-audit
+                // rules) was skipped at apply but kept in the plan, so the vault paid Bitcoin with no lock drawn behind it. A
+                // row from before this record: an exit on vaults the chain watches drew every part; any other is not signed.
+                List<PoolUnlockAllocation>? drawnParts;
+                if (exit.DrawnAllocationsJson == null)
+                {
+                    if (!Attestation.BtcWithdrawals.IsWatchedExit(exit)) return 0;
+                    drawnParts = allocs.Where(x => x != null).ToList();
+                }
+                else
+                {
+                    try { drawnParts = JsonConvert.DeserializeObject<List<PoolUnlockAllocation>>(exit.DrawnAllocationsJson); }
+                    catch { return 0; }
+                    if (drawnParts == null) return 0;
+                }
+                var undrawn = drawnParts.Where(x => x != null).ToList();
+
                 decimal sum = 0M;
                 var drawn = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var a in allocs)
@@ -598,6 +616,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                     var held = VBTCBridgeLockState.GetByLockId(a.LockId ?? "");
                     if (held == null || !string.Equals(a.LockId, held.LockId, StringComparison.Ordinal) || !drawn.Add(held.LockId))
                         return 0;
+                    var live = undrawn.FindIndex(d => string.Equals(d.LockId, a.LockId, StringComparison.Ordinal) && d.UnlockAmount == a.UnlockAmount);
+                    if (live < 0) return 0; // asks for more than its locks gave up: not signed
+                    undrawn.RemoveAt(live);
                     if (string.Equals(held.SmartContractUID, scUID, StringComparison.Ordinal))
                         sum += a.UnlockAmount;
                 }
