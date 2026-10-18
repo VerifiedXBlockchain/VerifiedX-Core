@@ -30,6 +30,7 @@ namespace VerifiedXCore.Tests
         private readonly string? _priorCustomPath;
         private readonly Network? _priorNetwork;
         private readonly Block _priorLastBlock;
+        private readonly bool _priorLibrary = Globals.FrostFFIAvailable;
         private readonly BitcoinAddress _vaultAddr = new Key().PubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, Net);
         private readonly BitcoinAddress _destAddr = new Key().PubKey.GetAddress(ScriptPubKeyType.Segwit, Net);
         private readonly string _vault = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
@@ -47,6 +48,7 @@ namespace VerifiedXCore.Tests
             Globals.BTCNetwork = Net;
             _priorLastBlock = Globals.LastBlock;
             Globals.LastBlock = new Block { Height = 500 };
+            Globals.FrostFFIAvailable = true;   // a validator whose FROST library passed its check
             DbContext.Initialize();
             CompletedWithdrawalConfirmation.ResetForTests();
 
@@ -69,6 +71,7 @@ namespace VerifiedXCore.Tests
             try { DbContext.CloseDB(); } catch { }
             Globals.BTCNetwork = _priorNetwork;
             Globals.LastBlock = _priorLastBlock;
+            Globals.FrostFFIAvailable = _priorLibrary;
             Globals.CustomPath = _priorCustomPath;
             try { Directory.Delete(_tempRoot, recursive: true); } catch { }
         }

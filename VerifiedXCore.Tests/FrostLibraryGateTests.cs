@@ -40,6 +40,12 @@ namespace VerifiedXCore.Tests
         [Theory]
         [InlineData("/frost/dkg/start")]
         [InlineData("/frost/sign/start")]
+        [InlineData("/frost/dkg/round1")]
+        [InlineData("/frost/dkg/round2/a-session")]
+        [InlineData("/frost/dkg/share")]
+        [InlineData("/frost/dkg/shares/a-session")]
+        [InlineData("/frost/dkg/round3")]
+        [InlineData("/frost/sign/round2/a-session")]
         public async Task WithoutAWorkingLibrary_TheNodeJoinsNoCeremony(string route)
         {
             Globals.FrostFFIAvailable = false;
