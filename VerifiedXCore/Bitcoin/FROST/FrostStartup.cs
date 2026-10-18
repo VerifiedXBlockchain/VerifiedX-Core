@@ -3021,6 +3021,16 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = ended }));
                                 return;
                             }
+                            // ... nor a bridge exit that was completed or failed after the ceremony started (sign/start checks it).
+                            if (!string.IsNullOrEmpty(session.WithdrawalRequestHash)
+                                && session.WithdrawalRequestHash.StartsWith(FrostSigningAuthorization.BtcExitPrefix, StringComparison.OrdinalIgnoreCase)
+                                && FrostSigningAuthorization.BridgeExitNoLongerSignable(session.WithdrawalRequestHash, session.SmartContractUID ?? "") is { } exitEnded)
+                            {
+                                LogUtility.Log($"[FROST] Sign Round 2 REFUSED for session {sessionId}: bridge exit {session.WithdrawalRequestHash}: {exitEnded}", "FrostStartup.SignRound2");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = exitEnded }));
+                                return;
+                            }
                             if (FrostSigningAuthorization.NotAtNetworkHeightToSign(session.SmartContractUID) is { } notReadyForShare)
                             {
                                 LogUtility.Log($"[FROST] Sign Round 2 REFUSED for session {sessionId}: {notReadyForShare}", "FrostStartup.SignRound2");

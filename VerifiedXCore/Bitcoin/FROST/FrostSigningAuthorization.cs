@@ -464,6 +464,20 @@ namespace VerifiedXCore.Bitcoin.FROST
         }
 
         /// <summary>
+        /// Why a bridge exit's share is no longer given: the reference names no exit on this contract any more, or the
+        /// exit was completed or failed after its ceremony started (sign/start judged it while it was open). Null while
+        /// the exit is still open.
+        /// </summary>
+        public static string? BridgeExitNoLongerSignable(string reference, string scUID)
+        {
+            var (exit, _, reason) = ResolveBtcExitForContract(reference, scUID);
+            if (exit == null) return reason;
+            if (exit.IsFailedRecord) return "Bridge exit has failed";
+            if (exit.IsComplete) return "Bridge exit already completed";
+            return null;
+        }
+
+        /// <summary>
         /// Bridge exit signings use a synthetic reference "btcexit_{burnHash[..16]}_{scUID[..8]}"
         /// (see BurnExitConsensusService.ExecuteBtcExit). Resolve it to the consensus-recorded exit
         /// AND bind it to the declared contract: the contract must be one the exit actually draws
