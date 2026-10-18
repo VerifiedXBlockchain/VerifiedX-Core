@@ -950,6 +950,36 @@ namespace VerifiedXCore.Tests
             Assert.Equal(BtcWithdrawals.ExitFeeRate * 2, part.Pins.Last().FeeRate);
         }
 
+        /// <summary>
+        /// C-200: the least an exit part may be (MinExitPartSats) is sized for one coin. A part at that size on a vault
+        /// holding only small coins was pinned at 10 sat/vB on many of them, and its fee could then never be raised,
+        /// while nothing else can move a pinned part. Such a part now waits instead (the exit fails by rule and its locks
+        /// come back); the same part on one coin is pinned.
+        /// </summary>
+        [Fact]
+        public async Task APartThatCouldNotBearTheRaisesOnTheCoinsItWouldSpend_IsNotPinned()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Report(_btc.Mine(Pay(null, Enumerable.Repeat((vault.Script, 1_100L), 23).ToArray())));   // 23 small coins
+            var amount = BtcWithdrawals.MinExitPartSats / 100_000_000M;
+            var lockId = await Lock(vault.Uid, amount);
+            var burn = NewBurn();
+            await Mine(Exit(burn, BtcDest, (lockId, vault.Uid, amount)));
+            var part = Part(burn, vault.Uid);
+            Assert.Equal(VaultWithdrawalState.Waiting, part.State);
+            Assert.Empty(part.Pins);
+            Assert.Contains("its fee could not be raised to 160 sat/vB", part.WaitingReason);
+
+            // On one coin the same part bears every raise, and is pinned.
+            var single = await CreateVault(H1 + 2);
+            await Deposit(single.Script, 1_000_000);
+            var singleLock = await Lock(single.Uid, amount);
+            var singleBurn = NewBurn();
+            await Mine(Exit(singleBurn, BtcDest, (singleLock, single.Uid, amount)));
+            Assert.Equal(VaultWithdrawalState.Pinned, Part(singleBurn, single.Uid).State);
+        }
+
         // ── What an exit may draw on ────────────────────────────────────────────────────────────────────────
 
         [Fact]

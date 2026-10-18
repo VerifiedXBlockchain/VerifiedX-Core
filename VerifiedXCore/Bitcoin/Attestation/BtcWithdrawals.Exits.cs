@@ -271,6 +271,17 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 var tx = string.IsNullOrEmpty(part.DestinationScriptHex) || cannotSign != null
                     ? null
                     : BtcCanonicalWithdrawal.Build(part.SmartContractUID, part.DestinationScriptHex, PayableSats(part), part.FeeRate, out reason, db);
+                // MinExitPartSats is sized for one coin. A part is first pinned only if it bears the rule's doublings on the
+                // coins it would really spend (which coins does not depend on the rate, so this is the transaction the last
+                // raise would build): fixed on many small coins it could be raised fewer times or never, and nothing else
+                // moves a pinned part. Not pinned, it waits, and the exit fails by rule and its locks come back. A part fixed
+                // again while its exit is paying is pinned as it can be: it never expires, and pays once fees fall.
+                if (tx != null && !committed
+                    && BtcCanonicalWithdrawal.Build(part.SmartContractUID, part.DestinationScriptHex, PayableSats(part), part.FeeRate << ExitPartBearsDoublings, out var bears, db) == null)
+                {
+                    reason = $"on the {tx.Inputs.Count} coin(s) it would spend, its fee could not be raised to {part.FeeRate << ExitPartBearsDoublings} sat/vB ({bears})";
+                    tx = null;
+                }
                 built.Add((part, tx, reason));
             }
 
