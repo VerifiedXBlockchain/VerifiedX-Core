@@ -158,6 +158,24 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void AnEmptyBody_CarriesNoRoyalty_SoItCannotStripOne()
+        {
+            // Two steps: an empty-body Update() wipes the stored body, and a royalty-free body after it compared against
+            // nothing. The first step is refused, so the second is judged against the royalty.
+            var (uid, _) = SoldNft();
+            var empty = Rewrite("Update()", uid, "", _owner, _owner.Address);
+            Assert.NotNull(LedgerIntegrityRules.RoyaltyUnchangedByRewrite(empty, Gate));
+            Assert.Null(LedgerIntegrityRules.RoyaltyUnchangedByRewrite(empty, Gate - 1)); // below the height as before
+
+            var plainUid = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
+            {
+                SmartContractUID = plainUid, ContractData = Body(plainUid, null), MinterAddress = _minter.Address, OwnerAddress = _owner.Address, IsLocked = false, Nonce = 0,
+            });
+            Assert.Null(LedgerIntegrityRules.RoyaltyUnchangedByRewrite(Rewrite("Update()", plainUid, "", _owner, _owner.Address), Gate)); // no royalty to lose
+        }
+
+        [Fact]
         public void Rule_IsPureAndInertBelowGate()
         {
             var (uid, _) = SoldNft();
