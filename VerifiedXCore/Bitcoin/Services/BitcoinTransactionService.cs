@@ -460,8 +460,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                     // Estimate transaction size for Taproot (smaller than legacy/segwit)
                     // Taproot: ~57.5 vBytes per input, ~43 vBytes per output + 10.5 overhead
-                    int estimatedSize = (int)(57.5 * unspentCoins.Count + 43 * 2 + 10.5); // destination + change
-                    feeEstimate = (ulong)(estimatedSize * feeRateSatsPerVByte);
+                    feeEstimate = (ulong)WithdrawalFeeSats(unspentCoins.Count, feeRateSatsPerVByte);
 
                     // Fee is deducted from withdrawal amount, so UTXOs only need to cover the amount
                     if (totalInputAmount >= amountToSend)
@@ -824,6 +823,13 @@ namespace VerifiedXCore.Bitcoin.Services
         /// version returned 0 for every failure mode, making "Electrum is broken" indistinguishable
         /// from "tx not confirmed".
         /// </summary>
+        /// <summary>
+        /// The fee a vault withdrawal pays for <paramref name="inputCount"/> inputs at <paramref name="feeRate"/> sat/vB, as the
+        /// builder sets it (Taproot: ~57.5 vB per input, ~43 vB per output, destination and change, + 10.5). Signers bound an
+        /// unwatched vault's transaction by the same figure (FrostSigningAuthorization).
+        /// </summary>
+        public static long WithdrawalFeeSats(int inputCount, long feeRate) => (int)(57.5 * inputCount + 43 * 2 + 10.5) * feeRate;
+
         public static async Task<TxConfirmationLookup> GetTransactionConfirmationsResilient(string txHash)
         {
             var answers = new List<int>();
@@ -857,6 +863,53 @@ namespace VerifiedXCore.Bitcoin.Services
 
             return new TxConfirmationLookup(CombineConfirmationAnswers(answers), serversTried,
                 details.Any() ? string.Join(", ", details) : "no servers tried");
+        }
+
+        /// <summary>Distinct Electrum hosts that must agree before an answer may release a pin or stop a signer.</summary>
+        public const int ConfirmationAgreementRequired = 2;
+
+        /// <summary>How one server is asked for a transaction's confirmations (Ok; &gt;= 1 in a block, 0 known and unconfirmed). Replaced in tests.</summary>
+        internal static Func<ClientSettings, string, Task<(bool Ok, int Confirms)>> QueryConfirms =
+            (server, txid) => ElectrumServerPool.AttemptAsync(server, c => c.GetConfirms(txid));
+
+        /// <summary>How many distinct hosts know a transaction, and how many have it in a block.</summary>
+        public readonly record struct TxSightings(int Known, int Confirmed, int MinConfirmations, string Detail);
+
+        /// <summary>
+        /// Every usable server is asked, one answer per host, until <paramref name="required"/> hosts have the transaction in
+        /// a block (or, with <paramref name="stopWhenKnown"/>, know it at all). For a decision that releases a pin or stops
+        /// acting: one server's word - or a path to it, as certificates are not checked - is never enough.
+        /// </summary>
+        public static async Task<TxSightings> GetTransactionConfirmationsCorroborated(string txHash, int required = ConfirmationAgreementRequired, bool stopWhenKnown = false)
+        {
+            int known = 0, confirmed = 0, minConfirmations = int.MaxValue;
+            var details = new List<string>();
+            var hosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var server in GetElectrumServerCandidates())
+            {
+                if (!hosts.Add((server.Host ?? "").Trim())) continue; // two ports of one host are one opinion
+                var (ok, answer) = await QueryConfirms(server, txHash);
+                var confirms = ok ? answer : -1;
+                details.Add($"{server.Host}:{server.Port}={(confirms >= 1 ? confirms.ToString() : confirms == 0 ? "0 (mempool)" : "no-answer")}");
+                if (confirms >= 0) known++;
+                if (confirms >= 1) { confirmed++; minConfirmations = Math.Min(minConfirmations, confirms); }
+                if (confirmed >= required || (stopWhenKnown && known >= required)) break;
+            }
+            return new TxSightings(known, confirmed, confirmed > 0 ? minConfirmations : 0, details.Count > 0 ? string.Join(", ", details) : "no servers tried");
+        }
+
+        /// <summary>
+        /// Two-host agreement in the tri-state of <see cref="TxConfirmationLookup.Confirmations"/>: &gt;= 1 only when
+        /// <see cref="ConfirmationAgreementRequired"/> distinct hosts have the transaction in a block (the fewest
+        /// confirmations among them); 0 when a host knows it and none has it in a block; null otherwise, including one host
+        /// alone saying "in a block". For steps that a false "confirmed" makes final (a withdrawal's completion).
+        /// </summary>
+        public static async Task<int?> GetAgreedConfirmations(string txHash)
+        {
+            var seen = await GetTransactionConfirmationsCorroborated(txHash);
+            if (seen.Confirmed >= ConfirmationAgreementRequired) return seen.MinConfirmations;
+            if (seen.Known > 0 && seen.Confirmed == 0) return 0;
+            return null;
         }
 
         /// <summary>

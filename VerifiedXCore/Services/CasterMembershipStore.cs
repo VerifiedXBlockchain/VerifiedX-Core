@@ -163,6 +163,21 @@ namespace VerifiedXCore.Services
             if (!string.Equals(candidate.PrevRecordHash, head.PrevRecordHash, StringComparison.OrdinalIgnoreCase)) return false;
             if (string.IsNullOrEmpty(candidate.RecordHash) || string.Equals(candidate.RecordHash, head.RecordHash, StringComparison.OrdinalIgnoreCase)) return false;
             if (!string.Equals(ComputeCasterSetHash(candidate), ComputeCasterSetHash(head), StringComparison.OrdinalIgnoreCase)) return false;
+            // The same change, and every entry kept: a lower-hash sibling with the same addresses replaced the head whole,
+            // so it could put in another PeerIP or PublicKey for a member. Only the promoted member's PeerIP may differ:
+            // each proposer reads it from its own view of the candidate, and honest siblings must still converge. A
+            // Demotion and a Departure of one member are one change (an outdated member stopped as it was demoted).
+            static string Kind(string? change) => change is "Demotion" or "Departure" ? "Removal" : change ?? "";
+            if (!string.Equals(Kind(candidate.ChangeType), Kind(head.ChangeType), StringComparison.Ordinal)
+                || !string.Equals(candidate.ChangedAddress, head.ChangedAddress, StringComparison.Ordinal)) return false;
+            foreach (var c in candidate.Casters ?? new List<CasterInfo>())
+            {
+                var h = head.Casters?.FirstOrDefault(x => string.Equals(x.Address, c.Address, StringComparison.Ordinal));
+                if (h == null || !string.Equals(c.PublicKey, h.PublicKey, StringComparison.Ordinal)) return false;
+                var promoted = string.Equals(candidate.ChangeType, "Promotion", StringComparison.Ordinal)
+                    && string.Equals(c.Address, candidate.ChangedAddress, StringComparison.Ordinal);
+                if (!promoted && !string.Equals(c.PeerIP, h.PeerIP, StringComparison.Ordinal)) return false;
+            }
             return string.CompareOrdinal(candidate.RecordHash.ToLowerInvariant(), head.RecordHash.ToLowerInvariant()) < 0;
         }
 
@@ -371,6 +386,7 @@ namespace VerifiedXCore.Services
         {
             reason = "";
             if (candidate == null) { reason = "null candidate"; return false; }
+            if (FieldHoldingTheSeparator(candidate) is { } field) { reason = $"{field} holds the payload separator '|'"; return false; }
 
             if (candidate.RecordSeq == 0)
             {
@@ -448,6 +464,23 @@ namespace VerifiedXCore.Services
             return true;
         }
 
+        /// <summary>
+        /// The signed payload joins a record's fields with '|' (FormatCasterMembershipV1). A field that holds '|' made two
+        /// records with different fields - a longer ChangedAddress and one member fewer, say - the same bytes, so the
+        /// signatures on one were valid on the other. No honest field holds it (addresses, IPs, hex keys and hashes, a
+        /// change name), so a record with one is refused: with none, the payload reads back as exactly one record.
+        /// </summary>
+        internal static string? FieldHoldingTheSeparator(CasterMembershipRecord r)
+        {
+            static bool Has(string? s) => s != null && s.Contains('|');
+            if (Has(r.PrevRecordHash)) return "PrevRecordHash";
+            if (Has(r.ChangeType)) return "ChangeType";
+            if (Has(r.ChangedAddress)) return "ChangedAddress";
+            foreach (var c in r.Casters ?? new List<CasterInfo>())
+                if (c == null || Has(c.Address) || Has(c.PeerIP) || Has(c.PublicKey)) return "a caster entry";
+            return null;
+        }
+
         /// <summary>Seconds since our tip's timestamp; long.MaxValue with no tip (cold start counts as stale).</summary>
         public static long TipAgeSeconds()
         {
@@ -482,6 +515,17 @@ namespace VerifiedXCore.Services
                 .Select(c => c.Address).ToHashSet(StringComparer.Ordinal);
             if (expectedSeeds.Count == 0 || !expectedSeeds.SetEquals(candidateSet))
             { reason = "bootstrap reset caster set is not the hardcoded seed list"; return false; }
+            if (candidate.Casters!.Count != candidateSet.Count)
+            { reason = "bootstrap reset lists a seed twice"; return false; }
+            // Each seed's entry as hardcoded (BootstrapResetService.ProposeAsync builds it so): the set alone let a reset
+            // rewrite a seed's PeerIP or PublicKey, and its co-signers check no entry either.
+            foreach (var seed in SeedNodeService.GetBootstrapSeedPeers().Where(p => !string.IsNullOrEmpty(p.ValidatorAddress)))
+            {
+                var entry = candidate.Casters!.First(c => string.Equals(c.Address, seed.ValidatorAddress, StringComparison.Ordinal));
+                if (!string.Equals(entry.PeerIP, (seed.PeerIP ?? "").Replace("::ffff:", ""), StringComparison.Ordinal)
+                    || !string.Equals(entry.PublicKey, seed.ValidatorPublicKey ?? "", StringComparison.Ordinal))
+                { reason = $"bootstrap reset changes seed {seed.ValidatorAddress}'s entry from the hardcoded one"; return false; }
+            }
 
             var payload = CanonicalPayload(candidate);
             var seedSigners = new HashSet<string>(StringComparer.Ordinal);

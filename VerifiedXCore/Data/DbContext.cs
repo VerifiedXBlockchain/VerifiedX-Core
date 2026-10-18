@@ -289,6 +289,7 @@ namespace VerifiedXCore.Data
             // vault's ledger (up to about 10 MB) among them (fourth review, round 7). Not unique: older states may hold a
             // UID twice; lookups take the oldest (lowest Id), as the scan did.
             scTrei.EnsureIndexSafe(x => x.SmartContractUID, false);
+            DB_SmartContractStateTrei.GetCollection<RetiredContractUid>(RetiredContractUid.CollectionName).EnsureIndexSafe(x => x.SmartContractUID, false);
             // Not indexed by owner or token owner: an owner change writes the text a transaction names (TokenContractOwnerChange
             // takes any string), LiteDB refuses an index key over 1,023 bytes and the write was lost on a node with the
             // index and kept on one without it (round 33 added them, round 34 drops them where a node built them).

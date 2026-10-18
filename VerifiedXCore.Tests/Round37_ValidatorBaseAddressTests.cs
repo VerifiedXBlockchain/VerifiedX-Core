@@ -63,13 +63,15 @@ namespace VerifiedXCore.Tests
             try { Directory.Delete(_tempRoot, recursive: true); } catch { }
         }
 
-        private Transaction Signed(TransactionType type, string? baseAddress)
+        private Transaction Signed(TransactionType type, string? baseAddress, bool includeKey = true)
         {
             var tx = new Transaction
             {
                 FromAddress = _validator.Address, ToAddress = _validator.Address, Amount = 0M, Fee = 0M, Nonce = 0,
                 Timestamp = TimeUtil.GetTime(), TransactionType = type,
-                Data = JsonConvert.SerializeObject(new { ValidatorAddress = _validator.Address, IPAddress = "203.0.113.10", FrostPublicKey = _validator.PublicKey, BaseAddress = baseAddress, IsS3C = false }),
+                Data = includeKey
+                    ? JsonConvert.SerializeObject(new { ValidatorAddress = _validator.Address, IPAddress = "203.0.113.10", FrostPublicKey = _validator.PublicKey, BaseAddress = baseAddress, IsS3C = false })
+                    : JsonConvert.SerializeObject(new { ValidatorAddress = _validator.Address, IPAddress = "203.0.113.10", BaseAddress = baseAddress, IsS3C = false }),
             };
             tx.Build();
             tx.Signature = VerifiedXCore.Services.SignatureService.CreateSignature(tx.Hash, _validator.GetPrivKey, _validator.PublicKey);
@@ -110,6 +112,37 @@ namespace VerifiedXCore.Tests
             Assert.NotEqual(TransactionValidatorService.RegisteredBaseAddressReason, msg);
             var (_, noAddressMsg) = await TransactionValidatorService.VerifyTX(Signed(type, null), false, true, false, null, false, Gate);
             Assert.NotEqual(TransactionValidatorService.RegisteredBaseAddressReason, noAddressMsg);
+        }
+
+        /// <summary>
+        /// C-222: a heartbeat may leave out its FrostPublicKey (the registry keeps the one it has), and every such heartbeat
+        /// naming a BaseAddress was refused: the address was derived from the key alone. It is now derived from the key that
+        /// signed the heartbeat, which the signature check ties to the validator's address: its own address passes, another
+        /// (an admin-tag shape, or the address another account's key derives) is still refused. A registration still needs
+        /// its key from the gate.
+        /// </summary>
+        [Fact]
+        public async Task AHeartbeatWithoutItsKey_IsJudgedByTheKeyThatSignedIt()
+        {
+            const TransactionType heartbeat = TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT;
+            var own = ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(_validator.PublicKey);
+            var other = AccountData.CreateNewAccount(skipSave: true)!;
+            foreach (var height in new long?[] { null, Gate })
+            {
+                var (_, ownMsg) = await TransactionValidatorService.VerifyTX(Signed(heartbeat, own, includeKey: false), false, height != null, false, null, false, height);
+                Assert.NotEqual(TransactionValidatorService.RegisteredBaseAddressReason, ownMsg);
+
+                foreach (var wrong in new[] { "0x414444" + new string('1', 34), ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(other.PublicKey) })
+                {
+                    var (ok, msg) = await TransactionValidatorService.VerifyTX(Signed(heartbeat, wrong, includeKey: false), false, height != null, false, null, false, height);
+                    Assert.False(ok);
+                    Assert.Equal(TransactionValidatorService.RegisteredBaseAddressReason, msg);
+                }
+            }
+
+            var (registered, registerMsg) = await TransactionValidatorService.VerifyTX(Signed(TransactionType.VBTC_V2_VALIDATOR_REGISTER, own, includeKey: false), false, true, false, null, false, Gate);
+            Assert.False(registered);
+            Assert.NotEqual(TransactionValidatorService.RegisteredBaseAddressReason, registerMsg);   // refused for the missing key itself
         }
 
         [Fact]

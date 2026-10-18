@@ -45,8 +45,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <summary>Whether Bitcoin already knows a transaction (in a block or waiting for one); null when nobody could say. Replaceable for tests.</summary>
         internal static Func<string, Task<bool?>> KnownOnBitcoin = async txid =>
         {
-            var lookup = await BitcoinTransactionService.GetTransactionConfirmationsResilient(txid);
-            return lookup.Confirmations.HasValue ? true : null;
+            // Two hosts must know it: every signer of every vault asks the same servers, so one server's word stopped
+            // them all from ever sending it. Signing and sending a pinned transaction Bitcoin already has changes nothing
+            // (only the pinned transaction is signed, so it is the same transaction).
+            var seen = await BitcoinTransactionService.GetTransactionConfirmationsCorroborated(txid, stopWhenKnown: true);
+            return seen.Known >= BitcoinTransactionService.ConfirmationAgreementRequired ? true : null;
         };
 
         public static async Task RunLoop(CancellationToken ct)

@@ -3476,12 +3476,13 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (!string.IsNullOrEmpty(completingRow?.CompleteAfterBtcTxId)
                     && string.Equals(completingRow.CompleteAfterBtcTxId, payload.BTCTransactionHash, StringComparison.OrdinalIgnoreCase))
                 {
-                    var conf = await Services.BitcoinTransactionService.GetTransactionConfirmationsResilient(payload.BTCTransactionHash);
-                    if (!(conf.Confirmations >= 1))
+                    // The same two-host agreement as the node's own deferred completion.
+                    var confirmations = await Services.BitcoinTransactionService.GetAgreedConfirmations(payload.BTCTransactionHash);
+                    if (!(confirmations >= 1))
                         return JsonConvert.SerializeObject(new
                         {
                             Success = false,
-                            Message = $"{Services.VBTCService.AwaitingConfirmationMarker} Bitcoin transaction {payload.BTCTransactionHash} has not confirmed yet ({(conf.Confirmations == 0 ? "in the mempool" : "not seen by any server")}). This withdrawal takes back coins a withheld withdrawal was holding, so complete it after the first confirmation.",
+                            Message = $"{Services.VBTCService.AwaitingConfirmationMarker} Bitcoin transaction {payload.BTCTransactionHash} has not confirmed yet ({(confirmations == 0 ? "in the mempool" : "not seen in a block by two servers")}). This withdrawal takes back coins a withheld withdrawal was holding, so complete it after the first confirmation.",
                             CompleteAfterConfirmation = true
                         });
                 }

@@ -173,6 +173,23 @@ namespace VerifiedXCore.Bitcoin.Services
         internal static bool DecompileFailureSettled(string key) =>
             _decompileFailures.AddOrUpdate(key, 1, (_, n) => n + 1) >= 3;
 
+        /// <summary>
+        /// A decompile that failed for a reason of this node, not of the code: its disk. Every run resets the interpreter,
+        /// which creates and deletes its submissions folder, and two decompiles at once race on it (access denied, wrapped
+        /// by the meta-command's reflection call). Passed on rather than answered "not a vault", which left a vault created
+        /// in a block unwatched on this node alone, silently: in a block's apply the step fails and the block is flagged
+        /// (StateData.NoteApplyStepFailed); in validation the block is not taken now and is asked again. Code that fails on
+        /// every node (bad encoding, an interpreter error, running out of memory) is still answered "not a vault": flagging
+        /// it let one cheap transaction mark every node's state failed (round 32).
+        /// </summary>
+        internal static bool DecompileFaultIsNodeLocal(Exception? ex)
+        {
+            for (var e = ex; e != null; e = e.InnerException)
+                if ((e is System.IO.IOException && e is not System.IO.EndOfStreamException) || e is UnauthorizedAccessException)
+                    return true;
+            return false;
+        }
+
         public static bool IsVbtcV2Contract(SmartContractStateTrei? scState)
         {
             if (scState == null || string.IsNullOrEmpty(scState.SmartContractUID) || string.IsNullOrEmpty(scState.ContractData))
@@ -198,7 +215,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (isV2 && plain)
                     isV2 = VerifiedXCore.Services.LedgerIntegrityRules.VaultCodeIsPlain(scMain, scState.ContractData);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!DecompileFaultIsNodeLocal(ex))
             {
                 ErrorLogUtility.LogError($"IsVbtcV2Contract: contract {scState.SmartContractUID} could not be decompiled: {ex.Message}",
                     "VBTCService.IsVbtcV2Contract()");
@@ -233,7 +250,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
             bool isV1;
             try { isV1 = DeclaresVbtcV1(SmartContractMain.GenerateSmartContractInMemory(scState.ContractData)); }
-            catch
+            catch (Exception ex) when (!DecompileFaultIsNodeLocal(ex)) // a fault of this node's disk is passed on, as for V2
             {
                 if (!DecompileFailureSettled("v1|" + scState.SmartContractUID + "|" + digest))
                     return false; // not cached: asked again next time (round 28)
@@ -2280,8 +2297,9 @@ namespace VerifiedXCore.Bitcoin.Services
                         int? pinnedTxConfirmations = 0;
                         if (pinLookup.Success && !anyPinnedUnspent && !string.IsNullOrEmpty(pinnedTxId))
                         {
-                            var confLookup = await BitcoinTransactionService.GetTransactionConfirmationsResilient(pinnedTxId);
-                            pinnedTxConfirmations = confLookup.Confirmations;
+                            // "Paid" submits the completion, which no block validation re-asks Bitcoin about: two hosts
+                            // must agree. One host alone reads as unknown, so the pinned transaction is reused (not rebuilt).
+                            pinnedTxConfirmations = await BitcoinTransactionService.GetAgreedConfirmations(pinnedTxId);
                         }
 
                         var disposition = DecidePinnedTxDisposition(pinLookup.Success, anyPinnedUnspent, pinnedTxConfirmations);
@@ -2511,10 +2529,12 @@ namespace VerifiedXCore.Bitcoin.Services
             if (HasPendingCompletion(row.TransactionHash, row.SmartContractUID))
                 return (DeferredCompletionAction.Wait, $"The completion for withdrawal {row.TransactionHash} is already in the mempool.");
 
-            var lookup = await BitcoinTransactionService.GetTransactionConfirmationsResilient(txid);
-            if (lookup.Confirmations >= 1)
+            // The completion is submitted only once two hosts have the reclaim in a block: one server's word submitted it
+            // while the withheld transaction could still replace the reclaim, and the completion then stood unpaid.
+            var confirmations = await BitcoinTransactionService.GetAgreedConfirmations(txid);
+            if (confirmations >= 1)
                 return (DeferredCompletionAction.Submit, string.Empty);
-            if (lookup.Confirmations == 0)
+            if (confirmations == 0)
                 return (DeferredCompletionAction.Wait, AwaitingConfirmationMessage(txid, "is in the mempool, waiting for its first confirmation"));
 
             // Unknown to every server: never broadcast (coordinator died after signing), evicted, or replaced.
