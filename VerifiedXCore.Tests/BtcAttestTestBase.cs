@@ -51,6 +51,7 @@ namespace VerifiedXCore.Tests
 
         /// <summary>Four registered validators that hold the validator balance.</summary>
         private readonly long _priorPathAudit = Globals.PathAuditRulesHeight;
+        private readonly bool _priorFrostLibrary = Globals.FrostFFIAvailable;
         protected readonly List<V> Signers = Enumerable.Range(0, 4).Select(_ => NewKey()).ToList();
         /// <summary>Registered and active, but without the validator balance.</summary>
         protected readonly V Unfunded = NewKey();
@@ -66,6 +67,7 @@ namespace VerifiedXCore.Tests
             Globals.BitcoinAttestationRecordHeight = H1;
             Globals.BitcoinAttestationHeight = long.MaxValue; // no enforcement height unless a test sets one
             Globals.PathAuditRulesHeight = H1;               // as released: the second path audit's rules start with recording
+            Globals.FrostFFIAvailable = true;                // the validators here have a FROST library that passed its check
             BtcChainRules.OverrideForTests = realMainnetRules ? null : BtcChainRules.Regtest;
             BtcAttestRules.DepthOverride = realMainnetRules ? null : 3;
             // The signers' wait for a pin's block to settle is a matter of blocks passing, tested on its own
@@ -126,6 +128,7 @@ namespace VerifiedXCore.Tests
             Globals.BitcoinAttestationRecordHeight = _priorRecord;
             Globals.BitcoinAttestationHeight = _priorEnforce;
             Globals.PathAuditRulesHeight = _priorPathAudit;
+            Globals.FrostFFIAvailable = _priorFrostLibrary;
             Globals.BitcoinCheckpointHeightMainnet = _priorCheckpointHeight;
             Globals.BitcoinCheckpointHeadersMainnet = _priorCheckpointHeaders;
             Globals.WithdrawalEscrowHeight = _priorWithdrawalGates[0];

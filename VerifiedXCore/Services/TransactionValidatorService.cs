@@ -1569,6 +1569,11 @@ namespace VerifiedXCore.Services
                                             if (txRequest.FromAddress != fromAddress)
                                                 return (txResult, "From address in data must match transaction FromAddress.");
 
+                                            // The apply credits tx.ToAddress; from VbtcEnvelopeRulesHeight Data names the same
+                                            // recipient, as the typed transfer requires, so every reader agrees who was paid.
+                                            if ((blockHeight ?? (Globals.LastBlock.Height + 1)) >= Globals.VbtcEnvelopeRulesHeight && txRequest.ToAddress != toAddress)
+                                                return (txResult, "To address in data must match transaction ToAddress.");
+
                                             // Reserve moves must use the typed VBTC_V2_TRANSFER path where the
                                             // reserve lifecycle (unlock time, deferred apply, callback) is enforced —
                                             // this envelope path would move the ledger immediately.

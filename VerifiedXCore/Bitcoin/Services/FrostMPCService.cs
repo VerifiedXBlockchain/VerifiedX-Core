@@ -261,6 +261,7 @@ namespace VerifiedXCore.Bitcoin.Services
             Func<string>? newContractUid = null)
         {
             var run = new FrostDkgRun();
+            if (!FrostLibraryGate.Ready) { run.Error = FrostLibraryGate.Unavailable; return run; }
             var leaderAddress = ownerAddress;
             var attempts = preSignedAuths is { Count: > 0 } ? Math.Min(MaxDkgAttempts, preSignedAuths.Count) : MaxDkgAttempts;
             var participants = validators.GroupBy(v => v.ValidatorAddress, StringComparer.Ordinal).Select(g => g.First()).ToList();
@@ -1074,6 +1075,9 @@ namespace VerifiedXCore.Bitcoin.Services
             int inputIndex = 0,
             FrostSigningTxContext? txContext = null)
         {
+            if (!FrostLibraryGate.Ready)
+                return new FrostCeremonyOutcome { FailureCode = FrostCeremonyFailureCode.LibraryUnavailable, Detail = FrostLibraryGate.Unavailable, InputIndex = inputIndex };
+
             // Reuse the pre-signed session ID if provided (web wallet flow), otherwise generate a new one.
             // The pre-signed signatures embed this session ID in the message, so it MUST match.
             var sessionId = !string.IsNullOrEmpty(preSignedAuth?.SessionId) ? preSignedAuth.SessionId : Guid.NewGuid().ToString();

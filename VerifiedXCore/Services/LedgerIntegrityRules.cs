@@ -180,8 +180,12 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static string? VbtcDataKeysAreDistinct(Transaction tx, long height)
         {
-            if (tx?.Data == null || height < Globals.PathAuditRulesHeight) return null;
-            if (!tx.TransactionType.ToString().StartsWith("VBTC_V2_", StringComparison.Ordinal) || VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType)) return null;
+            if (tx?.Data == null || VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType)) return null;
+            // From Globals.VbtcEnvelopeRulesHeight a vBTC transfer sent as a contract call is held to the same rule.
+            if (tx.TransactionType.ToString().StartsWith("VBTC_V2_", StringComparison.Ordinal)
+                    ? height < Globals.PathAuditRulesHeight
+                    : height < Globals.VbtcEnvelopeRulesHeight || DispatchedCall(tx.Data).Function is not ("TransferVBTCV2()" or "TransferVBTCMultiV2()"))
+                return null;
             JToken root;
             try { root = JToken.Parse(tx.Data); }
             catch { return null; } // not JSON: the type's own rules judge it

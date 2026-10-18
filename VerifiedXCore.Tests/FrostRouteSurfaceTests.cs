@@ -51,12 +51,18 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task SuffixedRound2_StillRouted_AndRejectsUnknownSession()
         {
-            using var server = NewServer();
-            var client = server.CreateClient();
-            var r = await client.PostAsync("/frost/sign/round2/no-such-session", Json("{}"));
-            // Routed (not a routing 404 with empty body): the handler answers with its own JSON.
-            var body = await r.Content.ReadAsStringAsync();
-            Assert.Contains("Signing session not found", body);
+            var priorLibrary = Globals.FrostFFIAvailable;
+            Globals.FrostFFIAvailable = true;   // a node whose FROST library passed its check
+            try
+            {
+                using var server = NewServer();
+                var client = server.CreateClient();
+                var r = await client.PostAsync("/frost/sign/round2/no-such-session", Json("{}"));
+                // Routed (not a routing 404 with empty body): the handler answers with its own JSON.
+                var body = await r.Content.ReadAsStringAsync();
+                Assert.Contains("Signing session not found", body);
+            }
+            finally { Globals.FrostFFIAvailable = priorLibrary; }
         }
 
         [Fact]

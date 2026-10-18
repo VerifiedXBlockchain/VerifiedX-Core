@@ -364,6 +364,14 @@ namespace VerifiedXCore
         public static long ReserveRecoverReadsEveryRowHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height a vBTC V2 transfer sent as a contract call (Function "TransferVBTCV2()" or
+        /// "TransferVBTCMultiV2()" under another transaction type) is held to the rules the typed VBTC_V2_TRANSFER
+        /// already meets: its Data names each key once, in one spelling. The apply reads the last of a repeated key while
+        /// other readers may take the first. Not active yet.
+        /// </summary>
+        public static long VbtcEnvelopeRulesHeight = 999_999_999_999;
+
+        /// <summary>
         /// From this height a reserve's transaction other than a TX (or its Register()) carries no Amount: the apply burned
         /// it at once and CallBack()/Recover() return only TX amounts (LedgerIntegrityRules.ReserveMovesVfxOnlyByTransfer).
         /// Not active yet.

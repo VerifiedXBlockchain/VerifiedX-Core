@@ -526,8 +526,12 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
             return null;
         }
         
-        /// <summary>Maximum number of participant addresses per session (supports mainnet scale)</summary>
-        public const int MAX_PARTICIPANTS = 200;
+        /// <summary>
+        /// Maximum number of participant addresses per session: the most a vault's key ceremony may have
+        /// (<see cref="FrostDkgAttestation.MaxParticipants"/>). A lower cap here refused, at the start of a ceremony, the
+        /// participant count consensus requires once the eligible validators outgrow it, so no public vault could be made.
+        /// </summary>
+        public const int MAX_PARTICIPANTS = FrostDkgAttestation.MaxParticipants;
         
         /// <summary>Minimum required threshold percentage</summary>
         public const int MIN_THRESHOLD = 51;

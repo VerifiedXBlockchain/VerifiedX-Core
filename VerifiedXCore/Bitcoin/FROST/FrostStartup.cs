@@ -629,6 +629,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                 {
                     try
                     {
+                        // A node whose FROST library has not passed its check cannot take part (FrostLibraryGate).
+                        if (!FrostLibraryGate.Ready)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = FrostLibraryGate.Unavailable }));
+                            return;
+                        }
+
                         // FIND-0013 Fix: Opportunistic cleanup to prevent unbounded session growth
                         FrostSessionStorage.CleanupOldSessions();
 
@@ -1012,6 +1020,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                 /// </summary>
                 endpoints.MapPost("/frost/dkg/round1", async context =>
                 {
+                    // A node whose FROST library has not passed its check cannot take part (FrostLibraryGate).
+                    if (!FrostLibraryGate.Ready)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = FrostLibraryGate.Unavailable }));
+                        return;
+                    }
+
                     // Not used by any coordinator, and an open door: anyone could put a commitment, share or verification
                     // into a validator's session ahead of the leader's, and the validator was then dropped as failing while
                     // its sender was never named (fourth review, round 4). It changes no session.
@@ -1210,6 +1226,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                 /// </summary>
                 endpoints.MapPost("/frost/dkg/round2/{sessionId}", async context =>
                 {
+                    // A node whose FROST library has not passed its check cannot take part (FrostLibraryGate).
+                    if (!FrostLibraryGate.Ready)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = FrostLibraryGate.Unavailable }));
+                        return;
+                    }
+
                     try
                     {
                         var sessionId = context.Request.RouteValues["sessionId"] as string;
@@ -1429,6 +1453,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                 /// </summary>
                 endpoints.MapPost("/frost/dkg/share", async context =>
                 {
+                    // A node whose FROST library has not passed its check cannot take part (FrostLibraryGate).
+                    if (!FrostLibraryGate.Ready)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = FrostLibraryGate.Unavailable }));
+                        return;
+                    }
+
                     // Not used by any coordinator, and an open door: anyone could put a commitment, share or verification
                     // into a validator's session ahead of the leader's, and the validator was then dropped as failing while
                     // its sender was never named (fourth review, round 4). It changes no session.
@@ -1577,6 +1609,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                 /// </summary>
                 endpoints.MapPost("/frost/dkg/shares/{sessionId}", async context =>
                 {
+                    // A node whose FROST library has not passed its check cannot take part (FrostLibraryGate).
+                    if (!FrostLibraryGate.Ready)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = FrostLibraryGate.Unavailable }));
+                        return;
+                    }
+
                     try
                     {
                         var sessionId = context.Request.RouteValues["sessionId"] as string;
@@ -1849,6 +1889,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                 /// </summary>
                 endpoints.MapPost("/frost/dkg/round3", async context =>
                 {
+                    // A node whose FROST library has not passed its check cannot take part (FrostLibraryGate).
+                    if (!FrostLibraryGate.Ready)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = FrostLibraryGate.Unavailable }));
+                        return;
+                    }
+
                     // Not used by any coordinator, and an open door: anyone could put a commitment, share or verification
                     // into a validator's session ahead of the leader's, and the validator was then dropped as failing while
                     // its sender was never named (fourth review, round 4). It changes no session.
@@ -2337,6 +2385,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                 {
                     try
                     {
+                        // A node whose FROST library has not passed its check cannot take part (FrostLibraryGate).
+                        if (!FrostLibraryGate.Ready)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = FrostLibraryGate.Unavailable }));
+                            return;
+                        }
+
                         // FIND-0013 Fix: Opportunistic cleanup
                         FrostSessionStorage.CleanupOldSessions();
 
@@ -2947,6 +3003,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                 /// </summary>
                 endpoints.MapPost("/frost/sign/round2/{sessionId}", async context =>
                 {
+                    // A node whose FROST library has not passed its check cannot take part (FrostLibraryGate).
+                    if (!FrostLibraryGate.Ready)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = FrostLibraryGate.Unavailable }));
+                        return;
+                    }
+
                     try
                     {
                         var sessionId = context.Request.RouteValues["sessionId"] as string;
@@ -3030,6 +3094,16 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 LogUtility.Log($"[FROST] Sign Round 2 REFUSED for session {sessionId}: withdrawal {session.WithdrawalRequestHash}: {ended}", "FrostStartup.SignRound2");
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = ended }));
+                                return;
+                            }
+                            // ... nor a bridge exit that was completed or failed after the ceremony started (sign/start checks it).
+                            if (!string.IsNullOrEmpty(session.WithdrawalRequestHash)
+                                && session.WithdrawalRequestHash.StartsWith(FrostSigningAuthorization.BtcExitPrefix, StringComparison.OrdinalIgnoreCase)
+                                && FrostSigningAuthorization.BridgeExitNoLongerSignable(session.WithdrawalRequestHash, session.SmartContractUID ?? "") is { } exitEnded)
+                            {
+                                LogUtility.Log($"[FROST] Sign Round 2 REFUSED for session {sessionId}: bridge exit {session.WithdrawalRequestHash}: {exitEnded}", "FrostStartup.SignRound2");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = exitEnded }));
                                 return;
                             }
                             if (FrostSigningAuthorization.NotAtNetworkHeightToSign(session.SmartContractUID) is { } notReadyForShare)

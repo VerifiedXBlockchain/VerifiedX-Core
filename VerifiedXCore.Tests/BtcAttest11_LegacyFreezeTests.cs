@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using VerifiedXCore.Bitcoin.Attestation;
+using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Data;
 using VerifiedXCore.Extensions;
 using VerifiedXCore.Models;
@@ -153,6 +154,57 @@ namespace VerifiedXCore.Tests
             var (admitted, why) = await TransactionValidatorService.VerifyTX(Transfer(legacy.Uid, 0.01M, _holder, Minter));
             Assert.False(admitted);
             Assert.Contains("has been frozen", why);
+        }
+
+        private VfxTx Complete(string vault, string requestHash, V from) =>
+            SignedBy(from, from.Address, TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE,
+                new { Function = "VBTCWithdrawalComplete()", ContractUID = vault, WithdrawalRequestHash = requestHash, BTCTransactionHash = Convert.ToHexString(Guid.NewGuid().ToByteArray()).ToLowerInvariant() + new string('0', 32) });
+
+        private static decimal Ledger(string vault, V holder) =>
+            SmartContractStateTrei.GetSmartContractState(vault)!.SCStateTreiTokenizationTXes!
+                .Where(t => t.FromAddress == holder.Address || t.ToAddress == holder.Address).Sum(t => t.Amount);
+
+        [Fact]
+        public async Task BetweenTheRecordingAndTheEnforcementHeights_AnOlderVaultsWithdrawalsWorkAsBefore_AndFromTheLatterAnOpenOneIsLeftAsItIs()
+        {
+            var legacy = await CreateVault(H1 - 50);
+            await Start();
+            Assert.True(BtcLegacyFreeze.IsLegacyVault(legacy.Uid));
+            await Apply(Tip + 1, Transfer(legacy.Uid, 0.01M, Minter, _holder));
+
+            // In the window a holder requests a withdrawal: its vBTC is held from the request, and the request completes.
+            var request = Request(legacy.Uid, 0.004M, _holder);
+            var (ok, why) = await Verify(request, Tip + 1);
+            Assert.True(ok, why);
+            await Apply(Tip + 1, request);
+            Assert.Equal(0.006M, Ledger(legacy.Uid, _holder));
+            var row = VBTCWithdrawalRequest.GetByTransactionHash(request.Hash, legacy.Uid)!;
+            Assert.False(row.IsCompleted);
+
+            var complete = Complete(legacy.Uid, request.Hash, _holder);
+            (ok, why) = await Verify(complete, Tip + 1);
+            Assert.True(ok, why);
+            await Apply(Tip + 1, complete);
+            row = VBTCWithdrawalRequest.GetByTransactionHash(request.Hash, legacy.Uid)!;
+            Assert.True(row.IsCompleted);
+            Assert.Equal(VBTCWithdrawalStatus.Completed, row.Status);
+            Assert.Equal(0.006M, Ledger(legacy.Uid, _holder));
+
+            // A request still open at the enforcement height: its completion is no longer taken, its vBTC stays held, and
+            // nothing else moves on the vault (it is completed or settled by hand, not by a transaction).
+            var open = Request(legacy.Uid, 0.002M, _holder);
+            (ok, why) = await Verify(open, H2 - 1);
+            Assert.True(ok, why);
+            await Apply(H2 - 1, open);
+            Assert.Equal(0.004M, Ledger(legacy.Uid, _holder));
+            (ok, why) = await Verify(Complete(legacy.Uid, open.Hash, _holder), H2);
+            Assert.False(ok);
+            Assert.Contains("no longer accepted (from block " + H2, why);
+            await Frozen(SignedBy(_holder, _holder.Address, TransactionType.VBTC_V2_WITHDRAWAL_CANCEL,
+                new { Function = "VBTCWithdrawalCancel()", ContractUID = legacy.Uid, WithdrawalRequestHash = open.Hash, FailureProof = "" }), H2);
+            await Apply(H2);
+            Assert.False(VBTCWithdrawalRequest.GetByTransactionHash(open.Hash, legacy.Uid)!.IsCompleted);
+            Assert.Equal(0.004M, Ledger(legacy.Uid, _holder));
         }
 
         [Fact]

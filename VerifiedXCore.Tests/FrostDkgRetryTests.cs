@@ -26,10 +26,17 @@ namespace VerifiedXCore.Tests
     [Collection("FrostDkgRetry")]
     public class FrostDkgRetryTests : IDisposable
     {
-        public FrostDkgRetryTests() => FrostMPCService.RecentDkgFailures.Clear();
+        private readonly bool _priorLibrary = Globals.FrostFFIAvailable;
+
+        public FrostDkgRetryTests()
+        {
+            FrostMPCService.RecentDkgFailures.Clear();
+            Globals.FrostFFIAvailable = true;   // the ceremonies here run on a node whose FROST library passed its check
+        }
 
         public void Dispose()
         {
+            Globals.FrostFFIAvailable = _priorLibrary;
             FrostMPCService.AttemptRunnerForTests = null;
             FrostMPCService.RecentDkgFailures.Clear();
         }

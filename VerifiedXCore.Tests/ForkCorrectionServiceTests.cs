@@ -170,7 +170,7 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public void FromTheAddressOnlyHeight_ANameRecipient_IsRefusedBeforeAnyRollback()
+        public void FromThePathAuditHeight_ANameRecipient_IsRefusedBeforeAnyRollback()
         {
             var prior = Globals.PathAuditRulesHeight;
             try

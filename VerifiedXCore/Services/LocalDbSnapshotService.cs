@@ -82,6 +82,28 @@ namespace VerifiedXCore.Services
                     CopySnapshotFile(logPath, Path.Combine(destDir, Path.GetFileName(logPath)));
             }
 
+            // The cancellations and votes are kept in the vBTC file, which is left out (it holds key shares): a node booted
+            // from this snapshot rebuilds the withdrawal store from the chain first, which writes them back.
+            var withdrawalStoreCopy = Path.Combine(destDir, DbContext.RSRV_DB_VBTC_WITHDRAWAL_REQUESTS);
+            if (File.Exists(withdrawalStoreCopy))
+            {
+                try
+                {
+                    using (var copy = new LiteDatabase(new ConnectionString { Filename = withdrawalStoreCopy, Connection = ConnectionType.Direct, ReadOnly = false }))
+                        Bitcoin.Services.VBTCWithdrawalStoreRebuildService.MarkUnfinishedIn(copy);
+                    ConsoleWriterService.Output($"{DbContext.RSRV_DB_VBTC_WITHDRAWAL_REQUESTS}: withdrawal requests, cancellations and votes are rebuilt from the chain on the first boot from this snapshot.");
+                }
+                catch (Exception ex)
+                {
+                    // Without the mark a node booted from it would have no cancellations; without the file, no bridge
+                    // locks. Neither is a snapshot to boot from: it is removed.
+                    try { Directory.Delete(destDir, recursive: true); } catch { }
+                    LogUtility.Log($"Chain DB snapshot abandoned: the withdrawal store copy could not be marked for rebuild ({ex.Message})", "LocalDbSnapshotService.CreateChainSnapshotAsync()");
+                    ConsoleWriterService.Output($"Chain DB snapshot FAILED: could not mark {DbContext.RSRV_DB_VBTC_WITHDRAWAL_REQUESTS} for rebuild ({ex.Message}). Nothing was kept.");
+                    return Task.CompletedTask;
+                }
+            }
+
             LogUtility.Log($"Chain DB snapshot completed: {destDir}", "LocalDbSnapshotService.CreateChainSnapshotAsync()");
             ConsoleWriterService.Output("Chain DB snapshot finished.");
             return Task.CompletedTask;

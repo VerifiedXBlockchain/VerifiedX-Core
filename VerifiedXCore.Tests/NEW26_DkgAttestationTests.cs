@@ -45,8 +45,11 @@ namespace VerifiedXCore.Tests
         private readonly string _groupKey;
         private readonly string _address;
 
+        private readonly bool _priorLibrary = Globals.FrostFFIAvailable;
+
         public NEW26_DkgAttestationTests()
         {
+            Globals.FrostFFIAvailable = true;   // the ceremonies here run on a node whose FROST library passed its check
             _tempRoot = Path.Combine(Path.GetTempPath(), $"new26_test_{Guid.NewGuid():N}") + Path.DirectorySeparatorChar;
             Directory.CreateDirectory(_tempRoot);
             _priorCustomPath = Globals.CustomPath;
@@ -72,6 +75,7 @@ namespace VerifiedXCore.Tests
 
         public void Dispose()
         {
+            Globals.FrostFFIAvailable = _priorLibrary;
             try { DbContext.CloseDB(); } catch { }
             Globals.LastBlock = _priorLastBlock;
             Globals.VbtcV2DkgAttestationHeight = _priorActivation;

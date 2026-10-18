@@ -25,7 +25,9 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// <summary>The transaction rebuilt at execute time no longer matches what was prepared/pre-signed.</summary>
         InputCountMismatch,
         /// <summary>Unhandled exception in the coordinator.</summary>
-        CoordinatorException
+        CoordinatorException,
+        /// <summary>This node's FROST library has not passed its startup check: it coordinates nothing (retryable after a restart).</summary>
+        LibraryUnavailable
     }
 
     /// <summary>
@@ -69,6 +71,7 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
             || FailureCode == FrostCeremonyFailureCode.StartRejectedByValidators
             || FailureCode == FrostCeremonyFailureCode.Round1InsufficientNonces
             || FailureCode == FrostCeremonyFailureCode.Round2InsufficientShares
+            || FailureCode == FrostCeremonyFailureCode.LibraryUnavailable
             || FailureCode == FrostCeremonyFailureCode.InputCountMismatch;
 
         /// <summary>

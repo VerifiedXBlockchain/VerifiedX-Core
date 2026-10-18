@@ -419,6 +419,7 @@ namespace VerifiedXCore
                     Globals.FrostFFIAvailable = frostResult.AllChecksPassed;
                     Globals.FrostFFIVersion = frostResult.LibraryVersion;
                     Globals.FrostFFICheckSummary = frostResult.Summary;
+                    Bitcoin.FROST.FrostLibraryGate.CheckFinished();
                     LogUtility.Log(frostResult.Summary, "FrostFFICheck");
                     if (frostResult.AllChecksPassed)
                     {
@@ -428,14 +429,17 @@ namespace VerifiedXCore
                     {
                         Console.WriteLine("[FROST FFI] Health check FAILED — see logs for details");
                         ErrorLogUtility.LogError($"FROST FFI check failed: {string.Join("; ", frostResult.Errors)}", "FrostFFICheck");
+                        Bitcoin.FROST.FrostLibraryGate.ReportCheckFailed(string.Join("; ", frostResult.Errors));
                     }
                 }
                 catch (Exception ex)
                 {
                     Globals.FrostFFIAvailable = false;
                     Globals.FrostFFICheckSummary = $"FROST FFI check error: {ex.Message}";
+                    Bitcoin.FROST.FrostLibraryGate.CheckFinished();
                     ErrorLogUtility.LogError($"FROST FFI check error: {ex}", "FrostFFICheck");
                     Console.WriteLine($"[FROST FFI] Health check ERROR: {ex.Message}");
+                    Bitcoin.FROST.FrostLibraryGate.ReportCheckFailed(ex.Message);
                 }
             });
 

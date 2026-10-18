@@ -151,7 +151,7 @@ namespace VerifiedXCore.Services
                 // was built by a release that did not have them: seeding here would bond other validators, at another
                 // height, than the rest of the network did.
                 if (height != Globals.ValidatorBondHeight)
-                    throw new InvalidOperationException($"the validator bonds start at block {Globals.ValidatorBondHeight} and this node's state has none at block {height}: it was built without them and must be rebuilt from the chain");
+                    throw new VerifiedXCore.Data.NodeStateFaultException($"the validator bonds start at block {Globals.ValidatorBondHeight} and this node's state has none at block {height}: it was built without them and must be rebuilt from the chain");
 
                 // The validators active before this block are bonded here; whether each holds its stake is looked at in
                 // the next block, once this block's own transactions (which were judged before any bond existed) have

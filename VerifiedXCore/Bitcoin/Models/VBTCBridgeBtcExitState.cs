@@ -1,5 +1,6 @@
 using LiteDB;
 using VerifiedXCore.Data;
+using VerifiedXCore.Utilities;
 
 namespace VerifiedXCore.Bitcoin.Models
 {
@@ -110,8 +111,11 @@ namespace VerifiedXCore.Bitcoin.Models
                 GetCollection().Insert(rec);
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                // A fault of this node's storage stops it as a failed apply; the caller still sees false.
+                StateData.NoteApplyStepFailed(StateWriteContext.StampHeight, ex);
+                ErrorLogUtility.LogError($"TryInsert: exit {rec.BaseBurnTxHash} not written: {ex.Message}", "VBTCBridgeBtcExitState.TryInsert");
                 return false;
             }
         }
@@ -122,7 +126,13 @@ namespace VerifiedXCore.Bitcoin.Models
 
         public static bool Update(VBTCBridgeBtcExitState rec)
         {
-            try { return GetCollection().Update(rec); } catch { return false; }
+            try { return GetCollection().Update(rec); }
+            catch (Exception ex)
+            {
+                StateData.NoteApplyStepFailed(StateWriteContext.StampHeight, ex);
+                ErrorLogUtility.LogError($"Update: exit {rec.BaseBurnTxHash} not written: {ex.Message}", "VBTCBridgeBtcExitState.Update");
+                return false;
+            }
         }
 
         public static void MarkComplete(string baseBurnTxHash, string btcTxHash)
@@ -136,7 +146,11 @@ namespace VerifiedXCore.Bitcoin.Models
                 r.BtcTxHash = btcTxHash;
                 c.Update(r);
             }
-            catch { }
+            catch (Exception ex)
+            {
+                StateData.NoteApplyStepFailed(StateWriteContext.StampHeight, ex);
+                ErrorLogUtility.LogError($"MarkComplete: exit {baseBurnTxHash} not written: {ex.Message}", "VBTCBridgeBtcExitState.MarkComplete");
+            }
         }
     }
 }
