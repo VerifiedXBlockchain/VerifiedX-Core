@@ -105,12 +105,30 @@ namespace VerifiedXCore.Tests
             Assert.False(string.IsNullOrEmpty(shop.StunSecret));
             Assert.False(shop.StunSecretConfirmed);
 
-            MessageService.ConfirmStunSecret(new Message { Data = DstSessionAuth.NewSecret() }, shopEndPoint);
+            MessageService.ConfirmStunSecret(new Message { Data = DstSessionAuth.NewSecret() }, shopEndPoint, _udp);
             Assert.False(shop.StunSecretConfirmed);
-            MessageService.ConfirmStunSecret(new Message { Data = shop.StunSecret }, IPEndPoint.Parse("127.0.0.1:50997"));
+            MessageService.ConfirmStunSecret(new Message { Data = shop.StunSecret }, IPEndPoint.Parse("127.0.0.1:50997"), _udp);
             Assert.False(shop.StunSecretConfirmed);
-            MessageService.ConfirmStunSecret(new Message { Data = shop.StunSecret }, shopEndPoint);
+            MessageService.ConfirmStunSecret(new Message { Data = shop.StunSecret }, shopEndPoint, _udp);
             Assert.True(shop.StunSecretConfirmed);
+        }
+
+        [Fact]
+        public void AnUnconfirmedShop_IsNotKeptAliveOrListedAsAClient()
+        {
+            var shopEndPoint = IPEndPoint.Parse("127.0.0.1:50996");
+            var helo = new Message { Type = MessageType.STUNConnect, Data = "helo" };
+            helo.Build();
+            MessageService.STUNConnect(helo, shopEndPoint, _udp);
+            var shop = Globals.ConnectedShops[shopEndPoint.ToString()];
+
+            MessageService.ShopKeepAlive(new Message { Type = MessageType.ShopKeepAlive }, shopEndPoint, _udp);
+            Assert.False(Globals.ConnectedClients.ContainsKey(shopEndPoint.ToString()));
+            Assert.False(shop.KeepAliveStarted);
+
+            MessageService.ConfirmStunSecret(new Message { Data = shop.StunSecret }, shopEndPoint, _udp);
+            Assert.True(Globals.ConnectedClients.ContainsKey(shopEndPoint.ToString()));
+            Assert.True(shop.KeepAliveStarted);
         }
     }
 }

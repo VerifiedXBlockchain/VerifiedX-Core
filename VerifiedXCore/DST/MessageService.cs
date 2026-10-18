@@ -138,7 +138,7 @@ namespace VerifiedXCore.DST
                                     ReceiveStunSecret(message, endPoint, udpClient);
                                     break;
                                 case MessageType.STUNSecretConfirm:
-                                    ConfirmStunSecret(message, endPoint);
+                                    ConfirmStunSecret(message, endPoint, udpClient);
                                     break;
                                 default:
                                     break;
@@ -318,13 +318,31 @@ namespace VerifiedXCore.DST
             udpClient.Send(Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(confirm)), endPoint);
         }
 
-        /// <summary>STUN side: a shop returning the secret issued to its endpoint; from then on punches are forwarded to it.</summary>
-        public static void ConfirmStunSecret(Message message, IPEndPoint endPoint)
+        /// <summary>
+        /// STUN side: a shop returning the secret issued to its endpoint. From then on punches are forwarded to it and it is
+        /// kept alive, which starts here if its keep-alive request came before the confirmation.
+        /// </summary>
+        public static void ConfirmStunSecret(Message message, IPEndPoint endPoint, UdpClient udpClient)
         {
             if (Globals.ConnectedShops.TryGetValue(endPoint.ToString(), out var shop) && !string.IsNullOrEmpty(shop.StunSecret)
                 && !string.IsNullOrEmpty(message.Data) && message.Data.Length == shop.StunSecret.Length
                 && CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(message.Data), Encoding.UTF8.GetBytes(shop.StunSecret)))
+            {
                 shop.StunSecretConfirmed = true;
+                StartShopKeepAlive(shop, endPoint, udpClient);
+            }
+        }
+
+        /// <summary>STUN side: keeps a confirmed shop alive and lists it among the connected endpoints.</summary>
+        private static void StartShopKeepAlive(DSTConnection shop, IPEndPoint endPoint, UdpClient udpClient)
+        {
+            shop.LastReceiveMessage = TimeUtil.GetTime();
+            if (!shop.KeepAliveStarted)
+            {
+                shop.KeepAliveStarted = true;
+                _ = KeepAliveService.KeepAlive(7, endPoint, udpClient, shop.ConnectionId, true);
+            }
+            Globals.ConnectedClients[endPoint.ToString()] = shop;
         }
 
         public static void KeepAlive(Message message, IPEndPoint endPoint, UdpClient udpClient, string shopURL = "NA")
@@ -383,20 +401,11 @@ namespace VerifiedXCore.DST
             {
                 message.ReceivedTimestamp = TimeUtil.GetTime();
 
-                if (Globals.ConnectedShops.TryGetValue(endPoint.ToString(), out var shop))
-                {
-                    if (shop != null)
-                    {
-                        shop.LastReceiveMessage = TimeUtil.GetTime();
-                        if (!shop.KeepAliveStarted)
-                        {
-                            shop.KeepAliveStarted = true;
-                            _ = KeepAliveService.KeepAlive(7, endPoint, udpClient, shop.ConnectionId, true);
-                        }
-
-                        Globals.ConnectedClients[endPoint.ToString()] = shop;
-                    }
-                }
+                // Only a shop that returned its registration secret showed it receives at this endpoint: an unconfirmed
+                // entry (a helo from a spoofed source) gets no keep-alive loop and is not listed as a client, which
+                // AssetPunchClient would echo to.
+                if (Globals.ConnectedShops.TryGetValue(endPoint.ToString(), out var shop) && shop != null && shop.StunSecretConfirmed)
+                    StartShopKeepAlive(shop, endPoint, udpClient);
             }
         }
 
