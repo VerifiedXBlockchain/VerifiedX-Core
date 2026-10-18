@@ -728,8 +728,13 @@ namespace VerifiedXCore.Bitcoin.Services
             }
         }
 
+        /// <summary>Stands in for the Electrum server's broadcast in tests: given the hex, the txid it answers, or its error.</summary>
+        internal static Func<string, Task<(string? TxHash, string? Error)>>? BroadcastHexForTests;
+
         /// <summary>
-        /// Broadcasts a signed Bitcoin transaction to the network
+        /// Broadcasts a signed Bitcoin transaction to the network. The txid returned is the signed transaction's own hash:
+        /// a server that answers with any other txid has not broadcast this transaction, and the broadcast fails with both
+        /// hashes in its error, so no caller records a payment under a txid the server chose.
         /// </summary>
         public static async Task<(bool Success, string TxHash, string ErrorMessage)> BroadcastTransaction(NBitcoin.Transaction signedTx)
         {
@@ -741,31 +746,44 @@ namespace VerifiedXCore.Bitcoin.Services
                 LogUtility.Log($"[FROST] Bitcoin transaction broadcast SUCCESS HEX: {txHex}",
                             "BitcoinTransactionService.BroadcastTransaction()");
 
-                var client = await GetElectrumClient();
-                if (client == null)
+                string? echoed, error;
+                if (BroadcastHexForTests != null)
+                    (echoed, error) = await BroadcastHexForTests(txHex);
+                else
                 {
-                    return (false, string.Empty, "No Electrum server available");
+                    var client = await GetElectrumClient();
+                    if (client == null)
+                    {
+                        return (false, string.Empty, "No Electrum server available");
+                    }
+
+                    using (client)
+                    {
+                        var broadcastResult = await client.Broadcast(txHex);
+                        (echoed, error) = (broadcastResult?.TxHash, broadcastResult?.ErrorMessage);
+                    }
                 }
 
-                using (client)
+                if (!string.IsNullOrEmpty(echoed))
                 {
-                    var broadcastResult = await client.Broadcast(txHex);
-
-                    if (!string.IsNullOrEmpty(broadcastResult?.TxHash))
+                    if (!string.Equals(echoed.Trim(), txHash, StringComparison.OrdinalIgnoreCase))
                     {
-                        LogUtility.Log($"[FROST] Bitcoin transaction broadcast SUCCESS: {broadcastResult.TxHash}",
-                            "BitcoinTransactionService.BroadcastTransaction()");
-                        return (true, broadcastResult.TxHash, string.Empty);
+                        var mismatch = $"Broadcast failed - the server answered txid {echoed} for the signed transaction {txHash}";
+                        ErrorLogUtility.LogError(mismatch, "BitcoinTransactionService.BroadcastTransaction()");
+                        return (false, string.Empty, mismatch);
                     }
-                    else
-                    {
-                        var errorDetail = !string.IsNullOrEmpty(broadcastResult?.ErrorMessage)
-                            ? $"Electrum rejected: {broadcastResult.ErrorMessage}"
-                            : "Broadcast failed - no result returned (empty response or connection issue)";
-                        ErrorLogUtility.LogError($"Bitcoin broadcast failed. TxHex length: {txHex.Length}, Error: {errorDetail}",
-                            "BitcoinTransactionService.BroadcastTransaction()");
-                        return (false, string.Empty, errorDetail);
-                    }
+                    LogUtility.Log($"[FROST] Bitcoin transaction broadcast SUCCESS: {txHash}",
+                        "BitcoinTransactionService.BroadcastTransaction()");
+                    return (true, txHash, string.Empty);
+                }
+                else
+                {
+                    var errorDetail = !string.IsNullOrEmpty(error)
+                        ? $"Electrum rejected: {error}"
+                        : "Broadcast failed - no result returned (empty response or connection issue)";
+                    ErrorLogUtility.LogError($"Bitcoin broadcast failed. TxHex length: {txHex.Length}, Error: {errorDetail}",
+                        "BitcoinTransactionService.BroadcastTransaction()");
+                    return (false, string.Empty, errorDetail);
                 }
             }
             catch (Exception ex)
