@@ -393,6 +393,20 @@ namespace VerifiedXCore
         public static long OneMovePerContractHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height a block producer's VRF is seeded from its epoch's anchor block, not the parent's hash, which the
+        /// previous producer could grind (VrfSeed). Height h is in epoch (h - VrfSeedHeight) / VrfEpochBlocks; the epoch's
+        /// anchor is VrfAnchorLagBlocks below its first height, deeper than any reorg by the time the epoch starts, and only a
+        /// validator registered before its epoch's anchor produces in it. Not active yet.
+        /// </summary>
+        public static long VrfSeedHeight = 999_999_999_999;
+
+        /// <summary>The length of a VRF seed epoch, in blocks (about a day at 10 s blocks).</summary>
+        public const long VrfEpochBlocks = 8_640;
+
+        /// <summary>How far below an epoch's first height its anchor block lies: above ForkChoiceUtility.MAX_REORG_DEPTH.</summary>
+        public const long VrfAnchorLagBlocks = 100;
+
+        /// <summary>
         /// From this height a transaction carrying a non-whole Amount must hash with that Amount: VerifyTX's re-hash
         /// fallback read it as 0 and accepted a signature over "0" (TransactionValidatorService.StandardHashMatches).
         /// Not active yet.
