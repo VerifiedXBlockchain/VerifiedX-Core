@@ -259,6 +259,51 @@ namespace VerifiedXCore.Tests
             finally { FrostSessionStorage.DKGSessions.TryRemove(session.SessionId, out _); }
         }
 
+        /// <summary>
+        /// C-181: a key ceremony its leader did not sign in full (a web wallet's vault creation) took its Round 2 set and its
+        /// share batches on the start's own signature alone, which every participant holds: one could fix another validator's
+        /// Round 2 set, or send it a garbage batch that made it report and refuse the leader's real one. Both now come only
+        /// from the endpoint the start came from.
+        /// </summary>
+        [Fact]
+        public async Task AnUnsignedCeremonysRound2AndShares_ComeFromTheStartsEndpointOnly()
+        {
+            using var server = new TestServer(new WebHostBuilder().UseStartup<FrostStartup>());
+            var session = new DKGSession
+            {
+                SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc", LeaderAddress = "xLeader", StartTimestamp = _now, LastProgressTimestamp = _now,
+                ParticipantAddresses = new List<string> { "xV1", "xV2", "xV3" }, RequiredThreshold = 67, MyParticipantIndex = 1,
+                LeaderSigned = false, StartRemoteIp = "198.51.100.7",
+            };
+            Assert.True(FrostSessionStorage.DKGSessions.TryAdd(session.SessionId, session));
+            try
+            {
+                async Task<(HttpStatusCode Code, string Body)> Post(string path, string from)
+                {
+                    var ctx = await server.SendAsync(c =>
+                    {
+                        c.Request.Method = "POST";
+                        c.Request.Path = path;
+                        c.Request.ContentType = "application/json";
+                        c.Request.Body = new System.IO.MemoryStream(Encoding.UTF8.GetBytes("{}"));
+                        c.Connection.RemoteIpAddress = IPAddress.Parse(from);
+                    });
+                    using var reader = new System.IO.StreamReader(ctx.Response.Body);
+                    return ((HttpStatusCode)ctx.Response.StatusCode, await reader.ReadToEndAsync());
+                }
+                foreach (var path in new[] { $"/frost/dkg/round2/{session.SessionId}", $"/frost/dkg/shares/{session.SessionId}" })
+                {
+                    var other = await Post(path, "203.0.113.9");
+                    Assert.Equal(HttpStatusCode.Forbidden, other.Code);
+                    Assert.Contains("the endpoint that started it", other.Body);
+                    var leader = await Post(path, "::ffff:198.51.100.7");
+                    Assert.DoesNotContain("the endpoint that started it", leader.Body);   // passes this check
+                }
+                Assert.False(session.Reported);
+            }
+            finally { FrostSessionStorage.DKGSessions.TryRemove(session.SessionId, out _); }
+        }
+
         /// <summary>A Round 2 request that makes no Round 2 stores nothing, and the ceremony has not gone on.</summary>
         [Fact]
         public async Task TheRound2Route_StoresNothing_FromARequestThatMakesNoRound2()
@@ -311,6 +356,47 @@ namespace VerifiedXCore.Tests
             var response = await client.PostAsync("/frost/sign/start", new StringContent(body, Encoding.UTF8, "application/json"));
             Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
             Assert.Contains("not a signing session", await response.Content.ReadAsStringAsync());
+        }
+
+        /// <summary>
+        /// #274 (C-224): a signing start ran Authorize (a contract decompile) and the prior-transaction Electrum lookups before
+        /// its leader's signature was checked, so anybody made every validator do both. A start whose leader did not sign it,
+        /// or signed it long ago, is refused before any of that.
+        /// </summary>
+        [Fact]
+        public async Task ASigningStartItsLeaderDidNotSign_IsRefused_BeforeItIsAuthorized()
+        {
+            using var server = new TestServer(new WebHostBuilder().UseStartup<FrostStartup>());
+            var client = server.CreateClient();
+            var leader = new EllipticCurve.PrivateKey("secp256k1");
+            var pub = "04" + Convert.ToHexString(leader.publicKey().toString()).ToLowerInvariant();
+            var address = VerifiedXCore.Data.AccountData.GetHumanAddress(pub);
+            var stranger = new EllipticCurve.PrivateKey("secp256k1");
+            var strangerPub = "04" + Convert.ToHexString(stranger.publicKey().toString()).ToLowerInvariant();
+
+            async Task<(HttpStatusCode Status, string Body)> Start(long timestamp, EllipticCurve.PrivateKey signer, string signerPub)
+            {
+                var sessionId = Guid.NewGuid().ToString();
+                var body = JsonConvert.SerializeObject(new
+                {
+                    SessionId = sessionId, LeaderAddress = address, Timestamp = timestamp, SignerAddresses = new[] { "xV1", "xV2" }, RequiredThreshold = 67,
+                    SmartContractUID = "sc-" + Guid.NewGuid().ToString("N"), MessageHash = new string('a', 64),
+                    LeaderSignature = VerifiedXCore.Services.SignatureService.CreateSignature($"{sessionId}.{address}.{timestamp}", signer, signerPub),
+                });
+                var response = await client.PostAsync("/frost/sign/start", new StringContent(body, Encoding.UTF8, "application/json"));
+                return (response.StatusCode, await response.Content.ReadAsStringAsync());
+            }
+
+            var forged = await Start(_now, stranger, strangerPub);
+            Assert.Equal(HttpStatusCode.Forbidden, forged.Status);
+            Assert.Contains("Invalid leader signature", forged.Body);                       // not Authorize's "Unauthorized signing request"
+
+            var old = await Start(_now - FrostSessionStorage.SIGNING_START_MAX_AGE_SECONDS - 60, leader, pub);
+            Assert.Equal(HttpStatusCode.BadRequest, old.Status);
+            Assert.Contains("too far from this validator's clock", old.Body);
+
+            var signed = await Start(_now, leader, pub);                                    // the leader's own start goes on to Authorize
+            Assert.Contains("Unauthorized signing request", signed.Body);
         }
 
         /// <summary>

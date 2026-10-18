@@ -63,6 +63,7 @@ namespace VerifiedXCore.Tests
                 CreatedTimestamp = 1,
                 IsComplete = false,
                 AllocationsJson = allocations == null ? null : JsonConvert.SerializeObject(allocations),
+                DrawnAllocationsJson = allocations == null ? null : JsonConvert.SerializeObject(allocations),   // applying it drew every part
             };
             Assert.True(VBTCBridgeBtcExitState.TryInsert(rec));
             // The locks a plan draws exist on chain (applying the exit drew them); the signer reads each part from its lock.

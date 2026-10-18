@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
+using VerifiedXCore.Bitcoin.FROST.Models;
 using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Bitcoin.Services;
 using VerifiedXCore.Utilities;
@@ -51,6 +52,39 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var seen = await BitcoinTransactionService.GetTransactionConfirmationsCorroborated(txid, stopWhenKnown: true);
             return seen.Known >= BitcoinTransactionService.ConfirmationAgreementRequired ? true : null;
         };
+
+        /// <summary>
+        /// Holders that, in a ceremony this node led for a pinned transaction, committed in Round 1 and gave no share:
+        /// pinned txid to holder to when. Asked again they would stall every attempt, so the next ones leave them out
+        /// for <see cref="WithheldFor"/>, never below the key's own threshold and never leaving out this node.
+        /// </summary>
+        private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, DateTime>> Withheld = new(StringComparer.Ordinal);
+        internal static TimeSpan WithheldFor => WithheldForOverride ?? TimeSpan.FromMinutes(60);
+        /// <summary>Tests only.</summary>
+        internal static TimeSpan? WithheldForOverride;
+        /// <summary>Which of the key's holders answer now. Replaceable for tests.</summary>
+        internal static Func<List<VBTCValidator>, Task<List<VBTCValidator>>> Reachable = FrostMPCService.ProbeValidatorReachability;
+        /// <summary>Tests only: runs the ceremony instead of ExecuteFROSTWithdrawal, given the holders asked and the threshold.</summary>
+        internal static Func<List<VBTCValidator>, int, Task<(bool Success, string TxHash, string SignedTxHex, string ErrorMessage, FrostCeremonyOutcome? Ceremony)>>? CeremonyForTests;
+
+        /// <summary>The holders to ask for a pinned transaction: the reachable ones less those that withheld their share lately.</summary>
+        internal static List<VBTCValidator> SignersToAsk(string txid, List<VBTCValidator> reachable, int minSigners, string me)
+        {
+            if (!Withheld.TryGetValue(txid, out var held)) return reachable;
+            var now = DateTime.UtcNow;
+            var left = reachable.Where(v => v.ValidatorAddress == me
+                || !held.TryGetValue(v.ValidatorAddress, out var at) || now - at >= WithheldFor).ToList();
+            return left.Count >= Math.Max(1, minSigners) ? left : reachable;
+        }
+
+        private static void NoteWithheld(string txid, IEnumerable<string> holders, List<VBTCValidator> asked)
+        {
+            var held = Withheld.GetOrAdd(txid, _ => new ConcurrentDictionary<string, DateTime>(StringComparer.Ordinal));
+            foreach (var holder in holders.Where(h => asked.Any(a => a.ValidatorAddress == h)))
+                held[holder] = DateTime.UtcNow;
+        }
+
+        internal static void ForgetWithheld() => Withheld.Clear();
 
         public static async Task RunLoop(CancellationToken ct)
         {
@@ -118,6 +152,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
             foreach (var old in Attempts.Where(a => DateTime.UtcNow - a.Value.At > TimeSpan.FromHours(6)).ToList())
                 Attempts.TryRemove(old.Key, out _);
+            foreach (var old in Withheld.Where(w => w.Value.Values.All(at => DateTime.UtcNow - at >= WithheldFor)).ToList())
+                Withheld.TryRemove(old.Key, out _);
             return led;
         }
 
@@ -204,16 +240,24 @@ namespace VerifiedXCore.Bitcoin.Attestation
             foreach (var holder in snapshot.Where(a => registered.All(r => r.ValidatorAddress != a)))
                 if (Globals.NetworkValidators.TryGetValue(holder, out var known) && !string.IsNullOrEmpty(known.IPAddress))
                     registered.Add(new VBTCValidator { ValidatorAddress = holder, IPAddress = known.IPAddress, IsActive = true });
-            var reachable = await FrostMPCService.ProbeValidatorReachability(registered);
+            var reachable = await Reachable(registered);
             if (reachable.Count == 0) return (false, $"none of the key's {snapshot.Count} signers is reachable");
+            // Holders that withheld their share in this node's last ceremonies for this transaction are left out while
+            // the rest still meet the key's threshold: asked again, one such holder failed every attempt.
+            var signers = SignersToAsk(pin.Txid, reachable, BtcVaultKeys.MinSigners(script), Globals.ValidatorAddress);
             var madeAt = script.Generation > 0 ? script.CreatedAtVfxHeight : vault.Feature.ProofBlockHeight; // the height a vault names is its creator's word: never after the tip
-            var threshold = VBTCThresholdCalculator.CalculateAdjustedThreshold(snapshot.Count, reachable.Count,
+            var threshold = VBTCThresholdCalculator.CalculateAdjustedThreshold(snapshot.Count, signers.Count,
                 Math.Max(0, Math.Min(madeAt, Globals.LastBlock?.Height ?? 0)), Globals.LastBlock?.Height ?? 0);
 
-            var result = await BitcoinTransactionService.ExecuteFROSTWithdrawal(
-                script.DepositAddress, destination, amount, feeRate, BtcVaultKeys.KeyUidOf(script), reachable, threshold,
-                broadcast: true, coordinatorAddress: Globals.ValidatorAddress, withdrawalRequestHash: reference,
-                pinnedUnsignedTxHex: pin.TxHex, pinnedCoins: coins);
+            var result = CeremonyForTests != null
+                ? await CeremonyForTests(signers, threshold)
+                : await BitcoinTransactionService.ExecuteFROSTWithdrawal(
+                    script.DepositAddress, destination, amount, feeRate, BtcVaultKeys.KeyUidOf(script), signers, threshold,
+                    broadcast: true, coordinatorAddress: Globals.ValidatorAddress, withdrawalRequestHash: reference,
+                    pinnedUnsignedTxHex: pin.TxHex, pinnedCoins: coins);
+            if (result.Ceremony?.FailureCode == FrostCeremonyFailureCode.Round2SharesWithheld)
+                NoteWithheld(pin.Txid, result.Ceremony.Withholders, signers);
+            if (result.Success) Withheld.TryRemove(pin.Txid, out _);
             if (!result.Success) return (false, result.ErrorMessage);
             return string.Equals(result.TxHash, pin.Txid, StringComparison.OrdinalIgnoreCase)
                 ? (true, result.TxHash)

@@ -4182,7 +4182,8 @@ namespace VerifiedXCore.Data
                         AllocationsJson = JsonConvert.SerializeObject(new List<PoolUnlockAllocation>
                         {
                             new PoolUnlockAllocation { LockId = lockId.Trim(), SmartContractUID = scUID, UnlockAmount = amount.Value }
-                        })
+                        }),
+                        DrawnAllocationsJson = "[]", // this shape draws no lock: nothing is signed for it
                     };
                     VBTCBridgeBtcExitState.TryInsert(st);
                     SCLogUtility.Log($"ApplyVBTCBridgeExitToBTC (legacy): burn={baseBurnTxHash}, lockId={lockId}", "StateData.ApplyVBTCBridgeExitToBTC()");
@@ -4223,7 +4224,9 @@ namespace VerifiedXCore.Data
                     return;
                 }
 
-                // Process each allocation: apply partial unlock to each lock
+                // Process each allocation: apply partial unlock to each lock. What is drawn is recorded with the exit: the
+                // signers sign only for that (a part whose lock was gone or already freed drew nothing).
+                var drawnAllocations = new List<PoolUnlockAllocation>();
                 foreach (var alloc in allocations)
                 {
                     var rec = VBTCBridgeLockState.GetByLockId(alloc.LockId);
@@ -4240,6 +4243,8 @@ namespace VerifiedXCore.Data
                     {
                         ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTC: failed to apply partial unlock for lock {alloc.LockId}", "StateData.ApplyVBTCBridgeExitToBTC()");
                     }
+                    else
+                        drawnAllocations.Add(alloc);
 
                     BridgeLockRecord.FinalizeFromChainUnlockIfPending(alloc.LockId);
                 }
@@ -4258,7 +4263,8 @@ namespace VerifiedXCore.Data
                     ExitTxHash = tx.Hash,
                     CreatedTimestamp = tx.Timestamp,
                     IsComplete = false,
-                    AllocationsJson = JsonConvert.SerializeObject(allocations)
+                    AllocationsJson = JsonConvert.SerializeObject(allocations),
+                    DrawnAllocationsJson = JsonConvert.SerializeObject(drawnAllocations)
                 };
                 if (VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(tx.Height))
                     exitState.ExitVfxHeight = tx.Height;

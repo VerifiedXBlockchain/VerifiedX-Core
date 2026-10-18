@@ -47,6 +47,9 @@ namespace VerifiedXCore.Tests
 
         public override void Dispose()
         {
+            BtcWithdrawalSigner.ForgetWithheld();
+            BtcWithdrawalSigner.CeremonyForTests = null;
+            BtcWithdrawalSigner.Reachable = VerifiedXCore.Bitcoin.Services.FrostMPCService.ProbeValidatorReachability;
             BtcWithdrawalSigner.SignAndBroadcast = _realSign;
             BtcWithdrawalSigner.KnownOnBitcoin = _realKnown;
             BtcWithdrawalSigner.ForgetAttempts();
@@ -614,6 +617,60 @@ namespace VerifiedXCore.Tests
             var one = Host("one");
             Assert.True(await Leads((one, 50001, true, 0), (one, 50002, true, 0)));                                                    // one host, two ports
             Assert.False(await Leads((Host("a"), 50002, true, 0), (Host("b"), 50002, true, 1)));                                       // two hosts know it
+        }
+
+        /// <summary>
+        /// C-197: a holder that commits in Round 1 and withholds its share makes every ceremony fail, and every retry asked
+        /// the same holders. The leader now leaves out those its last ceremonies for the transaction named, while the rest
+        /// still meet the key's threshold; never itself.
+        /// </summary>
+        [Fact]
+        public async Task AHolderThatWithheldItsShare_IsLeftOutOfTheNextCeremony_WhileTheRestMeetTheThreshold()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Report(_btc.Mine(Pay(vault.Script, 150_000)));
+            var request = await Request(vault.Uid, 0.001M);
+            var pin = BtcAttestStore.Withdrawal(BtcWithdrawals.RefOf(request.Hash, vault.Uid))!.Pins[0];
+            var addresses = Signers.Select(s => s.Address).ToList();
+            var order = addresses.OrderBy(a => BtcWithdrawalSigner.Turn(pin.Txid, a, addresses)).ToList();
+            var me = order[0];
+            var withholders = new Queue<string[]>(new[] { new[] { order[1] }, new[] { order[2] }, Array.Empty<string>() });
+            var asked = new List<string[]>();
+            var priorValidator = Globals.ValidatorAddress;
+            var priorSynced = Globals.IsChainSynced;
+            Globals.ValidatorAddress = me;
+            Globals.IsChainSynced = true;
+            BtcWithdrawalSigner.SignAndBroadcast = _realSign;
+            BtcWithdrawalSigner.KnownOnBitcoin = _ => Task.FromResult<bool?>(null);
+            BtcWithdrawalSigner.Reachable = list => Task.FromResult(list);
+            foreach (var s in Signers)
+                Globals.NetworkValidators[s.Address] = new NetworkValidator { Address = s.Address, IPAddress = "10.0.0.1", PublicKey = s.Pub };
+            BtcWithdrawalSigner.CeremonyForTests = (signers, threshold) =>
+            {
+                asked.Add(signers.Select(v => v.ValidatorAddress).OrderBy(a => a, StringComparer.Ordinal).ToArray());
+                var held = withholders.Dequeue();
+                var outcome = FrostCeremonyOutcome.Fail(FrostCeremonyFailureCode.Round2SharesWithheld, "s", "withheld");
+                outcome.Withholders = held.ToList();
+                return Task.FromResult((false, "", "", "withheld", (FrostCeremonyOutcome?)outcome));
+            };
+            try
+            {
+                async Task Tick() { BtcWithdrawalSigner.ForgetAttempts(); await BtcWithdrawalSigner.TickAsync(me, pin.PinnedAtVfxHeight); }
+                await Tick();
+                Assert.Equal(addresses.OrderBy(a => a, StringComparer.Ordinal), asked[0]);         // every holder, the first time
+                await Tick();
+                Assert.DoesNotContain(order[1], asked[1]);                                        // the one that withheld is left out
+                Assert.Contains(me, asked[1]);
+                await Tick();
+                Assert.Equal(addresses.OrderBy(a => a, StringComparer.Ordinal), asked[2]);         // two left out would go below the threshold
+            }
+            finally
+            {
+                Globals.ValidatorAddress = priorValidator;
+                Globals.IsChainSynced = priorSynced;
+                foreach (var s in Signers) Globals.NetworkValidators.TryRemove(s.Address, out _);
+            }
         }
 
         /// <summary>

@@ -33,6 +33,12 @@ namespace VerifiedXCore.Bitcoin.Models
         /// own allocation. Null on records written before this field existed.
         /// </summary>
         public string? AllocationsJson { get; set; }
+        /// <summary>
+        /// The parts of <see cref="AllocationsJson"/> that applying this exit actually drew from their locks: the exit is
+        /// signed only for these. "[]" for the single-lock shape, which draws no lock; null on rows written before this
+        /// field (an exit on vaults the chain watches drew every part; any other such row is not signed).
+        /// </summary>
+        public string? DrawnAllocationsJson { get; set; }
         public string? BtcTxHash { get; set; }
 
         public const string CollectionName = "rsrv_vbtc_bridge_btc_exits";
