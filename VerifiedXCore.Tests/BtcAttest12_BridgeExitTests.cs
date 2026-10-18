@@ -1100,6 +1100,57 @@ namespace VerifiedXCore.Tests
             Assert.Equal(400_000, BtcAttestStore.Total(other.Uid).SettledExitSats);
         }
 
+        /// <summary>
+        /// C-262 residual: a Bitcoin reorganisation deeper than the wait drops the voiding spend after the part was fixed
+        /// again on other coins. Its earlier transaction confirming went unnoticed (its coin had no holder), the part stayed
+        /// pinned and the newer transaction was signed and paid it a second time. The earlier one now pays the part and
+        /// frees the newer one's coin; if the newer one was signed already and confirms too, that payment is recorded as
+        /// owed to nobody, and the part is credited once.
+        /// </summary>
+        [Fact]
+        public async Task AVoidedPartsEarlierTransaction_ConfirmingAfterAReorgDeeperThanTheWait_PaysItOnce_AndASecondPaymentIsRecorded()
+        {
+            BtcAttestRules.ExitReopenBurialBlocksOverride = 2;
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var other = await CreateVault(H1 + 2);
+            await Deposit(vault.Script, 1_000_000);
+            var otherDeposit = await Deposit(other.Script, 1_000_000);
+            await Deposit(other.Script, 1_000_000);                                       // the coin it is fixed again on
+            var lockId = await Lock(vault.Uid, 0.004M);
+            var otherLock = await Lock(other.Uid, 0.004M);
+            var burn = NewBurn();
+            await Mine(Exit(burn, BtcDest, (lockId, vault.Uid, 0.004M), (otherLock, other.Uid, 0.004M)));
+            await SignAndConfirm(Part(burn, vault.Uid).Pins[0]);
+            var first = Part(burn, other.Uid).Pins[0];
+
+            var at = _btc.Mine(Pay(new[] { new OutPoint(otherDeposit, 0) }, (Elsewhere(), 20_000), (Elsewhere(), 979_000)));
+            await Report(at);
+            await Deposit(other.Script, 50_000);                                           // past the wait
+            var part = Part(burn, other.Uid);
+            Assert.Equal(VaultWithdrawalState.Pinned, part.State);
+            Assert.Equal(0, part.ReopenedAtBitcoinHeight);
+            var fresh = part.Pins.Last();
+            Assert.False(fresh.Dead);
+            Assert.NotEqual(first.Txid, fresh.Txid);
+
+            await Reorganise(at - 1);                                                      // deeper than the wait
+            Assert.Equal(VaultWithdrawalState.Pinned, Part(burn, other.Uid).State);
+
+            await SignAndConfirm(first);                                                   // the earlier transaction confirms
+            part = Part(burn, other.Uid);
+            Assert.Equal(VaultWithdrawalState.Settled, part.State);
+            Assert.Equal(first.Txid, part.SettledTxid);
+            Assert.True(Record(burn).IsComplete);
+            Assert.All(fresh.Inputs, o => Assert.NotEqual(VaultCoinStatus.Pinned, BtcAttestStore.Coin(o)!.Status)); // no validator signs the newer one
+
+            await SignAndConfirm(fresh);                                                   // signed before, it confirms too
+            part = Part(burn, other.Uid);
+            Assert.Equal(first.Txid, part.SettledTxid);
+            Assert.Equal(new[] { fresh.Txid }, part.UnowedPaymentTxids);
+            Assert.Equal(400_000, BtcAttestStore.Total(other.Uid).SettledExitSats);         // credited once
+        }
+
         // ── What an exit may draw on ────────────────────────────────────────────────────────────────────────
 
         [Fact]

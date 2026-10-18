@@ -264,6 +264,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <see cref="BtcAttestRules.ExitReopenBurialBlocks"/> deeper; 0 otherwise.
         /// </summary>
         public long ReopenedAtBitcoinHeight { get; set; }
+
+        /// <summary>
+        /// Transactions of this withdrawal that Bitcoin showed after it was already paid or closed: each paid its destination
+        /// again from the vault, for nothing owed. Reached only when a Bitcoin reorganisation drops the spend that voided one
+        /// of its transactions after it was fixed again on other coins (#262).
+        /// </summary>
+        public List<string>? UnowedPaymentTxids { get; set; }
         /// <summary>Why it is not pinned, or why it was closed. For people; nothing reads it.</summary>
         public string? WaitingReason { get; set; }
         public long LastModifiedHeight { get; set; }
