@@ -1058,6 +1058,14 @@ namespace VerifiedXCore.Services
                                             if(voteExist)
                                                 return (txResult, "Token Holder has already voted.");
 
+                                            // A block carries one vote per holder and topic (LedgerIntegrityRules.RegisterNftStepInBlock):
+                                            // at admission a second one waiting in the pool is refused.
+                                            if (blockHeight == null && !blockDownloads && !blockVerify
+                                                && (Globals.LastBlock?.Height ?? 0) + 1 >= Globals.VoteTopicRulesHeight
+                                                && LedgerIntegrityRules.TokenVoteKey(txRequest) is { } voteKey
+                                                && TransactionData.GetPool().Find(x => x.FromAddress == txRequest.FromAddress && x.Hash != txRequest.Hash).Any(p => LedgerIntegrityRules.TokenVoteKey(p) == voteKey))
+                                                return (txResult, $"{LedgerIntegrityRules.TokenVotedTwiceInBlock}: this holder's vote on this topic is already pending.");
+
                                             break;
                                         }
                                     case "Update()":
