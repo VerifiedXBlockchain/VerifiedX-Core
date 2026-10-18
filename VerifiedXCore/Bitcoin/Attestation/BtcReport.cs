@@ -51,6 +51,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// may be fixed on them (plan 5.5).
         /// </summary>
         public static int StuckPinBlocks => StuckPinBlocksOverride ?? 2160;
+
+        /// <summary>
+        /// How deep the spend that voided a bridge exit's part must be buried before the part is fixed again on other coins
+        /// (about a day). Its earlier transaction stays signed: a Bitcoin reorganisation that drops that spend lets it
+        /// confirm, and a transaction on other coins fixed meanwhile would pay the part a second time. Until then a rewind
+        /// that drops the spend makes the earlier transaction the part's payment again.
+        /// </summary>
+        public static int ExitReopenBurialBlocks => ExitReopenBurialBlocksOverride ?? QuietBlocks;
+        /// <summary>Tests only.</summary>
+        internal static int? ExitReopenBurialBlocksOverride;
         /// <summary>Tests only: a shorter wait, so that a run of a few hundred blocks reaches it.</summary>
         internal static int? StuckPinBlocksOverride;
         /// <summary>How often the withdrawals still waiting for coins are tried against coins that have become takeable, in VFX blocks.</summary>

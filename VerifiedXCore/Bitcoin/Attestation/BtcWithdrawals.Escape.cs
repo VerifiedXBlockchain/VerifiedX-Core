@@ -170,7 +170,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
         private static void RetryWaitingForTakeover(long vfxHeight, LiteDatabase? db)
         {
             if (vfxHeight % BtcAttestRules.TakeRetryBlocks != 0) return;
-            foreach (var waiting in InTurn(BtcAttestStore.WithdrawalsInState(VaultWithdrawalState.Waiting, db).Where(w => !w.IsBridgeExit)))
+            // And a bridge exit's part reopened after its transactions were voided: its wait ends with Bitcoin's height,
+            // whether or not its vault's coins move.
+            foreach (var waiting in InTurn(BtcAttestStore.WithdrawalsInState(VaultWithdrawalState.Waiting, db).Where(w => !w.IsBridgeExit || w.ReopenedAtBitcoinHeight > 0)))
                 TryPin(waiting, vfxHeight, db);
         }
 

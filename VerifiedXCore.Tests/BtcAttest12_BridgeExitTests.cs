@@ -33,7 +33,7 @@ namespace VerifiedXCore.Tests
     {
         private const long Checkpoint = 4032;
         private const string BtcDest = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
-        private readonly Btc _btc = new(Checkpoint - 11);
+        private Btc _btc = new(Checkpoint - 11);
         private readonly V _holder = NewKey();
         private readonly Network? _priorNetwork = Globals.BTCNetwork;
         private readonly long _priorGuard = Globals.BridgeIntraBlockGuardHeight;
@@ -57,6 +57,7 @@ namespace VerifiedXCore.Tests
 
         public override void Dispose()
         {
+            BtcAttestRules.ExitReopenBurialBlocksOverride = null;
             BtcWithdrawalSigner.SignAndBroadcast = _realSign;
             BtcWithdrawalSigner.KnownOnBitcoin = _realKnown;
             BtcWithdrawalSigner.ForgetAttempts();
@@ -88,6 +89,19 @@ namespace VerifiedXCore.Tests
             var (ok, why) = await Verify(tx, Tip + 1);
             Assert.True(ok, why);
             await Apply(Tip + 1, tx);
+        }
+
+        /// <summary>Bitcoin reorganises: the blocks above <paramref name="sharedHeight"/> are replaced by a longer branch, and the validators sign the rewind.</summary>
+        private async Task Reorganise(long sharedHeight)
+        {
+            var branch = _btc.ForkAfter(sharedHeight);
+            branch.MineEmpty((int)(_btc.Tip - sharedHeight) + 2);
+            var count = (int)(BtcAttestStore.GetMeta()!.TipHeight - sharedHeight) + 1;
+            var rewind = Signed(BtcBlockScanner.BuildRewind(sharedHeight, branch.HeaderHexes(sharedHeight + 1, sharedHeight + count), BtcAttestRules.EpochOf(Tip + 1)));
+            var (ok, why) = await Verify(rewind, Tip + 1);
+            Assert.True(ok, why);
+            await Apply(Tip + 1, rewind);
+            _btc = branch;
         }
 
         /// <summary>What the vault's signers do with a pin: sign exactly that transaction and broadcast it. Here it is mined.</summary>
@@ -868,6 +882,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task AVoidedPartOfAnExitAlreadyPartlyPaid_IsFixedAgainOnItsVault_AndTheExitCompletes()
         {
+            BtcAttestRules.ExitReopenBurialBlocksOverride = 0;                        // the reopen itself (the wait: #262)
             await Start();
             var vault = await CreateVault(H1 + 1);
             var other = await CreateVault(H1 + 2);
@@ -910,6 +925,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public async Task APartFixedAgainAfterManyRaises_CanStillHaveItsFeeRaised()
         {
+            BtcAttestRules.ExitReopenBurialBlocksOverride = 0;                        // the reopen itself (the wait: #262)
             await Start();
             var vault = await CreateVault(H1 + 1);
             var other = await CreateVault(H1 + 2);
@@ -1014,6 +1030,74 @@ namespace VerifiedXCore.Tests
                 Globals.BitcoinAttestationRecordHeight = priorRecord;
                 Globals.PathAuditRulesHeight = priorRules;
             }
+        }
+
+        /// <summary>
+        /// C-262: a voided part reopened on other coins was paid twice when a Bitcoin rewind dropped the spend that voided
+        /// it: its earlier transaction was signed and confirmed too. The part now waits until that spend is buried, and a
+        /// rewind during the wait makes the earlier transaction its payment again - paid once.
+        /// </summary>
+        [Fact]
+        public async Task AVoidedPartWhoseVoidingSpendIsRewound_IsPaidOnceByItsEarlierTransaction()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var other = await CreateVault(H1 + 2);
+            await Deposit(vault.Script, 1_000_000);
+            var otherDeposit = await Deposit(other.Script, 1_000_000);
+            await Deposit(other.Script, 1_000_000);                                       // a spare coin it could be fixed on
+            var lockId = await Lock(vault.Uid, 0.004M);
+            var otherLock = await Lock(other.Uid, 0.004M);
+            var burn = NewBurn();
+            await Mine(Exit(burn, BtcDest, (lockId, vault.Uid, 0.004M), (otherLock, other.Uid, 0.004M)));
+            await SignAndConfirm(Part(burn, vault.Uid).Pins[0]);
+            var first = Part(burn, other.Uid).Pins[0];
+
+            var at = _btc.Mine(Pay(new[] { new OutPoint(otherDeposit, 0) }, (Elsewhere(), 20_000), (other.Script, 979_000)));
+            await Report(at);
+            var part = Part(burn, other.Uid);
+            Assert.Equal(VaultWithdrawalState.Waiting, part.State);                          // not fixed on the spare coin yet
+            Assert.True(Assert.Single(part.Pins).Dead);
+            Assert.Contains("once that spend has", part.WaitingReason);
+
+            await Reorganise(at - 1);                                                      // the voiding spend is gone
+            part = Part(burn, other.Uid);
+            Assert.Equal(VaultWithdrawalState.Pinned, part.State);
+            Assert.False(Assert.Single(part.Pins).Dead);
+            Assert.Equal(first.Txid, part.Pins[0].Txid);
+
+            await SignAndConfirm(part.Pins[0]);
+            Assert.Equal(VaultWithdrawalState.Settled, Part(burn, other.Uid).State);
+            Assert.True(Record(burn).IsComplete);
+            Assert.Equal(400_000, BtcAttestStore.Total(other.Uid).SettledExitSats);         // once
+        }
+
+        /// <summary>C-262: once the voiding spend is buried past the wait, the part is fixed again on its vault's other coins and paid.</summary>
+        [Fact]
+        public async Task AVoidedPart_IsFixedAgainOnOtherCoins_OnceTheVoidingSpendIsBuried()
+        {
+            BtcAttestRules.ExitReopenBurialBlocksOverride = 2;
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var other = await CreateVault(H1 + 2);
+            await Deposit(vault.Script, 1_000_000);
+            var otherDeposit = await Deposit(other.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.004M);
+            var otherLock = await Lock(other.Uid, 0.004M);
+            var burn = NewBurn();
+            await Mine(Exit(burn, BtcDest, (lockId, vault.Uid, 0.004M), (otherLock, other.Uid, 0.004M)));
+            await SignAndConfirm(Part(burn, vault.Uid).Pins[0]);
+
+            await Report(_btc.Mine(Pay(new[] { new OutPoint(otherDeposit, 0) }, (Elsewhere(), 20_000), (other.Script, 979_000))));
+            Assert.Equal(VaultWithdrawalState.Waiting, Part(burn, other.Uid).State);
+            await Deposit(other.Script, 50_000);                                           // Bitcoin moves on past the wait
+            var part = Part(burn, other.Uid);
+            Assert.Equal(VaultWithdrawalState.Pinned, part.State);
+            var fresh = part.Pins.Last();
+            Assert.False(fresh.Dead);
+            await SignAndConfirm(fresh);
+            Assert.True(Record(burn).IsComplete);
+            Assert.Equal(400_000, BtcAttestStore.Total(other.Uid).SettledExitSats);
         }
 
         // ── What an exit may draw on ────────────────────────────────────────────────────────────────────────

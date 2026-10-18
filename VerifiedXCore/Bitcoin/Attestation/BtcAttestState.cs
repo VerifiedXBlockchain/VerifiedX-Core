@@ -258,6 +258,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public List<VaultPin> Pins { get; set; } = new();
         public string? SettledTxid { get; set; }
         public long ClosedAtVfxHeight { get; set; }
+        /// <summary>
+        /// A bridge exit's part reopened after its transactions were voided (another part of its exit is paid): the Bitcoin
+        /// height the voiding spend was reported through. It is fixed again on other coins only once that spend is buried
+        /// <see cref="BtcAttestRules.ExitReopenBurialBlocks"/> deeper; 0 otherwise.
+        /// </summary>
+        public long ReopenedAtBitcoinHeight { get; set; }
         /// <summary>Why it is not pinned, or why it was closed. For people; nothing reads it.</summary>
         public string? WaitingReason { get; set; }
         public long LastModifiedHeight { get; set; }
