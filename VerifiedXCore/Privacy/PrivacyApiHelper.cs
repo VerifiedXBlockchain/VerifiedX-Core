@@ -143,6 +143,32 @@ namespace VerifiedXCore.Privacy
             return true;
         }
 
+        public const string ViewingKeySpendWarning =
+            "This key can spend the wallet's shielded funds: anyone holding it can move them through the raw transaction routes. Share it only as you would the wallet itself.";
+
+        /// <summary>
+        /// The wallet's viewing key, for export. With the current key derivation the viewing key is spend authority (the raw
+        /// routes build and prove a spend from it and the zfx address), so it is released on the same bar as a spend: the
+        /// wallet's spending key must unwrap with <paramref name="walletPassword"/>. A row without a spending key (view-only)
+        /// cannot meet that bar and does not export.
+        /// </summary>
+        public static bool TryExportSpendCapableViewingKey(ShieldedWallet w, string? walletPassword, [NotNullWhen(true)] out string? viewingKeyBase64, out string? error)
+        {
+            viewingKeyBase64 = null;
+            if (w.ViewingKey == null || w.ViewingKey.Length == 0)
+            {
+                error = "No viewing key on wallet row.";
+                return false;
+            }
+            if (!TryGetKeyMaterial(w, walletPassword, out _, out error))
+            {
+                error = "The viewing key can spend this wallet's funds, so exporting it needs the wallet password, as a spend does: " + error;
+                return false;
+            }
+            viewingKeyBase64 = Convert.ToBase64String(w.ViewingKey);
+            return true;
+        }
+
         public static bool TryGetKeyMaterial(ShieldedWallet w, string? walletPassword, [NotNullWhen(true)] out ShieldedKeyMaterial? keys, out string? error)
         {
             keys = null;
