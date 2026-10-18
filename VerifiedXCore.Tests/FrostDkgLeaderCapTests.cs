@@ -60,9 +60,15 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void CapExceedsCoordinatorRetryCount()
         {
-            // The coordinator retries a DKG start up to MAX_DKG_START_RETRIES (2) times with a fresh
-            // session id under the same leader; the cap must leave room for the final attempt.
-            Assert.True(FrostSessionStorage.MAX_DKG_SESSIONS_PER_LEADER >= 3);
+            // The coordinator makes up to MaxDkgAttempts attempts, each under a fresh session id for the same leader, and a
+            // web wallet's failed attempts are not given up on the participants: the cap must leave room for the last one (#274).
+            Assert.True(FrostSessionStorage.MAX_DKG_SESSIONS_PER_LEADER > VerifiedXCore.Bitcoin.Services.FrostMPCService.MaxDkgAttempts);
+            var sessions = Enumerable.Range(0, VerifiedXCore.Bitcoin.Services.FrostMPCService.MaxDkgAttempts - 1).Select(_ => new DKGSession
+            {
+                SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc-cap", LeaderAddress = "xWebWallet", ParticipantAddresses = new List<string>(),
+                StartTimestamp = TimeUtil.GetTime(), LastProgressTimestamp = TimeUtil.GetTime(),
+            }).ToList();
+            Assert.Null(FrostSessionStorage.DkgStartRefusal(sessions, TimeUtil.GetTime(), Guid.NewGuid().ToString(), TimeUtil.GetTime(), "xWebWallet", null)); // the last attempt
         }
 
         [Fact]

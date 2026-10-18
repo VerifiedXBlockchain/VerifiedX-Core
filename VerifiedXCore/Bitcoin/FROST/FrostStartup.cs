@@ -2486,6 +2486,28 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // The leader is who it says, and the start is recent, before any work is done for it: Authorize
+                            // decompiles the vault's contract and the prior-transaction check asks Electrum, and anybody could
+                            // make every validator do both with a start nobody signed (#274, C-224).
+                            if (string.IsNullOrEmpty(request.LeaderAddress) || string.IsNullOrEmpty(request.LeaderSignature))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "LeaderAddress and leader signature required" }));
+                                return;
+                            }
+                            if (Math.Abs(TimeUtil.GetTime() - request.Timestamp) > FrostSessionStorage.SIGNING_START_MAX_AGE_SECONDS)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "The signing start's timestamp is too far from this validator's clock." }));
+                                return;
+                            }
+                            if (!SignatureService.VerifySignature(request.LeaderAddress, $"{request.SessionId}.{request.LeaderAddress}.{request.Timestamp}", request.LeaderSignature))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid leader signature" }));
+                                return;
+                            }
+
                             // SECURITY: a validator must never produce a share over a sighash it cannot
                             // tie to an authorized spend. Rebuild the sighash from the unsigned tx +
                             // prevouts, require the inputs to be the contract vault, the outputs to be

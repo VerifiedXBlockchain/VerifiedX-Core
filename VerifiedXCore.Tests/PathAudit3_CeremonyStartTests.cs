@@ -359,6 +359,47 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// #274 (C-224): a signing start ran Authorize (a contract decompile) and the prior-transaction Electrum lookups before
+        /// its leader's signature was checked, so anybody made every validator do both. A start whose leader did not sign it,
+        /// or signed it long ago, is refused before any of that.
+        /// </summary>
+        [Fact]
+        public async Task ASigningStartItsLeaderDidNotSign_IsRefused_BeforeItIsAuthorized()
+        {
+            using var server = new TestServer(new WebHostBuilder().UseStartup<FrostStartup>());
+            var client = server.CreateClient();
+            var leader = new EllipticCurve.PrivateKey("secp256k1");
+            var pub = "04" + Convert.ToHexString(leader.publicKey().toString()).ToLowerInvariant();
+            var address = VerifiedXCore.Data.AccountData.GetHumanAddress(pub);
+            var stranger = new EllipticCurve.PrivateKey("secp256k1");
+            var strangerPub = "04" + Convert.ToHexString(stranger.publicKey().toString()).ToLowerInvariant();
+
+            async Task<(HttpStatusCode Status, string Body)> Start(long timestamp, EllipticCurve.PrivateKey signer, string signerPub)
+            {
+                var sessionId = Guid.NewGuid().ToString();
+                var body = JsonConvert.SerializeObject(new
+                {
+                    SessionId = sessionId, LeaderAddress = address, Timestamp = timestamp, SignerAddresses = new[] { "xV1", "xV2" }, RequiredThreshold = 67,
+                    SmartContractUID = "sc-" + Guid.NewGuid().ToString("N"), MessageHash = new string('a', 64),
+                    LeaderSignature = VerifiedXCore.Services.SignatureService.CreateSignature($"{sessionId}.{address}.{timestamp}", signer, signerPub),
+                });
+                var response = await client.PostAsync("/frost/sign/start", new StringContent(body, Encoding.UTF8, "application/json"));
+                return (response.StatusCode, await response.Content.ReadAsStringAsync());
+            }
+
+            var forged = await Start(_now, stranger, strangerPub);
+            Assert.Equal(HttpStatusCode.Forbidden, forged.Status);
+            Assert.Contains("Invalid leader signature", forged.Body);                       // not Authorize's "Unauthorized signing request"
+
+            var old = await Start(_now - FrostSessionStorage.SIGNING_START_MAX_AGE_SECONDS - 60, leader, pub);
+            Assert.Equal(HttpStatusCode.BadRequest, old.Status);
+            Assert.Contains("too far from this validator's clock", old.Body);
+
+            var signed = await Start(_now, leader, pub);                                    // the leader's own start goes on to Authorize
+            Assert.Contains("Unauthorized signing request", signed.Body);
+        }
+
+        /// <summary>
         /// The leader's signature on a share batch did not say whom it was for: a participant replayed its own batch to
         /// another, which reported every dealer (to the replayer, so nothing was settled) and refused the leader's real
         /// batch, and was dropped (fifth review, round 15). A batch for another validator, or with no share for this one,
