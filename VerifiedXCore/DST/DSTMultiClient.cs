@@ -106,7 +106,7 @@ namespace VerifiedXCore.DST
                                         ConnectedShopServer = shopEndPoint;
                                         IsConnected = true;
                                     }
-                                    else
+                                    else if (!DstSessionAuth.AnswerCookie(receivedData, payload, udpClient, shopEndPoint)) // the shop asked for its cookie: the helo went again
                                     {
                                         IsConnected = false;
                                     }
@@ -250,7 +250,7 @@ namespace VerifiedXCore.DST
                                         ConnectedShopServerAssets = shopEndPoint;
                                         IsConnected = true;
                                     }
-                                    else
+                                    else if (!DstSessionAuth.AnswerCookie(receivedData, payload, udpAssets, shopEndPoint)) // the shop asked for its cookie: the helo went again
                                     {
                                         IsConnected = false;
                                     }
@@ -373,6 +373,15 @@ namespace VerifiedXCore.DST
             }
         }
 
+        /// <summary>Whether a datagram's sender is the connected shop's endpoint (an IPv4-mapped address read as IPv4).</summary>
+        internal static bool IsFromShop(IPEndPoint? sender, IPEndPoint? shop)
+        {
+            if (sender == null || shop == null || sender.Port != shop.Port) return false;
+            var a = sender.Address.IsIPv4MappedToIPv6 ? sender.Address.MapToIPv4() : sender.Address;
+            var b = shop.Address.IsIPv4MappedToIPv6 ? shop.Address.MapToIPv4() : shop.Address;
+            return a.Equals(b);
+        }
+
         static async Task Listen(CancellationToken token, ShopConnection shopConnection)
         {
             var counter = somecount;
@@ -390,6 +399,10 @@ namespace VerifiedXCore.DST
                         continue;
                     }
                     var dataGram = await udpClient.ReceiveAsync(token);
+                    // Handled as this shop's message only when it comes from this shop: it is processed under the shop's
+                    // endpoint and URL, so a datagram from any other sender wrote into this shop's cached data.
+                    if (!IsFromShop(dataGram.RemoteEndPoint, shopConnection.EndPoint))
+                        continue;
                     RemoteEndPoint = dataGram.RemoteEndPoint;
                     var payload = Encoding.UTF8.GetString(dataGram.Buffer);
 

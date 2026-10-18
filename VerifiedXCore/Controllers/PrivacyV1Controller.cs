@@ -664,7 +664,10 @@ namespace VerifiedXCore.Controllers
             }
         }
 
-        /// <summary>Export 32-byte viewing key (Base64) for watch-only import.</summary>
+        /// <summary>
+        /// Export the 32-byte viewing key (Base64). It is spend-capable, not watch-only (PrivacyApiHelper.TryExportSpendCapableViewingKey),
+        /// so it needs the wallet password and the response says it can spend.
+        /// </summary>
         [HttpPost("ExportViewingKey")]
         public Task<string> ExportViewingKey([FromBody] ExportViewingKeyRequest req)
         {
@@ -675,10 +678,9 @@ namespace VerifiedXCore.Controllers
                 var w = ShieldedWalletService.FindByZfxAddress(req.ZfxAddress);
                 if (w == null)
                     return Task.FromResult(Fail("Wallet not found."));
-                if (w.ViewingKey == null || w.ViewingKey.Length == 0)
-                    return Task.FromResult(Fail("No viewing key on wallet row."));
-                var vk = Convert.ToBase64String(w.ViewingKey);
-                return Task.FromResult(Ok(new { ViewingKeyBase64 = vk }));
+                if (!PrivacyApiHelper.TryExportSpendCapableViewingKey(w, req.WalletPassword, out var vk, out var err))
+                    return Task.FromResult(Fail(err ?? "Viewing key not exported."));
+                return Task.FromResult(Ok(new { ViewingKeyBase64 = vk, CanSpend = true, Warning = PrivacyApiHelper.ViewingKeySpendWarning }));
             }
             catch (Exception ex)
             {

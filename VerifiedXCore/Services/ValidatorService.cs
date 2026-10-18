@@ -262,13 +262,13 @@ namespace VerifiedXCore.Services
                 {
                     // Wait briefly for IP to be discovered before making decisions
                     var quickIpWait = 0;
-                    while (string.IsNullOrEmpty(Globals.ReportedIP) && quickIpWait < 6)
+                    while (string.IsNullOrEmpty(P2PClient.ValidatorReportedIP()) && quickIpWait < 6)
                     {
                         quickIpWait++;
                         await Task.Delay(5000);
                     }
 
-                    var currentIp = Globals.ReportedIP;
+                    var currentIp = P2PClient.ValidatorReportedIP();
 
                     if (existingValidator.IsActive)
                     {
@@ -311,7 +311,7 @@ namespace VerifiedXCore.Services
 
                 // Wait for IP to be discovered (up to 90 seconds)
                 var ipWaitAttempts = 0;
-                while (string.IsNullOrEmpty(Globals.ReportedIP) && ipWaitAttempts < 18)
+                while (string.IsNullOrEmpty(P2PClient.ValidatorReportedIP()) && ipWaitAttempts < 18)
                 {
                     ipWaitAttempts++;
                     LogUtility.Log($"Waiting for IP discovery before vBTC V2 registration (attempt {ipWaitAttempts}/18)...",
@@ -341,7 +341,7 @@ namespace VerifiedXCore.Services
                     await Task.Delay(5000);
                 }
 
-                var ipAddress = Globals.ReportedIP;
+                var ipAddress = P2PClient.ValidatorReportedIP();
                 if (string.IsNullOrEmpty(ipAddress))
                 {
                     LogUtility.Log($"Cannot send vBTC V2 registration - IP address not reported yet",
@@ -450,7 +450,7 @@ namespace VerifiedXCore.Services
 
                 // Wait for IP to be discovered (up to 90 seconds)
                 var ipWaitAttempts = 0;
-                while (string.IsNullOrEmpty(Globals.ReportedIP) && ipWaitAttempts < 18)
+                while (string.IsNullOrEmpty(P2PClient.ValidatorReportedIP()) && ipWaitAttempts < 18)
                 {
                     ipWaitAttempts++;
                     LogUtility.Log($"Waiting for IP discovery before vBTC V2 reactivation (attempt {ipWaitAttempts}/18)...",
@@ -480,7 +480,7 @@ namespace VerifiedXCore.Services
                     await Task.Delay(5000);
                 }
 
-                var ipAddress = Globals.ReportedIP;
+                var ipAddress = P2PClient.ValidatorReportedIP();
                 if (string.IsNullOrEmpty(ipAddress))
                 {
                     LogUtility.Log($"Cannot send vBTC V2 reactivation - IP address not reported yet",

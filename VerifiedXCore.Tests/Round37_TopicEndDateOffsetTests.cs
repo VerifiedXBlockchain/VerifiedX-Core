@@ -101,8 +101,9 @@ namespace VerifiedXCore.Tests
             var tx = TopicTx("X", In(TimeSpan.FromDays(2), offset));
             var (blockOk, blockMsg) = await TransactionValidatorService.VerifyTX(tx, false, true, false, null, false, Gate);
             Assert.True(blockOk, blockMsg);
-            var (poolOk, poolMsg) = await TransactionValidatorService.VerifyTX(tx);
-            Assert.True(poolOk, poolMsg);
+            // Admission now also refuses a VOTE_TOPIC whose Function is not TopicAdd() (VoteTopicRulesTests); the offset passes.
+            var (_, poolMsg) = await TransactionValidatorService.VerifyTX(tx);
+            Assert.NotEqual(TransactionValidatorService.VotingEndDateNeedsOffsetReason, poolMsg);
         }
         /// <summary>A topic made in a block below the height, as the chain stores it (the block kept, the topic applied).</summary>
         private async Task<string> TopicMadeBelowTheHeight(string votingEndDate, long height)

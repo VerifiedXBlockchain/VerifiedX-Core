@@ -311,6 +311,12 @@ namespace VerifiedXCore.Services
                 ?? LedgerIntegrityRules.TokenDocumentLimits(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                 // Nothing is addressed to a name: the applies credit the ToAddress as written.
                 ?? LedgerIntegrityRules.RecipientIsNotAName(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // The recipient is this network's (at admission at every height).
+                ?? LedgerIntegrityRules.RecipientIsThisNetworks(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1), admission: blockHeight == null && !blockVerify && !blockDownloads)
+                // The fee reads one way in the hash: amount digits cannot move into it.
+                ?? LedgerIntegrityRules.FeeBelowOneVfx(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // A reserve moves VFX only in a TX, which CallBack() and Recover() can return.
+                ?? LedgerIntegrityRules.ReserveMovesVfxOnlyByTransfer(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                 // A contract call is in the shape its apply reads.
                 ?? LedgerIntegrityRules.ContractCallIsArrayForm(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
             if (vaultInTransitError != null)
@@ -518,7 +524,7 @@ namespace VerifiedXCore.Services
             }
 
             //Hash Check
-            if (!StandardHashMatches(txRequest))
+            if (!StandardHashMatches(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)))
                 return (txResult, "This transactions hash is not equal to the original hash.");
 
             // The signature before any rule that parses or runs carried contract code: every transaction that reaches this
@@ -559,6 +565,11 @@ namespace VerifiedXCore.Services
             var royaltyRewriteError = LedgerIntegrityRules.RoyaltyUnchangedByRewrite(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
             if (royaltyRewriteError != null)
                 return (txResult, royaltyRewriteError);
+
+            // A sold NFT's body is rewritten by its minter only when it was made to evolve.
+            var evolutionError = LedgerIntegrityRules.EvolutionNeedsAnEvolvingContract(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (evolutionError != null)
+                return (txResult, evolutionError);
 
             // NEW-28: legacy V1 vBTC is retired and frozen (height-gated; block height at verify, tip + 1 at admission).
             var v1FrozenError = LedgerIntegrityRules.VbtcV1Frozen(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1));
@@ -795,6 +806,9 @@ namespace VerifiedXCore.Services
 
                                             if (scStateTreiRec.NextOwner != null)
                                                 return (txResult, "You are attempting to transfer a Smart contract that has a new owner assigned to it.");
+
+                                            if (TokenOwnerChangeRefusal(txRequest, toAddress, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) is { } ownerChange)
+                                                return (txResult, ownerChange);
 
                                             break;
                                         }
@@ -2101,6 +2115,14 @@ namespace VerifiedXCore.Services
                                         {
                                             return (txResult, "Name has already been taken.");
                                         }
+                                        // A name registered before V4Height is stored "label.rbx", and "label.vfx" was free to
+                                        // take: one label then had two owners. From the height the legacy spelling holds the label.
+                                        var legacyName = name.ToLower() + ".rbx";
+                                        if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.LegacyNameReservedHeight
+                                            && adnrList.FindOne(x => x.Name == legacyName) != null)
+                                        {
+                                            return (txResult, "Name has already been taken.");
+                                        }
                                     }
                                     
                                     var addressCheck = adnrList.FindOne(x => x.Address == txRequest.FromAddress);
@@ -2364,6 +2386,11 @@ namespace VerifiedXCore.Services
                                 if (topic != null && topic.VotingEndDate.Kind == DateTimeKind.Unspecified
                                     && (blockHeight == null || blockHeight.Value >= Globals.PathAuditRulesHeight))
                                     return (txResult, VotingEndDateNeedsOffsetReason);
+                                // The apply stores the topic whatever the function, and every rule below is a TopicAdd()'s: one
+                                // carrying another function mined a topic with any owner, counts and end date. From the height,
+                                // and at admission at every height.
+                                if (function != "TopicAdd()" && (blockHeight == null || blockHeight.Value >= Globals.VoteTopicRulesHeight))
+                                    return (txResult, VoteTopicIsTopicAddReason);
                                 if (function == "TopicAdd()")
                                 {
                                     if (topic == null)
@@ -2381,7 +2408,13 @@ namespace VerifiedXCore.Services
                                         var isTopicSigValid = SignatureService.VerifySignature(txRequest.FromAddress, topic.TopicUID, topicSig);
                                         if(isTopicSigValid)
                                         {
-                                            if(!blockDownloads)
+                                            if ((blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.TopicAddDeterministicHeight)
+                                            {
+                                                var topicRefusal = TopicAddRefusal(txRequest, topic, blockTime, admission: blockHeight == null);
+                                                if (topicRefusal != null)
+                                                    return (txResult, topicRefusal);
+                                            }
+                                            else if(!blockDownloads)
                                             {
                                                 //checks if topic height is within realm of mem blocks
                                                 if (!Globals.MemBlocks.Values.Where(x => x == topic.BlockHeight).Any())
@@ -2642,6 +2675,8 @@ namespace VerifiedXCore.Services
 
                                     if (function == "DecShopCreate()")
                                     {
+                                        if (DecShopOwnerRefusal(txRequest, decshop, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) is { } shopOwner)
+                                            return (txResult, shopOwner);
                                         if (txRequest.Amount < Globals.DecShopRequiredRBX)
                                             return (txResult, $"There must be at least {Globals.DecShopRequiredRBX} VFX to create a Auction House.");
 
@@ -4520,6 +4555,23 @@ namespace VerifiedXCore.Services
         /// be shaped into another contract message. Refused at admission at every height; in blocks from the path-audit
         /// height. Null when it passes.
         /// </summary>
+        internal const string DecShopOwnerReason = "A new shop is owned by the address that sends its creation.";
+        internal const string TokenOwnerChangeReason = "A token contract's new owner in the data is the transaction's recipient.";
+
+        /// <summary>
+        /// From DataOwnerBoundHeight a DecShopCreate()'s Data.OwnerAddress is its sender: the owner is stored from the data,
+        /// which the sender's signature covers but no rule tied to the sender, so a shop could be created in another's name.
+        /// </summary>
+        internal static string? DecShopOwnerRefusal(Transaction tx, DecShop decshop, long height) =>
+            height >= Globals.DataOwnerBoundHeight && decshop.OwnerAddress != tx.FromAddress ? DecShopOwnerReason : null;
+
+        /// <summary>
+        /// From DataOwnerBoundHeight a TokenContractOwnerChange()'s new owner in the data is the transaction's ToAddress: one
+        /// apply path stores the data's owner and the other the recipient, so the two had to be the same address.
+        /// </summary>
+        internal static string? TokenOwnerChangeRefusal(Transaction tx, string? dataToAddress, long height) =>
+            height >= Globals.DataOwnerBoundHeight && dataToAddress != tx.ToAddress ? TokenOwnerChangeReason : null;
+
         internal static string? RegisteredBaseAddressRefusal(JObject data, long? blockHeight, string? signature)
         {
             var named = data["BaseAddress"]?.ToObject<string>();
@@ -4549,6 +4601,52 @@ namespace VerifiedXCore.Services
         }
         internal const string BridgeLockDestinationIsAdminTagReason = "A bridge lock's EvmDestination cannot begin with a Base admin message tag.";
         internal const string VotingEndDateNeedsOffsetReason = "A topic's voting end date must carry a UTC offset.";
+
+        internal const string TopicOwnerHasActiveTopicReason = "Only one active topic per address is allowed.";
+        internal const string TopicAdjVoteInMissingReason = "Topic description was missing the Adj Vote in Requirements.";
+
+        /// <summary>
+        /// A signed TopicAdd()'s rules from TopicAddDeterministicHeight: each reads only the transaction, the state and the
+        /// block's timestamp, so live apply, a rebuild and a replay reach the same verdict (they run in block downloads too).
+        /// Under a Validator topic the sender keeps the validator balance after paying; the sender holds no other topic whose
+        /// voting is still open at the block's time; an AdjVoteIn topic meets its specs and the 2,800-character limit. Whether
+        /// the sender is in this node's adjudicator pool is node-local, so it is judged at admission only. Who has crafted a
+        /// block lately and the node's recent-block window are node-local too, and are not rules from the height.
+        /// </summary>
+        internal static string? TopicAddRefusal(Transaction tx, TopicTrei topic, long? blockTime, bool admission)
+        {
+            if (topic.VoterType == TopicVoterType.Validator)
+            {
+                var stAcct = StateData.GetSpecificAccountStateTrei(tx.FromAddress);
+                if (stAcct == null)
+                    return "Could not locate account in state trei.";
+                if (stAcct.Balance - (tx.Amount + tx.Fee) < ValidatorService.ValidatorRequiredAmount())
+                    return $"Balance is under {ValidatorService.ValidatorRequiredAmount()}. Topic will not be allowed.";
+            }
+            if (topic.VoterType == TopicVoterType.Adjudicator && admission && !Globals.AdjNodes.Values.Any(x => x.Address == tx.FromAddress))
+                return $"The from addesss ({tx.FromAddress}) is not in the adjudicator pool.";
+
+            var now = DateTimeOffset.FromUnixTimeSeconds(LedgerIntegrityRules.NowForAgeRules(blockTime)).UtcDateTime;
+            var owned = TopicTrei.GetSpecificTopicByAddress(tx.FromAddress);
+            if (owned != null && owned.Any(t => t.VotingEndDate.ToUniversalTime() >= now))
+                return TopicOwnerHasActiveTopicReason;
+
+            if (topic.VoteTopicCategory == VoteTopicCategories.AdjVoteIn)
+            {
+                AdjVoteInReqs? adjVoteReq;
+                try { adjVoteReq = JsonConvert.DeserializeObject<AdjVoteInReqs>(topic.TopicDescription ?? ""); }
+                catch (JsonException) { adjVoteReq = null; }
+                if (adjVoteReq == null)
+                    return TopicAdjVoteInMissingReason;
+                if (!VoteValidatorService.ValidateAdjVoteIn(adjVoteReq))
+                    return "You did not meet the required specs or information was not completed. This topic has been cancelled.";
+                if ((topic.TopicDescription?.Length ?? 0) + (topic.TopicName?.Length ?? 0) > 2800)
+                    return "Topic is larger than the 2800 limit.";
+            }
+            return null;
+        }
+
+        internal const string VoteTopicIsTopicAddReason = "A voting topic transaction creates a topic: its Function is TopicAdd().";
         internal const string TopicEndDateWithoutOffsetReason = "This topic's voting end date was written without a UTC offset; it cannot be voted on.";
 
         /// <summary>
@@ -4576,7 +4674,10 @@ namespace VerifiedXCore.Services
         /// Whether a standard (non-private) transaction's carried Hash is the hash of its content. Accepts the legacy
         /// spellings VerifyTX always has: a whole-number Amount hashed as "N.0", and a zero Amount hashed as "0".
         /// </summary>
-        internal static bool StandardHashMatches(Transaction txRequest)
+        internal static bool StandardHashMatches(Transaction txRequest) => StandardHashMatches(txRequest, long.MaxValue);
+
+        /// <summary>As <see cref="StandardHashMatches(Transaction)"/>, judged for <paramref name="height"/>.</summary>
+        internal static bool StandardHashMatches(Transaction txRequest, long height)
         {
             var newTxn = new Transaction()
             {
@@ -4597,6 +4698,10 @@ namespace VerifiedXCore.Services
                 return true;
 
             var amountCheck = txRequest.Amount % 1 == 0;
+            // A non-whole amount has no other spelling. Re-hashed below as 0, it matched a signature over "0", so a relay
+            // could put any fraction on such a transaction; from FractionalAmountRehashHeight it gets no re-hash.
+            if (!amountCheck && height >= Globals.FractionalAmountRehashHeight)
+                return false;
             var amountFormat = 0M;
             if (amountCheck)
             {

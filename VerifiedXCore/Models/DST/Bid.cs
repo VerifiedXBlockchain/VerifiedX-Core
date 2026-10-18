@@ -57,6 +57,14 @@ namespace VerifiedXCore.Models.DST
         /// </summary>
         public long? AutoCompleteUntil { get; set; }
 
+        /// <summary>
+        /// A hash of the contract's body and minter when the bid was made (<see cref="ContentHashOf"/>). The owner of an
+        /// unlocked NFT can Update() its body, and the bid signature does not cover it, so a seller could take a bid on one
+        /// asset and deliver another: a sale is completed automatically only while the hash is unchanged. Null when the
+        /// contract was unknown at bid time, and on rows from before this field.
+        /// </summary>
+        public string? ContentHashAtBid { get; set; }
+
         /// <summary>Whether a Sale_Start already completed this bid automatically. A bid pays automatically at most once.</summary>
         public bool? AutoCompleted { get; set; }
 
@@ -64,6 +72,35 @@ namespace VerifiedXCore.Models.DST
         public const long AutoCompleteGraceSeconds = 3 * 24 * 60 * 60;
 
         internal long AutoCompleteDeadline => AutoCompleteUntil ?? BidSendTime + AutoCompleteGraceSeconds;
+
+        /// <summary>SHA-256 (hex) of a contract's stored body and minter now; null when the contract is unknown.</summary>
+        internal static string? ContentHashOf(string? smartContractUID)
+        {
+            try
+            {
+                var state = string.IsNullOrWhiteSpace(smartContractUID) ? null : SmartContractStateTrei.GetSmartContractState(smartContractUID);
+                if (state == null) return null;
+                using var sha = System.Security.Cryptography.SHA256.Create();
+                var bytes = System.Text.Encoding.UTF8.GetBytes((state.ContractData ?? "") + "\n" + (state.MinterAddress ?? ""));
+                return Convert.ToHexString(sha.ComputeHash(bytes)).ToLowerInvariant();
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// Why a sale is not completed automatically for this bid: the contract's body or minter changed since the bid (an
+        /// Update() of an unlocked NFT, a re-mint), or was not recorded. Null when the contract is what was bid on.
+        /// </summary>
+        public static string? ContentChangedSinceBid(string? bidderAddress, string? purchaseKey, string? smartContractUID)
+        {
+            var recorded = MatchingSentBids(bidderAddress, purchaseKey, smartContractUID);
+            if (recorded.Count == 0 || recorded.Any(b => string.IsNullOrEmpty(b.ContentHashAtBid)))
+                return "The contract's content at the time of the bid was not recorded; complete the sale by hand after checking the asset.";
+            var now = ContentHashOf(smartContractUID);
+            return now != null && recorded.Any(b => string.Equals(b.ContentHashAtBid, now, StringComparison.Ordinal))
+                ? null
+                : "The contract's content or minter changed since the bid; the sale is not completed automatically.";
+        }
 
         /// <summary>The owner's spendable vBTC on <paramref name="smartContractUID"/> now, when it is a watched vault; else null.</summary>
         internal static decimal? VaultOwnerFigure(string? smartContractUID)
@@ -131,6 +168,7 @@ namespace VerifiedXCore.Models.DST
                 SmartContractUID = ListingContractFor(targetShop, ListingId, PurchaseKey);
             ContractFromTargetShop = !string.IsNullOrWhiteSpace(SmartContractUID);
             VaultOwnerBalanceAtBid = VaultOwnerFigure(SmartContractUID);
+            ContentHashAtBid = ContentHashOf(SmartContractUID);
             AutoCompleteUntil = Math.Max(ListingEndFor(PurchaseKey) ?? BidSendTime, BidSendTime) + AutoCompleteGraceSeconds;
 
             var bidModifier = (BidAmount * Globals.BidModifier);

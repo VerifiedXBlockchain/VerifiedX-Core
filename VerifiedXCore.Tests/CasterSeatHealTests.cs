@@ -111,6 +111,101 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ADepartureNotice_CountsOnlyNearOurTip_AndOnlyOnce()
+        {
+            var head = Head(changeType: "Demotion", changed: "RX");
+            Assert.NotNull(CasterSeatService.NoteDepartureNotice("RK28y", 1_000 - CasterSeatService.DepartureNoticeMaxAgeBlocks - 1, 1_000)); // an old copy
+            Assert.NotNull(CasterSeatService.NoteDepartureNotice("RK28y", 1_003, 1_000));                                                  // from ahead of the chain
+            Assert.NotNull(CasterSeatService.RemovalRefusal("Departure", "RK28y", head, TimeUtilNow()));
+
+            Assert.Null(CasterSeatService.NoteDepartureNotice("RK28y", 998, 1_000));
+            Assert.Null(CasterSeatService.RemovalRefusal("Departure", "RK28y", head, TimeUtilNow()));
+            Assert.NotNull(CasterSeatService.NoteDepartureNotice("RK28y", 998, 1_001));  // the same notice again
+            Assert.NotNull(CasterSeatService.NoteDepartureNotice("RK28y", 997, 1_001));  // an earlier one
+            Assert.Null(CasterSeatService.NoteDepartureNotice("RK28y", 1_001, 1_001));   // a later departure of the member
+        }
+
+        [Fact]
+        public async System.Threading.Tasks.Task AReplayedDepartureNotice_IsNotTakenAsADeparture()
+        {
+            var key = new VerifiedXCore.EllipticCurve.PrivateKey("secp256k1");
+            var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+            var address = VerifiedXCore.Data.AccountData.GetHumanAddress(pub);
+            CasterDepartureNotice NoticeAt(long height) => new()
+            {
+                DepartingAddress = address, BlockHeight = height,
+                DepartureSignature = SignatureService.CreateSignature($"DEPART|{address}|{height}", key, pub),
+            };
+            var head = Head(changeType: "Demotion", changed: "RX");
+            var priorTip = Globals.LastBlock;
+            try
+            {
+                Globals.LastBlock = new Block { Height = 5_000 };
+                await CasterDiscoveryService.HandleDeparture(NoticeAt(4_000)); // signed long ago, replayed now
+                Assert.NotNull(CasterSeatService.RemovalRefusal("Departure", address, head, TimeUtilNow()));
+
+                await CasterDiscoveryService.HandleDeparture(NoticeAt(4_999)); // the member leaving now
+                Assert.Null(CasterSeatService.RemovalRefusal("Departure", address, head, TimeUtilNow()));
+            }
+            finally { Globals.LastBlock = priorTip; }
+        }
+
+        [Fact]
+        public void ADemotionNotice_CountsOnlyNearOurTip_OncePerDemoter_AndInTheRecordEraOnlyOnceTheRecordDroppedTheMember()
+        {
+            var stillListed = Head(changeType: "Promotion", changed: "RFzuJ");
+            var dropped = Head(changeType: "Demotion", changed: "RK28y");
+            dropped.Casters.RemoveAll(c => c.Address == "RK28y");
+
+            Assert.NotNull(CasterSeatService.DemotionNoticeRefusal("RK28y", "RBQT6", 900, 1_000, false, null));        // an old copy
+            Assert.NotNull(CasterSeatService.DemotionNoticeRefusal("RK28y", "RBQT6", 999, 1_000, true, stillListed)); // our record keeps it
+            Assert.Null(CasterSeatService.DemotionNoticeRefusal("RK28y", "RBQT6", 999, 1_000, true, dropped));
+            Assert.NotNull(CasterSeatService.DemotionNoticeRefusal("RK28y", "RBQT6", 999, 1_001, true, dropped));      // the same notice again
+            Assert.Null(CasterSeatService.DemotionNoticeRefusal("RK28y", "RH9XA", 999, 1_001, true, dropped));         // another demoter's
+            Assert.Null(CasterSeatService.DemotionNoticeRefusal("RH9XA", "RBQT6", 1_000, 1_000, false, null));         // legacy era: fresh is enough
+        }
+
+        [Fact]
+        public async System.Threading.Tasks.Task AReplayedDemotionNotice_DoesNotRemoveTheMember()
+        {
+            var key = new VerifiedXCore.EllipticCurve.PrivateKey("secp256k1");
+            var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+            var demoter = VerifiedXCore.Data.AccountData.GetHumanAddress(pub);
+            CasterDemotionNotice NoticeAt(long height) => new()
+            {
+                DemotedAddress = "RK28y", DemoterAddress = demoter, BlockHeight = height,
+                DemotionSignature = SignatureService.CreateSignature($"DEMOTE|RK28y|{height}|{demoter}", key, pub),
+            };
+            var priorTip = Globals.LastBlock;
+            var priorCasters = Globals.BlockCasters;
+            try
+            {
+                Globals.LastBlock = new Block { Height = 5_000 };
+                Globals.BlockCasters = new System.Collections.Concurrent.ConcurrentBag<Peers>(new[]
+                {
+                    new Peers { ValidatorAddress = demoter, PeerIP = "10.0.0.9" },
+                    new Peers { ValidatorAddress = "RK28y", PeerIP = "10.0.0.8" },
+                });
+                Assert.False(CasterMembershipStore.RecordEraActive);
+
+                await CasterDiscoveryService.HandleDemotion(NoticeAt(4_000)); // signed long ago, replayed now
+                Assert.Contains(Globals.BlockCasters, c => c.ValidatorAddress == "RK28y");
+
+                // Legacy era: a fresh notice alone is one caster's word; it removes the member only on our own evidence.
+                await CasterDiscoveryService.HandleDemotion(NoticeAt(4_999));
+                Assert.Contains(Globals.BlockCasters, c => c.ValidatorAddress == "RK28y");
+                CasterSeatService.NoteOutdated("RK28y");
+                await CasterDiscoveryService.HandleDemotion(NoticeAt(5_000));
+                Assert.DoesNotContain(Globals.BlockCasters, c => c.ValidatorAddress == "RK28y");
+            }
+            finally
+            {
+                Globals.LastBlock = priorTip;
+                Globals.BlockCasters = priorCasters;
+            }
+        }
+
+        [Fact]
         public void APromotionThatNeverTook_CanBeRolledBack()
         {
             var head = Head(changeType: "Promotion", changed: "RFzuJ");

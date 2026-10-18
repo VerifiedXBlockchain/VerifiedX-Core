@@ -124,6 +124,25 @@ namespace VerifiedXCore.Tests
             Assert.Equal(HttpStatusCode.Forbidden, r.StatusCode);
         }
 
+        // However many empty segments follow, routing picks the catch-all V1 action, not UnlockWallet: refused, and the
+        // wallet's encryption-password state is untouched.
+        [Theory]
+        [InlineData("/api/V1/unlockwallet/GetEncryptedPassword///")]
+        [InlineData("/api/V1/unlockwallet/GetEncryptedPassword////")]
+        [InlineData("/api/V1/unlockwallet/GetDecryptWallet///")]
+        public async Task VX03_ApiPasswordWindowClosed_TrailingSlashes_DoNotReachAnotherV1Action(string path)
+        {
+            Startup.APIEnabled = true;
+            Globals.APIUnlockTime = DateTime.UtcNow.AddMinutes(-1);
+            var before = Globals.EncryptPassword?.Length ?? 0;
+            using var server = NewServer();
+
+            var r = await server.CreateClient().GetAsync(path);
+
+            Assert.Equal(HttpStatusCode.Forbidden, r.StatusCode);
+            Assert.Equal(before, Globals.EncryptPassword?.Length ?? 0);
+        }
+
         [Theory]
         [InlineData("/api/V1/UnlockWallet/StartMother")]
         [InlineData("/api/V1/UnlockWallet/JoinMother")]

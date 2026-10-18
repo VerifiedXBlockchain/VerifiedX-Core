@@ -6,6 +6,8 @@ namespace VerifiedXCore.Privacy
     /// <summary>
     /// Downloads PLONK universal parameters on first run and caches them permanently.
     /// The file is verified via a hardcoded SHA-256 hash before use.
+    /// Release rule: replacing this file (or the native library) changes every verifier key, so the change ships with its
+    /// own activation height and nodes keep the prior params to judge blocks below it (see Globals.PrivateTxProofRulesHeight).
     /// </summary>
     public static class PLONKParamsDownloader
     {

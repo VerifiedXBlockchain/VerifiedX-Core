@@ -72,7 +72,7 @@ namespace VerifiedXCore.Tests
             using var shop = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
             using var client = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
             var clientEndPoint = (IPEndPoint)client.Client.LocalEndPoint!;
-            MessageService.ShopConnect(new Message { Type = MessageType.KeepAlive, Data = "helo", IPAddress = clientEndPoint.ToString() }, clientEndPoint, shop);
+            MessageService.ShopConnect(new Message { Type = MessageType.KeepAlive, Data = "helo", IPAddress = clientEndPoint.ToString(), Auth = DstSessionAuth.Cookie(clientEndPoint.ToString(), TimeUtil.GetTime()) }, clientEndPoint, shop);
             Assert.True(Globals.ConnectedClients.ContainsKey(clientEndPoint.ToString()));
             await ReceiveOrNull(client); // the handshake's echo
             Globals.ClientMessageDict.Clear();
@@ -106,15 +106,42 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public void CollectionsReply_CarriesEveryLiveCollection()
+        public void CollectionsReply_CarriesEveryLiveCollection_WhenTheyFitOneDatagram()
         {
-            // Clients ask for collections once and take the reply as complete, so the reply is not paged.
+            // Clients ask for collections once and take the reply as complete.
             for (var i = 1; i <= 60; i++)
                 Collection.GetCollectionDb()!.InsertSafe(new Collection { Id = i, Name = $"c{i}", Description = "", CollectionLive = i <= 57 });
 
             var reply = JsonConvert.DeserializeObject<System.Collections.Generic.List<Collection>>(DecShopMessageService.ProcessMessage(Request("Collections"))!.Data)!;
 
             Assert.Equal(57, reply.Count);
+        }
+
+        [Fact]
+        public void CollectionsReply_StaysWithinOneDatagram_AndKeepsTheFirstCollections()
+        {
+            var description = new string('"', 2_000); // escaped as \" in the message: the budget counts it as sent
+            for (var i = 1; i <= 40; i++)
+                Collection.GetCollectionDb()!.InsertSafe(new Collection { Id = i, Name = $"c{i}", Description = description, CollectionLive = true });
+
+            var replyMessage = DecShopMessageService.ProcessMessage(Request("Collections"))!;
+            var reply = JsonConvert.DeserializeObject<System.Collections.Generic.List<Collection>>(replyMessage.Data)!;
+
+            Assert.InRange(reply.Count, 1, 39);
+            Assert.Equal(Enumerable.Range(1, reply.Count).ToArray(), reply.Select(c => c.Id).ToArray());
+            Assert.True(DecShopMessageService.ReplyDataBytes(replyMessage.Data) <= DecShopMessageService.MaxReplyDataBytes);
+            Assert.True(System.Text.Encoding.UTF8.GetByteCount(MessageService.GenerateMessage(replyMessage, false)) <= 65_507);
+        }
+
+        [Fact]
+        public void UpdateReply_TooLargeForOneDatagram_IsNotSentCutShort()
+        {
+            Collection.GetCollectionDb()!.InsertBulk(Enumerable.Range(1, 12_000).Select(i => new Collection { Id = i, Name = $"c{i}", Description = "", CollectionLive = true }));
+            Assert.Null(DecShopMessageService.ProcessMessage(Request("Update")));
+
+            Collection.GetCollectionDb()!.DeleteMany(c => c.Id > 100);
+            var update = JsonConvert.DeserializeObject<DecShopUpdateData>(DecShopMessageService.ProcessMessage(Request("Update"))!.Data)!;
+            Assert.Equal(100, update.CollectionList!.Count);
         }
 
         [Fact]
@@ -167,9 +194,13 @@ namespace VerifiedXCore.Tests
                 // A datagram from no STUN server, naming a third party: nothing is sent.
                 Assert.Null(await Punch(t => MessageService.PunchClient(new Message { Data = t.ToString() }, strangerEp, node)));
 
-                // From the STUN server this node registered with: the punch goes out.
+                // From the STUN server this node registered with, unsigned: nothing is sent; signed with the secret it
+                // issued at registration: the punch goes out.
                 Globals.STUNServer = new DSTConnection { IPAddress = strangerEp.ToString() };
-                Assert.Equal("ack", await Punch(t => MessageService.PunchClient(new Message { Data = t.ToString() }, strangerEp, node)));
+                Assert.Null(await Punch(t => MessageService.PunchClient(new Message { Data = t.ToString() }, strangerEp, node)));
+                var secret = DstSessionAuth.NewSecret();
+                DstSessionAuth.StunSecrets[strangerEp.ToString()] = secret;
+                Assert.Equal("ack", await Punch(t => MessageService.PunchClient(DstSessionAuth.SignedPunch(secret, t.ToString()), strangerEp, node)));
 
                 // An asset punch only for a sender that completed the handshake.
                 Assert.Null(await Punch(t => MessageService.AssetPunchClient(new Message { Data = t.Port.ToString() }, strangerEp, node)));
@@ -180,7 +211,7 @@ namespace VerifiedXCore.Tests
                 MessageService.PunchClient(new Message { Data = "not an endpoint" }, strangerEp, node);
                 MessageService.AssetPunchClient(new Message { Data = "99999" }, strangerEp, node);
             }
-            finally { Globals.STUNServer = priorStun; }
+            finally { Globals.STUNServer = priorStun; DstSessionAuth.StunSecrets.Clear(); }
         }
     }
 }

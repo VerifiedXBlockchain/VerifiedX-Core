@@ -608,10 +608,12 @@ namespace VerifiedXCore.Controllers
             var output = JsonConvert.SerializeObject(new { Result = "Fail", Message = "Update was not successful." });
             if (!Globals.UpToDate)
             {
-                var result = await VersionControlService.DownloadLatestAndUpdate(fileName, runUpdate);
+                var (ok, refusal) = await VersionControlService.DownloadLatestAndUpdateWithReason(fileName, runUpdate);
 
-                if (result)
+                if (ok)
                     output = JsonConvert.SerializeObject(new { Result = "Success", Message = "Update was successful. Please Restart CLI." });
+                else if (refusal != null)
+                    output = JsonConvert.SerializeObject(new { Result = "Fail", Message = refusal });
             }
             else
             {
@@ -1311,7 +1313,8 @@ namespace VerifiedXCore.Controllers
         {
             string output = "";
 
-            var result = AddressValidateUtility.ValidateAddress(address);
+            // Another network's address is well formed but nothing sent to it could be spent here.
+            var result = AddressValidateUtility.ValidateAddress(address) && !AddressValidateUtility.IsOtherNetworksAddress(address);
 
             output = result.ToString();
 

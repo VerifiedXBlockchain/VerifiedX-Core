@@ -253,7 +253,11 @@ namespace VerifiedXCore.Services
                 if (!HashMatchesStrictly(tx))
                     return $"transaction {tx.Hash} does not hash to its carried hash.";
                 // The recipient and amount are joined in the hash: a whole recipient keeps digits from moving between them.
-                if (TransactionValidatorService.RecipientError(tx) is { } recipientError)
+                // A name resolves against chain state, and the state in hand is the branch being replaced, so a name is
+                // left to full validation (from PathAuditRulesHeight a name is refused outright, without state).
+                if (LedgerIntegrityRules.RecipientIsNotAName(tx, block.Height) is { } nameError)
+                    return $"transaction {tx.Hash}: {nameError}";
+                if (!IsNameRecipient(tx.ToAddress) && TransactionValidatorService.RecipientError(tx) is { } recipientError)
                     return $"transaction {tx.Hash}: {recipientError}";
                 if (!TransactionValidatorService.VerifyTXSize(tx, LargestSizeCap(tx, block.Height)))
                     return $"transaction {tx.Hash} is larger than validation allows."; // whitespace inside the signature's Base64 still verifies
@@ -281,6 +285,12 @@ namespace VerifiedXCore.Services
                 return false;
             return TransactionValidatorService.StandardHashMatches(tx);
         }
+
+        /// <summary>Whether AddressValidateUtility.ValidateAddress would look this recipient up as a registered name.</summary>
+        private static bool IsNameRecipient(string? to) =>
+            !string.IsNullOrEmpty(to)
+            && !to.StartsWith(VerifiedXCore.Privacy.ShieldedAddressConstants.Prefix, StringComparison.Ordinal)
+            && (to.ToLower().Contains(".rbx") || to.ToLower().Contains(".vfx"));
 
         /// <summary>
         /// Whether a block reward hashes to its carried hash with the values it carries. A whole number built with no decimal

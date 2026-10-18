@@ -288,7 +288,7 @@ namespace VerifiedXCore.Utilities
                     skippedDuplicate++;
                     continue;
                 }
-                if (IsProducerExcluded(val.Address))
+                if (IsProducerExcluded(val.Address) || VrfSeed.Ineligibility(val.Address, blockHeight) != null)
                 {
                     skippedExcluded++;
                     continue;
@@ -366,7 +366,7 @@ namespace VerifiedXCore.Utilities
                     continue;
 
                 // VX-05 (follow-up): the same eligibility every other caster applies to this proof when it arrives.
-                if (ProducerIneligibility(entry.Address) != null)
+                if (ProducerIneligibility(entry.Address, blockHeight) != null)
                     continue;
 
                 var proof = await CreateProof(entry.Address, entry.PublicKey, blockHeight, prevHash);
@@ -548,6 +548,8 @@ namespace VerifiedXCore.Utilities
                 var stateAddress = StateData.GetSpecificAccountStateTrei(peer.ValidatorAddress);
                 if (stateAddress == null || stateAddress.Balance < ValidatorService.ValidatorRequiredAmount())
                     continue;
+                if (VrfSeed.Ineligibility(peer.ValidatorAddress, blockHeight) != null)
+                    continue;
 
                 var proofTuple = await CreateProof(peer.ValidatorAddress, peer.ValidatorPublicKey, blockHeight, prevHash);
                 if (proofTuple.Item1 != 0 && !string.IsNullOrEmpty(proofTuple.Item2))
@@ -574,7 +576,11 @@ namespace VerifiedXCore.Utilities
         /// </summary>
         public static (uint VrfNumber, string ProofHash) ComputeVrf(string publicKey, long blockHeight, string prevBlockHash)
         {
-            string seed = publicKey + blockHeight.ToString() + prevBlockHash;
+            // From VrfSeedHeight the parent's hash, which its producer could grind, no longer enters the VRF (VrfSeed).
+            var third = VrfSeed.ThirdInput(blockHeight, prevBlockHash);
+            if (third == null)
+                return (0, "");
+            string seed = publicKey + blockHeight.ToString() + third;
             byte[] combinedBytes = Encoding.UTF8.GetBytes(seed);
             using (SHA256 sha256 = SHA256.Create())
             {
@@ -623,7 +629,7 @@ namespace VerifiedXCore.Utilities
             if (!VerifyProofBinding(proof)) { reason = "binding"; return false; }
             if (proof.BlockHeight != expectedHeight) { reason = "height"; return false; }
             if (!string.Equals(proof.PreviousBlockHash, expectedPrevHash, StringComparison.OrdinalIgnoreCase)) { reason = "prevhash"; return false; }
-            var ineligible = ProducerIneligibility(proof.Address);
+            var ineligible = ProducerIneligibility(proof.Address, expectedHeight);
             if (ineligible != null) { reason = ineligible; return false; }
 
             if (Globals.NetworkValidators.TryGetValue(proof.Address, out var nv) && !string.IsNullOrEmpty(nv.IPAddress))
@@ -642,15 +648,16 @@ namespace VerifiedXCore.Utilities
         /// validator balance in committed state. Proofs this node generates (snapshot path) and proofs it receives must use
         /// the same rule: a snapshot validator that moved its coins out was elected locally on every caster but refused
         /// from every other, so the round sat under quorum at each height where it had the lowest VRF.
-        /// Returns null when eligible, else the reason ("abl" or "not-eligible").
+        /// From VrfSeedHeight a producer at <paramref name="height"/> must also be registered before its epoch's anchor
+        /// (<see cref="VrfSeed.Ineligibility"/>). Returns null when eligible, else the reason ("abl", "not-eligible" or "vrf-epoch").
         /// </summary>
-        public static string? ProducerIneligibility(string? address)
+        public static string? ProducerIneligibility(string? address, long? height = null)
         {
             if (string.IsNullOrEmpty(address)) return "not-eligible";
             if (Globals.ABL.Exists(x => x == address)) return "abl";
             var state = StateData.GetSpecificAccountStateTrei(address);
             if (state == null || state.Balance < ValidatorService.ValidatorRequiredAmount()) return "not-eligible";
-            return null;
+            return height is { } h ? VrfSeed.Ineligibility(address, h) : null;
         }
 
         /// <summary>Round-bound validation against the local tip (next height, current hash).</summary>
@@ -666,8 +673,11 @@ namespace VerifiedXCore.Utilities
             {
                 uint vrfNum = 0;
                 var proof = "";
-                // Random seed
-                string seed = publicKey + blockHeight.ToString() + prevBlockHash;
+                // Random seed; from VrfSeedHeight the epoch seed stands for the parent's hash (VrfSeed).
+                var third = VrfSeed.ThirdInput(blockHeight, prevBlockHash);
+                if (third == null)
+                    return false;
+                string seed = publicKey + blockHeight.ToString() + third;
                 //if (Globals.BlockHashes.Count >= 35)
                 //{
                 //    var height = blockHeight - 7;

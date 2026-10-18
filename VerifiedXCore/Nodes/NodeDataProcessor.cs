@@ -72,7 +72,7 @@ namespace VerifiedXCore.Nodes
                                     await BlockDownloadService.GetAllBlocks();
                                     return;
                                 }
-                                if (!BlockStaging.PassesGossipPreChecks(nextBlock, out _) || !BlockStaging.TryStageGossip(nextBlock, ipAddress))
+                                if (!BlockcasterNode.StageGossipOrWithdrawPin(nextBlock, ipAddress))
                                     return;
 
                                 await BlockValidatorService.ValidateBlocks();

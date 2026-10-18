@@ -269,6 +269,43 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        /// <summary>
+        /// #169's spin-off: the owner of an unlocked NFT can Update() its body after a bid on it, and the bid signature does
+        /// not cover the body. A bid records the body and minter it was made on, and a Sale_Start is completed automatically
+        /// only while they are unchanged.
+        /// </summary>
+        [Fact]
+        public void ABidOnContentTheSellerHasSinceReplaced_IsNotCompletedAutomatically()
+        {
+            var priorShop = Globals.DecShopData;
+            try
+            {
+                var nft = ListedNft();
+                Globals.DecShopData = new DecShopData { Listings = new System.Collections.Generic.List<Listing> { new Listing { Id = 30, PurchaseKey = "key-30", SmartContractUID = nft } } };
+                var bid = new Bid { BidAddress = _victim.Address, PurchaseKey = "key-30", BidAmount = 500M, ListingId = 30, CollectionId = 1, RawBid = true };
+                Assert.True(bid.Build(targetShop: Globals.DecShopData));
+                Assert.False(string.IsNullOrEmpty(bid.ContentHashAtBid));
+                Bid.SaveBid(bid);
+
+                Assert.Null(Bid.ContentChangedSinceBid(_victim.Address, "key-30", nft)); // the asset bid on
+
+                var state = SmartContractStateTrei.GetSmartContractState(nft)!;
+                state.ContractData = VbtcTestContracts.BuildContractData(nft, _seller.Address, null, description: "something else");
+                SmartContractStateTrei.UpdateSmartContract(state); // an Update() since the bid
+
+                Assert.NotNull(Bid.ContentChangedSinceBid(_victim.Address, "key-30", nft));
+            }
+            finally { Globals.DecShopData = priorShop; }
+        }
+
+        [Fact]
+        public void ABidThatRecordedNoContent_IsNotCompletedAutomatically()
+        {
+            var nft = ListedNft();
+            SaveSentBid("key-31", nft, BidStatus.Sent, TimeUtil.GetTime()); // a row from before the field
+            Assert.NotNull(Bid.ContentChangedSinceBid(_victim.Address, "key-31", nft));
+        }
+
         // ── Wallet-local: a bid pays automatically only while fresh, only if not rejected, and only once ──────────────
 
         private Bid SaveSentBid(string key, string nft, BidStatus status, long sendTime, long? autoCompleteUntil = null)

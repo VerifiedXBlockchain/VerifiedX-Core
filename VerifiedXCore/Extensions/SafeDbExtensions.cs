@@ -17,11 +17,19 @@ namespace VerifiedXCore.Extensions
             private static readonly AsyncLocal<FailureScope?> CurrentScope = new();
             private readonly FailureScope? _outer;
             private readonly HashSet<string> _collections;
+            private readonly Func<Exception, bool>? _counts;
             private int _count;
 
-            public FailureScope(params string[] collections)
+            public FailureScope(params string[] collections) : this(null, collections) { }
+
+            /// <summary>
+            /// A scope that counts a swallowed exception only when <paramref name="counts"/> accepts it (a fault of this
+            /// node's storage, say); a failure noted without its exception (<see cref="NoteFailure(string?)"/>) always counts.
+            /// </summary>
+            public FailureScope(Func<Exception, bool>? counts, params string[] collections)
             {
                 _collections = new HashSet<string>(collections, StringComparer.Ordinal);
+                _counts = counts;
                 _outer = CurrentScope.Value;
                 CurrentScope.Value = this;
             }
@@ -30,11 +38,11 @@ namespace VerifiedXCore.Extensions
 
             public void Dispose() => CurrentScope.Value = _outer;
 
-            internal static void Note(string? collection)
+            internal static void Note(string? collection, Exception? ex = null)
             {
                 if (collection == null) return;
                 for (var scope = CurrentScope.Value; scope != null; scope = scope._outer)
-                    if (scope._collections.Contains(collection))
+                    if (scope._collections.Contains(collection) && (ex == null || scope._counts == null || scope._counts(ex)))
                         Interlocked.Increment(ref scope._count);
             }
         }
@@ -42,9 +50,9 @@ namespace VerifiedXCore.Extensions
         /// <summary>Reports a failure swallowed elsewhere (a catch around this collection's writes) to the open scopes.</summary>
         public static void NoteFailure(string? collection) => FailureScope.Note(collection);
 
-        private static void NoteFailure<T>(ILiteCollection<T>? col)
+        private static void NoteFailure<T>(ILiteCollection<T>? col, Exception ex)
         {
-            try { FailureScope.Note(col?.Name); } catch { }
+            try { FailureScope.Note(col?.Name, ex); } catch { }
         }
         private static ConcurrentDictionary<string, SemaphoreSlim> DbSemaphores = new ConcurrentDictionary<string, SemaphoreSlim>();        
 
@@ -74,7 +82,7 @@ namespace VerifiedXCore.Extensions
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "SafeDBExtensions.Command()-1");
-                NoteFailure(col);                
+                NoteFailure(col, ex);                
             }
 
             try { slim.Release(); } catch { }            
@@ -93,7 +101,7 @@ namespace VerifiedXCore.Extensions
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "SafeDBExtensions.Command()-2");
-                NoteFailure(col);
+                NoteFailure(col, ex);
             }
 
             try { slim.Release(); } catch { }            
@@ -114,7 +122,7 @@ namespace VerifiedXCore.Extensions
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "SafeDBExtensions.CommandAsync()-1");
-                NoteFailure(col);                
+                NoteFailure(col, ex);                
             }
 
             try { slim?.Release(); } catch { }            
@@ -133,7 +141,7 @@ namespace VerifiedXCore.Extensions
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "SafeDBExtensions.CommandAsync()-2");
-                NoteFailure(col);
+                NoteFailure(col, ex);
             }
 
             try { slim?.Release(); } catch { }            

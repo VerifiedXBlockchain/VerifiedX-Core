@@ -455,6 +455,9 @@ namespace VerifiedXCore.Models
         ///   4) <c>FirstSeenAtHeight</c> is preserved if already set (to avoid
         ///      resetting the maturity-gate timer on reconnects), otherwise populated.
         /// </summary>
+        /// <summary>How long a trusted validator's IP holds against a direct connection from another IP since it was last seen.</summary>
+        public const long DirectConnectIpHoldSeconds = 600;
+
         public static void UpsertTrustedOnDirectConnect(NetworkValidator validator)
         {
             if (validator == null || string.IsNullOrEmpty(validator.Address))
@@ -520,6 +523,18 @@ namespace VerifiedXCore.Models
             // Wall-clock first-seen starts now unless preserved above.
             if (validator.FirstSeenAt == 0)
                 validator.FirstSeenAt = currentTime;
+
+            // A direct connection proves the key, not that the validator moved: the handshake names no recipient and
+            // replays to another node within its window, so it does not re-point a validator seen recently at another
+            // IP. A validator that really moved is taken at its new IP once its old entry has gone quiet.
+            if (Globals.NetworkValidators.TryGetValue(validator.Address, out var known) && known.IsFullyTrusted
+                && !string.IsNullOrEmpty(known.IPAddress) && !string.Equals(known.IPAddress, validator.IPAddress, StringComparison.Ordinal)
+                && currentTime - known.LastSeen <= DirectConnectIpHoldSeconds)
+            {
+                LogUtility.Log($"Validator {validator.Address} connected from {validator.IPAddress}; keeping its recently seen IP {known.IPAddress}.",
+                    "NetworkValidator.UpsertTrustedOnDirectConnect");
+                validator.IPAddress = known.IPAddress;
+            }
 
             // Upsert into the trusted registry.
             Globals.NetworkValidators[validator.Address] = validator;

@@ -170,6 +170,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void PlonkProofVerifier_VerifyRaw_InvalidPublicInputs_IsNativeError()
         {
+            if ((PlonkNative.plonk_capabilities() & PlonkNative.CapV1Circuits) != 0) return; // another test loaded the real v1 params into the process-global native state
             var r = PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Transfer, new byte[] { 1 }, new byte[] { 2 });
             Assert.Equal(PlonkVerifyResult.NativeError, r);
         }

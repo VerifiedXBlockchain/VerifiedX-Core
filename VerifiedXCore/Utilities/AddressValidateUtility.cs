@@ -42,6 +42,19 @@ namespace VerifiedXCore.Utilities
 			return result;
         }
 
+		/// <summary>
+		/// Whether a well-formed Base58Check address carries another network's version byte (a testnet 'x' address on
+		/// mainnet, a Bitcoin-style version-0 address): no key of this network derives it, so what is sent there is lost.
+		/// Reserve addresses (xRBX, matched by their prefix), shielded addresses and names keep their own rules.
+		/// </summary>
+		public static bool IsOtherNetworksAddress(string? addr)
+		{
+			if (string.IsNullOrEmpty(addr) || addr.StartsWith("xRBX", StringComparison.Ordinal)
+				|| addr.StartsWith(ShieldedAddressConstants.Prefix, StringComparison.Ordinal) || !ValidateRBXAddress(addr))
+				return false;
+			return DecodeBase58(addr)[0] != Globals.AddressPrefix;
+		}
+
 		const string Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 		const int Size = 25;
 

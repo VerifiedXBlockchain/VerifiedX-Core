@@ -206,7 +206,7 @@ namespace VerifiedXCore.Services
 
                 var genesis = CasterMembershipStore.BuildGenesisRecord(AgreedHeight + CasterMembershipStore.GenesisBoundaryMargin);
 
-                if (!CasterMembershipStore.TryMarkSigned(0, genesis.RecordHash, genesis.RecordHash /* genesis identity stays the full hash */))
+                if (!CasterMembershipStore.TryMarkSigned(0, genesis.RecordHash, genesis.RecordHash /* genesis identity stays the full hash */, genesis.EffectiveFromHeight))
                 {
                     CasterLogUtility.Log("MEMBERSHIP: refusing genesis — already signed a DIFFERENT record at seq 0.", "MEMBERSHIP");
                     return;

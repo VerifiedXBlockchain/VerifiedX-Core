@@ -104,171 +104,127 @@ namespace VerifiedXCore.Services
         {
             try
             {
-                if (!Globals.UpToDate) //add the ! back to beginning
-                {
-                    var count = 1;
-                    Dictionary<string, string> dict = new Dictionary<string, string>();
-                    Console.WriteLine("Please select the appropriate download:");
-                    Globals.GitHubLatestReleaseAssetsDict.Keys.ToList().ForEach(asset => {
-                        Console.WriteLine($"{count}. {asset}");
-                        dict.Add(count.ToString(), asset);
-                        count += 1;
-                    });
-
-                    var assetChoice = Console.ReadLine();
-                    if(!string.IsNullOrEmpty(assetChoice))
-                    {
-                        dict.TryGetValue(assetChoice, out var asset);
-                        if(asset != null)
-                        {
-                            AnsiConsole.MarkupLine($"You have chosen to download: {asset}. Are you sure? ([green]'y'[/] for [green]yes[/] and [red]'n'[/] for [red]no[/])");
-                            var confirm = Console.ReadLine();
-                            if(!string.IsNullOrEmpty(confirm))
-                            {
-                                if(confirm.ToLower() == "y")
-                                {
-                                    Globals.GitHubLatestReleaseAssetsDict.TryGetValue(asset, out var downloadUrl);
-                                    if(downloadUrl != null)
-                                    {
-                                        var path = DownloadPath();
-                                        int progress = 0;
-                                        bool isComplete = false;
-                                        AnsiConsole.MarkupLine($"Beginning download of [purple]{asset}[/].");
-                                        AnsiConsole.MarkupLine($"File Download coming from: [yellow]{downloadUrl}.[/]");
-                                        AnsiConsole.MarkupLine($"File being downloaded to: [aqua]{path}.[/]");
-                                        
-                                        using (WebClient client = new WebClient())
-                                        {
-                                            client.DownloadProgressChanged += (s, e) =>
-                                            {
-                                                progress = e.ProgressPercentage;
-                                            };
-                                            client.DownloadFileCompleted += (s, e) =>
-                                            {
-                                                isComplete = true;
-                                            };
-                                            client.DownloadFileAsync(new Uri(downloadUrl), path + asset);
-                                            while(!isComplete)
-                                            {
-                                                if(progress > 0 && progress <= 25)
-                                                {
-                                                    AnsiConsole.Markup($"\rDownloading File. Progress: [yellow]{progress}%[/]");
-                                                }
-                                                else if(progress > 25 && progress <= 50)
-                                                {
-                                                    AnsiConsole.Markup($"\rDownloading File. Progress: [purple]{progress}%[/]");
-                                                }
-                                                else if(progress > 50 && progress <= 99)
-                                                {
-                                                    AnsiConsole.Markup($"\rDownloading File. Progress: [blue]{progress}%[/]");
-                                                }
-                                                else if(progress == 100)
-                                                {
-                                                    AnsiConsole.Markup($"\rDownloading File. Progress: [green]{progress}%[/]");
-                                                }
-                                                else
-                                                {
-                                                    //do nothing
-                                                }
-                                            }
-                                            Console.WriteLine($" ");
-                                            Console.WriteLine($" ");
-                                            Console.WriteLine($"Download is Complete. Download is located in: {path + asset}");
-
-                                            AnsiConsole.MarkupLine($"Would you like to update files now? ([green]'y'[/] for [green]yes[/] and [red]'n'[/] for [red]no[/])");
-                                            var confirmUpdate = Console.ReadLine();
-                                            if(!string.IsNullOrEmpty(confirmUpdate))
-                                            {
-                                                if(confirmUpdate.ToLower() == "y")
-                                                {
-                                                    var assetPath = path + asset;
-                                                    var unzippedPath = path + @"temp" + Path.DirectorySeparatorChar;
-                                                    await PerformUpdate(assetPath, unzippedPath);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    else
-                                    {
-                                        StartupService.MainMenu();
-                                        AnsiConsole.MarkupLine("[yellow]There was an issue with download URL. Please go to VFX GitHub for latest version. Returned to main menu.[/]");
-                                    }
-                                }
-                                else
-                                {
-                                    StartupService.MainMenu();
-                                    AnsiConsole.MarkupLine("[yellow]You did not selected 'Yes'. Returned to main menu.[/]");
-                                }
-                            }
-                        }
-                        else
-                        {
-                            StartupService.MainMenu();
-                            AnsiConsole.MarkupLine("[yellow]Incorrect choice selected. Returned to main menu.[/]");
-                        }
-                    }
-                }
-                else
+                if (Globals.UpToDate)
                 {
                     Console.WriteLine("Client is already up to date.");
                     AnsiConsole.MarkupLine($"Client Version: [blue]{Globals.CLIVersion}[/] | GitHub Tag: [green]{Globals.GitHubVersion}[/]");
+                    return;
                 }
+                if (Globals.ReleaseSignerAddresses.Length == 0)
+                {
+                    StartupService.MainMenu();
+                    AnsiConsole.MarkupLine($"[yellow]{Markup.Escape(ReleaseSignature.NoSignerReason)}[/]");
+                    return;
+                }
+
+                var count = 1;
+                var dict = new Dictionary<string, string>();
+                Console.WriteLine("Please select the appropriate download:");
+                foreach (var asset in ReleaseZips(Globals.GitHubLatestReleaseAssetsDict.Keys))
+                {
+                    Console.WriteLine($"{count}. {asset}");
+                    dict.Add(count.ToString(), asset);
+                    count += 1;
+                }
+
+                var assetChoice = Console.ReadLine();
+                if (string.IsNullOrEmpty(assetChoice) || !dict.TryGetValue(assetChoice, out var chosen))
+                {
+                    StartupService.MainMenu();
+                    AnsiConsole.MarkupLine("[yellow]Incorrect choice selected. Returned to main menu.[/]");
+                    return;
+                }
+
+                AnsiConsole.MarkupLine($"You have chosen to download: {chosen}. Are you sure? ([green]'y'[/] for [green]yes[/] and [red]'n'[/] for [red]no[/])");
+                if (Console.ReadLine()?.ToLower() != "y")
+                {
+                    StartupService.MainMenu();
+                    AnsiConsole.MarkupLine("[yellow]You did not selected 'Yes'. Returned to main menu.[/]");
+                    return;
+                }
+
+                AnsiConsole.MarkupLine($"Downloading and verifying [purple]{chosen}[/]...");
+                var (zip, refusal) = await DownloadVerifiedAsync(chosen);
+                if (zip == null)
+                {
+                    StartupService.MainMenu();
+                    AnsiConsole.MarkupLine($"[yellow]{Markup.Escape(refusal ?? "The download failed.")}[/]");
+                    return;
+                }
+                AnsiConsole.MarkupLine($"Download is complete and its signature verifies. Would you like to update files now? ([green]'y'[/] for [green]yes[/] and [red]'n'[/] for [red]no[/])");
+                if (Console.ReadLine()?.ToLower() == "y")
+                    InstallFromBytes(zip);
+                else
+                    await File.WriteAllBytesAsync(DownloadPath() + chosen, zip);
             }
-            catch(Exception ex)
+            catch (Exception ex)
             {
+                ErrorLogUtility.LogError($"Error updating client: {ex}", "VersionControlService.DownloadLatestRelease()");
                 Console.WriteLine("There was an error updating client. Please download from GitHub.");
             }
-            
         }
 
-        public static async Task<bool> DownloadLatestAndUpdate(string fileName, bool update = false)
+        /// <summary>The release assets self-update can install: the zips (a signature file is not one).</summary>
+        public static List<string> ReleaseZips(IEnumerable<string> assetNames) =>
+            assetNames.Where(a => a != null && a.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)).ToList();
+
+        /// <summary>
+        /// Downloads a release zip and its "&lt;asset&gt;.sig" into memory and verifies the signature (ReleaseSignature). The
+        /// bytes returned are the ones verified, so they are the ones installed. (null, why) when it is not installed.
+        /// </summary>
+        public static async Task<(byte[]? Zip, string? Refusal)> DownloadVerifiedAsync(string assetName)
         {
+            if (Globals.ReleaseSignerAddresses.Length == 0)
+                return (null, ReleaseSignature.NoSignerReason);
+            if (string.IsNullOrEmpty(assetName) || !assetName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                return (null, "Only a release .zip is installed.");
+            if (!Globals.GitHubLatestReleaseAssetsDict.TryGetValue(assetName, out var url) || string.IsNullOrEmpty(url))
+                return (null, $"{assetName} is not an asset of the latest release.");
+            Globals.GitHubLatestReleaseAssetsDict.TryGetValue(assetName + ".sig", out var sigUrl);
             try
             {
-                if (!Globals.UpToDate) //add the ! back to beginning
+                using var client = Globals.HttpClientFactory.CreateClient();
+                client.Timeout = TimeSpan.FromMinutes(10);
+                var zip = await client.GetByteArrayAsync(url);
+                var signature = string.IsNullOrEmpty(sigUrl) ? null : await client.GetStringAsync(sigUrl);
+                var refusal = ReleaseSignature.Refusal(zip, signature);
+                if (refusal != null)
                 {
-                    Globals.GitHubLatestReleaseAssetsDict.TryGetValue(fileName, out var downloadUrl);
-                    if (downloadUrl != null)
-                    {
-                        var path = DownloadPath();
-                        bool isComplete = false;
-
-                        using (WebClient client = new WebClient())
-                        {
-                            client.DownloadFileCompleted += (s, e) =>
-                            {
-                                isComplete = true;
-                            };
-
-                            client.DownloadFileAsync(new Uri(downloadUrl), path + fileName);
-                            while (!isComplete)
-                            {
-
-                            }
-                            if (update)
-                            {
-                                var assetPath = path + fileName;
-                                var unzippedPath = path + "temp" + Path.DirectorySeparatorChar;
-                                var result = await PerformUpdate(assetPath, unzippedPath);
-                                if (result)
-                                {
-                                    return true;
-                                }
-                                else
-                                {
-                                    return false;
-                                }
-                            }
-
-                        }
-                    }
+                    ErrorLogUtility.LogError($"Release asset {assetName} refused: {refusal}", "VersionControlService.DownloadVerifiedAsync()");
+                    return (null, refusal);
                 }
+                return (zip, null);
             }
-            catch(Exception ex)
+            catch (Exception ex)
             {
-                ErrorLogUtility.LogError($"Error Performing update. Error: {ex.ToString()}", "VersionControlService.DownloadLatestAndUpdate()");
+                ErrorLogUtility.LogError($"Downloading release asset {assetName} failed: {ex.Message}", "VersionControlService.DownloadVerifiedAsync()");
+                return (null, $"Downloading {assetName} failed: {ex.Message}");
             }
-            return false;
+        }
+
+        public static async Task<bool> DownloadLatestAndUpdate(string fileName, bool update = false) =>
+            (await DownloadLatestAndUpdateWithReason(fileName, update)).Ok;
+
+        /// <summary>Downloads and verifies a release zip, then installs it (<paramref name="update"/>) or saves it.</summary>
+        public static async Task<(bool Ok, string? Refusal)> DownloadLatestAndUpdateWithReason(string fileName, bool update = false)
+        {
+            if (Globals.UpToDate)
+                return (false, "The client is already up to date.");
+            var (zip, refusal) = await DownloadVerifiedAsync(fileName);
+            if (zip == null)
+                return (false, refusal);
+            try
+            {
+                if (update)
+                    return InstallFromBytes(zip) ? (true, null) : (false, "Installing the update failed.");
+                await File.WriteAllBytesAsync(DownloadPath() + fileName, zip);
+                return (true, null);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error Performing update. Error: {ex}", "VersionControlService.DownloadLatestAndUpdateWithReason()");
+                return (false, "Installing the update failed.");
+            }
         }
 
         public static async Task<List<string>?> GetLatestDownloadFiles()
@@ -282,13 +238,16 @@ namespace VerifiedXCore.Services
             return null;
         }
 
-        private static async Task<bool> PerformUpdate(string assetPath, string unzipPath)
+        /// <summary>Extracts a verified release zip from the bytes that were verified, and installs its files.</summary>
+        public static bool InstallFromBytes(byte[] zip)
         {
             try
             {
+                var unzipPath = DownloadPath() + "temp" + Path.DirectorySeparatorChar;
                 if (Directory.Exists(unzipPath))
                     Directory.Delete(unzipPath, true);
-                System.IO.Compression.ZipFile.ExtractToDirectory(assetPath, unzipPath);
+                using (var archive = new System.IO.Compression.ZipArchive(new MemoryStream(zip), System.IO.Compression.ZipArchiveMode.Read))
+                    System.IO.Compression.ZipFileExtensions.ExtractToDirectory(archive, unzipPath);
                 var directory = Directory.GetDirectories(unzipPath);
                 var newFilesPath = directory.FirstOrDefault();
                 var filePaths = Directory.GetFiles(newFilesPath);
@@ -325,7 +284,7 @@ namespace VerifiedXCore.Services
             catch (Exception ex)
             {
                 Console.WriteLine($"Error Performing Updated. Error: {ex.ToString()}");
-                ErrorLogUtility.LogError($"Error Performing Updated. Error: {ex.ToString()}", "VersionControlService.PerformUpdate()");
+                ErrorLogUtility.LogError($"Error Performing Updated. Error: {ex.ToString()}", "VersionControlService.InstallFromBytes()");
             }
 
             return false;

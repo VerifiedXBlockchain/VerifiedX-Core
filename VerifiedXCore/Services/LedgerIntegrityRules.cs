@@ -251,6 +251,13 @@ namespace VerifiedXCore.Services
                     fields.Add(Read(() => j["DecShop"]?.ToObject<DecShop>()?.DecShopURL));
                     break;
                 case TransactionType.FTKN_TX:
+                // The token functions run by Data.Function for every contract-call type (VerifyTX's contract switch and
+                // UpdateTreis' dispatch), not for FTKN_TX alone: a vote under any of them is a real vote.
+                case TransactionType.NFT_TX: case TransactionType.NFT_MINT: case TransactionType.NFT_BURN:
+                case TransactionType.FTKN_MINT: case TransactionType.FTKN_BURN:
+                case TransactionType.TKNZ_TX: case TransactionType.TKNZ_MINT: case TransactionType.TKNZ_BURN:
+                case TransactionType.SC_TX: case TransactionType.SC_MINT: case TransactionType.SC_BURN:
+                case TransactionType.TKNZ_WD_ARB: case TransactionType.TKNZ_WD_OWNER:
                     // Token votes and transfers (round 27): a topic id is checked against votes through the collation,
                     // and a transfer's own recipient and sender are looked up through it.
                     fields.Add(Read(() => j["TopicUID"]?.ToString()));
@@ -300,7 +307,8 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static string? TokenDocumentLimits(Transaction tx, long height)
         {
-            if (tx == null || height < Globals.PathAuditRulesHeight || tx.TransactionType != TransactionType.FTKN_TX || string.IsNullOrEmpty(tx.Data))
+            // Every type the token functions run for, not FTKN_TX alone: VerifyTX and UpdateTreis dispatch them by Function.
+            if (tx == null || height < Globals.PathAuditRulesHeight || !ContractFunctionTypes.Contains(tx.TransactionType) || string.IsNullOrEmpty(tx.Data))
                 return null;
             JObject j;
             try { j = JObject.Parse(tx.Data); }
@@ -411,6 +419,39 @@ namespace VerifiedXCore.Services
             return !to.StartsWith(VerifiedXCore.Privacy.ShieldedAddressConstants.Prefix, StringComparison.Ordinal) && AddressValidateUtility.ValidateRBXAddress(to)
                 ? null
                 : "VFX can only be sent to a VFX address (not a shielded address or a name): nobody could spend it there.";
+        }
+
+        /// <summary>
+        /// From Globals.ReserveNonTransferAmountHeight a reserve (xRBX) sender's transaction other than a TX carries no
+        /// Amount. The apply debits a non-TX amount at once without locking it, and CallBack() and Recover() return only
+        /// TX amounts, so a stolen vault key destroyed the balance the recovery key exists to save. Register() still pays
+        /// the registration cost: it is sent before the reserve has a recovery address. Null when the rule passes.
+        /// </summary>
+        public static string? ReserveMovesVfxOnlyByTransfer(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.ReserveNonTransferAmountHeight) return null;
+            if (!(tx.FromAddress ?? "").StartsWith("xRBX") || tx.TransactionType == TransactionType.TX || tx.Amount == 0M) return null;
+            if (tx.TransactionType == TransactionType.RESERVE && DispatchedCall(tx.Data).Function == "Register()") return null;
+            return "A reserve account sends VFX only in a TX: its other transactions carry no amount.";
+        }
+
+        /// <summary>
+        /// A transaction's ToAddress is this network's: from Globals.RecipientNetworkByteHeight in a block, and at every
+        /// height at admission (a node does not admit what would strand the sender's funds). Validation checked only an
+        /// address's length, Base58 form and checksum, so a testnet address on mainnet, or a Bitcoin-style version-0 one,
+        /// was credited and nobody could ever spend it. Base sentinels, reserve (xRBX) and shielded addresses and names
+        /// keep their own rules; private transactions other than unshields have their own address rules. Null when it passes.
+        /// </summary>
+        public static string? RecipientIsThisNetworks(Transaction tx, long height, bool admission)
+        {
+            if (tx == null || (!admission && height < Globals.RecipientNetworkByteHeight)) return null;
+            if (VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType)
+                && tx.TransactionType != TransactionType.VFX_UNSHIELD && tx.TransactionType != TransactionType.VBTC_V2_UNSHIELD)
+                return null;
+            if (PlaceholderRecipients.Contains(tx.ToAddress ?? "")) return null;
+            return AddressValidateUtility.IsOtherNetworksAddress(tx.ToAddress)
+                ? "The recipient is an address of another network: nothing sent there could ever be spent."
+                : null;
         }
 
         /// <summary>
@@ -661,6 +702,40 @@ namespace VerifiedXCore.Services
                 && string.Equals(before.Value.PayTo, after.Value.PayTo, StringComparison.Ordinal))
                 return null;
             return $"A contract's Royalty feature cannot be changed after creation (stored: {Describe(before)}; carried: {Describe(after)}).";
+        }
+
+        /// <summary>The functions through which a contract's minter rewrites a sold NFT's body.</summary>
+        private static readonly HashSet<string> EvolutionFunctions = new(StringComparer.Ordinal) { "Evolve()", "Devolve()", "ChangeEvolveStateSpecific()" };
+
+        /// <summary>
+        /// From Globals.EvolveRulesHeight Evolve(), Devolve() and ChangeEvolveStateSpecific() apply only to a contract with
+        /// the Evolving feature, and carry a whole body that keeps it. They are the minter's, with no owner signature, and
+        /// the apply writes the carried body over the stored one: the minter of any NFT could replace or wipe what it had
+        /// sold. Null when the rule passes.
+        /// </summary>
+        public static string? EvolutionNeedsAnEvolvingContract(Transaction tx, long height)
+        {
+            if (tx?.Data == null || height < Globals.EvolveRulesHeight || !ContractFunctionTypes.Contains(tx.TransactionType)) return null;
+            var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+            if (payload.Function == null || !EvolutionFunctions.Contains(payload.Function) || string.IsNullOrEmpty(payload.ContractUID)) return null;
+            var stored = SmartContractStateTrei.GetSmartContractState(payload.ContractUID);
+            if (stored == null) return null; // the function's own rule refuses a contract that does not exist
+            if (!HasEvolvingFeature(stored.ContractData))
+                return "Only a contract with the Evolving feature can be evolved or devolved.";
+            if (!HasEvolvingFeature(payload.Data))
+                return "An evolution carries the contract's whole body, Evolving feature included.";
+            return null;
+        }
+
+        /// <summary>Whether a contract body decompiles with the Evolving feature. Never throws.</summary>
+        private static bool HasEvolvingFeature(string? body)
+        {
+            if (string.IsNullOrEmpty(body)) return false;
+            try
+            {
+                return SmartContractMain.GenerateSmartContractInMemory(body)?.Features?.Any(f => f != null && f.FeatureName == FeatureName.Evolving) == true;
+            }
+            catch (Exception) { return false; }
         }
 
         private static string Describe((decimal Amount, string PayTo)? r) => r == null ? "none" : $"{r.Value.Amount} to {r.Value.PayTo}";
@@ -1052,6 +1127,20 @@ namespace VerifiedXCore.Services
             return null;
         }
 
+        /// <summary>
+        /// From Globals.FeeBelowOneVfxHeight a transaction's fee is below 1 VFX. Amount and Fee are joined in the hash with
+        /// no separator, so trailing amount digits can move into the fee's whole part ("1.2345" + "0.00000602" hashes like
+        /// "1.2" + "3450.00000602"): same hash and signature, and the sender's balance burned as fee. Every such variant
+        /// gives a fee of 1 VFX or more (a decimal is never written with a leading zero), while the fee calculator's fee
+        /// for the largest transaction is far below it. Private transactions hash otherwise. Null when the rule passes.
+        /// </summary>
+        public static string? FeeBelowOneVfx(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.FeeBelowOneVfxHeight) return null;
+            if (VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType)) return null;
+            return tx.Fee >= 1M ? "A transaction's fee must be below 1 VFX (ambiguous hash)." : null;
+        }
+
         // ── NEW-17: NFT sale amounts ─────────────────────────────────────────────────────────────────────────────
 
         /// <summary>
@@ -1311,6 +1400,9 @@ namespace VerifiedXCore.Services
         /// <summary>A block carries a move (Transfer() or Burn()) and a sale of the same contract.</summary>
         public const string NftMoveAndSaleInBlock = "An NFT transfer or burn and a sale of the same contract within block";
 
+        /// <summary>A block carries two moves (Transfer() or Burn()) of the same contract.</summary>
+        public const string NftMovedTwiceInBlock = "Two transfers or burns of the same contract within block";
+
         /// <summary>
         /// The transaction types StateData runs a contract's functions for (UpdateTreis' dispatch). Only these move a
         /// contract by Transfer() or Burn(); the same text in another transaction's Data (a plain payment) does nothing.
@@ -1338,14 +1430,17 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
-        /// From PathAuditRulesHeight one contract is either moved or sold within a block, not both. Each is judged against
+        /// From PathAuditRulesHeight one contract is either moved or sold within a block, not both, and from
+        /// OneMovePerContractHeight it is moved at most once. Each is judged against
         /// the owner before the block, so an owner's Transfer() to B and its own M_Sale_Start to an accomplice both passed
         /// in one block: B then owned an NFT locked into the sale A set up, at A's price. Honest blocks never pair them: a
         /// transfer or burn needs the contract unlocked, and a sale's completion or cancel needs it locked.
         /// </summary>
         public static string? RegisterNftStepInBlock(Transaction tx, NftStepState state, long height)
         {
-            if (height < Globals.PathAuditRulesHeight) return null;
+            var moveOrSale = height >= Globals.PathAuditRulesHeight;
+            var oneMove = height >= Globals.OneMovePerContractHeight;
+            if (!moveOrSale && !oneMove) return null;
             var (ok, _, uid, function, _) = TransactionUtility.GetSCTXFunctionAndUID(tx);
             if (!ok) return null;
             // A sale, like a move, is one the chain runs: an NFT_SALE carrying another function does nothing, and
@@ -1356,7 +1451,11 @@ namespace VerifiedXCore.Services
             // nothing, and registering it let anyone crowd an owner's sale out of a block.
             if (!isSale && (!ContractFunctionTypes.Contains(tx.TransactionType) || (function != "Transfer()" && function != "Burn()"))) return null;
             uid = SmartContractStateTrei.GetSmartContractState(uid)?.SmartContractUID ?? uid;
-            if ((isSale ? state.Moves : state.Sales).Contains(uid)) return $"{NftMoveAndSaleInBlock}: {uid}";
+            if (moveOrSale && (isSale ? state.Moves : state.Sales).Contains(uid)) return $"{NftMoveAndSaleInBlock}: {uid}";
+            // From OneMovePerContractHeight a contract is moved once per block: each move was judged against the owner
+            // before the block, so an owner's second Transfer() (or a Burn()) undid a confirmed one. The type-pair check
+            // in ValidateBlock missed pairs such as FTKN_TX beside FTKN_BURN.
+            if (!isSale && oneMove && state.Moves.Contains(uid)) return $"{NftMovedTwiceInBlock}: {uid}";
             (isSale ? state.Sales : state.Moves).Add(uid);
             return null;
         }

@@ -4,6 +4,7 @@ using System.IO;
 using System.Threading.Tasks;
 using VerifiedXCore;
 using VerifiedXCore.Data;
+using VerifiedXCore.Extensions;
 using VerifiedXCore.Services;
 using VerifiedXCore.Models;
 using Xunit;
@@ -82,6 +83,94 @@ namespace VerifiedXCore.Tests
                 StateData.TxApplyForTests = null;
                 StateData.BlockStartFailedAtHeight = prior;
             }
+        }
+
+        /// <summary>
+        /// A write the *Safe wrappers swallow inside a block's apply: on a collection of the state and from this node's
+        /// storage it makes the apply incomplete; a throw the transaction's data could cause, or one on a collection that
+        /// is not state, changes nothing.
+        /// </summary>
+        private static async Task<(bool Applied, long FailedAt)> ApplyWithSwallowedWrite(Action? write, long height)
+        {
+            var prior = StateData.BlockStartFailedAtHeight;
+            try
+            {
+                StateData.BlockStartFailedAtHeight = -1;
+                StateData.TxApplyForTests = _ => write?.Invoke();
+                var block = new Block { Height = height, StateRoot = "sr", Transactions = new List<Transaction> { new Transaction { Hash = $"t{height}", FromAddress = "xA", ToAddress = "xB", Amount = 1M } } };
+                var applied = await StateData.UpdateTreis(block);
+                return (applied, StateData.BlockStartFailedAtHeight);
+            }
+            finally
+            {
+                StateData.TxApplyForTests = null;
+                StateData.BlockStartFailedAtHeight = prior;
+            }
+        }
+
+        [Fact]
+        public async Task AStorageFaultSwallowedOnAStateCollection_MakesTheApplyIncomplete()
+        {
+            var (applied, failedAt) = await ApplyWithSwallowedWrite(
+                () => StateData.GetAccountStateTrei().Command<bool, AccountStateTrei>(() => throw new IOException("disk")), 8);
+            Assert.False(applied);
+            Assert.Equal(8, failedAt);
+        }
+
+        [Fact]
+        public async Task ADataFault_OrAFaultOffTheStateCollections_ChangesNothing()
+        {
+            var baseline = await ApplyWithSwallowedWrite(null, 9);
+
+            var dataFault = await ApplyWithSwallowedWrite(
+                () => StateData.GetAccountStateTrei().Command<bool, AccountStateTrei>(() => throw new InvalidOperationException("what the transaction says")), 10);
+            Assert.Equal(baseline.Applied, dataFault.Applied);
+            Assert.Equal(-1, dataFault.FailedAt);
+
+            var offList = await ApplyWithSwallowedWrite(
+                () => DbContext.DB_AccountStateTrei.GetCollection("some_other_collection").Command<bool, LiteDB.BsonDocument>(() => throw new IOException("disk")), 11);
+            Assert.Equal(baseline.Applied, offList.Applied);
+            Assert.Equal(-1, offList.FailedAt);
+        }
+
+        [Fact]
+        public async Task AStorageFaultSwallowedOnTheShieldedPool_MakesTheApplyIncomplete()
+        {
+            var (applied, failedAt) = await ApplyWithSwallowedWrite(
+                () => VerifiedXCore.Privacy.PrivacyDbContext.Nullifiers().Command<bool, VerifiedXCore.Models.Privacy.NullifierRecord>(() => throw new IOException("disk")), 12);
+            Assert.False(applied);
+            Assert.Equal(12, failedAt);
+        }
+
+        /// <summary>Reserve settlement runs outside UpdateTreis and counts the same faults on its own.</summary>
+        private static async Task<bool> SettleWithSwallowedWrite(Action write)
+        {
+            var row = new ReserveTransactions
+            {
+                Id = Guid.NewGuid(), Hash = $"r{Guid.NewGuid():N}", FromAddress = "xRBXsender", ToAddress = "xB", Amount = 1M, Height = 20,
+                ConfirmTimestamp = 1, TransactionType = TransactionType.TX, ReserveTransactionStatus = ReserveTransactionStatus.Pending,
+            };
+            ReserveTransactions.GetReserveTransactionsDb()!.Insert(row);
+            try
+            {
+                StateData.SettleRowForTests = _ => write();
+                return await StateData.UpdateTreiFromReserve(new List<ReserveTransactions> { row }, new Block { Height = 21, Timestamp = 100 });
+            }
+            finally { StateData.SettleRowForTests = null; }
+        }
+
+        [Fact]
+        public async Task ReserveSettlement_AStorageFaultSwallowedOnTheState_MarksItIncomplete()
+        {
+            Assert.False(await SettleWithSwallowedWrite(() => StateData.GetAccountStateTrei().Command<bool, AccountStateTrei>(() => throw new IOException("disk"))));
+            Assert.True(StateTreiStatusService.NeedsRepair());
+        }
+
+        [Fact]
+        public async Task ReserveSettlement_ADataFault_MarksNothing()
+        {
+            Assert.True(await SettleWithSwallowedWrite(() => StateData.GetAccountStateTrei().Command<bool, AccountStateTrei>(() => throw new InvalidOperationException("what the row says"))));
+            Assert.False(StateTreiStatusService.NeedsRepair());
         }
 
         [Fact]

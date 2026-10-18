@@ -19,6 +19,8 @@ namespace VerifiedXCore.Privacy
         public const int ErrCrypto = -4;
         public const int ErrParam = -5;
         public const int ErrNotImplemented = -6;
+        /// <summary>The library panicked on the input (a malformed proof) and refused it instead of aborting the process.</summary>
+        public const int ErrPanic = -7;
 
         /// <summary>Bit 0: full PLONK verify (circuits + SRS) wired in native — see <see cref="PLONKSetup.IsProofVerificationImplemented"/>.</summary>
         public const uint CapVerifyV1 = 1;

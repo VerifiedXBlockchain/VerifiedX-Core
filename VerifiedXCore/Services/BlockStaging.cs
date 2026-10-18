@@ -116,6 +116,12 @@ namespace VerifiedXCore.Services
             }
         }
 
+        /// <summary>Whether this block (by height and hash) is staged.</summary>
+        public static bool IsStaged(Block block)
+        {
+            lock (_lock) return IsStagedLocked(block);
+        }
+
         private static bool IsStagedLocked(Block block) =>
             BlockDownloadService.BlockDict.TryGetValue(block.Height, out var list) && list.Any(b => b.block?.Hash == block.Hash);
 

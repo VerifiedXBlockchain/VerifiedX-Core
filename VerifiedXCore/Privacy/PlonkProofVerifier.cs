@@ -21,13 +21,13 @@ namespace VerifiedXCore.Privacy
     {
         public const string MissingProofReason = "A private transaction must carry a PLONK proof (proof_b64).";
         public const string FailedProofPrefix = "PLONK proof verification failed";
-        public const string VerifierUnavailableReason = "This node cannot verify PLONK proofs (VXPLNK06 params not loaded or the native library lacks the v2 owner-bound circuits); private transactions are refused until it can.";
+        public const string VerifierUnavailableReason = "This node cannot verify PLONK proofs (VXPLNK06 params not loaded, or the native library lacks the v2 owner-bound circuits or is a circuit generation this build does not pin); private transactions are refused until it can.";
 
         /// <summary>Replaceable for tests: whether this node can verify v1 proofs against version-2 public inputs.</summary>
         internal static Func<bool> VerifierAvailable = () =>
         {
             PLONKSetup.RefreshVerificationCapability();
-            return PLONKSetup.IsV1CircuitsLoaded && PLONKSetup.IsVfxPi2VerifyAvailable && PLONKSetup.IsV2CircuitsAvailable;
+            return PLONKSetup.IsCircuitVersionPinned && PLONKSetup.IsV1CircuitsLoaded && PLONKSetup.IsVfxPi2VerifyAvailable && PLONKSetup.IsV2CircuitsAvailable;
         };
 
         /// <summary>
@@ -102,7 +102,11 @@ namespace VerifiedXCore.Privacy
                 VerifiedProofs[key] = 0;
                 return PlonkVerifyResult.Valid;
             }
-            if (code == 0)
+            // A proof the library refuses - it panicked on it (ErrPanic, where it used to abort the node) or could not
+            // read it (ErrCrypto) - is an invalid proof, as one that fails verification is: it says nothing about this
+            // node's state, so it is not taken for a sign of local corruption. Public inputs the library rejects are the
+            // node's own, and stay a native error.
+            if (code == 0 || code == PlonkNative.ErrPanic || code == PlonkNative.ErrCrypto)
                 return PlonkVerifyResult.Invalid;
             return PlonkVerifyResult.NativeError;
         }
