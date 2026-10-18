@@ -115,5 +115,15 @@ namespace VerifiedXCore.Tests
             VBTCBridgeBtcExitState.MarkComplete("0xnone", "btc");
             Assert.Equal(-1, StateData.BlockStartFailedAtHeight);
         }
+
+        [Fact]
+        public void LiteDbsIntegrityCheck_IsANodeLocalFault_AndNoOtherPlainException()
+        {
+            Assert.True(StateData.IsNodeLocalFault(new Exception(StateData.LiteDbEnsurePrefix + "page type must be data page")));
+            Assert.True(StateData.IsNodeLocalFault(new InvalidOperationException("outer", new Exception(StateData.LiteDbEnsurePrefix + "x"))));
+            Assert.False(StateData.IsNodeLocalFault(new Exception("what the transaction says")));
+            Assert.False(StateData.IsNodeLocalFault(new Exception("ENSURE: not LiteDB's")));
+            Assert.False(StateData.IsNodeLocalFault(new InvalidOperationException(StateData.LiteDbEnsurePrefix + "a subclass is not LiteDB's check")));
+        }
     }
 }
