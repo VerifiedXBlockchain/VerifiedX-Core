@@ -1693,10 +1693,25 @@ namespace VerifiedXCore.Controllers
         /// Manually trigger FROST key recovery from peer validators.
         /// Used when a validator's database has been wiped and needs to restore FROST key packages.
         /// </summary>
+        /// <summary>One FROST key recovery or backup broadcast at a time: each asks every peer and writes the key store.</summary>
+        private static readonly SemaphoreSlim FrostKeyOperatorGate = new(1, 1);
+
+        /// <summary>The FROST key operator routes answer the node's own operator only.</summary>
+        private bool IsLoopbackCaller()
+        {
+            var remoteIp = HttpContext?.Connection?.RemoteIpAddress;
+            var mapped = remoteIp != null && remoteIp.IsIPv4MappedToIPv6 ? remoteIp.MapToIPv4() : remoteIp;
+            return mapped != null && System.Net.IPAddress.IsLoopback(mapped);
+        }
+
         [HttpPost]
         [Route("FrostKeyRecover")]
         public async Task<ActionResult<string>> FrostKeyRecover()
         {
+            if (!IsLoopbackCaller())
+                return Unauthorized(JsonConvert.SerializeObject(new { success = false, error = "FrostKeyRecover is localhost-only." }));
+            if (!await FrostKeyOperatorGate.WaitAsync(0))
+                return Conflict(JsonConvert.SerializeObject(new { success = false, error = "A FROST key recovery or broadcast is already running." }));
             try
             {
                 if (string.IsNullOrEmpty(Globals.ValidatorAddress))
@@ -1725,6 +1740,7 @@ namespace VerifiedXCore.Controllers
             {
                 return Ok(JsonConvert.SerializeObject(new { success = false, error = $"Recovery failed: {ApiErrorText.Generic(ex)}" }));
             }
+            finally { FrostKeyOperatorGate.Release(); }
         }
 
         /// <summary>
@@ -1735,6 +1751,10 @@ namespace VerifiedXCore.Controllers
         [Route("FrostKeyBroadcastAll")]
         public async Task<ActionResult<string>> FrostKeyBroadcastAll()
         {
+            if (!IsLoopbackCaller())
+                return Unauthorized(JsonConvert.SerializeObject(new { success = false, error = "FrostKeyBroadcastAll is localhost-only." }));
+            if (!await FrostKeyOperatorGate.WaitAsync(0))
+                return Conflict(JsonConvert.SerializeObject(new { success = false, error = "A FROST key recovery or broadcast is already running." }));
             try
             {
                 if (string.IsNullOrEmpty(Globals.ValidatorAddress))
@@ -1759,6 +1779,7 @@ namespace VerifiedXCore.Controllers
             {
                 return Ok(JsonConvert.SerializeObject(new { success = false, error = $"Broadcast failed: {ApiErrorText.Generic(ex)}" }));
             }
+            finally { FrostKeyOperatorGate.Release(); }
         }
 
         #endregion
