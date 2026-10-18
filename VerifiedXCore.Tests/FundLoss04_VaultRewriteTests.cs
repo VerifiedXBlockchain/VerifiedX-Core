@@ -332,6 +332,77 @@ namespace VerifiedXCore.Tests
             Assert.True(FrostKeyShareBinding.BindByOperator(shareB.Id, vaultB).Ok);     // already there
         }
 
+        /// <summary>An attested key-ceremony proof made for <paramref name="madeFor"/>.</summary>
+        private string AttestedProof(string madeFor, string groupKey) =>
+            FrostDkgAttestation.BuildProof(madeFor, groupKey, VictimDeposit, _owner.Address, 2, new[] { "xA", "xB", "xC" }, new List<FrostDkgAttestation.Attestation>());
+
+        /// <summary>
+        /// An operator resolving an ambiguous share is told which carrier is the vault, and the bind takes only that one: the
+        /// carrier attested for its own UID, or, when none is attested, the one created first. A copy of the key, made
+        /// before or after the vault and carrying the vault's own proof, is refused.
+        /// </summary>
+        [Fact]
+        public void AnAmbiguousShare_BindsOnlyToTheAttestedCarrier_OrWithNoneAttestedToTheFirstCreated()
+        {
+            var priorSynced = Globals.IsChainSynced;
+            FrostKeyShareBinding.ResetForTests();
+            try
+            {
+                Globals.IsChainSynced = true;
+                // A copy made before the vault, a vault whose body holds the proof made for it, and a copy carrying that proof.
+                var earlyCopy = LegacyVault(Key('g'), proof: null);
+                var vaultUid = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
+                var vault = LegacyVault(Key('g'), uid: vaultUid, proof: AttestedProof(vaultUid, Key('g')));
+                var proofCopy = LegacyVault(Key('g'), proof: AttestedProof(vaultUid, Key('g')));
+                var share = Share(Guid.NewGuid().ToString(), Key('g'));
+                Assert.Equal(0, FrostKeyShareBinding.BindSessionShares().Bound);
+
+                var row = FrostKeyShareBinding.Report(Me).Keys.Single(k => k.Id == share.Id);
+                Assert.Equal(FrostKeyShareBinding.StateSessionAmbiguous, row.State);
+                Assert.Equal(new[] { earlyCopy, vault, proofCopy }, row.Carriers.Select(c => c.SmartContractUID));
+                Assert.Equal(new[] { false, true, false }, row.Carriers.Select(c => c.Attested));
+                Assert.Equal(vault, row.BindTo);
+                var verdict = FrostKeyShareBinding.Report(Me).Verdict;
+                Assert.Contains($"{vault} (attested: yes", verdict);
+                Assert.Contains($"{earlyCopy} (attested: no", verdict);
+                Assert.Contains($"bind to {vault}", verdict);
+
+                var (ok, why) = FrostKeyShareBinding.BindByOperator(share.Id, earlyCopy);
+                Assert.False(ok);
+                Assert.Contains($"{vault} is the attested carrier", why);
+                Assert.False(FrostKeyShareBinding.BindByOperator(share.Id, proofCopy).Ok);
+                Assert.True(FrostKeyShareBinding.BindByOperator(share.Id, vault).Ok);
+                Assert.Equal(vault, FrostValidatorKeyStore.GetAllKeyPackages().Single(x => x.Id == share.Id).SmartContractUID);
+
+                // Vaults from before attestation: the first created is the vault; a later copy is refused.
+                var older = LegacyVault(Key('h'));
+                var laterCopy = LegacyVault(Key('h'), proof: null);
+                var legacyShare = Share(Guid.NewGuid().ToString(), Key('h'));
+                var legacyRow = FrostKeyShareBinding.Report(Me).Keys.Single(k => k.Id == legacyShare.Id);
+                Assert.Equal(older, legacyRow.BindTo);
+                Assert.All(legacyRow.Carriers, c => Assert.False(c.Attested));
+                (ok, why) = FrostKeyShareBinding.BindByOperator(legacyShare.Id, laterCopy);
+                Assert.False(ok);
+                Assert.Contains($"none is attested and {older} was created first", why);
+                Assert.True(FrostKeyShareBinding.BindByOperator(legacyShare.Id, older).Ok);
+
+                // Two carriers attested for themselves: fail closed, neither is bound.
+                var uidA = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
+                var uidB = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
+                LegacyVault(Key('i'), uid: uidA, proof: AttestedProof(uidA, Key('i')));
+                LegacyVault(Key('i'), uid: uidB, proof: AttestedProof(uidB, Key('i')));
+                var twice = Share(Guid.NewGuid().ToString(), Key('i'));
+                Assert.Null(FrostKeyShareBinding.Report(Me).Keys.Single(k => k.Id == twice.Id).BindTo);
+                Assert.False(FrostKeyShareBinding.BindByOperator(twice.Id, uidA).Ok);
+                Assert.False(FrostKeyShareBinding.BindByOperator(twice.Id, uidB).Ok);
+            }
+            finally
+            {
+                Globals.IsChainSynced = priorSynced;
+                FrostKeyShareBinding.ResetForTests();
+            }
+        }
+
         /// <summary>
         /// Fifth review: after an upgrade each validator checks its key store. The answer is one line. "Nothing under a
         /// session id" is not the test: a share whose ceremony never produced a contract stays there and is normal. The
