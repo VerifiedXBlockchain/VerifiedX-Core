@@ -59,6 +59,56 @@ namespace VerifiedXCore.Services
         public const int RECOVERY_EXHAUSTED_LOG_INTERVAL_MINUTES = 5;
         private static DateTime _lastRecoveryExhaustedLogUtc = DateTime.MinValue;
 
+        /// <summary>Tests only: forget when each validator last re-joined through a heartbeat.</summary>
+        internal static void ResetHeartbeatRejoinsForTests() => _lastHeartbeatRejoin.Clear();
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _lastHeartbeatRejoin = new(StringComparer.Ordinal);
+        /// <summary>One re-join per validator per this many blocks. An honest validator heartbeats every HEARTBEAT_TX_INTERVAL (500) blocks or on reactivation.</summary>
+        internal const long HeartbeatRejoinMinBlocks = 30;
+
+        /// <summary>
+        /// VALIDATOR-REJOIN: a heartbeat in a committed block is the strongest proof of liveness, so it returns the validator
+        /// to this node's NetworkValidators pool (re-added if evicted, IP updated, failure count and winner failures reset).
+        /// At most once per <see cref="HeartbeatRejoinMinBlocks"/> blocks per validator: heartbeats are free and a validator
+        /// can have one in every block, so one that failed every round it won reset its failures before they could count
+        /// and stayed in the pool for good. This node's memory only; what a block means is unchanged.
+        /// </summary>
+        internal static void ApplyHeartbeatRejoin(string validatorAddress, string ipAddress, long height)
+        {
+            if (_lastHeartbeatRejoin.TryGetValue(validatorAddress, out var last) && height >= last && height - last < HeartbeatRejoinMinBlocks)
+                return;
+            _lastHeartbeatRejoin[validatorAddress] = height;
+            var cleanIP = ipAddress.Replace("::ffff:", "");
+            var now = TimeUtil.GetTime();
+            if (Globals.NetworkValidators.TryGetValue(validatorAddress, out var existingNv))
+            {
+                // Update existing entry — reset fail counts, update IP if changed
+                existingNv.IPAddress = cleanIP;
+                existingNv.IsFullyTrusted = true;
+                existingNv.LastSeen = now;
+                existingNv.CheckFailCount = 0;
+                Globals.NetworkValidators[validatorAddress] = existingNv;
+            }
+            else
+            {
+                // Add new entry — validator just heartbeated on-chain
+                var nv = new NetworkValidator
+                {
+                    Address = validatorAddress,
+                    IPAddress = cleanIP,
+                    PublicKey = "", // Will be populated via P2P handshake or proof generation fallback
+                    IsFullyTrusted = true,
+                    LastSeen = now,
+                    FirstSeenAtHeight = height,
+                    CheckFailCount = 0,
+                };
+                Globals.NetworkValidators.TryAdd(validatorAddress, nv);
+            }
+            // Clear any winner failure tracking for this validator
+            Nodes.BlockcasterNode.ClearWinnerFailures(validatorAddress);
+            Utilities.ProofUtility.ClearProofGenerationCache();
+            LogUtility.Log($"VALIDATOR-REJOIN: Hydrated NetworkValidators from HEARTBEAT TX for {validatorAddress} (IP: {cleanIP}) at block {height}", "BlockValidatorService");
+        }
+
         /// <summary>
         /// STATE-CORRUPTION-SIGNAL: only TX rejections that can be explained by a wrong state trie
         /// should feed the rebuild counter. A replay-guard hit ("already been sent") or an in-block
@@ -1791,38 +1841,7 @@ namespace VerifiedXCore.Services
                                         // This is the primary mechanism for returning validators to re-enter the
                                         // in-memory NetworkValidators pool after being evicted or after a full restart.
                                         if (!string.IsNullOrEmpty(validatorAddress) && !string.IsNullOrEmpty(ipAddress))
-                                        {
-                                            var cleanIP = ipAddress.Replace("::ffff:", "");
-                                            var now = TimeUtil.GetTime();
-                                            if (Globals.NetworkValidators.TryGetValue(validatorAddress, out var existingNv))
-                                            {
-                                                // Update existing entry — reset fail counts, update IP if changed
-                                                existingNv.IPAddress = cleanIP;
-                                                existingNv.IsFullyTrusted = true;
-                                                existingNv.LastSeen = now;
-                                                existingNv.CheckFailCount = 0;
-                                                Globals.NetworkValidators[validatorAddress] = existingNv;
-                                            }
-                                            else
-                                            {
-                                                // Add new entry — validator just heartbeated on-chain
-                                                var nv = new NetworkValidator
-                                                {
-                                                    Address = validatorAddress,
-                                                    IPAddress = cleanIP,
-                                                    PublicKey = "", // Will be populated via P2P handshake or proof generation fallback
-                                                    IsFullyTrusted = true,
-                                                    LastSeen = now,
-                                                    FirstSeenAtHeight = block.Height,
-                                                    CheckFailCount = 0,
-                                                };
-                                                Globals.NetworkValidators.TryAdd(validatorAddress, nv);
-                                            }
-                                            // Clear any winner failure tracking for this validator
-                                            Nodes.BlockcasterNode.ClearWinnerFailures(validatorAddress);
-                                            Utilities.ProofUtility.ClearProofGenerationCache();
-                                            LogUtility.Log($"VALIDATOR-REJOIN: Hydrated NetworkValidators from HEARTBEAT TX for {validatorAddress} (IP: {cleanIP}) at block {block.Height}", "BlockValidatorService");
-                                        }
+                                            ApplyHeartbeatRejoin(validatorAddress, ipAddress, block.Height);
 
                                         //LogUtility.Log($"Processed VBTC V2 validator heartbeat/reactivation for {validatorAddress} (IP: {ipAddress}) at block {block.Height}", "BlockValidatorService");
                                     }
