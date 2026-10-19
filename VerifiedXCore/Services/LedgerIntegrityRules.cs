@@ -686,20 +686,22 @@ namespace VerifiedXCore.Services
         /// Royalty feature exactly (present or not, amount, pay-to address). Evolve()/Devolve() check only not-locked,
         /// sender == minter and recipient == owner, then overwrite the body, and a sale reads the royalty from the current
         /// body: the original minter could rewrite a sold NFT to a 99.99% royalty to itself whenever it was unlocked. A
-        /// body identical to the stored one is never decompiled. Null when the rule passes.
+        /// body identical to the stored one is never decompiled, and an empty body has no Royalty. Null when the rule passes.
         /// </summary>
         public static string? RoyaltyUnchangedByRewrite(Transaction tx, long height)
         {
             if (tx?.Data == null || height < Globals.RoyaltyRewriteRulesHeight) return null;
             var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
             if (payload.Function == null || !ContractRewritingFunctions.Contains(payload.Function)
-                || string.IsNullOrEmpty(payload.ContractUID) || string.IsNullOrEmpty(payload.Data))
+                || string.IsNullOrEmpty(payload.ContractUID))
                 return null;
             var stored = SmartContractStateTrei.GetSmartContractState(payload.ContractUID);
-            if (stored == null || string.Equals(payload.Data, stored.ContractData, StringComparison.Ordinal))
+            if (stored == null || string.Equals(payload.Data ?? "", stored.ContractData ?? "", StringComparison.Ordinal))
                 return null;
             var before = RoyaltyOf(stored.ContractData);
-            var after = RoyaltyOf(payload.Data);
+            // An empty body is written over the stored one as it is, so it carries no Royalty: passing it let the next
+            // rewrite be compared against a body that had already lost it.
+            var after = string.IsNullOrEmpty(payload.Data) ? null : RoyaltyOf(payload.Data);
             if (before == null && after == null) return null;
             if (before != null && after != null
                 && before.Value.Amount == after.Value.Amount
@@ -1426,11 +1428,33 @@ namespace VerifiedXCore.Services
             "Sale_Start()", "M_Sale_Start()", "Sale_Complete()", "M_Sale_Complete()", "Sale_Cancel()",
         };
 
-        /// <summary>Per-block register of the contracts a block moves (Transfer(), Burn()) and sells (NFT_SALE).</summary>
+        /// <summary>Per-block register of the contracts a block moves (Transfer(), Burn()) and sells (NFT_SALE), and of the token votes it casts.</summary>
         public sealed class NftStepState
         {
             public readonly HashSet<string> Moves = new(StringComparer.OrdinalIgnoreCase);
             public readonly HashSet<string> Sales = new(StringComparer.OrdinalIgnoreCase);
+            /// <summary>(holder, topic) pairs a block's TokenVoteTopicCast() calls vote for.</summary>
+            public readonly HashSet<string> TokenVotes = new(StringComparer.Ordinal);
+        }
+
+        public const string TokenVotedTwiceInBlock = "A block carries one token vote per holder and topic";
+
+        /// <summary>The (holder, topic) a TokenVoteTopicCast() votes for, read as its apply reads it; null for any other transaction.</summary>
+        public static string? TokenVoteKey(Transaction tx)
+        {
+            if (tx?.Data == null || !ContractFunctionTypes.Contains(tx.TransactionType)) return null;
+            try
+            {
+                var jobj = JObject.Parse(tx.Data);
+                if ((string?)jobj["Function"] != "TokenVoteTopicCast()") return null;
+                var holder = jobj["FromAddress"]?.ToObject<string?>();
+                var topic = jobj["TopicUID"]?.ToObject<string?>();
+                return string.IsNullOrEmpty(holder) || string.IsNullOrEmpty(topic) ? null : $"{holder}\u001d{topic}";
+            }
+            catch (Exception ex) when (ex is Newtonsoft.Json.JsonException || ex is ArgumentException || ex is FormatException || ex is InvalidCastException)
+            {
+                return null;
+            }
         }
 
         /// <summary>
@@ -1442,6 +1466,11 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static string? RegisterNftStepInBlock(Transaction tx, NftStepState state, long height)
         {
+            // From VoteTopicRulesHeight one TokenVoteTopicCast() per (holder, topic) in a block: each was judged against
+            // the votes stored before the block, and the apply counts every one, so two raised the tally by two while one
+            // vote row was kept.
+            if (height >= Globals.VoteTopicRulesHeight && TokenVoteKey(tx) is { } voteKey)
+                return state.TokenVotes.Add(voteKey) ? null : $"{TokenVotedTwiceInBlock}: {voteKey.Replace('\u001d', '/')}";
             var moveOrSale = height >= Globals.PathAuditRulesHeight;
             var oneMove = height >= Globals.OneMovePerContractHeight;
             if (!moveOrSale && !oneMove) return null;
