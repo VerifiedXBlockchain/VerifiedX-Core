@@ -377,19 +377,18 @@ namespace VerifiedXCore.BrowserWalletServices
                 return new { success = false, message = "scUID (vBTC contract UID) is required." };
 
             var asset = VbtcPrivacyAsset.FormatAssetKey(scUID);
-            // A read never creates a pool row: the pool state is consensus-read, and only state apply writes it.
+            // Read only: GetOrCreateState inserted a pool row into the consensus privacy store for any id a caller named,
+            // from a route a locked wallet may call (#208, D16). No row reads as an empty pool, as PrivacyV1 answers it.
             var pool = ShieldedPoolService.GetState(asset);
-            if (pool == null)
-                return new { success = false, scUID, message = "No shielded pool exists for this vBTC contract." };
             return new
             {
                 success = true,
                 scUID,
-                assetType = pool.AssetType,
-                totalCommitments = pool.TotalCommitments,
-                totalShieldedSupply = pool.TotalShieldedSupply,
-                currentMerkleRoot = pool.CurrentMerkleRoot,
-                lastUpdateHeight = pool.LastUpdateHeight
+                assetType = pool?.AssetType ?? asset,
+                totalCommitments = pool?.TotalCommitments ?? 0L,
+                totalShieldedSupply = pool?.TotalShieldedSupply ?? 0M,
+                currentMerkleRoot = pool?.CurrentMerkleRoot,
+                lastUpdateHeight = pool?.LastUpdateHeight ?? 0L
             };
         }
     }

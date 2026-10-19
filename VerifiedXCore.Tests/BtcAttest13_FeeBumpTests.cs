@@ -158,6 +158,40 @@ namespace VerifiedXCore.Tests
 
         // ── The ordinary path ───────────────────────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// #293: a coin frozen by a spend-only event stranded the withdrawal pinned on it: its transaction was never signed
+        /// again, nor a fee raise or release. The freeze is the signers' word; broadcasting is harmless (the transaction
+        /// confirms if the claim was false and fails if it was true). A frozen coin is signed for and can have its fee
+        /// raised, and stays frozen: holding it again does not make it count as backing.
+        /// </summary>
+        [Fact]
+        public async Task AWithdrawalOnAFrozenCoin_IsStillSignedAndItsFeeRaised_AndTheCoinStaysFrozen()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            var deposit = await Deposit(vault.Script, 150_000);
+            var request = await Mine(Request(vault.Uid, 0.001M));
+            var other = Elsewhere();
+            await Report(_btc.Mine(Pay(new[] { new OutPoint(deposit.GetHash(), 0) }, Enumerable.Range(0, 3_300).Select(_ => (other, 1_000L)).ToArray())));
+            var coin = Outpoint(deposit, 0);
+            Assert.Equal(VaultCoinStatus.Frozen, BtcAttestStore.Coin(coin)!.Status);
+            Assert.Equal(0, BtcAttestStore.Total(vault.Uid).PinnedSats);
+
+            await Mine(Bump(vault.Uid, request.Hash, 25));                                   // a fee raise on the frozen coin
+            var row = Row(request, vault.Uid);
+            Assert.Equal(2, row.Pins.Count);
+            Assert.Equal(VaultCoinStatus.Frozen, BtcAttestStore.Coin(coin)!.Status);         // still frozen
+            Assert.Equal(0, BtcAttestStore.Total(vault.Uid).PinnedSats);                     // no backing comes back
+
+            var led = new List<string>();
+            BtcWithdrawalSigner.SignAndBroadcast = (r, p) => { led.Add(p.Txid); return Task.FromResult((true, p.Txid)); };
+            BtcWithdrawalSigner.KnownOnBitcoin = _ => Task.FromResult<bool?>(false);
+            var newest = row.Pins[1];
+            foreach (var signer in Signers)
+                await BtcWithdrawalSigner.TickAsync(signer.Address, newest.PinnedAtVfxHeight + 8 * BtcWithdrawalSigner.TurnBlocks);
+            Assert.Contains(newest.Txid, led);                                                // its signers still lead it
+        }
+
         [Fact]
         public async Task TheRequester_RaisesTheFee_TheReplacementSpendsTheSameCoins_AndCompletesTheWithdrawal()
         {
