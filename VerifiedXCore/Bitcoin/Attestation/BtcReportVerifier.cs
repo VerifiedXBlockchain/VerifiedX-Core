@@ -440,6 +440,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 var coin = BtcAttestStore.Coin(outpoint, db);
                 var status = overlay.TryGetValue(outpoint, out var touched) ? touched : coin?.Status;
                 if (status != VaultCoinStatus.Unspent && status != VaultCoinStatus.Pinned) continue; // unknown, spent, orphaned or frozen already
+                if (coin != null && coin.CreatedInHeight > block) continue; // a transaction cannot spend a coin made after its block (#293)
                 var created = coin == null ? effects.First(e => !e.IsSpend && !e.IsFreeze && e.Outpoint == outpoint) : null;
                 var owner = coin?.SmartContractUID ?? created!.SmartContractUID;
                 if (scopedVault != null && owner != scopedVault) continue;
