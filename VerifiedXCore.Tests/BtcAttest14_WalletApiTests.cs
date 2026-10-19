@@ -48,6 +48,23 @@ namespace VerifiedXCore.Tests
 
         private static long Tip => Globals.LastBlock.Height;
 
+        /// <summary>
+        /// #208 (D16): the wallet's vBTC pool-state route, which a locked wallet may call, created a pool row in the
+        /// consensus privacy store for any contract id it was asked about. It reads only, and no row answers as an empty pool.
+        /// </summary>
+        [Fact]
+        public void ThePoolStateRoute_ReadsOnly_AndAnUnknownContractIsAnEmptyPool()
+        {
+            var madeUp = "made-up-" + Guid.NewGuid().ToString("N");
+            var asset = VerifiedXCore.Privacy.VbtcPrivacyAsset.FormatAssetKey(madeUp);
+            var result = new VerifiedXCore.Controllers.WalletController().GetVbtcShieldedPoolState(madeUp);
+            var body = JObject.FromObject(Assert.IsType<Microsoft.AspNetCore.Mvc.OkObjectResult>(result).Value!);
+            Assert.True(body["success"]!.Value<bool>());
+            Assert.Equal(0L, body["totalCommitments"]!.Value<long>());
+            Assert.Equal(0M, body["totalShieldedSupply"]!.Value<decimal>());
+            Assert.Null(VerifiedXCore.Privacy.ShieldedPoolService.GetState(asset));            // nothing was written
+        }
+
         /// <summary>The browser wallet's amounts: "0,5" was read as 5 (a comma taken as a thousands separator; round 19).</summary>
         [Fact]
         public void TheBrowserWalletsAmounts_AreDigitsAndOneDecimalPoint()
