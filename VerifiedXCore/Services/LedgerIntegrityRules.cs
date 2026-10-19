@@ -686,14 +686,16 @@ namespace VerifiedXCore.Services
         /// Royalty feature exactly (present or not, amount, pay-to address). Evolve()/Devolve() check only not-locked,
         /// sender == minter and recipient == owner, then overwrite the body, and a sale reads the royalty from the current
         /// body: the original minter could rewrite a sold NFT to a 99.99% royalty to itself whenever it was unlocked. A
-        /// body identical to the stored one is never decompiled. Null when the rule passes.
+        /// body identical to the stored one is never decompiled. An empty or missing body is written over the stored one
+        /// too, so it is a body with no royalty: skipped, it let a royalty-free rewrite after it pass as "none to none"
+        /// (#208, D18). Null when the rule passes.
         /// </summary>
         public static string? RoyaltyUnchangedByRewrite(Transaction tx, long height)
         {
             if (tx?.Data == null || height < Globals.RoyaltyRewriteRulesHeight) return null;
             var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
             if (payload.Function == null || !ContractRewritingFunctions.Contains(payload.Function)
-                || string.IsNullOrEmpty(payload.ContractUID) || string.IsNullOrEmpty(payload.Data))
+                || string.IsNullOrEmpty(payload.ContractUID))
                 return null;
             var stored = SmartContractStateTrei.GetSmartContractState(payload.ContractUID);
             if (stored == null || string.Equals(payload.Data, stored.ContractData, StringComparison.Ordinal))

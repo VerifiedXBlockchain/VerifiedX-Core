@@ -144,6 +144,40 @@ namespace VerifiedXCore.Tests
             Assert.StartsWith(Refused, msg);
         }
 
+        /// <summary>
+        /// #208 (D18): a rewrite carrying an empty body skipped the check and wrote the empty body over the stored one;
+        /// a royalty-free rewrite then compared "none" with "none" and passed, so the royalty was gone for good. An empty
+        /// or missing body is a body with no royalty, refused while the stored body carries one.
+        /// </summary>
+        [Fact]
+        public async Task AnEmptyBodyRewrite_CannotStripTheRoyalty()
+        {
+            var (uid, _) = SoldNft();
+            TipBelowGate();
+            var (okBelow, msgBelow) = await TransactionValidatorService.VerifyTX(Rewrite("Update()", uid, "", _owner, _owner.Address));
+            Assert.True(okBelow, msgBelow);                                                // the hole below the rules
+
+            TipAtGate();
+            foreach (var function in new[] { "Update()", "Transfer()" })
+            {
+                var (ok, msg) = await TransactionValidatorService.VerifyTX(Rewrite(function, uid, "", _owner, _owner.Address));
+                Assert.False(ok, $"{function} with an empty body passed");
+                Assert.StartsWith(Refused, msg);
+            }
+            var missing = Rewrite("Update()", uid, "", _owner, _owner.Address);
+            missing.Data = JsonConvert.SerializeObject(new[] { new { Function = "Update()", ContractUID = uid, MD5List = "NA", ToAddress = _owner.Address } });
+            missing.Build();
+            missing.Signature = SignatureService.CreateSignature(missing.Hash, _owner.Key, _owner.Pub);
+            Assert.NotNull(LedgerIntegrityRules.RoyaltyUnchangedByRewrite(missing, Gate));   // no Data field at all: the same
+
+            var (plainUid, _) = (Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime(), "");
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei
+            {
+                SmartContractUID = plainUid, ContractData = Body(plainUid, null), MinterAddress = _minter.Address, OwnerAddress = _owner.Address, IsLocked = false, Nonce = 0,
+            });
+            Assert.Null(LedgerIntegrityRules.RoyaltyUnchangedByRewrite(Rewrite("Update()", plainUid, "", _owner, _owner.Address), Gate)); // no royalty to keep
+        }
+
         [Fact]
         public async Task RewritesKeepingTheRoyalty_PassAtGate()
         {
