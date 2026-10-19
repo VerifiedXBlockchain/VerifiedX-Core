@@ -1435,6 +1435,8 @@ namespace VerifiedXCore.Services
             public readonly HashSet<string> Sales = new(StringComparer.OrdinalIgnoreCase);
             /// <summary>(holder, topic) pairs a block's TokenVoteTopicCast() calls vote for.</summary>
             public readonly HashSet<string> TokenVotes = new(StringComparer.Ordinal);
+            /// <summary>The token contracts a block's TokenMint() calls mint.</summary>
+            public readonly HashSet<string> TokenMints = new(StringComparer.OrdinalIgnoreCase);
         }
 
         private static readonly System.Text.RegularExpressions.Regex AdnrNameGrammar =
@@ -1484,6 +1486,8 @@ namespace VerifiedXCore.Services
                 ? afterCoinbase.Take(Math.Max(0, Globals.MaxTransactionsPerBlock - alreadyInBlock)).ToList()
                 : afterCoinbase;
 
+        public const string TokenMintedTwiceInBlock = "A block carries one TokenMint() per token contract";
+
         public const string TokenVotedTwiceInBlock = "A block carries one token vote per holder and topic";
 
         /// <summary>The (holder, topic) a TokenVoteTopicCast() votes for, read as its apply reads it; null for any other transaction.</summary>
@@ -1518,6 +1522,11 @@ namespace VerifiedXCore.Services
             // vote row was kept.
             if (height >= Globals.VoteTopicRulesHeight && TokenVoteKey(tx) is { } voteKey)
                 return state.TokenVotes.Add(voteKey) ? null : $"{TokenVotedTwiceInBlock}: {voteKey.Replace('\u001d', '/')}";
+            // From TokenMintRulesHeight one TokenMint() per contract in a block: each is judged against the supply and
+            // balance before the block, so a second could overflow at apply after the first (balance written, supply not).
+            if (height >= Globals.TokenMintRulesHeight && ContractFunctionTypes.Contains(tx.TransactionType)
+                && DispatchedCall(tx.Data) is { Function: "TokenMint()", ContractUID: { Length: > 0 } mintedUid })
+                return state.TokenMints.Add(mintedUid) ? null : $"{TokenMintedTwiceInBlock}: {mintedUid}";
             var moveOrSale = height >= Globals.PathAuditRulesHeight;
             var oneMove = height >= Globals.OneMovePerContractHeight;
             if (!moveOrSale && !oneMove) return null;
