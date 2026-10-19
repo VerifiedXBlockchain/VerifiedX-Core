@@ -735,6 +735,37 @@ namespace VerifiedXCore.Tests
         /// opened a session with one signer too many, and its validator was later dropped as failing. Each participant is
         /// listed once. And an idle or given-up session no longer keeps another leader off its UID (fourth review, round 5).
         /// </summary>
+        /// <summary>
+        /// #208 (D27): a key ceremony's start kept a contract id of any size with its session for an hour, long after the
+        /// session stopped counting toward the caps, so a few starts could hold gigabytes on a validator. The id is
+        /// bounded like the session id, and nothing is stored for a start that exceeds it.
+        /// </summary>
+        [Fact]
+        public async Task AStartsContractId_IsBounded_AndAnOversizedOneOpensNoSession()
+        {
+            using var server = new TestServer(new WebHostBuilder().UseStartup<FrostStartup>());
+            var client = server.CreateClient();
+            var sessionId = Guid.NewGuid().ToString();
+            var body = JsonConvert.SerializeObject(new FrostDKGStartRequest
+            {
+                SessionId = sessionId, SmartContractUID = new string('a', 1_000_000), LeaderAddress = "xLeader", LeaderSignature = "sig", Timestamp = _now,
+                ParticipantAddresses = new List<string> { "xV1", "xV2" }, RequiredThreshold = 67,
+            });
+            var response = await client.PostAsync("/frost/dkg/start", new StringContent(body, Encoding.UTF8, "application/json"));
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Contains("Invalid SmartContractUID", (string)JObject.Parse(await response.Content.ReadAsStringAsync())["Message"]!);
+            Assert.False(FrostSessionStorage.DKGSessions.ContainsKey(sessionId));
+
+            // A real contract id passes this check (and is refused later only for the made-up signature).
+            body = JsonConvert.SerializeObject(new FrostDKGStartRequest
+            {
+                SessionId = Guid.NewGuid().ToString(), SmartContractUID = FrostDkgAttestation.NewContractUid(), LeaderAddress = "xLeader", LeaderSignature = "sig", Timestamp = _now,
+                ParticipantAddresses = new List<string> { "xV1", "xV2" }, RequiredThreshold = 67,
+            });
+            response = await client.PostAsync("/frost/dkg/start", new StringContent(body, Encoding.UTF8, "application/json"));
+            Assert.DoesNotContain("Invalid SmartContractUID", await response.Content.ReadAsStringAsync());
+        }
+
         [Fact]
         public async Task AStart_ListsEachParticipantOnce_AndOnlyACeremonyUnderWayHoldsItsUid()
         {

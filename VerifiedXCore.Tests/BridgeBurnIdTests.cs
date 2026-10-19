@@ -25,13 +25,55 @@ namespace VerifiedXCore.Tests
         {
             var batched = "0x" + new string('a', 64);
             var lone = "0x" + new string('b', 64);
-            var ids = BaseBridgeExitWatchService.BurnIdsOf(new[] { Log(batched, 7), Log(lone, 2), Log(batched, 3) });
+            var prior = Globals.PathAuditRulesHeight;
+            try
+            {
+                Globals.PathAuditRulesHeight = 0;
+                var ids = BaseBridgeExitWatchService.BurnIdsOf(new[] { Log(batched, 7), Log(lone, 2), Log(batched, 3) });
 
-            Assert.Equal($"{batched}:0", ids[(batched, new BigInteger(3))]);   // emitted first, whichever kind it is
-            Assert.Equal($"{batched}:1", ids[(batched, new BigInteger(7))]);
-            Assert.Equal(lone, ids[(lone, new BigInteger(2))]);
-            Assert.Equal((batched, (int?)1), BaseBridgeService.SplitBurnId($"{batched}:1"));
-            Assert.Equal((lone, (int?)null), BaseBridgeService.SplitBurnId(lone));
+                Assert.Equal($"{batched}:0", ids[(batched, new BigInteger(3))]);   // emitted first, whichever kind it is
+                Assert.Equal($"{batched}:1", ids[(batched, new BigInteger(7))]);
+                Assert.Equal(lone, ids[(lone, new BigInteger(2))]);
+                Assert.Equal((batched, (int?)1), BaseBridgeService.SplitBurnId($"{batched}:1"));
+                Assert.Equal((lone, (int?)null), BaseBridgeService.SplitBurnId(lone));
+
+                // #291: before the path-audit rules a position is refused by every caster, so every burn keeps its
+                // transaction's hash, as before #277.
+                Globals.PathAuditRulesHeight = long.MaxValue;
+                ids = BaseBridgeExitWatchService.BurnIdsOf(new[] { Log(batched, 7), Log(lone, 2), Log(batched, 3) });
+                Assert.Equal(batched, ids[(batched, new BigInteger(3))]);
+                Assert.Equal(batched, ids[(batched, new BigInteger(7))]);
+            }
+            finally
+            {
+                Globals.PathAuditRulesHeight = prior;
+            }
+        }
+
+        /// <summary>
+        /// #291: a positioned burn read by a caster still before the path-audit rules (a block behind the one that named
+        /// it) was answered "no" and the record failed and was pruned; it is "not yet", and the record waits to be retried.
+        /// </summary>
+        [Fact]
+        public async System.Threading.Tasks.Task APositionedBurnReadBeforeTheRules_IsNotYet_NotFailed()
+        {
+            var prior = BaseBridgeService.BurnEventsForTests;
+            try
+            {
+                BaseBridgeService.BurnEventsForTests = (_, _) => (false, null, BaseBridgeService.PositionBeforeRules);
+                var record = new BurnExitConsensusService.ProcessedBurnRecord
+                {
+                    BaseBurnTxHash = "0x" + new string('c', 64) + ":1", ExitType = BurnExitConsensusService.BurnExitType.BtcExit, Amount = 0.002M, BtcDestination = "dest",
+                };
+                var (ok, transient, _, evidence) = await BurnExitConsensusService.VerifyBurnEvidenceAsync(record);
+                Assert.False(ok);
+                Assert.True(transient);                                                   // kept Pending and asked again
+                Assert.Null(evidence);
+            }
+            finally
+            {
+                BaseBridgeService.BurnEventsForTests = prior;
+            }
         }
 
         [Fact]

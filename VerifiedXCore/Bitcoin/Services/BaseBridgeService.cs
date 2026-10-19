@@ -342,12 +342,15 @@ namespace VerifiedXCore.Bitcoin.Services
         /// path-audit rules; the bare hash names the transaction's only burn, and from those rules a transaction with
         /// several burns of any kind is not named by its hash, so no burn can be redeemed under two ids.
         /// </summary>
+        /// <summary>A positioned burn id read before the path-audit rules: not yet, rather than no (#291).</summary>
+        public const string PositionBeforeRules = "A burn is named by its position in its transaction only from the path-audit rules";
+
         internal static (bool Ok, BurnEventInfo? Info, string Reason) BurnAt(IReadOnlyList<(bool Vfx, BurnEventInfo? Info)> burns, int? position, bool vfxExit)
         {
             var pathAudit = (Globals.LastBlock?.Height ?? -1) + 1 >= Globals.PathAuditRulesHeight;
             if (position is int n)
             {
-                if (!pathAudit) return (false, null, "A burn is named by its position in its transaction only from the path-audit rules");
+                if (!pathAudit) return (false, null, PositionBeforeRules);
                 if (burns.Count < 2) return (false, null, $"A burn named by its position is one of several in its transaction; this one holds {burns.Count}");
                 if (n >= burns.Count) return (false, null, $"No burn at position {n}: the transaction holds {burns.Count}");
                 if (burns[n].Vfx != vfxExit) return (false, null, "No matching burn event emitted by the bridge contract");
