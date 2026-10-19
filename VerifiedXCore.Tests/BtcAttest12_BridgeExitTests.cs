@@ -329,6 +329,8 @@ namespace VerifiedXCore.Tests
             await Start();
             var vault = await CreateVault(H1 + 1);
             await Deposit(vault.Script, 1_000_000);
+            await Deposit(vault.Script, 1_000_000);                                       // a coin for each exit's part
+            await Deposit(vault.Script, 1_000_000);
             var first = await Lock(vault.Uid, 0.002M);
             var second = await Lock(vault.Uid, 0.002M);
             var spare = await Lock(vault.Uid, 0.002M);
@@ -361,6 +363,15 @@ namespace VerifiedXCore.Tests
                 var (exit, _, why) = FrostSigningAuthorization.ResolveBtcExitForContract(reference, vault.Uid);
                 Assert.True(exit != null, why);
                 Assert.Equal(id, exit!.BaseBurnTxHash);
+
+                // #290: and its signers sign it. The reference the casters and the vault's signers send is the canonical
+                // one, and a positioned exit's carries its position; the bare 16 characters are refused.
+                Assert.Equal(reference, BtcWithdrawals.ExitSigningReference(id, vault.Uid));
+                var pinned = BtcTx.Parse(Assert.Single(Part(id, vault.Uid).Pins).TxHex, Network.Main);
+                var (signs, signWhy) = FrostSigningAuthorization.Authorize(Announce(vault.Uid, vault.Script, reference, pinned, Caster.Address));
+                Assert.True(signs, signWhy);
+                (signs, _) = FrostSigningAuthorization.Authorize(Announce(vault.Uid, vault.Script, $"btcexit_{baseTx[..16]}_{vault.Uid[..8]}", pinned, Caster.Address));
+                Assert.False(signs);
             }
         }
 

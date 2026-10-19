@@ -65,9 +65,14 @@ namespace VerifiedXCore.Bitcoin.Attestation
         private static bool IsPartOf(VaultWithdrawalRow part, VBTCBridgeBtcExitState exit) =>
             part.RequestHash == exit.ExitTxHash && part.RequestVfxHeight == exit.ExitVfxHeight;
 
-        /// <summary>The reference the signing ceremony uses for one vault's part of an exit (as the casters have always named it).</summary>
+        /// <summary>
+        /// The reference the signing ceremony uses for one vault's part of an exit (as the casters have always named it): the
+        /// burn's first 16 characters, and for one of several burns in a Base transaction its position too
+        /// (<see cref="Services.BaseBridgeService.BurnSigningPrefix"/>); without it the signers refused a positioned exit as
+        /// not canonical (#290).
+        /// </summary>
         public static string ExitSigningReference(string burnHash, string scUID) =>
-            $"{FROST.FrostSigningAuthorization.BtcExitPrefix}{burnHash[..Math.Min(16, burnHash.Length)]}_{scUID[..Math.Min(8, scUID.Length)]}";
+            $"{FROST.FrostSigningAuthorization.BtcExitPrefix}{Services.BaseBridgeService.BurnSigningPrefix(burnHash)}_{scUID[..Math.Min(8, scUID.Length)]}";
 
         private static List<PoolUnlockAllocation> AllocationsOf(VBTCBridgeBtcExitState? exit)
         {
