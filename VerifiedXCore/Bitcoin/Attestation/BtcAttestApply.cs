@@ -192,6 +192,18 @@ namespace VerifiedXCore.Bitcoin.Attestation
             foreach (var effect in outcome.Effects)
             {
                 var existing = BtcAttestStore.Coin(effect.Outpoint, db);
+                if (effect.IsFreeze)
+                {
+                    if (existing == null) continue; // a coin is created before anything can freeze it
+                    var frozen = Clone(existing);
+                    frozen.Status = VaultCoinStatus.Frozen;
+                    frozen.SpentByTxid = effect.Txid;
+                    frozen.SpentInHeight = effect.BitcoinHeight;
+                    BtcAttestStore.SaveCoin(frozen, existing, db); // no longer held: the backing drops by its value; its holders are kept
+                    ErrorLogUtility.LogError($"Coin {effect.Outpoint} of vault {effect.SmartContractUID} ({effect.Sats} sats) frozen: spent by {effect.Txid} at Bitcoin {effect.BitcoinHeight}, a transaction too large to prove.",
+                        "BtcAttestApply.ApplyReport()");
+                    continue;
+                }
                 if (effect.IsSpend)
                 {
                     if (existing == null) continue; // created and spent inside this report: written by the create below, then here

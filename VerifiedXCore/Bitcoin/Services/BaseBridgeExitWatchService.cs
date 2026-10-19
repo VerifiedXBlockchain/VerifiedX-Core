@@ -174,16 +174,19 @@ namespace VerifiedXCore.Bitcoin.Services
 
         /// <summary>
         /// Each bridge burn log's id (<see cref="BaseBridgeService.BurnId"/>): its transaction's hash, or with its position
-        /// among that transaction's bridge burns (both kinds, in emitted order) when it holds several.
+        /// among that transaction's bridge burns (both kinds, in emitted order) when it holds several. Before the path-audit
+        /// rules, which a position is named under, every burn is its transaction's hash, as it was: a positioned id was
+        /// refused by every caster's receipt check and both burns of the transaction failed for good (#291).
         /// </summary>
         internal static Dictionary<(string TxHash, BigInteger LogIndex), string> BurnIdsOf(IEnumerable<FilterLog> logs)
         {
+            var positioned = (Globals.LastBlock?.Height ?? -1) + 1 >= Globals.PathAuditRulesHeight; // as BaseBridgeService.BurnAt judges it
             var ids = new Dictionary<(string TxHash, BigInteger LogIndex), string>();
             foreach (var tx in logs.Where(l => l != null && !string.IsNullOrEmpty(l.TransactionHash)).GroupBy(l => l.TransactionHash.ToLowerInvariant()))
             {
                 var ordered = tx.GroupBy(BurnLogKey).Select(g => g.First()).OrderBy(l => l.LogIndex?.Value ?? BigInteger.Zero).ToList();
                 for (var i = 0; i < ordered.Count; i++)
-                    ids[BurnLogKey(ordered[i])] = BaseBridgeService.BurnId(ordered[i].TransactionHash, i, ordered.Count);
+                    ids[BurnLogKey(ordered[i])] = BaseBridgeService.BurnId(ordered[i].TransactionHash, i, positioned ? ordered.Count : 1);
             }
             return ids;
         }

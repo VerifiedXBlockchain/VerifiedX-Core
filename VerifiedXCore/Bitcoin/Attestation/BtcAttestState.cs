@@ -79,6 +79,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// back under the same outpoint.
         /// </summary>
         Orphaned = 3,
+        /// <summary>
+        /// Spent by a Bitcoin transaction too large to prove (#171), on the signers' word: it counts for nothing and is
+        /// never selected or signed. SpentByTxid and SpentInHeight name that transaction. A proven spend settles it; a
+        /// rewind below SpentInHeight unfreezes it. Its holders are kept: a pinned withdrawal is neither voided nor
+        /// refunded, since the pinned transaction may still confirm if the claim was false.
+        /// </summary>
+        Frozen = 4,
     }
 
     /// <summary>One Bitcoin output held by a vault. The id is the outpoint, "txid:vout", lowercase.</summary>

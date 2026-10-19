@@ -329,6 +329,8 @@ namespace VerifiedXCore.Tests
             await Start();
             var vault = await CreateVault(H1 + 1);
             await Deposit(vault.Script, 1_000_000);
+            await Deposit(vault.Script, 1_000_000);                                       // a coin for each exit's part
+            await Deposit(vault.Script, 1_000_000);
             var first = await Lock(vault.Uid, 0.002M);
             var second = await Lock(vault.Uid, 0.002M);
             var spare = await Lock(vault.Uid, 0.002M);
@@ -361,6 +363,15 @@ namespace VerifiedXCore.Tests
                 var (exit, _, why) = FrostSigningAuthorization.ResolveBtcExitForContract(reference, vault.Uid);
                 Assert.True(exit != null, why);
                 Assert.Equal(id, exit!.BaseBurnTxHash);
+
+                // #290: and its signers sign it. The reference the casters and the vault's signers send is the canonical
+                // one, and a positioned exit's carries its position; the bare 16 characters are refused.
+                Assert.Equal(reference, BtcWithdrawals.ExitSigningReference(id, vault.Uid));
+                var pinned = BtcTx.Parse(Assert.Single(Part(id, vault.Uid).Pins).TxHex, Network.Main);
+                var (signs, signWhy) = FrostSigningAuthorization.Authorize(Announce(vault.Uid, vault.Script, reference, pinned, Caster.Address));
+                Assert.True(signs, signWhy);
+                (signs, _) = FrostSigningAuthorization.Authorize(Announce(vault.Uid, vault.Script, $"btcexit_{baseTx[..16]}_{vault.Uid[..8]}", pinned, Caster.Address));
+                Assert.False(signs);
             }
         }
 
@@ -1666,6 +1677,37 @@ namespace VerifiedXCore.Tests
         }
 
         // ── Signing ─────────────────────────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// #171: a coin pinned to a withdrawal and frozen by a spend too large to carry leaves the withdrawal pinned: not
+        /// voided, nothing refunded. The freeze is the signers' word; if it was false the pinned transaction can still
+        /// confirm, and a refund then would pay the requester twice. When it does confirm, the withdrawal is paid.
+        /// </summary>
+        [Fact]
+        public async Task APinnedCoinFrozenBySpendOnly_KeepsItsWithdrawalPinned_AndRefundsNothing_UntilItsTransactionConfirms()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var deposit = await Deposit(vault.Script, 1_000_000);
+            var withdrawal = await Mine(Request(vault.Uid, 0.001M));
+            var row = BtcAttestStore.Withdrawal(BtcWithdrawals.RefOf(withdrawal.Hash, vault.Uid))!;
+            Assert.Equal(VaultWithdrawalState.Pinned, row.State);
+            Assert.Equal(1_000_000, BtcAttestStore.Total(vault.Uid).PinnedSats);
+
+            var other = Elsewhere();
+            await Report(_btc.Mine(Pay(new[] { new OutPoint(deposit.GetHash(), 0) }, Enumerable.Range(0, 3_300).Select(_ => (other, 1_000L)).ToArray())));
+            Assert.Equal(VaultCoinStatus.Frozen, BtcAttestStore.Coin(Outpoint(deposit, 0))!.Status);
+            Assert.Equal(0, BtcAttestStore.Total(vault.Uid).PinnedSats);                    // no longer backing
+            row = BtcAttestStore.Withdrawal(row.Ref)!;
+            Assert.Equal(VaultWithdrawalState.Pinned, row.State);                           // not voided
+            Assert.False(Assert.Single(row.Pins).Dead);
+            Assert.False(VBTCWithdrawalRequest.GetByTransactionHash(withdrawal.Hash, vault.Uid)!.IsCompleted); // not refunded
+
+            await SignAndConfirm(row.Pins[0]);                                               // the claim was false: it confirms
+            row = BtcAttestStore.Withdrawal(row.Ref)!;
+            Assert.Equal(VaultWithdrawalState.Settled, row.State);
+            Assert.Equal(VaultCoinStatus.Spent, BtcAttestStore.Coin(Outpoint(deposit, 0))!.Status);
+        }
 
         /// <summary>
         /// #274 (C-162): a peer's backup store took any number of backups from one registered validator, one per made-up
