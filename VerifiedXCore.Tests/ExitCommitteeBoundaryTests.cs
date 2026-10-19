@@ -23,6 +23,7 @@ namespace VerifiedXCore.Tests
         private readonly string _tempRoot;
         private readonly string? _priorCustomPath = Globals.CustomPath;
         private readonly Block _priorLastBlock = Globals.LastBlock;
+        private readonly long _priorCertEnforce = Globals.CertEnforceHeight;
 
         public ExitCommitteeBoundaryTests()
         {
@@ -36,6 +37,7 @@ namespace VerifiedXCore.Tests
         public void Dispose()
         {
             Globals.LastBlock = _priorLastBlock;
+            Globals.CertEnforceHeight = _priorCertEnforce;
             CasterMembershipStore.InvalidateCache();
             try { DbContext.CloseDB(); } catch { }
             Globals.CustomPath = _priorCustomPath;
@@ -46,7 +48,7 @@ namespace VerifiedXCore.Tests
         {
             var record = new CasterMembershipRecord
             {
-                RecordSeq = seq, EffectiveFromHeight = effective, PrevRecordHash = seq == 0 ? "GENESIS" : "prev", ChangeType = "Promotion",
+                RecordSeq = seq, EffectiveFromHeight = effective, PrevRecordHash = "prev", ChangeType = "Promotion",
                 Casters = casters.OrderBy(c => c, StringComparer.Ordinal).Select(c => new CasterInfo { Address = c, PeerIP = "10.0.0.1" }).ToList(),
             };
             record.RecordHash = CasterMembershipStore.ComputeRecordHash(record);
@@ -57,8 +59,9 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void AnExitsCasters_ReadTheNextBlocksCommittee_AsItsSignersDo()
         {
-            Record(0, 100, "xCasterA", "xCasterB", "xCasterC");
-            Record(1, 201, "xCasterA", "xCasterB", "xCasterD");                    // a rotation taking effect at the next block
+            // Not seq 0: a genesis record arms certificate enforcement for the whole process (TryArmFromGenesis).
+            Record(3, 100, "xCasterA", "xCasterB", "xCasterC");
+            Record(4, 201, "xCasterA", "xCasterB", "xCasterD");                    // a rotation taking effect at the next block
             Globals.LastBlock = new Block { Height = 200 };
 
             var committee = BurnExitConsensusService.ExitCommittee();
