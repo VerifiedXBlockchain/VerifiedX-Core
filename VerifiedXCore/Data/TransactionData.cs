@@ -595,17 +595,25 @@ namespace VerifiedXCore.Data
         /// else keeps its place. Producer-local: no block's validity changes.
         /// </summary>
         /// <summary>
-        /// Of the pool's ADNR transactions naming one name (as the block filter below reads it, any case), the one this node
-        /// saw first; later ones for that name stay in the pool and wait for a later block. Everything else passes as it is.
+        /// Of the pool's ADNR transactions naming one name, or DSTR transactions naming one shop URL (any case), the one this
+        /// node saw first; later ones for it stay in the pool and wait for a later block. Everything else passes as it is.
         /// Producer-local: no block's validity changes.
         /// </summary>
         internal static List<Transaction> EarliestRegistrationPerName(List<Transaction> pool)
         {
             static string? NameOf(Transaction t)
             {
-                if (t.TransactionType != TransactionType.ADNR || string.IsNullOrEmpty(t.Data)) return null;
-                try { return ((string?)JObject.Parse(t.Data)["Name"])?.ToLowerInvariant(); }
-                catch (Exception ex) when (ex is Newtonsoft.Json.JsonException || ex is InvalidCastException || ex is ArgumentException) { return null; }
+                if (string.IsNullOrEmpty(t.Data)) return null;
+                try
+                {
+                    // A name (ADNR) and a shop URL (DSTR) are claimed first come, so each is keyed by what it claims.
+                    if (t.TransactionType == TransactionType.ADNR)
+                        return ((string?)JObject.Parse(t.Data)["Name"]) is { Length: > 0 } name ? "adnr|" + name.ToLowerInvariant() : null;
+                    if (t.TransactionType == TransactionType.DSTR)
+                        return ((string?)JObject.Parse(t.Data)["DecShop"]?["DecShopURL"]) is { Length: > 0 } url ? "dstr|" + url.ToLowerInvariant() : null;
+                    return null;
+                }
+                catch (Exception ex) when (ex is Newtonsoft.Json.JsonException || ex is InvalidCastException || ex is ArgumentException || ex is InvalidOperationException) { return null; }
             }
             var earliest = new Dictionary<string, Transaction>(StringComparer.Ordinal);
             foreach (var t in pool)
