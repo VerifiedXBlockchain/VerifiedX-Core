@@ -1668,6 +1668,59 @@ namespace VerifiedXCore.Tests
         // ── Signing ─────────────────────────────────────────────────────────────────────────────────────────
 
         /// <summary>
+        /// #274 (C-162): a peer's backup store took any number of backups from one registered validator, one per made-up
+        /// contract id, and backups for a contract from an owner outside its snapshot. Ids that name no contract are kept
+        /// to the owner's newest sixteen, and an owner outside the contract's snapshot is refused.
+        /// </summary>
+        [Fact]
+        public async Task APeersBackupStore_KeepsAnOwnersNewestUnboundBackups_AndRefusesAnOwnerOutsideTheSnapshot()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers.Take(3));
+            var priorSynced = Globals.IsChainSynced;
+            var priorValidator = Globals.ValidatorAddress;
+            Globals.IsChainSynced = true;
+            Globals.ValidatorAddress = Signers[0].Address;                                  // this node holds a share
+            VBTCValidatorRegistry.InvalidateCache();
+            try
+            {
+                using var server = new Microsoft.AspNetCore.TestHost.TestServer(
+                    Microsoft.AspNetCore.Hosting.WebHostBuilderExtensions.UseStartup<FrostStartup>(new Microsoft.AspNetCore.Hosting.WebHostBuilder()));
+                var client = server.CreateClient();
+                async Task<System.Net.HttpStatusCode> Store(V owner, string uid)
+                {
+                    var ts = TimeUtil.GetTime();
+                    var blob = "blob-" + uid;
+                    var message = FrostKeyBackupService.BuildStoreSignMessage(owner.Address, uid, ts, 1, "", "ph", blob);
+                    var body = JsonConvert.SerializeObject(new
+                    {
+                        OwnerAddress = owner.Address, SmartContractUID = uid, EncryptedBlob = blob, PlaintextHash = "ph", Version = 1, Timestamp = ts,
+                        GroupPublicKey = "", Signature = VerifiedXCore.Services.SignatureService.CreateSignature(message, owner.Key, owner.Pub),
+                    });
+                    return (await client.PostAsync("/frost/backup/store", new System.Net.Http.StringContent(body, System.Text.Encoding.UTF8, "application/json"))).StatusCode;
+                }
+
+                var owner = Signers[1];
+                for (var i = 0; i < FrostPeerKeyBackup.MaxUnboundBackupsPerOwner + 5; i++)
+                    Assert.Equal(System.Net.HttpStatusCode.OK, await Store(owner, $"made-up-{i}"));
+                var kept = FrostPeerKeyBackup.GetBackupsForOwner(owner.Address);
+                Assert.Equal(FrostPeerKeyBackup.MaxUnboundBackupsPerOwner, kept.Count(b => b.Unbound));
+                Assert.DoesNotContain(kept, b => b.SmartContractUID == "made-up-0");          // the oldest made way
+                Assert.Contains(kept, b => b.SmartContractUID == $"made-up-{FrostPeerKeyBackup.MaxUnboundBackupsPerOwner + 4}");
+
+                Assert.Equal(System.Net.HttpStatusCode.OK, await Store(owner, vault.Uid));      // a contract it holds a share of
+                Assert.False(Assert.Single(FrostPeerKeyBackup.GetBackupsForOwner(owner.Address), b => b.SmartContractUID == vault.Uid).Unbound);
+                Assert.Equal(System.Net.HttpStatusCode.Forbidden, await Store(Signers[3], vault.Uid)); // registered, but outside the snapshot
+            }
+            finally
+            {
+                Globals.IsChainSynced = priorSynced;
+                Globals.ValidatorAddress = priorValidator;
+                VBTCValidatorRegistry.InvalidateCache();
+            }
+        }
+
+        /// <summary>
         /// #274 (C-184): an exit's signing was led by any caster this node had heard of (its own list, which keeps casters
         /// that have left the committee), not by the committee in the signed membership record. Such a caster could pin or
         /// withhold the exit. Only a committee caster (or a signer of the vault) leads it now.

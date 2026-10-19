@@ -42,6 +42,19 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public long MissingSince { get; set; }
 
         /// <summary>
+        /// Filed under an id that named no contract on chain when it was stored: a ceremony's session id before its vault
+        /// exists, or an id nobody's vault has. Such backups count toward <see cref="MaxUnboundBackupsPerOwner"/>.
+        /// </summary>
+        public bool Unbound { get; set; }
+
+        /// <summary>
+        /// Most unbound backups one owner keeps on this node; storing another removes the owner's oldest. Each contract on
+        /// chain holds one backup per owner, but ids that name no contract were unlimited: one registered validator could
+        /// fill every peer's store with made-up ones (#274, C-162). An owner's ceremonies under way are far fewer.
+        /// </summary>
+        public const int MaxUnboundBackupsPerOwner = 16;
+
+        /// <summary>
         /// How long an owner may be absent from the active set before its backups are deleted. A backup exists for the
         /// owner whose machine is gone; deleting it after a day's outage lost the share for good.
         /// </summary>
@@ -91,6 +104,40 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
             {
                 ErrorLogUtility.LogError($"Failed to save FROST peer backup: {ex.Message}", "FrostPeerKeyBackup.SaveBackup");
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// After an unbound backup is stored: the owner's unbound backups beyond <see cref="MaxUnboundBackupsPerOwner"/>
+        /// are removed, oldest first, except one whose id has since come to name a contract (<paramref name="namesAContract"/>).
+        /// Returns how many were removed.
+        /// </summary>
+        public static int TrimUnbound(string ownerAddress, Func<string, bool> namesAContract)
+        {
+            try
+            {
+                var db = GetDb();
+                var unbound = db.Find(x => x.OwnerAddress == ownerAddress && x.Unbound)
+                    .OrderByDescending(x => x.StoredTimestamp).ThenByDescending(x => x.Id).ToList();
+                var removed = 0;
+                foreach (var old in unbound.Skip(MaxUnboundBackupsPerOwner))
+                {
+                    if (namesAContract(old.SmartContractUID))
+                    {
+                        old.Unbound = false;
+                        db.UpdateSafe(old);
+                        continue;
+                    }
+                    if (db.Delete(old.Id)) removed++;
+                }
+                if (removed > 0)
+                    LogUtility.Log($"[FROST Backup] Removed {removed} oldest backup(s) of {ownerAddress} filed under ids that name no contract (cap {MaxUnboundBackupsPerOwner}).", "FrostPeerKeyBackup.TrimUnbound");
+                return removed;
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Trimming unbound FROST peer backups of {ownerAddress} failed: {ex.Message}", "FrostPeerKeyBackup.TrimUnbound");
+                return 0;
             }
         }
 

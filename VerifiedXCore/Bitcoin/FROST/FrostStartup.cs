@@ -3598,6 +3598,13 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This node is not in the contract's DKG snapshot; refusing to store backup." }));
                                 return;
                             }
+                            // And only for an owner that holds a share of that contract's key (#274, C-162).
+                            if (storeSnapshot.Count > 0 && !storeSnapshot.Contains(ownerAddress))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "The owner is not in the contract's DKG snapshot; refusing to store backup." }));
+                                return;
+                            }
 
                             // Verify signature: message = "{OwnerAddress}.{SmartContractUID}.{Timestamp}"
                             // Signature must cover the blob (see FrostKeyBackupService.BuildStoreSignMessage).
@@ -3621,7 +3628,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 PlaintextHash = plaintextHash ?? "",
                                 Version = version,
                                 GroupPublicKey = request["GroupPublicKey"]?.ToString() ?? "",
-                                StoredTimestamp = now
+                                StoredTimestamp = now,
+                                // An id that names no contract on chain (nor a later key of a watched vault): counted per owner (#274, C-162).
+                                Unbound = string.IsNullOrEmpty(FrostDkgGuard.ResolveOnChainGroupPublicKey(smartContractUID)),
                             };
 
                             if (!FrostPeerKeyBackup.SaveBackup(backup))
@@ -3630,6 +3639,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Refusing to overwrite an existing backup for a different group key" }));
                                 return;
                             }
+                            if (backup.Unbound)
+                                FrostPeerKeyBackup.TrimUnbound(ownerAddress, uid => !string.IsNullOrEmpty(FrostDkgGuard.ResolveOnChainGroupPublicKey(uid)));
 
                             // Compute hash of stored blob for verification by sender
                             var storedHash = Convert.ToHexString(
