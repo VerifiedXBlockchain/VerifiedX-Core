@@ -59,6 +59,21 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ValidateBlockSize_ABlockLargerThanItsCarriedSize_IsMeasured()
+        {
+            var prior = Globals.MaxBlockSizeBytes;
+            try
+            {
+                Globals.MaxBlockSizeBytes = 4096;
+                var block = new Block { Size = 1024, Height = 100, Hash = "lying_size", ValidatorAnswer = new string('x', 8192), Transactions = new System.Collections.Generic.List<Transaction>() };
+                var result = InputValidationHelper.ValidateBlockSize(block, "127.0.0.1");
+                Assert.False(result.IsValid);
+                Assert.Contains("exceeds maximum allowed", result.ErrorMessage);
+            }
+            finally { Globals.MaxBlockSizeBytes = prior; }
+        }
+
+        [Fact]
         public void ValidateBlockSize_NegativeSize_ReturnsInvalid()
         {
             // Arrange
