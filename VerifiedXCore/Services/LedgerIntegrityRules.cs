@@ -1438,7 +1438,7 @@ namespace VerifiedXCore.Services
         }
 
         private static readonly System.Text.RegularExpressions.Regex AdnrNameGrammar =
-            new("^[a-z0-9-]+$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+            new(@"\A[a-z0-9-]+\z", System.Text.RegularExpressions.RegexOptions.CultureInvariant); // \z: "$" also matches before a final newline
 
         /// <summary>
         /// From Globals.AdnrNameGrammarHeight an AdnrCreate() name is lowercase a-z, 0-9 and '-', 1 to Globals.ADNRLimit

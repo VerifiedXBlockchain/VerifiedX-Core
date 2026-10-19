@@ -38,6 +38,7 @@ namespace VerifiedXCore.Tests
         [InlineData("alice.vfx")]
         [InlineData("<b>x</b>")]
         [InlineData("al ice")]
+        [InlineData("alice\n")]
         public void AnythingElse_IsRefusedFromTheHeight(string? name)
         {
             Assert.NotNull(LedgerIntegrityRules.AdnrNameError(name, Gate));
