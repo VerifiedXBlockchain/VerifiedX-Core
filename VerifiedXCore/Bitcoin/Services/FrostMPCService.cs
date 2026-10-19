@@ -19,10 +19,13 @@ namespace VerifiedXCore.Bitcoin.Services
     /// </summary>
     public class FrostMPCService
     {
-        private static readonly HttpClient _httpClient = new HttpClient
+        private static HttpClient _httpClient = new HttpClient
         {
             Timeout = TimeSpan.FromSeconds(30)
         };
+
+        /// <summary>Tests only: the client the signing ceremony's requests go through.</summary>
+        internal static HttpClient SigningHttpForTests { get => _httpClient; set => _httpClient = value; }
 
         /// <summary>
         /// Dedicated long-timeout HttpClient for DKG Round 2 share generation.
@@ -1140,6 +1143,21 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 // Phase 3: Signing Round 2 - Signature shares
                 var round2Shares = await CollectSigningRound2Shares(sessionId, validators, round1Nonces, leaderAddress, startTimestamp, startSignature);
+
+                // Every share is made over the whole commitment set, so a holder that committed in Round 1 and gave no
+                // share makes the set impossible to aggregate, attempt after attempt. Named, a new session leaves it out.
+                var withheld = round2Shares == null ? new List<string>()
+                    : round1Nonces.Keys.Where(a => !round2Shares.ContainsKey(a)).OrderBy(a => a, StringComparer.Ordinal).ToList();
+                if (withheld.Count > 0)
+                {
+                    LogUtility.Log($"[FROST MPC] sid={sessionId} input={inputIndex} wrh={Shorten(withdrawalRequestHash)} phase=r2 withheld=[{string.Join(",", withheld)}] code={FrostCeremonyFailureCode.Round2SharesWithheld}", "FrostMPCService.CoordinateSigningCeremony");
+                    AbortCeremony();
+                    var withheldOutcome = FrostCeremonyOutcome.Fail(FrostCeremonyFailureCode.Round2SharesWithheld, sessionId,
+                        $"{withheld.Count} holder(s) committed in Round 1 and gave no share: {string.Join(", ", withheld)}",
+                        round2Shares!.Count, round1Nonces.Count, validators.Count, null, inputIndex);
+                    withheldOutcome.Withholders = withheld;
+                    return withheldOutcome;
+                }
                 if (round2Shares == null || round2Shares.Count < requiredCount)
                 {
                     var got = round2Shares?.Count ?? 0;
@@ -1153,7 +1171,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 // FIND-026 Fix: Pass scUID and ordered signer addresses for correct pubkey package lookup
                 // and FROST Identifier remapping
                 var signerAddresses = validators.Select(v => v.ValidatorAddress).ToList();
-                var (signingResult, aggCode, aggDetail) = await AggregateSignature(sessionId, messageHash, scUID, signerAddresses, validators, threshold, round2Shares, ceremonyId);
+                var (signingResult, aggCode, aggDetail) = await AggregateSignature(sessionId, messageHash, scUID, signerAddresses, validators, threshold, round2Shares, round1Nonces, ceremonyId);
                 if (signingResult != null)
                 {
                     LogUtility.Log($"[FROST MPC] sid={sessionId} input={inputIndex} wrh={Shorten(withdrawalRequestHash)} phase=agg — ceremony completed successfully", "FrostMPCService.CoordinateSigningCeremony");
@@ -1388,19 +1406,16 @@ namespace VerifiedXCore.Bitcoin.Services
                             var responseBody = await response.Content.ReadAsStringAsync();
                             var json = JObject.Parse(responseBody);
                             
-                            if (json["Success"]?.Value<bool>() == true 
+                            if (json["Success"]?.Value<bool>() == true
                                 && json["SessionId"]?.Value<string>() == sessionId
                                 && json["Nonces"] is JObject noncesObj)
                             {
-                                foreach (var kvp in noncesObj)
-                                {
-                                    var addr = kvp.Key;
-                                    var data = kvp.Value?.Value<string>();
-                                    if (!string.IsNullOrEmpty(data))
-                                    {
-                                        nonces.TryAdd(addr, data);
-                                    }
-                                }
+                                // Each validator answers for its own commitment only: one that sent another holder's
+                                // entry could put a commitment that holder never made into the set, so that holder
+                                // refuses Round 2 and is taken for one that withheld its share.
+                                var data = noncesObj[validator.ValidatorAddress]?.Value<string>();
+                                if (!string.IsNullOrEmpty(data))
+                                    nonces.TryAdd(validator.ValidatorAddress, data);
                             }
                         }
                     }
@@ -1556,15 +1571,10 @@ namespace VerifiedXCore.Bitcoin.Services
                                 {
                                     lock (shares)
                                     {
-                                        foreach (var kvp in sharesObj)
-                                        {
-                                            var addr = kvp.Key;
-                                            var data = kvp.Value?.Value<string>();
-                                            if (!string.IsNullOrEmpty(data) && !shares.ContainsKey(addr))
-                                            {
-                                                shares[addr] = data;
-                                            }
-                                        }
+                                        // Its own share only, as for the commitments.
+                                        var data = sharesObj[validator.ValidatorAddress]?.Value<string>();
+                                        if (!string.IsNullOrEmpty(data) && !shares.ContainsKey(validator.ValidatorAddress))
+                                            shares[validator.ValidatorAddress] = data;
                                     }
                                 }
                             }
@@ -1615,37 +1625,16 @@ namespace VerifiedXCore.Bitcoin.Services
             List<VBTCValidator> validators,
             int threshold,
             Dictionary<string, string> shares,
+            Dictionary<string, string> sentNonces,
             string? ceremonyId = null)
         {
             try
             {
                 LogUtility.Log($"[FROST MPC] Aggregating {shares.Count} signature shares via FROST native library for contract {scUID}...", "FrostMPCService.AggregateSignature");
 
-                // Collect nonce commitments from validators in parallel (needed for aggregation)
-                var nonces = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
-                var nonceCollectTasks = validators.Select(async validator =>
-                {
-                    try
-                    {
-                        var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/sign/round1/{sessionId}";
-                        var response = await _httpClient.GetAsync(url);
-                        if (response.IsSuccessStatusCode)
-                        {
-                            var responseBody = await response.Content.ReadAsStringAsync();
-                            var json = JObject.Parse(responseBody);
-                            if (json["Success"]?.Value<bool>() == true && json["Nonces"] is JObject noncesObj)
-                            {
-                                foreach (var kvp in noncesObj)
-                                {
-                                    nonces.TryAdd(kvp.Key, kvp.Value?.Value<string>() ?? "");
-                                }
-                            }
-                        }
-                    }
-                    catch { /* Already logged during collection phase */ }
-                });
-
-                await Task.WhenAll(nonceCollectTasks);
+                // The commitments exactly as Round 2 sent them, the set every share was made over. They were fetched again
+                // here, and a holder that answered differently the second time made the aggregate fail.
+                var nonces = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(sentNonces);
 
                 // 3-tier key lookup for pubkey package:
                 // 1. Try SCUID first (works after SignStart auto-updated the record)

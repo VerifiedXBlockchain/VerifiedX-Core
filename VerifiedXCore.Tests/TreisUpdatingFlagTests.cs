@@ -134,6 +134,18 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task AnIntegrityFaultSwallowedOnAContractUpdate_MakesTheApplyIncomplete()
+        {
+            // An unwatched vault's ledger is written through SmartContractStateTrei.UpdateSmartContract (UpdateSafe); LiteDB's
+            // page-integrity check fails as a plain Exception, which the wrapper swallows.
+            var (applied, failedAt) = await ApplyWithSwallowedWrite(
+                () => DbContext.DB_SmartContractStateTrei.GetCollection<SmartContractStateTrei>(DbContext.RSRV_SCSTATE_TREI)
+                    .Command<bool, SmartContractStateTrei>(() => throw new Exception(StateData.LiteDbEnsurePrefix + "page type must be data page")), 13);
+            Assert.False(applied);
+            Assert.Equal(13, failedAt);
+        }
+
+        [Fact]
         public async Task AStorageFaultSwallowedOnTheShieldedPool_MakesTheApplyIncomplete()
         {
             var (applied, failedAt) = await ApplyWithSwallowedWrite(

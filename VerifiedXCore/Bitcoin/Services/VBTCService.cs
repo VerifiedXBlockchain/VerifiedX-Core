@@ -2293,8 +2293,11 @@ namespace VerifiedXCore.Bitcoin.Services
                         var anyPinnedUnspent = pinLookup.Success && parsedPinnedCoins.Any(c =>
                             pinLookup.Utxos.Any(u => $"{u.TxHash}:{u.TxPos}".ToLowerInvariant() == c.ToOutpointKey()));
 
-                        var pinnedTxId = withdrawalRequest.LastSignedBtcTxId;
-                        int? pinnedTxConfirmations = 0;
+                        // The pinned transaction's own id: LastSignedBtcTxId is written only after a broadcast reported
+                        // success, so a broadcast that timed out but went through left it empty and the paid withdrawal
+                        // read as "conflicted away" (rebuilt, and the rebuild refused by the validators holding the pin).
+                        var pinnedTxId = PinnedTxIdOf(withdrawalRequest.PinnedUnsignedTxHex, withdrawalRequest.LastSignedBtcTxId);
+                        int? pinnedTxConfirmations = string.IsNullOrEmpty(pinnedTxId) ? null : 0; // no id at all: unknown, so reuse
                         if (pinLookup.Success && !anyPinnedUnspent && !string.IsNullOrEmpty(pinnedTxId))
                         {
                             // "Paid" submits the completion, which no block validation re-asks Bitcoin about: two hosts
@@ -2732,6 +2735,20 @@ namespace VerifiedXCore.Bitcoin.Services
         /// (FIND-028), deadlocking the withdrawal until their pin cleared. Reuse is always safe:
         /// re-signing the identical tx is idempotent under the validators' sighash rules.
         /// </summary>
+        /// <summary>
+        /// The id of a pinned withdrawal transaction, from its unsigned bytes: the vault's inputs are Taproot, and an id
+        /// does not cover the witness, so the signed transaction has this id. Falls back to the id recorded at signing.
+        /// </summary>
+        internal static string? PinnedTxIdOf(string? pinnedUnsignedTxHex, string? lastSignedBtcTxId)
+        {
+            if (!string.IsNullOrEmpty(pinnedUnsignedTxHex))
+            {
+                try { return NBitcoin.Transaction.Parse(pinnedUnsignedTxHex, Globals.BTCNetwork ?? NBitcoin.Network.Main).GetHash().ToString(); }
+                catch { }
+            }
+            return string.IsNullOrEmpty(lastSignedBtcTxId) ? null : lastSignedBtcTxId;
+        }
+
         public static PinnedReuseDecision DecidePinnedTxDisposition(bool utxoLookupSucceeded, bool anyPinnedOutpointUnspent, int? pinnedTxConfirmations)
         {
             // Inconclusive UTXO view, or the pinned tx can still confirm as-is → reuse it verbatim.

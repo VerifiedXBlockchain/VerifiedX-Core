@@ -262,6 +262,15 @@ namespace VerifiedXCore.Bitcoin.Attestation
             var built = new List<(VaultWithdrawalRow Row, BtcCanonicalTx? Tx, string? Reason)>();
             foreach (var part in parts.Where(p => p.State == VaultWithdrawalState.Waiting))
             {
+                // A part reopened after its transactions were voided waits until the voiding spend is buried: its earlier
+                // transaction is signed, and a rewind that drops that spend lets it confirm - a transaction on other coins
+                // fixed meanwhile would pay it twice. A rewind during the wait brings the earlier one back instead.
+                if (committed && part.ReopenedAtBitcoinHeight > 0
+                    && (BtcAttestStore.GetMeta(db)?.EventsThroughHeight ?? 0) < part.ReopenedAtBitcoinHeight + BtcAttestRules.ExitReopenBurialBlocks)
+                {
+                    built.Add((part, null, $"its transaction was voided by a Bitcoin spend through block {part.ReopenedAtBitcoinHeight}; it is fixed again on other coins once that spend has {BtcAttestRules.ExitReopenBurialBlocks} blocks on it, so the voided transaction cannot also confirm"));
+                    continue;
+                }
                 string? reason = "the destination is not a Bitcoin address on this network";
                 // As for a withdrawal: not on a key that cannot sign (the exit then fails by rule and its locks are
                 // restored), and leaving its share of a sweep shortfall in the vault.
@@ -417,7 +426,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
             {
                 row.State = VaultWithdrawalState.Waiting;
                 row.ClosedAtVfxHeight = 0;
-                row.WaitingReason = $"its transaction was voided ({why}); fixed again on the vault's free coins";
+                row.ReopenedAtBitcoinHeight = BtcAttestStore.GetMeta(db)?.EventsThroughHeight ?? 0; // saved before the coins changed: the voiding report's block
+                row.WaitingReason = $"its transaction was voided ({why}); fixed again on the vault's free coins once that spend is buried";
                 BtcAttestStore.SaveWithdrawal(row, db);
                 ErrorLogUtility.LogError($"Bridge exit for burn {exit.BaseBurnTxHash}: the part on vault {row.SmartContractUID} was voided ({why}). Other parts are paid or pinned, so it is fixed again on its vault's free coins.",
                     "BtcWithdrawals.VoidExitPart()");

@@ -197,9 +197,22 @@ namespace VerifiedXCore.Data
                         || lite.ErrorCode == LiteDB.LiteException.FILE_NOT_FOUND || lite.ErrorCode == LiteDB.LiteException.INVALID_DATABASE
                         || lite.ErrorCode == LiteDB.LiteException.FILE_SIZE_EXCEEDED || lite.ErrorCode == LiteDB.LiteException.ALREADY_OPEN_DATAFILE))
                     return true;
+                if (IsLiteDbIntegrityFailure(e))
+                    return true;
             }
             return false;
         }
+
+        /// <summary>The message prefix of LiteDB's internal consistency check (ENSURE) in the bundled 5.0.15.</summary>
+        internal const string LiteDbEnsurePrefix = "LiteDB ENSURE: ";
+
+        /// <summary>
+        /// LiteDB's page-integrity check fails with a plain <see cref="Exception"/> whose message starts "LiteDB ENSURE: "
+        /// (not a LiteException with an error code): its data file is damaged or inconsistent on this node. Matched on that
+        /// exact type and prefix only, so no other plain exception counts.
+        /// </summary>
+        internal static bool IsLiteDbIntegrityFailure(Exception e) =>
+            e.GetType() == typeof(Exception) && e.Message.StartsWith(LiteDbEnsurePrefix, StringComparison.Ordinal);
 
         /// <summary>
         /// The collections the chain's state lives in, apart from the withdrawal store's (its own scope reports those): what
@@ -4169,7 +4182,8 @@ namespace VerifiedXCore.Data
                         AllocationsJson = JsonConvert.SerializeObject(new List<PoolUnlockAllocation>
                         {
                             new PoolUnlockAllocation { LockId = lockId.Trim(), SmartContractUID = scUID, UnlockAmount = amount.Value }
-                        })
+                        }),
+                        DrawnAllocationsJson = "[]", // this shape draws no lock: nothing is signed for it
                     };
                     VBTCBridgeBtcExitState.TryInsert(st);
                     SCLogUtility.Log($"ApplyVBTCBridgeExitToBTC (legacy): burn={baseBurnTxHash}, lockId={lockId}", "StateData.ApplyVBTCBridgeExitToBTC()");
@@ -4210,7 +4224,9 @@ namespace VerifiedXCore.Data
                     return;
                 }
 
-                // Process each allocation: apply partial unlock to each lock
+                // Process each allocation: apply partial unlock to each lock. What is drawn is recorded with the exit: the
+                // signers sign only for that (a part whose lock was gone or already freed drew nothing).
+                var drawnAllocations = new List<PoolUnlockAllocation>();
                 foreach (var alloc in allocations)
                 {
                     var rec = VBTCBridgeLockState.GetByLockId(alloc.LockId);
@@ -4227,6 +4243,8 @@ namespace VerifiedXCore.Data
                     {
                         ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTC: failed to apply partial unlock for lock {alloc.LockId}", "StateData.ApplyVBTCBridgeExitToBTC()");
                     }
+                    else
+                        drawnAllocations.Add(alloc);
 
                     BridgeLockRecord.FinalizeFromChainUnlockIfPending(alloc.LockId);
                 }
@@ -4245,7 +4263,8 @@ namespace VerifiedXCore.Data
                     ExitTxHash = tx.Hash,
                     CreatedTimestamp = tx.Timestamp,
                     IsComplete = false,
-                    AllocationsJson = JsonConvert.SerializeObject(allocations)
+                    AllocationsJson = JsonConvert.SerializeObject(allocations),
+                    DrawnAllocationsJson = JsonConvert.SerializeObject(drawnAllocations)
                 };
                 if (VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(tx.Height))
                     exitState.ExitVfxHeight = tx.Height;
