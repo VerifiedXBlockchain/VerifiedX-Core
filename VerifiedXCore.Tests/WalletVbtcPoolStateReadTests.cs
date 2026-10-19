@@ -9,8 +9,9 @@ using Xunit;
 namespace VerifiedXCore.Tests
 {
     /// <summary>
-    /// The wallet's vBTC pool-state read never creates a pool row: for a contract with no pool it answers not found and
-    /// the pool-state collection is unchanged; for a contract with a pool it returns that pool as stored.
+    /// The wallet's vBTC pool-state read never creates a pool row: for a contract with no pool it answers an empty pool
+    /// (as the PrivacyV1 route does; Aaron's Round 49 (4) for #208 D16) and the pool-state collection is unchanged; for a
+    /// contract with a pool it returns that pool as stored.
     /// </summary>
     [Collection("DbContextSequential")]
     public class WalletVbtcPoolStateReadTests : IDisposable
@@ -37,13 +38,15 @@ namespace VerifiedXCore.Tests
         private static JObject Read(string scUID) => JObject.FromObject(WalletPrivacyVbtcService.GetVbtcShieldedPoolState(scUID));
 
         [Fact]
-        public void AContractWithNoPool_IsNotFound_AndNoRowIsWritten()
+        public void AContractWithNoPool_IsAnEmptyPool_AndNoRowIsWritten()
         {
             var rowsBefore = PrivacyDbContext.PoolState().Count();
 
             var answer = Read("any-caller-chosen-uid:1");
 
-            Assert.False(answer.Value<bool>("success"));
+            Assert.True(answer.Value<bool>("success"));
+            Assert.Equal(0L, answer.Value<long>("totalCommitments"));
+            Assert.Equal(0M, answer.Value<decimal>("totalShieldedSupply"));
             Assert.Null(ShieldedPoolService.GetState(VbtcPrivacyAsset.FormatAssetKey("any-caller-chosen-uid:1")));
             Assert.Equal(rowsBefore, PrivacyDbContext.PoolState().Count());
         }

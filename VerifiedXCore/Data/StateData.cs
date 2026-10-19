@@ -95,6 +95,9 @@ namespace VerifiedXCore.Data
             }
         }
 
+        /// <summary>Tests only: answers the burn's account write in place of the store.</summary>
+        internal static Func<AccountStateTrei, bool>? ForgedBurnWriteForTests;
+
         private static async Task BurnListedAsync(long height, string? stateRoot, string how)
         {
             var accStTrei = GetAccountStateTrei();
@@ -109,7 +112,11 @@ namespace VerifiedXCore.Data
                 var burned = Math.Min(account.Balance, listed);
                 account.Balance -= burned;
                 account.StateRoot = stateRoot;
-                await accStTrei.UpdateSafeAsync(account);
+                // A write that did not land is a fault, not a burn: the marker is not set and the block is flagged (the
+                // caller's catch), or the burn was marked applied with the balance untouched (#208, D09).
+                var written = ForgedBurnWriteForTests?.Invoke(account) ?? await accStTrei.UpdateSafeAsync(account);
+                if (!written)
+                    throw new NodeStateFaultException($"Forged-VFX burn {how} {height}: the balance of {address} could not be written.");
                 LogUtility.Log($"Forged-VFX burn {how} {height}: {burned} VFX burned from {address} (listed {listed}); balance now {account.Balance}.", "StateData.ApplyForgedVfxBurnsAsync()");
             }
         }

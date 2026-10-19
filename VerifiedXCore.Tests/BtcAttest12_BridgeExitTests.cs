@@ -894,6 +894,42 @@ namespace VerifiedXCore.Tests
             BaseBridgeExitWatchService.ResetRewindForTests();
         }
 
+        /// <summary>
+        /// #294: a batched Base transaction named by its bare hash just before the path-audit rules and checked just after
+        /// them failed for good. When the watcher sees the rules begin it reads the last few minutes of Base once more, and
+        /// the batch is named by position; a node that starts after they began does not.
+        /// </summary>
+        [Fact]
+        public async Task TheWatcher_ReadsTheLastMinutesAgain_WhenThePathAuditRulesBegin()
+        {
+            await Start();
+            BaseBridgeExitWatchService.ResetRewindForTests();
+            var prior = Globals.PathAuditRulesHeight;
+            try
+            {
+                var state = new BridgeExitSyncState { LastScannedBlock = 50_000 };
+                Globals.PathAuditRulesHeight = Tip + 2;                                     // not yet
+                BaseBridgeExitWatchService.ConsumeRulesFlip(state);
+                Assert.Equal(50_000, state.LastScannedBlock);
+                state.LastScannedBlock = 50_010;
+                Globals.PathAuditRulesHeight = Tip + 1;                                     // they begin at the next block
+                BaseBridgeExitWatchService.ConsumeRulesFlip(state);
+                Assert.Equal(50_010 - BaseBridgeExitWatchService.RulesFlipRewindBlocks, state.LastScannedBlock);
+                BaseBridgeExitWatchService.ConsumeRulesFlip(state);                         // once
+                Assert.Equal(50_010 - BaseBridgeExitWatchService.RulesFlipRewindBlocks, state.LastScannedBlock);
+
+                BaseBridgeExitWatchService.ResetRewindForTests();                           // a node started after they began
+                state.LastScannedBlock = 60_000;
+                BaseBridgeExitWatchService.ConsumeRulesFlip(state);
+                Assert.Equal(60_000, state.LastScannedBlock);
+            }
+            finally
+            {
+                Globals.PathAuditRulesHeight = prior;
+                BaseBridgeExitWatchService.ResetRewindForTests();
+            }
+        }
+
         [Fact]
         public async Task APinnedExitCoinSpentByAnotherTransaction_VoidsThePart_AndTheExitCanBeMadeFromOtherLocks()
         {

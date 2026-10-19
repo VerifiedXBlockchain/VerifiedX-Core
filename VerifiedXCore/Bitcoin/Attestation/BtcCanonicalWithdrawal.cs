@@ -255,7 +255,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
             foreach (var outpoint in inputs)
             {
                 var coin = BtcAttestStore.Coin(outpoint, db);
-                if (coin == null || coin.Status != VaultCoinStatus.Pinned || !BtcWithdrawals.RefsOn(coin).Contains(reference, StringComparer.Ordinal) || coin.SmartContractUID != vault.SmartContractUID)
+                // Frozen too (#293): a frozen coin keeps its holders, and a false freeze must not strand a fee raise or release.
+                if (coin == null || coin.Status is not (VaultCoinStatus.Pinned or VaultCoinStatus.Frozen) || !BtcWithdrawals.RefsOn(coin).Contains(reference, StringComparer.Ordinal) || coin.SmartContractUID != vault.SmartContractUID)
                 {
                     reason = $"coin {outpoint} is not held for this withdrawal";
                     return null;

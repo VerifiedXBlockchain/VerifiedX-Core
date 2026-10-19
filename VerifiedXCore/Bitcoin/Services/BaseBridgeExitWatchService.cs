@@ -161,11 +161,37 @@ namespace VerifiedXCore.Bitcoin.Services
             BridgeExitSyncState.Save(state);
         }
 
+        /// <summary>Base blocks (about ten minutes) read again once when the path-audit rules begin; see <see cref="ConsumeRulesFlip"/>.</summary>
+        internal const long RulesFlipRewindBlocks = 300;
+        private static bool? _positionedSeen;
+
+        /// <summary>
+        /// When this node sees the path-audit rules begin (a burn of a batched transaction is named by its position from
+        /// them, <see cref="BurnIdsOf"/>), the last <see cref="RulesFlipRewindBlocks"/> Base blocks are read once more. A
+        /// batch named by its bare hash just before and checked just after was refused as "multiple burn events" and
+        /// failed for good; read again it is named by position, new keys its failed record does not block, and a burn the
+        /// bare hash already redeemed stays redeemed (VBTCBridgeConsumedBurn.Overlaps) (#294).
+        /// </summary>
+        internal static void ConsumeRulesFlip(BridgeExitSyncState state)
+        {
+            var positioned = (Globals.LastBlock?.Height ?? -1) + 1 >= Globals.PathAuditRulesHeight; // as BurnIdsOf judges it
+            var before = _positionedSeen;
+            _positionedSeen = positioned;
+            if (before != false || !positioned) return; // only a flip this process saw
+            var back = Math.Max(0, state.LastScannedBlock - RulesFlipRewindBlocks);
+            if (back >= state.LastScannedBlock) return;
+            LogUtility.Log($"[BaseBridgeExit] The path-audit rules have begun: reading Base again from block {back + 1} (cursor was {state.LastScannedBlock}).",
+                "BaseBridgeExitWatchService.PollOnceInternal");
+            state.LastScannedBlock = back;
+            BridgeExitSyncState.Save(state);
+        }
+
         /// <summary>Test seam: forget the start and handling history.</summary>
         internal static void ResetRewindForTests()
         {
             _started = false;
             _cursorWhenNotHandling = null;
+            _positionedSeen = null;
         }
 
         /// <summary>A burn log's place: its transaction and its index (logs of one transaction share a block).</summary>
@@ -228,6 +254,7 @@ namespace VerifiedXCore.Bitcoin.Services
             // stretch is counted from where the cursor stood when the node last did not handle burns, so burns passed
             // over while it was not a caster (at start, or after losing its place) are read again too.
             ConsumeRewind(state, Globals.IsBlockCaster && Globals.IsChainSynced);
+            ConsumeRulesFlip(state);
 
             var from = state.LastScannedBlock + 1;
             if (from > latest)

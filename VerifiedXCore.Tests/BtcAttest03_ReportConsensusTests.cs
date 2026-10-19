@@ -1094,6 +1094,36 @@ namespace VerifiedXCore.Tests
             await Refused(Signed(forged), H1 + 4, "not a recorded unspent or pinned coin");
         }
 
+        /// <summary>
+        /// #293: a spend-only event bound the coins it froze to nothing, not even time: a backfill of an older block could
+        /// name a coin created after it and freeze it. A coin is frozen only by a transaction in its own block or a later one.
+        /// </summary>
+        [Fact]
+        public async Task ASpendOnlyEvent_CannotFreezeACoinMadeAfterItsBlock()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var earlyDeposit = Pay(vault.Script, 10_000);
+            var filler = Pay(Elsewhere(), 1_000);
+            var early = _btc.Mine(earlyDeposit, filler);
+            _btc.MineEmpty(3);
+            await Apply(H1 + 2, Signed(Forward(early)));
+            var later = Pay(vault.Script, 50_000);
+            var at = _btc.Mine(later);
+            _btc.MineEmpty(3);
+            await Apply(H1 + 3, Signed(Forward(at)));
+            Assert.Equal(VaultCoinStatus.Unspent, BtcAttestStore.Coin(Outpoint(later, 0))!.Status);
+
+            BtcReport BackfillOfEarly(string coin) => new()
+            {
+                Scope = vault.Uid, BlockHeight = early, BlockHash = _btc.Header(early).Hash,
+                CoinbaseTxHex = BtcTxInclusion.ToStrippedHex(_btc.Block(early).Transactions[0]), CoinbaseBranch = EventFor(_btc.Block(early), 0).Branch,
+                Events = { new BtcReportEvent { Position = 2, Txid = filler.GetHash().ToString(), Spends = new() { coin }, Branch = EventFor(_btc.Block(early), 2).Branch } },
+            };
+            await Refused(Signed(BackfillOfEarly(Outpoint(later, 0))), H1 + 4, "not a recorded unspent or pinned coin");   // made after that block
+            await Accepted(Signed(BackfillOfEarly(Outpoint(earlyDeposit, 0))), H1 + 4);                                  // same block: the signers' word, as before
+        }
+
         [Fact]
         public async Task ACoinbasePayingAVault_IsACoin_MarkedAsOne()
         {

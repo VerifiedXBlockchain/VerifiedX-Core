@@ -120,7 +120,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 if (pin == null) continue;
                 // After a deep Bitcoin reorganisation a pinned transaction can spend a coin that is not there (yet):
                 // it cannot be broadcast until that coin's own transaction has confirmed again.
-                if (pin.Inputs.Any(o => BtcAttestStore.Coin(o)?.Status != VaultCoinStatus.Pinned)) continue;
+                // A coin frozen on the signers' word (#171) is still signed for: broadcast, the transaction confirms if the
+                // claim was false and fails if it was true (#293).
+                if (pin.Inputs.Any(o => BtcAttestStore.Coin(o)?.Status is not (VaultCoinStatus.Pinned or VaultCoinStatus.Frozen))) continue;
                 // The holders of the key its coins are under (a vault can have had more than one, plan 8.8).
                 var key = BtcVaultKeys.KeyOfCoins(pin.Inputs);
                 if (key == null) continue;
