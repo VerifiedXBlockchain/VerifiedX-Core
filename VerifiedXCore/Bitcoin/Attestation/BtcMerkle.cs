@@ -233,6 +233,25 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public static string? Verify(BtcHeader header, string? strippedHex, long position, IReadOnlyList<string>? branch, int treeDepth, out Transaction? tx, out string? txid) =>
             Check(header, strippedHex, position, branch, treeDepth, out tx, out txid);
 
+        /// <summary>
+        /// A transaction too large to carry, by its id: at <paramref name="position"/> of the block, in a tree of
+        /// <paramref name="treeDepth"/> levels (the coinbase's, so the id is a leaf: a transaction). Nothing is learnt of
+        /// what it spends or pays. Null reason on success.
+        /// </summary>
+        public static string? VerifyTxid(BtcHeader header, string? txid, long position, IReadOnlyList<string>? branch, int treeDepth)
+        {
+            if (header == null) return "no header";
+            if (branch == null) return "no Merkle branch";
+            if (treeDepth < 0 || treeDepth > BtcMerkle.MaxDepth) return "the tree depth is out of range";
+            if (branch.Count != treeDepth)
+                return $"the proof has {branch.Count} levels; this block's tree has {treeDepth} (every transaction of a block sits at the same depth)";
+            if (position <= 0) return "position 0 is the coinbase, which spends no coin";
+            if (!BtcReportVerifier.IsLowerHex64(txid)) return "the txid is not 64 lowercase hex characters";
+            var root = BtcMerkle.RootFromBranch(txid, position, branch);
+            if (root == null) return "the Merkle branch or the position is malformed";
+            return string.Equals(root, header.MerkleRoot, StringComparison.Ordinal) ? null : $"transaction {txid} is not in block {header.Hash} at position {position}";
+        }
+
         /// <summary>The size of an inner node of the tree: two hashes.</summary>
         public const int InnerNodeBytes = 64;
 

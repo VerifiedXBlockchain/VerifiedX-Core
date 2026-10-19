@@ -737,6 +737,25 @@ namespace VerifiedXCore.Tests
             Assert.Equal(at - 1, Meta.EventsThroughHeight);
         }
 
+        /// <summary>#171: a coin frozen by a spend too large to carry comes back when Bitcoin drops the block of that spend.</summary>
+        [Fact]
+        public async Task ARewindBelowAFreeze_UnfreezesTheCoin_AndItCountsAgain()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var a = Pay(vault.Script, 50_000);
+            await MineAndReport(a);
+            var other = Elsewhere();
+            var at = await MineAndReport(Pay(new[] { new OutPoint(a.GetHash(), 0) }, Enumerable.Range(0, 3_300).Select(_ => (other, 1_000L)).ToArray()));
+            Assert.Equal(VaultCoinStatus.Frozen, Coin(a, 0).Status);
+            Assert.Equal(0, BtcAttestStore.Total(vault.Uid).HeldSats);
+
+            await Reorganise(at - 1);
+            Assert.Equal(VaultCoinStatus.Unspent, Coin(a, 0).Status);
+            Assert.Null(Coin(a, 0).SpentByTxid);
+            Assert.Equal(50_000, BtcAttestStore.Total(vault.Uid).HeldSats);
+        }
+
         [Fact]
         public async Task ARewindCanReachBackOverSeveralReportedBlocks_AndEachIsReportedAgainInOrder()
         {

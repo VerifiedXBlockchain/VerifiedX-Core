@@ -1668,6 +1668,37 @@ namespace VerifiedXCore.Tests
         // ── Signing ─────────────────────────────────────────────────────────────────────────────────────────
 
         /// <summary>
+        /// #171: a coin pinned to a withdrawal and frozen by a spend too large to carry leaves the withdrawal pinned: not
+        /// voided, nothing refunded. The freeze is the signers' word; if it was false the pinned transaction can still
+        /// confirm, and a refund then would pay the requester twice. When it does confirm, the withdrawal is paid.
+        /// </summary>
+        [Fact]
+        public async Task APinnedCoinFrozenBySpendOnly_KeepsItsWithdrawalPinned_AndRefundsNothing_UntilItsTransactionConfirms()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var deposit = await Deposit(vault.Script, 1_000_000);
+            var withdrawal = await Mine(Request(vault.Uid, 0.001M));
+            var row = BtcAttestStore.Withdrawal(BtcWithdrawals.RefOf(withdrawal.Hash, vault.Uid))!;
+            Assert.Equal(VaultWithdrawalState.Pinned, row.State);
+            Assert.Equal(1_000_000, BtcAttestStore.Total(vault.Uid).PinnedSats);
+
+            var other = Elsewhere();
+            await Report(_btc.Mine(Pay(new[] { new OutPoint(deposit.GetHash(), 0) }, Enumerable.Range(0, 3_300).Select(_ => (other, 1_000L)).ToArray())));
+            Assert.Equal(VaultCoinStatus.Frozen, BtcAttestStore.Coin(Outpoint(deposit, 0))!.Status);
+            Assert.Equal(0, BtcAttestStore.Total(vault.Uid).PinnedSats);                    // no longer backing
+            row = BtcAttestStore.Withdrawal(row.Ref)!;
+            Assert.Equal(VaultWithdrawalState.Pinned, row.State);                           // not voided
+            Assert.False(Assert.Single(row.Pins).Dead);
+            Assert.False(VBTCWithdrawalRequest.GetByTransactionHash(withdrawal.Hash, vault.Uid)!.IsCompleted); // not refunded
+
+            await SignAndConfirm(row.Pins[0]);                                               // the claim was false: it confirms
+            row = BtcAttestStore.Withdrawal(row.Ref)!;
+            Assert.Equal(VaultWithdrawalState.Settled, row.State);
+            Assert.Equal(VaultCoinStatus.Spent, BtcAttestStore.Coin(Outpoint(deposit, 0))!.Status);
+        }
+
+        /// <summary>
         /// #274 (C-162): a peer's backup store took any number of backups from one registered validator, one per made-up
         /// contract id, and backups for a contract from an owner outside its snapshot. Ids that name no contract are kept
         /// to the owner's newest sixteen, and an owner outside the contract's snapshot is refused.

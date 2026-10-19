@@ -9,6 +9,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
     public sealed class BtcCoinEffect
     {
         public bool IsSpend { get; init; }
+        /// <summary>A recorded coin spent by a transaction too large to prove: frozen, not spent (#171). IsSpend is false.</summary>
+        public bool IsFreeze { get; init; }
         public string Outpoint { get; init; } = "";
         public string SmartContractUID { get; init; } = "";
         public long Sats { get; init; }
@@ -264,8 +266,17 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 lastPosition = ev.Position;
 
                 // Every event is a transaction with its bytes and its proof. What it does is read from those bytes;
-                // nothing about it is taken on the signers' word.
-                if (ev.TxHex == null) return BtcReportOutcome.Fail("an event carries its transaction and its proof");
+                // nothing about it is taken on the signers' word. Except a transaction too large to carry: its id is
+                // proven, and the coins it spends, on the signers' word, are frozen rather than spent (#171).
+                if (ev.TxHex == null)
+                {
+                    if (ev.Txid == null && ev.Spends == null) return BtcReportOutcome.Fail("an event carries its transaction and its proof");
+                    var spendOnly = VerifySpendOnly(ev, blockHeader, depth, block, scopedVault?.SmartContractUID, overlay, effects, db);
+                    if (spendOnly != null) return BtcReportOutcome.Fail($"spend-only event at position {ev.Position}: {spendOnly}");
+                    continue;
+                }
+                if (ev.Txid != null || ev.Spends != null)
+                    return BtcReportOutcome.Fail("an event with its transaction names no txid or coins: they are read from the transaction");
                 var inclusion = BtcTxInclusion.Verify(blockHeader, ev.TxHex, ev.Position, ev.Branch, depth, out var tx, out var id);
                 if (inclusion != null) return BtcReportOutcome.Fail($"event at position {ev.Position}: {inclusion}");
                 var txid = id!;
@@ -369,7 +380,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 var coin = BtcAttestStore.Coin(outpoint, db);
                 var status = overlay.TryGetValue(outpoint, out var touched) ? touched : coin?.Status;
                 if (status == null || status == VaultCoinStatus.Spent || status == VaultCoinStatus.Orphaned) continue;
-                var created = coin == null ? effects.First(e => !e.IsSpend && e.Outpoint == outpoint) : null;
+                var created = coin == null ? effects.First(e => !e.IsSpend && !e.IsFreeze && e.Outpoint == outpoint) : null;
                 var owner = coin?.SmartContractUID ?? created!.SmartContractUID;
                 if (scopedVault != null && owner != scopedVault) continue;
                 effects.Add(new BtcCoinEffect { IsSpend = true, Outpoint = outpoint, SmartContractUID = owner, Sats = coin?.ValueSats ?? created!.Sats, Txid = txid, BitcoinHeight = block });
@@ -391,6 +402,59 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
             return effects.Count - before;
         }
+
+        /// <summary>
+        /// A spend-only event (#171): the transaction's id at a proven non-coinbase position of the block, and the vault
+        /// coins it spends, each a recorded coin that is unspent or pinned (of the scoped vault, for a backfill), listed
+        /// once, in ordinal order. Null when it holds.
+        /// </summary>
+        private static string? VerifySpendOnly(BtcReportEvent ev, BtcHeader header, int depth, long block, string? scopedVault,
+            Dictionary<string, VaultCoinStatus> overlay, List<BtcCoinEffect> effects, LiteDatabase db)
+        {
+            if (ev.Txid == null || ev.Spends == null || ev.Spends.Count == 0) return "it names its txid and the vault coins it spends";
+            if (ev.Spends.Count > BtcAttestRules.MaxSpendsPerEvent) return $"it names at most {BtcAttestRules.MaxSpendsPerEvent} coins";
+            var inclusion = BtcTxInclusion.VerifyTxid(header, ev.Txid, ev.Position, ev.Branch, depth);
+            if (inclusion != null) return inclusion;
+            for (var i = 0; i < ev.Spends.Count; i++)
+            {
+                if (!IsOutpointKey(ev.Spends[i])) return $"{ev.Spends[i]} is not an outpoint (lowercase txid:vout)";
+                if (i > 0 && string.CompareOrdinal(ev.Spends[i - 1], ev.Spends[i]) >= 0) return "the coins are listed once each, in ordinal order";
+            }
+            var added = DeriveFreezes(ev.Txid, ev.Spends, block, scopedVault, overlay, effects, db, int.MaxValue);
+            return added == ev.Spends.Count ? null
+                : $"it names a coin that is not a recorded unspent or pinned coin{(scopedVault != null ? " of " + scopedVault : "")}";
+        }
+
+        /// <summary>
+        /// The coins of <paramref name="spends"/> that are recorded (or created earlier in this report) and unspent or
+        /// pinned, as freeze effects, in the order given, at most <paramref name="max"/>; returns how many. The verifier and
+        /// the scanner both call this, so they cannot disagree.
+        /// </summary>
+        internal static int DeriveFreezes(string txid, IReadOnlyList<string> spends, long block, string? scopedVault,
+            Dictionary<string, VaultCoinStatus> overlay, List<BtcCoinEffect> effects, LiteDatabase? db, int max)
+        {
+            var before = effects.Count;
+            foreach (var outpoint in spends)
+            {
+                if (effects.Count - before >= max) break;
+                var coin = BtcAttestStore.Coin(outpoint, db);
+                var status = overlay.TryGetValue(outpoint, out var touched) ? touched : coin?.Status;
+                if (status != VaultCoinStatus.Unspent && status != VaultCoinStatus.Pinned) continue; // unknown, spent, orphaned or frozen already
+                var created = coin == null ? effects.First(e => !e.IsSpend && !e.IsFreeze && e.Outpoint == outpoint) : null;
+                var owner = coin?.SmartContractUID ?? created!.SmartContractUID;
+                if (scopedVault != null && owner != scopedVault) continue;
+                effects.Add(new BtcCoinEffect { IsFreeze = true, Outpoint = outpoint, SmartContractUID = owner, Sats = coin?.ValueSats ?? created!.Sats, Txid = txid, BitcoinHeight = block });
+                overlay[outpoint] = VaultCoinStatus.Frozen;
+            }
+            return effects.Count - before;
+        }
+
+        internal static bool IsLowerHex64(string? s) => s is { Length: 64 } && s.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+        /// <summary>"txid:vout" as the store writes it: a lowercase txid and the output's index in plain digits.</summary>
+        private static bool IsOutpointKey(string? o) =>
+            o != null && o.Length >= 66 && o.Length <= 75 && o[64] == ':' && IsLowerHex64(o[..64]) && (o.Length == 66 || o[65] != '0')
+            && uint.TryParse(o.AsSpan(65), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out _);
 
         /// <summary>
         /// The signatures: distinct members of the stored signer set of the report's epoch (the current epoch or the one
