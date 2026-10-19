@@ -746,6 +746,10 @@ namespace VerifiedXCore.Services
                                             if (amount.Value < 1.0M)
                                                 return (txResult, "You must mint at least 1 token.");
 
+                                            var holderBalance = StateData.GetSpecificAccountStateTrei(fromAddress)?.TokenAccounts?.FirstOrDefault(x => x.SmartContractUID == scUID)?.Balance ?? 0M;
+                                            if (LedgerIntegrityRules.TokenMintRefusal(scStateTreiRec.TokenDetails, amount.Value, holderBalance, blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) is { } mintRefusal)
+                                                return (txResult, mintRefusal);
+
                                             if (txRequest.ToAddress != "Token_Base")
                                                 return (txResult, "To Address must be 'Token_Base'.");
 
@@ -2116,6 +2120,8 @@ namespace VerifiedXCore.Services
                                     return (txResult, "A reserve account may not create an ADNR.");
 
                                 var name = (string)jobj["Name"];
+                                if (LedgerIntegrityRules.AdnrNameError(name, blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) is { } nameGrammar)
+                                    return (txResult, nameGrammar);
 
                                 var adnrList = Adnr.GetAdnr();
                                 if (adnrList != null)
