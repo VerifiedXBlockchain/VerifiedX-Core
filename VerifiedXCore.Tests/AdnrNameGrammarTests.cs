@@ -5,6 +5,7 @@ using VerifiedXCore;
 using VerifiedXCore.Data;
 using VerifiedXCore.Models;
 using VerifiedXCore.Services;
+using VerifiedXCore.Utilities;
 using Xunit;
 
 namespace VerifiedXCore.Tests
@@ -37,6 +38,7 @@ namespace VerifiedXCore.Tests
         [InlineData("alice.vfx")]
         [InlineData("<b>x</b>")]
         [InlineData("al ice")]
+        [InlineData("alice\n")]
         public void AnythingElse_IsRefusedFromTheHeight(string? name)
         {
             Assert.NotNull(LedgerIntegrityRules.AdnrNameError(name, Gate));
@@ -62,6 +64,46 @@ namespace VerifiedXCore.Tests
 
             var ordered = TransactionData.RegistrationsInArrivalOrder(sorted);
             Assert.Equal(new[] { "earlier", "pay", "backdated" }, ordered.Select(t => t.Hash));
+        }
+
+        [Fact]
+        public void UnderLoad_ABackdatedRegistration_DoesNotWinOverAnEarlierOneTheSizeCutDrops()
+        {
+            // The earlier registration carries a later Timestamp, so the 1 MB cut (Timestamp order) drops it; the backdated
+            // one, seen second, sorts first. Only the earliest seen per name goes to the cut, so neither is proposed.
+            var earlier = new Transaction { Hash = "earlier", Id = new ObjectId(1, 1, 1, 1), Timestamp = 9_000_000, TransactionType = TransactionType.ADNR, TransactionRating = TransactionRating.A, Data = "{\"Function\":\"AdnrCreate()\",\"Name\":\"alice\"}", Signature = new string('s', 4_000) }; // larger than any gap the cut leaves
+            var backdated = new Transaction { Hash = "backdated", Id = new ObjectId(2, 1, 1, 2), Timestamp = 1, TransactionType = TransactionType.ADNR, TransactionRating = TransactionRating.A, Data = "{\"Function\":\"AdnrCreate()\",\"Name\":\"Alice\"}" };
+            var filler = Enumerable.Range(0, 3_000).Select(i => new Transaction
+            {
+                Hash = $"f{i}", Id = new ObjectId(3, 1, 1, 3 + i), Timestamp = 1_000 + i, TransactionType = TransactionType.TX, TransactionRating = TransactionRating.A, Data = new string('x', 400),
+            });
+            var pool = new List<Transaction> { earlier, backdated };
+            pool.AddRange(filler);
+
+            var proposed = MempoolSizeUtility.SizeMempoolDown(TransactionData.EarliestRegistrationPerName(pool));
+            Assert.DoesNotContain(proposed, t => t.Hash == "earlier");   // cut by size, as before
+            Assert.DoesNotContain(proposed, t => t.Hash == "backdated"); // never reaches the cut
+            Assert.True(proposed.Count < pool.Count);
+
+            Assert.Equal(new[] { "earlier" }, TransactionData.EarliestRegistrationPerName(new List<Transaction> { backdated, earlier }).Select(t => t.Hash));
+        }
+
+        [Fact]
+        public void UnderLoad_ABackdatedShopRegistration_DoesNotWinOverAnEarlierOneForTheSameUrl()
+        {
+            static string Shop(string url) => Newtonsoft.Json.JsonConvert.SerializeObject(new { Function = "DecShopCreate()", DecShop = new { DecShopURL = url, Name = "shop" } });
+            var earlier = new Transaction { Hash = "earlier-shop", Id = new ObjectId(1, 1, 1, 1), Timestamp = 9_000_000, TransactionType = TransactionType.DSTR, TransactionRating = TransactionRating.A, Data = Shop("myshop"), Signature = new string('s', 4_000) };
+            var backdated = new Transaction { Hash = "backdated-shop", Id = new ObjectId(2, 1, 1, 2), Timestamp = 1, TransactionType = TransactionType.DSTR, TransactionRating = TransactionRating.A, Data = Shop("MyShop") };
+            var filler = Enumerable.Range(0, 3_000).Select(i => new Transaction
+            {
+                Hash = $"f{i}", Id = new ObjectId(3, 1, 1, 3 + i), Timestamp = 1_000 + i, TransactionType = TransactionType.TX, TransactionRating = TransactionRating.A, Data = new string('x', 400),
+            });
+            var pool = new List<Transaction> { earlier, backdated };
+            pool.AddRange(filler);
+
+            var proposed = MempoolSizeUtility.SizeMempoolDown(TransactionData.EarliestRegistrationPerName(pool));
+            Assert.DoesNotContain(proposed, t => t.Hash == "backdated-shop");
+            Assert.Equal(new[] { "earlier-shop" }, TransactionData.EarliestRegistrationPerName(new List<Transaction> { backdated, earlier }).Select(t => t.Hash));
         }
     }
 }
