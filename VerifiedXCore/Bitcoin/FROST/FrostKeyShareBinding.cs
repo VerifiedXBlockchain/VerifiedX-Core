@@ -139,7 +139,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     continue;
                 }
                 var vault = carrying[0];
-                if (FrostValidatorKeyStore.UpdateSmartContractUID(record.Id, vault))
+                if (FrostValidatorKeyStore.UpdateSmartContractUID(record.Id, vault, boundToTheVaultsKey: true))
                 {
                     result.Bound++;
                     result.Notes.Add($"key share {record.Id} bound to {vault} (was filed under session id {filedUnder})");
@@ -278,7 +278,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                 return (false, $"key share {recordId} is bound to no contract: {notBindable}");
             if (!string.Equals(bindable.SmartContractUID, scUid, StringComparison.Ordinal))
                 return (false, $"contract {scUid} is not the vault for key share {recordId}: {(bindable.Attested ? $"{bindable.SmartContractUID} is the attested carrier" : $"none is attested and {bindable.SmartContractUID} was created first")}. Carriers: {string.Join("; ", carriers)}");
-            if (!FrostValidatorKeyStore.UpdateSmartContractUID(record.Id, scUid))
+            if (!FrostValidatorKeyStore.UpdateSmartContractUID(record.Id, scUid, boundToTheVaultsKey: true))
                 return (false, "the record could not be relabelled (see the error log)");
             LogUtility.Log($"[FROST KeyStore] Operator bound key share {recordId} to {scUid} (was filed under {record.SmartContractUID}).", "FrostKeyShareBinding.BindByOperator()");
             return (true, $"key share {recordId} bound to {scUid}");

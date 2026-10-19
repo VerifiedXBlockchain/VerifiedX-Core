@@ -71,7 +71,11 @@ namespace VerifiedXCore.Tests
             Assert.Contains("GROUP-A", why);
 
             Assert.True(FrostValidatorKeyStore.CanReplace(existing, Key("sc", "group-a"), out _)); // case-insensitive same key
-            Assert.True(FrostValidatorKeyStore.CanReplace(Key("sc", ""), Key("sc", "GROUP-B"), out _)); // no prior group key
+            // Key material with no group key recorded (#274, C-186): only the same material, or a share bound against the vault's key.
+            Assert.False(FrostValidatorKeyStore.CanReplace(Key("sc", ""), Key("sc", "GROUP-B", pkg: "other"), out var noGroup));
+            Assert.Contains("no group key recorded", noGroup);
+            Assert.True(FrostValidatorKeyStore.CanReplace(Key("sc", ""), Key("sc", "GROUP-B"), out _));        // the same key material
+            Assert.True(FrostValidatorKeyStore.CanReplace(Key("sc", ""), Key("sc", "GROUP-B", pkg: "other"), out _, incomingIsTheVaultsKey: true));
             Assert.True(FrostValidatorKeyStore.CanReplace(Key("sc", "GROUP-A", pkg: ""), Key("sc", "GROUP-B"), out _)); // no prior key material
         }
 
@@ -85,6 +89,17 @@ namespace VerifiedXCore.Tests
         }
 
         // ── Persisted behaviour ─────────────────────────────────────────────────
+
+        /// <summary>#274 (C-186): a stored record with key material and no group key is not overwritten by a record for another key.</summary>
+        [Fact]
+        public void SaveKeyPackage_RefusesToOverwriteKeyMaterialWithNoGroupKey_OriginalIntact()
+        {
+            Assert.True(FrostValidatorKeyStore.SaveKeyPackage(Key("sc-0", "", "pkg-old")));
+            Assert.False(FrostValidatorKeyStore.SaveKeyPackage(Key("sc-0", "GROUP-B", "pkg-B")));
+            Assert.Equal("pkg-old", FrostValidatorKeyStore.GetKeyPackage("sc-0", Me)!.KeyPackage);
+            Assert.True(FrostValidatorKeyStore.SaveKeyPackage(Key("sc-0", "GROUP-A", "pkg-old")));       // the same key, now named
+            Assert.Equal("GROUP-A", FrostValidatorKeyStore.GetKeyPackage("sc-0", Me)!.GroupPublicKey);
+        }
 
         [Fact]
         public void SaveKeyPackage_RefusesToOverwriteDifferentGroupKey_OriginalIntact()

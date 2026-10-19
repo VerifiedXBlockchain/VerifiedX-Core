@@ -130,8 +130,12 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// <summary>
         /// Pure replacement rule: an existing record that carries key material with a non-empty
         /// group public key may only be replaced by a record with the SAME group public key.
+        /// One that carries key material with no group key recorded (from before the field) holds a key nobody can name:
+        /// it is replaced only by the same key material, or by a share checked against the vault's group key on chain
+        /// (<paramref name="incomingIsTheVaultsKey"/>: the binding and an operator's bind). Before, any record replaced it
+        /// (#274, C-186).
         /// </summary>
-        public static bool CanReplace(FrostValidatorKeyStore existing, FrostValidatorKeyStore incoming, out string reason)
+        public static bool CanReplace(FrostValidatorKeyStore existing, FrostValidatorKeyStore incoming, out string reason, bool incomingIsTheVaultsKey = false)
         {
             reason = "";
             if (existing == null) return true;
@@ -142,6 +146,12 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
                 && !string.Equals(existingGroup, incomingGroup, StringComparison.OrdinalIgnoreCase))
             {
                 reason = $"existing group key {existingGroup} != incoming {incomingGroup}";
+                return false;
+            }
+            if (hasKey && string.IsNullOrEmpty(existingGroup) && !incomingIsTheVaultsKey
+                && !string.Equals(existing.KeyPackage, incoming?.KeyPackage, StringComparison.Ordinal))
+            {
+                reason = "the existing record holds key material with no group key recorded; only the same key material, or a share bound against the vault's key on chain, replaces it";
                 return false;
             }
             return true;
@@ -207,7 +217,7 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// <summary>
         /// Update the SmartContractUID on a key store record (used to fix ceremonyId → real SCUID).
         /// </summary>
-        public static bool UpdateSmartContractUID(long recordId, string newSmartContractUID)
+        public static bool UpdateSmartContractUID(long recordId, string newSmartContractUID, bool boundToTheVaultsKey = false)
         {
             try
             {
@@ -217,7 +227,7 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
                 {
                     // Never relabel onto a contract that already has a record with a DIFFERENT group key.
                     var collision = db.FindOne(x => x.SmartContractUID == newSmartContractUID && x.ValidatorAddress == record.ValidatorAddress && x.Id != record.Id);
-                    if (collision != null && !CanReplace(collision, record, out var why))
+                    if (collision != null && !CanReplace(collision, record, out var why, boundToTheVaultsKey))
                     {
                         ErrorLogUtility.LogError($"[FROST KeyStore] REFUSED to relabel record {recordId} onto {newSmartContractUID}: {why}", "FrostValidatorKeyStore.UpdateSmartContractUID");
                         return false;
