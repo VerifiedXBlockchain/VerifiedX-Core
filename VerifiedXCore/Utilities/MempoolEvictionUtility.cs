@@ -182,6 +182,9 @@ namespace VerifiedXCore.Utilities
                 reason = plan.reason;
                 if (!plan.admit)
                     return false;
+                // The row's id is its arrival here, which a producer orders registrations by: an id the transaction
+                // already carries is not kept, and the insert makes a new one.
+                tx.Id = LiteDB.ObjectId.Empty;
                 // Inserted before anything is evicted for it: an insert that fails leaves the pool as it was.
                 if (mempool.InsertSafe(tx) == null)
                 {

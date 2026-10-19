@@ -28,9 +28,13 @@ namespace VerifiedXCore.Tests
         private readonly List<(long Height, string Hash, Block? Known)> _reorgs = new();
         private readonly string _tempRoot;
         private readonly string? _priorCustomPath = Globals.CustomPath;
+        private readonly long _priorCertEnforceHeight = Globals.CertEnforceHeight;
 
         public ForkCorrectionServiceTests()
         {
+            // Certificates are not enforced unless a test says so: a genesis record another test loaded arms enforcement
+            // for the process, from that record's height.
+            Globals.CertEnforceHeight = long.MaxValue;
             _tempRoot = Path.Combine(Path.GetTempPath(), $"fork_correction_{Guid.NewGuid():N}") + Path.DirectorySeparatorChar;
             Directory.CreateDirectory(_tempRoot);
             Globals.CustomPath = _tempRoot;
@@ -43,6 +47,7 @@ namespace VerifiedXCore.Tests
         public void Dispose()
         {
             Globals.LastBlock = _priorLastBlock;
+            Globals.CertEnforceHeight = _priorCertEnforceHeight;
             BlockchainData.ChainRef = _priorChainRef;
             ForkCorrectionService.HasValidCertificate = _priorCert;
             ForkCorrectionService.Reorg = _priorReorg;
