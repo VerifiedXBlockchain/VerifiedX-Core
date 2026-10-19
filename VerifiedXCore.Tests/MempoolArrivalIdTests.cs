@@ -11,8 +11,8 @@ using Xunit;
 namespace VerifiedXCore.Tests
 {
     /// <summary>
-    /// A producer orders name registrations by the pool row's id (its arrival on this node). Transactions reach the pool
-    /// from JSON, and an id a sender puts in that JSON does not survive deserialization.
+    /// A producer orders name registrations by the pool row's id (its arrival on this node). An id a sender puts in a
+    /// transaction's JSON does not survive deserialization, and admission replaces any id the transaction carries.
     /// </summary>
     [Collection("DbContextSequential")]
     public class MempoolArrivalIdTests : IDisposable
@@ -60,6 +60,20 @@ namespace VerifiedXCore.Tests
             var stored = pool.FindOne(x => x.Hash == sent.Hash);
             Assert.NotNull(stored);
             Assert.NotEqual(sent.Id, stored.Id);
+            Assert.NotEqual(ObjectId.Empty, stored.Id);
+        }
+
+        [Fact]
+        public void AnIdOnTheAdmittedTransaction_IsReplacedByTheArrivalId()
+        {
+            var forged = new ObjectId(1, 1, 1, 1);
+            var tx = Registration(forged); // carries the id, with no JSON in between
+
+            var pool = TransactionData.GetPool();
+            Assert.True(MempoolEvictionUtility.TryAdmitAndInsert(tx, pool, out var reason), reason);
+            var stored = pool.FindOne(x => x.Hash == tx.Hash);
+            Assert.NotNull(stored);
+            Assert.NotEqual(forged, stored.Id);
             Assert.NotEqual(ObjectId.Empty, stored.Id);
         }
     }
