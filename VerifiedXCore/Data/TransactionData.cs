@@ -594,6 +594,27 @@ namespace VerifiedXCore.Data
         /// an earlier one for the same name, which was then dropped. A pool row's id is made when it is inserted. Everything
         /// else keeps its place. Producer-local: no block's validity changes.
         /// </summary>
+        /// <summary>
+        /// Of the pool's ADNR transactions naming one name (as the block filter below reads it, any case), the one this node
+        /// saw first; later ones for that name stay in the pool and wait for a later block. Everything else passes as it is.
+        /// Producer-local: no block's validity changes.
+        /// </summary>
+        internal static List<Transaction> EarliestRegistrationPerName(List<Transaction> pool)
+        {
+            static string? NameOf(Transaction t)
+            {
+                if (t.TransactionType != TransactionType.ADNR || string.IsNullOrEmpty(t.Data)) return null;
+                try { return ((string?)JObject.Parse(t.Data)["Name"])?.ToLowerInvariant(); }
+                catch (Exception ex) when (ex is Newtonsoft.Json.JsonException || ex is InvalidCastException || ex is ArgumentException) { return null; }
+            }
+            var earliest = new Dictionary<string, Transaction>(StringComparer.Ordinal);
+            foreach (var t in pool)
+                if (NameOf(t) is { Length: > 0 } name
+                    && (!earliest.TryGetValue(name, out var kept) || (t.Id ?? LiteDB.ObjectId.Empty).CompareTo(kept.Id ?? LiteDB.ObjectId.Empty) < 0))
+                    earliest[name] = t;
+            return pool.Where(t => NameOf(t) is not { Length: > 0 } name || ReferenceEquals(earliest[name], t)).ToList();
+        }
+
         internal static List<Transaction> RegistrationsInArrivalOrder(List<Transaction> txs)
         {
             static bool IsRegistration(Transaction t) => t.TransactionType == TransactionType.ADNR || t.TransactionType == TransactionType.DSTR;
@@ -646,7 +667,9 @@ namespace VerifiedXCore.Data
             }
 
             //Size the pool to 1mb
-            var sizedMempoolList = RegistrationsInArrivalOrder(MempoolSizeUtility.SizeMempoolDown(memPoolTxList));
+            // Earliest registration per name first, over the whole pool: the size cut below keeps the pool's first 1 MB in
+            // Timestamp order, so a backdated registration could fit while the earlier one for its name was cut.
+            var sizedMempoolList = RegistrationsInArrivalOrder(MempoolSizeUtility.SizeMempoolDown(EarliestRegistrationPerName(memPoolTxList)));
 
             var approvedMemPoolList = new List<Transaction>();
             // Bridge conflicts within the batch we are about to propose: the block-level guard
