@@ -425,6 +425,12 @@ namespace VerifiedXCore
         public static long TokenTransferRecipientFirstHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height an AdnrCreate() name is lowercase letters, digits and '-', 1 to ADNRLimit characters, with no
+        /// suffix (LedgerIntegrityRules.AdnrNameError): consensus checked only that the name was free. Not active yet.
+        /// </summary>
+        public static long AdnrNameGrammarHeight = 999_999_999_999;
+
+        /// <summary>
         /// From this height a transaction carrying a non-whole Amount must hash with that Amount: VerifyTX's re-hash
         /// fallback read it as 0 and accepted a signature over "0" (TransactionValidatorService.StandardHashMatches).
         /// Not active yet.

@@ -1437,6 +1437,23 @@ namespace VerifiedXCore.Services
             public readonly HashSet<string> TokenVotes = new(StringComparer.Ordinal);
         }
 
+        private static readonly System.Text.RegularExpressions.Regex AdnrNameGrammar =
+            new("^[a-z0-9-]+$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+        /// <summary>
+        /// From Globals.AdnrNameGrammarHeight an AdnrCreate() name is lowercase a-z, 0-9 and '-', 1 to Globals.ADNRLimit
+        /// characters, with no suffix (the chain adds ".vfx"): consensus checked only that a name was free, so a raw
+        /// transaction registered empty, suffixed, markup or unbounded names. The wallet already builds names this way.
+        /// Null when the name passes.
+        /// </summary>
+        public static string? AdnrNameError(string? name, long height)
+        {
+            if (height < Globals.AdnrNameGrammarHeight) return null;
+            return !string.IsNullOrEmpty(name) && name.Length <= Globals.ADNRLimit && AdnrNameGrammar.IsMatch(name)
+                ? null
+                : $"A name is lowercase letters, digits and '-', 1 to {Globals.ADNRLimit} characters, with no suffix.";
+        }
+
         public const string TokenVotedTwiceInBlock = "A block carries one token vote per holder and topic";
 
         /// <summary>The (holder, topic) a TokenVoteTopicCast() votes for, read as its apply reads it; null for any other transaction.</summary>

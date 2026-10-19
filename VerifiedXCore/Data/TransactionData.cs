@@ -588,6 +588,25 @@ namespace VerifiedXCore.Data
             function == "BTCAdnrCreate()" ? (string?)call["BTCAddress"]
             : function == "BTCAdnrTransfer()" ? (string?)call["BTCToAddress"] : null;
 
+        /// <summary>
+        /// Name (ADNR) and shop (DSTR) registrations in the order this node first saw them, each in a slot one of them held:
+        /// the pool is sorted by the sender's Timestamp, so a registration backdated by up to the age limit sorted ahead of
+        /// an earlier one for the same name, which was then dropped. A pool row's id is made when it is inserted. Everything
+        /// else keeps its place. Producer-local: no block's validity changes.
+        /// </summary>
+        internal static List<Transaction> RegistrationsInArrivalOrder(List<Transaction> txs)
+        {
+            static bool IsRegistration(Transaction t) => t.TransactionType == TransactionType.ADNR || t.TransactionType == TransactionType.DSTR;
+            var slots = new List<int>();
+            for (var i = 0; i < txs.Count; i++)
+                if (IsRegistration(txs[i])) slots.Add(i);
+            if (slots.Count < 2) return txs;
+            var arrived = slots.Select(i => txs[i]).OrderBy(t => t.Id ?? LiteDB.ObjectId.Empty).ToList();
+            var result = new List<Transaction>(txs);
+            for (var k = 0; k < slots.Count; k++) result[slots[k]] = arrived[k];
+            return result;
+        }
+
         public static async Task<List<Transaction>> ProcessTxPool()
         {
             // Block proposal: an owner debit whose Bitcoin deposit no Electrum server can confirm is left out of this
@@ -627,7 +646,7 @@ namespace VerifiedXCore.Data
             }
 
             //Size the pool to 1mb
-            var sizedMempoolList = MempoolSizeUtility.SizeMempoolDown(memPoolTxList);
+            var sizedMempoolList = RegistrationsInArrivalOrder(MempoolSizeUtility.SizeMempoolDown(memPoolTxList));
 
             var approvedMemPoolList = new List<Transaction>();
             // Bridge conflicts within the batch we are about to propose: the block-level guard

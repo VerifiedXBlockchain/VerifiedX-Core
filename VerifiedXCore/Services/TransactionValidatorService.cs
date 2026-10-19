@@ -2116,6 +2116,8 @@ namespace VerifiedXCore.Services
                                     return (txResult, "A reserve account may not create an ADNR.");
 
                                 var name = (string)jobj["Name"];
+                                if (LedgerIntegrityRules.AdnrNameError(name, blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) is { } nameGrammar)
+                                    return (txResult, nameGrammar);
 
                                 var adnrList = Adnr.GetAdnr();
                                 if (adnrList != null)
