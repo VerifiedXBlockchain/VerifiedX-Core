@@ -1471,6 +1471,19 @@ namespace VerifiedXCore.Services
             return null;
         }
 
+        /// <summary>Whether a block of <paramref name="transactionCount"/> transactions at <paramref name="height"/> is over the per-block cap (Globals.BlockTransactionCapHeight).</summary>
+        public static bool OverTransactionCap(int transactionCount, long height) =>
+            height >= Globals.BlockTransactionCapHeight && transactionCount > Globals.MaxTransactionsPerBlock;
+
+        /// <summary>
+        /// What a producer may put after its coinbase in a block at <paramref name="height"/>: below the cap height
+        /// everything, from it no more than the cap leaves room for, in the order given.
+        /// </summary>
+        public static List<Transaction> WithinTransactionCap(List<Transaction> afterCoinbase, int alreadyInBlock, long height) =>
+            height >= Globals.BlockTransactionCapHeight
+                ? afterCoinbase.Take(Math.Max(0, Globals.MaxTransactionsPerBlock - alreadyInBlock)).ToList()
+                : afterCoinbase;
+
         public const string TokenVotedTwiceInBlock = "A block carries one token vote per holder and topic";
 
         /// <summary>The (holder, topic) a TokenVoteTopicCast() votes for, read as its apply reads it; null for any other transaction.</summary>

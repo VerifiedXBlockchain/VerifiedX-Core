@@ -1097,6 +1097,12 @@ namespace VerifiedXCore.Services
                             return result;
                         }
 
+                        if (LedgerIntegrityRules.OverTransactionCap(block.Transactions.Count, block.Height))
+                        {
+                            DbContext.Rollback("BlockValidatorService.ValidateBlock()-transactionCap");
+                            return result;
+                        }
+
                         if (!blockDownloads && block.Transactions.Any(t =>
                             t.FromAddress != "Coinbase_TrxFees" && t.FromAddress != "Coinbase_BlkRwd"
                             && PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)))
@@ -2155,6 +2161,9 @@ namespace VerifiedXCore.Services
             if (block.Transactions.Count() > 0)
             {
                 if (block.Transactions.Count(t => PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)) > Globals.MaxPrivateTxPerBlock)
+                    return result;
+
+                if (LedgerIntegrityRules.OverTransactionCap(block.Transactions.Count, block.Height))
                     return result;
 
                 if (!blockDownloads && block.Transactions.Any(t =>
