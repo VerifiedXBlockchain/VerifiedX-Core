@@ -998,7 +998,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     {
                         record.Status = BurnExitStatus.FrostInProgress;
 
-                        var syntheticHash = $"btcexit_{BaseBridgeService.BurnSigningPrefix(record.BaseBurnTxHash)}_{scUID[..Math.Min(8, scUID.Length)]}";
+                        var syntheticHash = Attestation.BtcWithdrawals.ExitSigningReference(record.BaseBurnTxHash, scUID); // the signers' canonical spelling
 
                         var frostResult = await VBTCService.CompleteWithdrawal(
                             scUID, syntheticHash,
