@@ -1454,6 +1454,23 @@ namespace VerifiedXCore.Services
                 : $"A name is lowercase letters, digits and '-', 1 to {Globals.ADNRLimit} characters, with no suffix.";
         }
 
+        /// <summary>
+        /// From Globals.TokenMintRulesHeight a TokenMint() is refused on a paused contract (every other token function
+        /// already is), with more decimals than the token's DecimalPlaces (the remainder could never be transferred), or
+        /// when the supply or the holder's balance would overflow (the apply wrote the balance, then threw before the
+        /// supply, so the two disagreed). Null when the mint passes.
+        /// </summary>
+        public static string? TokenMintRefusal(VerifiedXCore.Models.SmartContracts.TokenDetails details, decimal amount, decimal holderBalance, long height)
+        {
+            if (height < Globals.TokenMintRulesHeight) return null;
+            if (details.IsPaused) return "Contract is paused. NO TXs may go through.";
+            if (details.DecimalPlaces < 0 || decimal.Round(amount, Math.Min(details.DecimalPlaces, 28)) != amount)
+                return $"A mint has at most {details.DecimalPlaces} decimal places, the token's.";
+            if (amount > decimal.MaxValue - details.CurrentSupply || amount > decimal.MaxValue - holderBalance)
+                return "A mint cannot take the supply or a balance past the largest amount.";
+            return null;
+        }
+
         public const string TokenVotedTwiceInBlock = "A block carries one token vote per holder and topic";
 
         /// <summary>The (holder, topic) a TokenVoteTopicCast() votes for, read as its apply reads it; null for any other transaction.</summary>

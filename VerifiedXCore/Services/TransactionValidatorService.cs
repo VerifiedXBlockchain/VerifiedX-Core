@@ -746,6 +746,10 @@ namespace VerifiedXCore.Services
                                             if (amount.Value < 1.0M)
                                                 return (txResult, "You must mint at least 1 token.");
 
+                                            var holderBalance = StateData.GetSpecificAccountStateTrei(fromAddress)?.TokenAccounts?.FirstOrDefault(x => x.SmartContractUID == scUID)?.Balance ?? 0M;
+                                            if (LedgerIntegrityRules.TokenMintRefusal(scStateTreiRec.TokenDetails, amount.Value, holderBalance, blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) is { } mintRefusal)
+                                                return (txResult, mintRefusal);
+
                                             if (txRequest.ToAddress != "Token_Base")
                                                 return (txResult, "To Address must be 'Token_Base'.");
 

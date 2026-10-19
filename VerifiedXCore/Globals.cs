@@ -431,6 +431,13 @@ namespace VerifiedXCore
         public static long AdnrNameGrammarHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height a TokenMint() is refused on a paused contract, with more decimals than the token's
+        /// DecimalPlaces, or when it would overflow the supply or the holder's balance (LedgerIntegrityRules.TokenMintRefusal).
+        /// Not active yet.
+        /// </summary>
+        public static long TokenMintRulesHeight = 999_999_999_999;
+
+        /// <summary>
         /// From this height a transaction carrying a non-whole Amount must hash with that Amount: VerifyTX's re-hash
         /// fallback read it as 0 and accepted a signature over "0" (TransactionValidatorService.StandardHashMatches).
         /// Not active yet.
