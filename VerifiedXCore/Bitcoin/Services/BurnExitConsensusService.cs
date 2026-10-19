@@ -1438,6 +1438,10 @@ namespace VerifiedXCore.Bitcoin.Services
                 // are answers: the alert pointed at something that is not a burn of this type.
                 var transient = reason.StartsWith("Could not read", StringComparison.OrdinalIgnoreCase)
                                 || reason.IndexOf("receipt not found", StringComparison.OrdinalIgnoreCase) >= 0;
+                // A positioned id met before the path-audit rules (a caster a block behind the one that named it) is
+                // asked again once they are reached, not failed and pruned (#291).
+                if (string.Equals(reason, BaseBridgeService.PositionBeforeRules, StringComparison.Ordinal))
+                    return (false, true, $"burn evidence not yet: {reason}", null);
                 // The type comes from Base too, like the amount and destination: a committee caster's alert naming the
                 // other type had every caster that took it fail the burn and skip it for good (fifth review, round 21).
                 if (!transient)
