@@ -667,6 +667,15 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 }));
                                 return;
                             }
+                            // The contract id is kept with the session for an hour, long after it stops counting toward the
+                            // caps: unbounded, a few starts could hold gigabytes here (#208, D27). A contract's or a re-key's
+                            // id is under 60 characters.
+                            if (request.SmartContractUID != null && request.SmartContractUID.Length > FrostSessionStorage.MAX_SESSION_ID_LENGTH)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Invalid SmartContractUID (max {FrostSessionStorage.MAX_SESSION_ID_LENGTH} characters)" }));
+                                return;
+                            }
 
                             if (request.ParticipantAddresses == null || request.ParticipantAddresses.Count == 0
                                 || request.ParticipantAddresses.Count > FrostSessionStorage.MAX_PARTICIPANTS)
