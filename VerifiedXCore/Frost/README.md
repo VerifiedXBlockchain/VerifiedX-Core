@@ -13,7 +13,7 @@ Frost/
 ├── linux/
 │   └── libfrost_ffi.so        # Linux x64 native library (future)
 └── mac/
-    └── libfrost_ffi.dylib     # macOS x64 native library (future)
+    └── libfrost_ffi.dylib     # macOS universal library (x86_64 + arm64)
 ```
 
 ## Build Configuration
