@@ -98,6 +98,9 @@ namespace VerifiedXCore.Tests
         [InlineData("Mint()", TransactionType.NFT_MINT)]
         [InlineData("Transfer()", TransactionType.NFT_TX)]
         [InlineData("Update()", TransactionType.NFT_MINT)]
+        [InlineData("Evolve()", TransactionType.NFT_TX)]
+        [InlineData("Devolve()", TransactionType.NFT_TX)]
+        [InlineData("ChangeEvolveStateSpecific()", TransactionType.NFT_TX)]
         public async Task AnUnsignedTransaction_IsRefusedBeforeItsBodyIsParsed(string function, TransactionType type)
         {
             var unsigned = Tx(function, With(DoWhile), type);
