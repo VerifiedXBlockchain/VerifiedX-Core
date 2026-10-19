@@ -4099,7 +4099,7 @@ namespace VerifiedXCore.Services
                     if (expectedSats != amountSats.Value)
                         return (txResult, "AmountSats does not match Amount for bridge unlock.");
 
-                    if (!IsValidEvmTxHash32(exitBurnTxHash))
+                    if (!IsValidBurnId(exitBurnTxHash, blockHeight ?? (Globals.LastBlock.Height + 1)))
                         return (txResult, "ExitBurnTxHash must be a 32-byte hex string (optionally 0x-prefixed).");
 
                     var unlockGateHeight = blockHeight ?? (Globals.LastBlock.Height + 1);
@@ -4199,7 +4199,7 @@ namespace VerifiedXCore.Services
                     if (string.IsNullOrEmpty(vfxDestAddr))
                         return (txResult, "VfxDestinationAddress is required for bridge pool unlock.");
 
-                    if (!IsValidEvmTxHash32(exitBurnTxHash))
+                    if (!IsValidBurnId(exitBurnTxHash, blockHeight ?? (Globals.LastBlock.Height + 1)))
                         return (txResult, "ExitBurnTxHash must be a 32-byte hex string (optionally 0x-prefixed).");
 
                     if (txRequest.FromAddress != txRequest.ToAddress)
@@ -4310,7 +4310,7 @@ namespace VerifiedXCore.Services
                     if (txRequest.FromAddress != txRequest.ToAddress)
                         return (txResult, "Bridge exit to BTC must be a self-transaction (from == to).");
 
-                    if (!IsValidEvmTxHash32(baseBurnTxHash))
+                    if (!IsValidBurnId(baseBurnTxHash, blockHeight ?? (Globals.LastBlock.Height + 1)))
                         return (txResult, "BaseBurnTxHash must be a valid 32-byte hex transaction hash.");
 
                     // Duplicate burn: post-gate use the normalized, cross-path check (consumed registry,
@@ -4883,6 +4883,21 @@ namespace VerifiedXCore.Services
             try { key = token?.ToObject<string?>(); } catch { return false; }
             if (string.IsNullOrEmpty(key)) return !required;
             return Bitcoin.FROST.FrostShareCrypto.IsOwnKey(key, address); // one spelling (round 14)
+        }
+
+        /// <summary>
+        /// A bridge burn's id as a transaction names it: its Base transaction's hash, and from the path-audit rules also
+        /// "{hash}:{position}" for one of several burns in that transaction (BaseBridgeService.BurnId; #277). The position is
+        /// written plainly (digits, no leading zero), so a burn has one spelling of it.
+        /// </summary>
+        private static bool IsValidBurnId(string? id, long height)
+        {
+            if (IsValidEvmTxHash32(id)) return true;
+            if (id == null || height < Globals.PathAuditRulesHeight) return false;
+            var colon = id.IndexOf(':');
+            if (colon < 0 || !IsValidEvmTxHash32(id[..colon])) return false;
+            var position = id[(colon + 1)..];
+            return position.Length is > 0 and <= 3 && position.All(c => c >= '0' && c <= '9') && (position == "0" || position[0] != '0');
         }
 
         private static bool IsValidEvmTxHash32(string? h)

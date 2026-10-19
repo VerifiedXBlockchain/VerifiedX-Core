@@ -168,6 +168,26 @@ namespace VerifiedXCore.Bitcoin.Services
             _cursorWhenNotHandling = null;
         }
 
+        /// <summary>A burn log's place: its transaction and its index (logs of one transaction share a block).</summary>
+        private static (string TxHash, BigInteger LogIndex) BurnLogKey(FilterLog log) =>
+            (log.TransactionHash.ToLowerInvariant(), log.LogIndex?.Value ?? BigInteger.Zero);
+
+        /// <summary>
+        /// Each bridge burn log's id (<see cref="BaseBridgeService.BurnId"/>): its transaction's hash, or with its position
+        /// among that transaction's bridge burns (both kinds, in emitted order) when it holds several.
+        /// </summary>
+        internal static Dictionary<(string TxHash, BigInteger LogIndex), string> BurnIdsOf(IEnumerable<FilterLog> logs)
+        {
+            var ids = new Dictionary<(string TxHash, BigInteger LogIndex), string>();
+            foreach (var tx in logs.Where(l => l != null && !string.IsNullOrEmpty(l.TransactionHash)).GroupBy(l => l.TransactionHash.ToLowerInvariant()))
+            {
+                var ordered = tx.GroupBy(BurnLogKey).Select(g => g.First()).OrderBy(l => l.LogIndex?.Value ?? BigInteger.Zero).ToList();
+                for (var i = 0; i < ordered.Count; i++)
+                    ids[BurnLogKey(ordered[i])] = BaseBridgeService.BurnId(ordered[i].TransactionHash, i, ordered.Count);
+            }
+            return ids;
+        }
+
         private static async Task<(int Processed, long ScannedToBlock, string Message)> PollOnceInternal()
         {
             var web3 = new Web3(BaseBridgeService.BaseRpcUrl);
@@ -216,19 +236,42 @@ namespace VerifiedXCore.Bitcoin.Services
             var processed = 0;
             var scanFailed = false;
 
-            // --- VfxExitBurned events (V3 burnForVfxExit → pool-based unlock) ---
+            // Both kinds of burn are read before either is handled: a burn's id counts every bridge burn of its transaction
+            // (BaseBridgeService.BurnId). A range one kind of which could not be read is read again, both kinds.
+            var v3Contract = BaseBridgeService.ContractAddress;
+            var v2Contract = BaseBridgeService.ContractAddress; // also scan the V2 contract if configured
+            var btcExitContract = !string.IsNullOrEmpty(v2Contract) ? v2Contract : contract;
+            var vfxExitLogs = new List<Nethereum.Contracts.EventLog<VfxExitBurnedEventDTO>>();
+            var btcLogs = new List<Nethereum.Contracts.EventLog<BTCExitBurnedEventDTO>>();
             try
             {
-                var v3Contract = BaseBridgeService.ContractAddress;
                 if (!string.IsNullOrEmpty(v3Contract))
                 {
                     var vfxExitHandler = web3.Eth.GetEvent<VfxExitBurnedEventDTO>(v3Contract);
-                    var vfxExitFilter = vfxExitHandler.CreateFilterInput(
+                    vfxExitLogs = await vfxExitHandler.GetAllChangesAsync(vfxExitHandler.CreateFilterInput(
                         new BlockParameter(new HexBigInteger(from)),
-                        new BlockParameter(new HexBigInteger(to)));
+                        new BlockParameter(new HexBigInteger(to))));
+                }
+                var btcEventHandler = web3.Eth.GetEvent<BTCExitBurnedEventDTO>(btcExitContract);
+                btcLogs = await btcEventHandler.GetAllChangesAsync(btcEventHandler.CreateFilterInput(
+                    new BlockParameter(new HexBigInteger(from)),
+                    new BlockParameter(new HexBigInteger(to))));
+            }
+            catch (Exception readEx)
+            {
+                scanFailed = true;
+                vfxExitLogs.Clear();
+                btcLogs.Clear();
+                LogUtility.Log($"[BaseBridgeExit] Burn log query error: {readEx.Message}",
+                    "BaseBridgeExitWatchService.PollOnceInternal");
+            }
+            var burnIds = BurnIdsOf(vfxExitLogs.Select(e => e.Log).Concat(btcLogs.Select(e => e.Log)));
 
-                    var vfxExitLogs = await vfxExitHandler.GetAllChangesAsync(vfxExitFilter);
-
+            // --- VfxExitBurned events (V3 burnForVfxExit → pool-based unlock) ---
+            try
+            {
+                if (!string.IsNullOrEmpty(v3Contract))
+                {
                     foreach (var ev in vfxExitLogs)
                     {
                         var log = ev.Log;
@@ -238,8 +281,8 @@ namespace VerifiedXCore.Bitcoin.Services
                         if (string.IsNullOrEmpty(burner) || string.IsNullOrEmpty(vfxDest)) continue;
                         if (amount > long.MaxValue || amount <= 0) continue;
 
-                        var txHash = log.TransactionHash;
-                        if (string.IsNullOrEmpty(txHash)) continue;
+                        if (string.IsNullOrEmpty(log.TransactionHash)) continue;
+                        var txHash = burnIds[BurnLogKey(log)]; // the burn's id: its transaction's hash, with its position when that holds several
 
                         if (BurnExitConsensusService.IsAlreadyProcessed(txHash))
                             continue;
@@ -278,17 +321,6 @@ namespace VerifiedXCore.Bitcoin.Services
             // --- BTCExitBurned events (burnForBTCExit → direct BTC withdrawal) ---
             try
             {
-                // Also scan the V2 contract if configured
-                var v2Contract = BaseBridgeService.ContractAddress;
-                var btcExitContract = !string.IsNullOrEmpty(v2Contract) ? v2Contract : contract;
-
-                var btcEventHandler = web3.Eth.GetEvent<BTCExitBurnedEventDTO>(btcExitContract);
-                var btcFilter = btcEventHandler.CreateFilterInput(
-                    new BlockParameter(new HexBigInteger(from)),
-                    new BlockParameter(new HexBigInteger(to)));
-
-                var btcLogs = await btcEventHandler.GetAllChangesAsync(btcFilter);
-
                 foreach (var ev in btcLogs)
                 {
                     var log = ev.Log;
@@ -298,8 +330,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (string.IsNullOrEmpty(burner) || string.IsNullOrEmpty(btcDest)) continue;
                     if (amount > long.MaxValue || amount <= 0) continue;
 
-                    var txHash = log.TransactionHash;
-                    if (string.IsNullOrEmpty(txHash)) continue;
+                    if (string.IsNullOrEmpty(log.TransactionHash)) continue;
+                    var txHash = burnIds[BurnLogKey(log)]; // the burn's id: its transaction's hash, with its position when that holds several
 
                     if (BurnExitConsensusService.IsAlreadyProcessed(txHash))
                         continue;

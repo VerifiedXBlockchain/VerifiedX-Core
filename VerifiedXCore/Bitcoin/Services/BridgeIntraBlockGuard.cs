@@ -60,7 +60,8 @@ namespace VerifiedXCore.Bitcoin.Services
             var lockIds = ExtractLockIds(jobj, asApply: at >= Globals.PathAuditRulesHeight);
 
             // Check everything first, then register, so a rejected tx leaves the state untouched.
-            if (burn.Length > 0 && state.BurnHashes.Contains(burn))
+            // A transaction's hash and one of its burns named by position are the same burn too (#277).
+            if (burn.Length > 0 && state.BurnHashes.Any(b => !b.StartsWith("fail:", StringComparison.Ordinal) && VerifiedXCore.Bitcoin.Models.VBTCBridgeConsumedBurn.Overlaps(b, burn)))
                 return (false, $"Duplicate Base burn {burn} within block (already redeemed by an earlier bridge transaction).");
             foreach (var id in lockIds)
                 if (state.LockIds.Contains(id))
