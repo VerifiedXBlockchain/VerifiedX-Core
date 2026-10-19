@@ -119,7 +119,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             foreach (var coin in touched)
             {
                 var next = Copy(coin);
-                var wasSpentAbove = coin.Status == VaultCoinStatus.Spent && coin.SpentInHeight > bitcoinHeight;
+                var wasSpentAbove = (coin.Status == VaultCoinStatus.Spent || coin.Status == VaultCoinStatus.Frozen) && coin.SpentInHeight > bitcoinHeight; // a freeze too (#171)
                 if (wasSpentAbove)
                 {
                     next.SpentByTxid = null;
