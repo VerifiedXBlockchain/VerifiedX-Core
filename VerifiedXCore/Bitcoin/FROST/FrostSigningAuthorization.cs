@@ -247,7 +247,7 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                 // ── 5. Leader: the withdrawal owner for user withdrawals; a committee caster for exits ─
                 var (leaderOk, leaderReason) = IsLeaderAllowed(isBridgeExit, leaderIsOwner || leaderIsVaultSignerOfPinned,
-                    IsKnownCaster(request.LeaderAddress) || (isBridgeExit && leaderIsVaultSignerOfPinned));
+                    IsCommitteeCaster(request.LeaderAddress) || (isBridgeExit && leaderIsVaultSignerOfPinned));
                 if (!leaderOk) return (false, leaderReason);
 
                 return (true, "");
@@ -634,6 +634,16 @@ namespace VerifiedXCore.Bitcoin.FROST
             return 0;
         }
 
+
+        /// <summary>
+        /// Whether a bridge exit's leader is a caster of the committee in the signed membership record for the next block:
+        /// the committee whose votes the exit carries and that elects its handler. The node's own list of casters
+        /// (<see cref="IsKnownCaster"/>) also holds every caster it has heard of, so a caster that had left the committee
+        /// could still lead an exit's signing, and pin or withhold it (#274, C-184).
+        /// </summary>
+        internal static bool IsCommitteeCaster(string? address) =>
+            !string.IsNullOrEmpty(address)
+            && BridgeCasterConsensus.GetCommitteeForHeight((Globals.LastBlock?.Height ?? 0) + 1).Contains(address);
 
         internal static bool IsKnownCaster(string address)
         {

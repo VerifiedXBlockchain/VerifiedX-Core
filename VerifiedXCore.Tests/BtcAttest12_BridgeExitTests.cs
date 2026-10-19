@@ -1667,6 +1667,40 @@ namespace VerifiedXCore.Tests
 
         // ── Signing ─────────────────────────────────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// #274 (C-184): an exit's signing was led by any caster this node had heard of (its own list, which keeps casters
+        /// that have left the committee), not by the committee in the signed membership record. Such a caster could pin or
+        /// withhold the exit. Only a committee caster (or a signer of the vault) leads it now.
+        /// </summary>
+        [Fact]
+        public async Task AnExitsSigning_IsLedByACommitteeCaster_NotByACasterThisNodeMerelyKnows()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.004M);
+            var burn = NewBurn();
+            await Mine(Exit(burn, BtcDest, (lockId, vault.Uid, 0.004M)));
+            var pinned = BtcTx.Parse(Assert.Single(Part(burn, vault.Uid).Pins).TxHex, Network.Main);
+            var reference = BtcWithdrawals.ExitSigningReference(burn, vault.Uid);
+
+            var (ok, why) = FrostSigningAuthorization.Authorize(Announce(vault.Uid, vault.Script, reference, pinned, Caster.Address));
+            Assert.True(ok, why);                                                          // in the committee
+
+            var departed = new CasterInfo { Address = Unfunded.Address, PeerIP = "10.0.0.77" };
+            lock (Globals.KnownCastersLock) Globals.KnownCasters.Add(departed);
+            try
+            {
+                (ok, why) = FrostSigningAuthorization.Authorize(Announce(vault.Uid, vault.Script, reference, pinned, Unfunded.Address));
+                Assert.False(ok, "a caster outside the committee led an exit's signing");
+                Assert.Contains("led by a committee caster", why);
+            }
+            finally
+            {
+                lock (Globals.KnownCastersLock) Globals.KnownCasters.Remove(departed);
+            }
+        }
+
         [Fact]
         public async Task TheVaultsSigners_SignThePinnedExitTransaction_AndNoOther_WithoutACaster()
         {
