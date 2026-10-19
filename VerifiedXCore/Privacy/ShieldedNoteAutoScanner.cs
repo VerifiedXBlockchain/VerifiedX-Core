@@ -16,6 +16,9 @@ namespace VerifiedXCore.Privacy
             System.Threading.Channels.Channel.CreateUnbounded<Block>(new System.Threading.Channels.UnboundedChannelOptions { SingleReader = true });
         private static int _workerStarted;
 
+        /// <summary>Called with a wallet's address just before the worker waits on that wallet's lock. Test seam.</summary>
+        internal static Action<string>? WaitingForWalletLock;
+
         /// <summary>
         /// Hands an accepted block to the wallet scanner, which works through blocks in order on its own thread. Block
         /// processing called the scanner directly and waited on every local wallet's lock: a manual scan or resync of a
@@ -167,6 +170,7 @@ namespace VerifiedXCore.Privacy
             {
                 var sem = ShieldedWalletLock.For(w.ShieldedAddress);
                 if (heldLocks.Contains(sem)) continue; // two rows of one wallet: one lock
+                WaitingForWalletLock?.Invoke(w.ShieldedAddress);
                 sem.Wait();
                 heldLocks.Add(sem);
             }

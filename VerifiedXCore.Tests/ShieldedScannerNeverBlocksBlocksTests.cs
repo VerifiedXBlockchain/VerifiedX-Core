@@ -51,20 +51,31 @@ namespace VerifiedXCore.Tests
                 Transactions = new List<Transaction> { new() { Hash = "p", TransactionType = TransactionType.VFX_SHIELD, Data = "{}" } },
             };
 
-            var held = ShieldedWalletLock.Acquire(keys.ZfxAddress); // as a long resync holds it
+            var reachedLock = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            ShieldedNoteAutoScanner.WaitingForWalletLock = address => { if (address == keys.ZfxAddress) reachedLock.TrySetResult(); };
             try
             {
-                var handOff = Task.Run(() => ShieldedNoteAutoScanner.Enqueue(block));
-                Assert.Same(handOff, await Task.WhenAny(handOff, Task.Delay(5_000)));
-                await handOff; // completed, and without a fault
-                Assert.True(ShieldedNoteAutoScanner.ProcessedThrough() < height); // the scanner is still waiting on the lock
-            }
-            finally { ShieldedWalletLock.Release(held); }
+                var held = ShieldedWalletLock.Acquire(keys.ZfxAddress); // as a long resync holds it
+                try
+                {
+                    var handOff = Task.Run(() => ShieldedNoteAutoScanner.Enqueue(block));
+                    Assert.Same(handOff, await Task.WhenAny(handOff, Task.Delay(5_000)));
+                    await handOff; // completed, and without a fault
+                    // The worker took up this block and is waiting on this wallet's lock.
+                    Assert.Same(reachedLock.Task, await Task.WhenAny(reachedLock.Task, Task.Delay(5_000)));
+                    Assert.True(ShieldedNoteAutoScanner.ProcessedThrough() < height);
+                }
+                finally { ShieldedWalletLock.Release(held); }
 
-            // Once the lock is free the scanner finishes the block, inside this test's database.
-            for (var i = 0; i < 100 && ShieldedNoteAutoScanner.ProcessedThrough() < height; i++)
-                await Task.Delay(50);
-            Assert.True(ShieldedNoteAutoScanner.ProcessedThrough() >= height);
+                // Once the lock is free the scanner scans the block for this wallet, inside this test's database.
+                for (var i = 0; i < 100 && (ShieldedWalletService.FindByZfxAddress(keys.ZfxAddress)?.LastScannedBlock ?? 0) < height; i++)
+                    await Task.Delay(50);
+                Assert.True(ShieldedWalletService.FindByZfxAddress(keys.ZfxAddress)!.LastScannedBlock >= height);
+                for (var i = 0; i < 100 && ShieldedNoteAutoScanner.ProcessedThrough() < height; i++)
+                    await Task.Delay(50);
+                Assert.True(ShieldedNoteAutoScanner.ProcessedThrough() >= height);
+            }
+            finally { ShieldedNoteAutoScanner.WaitingForWalletLock = null; }
         }
     }
 }
