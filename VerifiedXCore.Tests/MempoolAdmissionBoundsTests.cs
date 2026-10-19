@@ -472,23 +472,25 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void AnInsertThatFails_EvictsNothing()
         {
+            var tx = Send(1M);
+            tx.TransactionRating = TransactionRating.A;     // outranks every pooled entry, so room would be made for it
+
+            // A pooled row with another hash but this transaction's signature, under a unique index: the insert fails.
             var pool = TransactionData.GetPool();
             pool.InsertBulk(Enumerable.Range(0, Globals.MaxMempoolEntries).Select(i => new Transaction
             {
                 Hash = $"d{i}", FromAddress = "x", ToAddress = "y", Amount = 1M, Fee = 1M, Timestamp = i,
                 TransactionType = TransactionType.TX, TransactionRating = TransactionRating.D,
+                Signature = i == 0 ? tx.Signature : $"s{i}",
             }));
+            pool.EnsureIndex(x => x.Signature, unique: true);
             MempoolEvictionUtility.InvalidateAdmissionStats();
-
-            var tx = Send(1M);
-            tx.TransactionRating = TransactionRating.A;     // outranks every pooled entry, so room would be made for it
-            tx.Id = pool.FindAll().First().Id;              // an id already in the pool: the insert fails
 
             Assert.False(MempoolEvictionUtility.TryAdmitAndInsert(tx, pool, out var reason));
             Assert.Contains("insert failed", reason);
             Assert.Equal(Globals.MaxMempoolEntries, PoolCount());
 
-            tx.Id = null;                                   // the same transaction with a fresh id is admitted, making room
+            pool.DropIndex("Signature");                    // the same transaction, once the insert can succeed, makes room
             Assert.True(MempoolEvictionUtility.TryAdmitAndInsert(tx, pool, out var e2), e2);
             Assert.True(PoolCount() < Globals.MaxMempoolEntries);
             Assert.NotNull(pool.FindOne(x => x.Hash == tx.Hash));
