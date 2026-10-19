@@ -30,6 +30,33 @@ namespace VerifiedXCore.Bitcoin.Services
             return "F";
         }
 
+        /// <summary>
+        /// Whether the key a signature carries (the part after the '.') is the key of <paramref name="btcAddress"/>, in any
+        /// form a wallet makes from one key: legacy, SegWit, SegWit in P2SH, or Taproot with or without the BIP86 tweak.
+        /// </summary>
+        public static bool SignerOwnsAddress(string signatureHex, string btcAddress, Network network)
+        {
+            try
+            {
+                var parts = signatureHex.Split(".");
+                if (parts.Length != 2) return false;
+                var publicKey = new PubKey(parts[1]);
+                var target = BitcoinAddress.Create(btcAddress, network).ScriptPubKey;
+
+                if (publicKey.GetScriptPubKey(ScriptPubKeyType.Legacy) == target
+                    || publicKey.GetScriptPubKey(ScriptPubKeyType.Segwit) == target
+                    || publicKey.GetScriptPubKey(ScriptPubKeyType.SegwitP2SH) == target
+                    || publicKey.GetScriptPubKey(ScriptPubKeyType.TaprootBIP86) == target)
+                    return true;
+
+                var xOnly = publicKey.Compress().ToBytes().AsSpan(1).ToArray();
+                return new TaprootPubKey(xOnly).ScriptPubKey == target;
+            }
+            catch { }
+
+            return false;
+        }
+
         public static bool VerifySignature(string message, string signatureHex)
         {
             try

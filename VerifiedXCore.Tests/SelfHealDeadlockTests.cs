@@ -74,34 +74,59 @@ namespace VerifiedXCore.Tests
             Assert.DoesNotContain("exceeds pool cap", reason); // fails later on signatures, never on the cap
         }
 
-        // ── ROTATION-LIVENESS: mark expiry ───────────────────────────────
+        // ── ROTATION-LIVENESS: mark release, by chain time ───────────────
+
+        private const long Moving = 5; // a tip 5 s old: the chain is moving
+        private const long Now = 1000 + 86_400; // a day after every mark below was signed
+
+        private static CasterMembershipStore.SignedSeqMarker Mark(long effective) =>
+            new() { Id = 16, RecordHash = "h", SetHash = "s", SignedAt = 1000, EffectiveFromHeight = effective };
 
         [Fact]
-        public void StaleMark_HeadAtOrPastSeq_NeverExpires()
+        public void StaleMark_HeadAtOrPastSeq_IsNeverReleased()
         {
-            var m = new CasterMembershipStore.SignedSeqMarker { Id = 16, RecordHash = "h", SetHash = "s", SignedAt = 1000 };
-            Assert.False(CasterMembershipStore.IsStaleAbortedMark(m, 16, headSeq: 16, nowUnix: 1000 + CasterMembershipStore.SignedMarkExpirySeconds + 1));
+            Assert.False(CasterMembershipStore.IsStaleAbortedMark(Mark(500), 16, headSeq: 16, tipHeight: 10_000, tipAgeSeconds: Moving, nowUnix: Now));
+            Assert.False(CasterMembershipStore.IsStaleAbortedMark(Mark(500), 16, headSeq: 16, tipHeight: 10_000, tipAgeSeconds: long.MaxValue, nowUnix: Now));
         }
 
         [Fact]
-        public void StaleMark_LegacyNoTimestamp_NeverExpires()
+        public void StaleMark_HoldsWhileItsCandidateCouldStillBeAppended_HoweverOld()
         {
-            var m = new CasterMembershipStore.SignedSeqMarker { Id = 16, RecordHash = "h", SetHash = "s", SignedAt = 0 };
-            Assert.False(CasterMembershipStore.IsStaleAbortedMark(m, 16, headSeq: 15, nowUnix: long.MaxValue / 2));
+            // Wall-clock age no longer releases a mark: a withheld candidate could land after a replacement was signed.
+            Assert.False(CasterMembershipStore.IsStaleAbortedMark(Mark(500), 16, headSeq: 15, tipHeight: 498, tipAgeSeconds: Moving, nowUnix: Now));
+            Assert.False(CasterMembershipStore.IsStaleAbortedMark(Mark(500), 16, headSeq: 15, tipHeight: 500 + CasterMembershipStore.SignedMarkReleaseMarginBlocks - 1, tipAgeSeconds: Moving, nowUnix: Now));
         }
 
         [Fact]
-        public void StaleMark_YoungerThanExpiry_Holds()
+        public void StaleMark_IsReleasedOnceItsEffectiveHeightIsBehindTheTip()
         {
-            var m = new CasterMembershipStore.SignedSeqMarker { Id = 16, RecordHash = "h", SetHash = "s", SignedAt = 1000 };
-            Assert.False(CasterMembershipStore.IsStaleAbortedMark(m, 16, headSeq: 15, nowUnix: 1000 + CasterMembershipStore.SignedMarkExpirySeconds - 1));
+            Assert.True(CasterMembershipStore.IsStaleAbortedMark(Mark(500), 16, headSeq: 15, tipHeight: 500 + CasterMembershipStore.SignedMarkReleaseMarginBlocks, tipAgeSeconds: Moving, nowUnix: Now));
         }
 
         [Fact]
-        public void StaleMark_OldAndNeverAppended_Expires()
+        public void StaleMark_WrittenByThePreviousBuild_KeepsItsWallClockExpiry()
         {
-            var m = new CasterMembershipStore.SignedSeqMarker { Id = 16, RecordHash = "h", SetHash = "s", SignedAt = 1000 };
-            Assert.True(CasterMembershipStore.IsStaleAbortedMark(m, 16, headSeq: 15, nowUnix: 1000 + CasterMembershipStore.SignedMarkExpirySeconds));
+            var legacy = Mark(0); // SignedAt 1000, no effective height
+            Assert.False(CasterMembershipStore.IsStaleAbortedMark(legacy, 16, headSeq: 15, tipHeight: 10_000, tipAgeSeconds: Moving, nowUnix: 1000 + CasterMembershipStore.LegacyMarkExpirySeconds - 1));
+            Assert.True(CasterMembershipStore.IsStaleAbortedMark(legacy, 16, headSeq: 15, tipHeight: 0, tipAgeSeconds: Moving, nowUnix: 1000 + CasterMembershipStore.LegacyMarkExpirySeconds));
+            legacy.SignedAt = 0; // older still: no timestamp, never expires
+            Assert.False(CasterMembershipStore.IsStaleAbortedMark(legacy, 16, headSeq: 15, tipHeight: 10_000, tipAgeSeconds: Moving, nowUnix: Now));
+        }
+
+        [Fact]
+        public void StaleMark_WhileTheChainIsStalled_IsReleasedForTheRecovery()
+        {
+            Assert.True(CasterMembershipStore.IsStaleAbortedMark(Mark(500), 16, headSeq: 15, tipHeight: 498, tipAgeSeconds: CasterMembershipStore.BootstrapResetMinStallSeconds, nowUnix: Now));
+            Assert.False(CasterMembershipStore.IsStaleAbortedMark(Mark(500), 16, headSeq: 15, tipHeight: 498, tipAgeSeconds: CasterMembershipStore.BootstrapResetMinStallSeconds - 1, nowUnix: Now));
+        }
+
+        [Fact]
+        public void EffectiveHeight_HasPassedAtOrBelowTheTip()
+        {
+            Assert.True(CasterMembershipStore.EffectiveHeightHasPassed(500, 500));
+            Assert.True(CasterMembershipStore.EffectiveHeightHasPassed(499, 500));
+            Assert.False(CasterMembershipStore.EffectiveHeightHasPassed(501, 500));
+            Assert.False(CasterMembershipStore.EffectiveHeightHasPassed(1, -1)); // no tip yet
         }
 
         // ── SELF-HEAL maturity ───────────────────────────────────────────
@@ -280,6 +305,47 @@ namespace VerifiedXCore.Tests
             var candidate = Rec(16, 975534, "prev", CasterMembershipStore.BootstrapResetChangeType, 3);
             Assert.False(CasterMembershipStore.ValidateBootstrapReset(candidate, CasterMembershipStore.BootstrapResetMinStallSeconds - 1, out var reason));
             Assert.Contains("not stalled here", reason);
+        }
+
+        /// <summary>
+        /// C-012: a reset was judged on the seeds' addresses alone, so it could install a seed with another PeerIP or
+        /// PublicKey (and its co-signers check no entry). Each seed's entry must be the hardcoded one, as the proposer
+        /// builds it.
+        /// </summary>
+        [Fact]
+        public void ResetRecord_RefusedWhenItChangesASeedsEntry()
+        {
+            var seeds = SeedNodeService.GetBootstrapSeedPeers().Where(p => !string.IsNullOrEmpty(p.ValidatorAddress))
+                .Select(p => new CasterInfo { Address = p.ValidatorAddress!, PeerIP = (p.PeerIP ?? "").Replace("::ffff:", ""), PublicKey = p.ValidatorPublicKey ?? "" })
+                .OrderBy(c => c.Address, StringComparer.Ordinal).ToList();
+            CasterMembershipRecord Reset(List<CasterInfo> casters)
+            {
+                var r = new CasterMembershipRecord
+                {
+                    RecordSeq = 16, EffectiveFromHeight = 975534, PrevRecordHash = "prev", ChangeType = CasterMembershipStore.BootstrapResetChangeType,
+                    ChangedAddress = "", Casters = casters, Signatures = new List<RecordSignature>(),
+                };
+                r.RecordHash = CasterMembershipStore.ComputeRecordHash(r);
+                return r;
+            }
+
+            Assert.False(CasterMembershipStore.ValidateBootstrapReset(Reset(seeds), Stale, out var reason));
+            Assert.Contains("signatures", reason);                                    // the entries pass; unsigned here
+
+            var movedIp = seeds.Select(c => new CasterInfo { Address = c.Address, PeerIP = c.PeerIP, PublicKey = c.PublicKey }).ToList();
+            movedIp[0].PeerIP = "203.0.113.9";
+            Assert.False(CasterMembershipStore.ValidateBootstrapReset(Reset(movedIp), Stale, out reason));
+            Assert.Contains("entry from the hardcoded one", reason);
+
+            var otherKey = seeds.Select(c => new CasterInfo { Address = c.Address, PeerIP = c.PeerIP, PublicKey = c.PublicKey }).ToList();
+            otherKey[^1].PublicKey = "04" + new string('a', 128);
+            Assert.False(CasterMembershipStore.ValidateBootstrapReset(Reset(otherKey), Stale, out reason));
+            Assert.Contains("entry from the hardcoded one", reason);
+
+            var twice = seeds.Select(c => new CasterInfo { Address = c.Address, PeerIP = c.PeerIP, PublicKey = c.PublicKey }).ToList();
+            twice.Add(new CasterInfo { Address = seeds[0].Address, PeerIP = "203.0.113.9", PublicKey = seeds[0].PublicKey });   // the hardcoded entry first
+            Assert.False(CasterMembershipStore.ValidateBootstrapReset(Reset(twice), Stale, out reason));
+            Assert.Contains("lists a seed twice", reason);
         }
     }
 }

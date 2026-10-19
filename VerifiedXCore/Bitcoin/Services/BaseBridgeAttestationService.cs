@@ -32,10 +32,61 @@ namespace VerifiedXCore.Bitcoin.Services
             return Sha3Keccack.Current.CalculateHash(ms.ToArray());
         }
 
+        internal const string DestinationIsAdminTagReason = "EVM destination begins with a Base admin message tag";
+
+        /// <summary>The text tags the vBTCb contract's admin messages begin with (ADD_BATCH and REMOVE_BATCH start with ADD and REMOVE).</summary>
+        private static readonly byte[][] AdminMessageTags = { Encoding.ASCII.GetBytes("ADD"), Encoding.ASCII.GetBytes("REMOVE"), Encoding.ASCII.GetBytes("UPGRADE") };
+
+        /// <summary>Whether a 0x-prefixed EVM address begins with the bytes of an admin message tag. True for anything unreadable.</summary>
+        internal static bool DestinationStartsWithAdminTag(string? evmDestination)
+        {
+            var hex = (evmDestination ?? "").Trim();
+            if (hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) hex = hex[2..];
+            byte[] bytes;
+            try { bytes = Convert.FromHexString(hex); } catch { return true; }
+            return AdminMessageTags.Any(t => bytes.AsSpan().StartsWith(t));
+        }
+
         public static MintAttestationState? GetAttestationState(string lockId) =>
             string.IsNullOrEmpty(lockId) ? null : Pending.TryGetValue(lockId.Trim(), out var s) ? s : null;
 
         /// <summary>Validator node: verify lock and return hex signature (0x + 130 hex) for mint message.</summary>
+        public const string LockInsideReorgWindowReason = "Bridge lock is still inside the reorg window; ask again once its block is deeper";
+
+        /// <summary>
+        /// Blocks on top of a lock's block before its mint is signed: three times the deepest automatic reorganisation
+        /// (ForkChoiceUtility.MAX_REORG_DEPTH), about six minutes. A deeper reorganisation (onto a majority branch, at any
+        /// depth) is not bounded by any depth; <see cref="NotReadyToAttest"/> keeps a node that is on such a branch from
+        /// signing at all.
+        /// </summary>
+        public const int MintAttestationDepth = 3 * VerifiedXCore.Utilities.ForkChoiceUtility.MAX_REORG_DEPTH;
+
+        /// <summary>
+        /// Why this validator does not sign a mint now, or null. A lock is read from this node's chain, and vBTCb minted on
+        /// Base stays, so only a node at the network's height (synced, not resyncing or recovering, its tip recent) and not
+        /// stalled or holding another chain than the majority of its peers attests one: a lock on a branch the network
+        /// abandons is the lock a deep reorganisation drops.
+        /// </summary>
+        public static string? NotReadyToAttest()
+        {
+            if (VerifiedXCore.Bitcoin.FROST.FrostSigningAuthorization.NodeNotAtNetworkHeight() is { } notAtHeight)
+                return notAtHeight;
+            if (VerifiedXCore.Services.ForkDetectionService.IsStalled)
+                return "This validator's chain is stalled; signing resumes when it advances again";
+            if (VerifiedXCore.Services.ForkDetectionService.ForkStatusText is "Resolving" or "Unresolved")
+                return "A majority of this validator's peers holds another chain; signing resumes once it is resolved";
+            return null;
+        }
+
+        /// <summary>
+        /// Whether the block that carried <paramref name="chainLock"/> can still be replaced by an automatic reorganisation
+        /// (fewer than MintAttestationDepth blocks on top of it). A row written before the block height was recorded (0) is
+        /// not held back: it predates this rule and is long buried.
+        /// </summary>
+        public static bool InsideReorgWindow(VBTCBridgeLockState chainLock) =>
+            chainLock.LockBlockHeight > 0
+            && (Globals.LastBlock?.Height ?? 0) - chainLock.LockBlockHeight < MintAttestationDepth;
+
         public static Task<(bool success, string? signatureHex, string? error)> HandleMintAttestationRequest(MintAttestationRequest request)
         {
             const string TAG = "BaseBridgeAttestationService.HandleMintAttestationRequest";
@@ -75,10 +126,28 @@ namespace VerifiedXCore.Bitcoin.Services
                     return Task.FromResult<(bool, string?, string?)>((false, null, "Lock id must be the lock's own id exactly"));
                 }
 
+                // C-066: vBTCb is minted on Base for good, while the block that carried the lock can still be replaced by
+                // a reorganisation: a lock signed at depth one and dropped by a reorg left vBTCb with no lock behind it. No
+                // attestation until the lock is MintAttestationDepth deep, and none from a node off the network's chain.
+                if (InsideReorgWindow(chainLock))
+                {
+                    LogUtility.Log($"[BridgeAttest] REJECT: lock {chainLock.LockId} at block {chainLock.LockBlockHeight} is inside the reorg window (tip {Globals.LastBlock?.Height}).", TAG);
+                    return Task.FromResult<(bool, string?, string?)>((false, null, LockInsideReorgWindowReason));
+                }
+
                 if (!string.Equals(chainLock.EvmDestination?.Trim(), request.EvmDestination?.Trim(), StringComparison.OrdinalIgnoreCase))
                 {
                     LogUtility.Log($"[BridgeAttest] REJECT: EVM destination mismatch. Chain={chainLock.EvmDestination}, Request={request.EvmDestination}", TAG);
                     return Task.FromResult<(bool, string?, string?)>((false, null, "EVM destination mismatch"));
+                }
+
+                // A mint message starts with the destination's 20 bytes and the contract's admin messages start with a text
+                // tag, under the same signer set and signature scheme. A destination that begins with one of those tags is
+                // never signed for, so no mint signature can also read as an admin one.
+                if (DestinationStartsWithAdminTag(request.EvmDestination))
+                {
+                    LogUtility.Log($"[BridgeAttest] REJECT: EVM destination {request.EvmDestination} begins with a Base admin message tag", TAG);
+                    return Task.FromResult<(bool, string?, string?)>((false, null, DestinationIsAdminTagReason));
                 }
 
                 if (chainLock.AmountSats != request.AmountSats)
@@ -91,6 +160,13 @@ namespace VerifiedXCore.Bitcoin.Services
                 {
                     LogUtility.Log($"[BridgeAttest] REJECT: Invalid contract or chainId. RequestContract={request.ContractAddress}, RequestChainId={request.ChainId}, ExpectedChainId={Globals.BaseEvmChainId}", TAG);
                     return Task.FromResult<(bool, string?, string?)>((false, null, "Invalid contract or chain id"));
+                }
+
+                // Last before the key: a request that is right in itself is signed only by a node on the network's chain.
+                if (NotReadyToAttest() is { } notReady)
+                {
+                    LogUtility.Log($"[BridgeAttest] REJECT: lock {chainLock.LockId}: {notReady}", TAG);
+                    return Task.FromResult<(bool, string?, string?)>((false, null, notReady));
                 }
 
                 var account = AccountData.GetSingleAccount(Globals.ValidatorAddress);
@@ -136,11 +212,17 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             if (!BaseBridgeService.IsBridgeConfigured || record == null) return;
 
-            // Pre-check: verify the owner actually has sufficient vBTC balance for this lock
-            var balCheck = await VBTCService.TryGetAvailableTransparentVbtcBalance(record.SmartContractUID, record.OwnerAddress);
-            if (balCheck.success && balCheck.availableBalance < record.Amount)
+            // The lock as consensus holds it (ApplyVBTCBridgeLock writes this row after the lock's debit; every validator checks
+            // the same row before it signs). The owner's remaining balance said nothing about this lock: the lock is already
+            // taken out of it, so a lock of more than half the balance - the whole of it, say - was never collected for.
+            var chainLock = VBTCBridgeLockState.GetByLockId(record.LockId);
+            if (chainLock == null
+                || !string.Equals(chainLock.LockId, record.LockId, StringComparison.Ordinal)
+                || chainLock.AmountSats != record.AmountSats
+                || !string.Equals(chainLock.OwnerAddress, record.OwnerAddress, StringComparison.Ordinal)
+                || !string.Equals(chainLock.SmartContractUID, record.SmartContractUID, StringComparison.Ordinal))
             {
-                LogUtility.Log($"[BaseBridgeAttestation] Owner {record.OwnerAddress} has insufficient vBTC balance ({balCheck.availableBalance}) for lock amount ({record.Amount}). Skipping attestation.", "BaseBridgeAttestationService");
+                LogUtility.Log($"[BaseBridgeAttestation] Lock {record.LockId} is not in consensus state as recorded here. Skipping attestation.", "BaseBridgeAttestationService");
                 return;
             }
 

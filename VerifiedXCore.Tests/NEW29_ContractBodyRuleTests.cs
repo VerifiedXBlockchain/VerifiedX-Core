@@ -98,6 +98,9 @@ namespace VerifiedXCore.Tests
         [InlineData("Mint()", TransactionType.NFT_MINT)]
         [InlineData("Transfer()", TransactionType.NFT_TX)]
         [InlineData("Update()", TransactionType.NFT_MINT)]
+        [InlineData("Evolve()", TransactionType.NFT_TX)]
+        [InlineData("Devolve()", TransactionType.NFT_TX)]
+        [InlineData("ChangeEvolveStateSpecific()", TransactionType.NFT_TX)]
         public async Task AnUnsignedTransaction_IsRefusedBeforeItsBodyIsParsed(string function, TransactionType type)
         {
             var unsigned = Tx(function, With(DoWhile), type);
@@ -127,6 +130,20 @@ namespace VerifiedXCore.Tests
             var src = NEW29_ContractCodeTests.Source(Plain()).Replace("let Name = \"Plain\"", "let Name = \"Plain\nwhat we do for rand(1) input()\"");
             Assert.Contains("what we do", src);
             Assert.Null(LedgerIntegrityRules.ContractBodyAllowed(Tx("Mint()", NEW29_ContractCodeTests.Body(src))));
+        }
+
+        [Fact]
+        public void ABodyTheParserCannotRead_IsRefused_NotThrown()
+        {
+            var prior = LedgerIntegrityRules.ParseContractBody;
+            try
+            {
+                LedgerIntegrityRules.ParseContractBody = _ => throw new InvalidOperationException("parser fault");
+                Assert.Equal("Contract code cannot be read.", LedgerIntegrityRules.ContractBodyAllowed(Tx("Mint()", Plain())));
+            }
+            finally { LedgerIntegrityRules.ParseContractBody = prior; }
+
+            Assert.Null(LedgerIntegrityRules.ContractBodyAllowed(Tx("Mint()", Plain()))); // the real parser reads it
         }
 
         [Fact]

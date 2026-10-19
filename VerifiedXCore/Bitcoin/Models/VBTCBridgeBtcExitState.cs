@@ -1,5 +1,6 @@
 using LiteDB;
 using VerifiedXCore.Data;
+using VerifiedXCore.Utilities;
 
 namespace VerifiedXCore.Bitcoin.Models
 {
@@ -32,6 +33,12 @@ namespace VerifiedXCore.Bitcoin.Models
         /// own allocation. Null on records written before this field existed.
         /// </summary>
         public string? AllocationsJson { get; set; }
+        /// <summary>
+        /// The parts of <see cref="AllocationsJson"/> that applying this exit actually drew from their locks: the exit is
+        /// signed only for these. "[]" for the single-lock shape, which draws no lock; null on rows written before this
+        /// field (an exit on vaults the chain watches drew every part; any other such row is not signed).
+        /// </summary>
+        public string? DrawnAllocationsJson { get; set; }
         public string? BtcTxHash { get; set; }
 
         public const string CollectionName = "rsrv_vbtc_bridge_btc_exits";
@@ -87,6 +94,9 @@ namespace VerifiedXCore.Bitcoin.Models
             var p = burnHashPrefix.Trim().ToLowerInvariant();
             if (p.StartsWith("0x")) p = p.Substring(2);
             if (p.Length == 0) return new List<VBTCBridgeBtcExitState>();
+            // One of several burns in a transaction is named with its position (BaseBridgeService.BurnSigningPrefix):
+            // the hash's prefix and that exact position must both match, and a bare prefix names a bare hash.
+            var (prefixHash, prefixPosition) = VerifiedXCore.Bitcoin.Services.BaseBridgeService.SplitBurnId(p);
             try
             {
                 return GetCollection().FindAll()
@@ -94,7 +104,8 @@ namespace VerifiedXCore.Bitcoin.Models
                     {
                         var h = (x.BaseBurnTxHash ?? "").ToLowerInvariant();
                         if (h.StartsWith("0x")) h = h.Substring(2);
-                        return h.StartsWith(p);
+                        var (hash, position) = VerifiedXCore.Bitcoin.Services.BaseBridgeService.SplitBurnId(h);
+                        return hash.StartsWith(prefixHash) && position == prefixPosition;
                     })
                     .ToList();
             }
@@ -110,8 +121,11 @@ namespace VerifiedXCore.Bitcoin.Models
                 GetCollection().Insert(rec);
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                // A fault of this node's storage stops it as a failed apply; the caller still sees false.
+                StateData.NoteApplyStepFailed(StateWriteContext.StampHeight, ex);
+                ErrorLogUtility.LogError($"TryInsert: exit {rec.BaseBurnTxHash} not written: {ex.Message}", "VBTCBridgeBtcExitState.TryInsert");
                 return false;
             }
         }
@@ -122,7 +136,13 @@ namespace VerifiedXCore.Bitcoin.Models
 
         public static bool Update(VBTCBridgeBtcExitState rec)
         {
-            try { return GetCollection().Update(rec); } catch { return false; }
+            try { return GetCollection().Update(rec); }
+            catch (Exception ex)
+            {
+                StateData.NoteApplyStepFailed(StateWriteContext.StampHeight, ex);
+                ErrorLogUtility.LogError($"Update: exit {rec.BaseBurnTxHash} not written: {ex.Message}", "VBTCBridgeBtcExitState.Update");
+                return false;
+            }
         }
 
         public static void MarkComplete(string baseBurnTxHash, string btcTxHash)
@@ -136,7 +156,11 @@ namespace VerifiedXCore.Bitcoin.Models
                 r.BtcTxHash = btcTxHash;
                 c.Update(r);
             }
-            catch { }
+            catch (Exception ex)
+            {
+                StateData.NoteApplyStepFailed(StateWriteContext.StampHeight, ex);
+                ErrorLogUtility.LogError($"MarkComplete: exit {baseBurnTxHash} not written: {ex.Message}", "VBTCBridgeBtcExitState.MarkComplete");
+            }
         }
     }
 }

@@ -186,6 +186,9 @@ namespace VerifiedXCore.Services
             {
                 if (string.IsNullOrEmpty(Globals.ValidatorAddress))
                     return false;
+                // A validator that cannot take part in a ceremony does not announce itself (FrostLibraryGate).
+                if (!Bitcoin.FROST.FrostLibraryGate.Ready)
+                    return false;
 
                 // Guard: Check if there's already a pending heartbeat TX in the mempool
                 var mempool = TransactionData.GetPool();
@@ -211,7 +214,7 @@ namespace VerifiedXCore.Services
                 var sTreiAcct = StateData.GetSpecificAccountStateTrei(validator.Address);
                 if (sTreiAcct == null) return false;
 
-                var ipAddress = Globals.ReportedIP;
+                var ipAddress = P2PClient.ValidatorReportedIP();
                 if (string.IsNullOrEmpty(ipAddress))
                 {
                     LogUtility.Log("Cannot send heartbeat TX - IP address not reported yet",

@@ -547,9 +547,10 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Signs a recovery request, sends it to peers, decrypts returned blobs,
         /// and restores the local FrostValidatorKeyStore records.
         /// </summary>
-        public static async Task<int> RecoverKeysFromPeers(
+        public static async Task<PeerRecoveryResult> RecoverKeysFromPeers(
             string validatorAddress, List<VBTCValidator> validators)
         {
+            var result = new PeerRecoveryResult();
             try
             {
                 LogUtility.Log($"[FROST Backup] Starting key recovery for {validatorAddress} from {validators.Count} peers",
@@ -563,7 +564,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 {
                     ErrorLogUtility.LogError("Failed to sign recovery request",
                         "FrostKeyBackupService.RecoverKeysFromPeers");
-                    return 0;
+                    return result;
                 }
 
                 var requestPayload = JsonConvert.SerializeObject(new
@@ -573,52 +574,44 @@ namespace VerifiedXCore.Bitcoin.Services
                     Signature = signature
                 });
 
-                // Try peers until we get a successful response
-                List<BackupRecoveryItem>? recoveredBackups = null;
-
+                // Every peer is asked: each holds the backups that reached it, and one peer's answer can be missing
+                // shares another holds. The answers are joined per contract (the owner is this validator).
+                var copiesByContract = new Dictionary<string, List<BackupRecoveryItem>>(StringComparer.Ordinal);
                 foreach (var validator in validators)
                 {
                     if (validator.ValidatorAddress == validatorAddress) continue;
                     if (string.IsNullOrEmpty(validator.IPAddress)) continue;
 
-                    try
+                    result.PeersAsked++;
+                    var backups = await FetchBackupsFromPeer(validator, requestPayload);
+                    if (backups == null)
                     {
-                        var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/backup/recover";
-                        var content = new StringContent(requestPayload, Encoding.UTF8, "application/json");
-                        var response = await _backupHttpClient.PostAsync(url, content);
-
-                        if (response.IsSuccessStatusCode)
-                        {
-                            var responseBody = await response.Content.ReadAsStringAsync();
-                            var responseObj = JsonConvert.DeserializeObject<BackupRecoveryResponse>(responseBody);
-
-                            if (responseObj?.Success == true && responseObj.Backups != null && responseObj.Backups.Count > 0)
-                            {
-                                recoveredBackups = responseObj.Backups;
-                                LogUtility.Log($"[FROST Backup] Received {recoveredBackups.Count} backup(s) from peer {validator.ValidatorAddress}",
-                                    "FrostKeyBackupService.RecoverKeysFromPeers");
-                                break; // Got backups from first successful peer
-                            }
-                        }
+                        result.PeersFailed++;
+                        continue;
                     }
-                    catch (Exception ex)
-                    {
-                        LogUtility.Log($"[FROST Backup] Recovery request to {validator.ValidatorAddress} failed: {ex.Message}",
-                            "FrostKeyBackupService.RecoverKeysFromPeers");
-                    }
-                }
-
-                if (recoveredBackups == null || recoveredBackups.Count == 0)
-                {
-                    LogUtility.Log("[FROST Backup] No backups recovered from any peer",
+                    result.FromPeer[validator.ValidatorAddress] = backups.Count;
+                    LogUtility.Log($"[FROST Backup] Peer {validator.ValidatorAddress} returned {backups.Count} backup(s)",
                         "FrostKeyBackupService.RecoverKeysFromPeers");
-                    return 0;
+                    foreach (var backup in backups.Where(x => x != null && !string.IsNullOrEmpty(x.SmartContractUID)))
+                    {
+                        if (!copiesByContract.TryGetValue(backup.SmartContractUID, out var copies))
+                            copiesByContract[backup.SmartContractUID] = copies = new List<BackupRecoveryItem>();
+                        if (!copies.Any(c => c.EncryptedBlob == backup.EncryptedBlob))
+                            copies.Add(backup);
+                    }
                 }
 
-                // Decrypt each backup and restore to local key store
-                var restoredCount = 0;
-                foreach (var backup in recoveredBackups)
+                if (copiesByContract.Count == 0)
                 {
+                    LogUtility.Log($"[FROST Backup] No backups recovered from any peer ({result.PeersAsked} asked, {result.PeersFailed} failed)",
+                        "FrostKeyBackupService.RecoverKeysFromPeers");
+                    return result;
+                }
+
+                // Decrypt and restore one copy per contract: the first that decrypts and the key store takes.
+                foreach (var backup in copiesByContract.SelectMany(kv => kv.Value))
+                {
+                    if (result.RestoredContracts.Contains(backup.SmartContractUID)) continue;
                     try
                     {
                         var plaintext = DecryptKeyPackage(validatorAddress, backup.SmartContractUID, backup.EncryptedBlob);
@@ -663,7 +656,7 @@ namespace VerifiedXCore.Bitcoin.Services
                         };
 
                         if (FrostValidatorKeyStore.SaveKeyPackage(keyStoreRecord))
-                            restoredCount++;
+                            result.RestoredContracts.Add(backup.SmartContractUID);
                         else
                             ErrorLogUtility.LogError($"[FROST Backup] Restore of {backup.SmartContractUID} was refused by the key store (different group key already present).", "FrostKeyBackupService.RecoverKeysFromPeers");
 
@@ -677,17 +670,69 @@ namespace VerifiedXCore.Bitcoin.Services
                     }
                 }
 
-                LogUtility.Log($"[FROST Backup] Recovery complete: {restoredCount}/{recoveredBackups.Count} key packages restored",
+                LogUtility.Log($"[FROST Backup] Recovery complete: {result.RestoredContracts.Count}/{copiesByContract.Count} key packages restored from {result.PeersAsked - result.PeersFailed} of {result.PeersAsked} peers",
                     "FrostKeyBackupService.RecoverKeysFromPeers");
 
-                return restoredCount;
+                return result;
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Recovery failed: {ex.Message}",
                     "FrostKeyBackupService.RecoverKeysFromPeers");
-                return 0;
+                return result;
             }
+        }
+
+        /// <summary>
+        /// Recovers as <see cref="RecoverKeysFromPeers"/> does, and asks every peer once more when any did not answer: a
+        /// share only that peer holds would otherwise be left unrecovered with nothing said. The result joins both runs.
+        /// </summary>
+        public static async Task<PeerRecoveryResult> RecoverKeysFromPeersWithRetry(string validatorAddress, List<VBTCValidator> validators)
+        {
+            var first = await RecoverKeysFromPeers(validatorAddress, validators);
+            if (first.PeersFailed == 0) return first;
+            LogUtility.Log($"[FROST Backup] {first.PeersFailed} of {first.PeersAsked} peers did not answer; asking every peer once more",
+                "FrostKeyBackupService.RecoverKeysFromPeersWithRetry");
+            var second = await RecoverKeysFromPeers(validatorAddress, validators);
+            second.RestoredContracts.UnionWith(first.RestoredContracts);
+            foreach (var (peer, count) in first.FromPeer) second.FromPeer.TryAdd(peer, count);
+            return second;
+        }
+
+        /// <summary>Stands in for a peer's /frost/backup/recover answer in tests: the backups it returns, or null for no answer.</summary>
+        internal static Func<VBTCValidator, Task<List<BackupRecoveryItem>?>>? FetchFromPeerForTests;
+
+        /// <summary>The backups a peer holds for the requester, an empty list when it holds none, null when it did not answer.</summary>
+        private static async Task<List<BackupRecoveryItem>?> FetchBackupsFromPeer(VBTCValidator validator, string requestPayload)
+        {
+            if (FetchFromPeerForTests != null) return await FetchFromPeerForTests(validator);
+            try
+            {
+                var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/backup/recover";
+                var content = new StringContent(requestPayload, Encoding.UTF8, "application/json");
+                var response = await _backupHttpClient.PostAsync(url, content);
+                if (!response.IsSuccessStatusCode) return null;
+                var responseObj = JsonConvert.DeserializeObject<BackupRecoveryResponse>(await response.Content.ReadAsStringAsync());
+                if (responseObj == null) return null;
+                return responseObj.Backups ?? new List<BackupRecoveryItem>();
+            }
+            catch (Exception ex)
+            {
+                LogUtility.Log($"[FROST Backup] Recovery request to {validator.ValidatorAddress} failed: {ex.Message}",
+                    "FrostKeyBackupService.RecoverKeysFromPeers");
+                return null;
+            }
+        }
+
+        /// <summary>What a recovery from peers did: the contracts restored, and how many peers answered.</summary>
+        public sealed class PeerRecoveryResult
+        {
+            public HashSet<string> RestoredContracts { get; } = new(StringComparer.Ordinal);
+            public int Restored => RestoredContracts.Count;
+            public int PeersAsked { get; set; }
+            public int PeersFailed { get; set; }
+            /// <summary>Backups each answering peer returned.</summary>
+            public Dictionary<string, int> FromPeer { get; } = new(StringComparer.Ordinal);
         }
 
         #endregion

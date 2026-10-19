@@ -112,9 +112,9 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
-        /// /safe-update: graceful departure → download latest release for this OS → apply →
-        /// restart. Aborts (without exiting) if no unambiguous OS asset is found or the
-        /// download/update fails — the operator can fall back to the interactive /update.
+        /// /safe-update: download and verify the latest release for this OS → graceful departure → install the verified
+        /// bytes → restart. Aborts without departing (the node keeps running in the pool) if no unambiguous OS asset is
+        /// found or the download is not a signed release; the operator can fall back to the interactive /update.
         /// </summary>
         public static async Task SafeUpdateAsync()
         {
@@ -136,14 +136,18 @@ namespace VerifiedXCore.Services
                 return;
             }
 
-            ConsoleWriterService.Output($"[SafeUpdate] Update available → departing gracefully before applying '{asset}'…");
-            await DepartAndWaitAsync(TimeSpan.FromSeconds(60));
-
-            ConsoleWriterService.Output($"[SafeUpdate] Downloading and applying {asset}…");
-            var updated = await VersionControlService.DownloadLatestAndUpdate(asset, true);
-            if (!updated)
+            ConsoleWriterService.Output($"[SafeUpdate] Downloading and verifying {asset}…");
+            var zip = await VerifyThenDepartAsync(asset, () => DepartAndWaitAsync(TimeSpan.FromSeconds(60)));
+            if (zip == null)
             {
-                ConsoleWriterService.Output("[SafeUpdate] Download/update FAILED. Node has departed the caster pool but is still running — restart or /update manually.");
+                Globals.IsDeparting = false;
+                return;
+            }
+
+            ConsoleWriterService.Output($"[SafeUpdate] Applying {asset}…");
+            if (!VersionControlService.InstallFromBytes(zip))
+            {
+                ConsoleWriterService.Output("[SafeUpdate] Update FAILED. Node has departed the caster pool but is still running — restart or /update manually.");
                 Globals.IsDeparting = false;
                 return;
             }
@@ -155,6 +159,23 @@ namespace VerifiedXCore.Services
                 await LinuxUtilities.ClientRestart();
             else
                 ConsoleWriterService.Output("[SafeUpdate] No restart command for this OS — please restart the client manually.");
+        }
+
+        /// <summary>
+        /// Downloads and verifies <paramref name="asset"/> first, and departs only once it verifies, so an update that is
+        /// refused never takes the node out of the caster pool. Returns the verified bytes, or null (nothing departed).
+        /// </summary>
+        internal static async Task<byte[]?> VerifyThenDepartAsync(string asset, Func<Task> depart)
+        {
+            var (zip, refusal) = await VersionControlService.DownloadVerifiedAsync(asset);
+            if (zip == null)
+            {
+                ConsoleWriterService.Output($"[SafeUpdate] Not updating: {refusal} Node keeps running.");
+                return null;
+            }
+            ConsoleWriterService.Output($"[SafeUpdate] {asset} is a signed release → departing gracefully before applying it…");
+            await depart();
+            return zip;
         }
 
         /// <summary>
@@ -181,7 +202,7 @@ namespace VerifiedXCore.Services
         {
             if (assetNames == null || assetNames.Count == 0)
                 return null;
-            var matches = assetNames
+            var matches = VersionControlService.ReleaseZips(assetNames)
                 .Where(a => keywords.Any(k => a.Contains(k, StringComparison.OrdinalIgnoreCase)))
                 .ToList();
             return matches.Count == 1 ? matches[0] : null;

@@ -110,6 +110,30 @@ namespace VerifiedXCore.Tests
             Assert.Equal(BurnHeight, Marker());
         }
 
+        /// <summary>
+        /// #208 (D09): the burn's account write could fail without an exception (the store answered false), and the burn
+        /// was marked applied with the balance untouched, for good. A write that does not land leaves no marker, and the
+        /// next block burns.
+        /// </summary>
+        [Fact]
+        public async Task ABurnWhoseWriteDoesNotLand_IsNotMarkedApplied_AndTheNextBlockBurns()
+        {
+            StateData.ForgedBurnWriteForTests = _ => false;
+            try
+            {
+                await StateData.UpdateTreis(EmptyBlock(BurnHeight));
+                Assert.False(StateData.ForgedVfxBurnApplied());
+                Assert.Equal(0, Marker());
+            }
+            finally
+            {
+                StateData.ForgedBurnWriteForTests = null;
+            }
+            Assert.True(await StateData.UpdateTreis(EmptyBlock(BurnHeight + 1)));
+            Assert.Equal(0M, Balance(Thief));
+            Assert.Equal(BurnHeight + 1, Marker());
+        }
+
         [Fact]
         public async Task ABalanceAboveTheListedAmount_LosesExactlyTheListedAmount()
         {

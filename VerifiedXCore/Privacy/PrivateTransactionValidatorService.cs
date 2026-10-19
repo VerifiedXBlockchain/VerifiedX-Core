@@ -37,7 +37,8 @@ namespace VerifiedXCore.Privacy
                     return (false, "The timestamp of this transaction is too old or too far in the future.");
             }
 
-            if (!await TransactionValidatorService.VerifyTXSize(txRequest))
+            var admission = blockHeight == null && !blockVerify && !blockDownloads; // measured as a block will carry it
+            if (!await TransactionValidatorService.VerifyTXSize(admission ? TransactionValidatorService.AsCarriedInABlock(txRequest) : txRequest))
                 return (false, "This transactions is too large. Max size allowed is 30 kb.");
 
             var txExist = Globals.MemBlocks.ContainsKey(txRequest.Hash);
@@ -64,9 +65,17 @@ namespace VerifiedXCore.Privacy
             // Fund-loss audit item 1 (stage 2): the shape proofs require (nothing in the reset block; note hashes on every
             // output; two notes spent; the dummy note at most once). Block validation judges at the block's height.
             var proofRulesHeight = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
+            // A downloaded block skips the root and proof checks only before the proof-rules epoch, as history the validators
+            // of its time judged. In the epoch it is judged as a live block: a caster's catch-up block (tip + 1) and the
+            // download loop both pass blockDownloads, and one caster could have a proof-less, made-up-root unshield committed.
+            var skipHistoricalPrivacyChecks = blockDownloads && !PrivacyEpoch.ProofRulesActive(proofRulesHeight);
             var proofShapeError = PrivateTxProofRules.Check(txRequest, payload, proofRulesHeight);
             if (proofShapeError != null)
                 return (false, proofShapeError);
+            // From ShieldSpendsNothingHeight in a block, and at admission at every height.
+            if ((proofRulesHeight >= Globals.ShieldSpendsNothingHeight || (blockHeight == null && !blockVerify && !blockDownloads))
+                && PrivateTxProofRules.ShieldSpendsNothing(txRequest, payload) is { } shieldSpends)
+                return (false, shieldSpends);
             if (proofRulesHeight >= Globals.PathAuditRulesHeight && EncodingRefusal(txRequest, payload) is { } encoding)
                 return (false, encoding);
             // At most two notes spent and two made. Before the proof rules nothing bounded them but the Data cap: a
@@ -89,13 +98,13 @@ namespace VerifiedXCore.Privacy
                     // epoch on (fifth review, round 32).
                     if (PrivacyEpoch.ProofRulesActive(proofRulesHeight) && PrivacyEpoch.IsDummyNullifier(n))
                         continue;
-                    if (NullifierService.IsNullifierSpentInDb(n, payload.Asset))
+                    if (NullifierService.IsNullifierSpentInDb(n, payload.Asset, height: proofRulesHeight))
                         return (false, "Nullifier already spent on-chain.");
                 }
             }
 
             if (!string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64)
-                && NullifierService.IsNullifierSpentInDb(payload.FeeInputNullifierB64, "VFX"))
+                && NullifierService.IsNullifierSpentInDb(payload.FeeInputNullifierB64, "VFX", height: proofRulesHeight))
                 return (false, "VFX fee nullifier already spent on-chain.");
 
             if (!string.IsNullOrWhiteSpace(payload.Kind) && !ExpectedKindMatches(txRequest.TransactionType, payload.Kind))
@@ -123,10 +132,10 @@ namespace VerifiedXCore.Privacy
                 var supplyRules = PrivateTxSupplyRules.Check(txRequest, payload!, judgedAt);
                 if (!supplyRules.ok)
                     return supplyRules;
-                var merkle = ValidatePayloadMerkleRootRecency(payload!, blockDownloads);
+                var merkle = ValidatePayloadMerkleRootRecency(payload!, skipHistoricalPrivacyChecks);
                 if (!merkle.ok)
                     return merkle;
-                var feeMerkle = ValidateVfxFeeTreeMerkleRootRecency(payload!, blockDownloads);
+                var feeMerkle = ValidateVfxFeeTreeMerkleRootRecency(payload!, skipHistoricalPrivacyChecks);
                 if (!feeMerkle.ok)
                     return feeMerkle;
             }
@@ -147,7 +156,7 @@ namespace VerifiedXCore.Privacy
 
             if (!skipPlonkProofVerification)
             {
-                var plonk = PlonkProofVerifier.TryValidatePrivateProofs(txRequest, payload!, blockDownloads, proofRulesHeight);
+                var plonk = PlonkProofVerifier.TryValidatePrivateProofs(txRequest, payload!, skipHistoricalPrivacyChecks, proofRulesHeight);
                 if (!plonk.ok)
                     return (false, plonk.message);
             }
@@ -411,7 +420,7 @@ namespace VerifiedXCore.Privacy
             return (true, "");
         }
 
-        private static (bool ok, string message) ValidateZkPrivate(Transaction txRequest, PrivateTxPayload payload)
+        internal static (bool ok, string message) ValidateZkPrivate(Transaction txRequest, PrivateTxPayload payload)
         {
             if (txRequest.Fee != 0)
                 return (false, "Private ZK transactions must have Fee 0 (fee is burned inside the proof in later phases).");
@@ -507,7 +516,7 @@ namespace VerifiedXCore.Privacy
             return null;
         }
 
-        private static bool VerifyPrivateHash(Transaction txRequest, long height)
+        internal static bool VerifyPrivateHash(Transaction txRequest, long height)
         {
             var probe = new Transaction
             {

@@ -60,7 +60,12 @@ namespace VerifiedXCore.Bitcoin.Attestation
             for (var position = 0; position < block.Transactions.Count; position++)
             {
                 var tx = block.Transactions[position];
-                if (CannotBeProven(tx, position)) continue; // never an event (see Build)
+                if (TooLargeToProve(tx))
+                {
+                    // Its spends of recorded coins are frozen (see Build); every one is found here, past the cap of an event.
+                    if (position > 0) BtcReportVerifier.DeriveFreezes(tx.GetHash().ToString(), SortedInputs(tx), blockHeight, null, overlay, effects, db, int.MaxValue);
+                    continue;
+                }
                 var isCoinbase = position == 0 && tx.IsCoinBase;
                 var spends = isCoinbase ? new List<string>() : tx.Inputs.Select(i => BtcAttestStore.OutpointKey(i.PrevOut.Hash.ToString(), i.PrevOut.N)).ToList();
                 var outputs = tx.Outputs.Select((o, i) => ((long)i, o.ScriptPubKey.ToHex().ToLowerInvariant(), o.Value.Satoshi)).ToList();
@@ -71,17 +76,18 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
         /// <summary>
         /// A transaction larger than a report can carry (<see cref="BtcTxInclusion.MaxTxBytes"/> without witness data:
-        /// larger than any Bitcoin node relays). It is not an event and nothing it does is recorded: an event is a
-        /// transaction with its proof, and nothing else. What such a transaction pays to a vault is not credited.
+        /// larger than any Bitcoin node relays). Its bytes are never an event. It is reported spend-only: its id with its
+        /// proof, and the recorded coins it spends, which are frozen (#171): left out, a vault's 51% key holders and one
+        /// miner could move a coin in a padded transaction while the chain kept counting it as backing. What such a
+        /// transaction pays to a vault is not credited.
         /// </summary>
         private static bool TooLargeToProve(Transaction tx) =>
             tx.WithOptions(TransactionOptions.None).GetSerializedSize() > BtcTxInclusion.MaxTxBytes;
 
-        /// <summary>
-        /// A transaction the verifier would refuse as an event whatever its proof: one too large to carry. It is left
-        /// out here exactly as the verifier leaves it out.
-        /// </summary>
-        private static bool CannotBeProven(Transaction tx, int position) => TooLargeToProve(tx);
+        /// <summary>A transaction's inputs as outpoint keys, each once, in ordinal order: how a spend-only event lists them.</summary>
+        private static List<string> SortedInputs(Transaction tx) =>
+            tx.Inputs.Select(i => BtcAttestStore.OutpointKey(i.PrevOut.Hash.ToString(), i.PrevOut.N))
+                .Distinct(StringComparer.Ordinal).OrderBy(o => o, StringComparer.Ordinal).ToList();
 
         private static List<BtcReport> Build(Block block, long blockHeight, string scope, IReadOnlyList<string> headers, long signerEpoch, LiteDatabase? db,
             long afterPosition, int firstPart, int maxParts = int.MaxValue)
@@ -107,7 +113,21 @@ namespace VerifiedXCore.Bitcoin.Attestation
             for (var position = (int)Math.Max(0, afterPosition + 1); position < block.Transactions.Count; position++)
             {
                 var tx = block.Transactions[position];
-                if (CannotBeProven(tx, position)) continue; // before anything of it is counted: the verifier never sees it
+                if (TooLargeToProve(tx))
+                {
+                    // Spend-only (#171): its id and proof, and the recorded coins it spends, at most a cap of them; the rest
+                    // are found by VaultsWithUnrecordedEvents and frozen by backfills. A coinbase spends nothing.
+                    if (position == 0) continue;
+                    var first = effects.Count;
+                    if (BtcReportVerifier.DeriveFreezes(txids[position], SortedInputs(tx), blockHeight, scopedVault, overlay, effects, db, BtcAttestRules.MaxSpendsPerEvent) == 0)
+                        continue;
+                    events.Add(new BtcReportEvent
+                    {
+                        Position = position, Txid = txids[position], Spends = effects.Skip(first).Select(e => e.Outpoint).ToList(),
+                        Branch = levels == null ? null : BtcMerkle.BranchFrom(levels, position),
+                    });
+                    continue;
+                }
                 var isCoinbase = position == 0 && tx.IsCoinBase;
                 var spends = isCoinbase ? new List<string>() : tx.Inputs.Select(i => BtcAttestStore.OutpointKey(i.PrevOut.Hash.ToString(), i.PrevOut.N)).ToList();
                 var outputs = tx.Outputs.Select((o, i) => ((long)i, o.ScriptPubKey.ToHex().ToLowerInvariant(), o.Value.Satoshi)).ToList();

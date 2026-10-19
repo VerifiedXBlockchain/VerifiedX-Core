@@ -29,10 +29,17 @@ namespace VerifiedXCore.Models.DST
         /// <summary>
         /// Re-audit (9 Oct 2026): the contract the listing sells. The bid signature covers purchase key, amount and bidder
         /// only, so the wallet records which contract it bid on and completes a sale only for that contract
-        /// (<see cref="HasLocalSentBid"/>). Filled by <see cref="Build"/> from the connected shop's listing when the client
-        /// did not send it; null on rows from before this field existed.
+        /// (<see cref="HasLocalSentBid"/>). Filled by <see cref="Build"/> from the listing of the shop the bid is sent to
+        /// when the client did not send it; null when that shop's data does not name it, and on rows from before this field.
         /// </summary>
         public string? SmartContractUID { get; set; }
+
+        /// <summary>
+        /// Whether <see cref="SmartContractUID"/> was recorded under the current rule: named by the client, or read from the
+        /// shop the bid was sent to. A bid saved before that rule may carry a contract read from another cached shop, and
+        /// is not completed automatically (null on those rows).
+        /// </summary>
+        public bool? ContractFromTargetShop { get; set; }
 
         /// <summary>
         /// For a vBTC vault the chain watches: the owner's spendable vBTC when the bid was made. A sale is completed from
@@ -40,6 +47,60 @@ namespace VerifiedXCore.Models.DST
         /// balance before (or with) its Sale_Start: the buyer paid in full for an empty vault (fifth review, round 30).
         /// </summary>
         public decimal? VaultOwnerBalanceAtBid { get; set; }
+
+        /// <summary>
+        /// Until when (unix seconds) a Sale_Start may complete this bid from the wallet automatically: the listing's end plus
+        /// <see cref="AutoCompleteGraceSeconds"/>, or the bid time plus that grace when the end is unknown. A bid signature
+        /// never expires and a cancelled sale does not use up its purchase key, so without a deadline the seller could start
+        /// the sale under the old signature at any later time and the wallet paid. Null on rows from before this field:
+        /// those use the bid time.
+        /// </summary>
+        public long? AutoCompleteUntil { get; set; }
+
+        /// <summary>
+        /// A hash of the contract's body and minter when the bid was made (<see cref="ContentHashOf"/>). The owner of an
+        /// unlocked NFT can Update() its body, and the bid signature does not cover it, so a seller could take a bid on one
+        /// asset and deliver another: a sale is completed automatically only while the hash is unchanged. Null when the
+        /// contract was unknown at bid time, and on rows from before this field.
+        /// </summary>
+        public string? ContentHashAtBid { get; set; }
+
+        /// <summary>Whether a Sale_Start already completed this bid automatically. A bid pays automatically at most once.</summary>
+        public bool? AutoCompleted { get; set; }
+
+        /// <summary>How long after a listing ends (or, when its end is unknown, after the bid) a sale is completed automatically.</summary>
+        public const long AutoCompleteGraceSeconds = 3 * 24 * 60 * 60;
+
+        internal long AutoCompleteDeadline => AutoCompleteUntil ?? BidSendTime + AutoCompleteGraceSeconds;
+
+        /// <summary>SHA-256 (hex) of a contract's stored body and minter now; null when the contract is unknown.</summary>
+        internal static string? ContentHashOf(string? smartContractUID)
+        {
+            try
+            {
+                var state = string.IsNullOrWhiteSpace(smartContractUID) ? null : SmartContractStateTrei.GetSmartContractState(smartContractUID);
+                if (state == null) return null;
+                using var sha = System.Security.Cryptography.SHA256.Create();
+                var bytes = System.Text.Encoding.UTF8.GetBytes((state.ContractData ?? "") + "\n" + (state.MinterAddress ?? ""));
+                return Convert.ToHexString(sha.ComputeHash(bytes)).ToLowerInvariant();
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// Why a sale is not completed automatically for this bid: the contract's body or minter changed since the bid (an
+        /// Update() of an unlocked NFT, a re-mint), or was not recorded. Null when the contract is what was bid on.
+        /// </summary>
+        public static string? ContentChangedSinceBid(string? bidderAddress, string? purchaseKey, string? smartContractUID)
+        {
+            var recorded = MatchingSentBids(bidderAddress, purchaseKey, smartContractUID);
+            if (recorded.Count == 0 || recorded.Any(b => string.IsNullOrEmpty(b.ContentHashAtBid)))
+                return "The contract's content at the time of the bid was not recorded; complete the sale by hand after checking the asset.";
+            var now = ContentHashOf(smartContractUID);
+            return now != null && recorded.Any(b => string.Equals(b.ContentHashAtBid, now, StringComparison.Ordinal))
+                ? null
+                : "The contract's content or minter changed since the bid; the sale is not completed automatically.";
+        }
 
         /// <summary>The owner's spendable vBTC on <paramref name="smartContractUID"/> now, when it is a watched vault; else null.</summary>
         internal static decimal? VaultOwnerFigure(string? smartContractUID)
@@ -88,7 +149,8 @@ namespace VerifiedXCore.Models.DST
                 : null;
         }
 
-        public bool Build(bool thirdParty = false)
+        /// <param name="targetShop">The data of the shop this bid is sent to; the contract is read from it alone.</param>
+        public bool Build(bool thirdParty = false, DecShopData? targetShop = null)
         {
             if (BidAmount < Globals.BidMinimum)
                 return false;
@@ -103,8 +165,11 @@ namespace VerifiedXCore.Models.DST
             MaxBidAmount = BidAmount;
             BidSendReceive = BidSendReceive.Sent;
             if (string.IsNullOrWhiteSpace(SmartContractUID))
-                SmartContractUID = ListingContractFor(ListingId, PurchaseKey);
+                SmartContractUID = ListingContractFor(targetShop, ListingId, PurchaseKey);
+            ContractFromTargetShop = !string.IsNullOrWhiteSpace(SmartContractUID);
             VaultOwnerBalanceAtBid = VaultOwnerFigure(SmartContractUID);
+            ContentHashAtBid = ContentHashOf(SmartContractUID);
+            AutoCompleteUntil = Math.Max(ListingEndFor(PurchaseKey) ?? BidSendTime, BidSendTime) + AutoCompleteGraceSeconds;
 
             var bidModifier = (BidAmount * Globals.BidModifier);
             var bidAmount = Convert.ToInt64(bidModifier);
@@ -243,25 +308,72 @@ namespace VerifiedXCore.Models.DST
         #region Save Bid
         public static (bool, string) SaveBid(Bid bid, bool dontUpdate = false)
         {
-            var singleBid = GetSingleBid(bid.Id);
-            var bidDb = GetBidDb();
-            if (singleBid == null)
+            lock (BidWriteLock)
             {
-                if (bidDb != null)
+                var singleBid = GetSingleBid(bid.Id);
+                var bidDb = GetBidDb();
+                if (singleBid == null)
                 {
-                    bidDb.InsertSafe(bid);
-                    return (true, "Bid saved.");
+                    if (bidDb != null)
+                    {
+                        bidDb.InsertSafe(bid);
+                        return (true, "Bid saved.");
+                    }
                 }
+                else
+                {
+                    if (bidDb != null && !dontUpdate)
+                    {
+                        // A bid a sale already completed automatically stays used: a caller holding a copy read before
+                        // that would otherwise save it back unused.
+                        if (singleBid.AutoCompleted == true)
+                            bid.AutoCompleted = true;
+                        bidDb.UpdateSafe(bid);
+                        return (true, "Bid updated.");
+                    }
+                }
+                return (false, "Bid DB was null.");
             }
-            else
+        }
+
+        /// <summary>
+        /// The owner resending a bid authorises it again: a rejected bid is Sent once more and its auto-complete window runs
+        /// from now. Only this owner action reopens a rejected bid; a shop response cannot (<see cref="ApplyShopResponse"/>).
+        /// A bid a sale already completed automatically stays used.
+        /// </summary>
+        public static Bid? ReopenForResend(Guid bidId)
+        {
+            lock (BidWriteLock)
             {
-                if (bidDb != null && !dontUpdate)
-                {
-                    bidDb.UpdateSafe(bid);
-                    return (true, "Bid updated.");
-                }
+                var bid = GetSingleBid(bidId);
+                if (bid == null || bid.BidSendReceive != BidSendReceive.Sent)
+                    return bid;
+                bid.BidStatus = BidStatus.Sent;
+                bid.BidSendTime = TimeUtil.GetTime();
+                bid.AutoCompleteUntil = Math.Max(ListingEndFor(bid.PurchaseKey) ?? bid.BidSendTime, bid.BidSendTime) + AutoCompleteGraceSeconds;
+                GetBidDb()?.UpdateSafe(bid);
+                return bid;
             }
-            return (false, "Bid DB was null.");
+        }
+
+        /// <summary>Serialises bid writes, so a status update and <see cref="MarkAutoCompleted"/> cannot interleave.</summary>
+        private static readonly object BidWriteLock = new();
+
+        /// <summary>
+        /// Applies a shop's response to a bid this wallet sent. The response is the shop's word and is not authenticated,
+        /// so it can change only the status of a sent bid, and a rejected bid stays rejected: otherwise a response naming
+        /// it made it payable again by <see cref="HasLocalSentBid"/>.
+        /// </summary>
+        public static void ApplyShopResponse(Guid bidId, BidStatus status)
+        {
+            lock (BidWriteLock)
+            {
+                var bid = GetSingleBid(bidId);
+                if (bid == null || bid.BidSendReceive != BidSendReceive.Sent || bid.BidStatus == BidStatus.Rejected)
+                    return;
+                bid.BidStatus = status;
+                GetBidDb()?.UpdateSafe(bid);
+            }
         }
 
         #endregion
@@ -359,24 +471,64 @@ namespace VerifiedXCore.Models.DST
                 return false;
             try
             {
-                var bids = GetAllBids(BidSendReceive.Sent);
-                if (bids == null) return false;
-                return bids.Any(b => b != null
-                    && string.Equals(b.BidAddress, bidderAddress, StringComparison.Ordinal)
-                    && string.Equals(b.PurchaseKey, purchaseKey, StringComparison.Ordinal)
-                    && Math.Max(b.BidAmount, b.MaxBidAmount) >= amount
-                    && string.Equals(b.SmartContractUID, smartContractUID, StringComparison.Ordinal)); // no fallback: shop data is the seller's (re-audit)
+                var now = TimeUtil.GetTime();
+                return MatchingSentBids(bidderAddress, purchaseKey, smartContractUID).Any(b =>
+                    Math.Max(b.BidAmount, b.MaxBidAmount) >= amount
+                    && b.BidStatus != BidStatus.Rejected
+                    && b.AutoCompleted != true
+                    && now <= b.AutoCompleteDeadline);
             }
             catch { return false; }
         }
 
         /// <summary>
-        /// The contract a listing sells, from the shop data this node holds (the connected shop and any multi-shop
-        /// sessions), by purchase key only, and only when every shop holding that key names one contract. Listing ids
-        /// repeat from shop to shop and a key can be copied: a bid sent to one shop was bound to another shop's contract,
-        /// whose owner could then start a sale of it under the bid's signature (fifth review, round 31). Null when unknown.
+        /// Records that a sale completed this wallet's bids on <paramref name="purchaseKey"/> automatically, so a later
+        /// Sale_Start under the same bid signature (after a cancel) is not paid automatically again.
         /// </summary>
-        public static string? ListingContractFor(int listingId, string? purchaseKey)
+        public static void MarkAutoCompleted(string? bidderAddress, string? purchaseKey, string? smartContractUID)
+        {
+            lock (BidWriteLock)
+            {
+                var db = GetBidDb();
+                if (db == null) return;
+                foreach (var b in MatchingSentBids(bidderAddress, purchaseKey, smartContractUID))
+                {
+                    b.AutoCompleted = true;
+                    db.UpdateSafe(b);
+                }
+            }
+        }
+
+        /// <summary>
+        /// A sale completion this wallet sends (Sale_Complete or M_Sale_Complete, built here or signed elsewhere and sent
+        /// raw) pays the bid under its purchase key: that bid is used, so a re-minted UID cannot have it paid again.
+        /// </summary>
+        public static void MarkUsedByCompletion(Transaction? tx)
+        {
+            if (tx?.TransactionType != TransactionType.NFT_SALE || string.IsNullOrEmpty(tx.Data)) return;
+            try
+            {
+                var jobj = Newtonsoft.Json.Linq.JObject.Parse(tx.Data);
+                var function = jobj["Function"]?.ToObject<string?>();
+                if (function != "Sale_Complete()" && function != "M_Sale_Complete()") return;
+                MarkAutoCompleted(tx.FromAddress, jobj["KeySign"]?.ToObject<string?>(), jobj["ContractUID"]?.ToObject<string?>());
+            }
+            catch { }
+        }
+
+        private static List<Bid> MatchingSentBids(string? bidderAddress, string? purchaseKey, string? smartContractUID) =>
+            (GetAllBids(BidSendReceive.Sent) ?? new List<Bid>()).Where(b => b != null
+                && string.Equals(b.BidAddress, bidderAddress, StringComparison.Ordinal)
+                && string.Equals(b.PurchaseKey, purchaseKey, StringComparison.Ordinal)
+                && string.Equals(b.SmartContractUID, smartContractUID, StringComparison.Ordinal) // no fallback: shop data is the seller's (re-audit)
+                && b.ContractFromTargetShop == true) // a contract bound before the target-shop rule may be another shop's
+                .ToList();
+
+        /// <summary>
+        /// The end (unix seconds) of the auction listed under <paramref name="purchaseKey"/>, from the shop data this node
+        /// holds, when every shop holding that key names one end; null for a buy-now-only listing or when unknown.
+        /// </summary>
+        public static long? ListingEndFor(string? purchaseKey)
         {
             try
             {
@@ -384,8 +536,30 @@ namespace VerifiedXCore.Models.DST
                 var sources = new List<IEnumerable<Listing>?> { Globals.DecShopData?.Listings };
                 foreach (var shop in Globals.MultiDecShopData.Values)
                     sources.Add(shop?.Listings);
-                var contracts = sources.Where(s => s != null)
+                var listings = sources.Where(s => s != null)
                     .SelectMany(s => s!.Where(l => l != null && string.Equals(l.PurchaseKey, purchaseKey, StringComparison.Ordinal)))
+                    .ToList();
+                if (listings.Count == 0 || listings.Any(l => l.IsBuyNowOnly)) return null;
+                var ends = listings.Select(l => new DateTimeOffset(DateTime.SpecifyKind(l.EndDate, DateTimeKind.Utc)).ToUnixTimeSeconds()).Distinct().ToList();
+                return ends.Count == 1 ? ends[0] : null;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// The contract a listing sells, from the data of the shop the bid is sent to only: the listing with this id and
+        /// this purchase key there, when it names one contract. Any other shop's data is the other shop's to serve: read
+        /// from every shop this node had cached, a shop that served a listing with the key the buyer bid with bound the bid
+        /// to its own contract, whose owner could then start a sale of it under the bid's signature. Null when unknown,
+        /// and a bid without a contract is never completed automatically.
+        /// </summary>
+        public static string? ListingContractFor(DecShopData? targetShop, int listingId, string? purchaseKey)
+        {
+            try
+            {
+                if (targetShop?.Listings == null || string.IsNullOrEmpty(purchaseKey)) return null;
+                var contracts = targetShop.Listings
+                    .Where(l => l != null && l.Id == listingId && string.Equals(l.PurchaseKey, purchaseKey, StringComparison.Ordinal))
                     .Select(l => l.SmartContractUID).Where(uid => !string.IsNullOrWhiteSpace(uid))
                     .Distinct(StringComparer.Ordinal).ToList();
                 return contracts.Count == 1 ? contracts[0] : null;

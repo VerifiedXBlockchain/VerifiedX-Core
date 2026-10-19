@@ -23,6 +23,11 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public string? RekeyOf { get; set; }
         /// <summary>The leader signed the start in full (<see cref="FrostDkgLeaderAuth"/>): its Round 2 set and share batch must be signed too.</summary>
         public bool LeaderSigned { get; set; }
+        /// <summary>
+        /// The exact address the start came from (FrostSigningAuthorization.NormalizeRemoteIp). A session its leader did not
+        /// sign in full (a web wallet's creation) takes its Round 2 set and share batches from that endpoint only.
+        /// </summary>
+        public string? StartRemoteIp { get; set; }
         /// <summary>The hash of the start this session was opened by: the same start sent again is answered, not refused.</summary>
         public string? StartBodyHash { get; set; }
         
@@ -395,8 +400,10 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// cap, any address can fill the global cap and block legitimate contract creation. Must
         /// exceed the coordinator's own start-retry count (each retry opens a new session id under
         /// the same leader) or a legitimate retry would be refused by exactly the validators it needs.
+        /// The coordinator makes up to MaxDkgAttempts attempts, each a new session; a web wallet's (pre-signed) attempts are
+        /// not given up on the participants and hold their places for two minutes, so the fifth and sixth were refused (#274).
         /// </summary>
-        public const int MAX_DKG_SESSIONS_PER_LEADER = 4;
+        public const int MAX_DKG_SESSIONS_PER_LEADER = VerifiedXCore.Bitcoin.Services.FrostMPCService.MaxDkgAttempts + 1;
 
         /// <summary>An in-progress DKG session older than this no longer counts against its leader.</summary>
         public const int DKG_LEADER_CAP_WINDOW_SECONDS = 900;
@@ -526,8 +533,12 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
             return null;
         }
         
-        /// <summary>Maximum number of participant addresses per session (supports mainnet scale)</summary>
-        public const int MAX_PARTICIPANTS = 200;
+        /// <summary>
+        /// Maximum number of participant addresses per session: the most a vault's key ceremony may have
+        /// (<see cref="FrostDkgAttestation.MaxParticipants"/>). A lower cap here refused, at the start of a ceremony, the
+        /// participant count consensus requires once the eligible validators outgrow it, so no public vault could be made.
+        /// </summary>
+        public const int MAX_PARTICIPANTS = FrostDkgAttestation.MaxParticipants;
         
         /// <summary>Minimum required threshold percentage</summary>
         public const int MIN_THRESHOLD = 51;

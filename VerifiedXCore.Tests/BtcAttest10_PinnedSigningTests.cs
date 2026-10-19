@@ -47,6 +47,9 @@ namespace VerifiedXCore.Tests
 
         public override void Dispose()
         {
+            BtcWithdrawalSigner.ForgetWithheld();
+            BtcWithdrawalSigner.CeremonyForTests = null;
+            BtcWithdrawalSigner.Reachable = VerifiedXCore.Bitcoin.Services.FrostMPCService.ProbeValidatorReachability;
             BtcWithdrawalSigner.SignAndBroadcast = _realSign;
             BtcWithdrawalSigner.KnownOnBitcoin = _realKnown;
             BtcWithdrawalSigner.ForgetAttempts();
@@ -317,6 +320,86 @@ namespace VerifiedXCore.Tests
             Assert.Contains("already completed", why);
         }
 
+        /// <summary>
+        /// C-060: a coin whose transaction is not confirmed on Bitcoin can be replaced away (RBF), and the payment with it,
+        /// after the withdrawal settled. The builder no longer picks one, but a build saved before that, or a transaction
+        /// the owner built itself, still reached the signers of a vault the chain does not watch. Each signer now asks
+        /// whether every input's transaction is confirmed, once the leader's signature checks, and refuses otherwise
+        /// (no answer included). A watched vault's inputs are attested coins and are not asked about.
+        /// </summary>
+        [Fact]
+        public async Task AnOldVaultsSigningStart_OverAnUnconfirmedCoin_IsRefused()
+        {
+            var legacy = await CreateVault(H1 - 50, keyHolders: Signers);
+            await Start();
+            using var electrum = new FakeElectrum(("a", true, 1M));
+            var tx = new VfxTx
+            {
+                Timestamp = TimeUtil.GetTime(), FromAddress = Minter.Address, ToAddress = Minter.Address, Amount = 0.0M, Fee = 0, Nonce = 0,
+                TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                Data = JsonConvert.SerializeObject(new { Function = "VBTCWithdrawalRequest()", ContractUID = legacy.Uid, BTCAddress = BtcDest, Amount = 0.0005M, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") }),
+            };
+            tx.Fee = VerifiedXCore.Services.FeeCalcService.CalculateTXFee(tx);
+            tx.Build();
+            await Apply(Tip + 1, tx);
+            var parent = new uint256(RandomUtils.GetBytes(32));
+            var built = Network.Main.CreateTransaction();
+            built.Inputs.Add(new TxIn(new OutPoint(parent, 0)));
+            built.Outputs.Add(Money.Satoshis(50_000 - VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.WithdrawalFeeSats(1, 10)), BitcoinAddress.Create(BtcDest, Network.Main).ScriptPubKey);
+            built.Outputs.Add(Money.Satoshis(77_777 - 50_000), legacy.Script);   // as the builder makes it: the fee out of the payout
+
+            var priorSynced = Globals.IsChainSynced;
+            var priorLookup = FrostSigningAuthorization.ParentConfirmations;
+            var asked = new List<string>();
+            int? answer = 0;
+            Globals.IsChainSynced = true;
+            FrostSigningAuthorization.ParentConfirmations = txid => { lock (asked) asked.Add(txid); return Task.FromResult(answer); };
+            try
+            {
+                using var server = new TestServer(new WebHostBuilder().UseStartup<FrostStartup>());
+                var client = server.CreateClient();
+                async Task<(System.Net.HttpStatusCode Code, string Body)> Post(FrostSigningStartRequest start)
+                {
+                    var r = await client.PostAsync("/frost/sign/start", new System.Net.Http.StringContent(JsonConvert.SerializeObject(start), System.Text.Encoding.UTF8, "application/json"));
+                    return (r.StatusCode, await r.Content.ReadAsStringAsync());
+                }
+                FrostSigningStartRequest Begin()
+                {
+                    var start = Announce(legacy.Uid, legacy.Script, tx.Hash, built, Minter.Address);
+                    start.SignerAddresses = Signers.Select(s => s.Address).ToList();
+                    start.RequiredThreshold = 51;
+                    start.LeaderSignature = VerifiedXCore.Services.SignatureService.CreateSignature($"{start.SessionId}.{Minter.Address}.{start.Timestamp}", Minter.Key, Minter.Pub);
+                    return start;
+                }
+
+                var unconfirmed = await Post(Begin());
+                Assert.True(unconfirmed.Code == System.Net.HttpStatusCode.Conflict, unconfirmed.Body);
+                Assert.Contains("is not confirmed on Bitcoin yet", unconfirmed.Body);
+                Assert.Equal(parent.ToString(), Assert.Single(asked));
+
+                answer = null;                                                        // no Electrum answer: refused too
+                Assert.Contains("could not establish that input transaction", (await Post(Begin())).Body);
+
+                answer = 1;
+                Assert.DoesNotContain("confirmed on Bitcoin", (await Post(Begin())).Body);   // passes this check
+
+                asked.Clear();                                                        // nobody else makes it ask
+                var forged = Begin();
+                forged.LeaderSignature = VerifiedXCore.Services.SignatureService.CreateSignature($"{forged.SessionId}.{Minter.Address}.{forged.Timestamp}", Signers[0].Key, Signers[0].Pub);
+                Assert.Equal(System.Net.HttpStatusCode.Forbidden, (await Post(forged)).Code);
+                Assert.Empty(asked);
+
+                var watched = await CreateVault(Tip + 1, keyHolders: Signers);
+                Assert.Null(await FrostSigningAuthorization.UnconfirmedInputToSign(watched.Uid, new[] { $"{parent}:0" }));
+                Assert.Empty(asked);
+            }
+            finally
+            {
+                FrostSigningAuthorization.ParentConfirmations = priorLookup;
+                Globals.IsChainSynced = priorSynced;
+            }
+        }
+
         [Fact]
         public async Task AnOldVault_KeepsItsOwnerLedSigning()
         {
@@ -328,7 +411,7 @@ namespace VerifiedXCore.Tests
             {
                 Timestamp = TimeUtil.GetTime(), FromAddress = signer.Address, ToAddress = signer.Address, Amount = 0.0M, Fee = 0, Nonce = 0,
                 TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
-                Data = JsonConvert.SerializeObject(new { Function = "VBTCWithdrawalRequest()", ContractUID = legacy.Uid, BTCAddress = BtcDest, Amount = 0.001M, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") }),
+                Data = JsonConvert.SerializeObject(new { Function = "VBTCWithdrawalRequest()", ContractUID = legacy.Uid, BTCAddress = BtcDest, Amount = 0.0005M, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") }),
             };
             tx.Fee = VerifiedXCore.Services.FeeCalcService.CalculateTXFee(tx);
             tx.Build();
@@ -337,7 +420,8 @@ namespace VerifiedXCore.Tests
             // Any transaction within the bounds, built by the owner from coins only Bitcoin knows about.
             var built = Network.Main.CreateTransaction();
             built.Inputs.Add(new TxIn(new OutPoint(new uint256(RandomUtils.GetBytes(32)), 0)));
-            built.Outputs.Add(Money.Satoshis(70_000), BitcoinAddress.Create(BtcDest, Network.Main).ScriptPubKey);
+            built.Outputs.Add(Money.Satoshis(50_000 - VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.WithdrawalFeeSats(1, 10)), BitcoinAddress.Create(BtcDest, Network.Main).ScriptPubKey);
+            built.Outputs.Add(Money.Satoshis(77_777 - 50_000), legacy.Script);   // as the builder makes it: the fee out of the payout
             var (ok, why) = FrostSigningAuthorization.Authorize(Announce(legacy.Uid, legacy.Script, tx.Hash, built, Minter.Address));
             Assert.True(ok, why);
             (ok, why) = FrostSigningAuthorization.Authorize(Announce(legacy.Uid, legacy.Script, tx.Hash, built, Signers[0].Address));
@@ -350,6 +434,49 @@ namespace VerifiedXCore.Tests
             var watched = await CreateVault(Tip + 1, keyHolders: Signers);
             Assert.True(FrostSigningAuthorization.LedByRequester(Minter.Address, watched.Uid));
             Assert.False(FrostSigningAuthorization.LedByRequester(Signers[0].Address, watched.Uid));
+        }
+
+        /// <summary>
+        /// C-188: an unwatched vault's start is authorised by a signature that names no content, so whoever saw it could
+        /// send the same start with a transaction of its own over the same coins, paying the destination a few sats and
+        /// burning the rest as fee: anything within the authorized amount was signed. It is now signed only as the
+        /// builder makes it - the fee the request's rate sets, and the whole amount taken from the vault.
+        /// </summary>
+        [Fact]
+        public async Task AnOldVaultsTransaction_PaysTheBuildersFee_OutOfTheWholeAmount()
+        {
+            var legacy = await CreateVault(H1 - 50, keyHolders: Signers);
+            await Start();
+            using var electrum = new FakeElectrum(("a", true, 1M));
+            var tx = new VfxTx
+            {
+                Timestamp = TimeUtil.GetTime(), FromAddress = Minter.Address, ToAddress = Minter.Address, Amount = 0.0M, Fee = 0, Nonce = 0,
+                TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                Data = JsonConvert.SerializeObject(new { Function = "VBTCWithdrawalRequest()", ContractUID = legacy.Uid, BTCAddress = BtcDest, Amount = 0.0005M, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") }),
+            };
+            tx.Fee = VerifiedXCore.Services.FeeCalcService.CalculateTXFee(tx);
+            tx.Build();
+            await Apply(Tip + 1, tx);
+
+            var coin = new OutPoint(new uint256(RandomUtils.GetBytes(32)), 0);   // 77,777 sats (Announce)
+            var fee = VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.WithdrawalFeeSats(1, 10);
+            (bool Ok, string Why) Spend(long destination, long change)
+            {
+                var built = Network.Main.CreateTransaction();
+                built.Inputs.Add(new TxIn(coin));
+                built.Outputs.Add(Money.Satoshis(destination), BitcoinAddress.Create(BtcDest, Network.Main).ScriptPubKey);
+                built.Outputs.Add(Money.Satoshis(change), legacy.Script);
+                return FrostSigningAuthorization.Authorize(Announce(legacy.Uid, legacy.Script, tx.Hash, built, Minter.Address));
+            }
+
+            var honest = Spend(50_000 - fee, 27_777);
+            Assert.True(honest.Ok, honest.Why);
+            var burn = Spend(1_000, 27_777);                                     // the rest of the payout to the fee
+            Assert.False(burn.Ok);
+            Assert.Contains("fee rate allows", burn.Why);
+            var shortPay = Spend(1_000, 77_777 - 1_000 - fee);                   // the builder's fee, the payout kept in the vault
+            Assert.False(shortPay.Ok);
+            Assert.Contains("the payout is short", shortPay.Why);
         }
 
         /// <summary>
@@ -430,6 +557,120 @@ namespace VerifiedXCore.Tests
             BtcWithdrawalSigner.ForgetAttempts();
             foreach (var signer in order)
                 Assert.Empty(await BtcWithdrawalSigner.TickAsync(signer, Tip + 500));
+        }
+
+        /// <summary>Electrum servers that answer a transaction's confirmations as given (per host and port); restores everything when disposed.</summary>
+        private sealed class FakeConfirmations : IDisposable
+        {
+            private readonly List<VerifiedXCore.Bitcoin.ElectrumX.ClientSettings>? _priorServers = Globals.ClientSettings;
+            private readonly Func<VerifiedXCore.Bitcoin.ElectrumX.ClientSettings, string, Task<(bool Ok, int Confirms)>> _priorQuery = VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.QueryConfirms;
+
+            public FakeConfirmations(params (string Host, int Port, bool Ok, int Confirms)[] answers)
+            {
+                Globals.ClientSettings = answers.Select(a => new VerifiedXCore.Bitcoin.ElectrumX.ClientSettings { Host = a.Host, Port = a.Port, UseSsl = true }).ToList();
+                VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.QueryConfirms = (server, _) =>
+                {
+                    var a = answers.First(x => x.Host == server.Host && x.Port == server.Port);
+                    return Task.FromResult((a.Ok, a.Confirms));
+                };
+            }
+
+            public void Dispose()
+            {
+                VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.QueryConfirms = _priorQuery;
+                Globals.ClientSettings = _priorServers;
+            }
+        }
+
+        /// <summary>
+        /// C-193: a watched vault's signers skipped the ceremony for a pinned transaction whenever one Electrum server said
+        /// Bitcoin knew it (in a block, or merely in its mempool), and every signer asks the same servers: one false
+        /// answer stopped the payment network-wide. Two distinct hosts must now know it; sending the pinned transaction
+        /// again is harmless.
+        /// </summary>
+        [Fact]
+        public async Task OneServerSayingItKnowsThePinnedTransaction_DoesNotStopTheSigners()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Report(_btc.Mine(Pay(vault.Script, 150_000)));
+            var request = await Request(vault.Uid, 0.001M);
+            var pin = BtcAttestStore.Withdrawal(BtcWithdrawals.RefOf(request.Hash, vault.Uid))!.Pins[0];
+            var addresses = Signers.Select(s => s.Address).ToList();
+            var first = addresses.OrderBy(a => BtcWithdrawalSigner.Turn(pin.Txid, a, addresses)).First();
+            var led = 0;
+            BtcWithdrawalSigner.KnownOnBitcoin = _realKnown;                     // the production check
+            BtcWithdrawalSigner.SignAndBroadcast = (row, p) => { led++; return Task.FromResult((false, "validators unreachable")); };
+            string Host(string name) => $"{name}-{Guid.NewGuid():N}";
+
+            async Task<bool> Leads(params (string Host, int Port, bool Ok, int Confirms)[] answers)
+            {
+                using var _ = new FakeConfirmations(answers);
+                BtcWithdrawalSigner.ForgetAttempts();
+                var before = led;
+                await BtcWithdrawalSigner.TickAsync(first, pin.PinnedAtVfxHeight);
+                return led > before;
+            }
+
+            Assert.True(await Leads((Host("liar"), 50002, true, 1), (Host("b"), 50002, false, 0), (Host("c"), 50002, false, 0)));   // in a block, says one
+            Assert.True(await Leads((Host("liar"), 50002, true, 0), (Host("b"), 50002, false, 0), (Host("c"), 50002, false, 0)));   // in its mempool, says one
+            var one = Host("one");
+            Assert.True(await Leads((one, 50001, true, 0), (one, 50002, true, 0)));                                                    // one host, two ports
+            Assert.False(await Leads((Host("a"), 50002, true, 0), (Host("b"), 50002, true, 1)));                                       // two hosts know it
+        }
+
+        /// <summary>
+        /// C-197: a holder that commits in Round 1 and withholds its share makes every ceremony fail, and every retry asked
+        /// the same holders. The leader now leaves out those its last ceremonies for the transaction named, while the rest
+        /// still meet the key's threshold; never itself.
+        /// </summary>
+        [Fact]
+        public async Task AHolderThatWithheldItsShare_IsLeftOutOfTheNextCeremony_WhileTheRestMeetTheThreshold()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Report(_btc.Mine(Pay(vault.Script, 150_000)));
+            var request = await Request(vault.Uid, 0.001M);
+            var pin = BtcAttestStore.Withdrawal(BtcWithdrawals.RefOf(request.Hash, vault.Uid))!.Pins[0];
+            var addresses = Signers.Select(s => s.Address).ToList();
+            var order = addresses.OrderBy(a => BtcWithdrawalSigner.Turn(pin.Txid, a, addresses)).ToList();
+            var me = order[0];
+            var withholders = new Queue<string[]>(new[] { new[] { order[1] }, new[] { order[2] }, Array.Empty<string>() });
+            var asked = new List<string[]>();
+            var priorValidator = Globals.ValidatorAddress;
+            var priorSynced = Globals.IsChainSynced;
+            Globals.ValidatorAddress = me;
+            Globals.IsChainSynced = true;
+            BtcWithdrawalSigner.SignAndBroadcast = _realSign;
+            BtcWithdrawalSigner.KnownOnBitcoin = _ => Task.FromResult<bool?>(null);
+            BtcWithdrawalSigner.Reachable = list => Task.FromResult(list);
+            foreach (var s in Signers)
+                Globals.NetworkValidators[s.Address] = new NetworkValidator { Address = s.Address, IPAddress = "10.0.0.1", PublicKey = s.Pub };
+            BtcWithdrawalSigner.CeremonyForTests = (signers, threshold) =>
+            {
+                asked.Add(signers.Select(v => v.ValidatorAddress).OrderBy(a => a, StringComparer.Ordinal).ToArray());
+                var held = withholders.Dequeue();
+                var outcome = FrostCeremonyOutcome.Fail(FrostCeremonyFailureCode.Round2SharesWithheld, "s", "withheld");
+                outcome.Withholders = held.ToList();
+                return Task.FromResult((false, "", "", "withheld", (FrostCeremonyOutcome?)outcome));
+            };
+            try
+            {
+                async Task Tick() { BtcWithdrawalSigner.ForgetAttempts(); await BtcWithdrawalSigner.TickAsync(me, pin.PinnedAtVfxHeight); }
+                await Tick();
+                Assert.Equal(addresses.OrderBy(a => a, StringComparer.Ordinal), asked[0]);         // every holder, the first time
+                await Tick();
+                Assert.DoesNotContain(order[1], asked[1]);                                        // the one that withheld is left out
+                Assert.Contains(me, asked[1]);
+                await Tick();
+                Assert.Equal(addresses.OrderBy(a => a, StringComparer.Ordinal), asked[2]);         // two left out would go below the threshold
+            }
+            finally
+            {
+                Globals.ValidatorAddress = priorValidator;
+                Globals.IsChainSynced = priorSynced;
+                foreach (var s in Signers) Globals.NetworkValidators.TryRemove(s.Address, out _);
+            }
         }
 
         /// <summary>

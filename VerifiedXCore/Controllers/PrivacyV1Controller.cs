@@ -414,9 +414,7 @@ namespace VerifiedXCore.Controllers
                 if (string.IsNullOrWhiteSpace(accountKey))
                     return Task.FromResult(Fail("Cannot access account private key. Is the wallet locked?"));
 
-                var keyMat = ShieldedHdDerivation.DeriveFromPrivateKey(accountKey);
-                var wallet = ShieldedWalletService.CreateFromKeyMaterial(keyMat, req.TransparentAddress, req.WalletPassword);
-                ShieldedWalletService.Upsert(wallet);
+                var keyMat = ShieldedWalletService.UpsertFromAccountKey(accountKey, req.TransparentAddress, req.WalletPassword);
 
                 return Task.FromResult(Ok(new
                 {
@@ -666,7 +664,10 @@ namespace VerifiedXCore.Controllers
             }
         }
 
-        /// <summary>Export 32-byte viewing key (Base64) for watch-only import.</summary>
+        /// <summary>
+        /// Export the 32-byte viewing key (Base64). It is spend-capable, not watch-only (PrivacyApiHelper.TryExportSpendCapableViewingKey),
+        /// so it needs the wallet password and the response says it can spend.
+        /// </summary>
         [HttpPost("ExportViewingKey")]
         public Task<string> ExportViewingKey([FromBody] ExportViewingKeyRequest req)
         {
@@ -677,10 +678,9 @@ namespace VerifiedXCore.Controllers
                 var w = ShieldedWalletService.FindByZfxAddress(req.ZfxAddress);
                 if (w == null)
                     return Task.FromResult(Fail("Wallet not found."));
-                if (w.ViewingKey == null || w.ViewingKey.Length == 0)
-                    return Task.FromResult(Fail("No viewing key on wallet row."));
-                var vk = Convert.ToBase64String(w.ViewingKey);
-                return Task.FromResult(Ok(new { ViewingKeyBase64 = vk }));
+                if (!PrivacyApiHelper.TryExportSpendCapableViewingKey(w, req.WalletPassword, out var vk, out var err))
+                    return Task.FromResult(Fail(err ?? "Viewing key not exported."));
+                return Task.FromResult(Ok(new { ViewingKeyBase64 = vk, CanSpend = true, Warning = PrivacyApiHelper.ViewingKeySpendWarning }));
             }
             catch (Exception ex)
             {
@@ -707,6 +707,15 @@ namespace VerifiedXCore.Controllers
                 }
                 if (vk.Length != 32)
                     return Task.FromResult(Fail("Viewing key must be 32 bytes."));
+
+                // The key must be this address's own: any other produced a wallet that sees nothing and, imported over a
+                // spendable row, replaced its viewing key while the row kept its spend key.
+                if (!PrivateRawTxService.TryKeyMaterial(req.ZfxAddress, vk, out _, out var bindErr))
+                    return Task.FromResult(Fail(bindErr ?? "The viewing key does not belong to this zfx address."));
+
+                var existing = ShieldedWalletService.FindByZfxAddress(req.ZfxAddress);
+                if (existing?.SpendingKey != null && existing.SpendingKey.Length > 0)
+                    return Task.FromResult(Ok(new { Message = "This node already holds the spendable wallet for this address; nothing imported." }));
 
                 var row = new ShieldedWallet
                 {

@@ -1,3 +1,4 @@
+using LiteDB;
 using VerifiedXCore.Data;
 using VerifiedXCore.Utilities;
 
@@ -456,15 +457,92 @@ namespace VerifiedXCore.Bitcoin.Models
         /// FIND-005 FIX: Use composite key (RequestorAddress, OriginalUniqueId, SmartContractUID) for uniqueness
         /// Also supports lookup by TransactionHash for FIND-002 multi-user tracking
         /// </summary>
+        /// <remarks>
+        /// A row that belongs to a different mined request (same requester, UniqueId and contract, another transaction
+        /// hash): from WithdrawalUniqueIdRulesHeight the incoming row is inserted on its own (validation refuses the
+        /// reuse from there); below it the released rule stands, as every node applied it, and the later request is
+        /// written over that row. A replay reproduces the chain's history either way. The store rebuild never applies
+        /// the released rule and never guesses at it: <see cref="AnotherMinedRequestsRow"/>.
+        /// </remarks>
         /// <param name="neverOverAnotherRequest">A row that belongs to a different mined request (same requester,
         /// UniqueId and contract, another transaction hash) is never the one written to, at any height: the incoming
-        /// row is inserted on its own. For the chain recovery, which must only add what is missing.</param>
+        /// row is inserted on its own. For the chain recovery from PathAuditRulesHeight, which must only add what is missing.</param>
         public static bool Save(VBTCWithdrawalRequest request, bool update = false, bool neverOverAnotherRequest = false)
+        {
+            lock (RowWrite)
+                return SaveUnderRowLock(request, update, neverOverAnotherRequest);
+        }
+
+        /// <summary>A write of a request row that the storage loses (a test's switch): counted as the wrapper would count it.</summary>
+        internal static Func<bool>? FailWriteForTests;
+
+        /// <summary>
+        /// The row of a different mined request (another transaction hash) under <paramref name="request"/>'s key
+        /// (requester, UniqueId, contract), or null. Below WithdrawalUniqueIdRulesHeight a block's apply writes the
+        /// request over that row (the released rule, which a replay reproduces). The store rebuild, which only adds what
+        /// is missing, never does that and never guesses at what it did: it reports it and the state is rebuilt from the
+        /// blocks, which replays the block as every node applied it.
+        /// </summary>
+        public static VBTCWithdrawalRequest? AnotherMinedRequestsRow(VBTCWithdrawalRequest request)
+        {
+            var vwrDb = GetVBTCWithdrawalRequestDb();
+            if (vwrDb == null || string.IsNullOrEmpty(request.OriginalUniqueId) || string.IsNullOrEmpty(request.TransactionHash)) return null;
+            return vwrDb.Query().Where(x =>
+                    x.RequestorAddress == request.RequestorAddress &&
+                    x.OriginalUniqueId == request.OriginalUniqueId &&
+                    x.SmartContractUID == request.SmartContractUID)
+                .ToList().OrderBy(x => x.Id)
+                .FirstOrDefault(x => !string.IsNullOrEmpty(x.TransactionHash) && !string.Equals(x.TransactionHash, request.TransactionHash, StringComparison.Ordinal));
+        }
+
+        /// <summary>
+        /// Save, the completion record and UpdateLocalFields each look the row up and write it under this lock, so none
+        /// lands between UpdateLocalFields' read and its write (a caller that read a row earlier and passes it to Save
+        /// still carries what it read).
+        /// </summary>
+        private static readonly object RowWrite = new();
+
+        /// <summary>
+        /// Changes only this node's own fields of a request row (its pinned build, deferred completion and signing
+        /// notes), on the row as it is at that moment: read and written under the row lock, so the status, completion
+        /// and everything else the chain decides stay exactly as they are. A wallet path held a row across a Bitcoin
+        /// lookup and saved it whole, writing its old status back over a withdrawal cancelled meanwhile.
+        /// </summary>
+        public static bool UpdateLocalFields(string transactionHash, string scUID, Action<VBTCWithdrawalRequest> change)
+        {
+            var vwrDb = GetVBTCWithdrawalRequestDb();
+            if (vwrDb == null || string.IsNullOrEmpty(transactionHash)) return false;
+            lock (RowWrite)
+            {
+                var row = vwrDb.Query().Where(x => x.TransactionHash == transactionHash && x.SmartContractUID == scUID).ToList().OrderBy(x => x.Id).FirstOrDefault();
+                if (row == null) return false;
+                change(row);
+                // Only these fields are written, in one operation on the row by its id: a row a state rebuild or restore
+                // has removed meanwhile (they write outside this lock) is not put back, and one it has rewritten keeps
+                // everything but these.
+                static BsonValue S(string? v) => v == null ? BsonValue.Null : new BsonValue(v);
+                var updated = vwrDb.UpdateMany(
+                    BsonExpression.Create(
+                        "{ PinnedUnsignedTxHex: @0, PinnedCoinsJson: @1, CompleteAfterConfirmation: @2, CompleteAfterBtcTxId: @3, DeferredSignedTxHex: @4, " +
+                        "LastSigningFailureCode: @5, LastSigningFailureAt: @6, LastSigningSessionId: @7, LastSignedBtcTxId: @8 }",
+                        S(row.PinnedUnsignedTxHex), S(row.PinnedCoinsJson), new BsonValue(row.CompleteAfterConfirmation), S(row.CompleteAfterBtcTxId), S(row.DeferredSignedTxHex),
+                        S(row.LastSigningFailureCode), row.LastSigningFailureAt.HasValue ? new BsonValue(row.LastSigningFailureAt.Value) : BsonValue.Null, S(row.LastSigningSessionId), S(row.LastSignedBtcTxId)),
+                    BsonExpression.Create("_id = @0", new BsonValue(row.Id)));
+                return updated > 0;
+            }
+        }
+
+        private static bool SaveUnderRowLock(VBTCWithdrawalRequest request, bool update, bool neverOverAnotherRequest)
         {
             var vwrDb = GetVBTCWithdrawalRequestDb();
             if (vwrDb == null)
             {
                 ErrorLogUtility.LogError("GetVBTCWithdrawalRequestDb() returned a null value.", "VBTCWithdrawalRequest.Save()");
+                return false;
+            }
+            if (FailWriteForTests?.Invoke() == true)
+            {
+                Extensions.DbExtensions.NoteFailure(DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS);
                 return false;
             }
 
@@ -492,14 +570,19 @@ namespace VerifiedXCore.Bitcoin.Models
 
                 // Fund-loss audit item 6: a composite-key match upgrades only this node's local pre-registration row
                 // (no TransactionHash yet) or the same mined request. A row of a DIFFERENT mined request is that
-                // request's row - it used to be overwritten (status reset, old Amount and destination kept) by any later
-                // request reusing the UniqueId. From the height such a request is refused by validation; here the
-                // later row is inserted on its own either way.
+                // request's row. From WithdrawalUniqueIdRulesHeight such a request is refused by validation, and here
+                // the later row is inserted on its own. Below it the released rule stands as every node applied it: the
+                // later request is written over the row (status reset, old Amount and destination kept), which a
+                // replay must reproduce (no mined request on either chain has reused a UniqueId: it defaults to the
+                // request's own hash). This node's own note of a request (no hash yet, inserted, not updated) is refused
+                // under a key a mined request holds, at any height, not left as a row nothing will upgrade.
                 if (existingRequest != null
-                    && (request.RequestBlockHeight >= Globals.WithdrawalUniqueIdRulesHeight || neverOverAnotherRequest)
                     && !string.IsNullOrEmpty(existingRequest.TransactionHash)
                     && !string.Equals(existingRequest.TransactionHash, request.TransactionHash, StringComparison.Ordinal))
-                    existingRequest = null;
+                {
+                    if (!update) return false;
+                    if (request.RequestBlockHeight >= Globals.WithdrawalUniqueIdRulesHeight || neverOverAnotherRequest) existingRequest = null;
+                }
             }
 
             if (existingRequest != null)
@@ -558,13 +641,12 @@ namespace VerifiedXCore.Bitcoin.Models
                 existingRequest.CompleteAfterBtcTxId = request.CompleteAfterBtcTxId;
                 existingRequest.DeferredSignedTxHex = request.DeferredSignedTxHex;
 
-                vwrDb.UpdateSafe(existingRequest);
-                return true;
+                return vwrDb.UpdateSafe(existingRequest);
             }
             else
             {
-                vwrDb.InsertSafe(request);
-                return true;
+                var id = vwrDb.InsertSafe(request);
+                return id != null && !id.IsNull;
             }
         }
         #endregion
@@ -577,15 +659,19 @@ namespace VerifiedXCore.Bitcoin.Models
         {
             try
             {
-                var db = GetVBTCWithdrawalRequestDb();
-                var row = db?.Query().Where(x => x.TransactionHash == transactionHash && x.SmartContractUID == scUID).ToList().OrderBy(x => x.Id).FirstOrDefault();
-                if (row == null) return;
-                row.CompletionTxHash = completionTxHash;
-                row.CompletionTimestamp = completionTimestamp;
-                db!.UpdateSafe(row);
+                lock (RowWrite)
+                {
+                    var db = GetVBTCWithdrawalRequestDb();
+                    var row = db?.Query().Where(x => x.TransactionHash == transactionHash && x.SmartContractUID == scUID).ToList().OrderBy(x => x.Id).FirstOrDefault();
+                    if (row == null) return;
+                    row.CompletionTxHash = completionTxHash;
+                    row.CompletionTimestamp = completionTimestamp;
+                    db!.UpdateSafe(row);
+                }
             }
             catch (Exception ex)
             {
+                VerifiedXCore.Extensions.DbExtensions.NoteFailure(DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS);
                 ErrorLogUtility.LogError($"Completion record for withdrawal {transactionHash} on {scUID} could not be written: {ex.Message}", "VBTCWithdrawalRequest.SaveCompletionRecord()");
             }
         }

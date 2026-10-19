@@ -1185,6 +1185,22 @@ namespace VerifiedXCore.Services
                 return;
             }
 
+            // Outside the record era no quorum stands behind a removal, so one caster's notice only hastens what this node
+            // sees itself: the member outdated or past its absence grace by our observation, or failing our own audit.
+            if (!CasterMembershipStore.RecordEraActive && !LegacyDemotionEvidence(demotion.DemotedAddress))
+            {
+                CasterLogUtility.Log($"DEMOTE: notice for {demotion.DemotedAddress} from {demotion.DemoterAddress} ignored — no evidence of our own for the removal.", "DEMOTE");
+                return;
+            }
+
+            var refusal = CasterSeatService.DemotionNoticeRefusal(demotion.DemotedAddress, demotion.DemoterAddress, demotion.BlockHeight,
+                Globals.LastBlock?.Height ?? 0, CasterMembershipStore.RecordEraActive, CasterMembershipStore.GetCurrent());
+            if (refusal != null)
+            {
+                CasterLogUtility.Log($"DEMOTE: notice for {demotion.DemotedAddress} from {demotion.DemoterAddress} ignored — {refusal}.", "DEMOTE");
+                return;
+            }
+
             var casterList = Globals.BlockCasters.ToList();
             if (!casterList.Any(c => c.ValidatorAddress == demotion.DemotedAddress))
                 return; // Already removed
@@ -1206,6 +1222,11 @@ namespace VerifiedXCore.Services
 
             await OnCasterRemoved(demotion.DemotedAddress).ConfigureAwait(false);
         }
+
+        /// <summary>This node's own evidence for a legacy-era demotion: seat evidence, or a failed audit of ours.</summary>
+        internal static bool LegacyDemotionEvidence(string address) =>
+            CasterSeatService.HasOwnRemovalEvidence(address, TimeUtil.GetTime())
+            || (_auditFailCounts.TryGetValue(address, out var failures) && failures > 0);
 
         public static async Task OnCasterRemoved(string removedAddress)
         {
@@ -1502,8 +1523,14 @@ namespace VerifiedXCore.Services
                 ErrorLogUtility.LogError($"Invalid departure signature for {departure.DepartingAddress}", "CasterDiscoveryService");
                 return;
             }
-            // SEAT-HEAL: signers sign a Departure removal only on the member's own signed notice.
-            CasterSeatService.NoteDeparture(departure.DepartingAddress);
+            // SEAT-HEAL: signers sign a Departure removal only on the member's own signed notice, and a copy of an old
+            // one is not a departure: it neither counts as that evidence nor removes the member.
+            var staleNotice = CasterSeatService.NoteDepartureNotice(departure.DepartingAddress, departure.BlockHeight, Globals.LastBlock?.Height ?? 0);
+            if (staleNotice != null)
+            {
+                CasterLogUtility.Log($"DEPART: notice from {departure.DepartingAddress} ignored — {staleNotice}.", "DEPART");
+                return;
+            }
 
             var casterList = Globals.BlockCasters.ToList();
             if (!casterList.Any(c => c.ValidatorAddress == departure.DepartingAddress))
@@ -1696,6 +1723,34 @@ namespace VerifiedXCore.Services
         /// Runs the same gates locally (balance, maturity, port, version) and returns accept/reject.
         /// Called from ValidatorController.ProposePromotion endpoint.
         /// </summary>
+        /// <summary>
+        /// Why this node will not sign a membership record that seats <paramref name="added"/>, or null when it will. The
+        /// sign request names no one this node can verify, so the seat is judged on this node's own view, with the state
+        /// gates EvaluatePromotionProposal applies: a validator it knows, at the address it knows, whose key is the
+        /// address's, holding the caster balance, and mature. No outbound check runs for an unauthenticated request.
+        /// </summary>
+        internal static string? PromotionSigningRefusal(CasterInfo? added, long currentHeight, long nowUnix)
+        {
+            if (added == null || string.IsNullOrEmpty(added.Address))
+                return "no added caster";
+            if (!Globals.NetworkValidators.TryGetValue(added.Address, out var validator) || validator == null)
+                return "candidate not in NetworkValidators";
+            string? keyAddress = null;
+            try { keyAddress = string.IsNullOrEmpty(added.PublicKey) ? null : AccountData.GetHumanAddress(added.PublicKey); }
+            catch (Exception) { keyAddress = null; }
+            if (!string.Equals(keyAddress, added.Address, StringComparison.Ordinal))
+                return "public key is not the candidate's";
+            var knownIp = (validator.IPAddress ?? "").Replace("::ffff:", "");
+            if (string.IsNullOrEmpty(knownIp) || !string.Equals((added.PeerIP ?? "").Replace("::ffff:", ""), knownIp, StringComparison.Ordinal))
+                return $"peer IP is not the candidate's known {knownIp}";
+            var balance = AccountStateTrei.GetAccountBalance(added.Address);
+            if (balance < MinCasterBalance)
+                return $"balance {balance} < {MinCasterBalance}";
+            if (!IsMatureCandidate(validator, currentHeight, nowUnix, out var maturityDetail))
+                return $"maturity {maturityDetail}";
+            return null;
+        }
+
         public static async Task<PromotionProposalResponse> EvaluatePromotionProposal(PromotionProposalRequest proposal)
         {
             var response = new PromotionProposalResponse { ResponderAddress = Globals.ValidatorAddress };
@@ -2205,6 +2260,59 @@ namespace VerifiedXCore.Services
         internal static void SetObservedPeerHeadsForTests(params long[] heads) => LastObservedPeerHeads = heads;
 
         /// <summary>
+        /// The lowest seq above <paramref name="localHeadSeq"/> at which two responders return records with different
+        /// hashes, or null when none does. Sync applies a finalized record without the live effective-height check, so a
+        /// record whose proposer withheld it while its signers went on to sign another set can still reach a lagging node;
+        /// when the responders disagree at a seq, that node cannot tell which record its peers hold.
+        /// </summary>
+        internal static long? ContestedSeq(long localHeadSeq, IEnumerable<(string Ip, long HeadSeq, List<CasterMembershipRecord> Records)> responses)
+        {
+            long? lowest = null;
+            foreach (var group in responses
+                         .SelectMany(r => r.Records)
+                         .Where(rec => rec != null && rec.RecordSeq > localHeadSeq)
+                         .GroupBy(rec => rec.RecordSeq))
+            {
+                if (group.Select(rec => rec.RecordHash).Distinct(StringComparer.Ordinal).Count() > 1
+                    && (lowest == null || group.Key < lowest))
+                    lowest = group.Key;
+            }
+            return lowest;
+        }
+
+        /// <summary>
+        /// Applies the responders' records, longest chain first (every record is fully validated on append). Nothing is
+        /// adopted at or above a contested seq (<see cref="ContestedSeq"/>): that is logged and raised to the operator as
+        /// a membership fork, and the next pull asks again. Returns the number of records applied.
+        /// </summary>
+        internal static int AdoptResponses(long localHeadSeq, List<(string Ip, long HeadSeq, List<CasterMembershipRecord> Records)> responses)
+        {
+            var contested = ContestedSeq(localHeadSeq, responses);
+            if (contested is { } seq)
+            {
+                var holders = responses
+                    .Where(r => r.Records.Any(rec => rec?.RecordSeq == seq))
+                    .Select(r => $"{r.Ip}={r.Records.First(rec => rec?.RecordSeq == seq).RecordHash}");
+                var line = $"MEMBERSHIP FORK: peers hold different records at seq {seq} ({string.Join(", ", holders)}); nothing at or above it is adopted from this pull.";
+                CasterLogUtility.Log(line, "MEMBERSHIP");
+                ErrorLogUtility.LogError(line, "CasterDiscoveryService.AdoptResponses()");
+                ConsoleWriterService.Output(line);
+            }
+
+            var total = 0;
+            foreach (var r in responses.OrderByDescending(x => x.HeadSeq))
+            {
+                var records = contested is { } floor ? r.Records.Where(rec => rec != null && rec.RecordSeq < floor).ToList() : r.Records;
+                if (records.Count == 0) continue;
+                var applied = CasterMembershipStore.TryAppendChain(records);
+                total += applied;
+                if (applied > 0)
+                    CasterLogUtility.Log($"MEMBERSHIP: adopted {applied} record(s) from {r.Ip} (their head {r.HeadSeq}).", "MEMBERSHIP");
+            }
+            return total;
+        }
+
+        /// <summary>
         /// Wave 3: record-era adoption. Pulls membership records after our head from up to 10 peers
         /// in parallel, verifies each chain locally (TryAppendChain runs full successor validation),
         /// adopts the highest valid seq, heals stragglers by pushing them the records they miss,
@@ -2240,14 +2348,7 @@ namespace VerifiedXCore.Services
             if (observeHeads && !responses.IsEmpty)
                 LastObservedPeerHeads = responses.Select(x => x.HeadSeq).ToList();
 
-            // Apply the longest chains first — every record is fully validated on append.
-            foreach (var r in responses.OrderByDescending(x => x.HeadSeq))
-            {
-                if (r.Records.Count == 0) continue;
-                var applied = CasterMembershipStore.TryAppendChain(r.Records);
-                if (applied > 0)
-                    CasterLogUtility.Log($"MEMBERSHIP: adopted {applied} record(s) from {r.Ip} (their head {r.HeadSeq}).", "MEMBERSHIP");
-            }
+            AdoptResponses(localHeadSeq, responses.ToList());
 
             var head = CasterMembershipStore.GetCurrent();
             if (head == null)

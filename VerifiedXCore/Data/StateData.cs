@@ -95,6 +95,9 @@ namespace VerifiedXCore.Data
             }
         }
 
+        /// <summary>Tests only: answers the burn's account write in place of the store.</summary>
+        internal static Func<AccountStateTrei, bool>? ForgedBurnWriteForTests;
+
         private static async Task BurnListedAsync(long height, string? stateRoot, string how)
         {
             var accStTrei = GetAccountStateTrei();
@@ -109,7 +112,11 @@ namespace VerifiedXCore.Data
                 var burned = Math.Min(account.Balance, listed);
                 account.Balance -= burned;
                 account.StateRoot = stateRoot;
-                await accStTrei.UpdateSafeAsync(account);
+                // A write that did not land is a fault, not a burn: the marker is not set and the block is flagged (the
+                // caller's catch), or the burn was marked applied with the balance untouched (#208, D09).
+                var written = ForgedBurnWriteForTests?.Invoke(account) ?? await accStTrei.UpdateSafeAsync(account);
+                if (!written)
+                    throw new NodeStateFaultException($"Forged-VFX burn {how} {height}: the balance of {address} could not be written.");
                 LogUtility.Log($"Forged-VFX burn {how} {height}: {burned} VFX burned from {address} (listed {listed}); balance now {account.Balance}.", "StateData.ApplyForgedVfxBurnsAsync()");
             }
         }
@@ -158,11 +165,31 @@ namespace VerifiedXCore.Data
         /// flagging it let anyone send one cheap request with an unreadable field and leave every node's state marked
         /// failed, its snapshots stopped and every later rebuild failing (fourth review, round 4).
         /// </remarks>
+        /// <summary>Test seam: runs at the start of each transaction's apply.</summary>
+        internal static Action<Transaction>? TxApplyForTests;
+
+        /// <summary>Whether the block applied last hit a fault of this node's storage (<see cref="NoteApplyStepFailed"/>).</summary>
+        public static bool LastApplyHadNodeLocalFault => _applyStepFailed;
+
         public static void NoteApplyStepFailed(long height, Exception ex)
         {
             if (!IsNodeLocalFault(ex)) return;
             _applyStepFailed = true;
             BlockStartFailedAtHeight = height;
+        }
+
+        /// <summary>A step writing the withdrawal store (requests, cancellations) failed on this node (cleared as each block starts).</summary>
+        private static bool _withdrawalStoreStepFailed;
+
+        /// <summary>
+        /// As <see cref="NoteApplyStepFailed"/>, for a step that writes the withdrawal store: a fault of this node's
+        /// storage there may have left it without what the chain wrote, so the store is also marked unfinished (blocks
+        /// held, store rebuilt; see <see cref="UpdateTreis"/>). Faults elsewhere in the apply do not mark it.
+        /// </summary>
+        public static void NoteWithdrawalStoreStepFailed(long height, Exception ex)
+        {
+            if (IsNodeLocalFault(ex)) _withdrawalStoreStepFailed = true;
+            NoteApplyStepFailed(height, ex);
         }
 
         /// <summary>Whether an exception comes from this node's storage or process (not from what a transaction says).</summary>
@@ -171,20 +198,120 @@ namespace VerifiedXCore.Data
             for (var e = ex; e != null; e = e.InnerException)
             {
                 if (e is System.IO.IOException || e is UnauthorizedAccessException || e is ObjectDisposedException
-                    || e is TimeoutException || e is OutOfMemoryException)
+                    || e is TimeoutException || e is OutOfMemoryException || e is NodeStateFaultException)
                     return true;
                 if (e is LiteDB.LiteException lite && (lite.ErrorCode == LiteDB.LiteException.LOCK_TIMEOUT || lite.ErrorCode == LiteDB.LiteException.DATABASE_SHUTDOWN
                         || lite.ErrorCode == LiteDB.LiteException.FILE_NOT_FOUND || lite.ErrorCode == LiteDB.LiteException.INVALID_DATABASE
                         || lite.ErrorCode == LiteDB.LiteException.FILE_SIZE_EXCEEDED || lite.ErrorCode == LiteDB.LiteException.ALREADY_OPEN_DATAFILE))
                     return true;
+                if (IsLiteDbIntegrityFailure(e))
+                    return true;
             }
             return false;
+        }
+
+        /// <summary>The message prefix of LiteDB's internal consistency check (ENSURE) in the bundled 5.0.15.</summary>
+        internal const string LiteDbEnsurePrefix = "LiteDB ENSURE: ";
+
+        /// <summary>
+        /// LiteDB's page-integrity check fails with a plain <see cref="Exception"/> whose message starts "LiteDB ENSURE: "
+        /// (not a LiteException with an error code): its data file is damaged or inconsistent on this node. Matched on that
+        /// exact type and prefix only, so no other plain exception counts.
+        /// </summary>
+        internal static bool IsLiteDbIntegrityFailure(Exception e) =>
+            e.GetType() == typeof(Exception) && e.Message.StartsWith(LiteDbEnsurePrefix, StringComparison.Ordinal);
+
+        /// <summary>
+        /// The collections the chain's state lives in, apart from the withdrawal store's (its own scope reports those): what
+        /// a state rebuild wipes and replays (BlockRollbackUtility.WipeChainDerivedState), and nothing it keeps (wallet,
+        /// keystore, local transactions, mempool, DST, beacons, peers, FROST keys, bridge mint tracking).
+        /// </summary>
+        public static string[] StateCollections()
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal)
+            {
+                DbContext.RSRV_ASTATE_TREI, DbContext.RSRV_WSTATE_TREI, DbContext.RSRV_SCSTATE_TREI, DbContext.RSRV_DECSHOPSTATE_TREI,
+                DbContext.RSRV_TOPIC_TREI, DbContext.RSRV_VOTE, DbContext.RSRV_TOKEN_VOTE, DbContext.RSRV_DNR, DbContext.RSRV_BITCOIN_ADNR,
+                DbContext.RSRV_RESERVE_TRANSACTIONS, DbContext.RSRV_RESERVE_TRANSACTIONS_CALLED_BACK,
+                DbContext.RSRV_VBTC_V2_CONTRACTS, DbContext.RSRV_VBTC_V2_VALIDATORS, DbContext.RSRV_TOKENIZED_WITHDRAWALS,
+                // The shielded pool's chain state (the wallets' own notes are local).
+                PrivacyDbContext.PRIV_COMMITMENTS, PrivacyDbContext.PRIV_NULLIFIERS, PrivacyDbContext.PRIV_POOL_STATE, PrivacyDbContext.PRIV_MERKLE_NODES,
+                // Bridge lock and exit state and consumed burns.
+                Bitcoin.Models.VBTCBridgeLockState.CollectionName, Bitcoin.Models.VBTCBridgeBtcExitState.CollectionName, Bitcoin.Models.VBTCBridgeConsumedBurn.CollectionName,
+            };
+            // Bitcoin attestation and validator bonds.
+            names.UnionWith(Bitcoin.Attestation.BtcAttestStore.AllCollections);
+            // Every collection of the contract and shop state databases, as the wipe takes them.
+            foreach (var db in new[] { DbContext.DB_SmartContractStateTrei, DbContext.DB_DecShopStateTrei })
+            {
+                try { if (db != null) names.UnionWith(db.GetCollectionNames()); }
+                catch (Exception ex) { ErrorLogUtility.LogError($"Could not list a state database's collections: {ex.Message}", "StateData.StateCollections()"); }
+            }
+            names.ExceptWith(Bitcoin.Services.VBTCWithdrawalStoreRebuildService.StoreCollections);
+            return names.ToArray();
         }
 
         public static async Task<bool> UpdateTreis(Block block)
         {
             Globals.TreisUpdating = true;
+            try
+            {
+                // A write to the withdrawal store the storage swallowed would leave this node's table unlike its peers':
+                // the block's apply fails, as for any other fault of this node's storage.
+                using var storeWrites = new Extensions.DbExtensions.FailureScope(Bitcoin.Services.VBTCWithdrawalStoreRebuildService.StoreCollections);
+                // A write to any other collection of the state that this node's storage swallowed leaves it unlike its
+                // peers' too: the block's apply is incomplete. Only faults of this node's storage count; a throw the
+                // transaction's data causes happens on every node alike and flags nothing.
+                using var stateWrites = new Extensions.DbExtensions.FailureScope(IsNodeLocalFault, StateCollections());
+                bool applied;
+                try { applied = await UpdateTreisCore(block); }
+                finally
+                {
+                    // A lost store write, or a fault of this node's storage in a step that writes the store (also when the
+                    // apply then threw): neither the store nor the block's other writes (an escrow debit, a refund) may hold
+                    // what the chain wrote. Blocks are held until the state is rebuilt, the store with it. The state is
+                    // marked failed here too (the caller's mark is skipped when the apply throws), so a restart restores it.
+                    if (storeWrites.Count > 0 || _withdrawalStoreStepFailed)
+                    {
+                        var why = storeWrites.Count > 0
+                            ? $"{storeWrites.Count} write(s) to it failed while block {block.Height} was applied"
+                            : $"a fault of this node's storage interrupted a withdrawal step of block {block.Height}";
+                        Bitcoin.Services.VBTCWithdrawalStoreRebuildService.MarkNeedsStateRebuild(why);
+                        try { VerifiedXCore.Services.StateTreiStatusService.SetFailed($"Withdrawal store: {why}."); } catch { }
+                    }
+                }
+                if (storeWrites.Count > 0)
+                {
+                    NoteApplyStepFailed(block.Height, new System.IO.IOException($"{storeWrites.Count} write(s) to the withdrawal store failed while block {block.Height} was applied."));
+                    ErrorLogUtility.LogError($"Block {block.Height}: {storeWrites.Count} write(s) to the withdrawal store failed; the block's apply is incomplete.", "StateData.UpdateTreis()");
+                    return false;
+                }
+                if (stateWrites.Count > 0)
+                {
+                    NoteApplyStepFailed(block.Height, new System.IO.IOException($"{stateWrites.Count} write(s) to the state failed on this node's storage while block {block.Height} was applied."));
+                    ErrorLogUtility.LogError($"Block {block.Height}: {stateWrites.Count} write(s) to the state failed on this node's storage; the block's apply is incomplete.", "StateData.UpdateTreis()");
+                    return false;
+                }
+                return applied;
+            }
+            finally
+            {
+                // AddBlock waits while this is set, so a throw anywhere in the apply must still clear it.
+                StateWriteContext.Clear();
+                Globals.TreisUpdating = false;
+            }
+        }
+
+        internal static Action<long>? ApplyStepForTests;
+
+        /// <summary>Test seam: runs inside the validator-bond block-start step.</summary>
+        internal static Action<long>? BlockStartStepForTests;
+
+        private static async Task<bool> UpdateTreisCore(Block block)
+        {
             _applyStepFailed = false;
+            _withdrawalStoreStepFailed = false;
+            ApplyStepForTests?.Invoke(block.Height);
             lock (_ownerChangesThisBlock) _ownerChangesThisBlock.Clear();
             StateWriteContext.SetHeight(block.Height); //stamp LastModifiedHeight on state writes for snapshot diffing
             LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13: every apply path uses the block's height
@@ -210,19 +337,24 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
-                blockStartFailed = true;
-                BlockStartFailedAtHeight = block.Height;
+                // Only a fault of this node (its storage, or its own state found missing) flags the block; a throw caused by
+                // the block's data happens on every node alike and is logged.
+                if (IsNodeLocalFault(ex)) blockStartFailed = true;
+                NoteApplyStepFailed(block.Height, ex); // marks BlockStartFailedAtHeight for those same faults (a rebuild keeps its stop)
                 ErrorLogUtility.LogError($"Block {block.Height}: the Bitcoin attestation block-start step failed: {ex}", "StateData.UpdateTreis() - block start");
             }
             try
             {
                 // Each step on its own: one that fails must not also skip the other for this block.
+                BlockStartStepForTests?.Invoke(block.Height);
                 VerifiedXCore.Services.ValidatorBond.OnBlockStart(block.Height); // validator bonds: active validators bonded at the bond height; funded stakes confirmed
             }
             catch (Exception ex)
             {
-                blockStartFailed = true;
-                BlockStartFailedAtHeight = block.Height;
+                // Only a fault of this node (its storage, or its own state found missing) flags the block; a throw caused by
+                // the block's data happens on every node alike and is logged.
+                if (IsNodeLocalFault(ex)) blockStartFailed = true;
+                NoteApplyStepFailed(block.Height, ex); // marks BlockStartFailedAtHeight for those same faults (a rebuild keeps its stop)
                 ErrorLogUtility.LogError($"Block {block.Height}: the validator bond block-start step failed: {ex}", "StateData.UpdateTreis() - block start");
             }
             var txList = block.Transactions.ToList();
@@ -237,6 +369,7 @@ namespace VerifiedXCore.Data
             {
                 try
                 {
+                    TxApplyForTests?.Invoke(tx);
                     if (block.Height == 0)
                     {
                         var acctStateTreiFrom = new AccountStateTrei
@@ -432,7 +565,7 @@ namespace VerifiedXCore.Data
                                         TransferSmartContract(tx);
                                         break;
                                     case "Burn()":
-                                        BurnSmartContract(tx);
+                                        BurnSmartContract(tx, block.Height);
                                         break;
                                     case "Evolve()":
                                         EvolveSC(tx);
@@ -548,7 +681,7 @@ namespace VerifiedXCore.Data
                                     switch (function)
                                     {
                                         case "AdnrCreate()":
-                                            AddNewAdnr(tx);
+                                            AddNewAdnr(tx, block.Height);
                                             break;
                                         case "AdnrTransfer()":
                                             await TransferAdnr(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
@@ -560,10 +693,10 @@ namespace VerifiedXCore.Data
                                             AddNewBTCAdnr(tx);
                                             break;
                                         case "BTCAdnrTransfer()":
-                                            await TransferBTCAdnr(tx); // NEW-12: awaited (ran concurrently with the rest of the block)
+                                            await TransferBTCAdnr(tx, block.Height); // NEW-12: awaited (ran concurrently with the rest of the block)
                                             break;
                                         case "BTCAdnrDelete()":
-                                            DeleteBTCAdnr(tx);
+                                            DeleteBTCAdnr(tx, block.Height);
                                             break;
                                         default:
                                             break;
@@ -586,6 +719,8 @@ namespace VerifiedXCore.Data
                                     {
                                         topic.Id = 0;//save new
                                         topic.BlockHeight = tx.Height;
+                                        if (NormalizesNewTopic(block.Height))
+                                            NormalizeNewTopic(topic, tx, block.Height);
                                         TopicTrei.SaveTopic(topic);
                                         if(topic.VoteTopicCategory == VoteTopicCategories.AdjVoteIn)
                                             AdjVoteInQueue.SaveToQueue(topic);
@@ -725,7 +860,7 @@ namespace VerifiedXCore.Data
 
                         if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_LOCK)
                         {
-                            ApplyVBTCBridgeLock(tx);
+                            ApplyVBTCBridgeLock(tx, block.Height);
                         }
 
                         if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_UNLOCK)
@@ -817,6 +952,10 @@ namespace VerifiedXCore.Data
                 catch(Exception ex)
                 {
                     txFailList.Add(tx);
+                    // A storage fault on this node (not what the transaction says) is reported like a failed block step, so a
+                    // rebuild that hits one does not count as complete. Faults the transaction's data causes are not: they
+                    // happen on every node alike, and some historical transactions do.
+                    NoteApplyStepFailed(block.Height, ex);
                     var txJson = JsonConvert.SerializeObject(tx);
                     ErrorLogUtility.LogError($"Error Updating State Treis. Error: {ex.ToString()}", "StateData.UpdateTreis() - Part 1");
                     ErrorLogUtility.LogError($"TX Info. TX: {txJson}", "StateData.UpdateTreis() - Part 2");
@@ -830,8 +969,10 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
-                blockStartFailed = true;
-                BlockStartFailedAtHeight = block.Height;
+                // Only a fault of this node (its storage, or its own state found missing) flags the block; a throw caused by
+                // the block's data happens on every node alike and is logged.
+                if (IsNodeLocalFault(ex)) blockStartFailed = true;
+                NoteApplyStepFailed(block.Height, ex); // marks BlockStartFailedAtHeight for those same faults (a rebuild keeps its stop)
                 ErrorLogUtility.LogError($"Block {block.Height}: fixing the block's withdrawals on coins failed: {ex}", "StateData.UpdateTreis() - block end");
             }
 
@@ -854,7 +995,6 @@ namespace VerifiedXCore.Data
                 // under-stamp and be missed by snapshot diffs — always clear, even on throw.
                 StateWriteContext.Clear();
             }
-            Globals.TreisUpdating = false;
 
             // ROOT-CAUSE GUARD: Report whether every transaction's state mutation actually applied.
             // A false here means the block was/will be committed to the chain while its state
@@ -864,6 +1004,9 @@ namespace VerifiedXCore.Data
         }
 
         /// <param name="asOf">The block whose timestamp made these transfers fall due: contract code is read as of it.</param>
+        /// <summary>Test seam: runs as each due reserve row is settled.</summary>
+        internal static Action<ReserveTransactions>? SettleRowForTests;
+
         public static async Task<bool> UpdateTreiFromReserve(List<ReserveTransactions> txList, Block? asOf = null)
         {
             using var contractClock = asOf != null ? ContractClock.ForBlock(asOf.Timestamp, asOf.Height + 1) : null;
@@ -876,6 +1019,10 @@ namespace VerifiedXCore.Data
             // the batch left, so two rows competing for one balance or one place on a ledger came out differently on
             // different nodes (fourth review, round 7).
             var appliedCleanly = true;
+            // Settlement runs outside UpdateTreis: a write to the state that this node's storage swallowed is counted here,
+            // as UpdateTreis counts the block's own.
+            using var stateWrites = new Extensions.DbExtensions.FailureScope(IsNodeLocalFault, StateCollections());
+            var settlementFaults = 0;
             foreach (var rtx in txList.OrderBy(x => x.ConfirmTimestamp).ThenBy(x => x.Height).ThenBy(x => x.Hash, StringComparer.Ordinal))
             {
                 try
@@ -883,12 +1030,14 @@ namespace VerifiedXCore.Data
                     // HAL-070 Fix + reserve-vBTC hardening: re-read the row's CURRENT status from
                     // the DB (not the caller's snapshot) — real idempotence against re-entry and
                     // replay. Anything not Pending has already been finalized/cancelled/recovered.
-                    var currentRow = rtxDb.Query().Where(x => x.Id == rtx.Id).FirstOrDefault();
+                    var currentRow = ReserveTransactions.GetRowForApply(rtxDb, rtx.Id);
                     if (currentRow == null || currentRow.ReserveTransactionStatus != ReserveTransactionStatus.Pending)
                     {
                         ErrorLogUtility.LogError($"UpdateTreiFromReserve skipped for hash {rtx.Hash} - status {(currentRow?.ReserveTransactionStatus.ToString() ?? "missing")}, not Pending", "StateData.UpdateTreiFromReserve()");
                         continue;
                     }
+
+                    SettleRowForTests?.Invoke(rtx);
 
                     if(rtx.TransactionType == TransactionType.TX)
                     {
@@ -949,10 +1098,29 @@ namespace VerifiedXCore.Data
                         rtx.TransactionType == TransactionType.TKNZ_TX ||
                         rtx.TransactionType == TransactionType.SC_TX)
                     {
-                        var scDataArray = JsonConvert.DeserializeObject<JArray>(rtx.Data);
-                        var scData = scDataArray[0];
-                        var function = (string?)scData["Function"];
-                        var scUID = (string?)scData["ContractUID"];
+                        string? function, scUID;
+                        if ((asOf?.Height ?? -1) >= Globals.ReserveRecoverReadsEveryRowHeight)
+                        {
+                            // A call that cannot be read has no effect. It threw here, so the row stayed Pending and was
+                            // read again at every block for good.
+                            var call = ReserveRowCall(rtx.Data);
+                            if (!call.Readable)
+                            {
+                                ErrorLogUtility.LogError($"UpdateTreiFromReserve: contract call of {rtx.Hash} cannot be read; not applied.", "StateData.UpdateTreiFromReserve()");
+                                rtx.ReserveTransactionStatus = ReserveTransactionStatus.CalledBack;
+                                await Written(rtxDb.UpdateSafeAsync(rtx), "rtx");
+                                await TransactionData.UpdateTxStatusForAllByHash(rtx.Hash, TransactionStatus.Failed);
+                                continue;
+                            }
+                            (function, scUID) = (call.Function, call.ContractUID);
+                        }
+                        else
+                        {
+                            var scDataArray = JsonConvert.DeserializeObject<JArray>(rtx.Data);
+                            var scData = scDataArray[0];
+                            function = (string?)scData["Function"];
+                            scUID = (string?)scData["ContractUID"];
+                        }
 
                         if(function != null)
                         {
@@ -992,7 +1160,7 @@ namespace VerifiedXCore.Data
                                             VBTCContractV2.UpdateContract(vbtcContract);
                                         }
                                     }
-                                    catch { }
+                                    catch (Exception ex) { if (IsNodeLocalFault(ex)) settlementFaults++; }
                                 }
                             }
 
@@ -1070,7 +1238,7 @@ namespace VerifiedXCore.Data
                         }
                     }
 
-                    var rtxRec = rtxDb.Query().Where(x => x.Id == rtx.Id).FirstOrDefault();
+                    var rtxRec = ReserveTransactions.GetRowForApply(rtxDb, rtx.Id);
                     var hash = rtx.Hash;
 
                     if (rtxRec != null)
@@ -1093,6 +1261,13 @@ namespace VerifiedXCore.Data
                         StateTreiStatusService.SetFailed($"Reserve settlement {rtx.Hash} failed on this node: {ex.Message}");
                     }
                 }
+            }
+            if (stateWrites.Count > 0 || settlementFaults > 0)
+            {
+                // Writes the settlement omitted are missing until a rebuild or a restore (a rebuild counts the false as a
+                // fault of this node's storage).
+                appliedCleanly = false;
+                StateTreiStatusService.SetIncompleteApply($"Reserve settlement at block {asOf?.Height ?? Globals.LastBlock?.Height}: {stateWrites.Count + settlementFaults} write(s) to the state failed on this node's storage.");
             }
             return appliedCleanly;
         }
@@ -1154,7 +1329,7 @@ namespace VerifiedXCore.Data
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { NoteApplyStepFailed(tx.Height, ex); }
         }
 
         /// <param name="keepTransferPending">Only for the historical mainnet callbacks in
@@ -1165,7 +1340,7 @@ namespace VerifiedXCore.Data
             {
                 if(callBackHash != null)
                 {
-                    var rTX = ReserveTransactions.GetTransactions(callBackHash);
+                    var rTX = ReserveTransactions.GetTransactionsForApply(callBackHash);
                     if (rTX != null)
                     {
                         // HAL-070 Fix: Idempotence guard - skip if already processed
@@ -1282,9 +1457,14 @@ namespace VerifiedXCore.Data
                         // not just NFT_TX — a called-back TKNZ_TX/SC_TX transfer previously left
                         // NextOwner set + IsLocked=true forever, permanently bricking the contract
                         // (any further Transfer() is rejected while locked/NextOwner is set).
+                        // From ReserveRecoverReadsEveryRowHeight under every type a contract call travels in: the
+                        // dispatcher runs a Transfer() carried as FTKN_TX (or any other contract type) and locks the
+                        // contract, and the callback left it locked with the thief as NextOwner.
+                        var everyContractType = height >= Globals.ReserveRecoverReadsEveryRowHeight;
                         if(rTX.TransactionType == TransactionType.NFT_TX ||
                            rTX.TransactionType == TransactionType.TKNZ_TX ||
-                           rTX.TransactionType == TransactionType.SC_TX)
+                           rTX.TransactionType == TransactionType.SC_TX ||
+                           (everyContractType && LedgerIntegrityRules.ContractCallTypes.Contains(rTX.TransactionType)))
                         {
                           // Own try/catch: some legacy TKNZ_TX rows carry flat-JObject data and
                           // the JArray parse throws — that must NEVER skip the unconditional
@@ -1292,10 +1472,19 @@ namespace VerifiedXCore.Data
                           // applies a transfer that was called back.
                           try
                           {
-                            var scDataArray = JsonConvert.DeserializeObject<JArray>(rTX.Data);
-                            var scData = scDataArray[0];
-                            var function = (string?)scData["Function"];
-                            var scUID = (string?)scData["ContractUID"];
+                            string? function, scUID;
+                            if (everyContractType)
+                            {
+                                // Read as the dispatcher reads it (an array or a single object).
+                                (function, scUID) = LedgerIntegrityRules.DispatchedCall(rTX.Data);
+                            }
+                            else
+                            {
+                                var scDataArray = JsonConvert.DeserializeObject<JArray>(rTX.Data);
+                                var scData = scDataArray[0];
+                                function = (string?)scData["Function"];
+                                scUID = (string?)scData["ContractUID"];
+                            }
 
                             if(scUID != null)
                             {
@@ -1327,7 +1516,7 @@ namespace VerifiedXCore.Data
                                             VBTCContractV2.UpdateContract(vbtcContract);
                                         }
                                     }
-                                    catch { }
+                                    catch (Exception ex) { NoteApplyStepFailed(height, ex); }
                                 }
                             }
                           }
@@ -1366,6 +1555,24 @@ namespace VerifiedXCore.Data
         }
         /// <param name="keepTransfersPending">Only for the historical mainnet recovery in HistoricalTransactionExceptions:
         /// redirect as usual but leave the reserve rows Pending, as the network applied it.</param>
+        /// <summary>
+        /// A pending reserve contract row's call, read as the settlement and recovery read it (the first element of the
+        /// Data array). Readable is false where that read threw: Data that is not JSON, not an array, an empty array, a
+        /// first element that is not an object, or a Function or ContractUID that is not text.
+        /// </summary>
+        internal static (bool Readable, string? Function, string? ContractUID) ReserveRowCall(string? data)
+        {
+            try
+            {
+                var first = JsonConvert.DeserializeObject<JArray>(data!)![0];
+                return (true, (string?)first["Function"], (string?)first["ContractUID"]);
+            }
+            catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException or InvalidCastException or NullReferenceException)
+            {
+                return (false, null, null);
+            }
+        }
+
         private static async Task RecoverReserveAccountTx(string? _recoveryAddress, string _fromAddress, string stateRoot, bool keepTransfersPending = false, long height = 0, long blockTimestamp = 0)
         {
             try
@@ -1487,12 +1694,27 @@ namespace VerifiedXCore.Data
                             }
                         }
 
-                        if (rTX.TransactionType == TransactionType.NFT_TX)
+                        // From ReserveRecoverReadsEveryRowHeight a pending transfer is taken back under every type a contract
+                        // call travels in, read as the dispatcher reads it, not only an NFT_TX in the array shape.
+                        if (rTX.TransactionType == TransactionType.NFT_TX
+                            || (height >= Globals.ReserveRecoverReadsEveryRowHeight && LedgerIntegrityRules.ContractCallTypes.Contains(rTX.TransactionType)))
                         {
-                            var scDataArray = JsonConvert.DeserializeObject<JArray>(rTX.Data);
-                            var scData = scDataArray[0];
-                            var function = (string?)scData["Function"];
-                            var scUID = (string?)scData["ContractUID"];
+                            string? scUID;
+                            if (height >= Globals.ReserveRecoverReadsEveryRowHeight)
+                            {
+                                // A row whose call cannot be read names no contract to take back (the sweep below still
+                                // takes back what the reserve owns), and no longer stops the recovery of everything after it.
+                                scUID = rTX.TransactionType == TransactionType.NFT_TX
+                                    ? ReserveRowCall(rTX.Data).ContractUID
+                                    : LedgerIntegrityRules.DispatchedCall(rTX.Data).ContractUID;
+                            }
+                            else
+                            {
+                                var scDataArray = JsonConvert.DeserializeObject<JArray>(rTX.Data);
+                                var scData = scDataArray[0];
+                                var function = (string?)scData["Function"];
+                                scUID = (string?)scData["ContractUID"];
+                            }
                             var recoveryAddress = stateTreiFrom?.RecoveryAccount;
 
                             if (scUID != null)
@@ -1702,7 +1924,7 @@ namespace VerifiedXCore.Data
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { NoteApplyStepFailed(tx.Height, ex); }
         }
         private static void UpdateDecShop(Transaction tx)
         {
@@ -1726,7 +1948,7 @@ namespace VerifiedXCore.Data
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { NoteApplyStepFailed(tx.Height, ex); }
         }
 
         private static async Task DeleteDecShop(Transaction tx)
@@ -1754,7 +1976,7 @@ namespace VerifiedXCore.Data
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { NoteApplyStepFailed(tx.Height, ex); }
         }
         private static void AddNewBTCAdnr(Transaction tx)
         {
@@ -1789,7 +2011,12 @@ namespace VerifiedXCore.Data
         /// sender's name in one block passes validation, which reads the state before the block, and found nothing at
         /// apply, so every node spun on that block for good (fifth review, round 26). A name that is not there is left.
         /// </summary>
-        private static async Task TransferBTCAdnr(Transaction tx)
+        /// <remarks>
+        /// From <see cref="Globals.BtcNameOneRecordPerAddressHeight"/> a transfer to an address that already holds a name
+        /// (another transfer to it earlier in the block) is left, so an address keeps one record, and the name moved is the
+        /// sender's own (validation checks the sender holds one there, but an address could hold two records before).
+        /// </remarks>
+        internal static async Task TransferBTCAdnr(Transaction tx, long height)
         {
             try
             {
@@ -1799,10 +2026,20 @@ namespace VerifiedXCore.Data
                 var BTCFromAddress = (string?)jobj["BTCFromAddress"];
 
                 var adnrs = BitcoinAdnr.GetBitcoinAdnr();
-                var adnr = adnrs?.FindOne(x => x.BTCAddress == BTCFromAddress);
+                var ownOnly = height >= Globals.BtcNameOneRecordPerAddressHeight;
+                var adnr = height >= Globals.BtcNameSignerOwnsAddressHeight
+                    ? (adnrs == null ? null : SignedBtcNameRecord(adnrs, BTCFromAddress, tx.FromAddress, (string?)jobj["BTCToMessage"]))
+                    : ownOnly
+                        ? adnrs?.FindOne(x => x.BTCAddress == BTCFromAddress && x.RBXAddress == tx.FromAddress)
+                        : adnrs?.FindOne(x => x.BTCAddress == BTCFromAddress);
                 if (adnr == null)
                 {
                     ErrorLogUtility.LogError($"BTC ADNR transfer {tx.Hash}: no name for {BTCFromAddress} (moved or deleted earlier in the block); nothing applied.", "StateData.TransferBTCAdnr()");
+                    return;
+                }
+                if (height >= Globals.BtcNameOneRecordPerAddressHeight && adnrs!.FindOne(x => x.BTCAddress == BTCToAddress) != null)
+                {
+                    ErrorLogUtility.LogError($"BTC ADNR transfer {tx.Hash}: {BTCToAddress} already holds a name (moved there earlier in the block); nothing applied.", "StateData.TransferBTCAdnr()");
                     return;
                 }
                 adnr.BTCAddress = BTCToAddress;
@@ -1810,10 +2047,26 @@ namespace VerifiedXCore.Data
                 adnr.TxHash = tx.Hash;
                 await adnrs!.UpdateSafeAsync(adnr);
             }
-            catch { }
+            catch (Exception ex) { NoteApplyStepFailed(height, ex); }
         }
 
-        private static void DeleteBTCAdnr(Transaction tx)
+        /// <summary>
+        /// From <see cref="Globals.BtcNameSignerOwnsAddressHeight"/> a transfer moves the sender's record at the address
+        /// whose name the receiver signed, so validation and apply agree on the record even when the address holds two.
+        /// </summary>
+        internal static BitcoinAdnr? SignedBtcNameRecord(LiteDB.ILiteCollection<BitcoinAdnr> adnrs, string? btcAddress, string owner, string? acceptMessage)
+        {
+            var signedName = Bitcoin.Services.BtcNameSignatures.SignedName(acceptMessage);
+            if (signedName == null) return null;
+            return adnrs.Find(x => x.BTCAddress == btcAddress && x.RBXAddress == owner)
+                .FirstOrDefault(x => string.Equals(x.Name, signedName, StringComparison.OrdinalIgnoreCase));
+        }
+
+        /// <summary>
+        /// Deletes a BTC name. From <see cref="Globals.BtcNameOneRecordPerAddressHeight"/> only the sender's own record at the
+        /// address goes; before, every record there did.
+        /// </summary>
+        internal static void DeleteBTCAdnr(Transaction tx, long height)
         {
             try
             {
@@ -1821,7 +2074,10 @@ namespace VerifiedXCore.Data
                 {
                     var jobj = JObject.Parse(tx.Data);
                     var BTCFromAddress = (string?)jobj["BTCFromAddress"];
-                    BitcoinAdnr.DeleteAdnr(BTCFromAddress);
+                    if (height >= Globals.BtcNameOneRecordPerAddressHeight)
+                        BitcoinAdnr.DeleteAdnr(BTCFromAddress, tx.FromAddress);
+                    else
+                        BitcoinAdnr.DeleteAdnr(BTCFromAddress);
                 }
                 
             }
@@ -1831,7 +2087,34 @@ namespace VerifiedXCore.Data
             }
         }
 
-        private static void AddNewAdnr(Transaction tx)
+        /// <summary>
+        /// From Globals.VoteTopicRulesHeight a new topic's system fields come from the chain, not its creator: no votes yet,
+        /// owned by its sender, created at its transaction's time, and counted against the validators active at the block
+        /// before. The creator's own values (a forged owner or tally, a chosen denominator) were stored as given.
+        /// </summary>
+        /// <summary>
+        /// Whether a new topic's system fields are set by the apply at <paramref name="blockHeight"/>: from
+        /// VoteTopicRulesHeight, and from TopicAddDeterministicHeight, whose TopicAdd() is judged on what every node holds
+        /// alike and so is applied the same way.
+        /// </summary>
+        internal static bool NormalizesNewTopic(long blockHeight) =>
+            blockHeight >= Math.Min(Globals.VoteTopicRulesHeight, Globals.TopicAddDeterministicHeight);
+
+        internal static void NormalizeNewTopic(TopicTrei topic, Transaction tx, long blockHeight)
+        {
+            topic.VoteYes = 0;
+            topic.VoteNo = 0;
+            topic.TopicOwnerAddress = tx.FromAddress;
+            topic.TopicCreateDate = DateTimeOffset.FromUnixTimeSeconds(tx.Timestamp).UtcDateTime;
+            topic.ValidatorCount = VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidatorsAt(blockHeight - 1).Count;
+        }
+
+        /// <summary>
+        /// Registers a name with the suffix of the block's era: ".rbx" below V4Height, ".vfx" from it. The block's own
+        /// height decides it, as live apply (which sets the tip to the block first) always did, so a rebuild or replay
+        /// stores the same name.
+        /// </summary>
+        internal static void AddNewAdnr(Transaction tx, long blockHeight)
         {
             try
             {
@@ -1841,7 +2124,7 @@ namespace VerifiedXCore.Data
 
                 adnr.Address = tx.FromAddress;
                 adnr.Timestamp = tx.Timestamp;
-                adnr.Name = Globals.V4Height > Globals.LastBlock.Height ? name + ".rbx" : name + ".vfx";
+                adnr.Name = Globals.V4Height > blockHeight ? name + ".rbx" : name + ".vfx";
                 adnr.TxHash = tx.Hash;
 
                 Adnr.SaveAdnr(adnr);
@@ -1981,14 +2264,25 @@ namespace VerifiedXCore.Data
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { NoteApplyStepFailed(tx.Height, ex); }
             
         }
+        /// <summary>
+        /// The call of a contract transaction whose apply reads only the array form. Any other shape gives null, and the apply
+        /// then has no effect, as it always had (it threw before reading anything), without reporting the block's state as
+        /// failed on every node.
+        /// </summary>
+        private static JToken? ArrayFormCall(Transaction tx)
+        {
+            try { return JsonConvert.DeserializeObject<JArray>(tx.Data)?[0] as JObject; }
+            catch { return null; }
+        }
+
         private static void TransferSmartContract(Transaction tx)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-            var scData = scDataArray[0];
+            var scData = ArrayFormCall(tx);
+            if (scData == null) return;
 
             var function = (string?)scData["Function"];
             var data = (string?)scData["Data"];
@@ -2036,11 +2330,11 @@ namespace VerifiedXCore.Data
             }
 
         }
-        private static void BurnSmartContract(Transaction tx)
+        private static void BurnSmartContract(Transaction tx, long height)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-            var scData = scDataArray[0];
+            var scData = ArrayFormCall(tx);
+            if (scData == null) return;
             var function = (string?)scData["Function"];
             var data = (string?)scData["Data"];
             var scUID = (string?)scData["ContractUID"];
@@ -2048,6 +2342,17 @@ namespace VerifiedXCore.Data
             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
             if (scStateTreiRec != null)
             {
+                // From the path-audit rules a burned UID is retired (as stored): nothing is created under it again.
+                if (height >= Globals.PathAuditRulesHeight)
+                {
+                    try { RetiredContractUid.Retire(scStateTreiRec.SmartContractUID, height, tx.Hash); }
+                    catch (Exception ex)
+                    {
+                        // Not written here while every other node has it: this node's state is flagged incomplete.
+                        ErrorLogUtility.LogError($"Retiring burned UID {scStateTreiRec.SmartContractUID} at {height} failed: {ex.Message}", "StateData.BurnSmartContract()");
+                        NoteApplyStepFailed(height, ex);
+                    }
+                }
                 SmartContractStateTrei.DeleteSmartContract(scStateTreiRec);
             }
 
@@ -2056,8 +2361,8 @@ namespace VerifiedXCore.Data
         private static void EvolveSC(Transaction tx)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-            var scData = scDataArray[0];
+            var scData = ArrayFormCall(tx);
+            if (scData == null) return;
 
             var data = (string?)scData["Data"];
             var scUID = (string?)scData["ContractUID"];
@@ -2075,8 +2380,8 @@ namespace VerifiedXCore.Data
         private static void DevolveSC(Transaction tx)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-            var scData = scDataArray[0];
+            var scData = ArrayFormCall(tx);
+            if (scData == null) return;
 
             var data = (string?)scData["Data"];
             var scUID = (string?)scData["ContractUID"];
@@ -2094,8 +2399,8 @@ namespace VerifiedXCore.Data
         private static void EvolveDevolveSpecific(Transaction tx)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
-            var scDataArray = JsonConvert.DeserializeObject<JArray>(tx.Data);
-            var scData = scDataArray[0];
+            var scData = ArrayFormCall(tx);
+            if (scData == null) return;
 
             var data = (string?)scData["Data"];
             var scUID = (string?)scData["ContractUID"];
@@ -2482,6 +2787,11 @@ namespace VerifiedXCore.Data
             var fromAddress = jobj["FromAddress"]?.ToObject<string?>();
 
             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+            if (scStateTreiRec != null && scStateTreiRec.TokenDetails != null && block.Height >= Globals.TokenTransferRecipientFirstHeight)
+            {
+                await TokenTransferRecipientFirst(tx, block, stDB, scStateTreiRec, scUID, toAddress, fromAddress, amount!.Value);
+                return;
+            }
             if (scStateTreiRec != null)
             {
                 if(scStateTreiRec.TokenDetails != null)
@@ -2569,6 +2879,60 @@ namespace VerifiedXCore.Data
                 //}
             }
 
+        }
+
+        /// <summary>The write of a token transfer's recipient record. Test seam.</summary>
+        internal static Func<LiteDB.ILiteCollection<AccountStateTrei>, AccountStateTrei, Task<bool>> TokenRecipientWrite =
+            (col, account) => col.UpdateSafeAsync(account);
+
+        /// <summary>
+        /// A token transfer from TokenTransferRecipientFirstHeight: the recipient's record is written first, and the sender
+        /// is debited (re-read, so a transfer to oneself nets to nothing) only once that write succeeded. A failed write left
+        /// the debit in place before, and the tokens were gone from every balance.
+        /// </summary>
+        private static async Task TokenTransferRecipientFirst(Transaction tx, Block block, LiteDB.ILiteCollection<AccountStateTrei> stDB,
+            SmartContractStateTrei scStateTreiRec, string? scUID, string? toAddress, string? fromAddress, decimal amount)
+        {
+            var toAccount = GetSpecificAccountStateTrei(toAddress);
+            if (toAccount == null)
+            {
+                toAccount = new AccountStateTrei { Key = tx.ToAddress, Nonce = 0, Balance = 0.0M, StateRoot = block.StateRoot };
+                if (!tx.FromAddress.StartsWith("xRBX"))
+                    toAccount.Balance += tx.Amount;
+                else
+                    toAccount.LockedBalance += tx.Amount;
+                await stDB.InsertSafeAsync(toAccount);
+            }
+
+            var tokenAccountTo = toAccount.TokenAccounts?.FirstOrDefault(x => x.SmartContractUID == scUID);
+            if (tokenAccountTo == null)
+            {
+                var created = TokenAccount.CreateTokenAccount(scUID, scStateTreiRec.TokenDetails.TokenName, scStateTreiRec.TokenDetails.TokenTicker,
+                    amount, scStateTreiRec.TokenDetails.DecimalPlaces);
+                toAccount.TokenAccounts ??= new List<TokenAccount>();
+                toAccount.TokenAccounts.Add(created);
+            }
+            else
+            {
+                tokenAccountTo.Balance += amount;
+            }
+
+            if (!await TokenRecipientWrite(stDB, toAccount))
+            {
+                ErrorLogUtility.LogError($"Token transfer {tx.Hash} at block {block.Height}: the recipient {toAddress}'s record could not be written; the sender {fromAddress} is not debited.",
+                    "StateData.TokenTransferRecipientFirst()");
+                return;
+            }
+
+            var fromAccount = GetSpecificAccountStateTrei(fromAddress);
+            var tokenAccountFrom = fromAccount?.TokenAccounts?.FirstOrDefault(x => x.SmartContractUID == scUID);
+            if (fromAccount != null && tokenAccountFrom != null)
+            {
+                tokenAccountFrom.Balance -= amount;
+                if (!await stDB.UpdateSafeAsync(fromAccount))
+                    ErrorLogUtility.LogError($"Token transfer {tx.Hash} at block {block.Height}: the sender {fromAddress}'s debit could not be written.",
+                        "StateData.TokenTransferRecipientFirst()");
+            }
         }
 
         private static async Task TokenBurn(Transaction tx)
@@ -3452,7 +3816,7 @@ namespace VerifiedXCore.Data
         /// <summary>
         /// vBTC Base bridge lock: deduct transparent balance chain-wide (same ledger pattern as withdrawal burn).
         /// </summary>
-        private static void ApplyVBTCBridgeLock(Transaction tx)
+        private static void ApplyVBTCBridgeLock(Transaction tx, long blockHeight = 0)
         {
             try
             {
@@ -3492,6 +3856,17 @@ namespace VerifiedXCore.Data
                     return;
                 }
 
+                // The lock row first, then the debit: a debit with no row would take the holder's vBTC with nothing to
+                // mint or unlock against it. A row already there is a replay (the debit was applied with it); a storage
+                // fault has been reported as a failed apply and nothing is debited.
+                var inserted = VBTCBridgeLockState.InsertFromLockTx(tx, scUID, lockId, amount.Value, amountSats.Value, evmDestination, blockHeight);
+                if (inserted != VBTCBridgeLockState.LockInsert.Inserted)
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeLock: lock {lockId} not applied ({inserted})", "StateData.ApplyVBTCBridgeLock()");
+                    LogUtility.Log($"[BridgeAttest] CONSENSUS STATE: FAILED to insert VBTCBridgeLockState ({inserted}). lockId={lockId}, txHash={tx.Hash}", "StateData.ApplyVBTCBridgeLock");
+                    return;
+                }
+
                 var tknTxList = new List<SmartContractStateTreiTokenizationTX>
                 {
                     new SmartContractStateTreiTokenizationTX
@@ -3509,16 +3884,8 @@ namespace VerifiedXCore.Data
 
                 SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
 
-                if (!VBTCBridgeLockState.TryInsertFromLockTx(tx, scUID, lockId, amount.Value, amountSats.Value, evmDestination))
-                {
-                    ErrorLogUtility.LogError($"ApplyVBTCBridgeLock: failed to persist VBTCBridgeLockState for {lockId}", "StateData.ApplyVBTCBridgeLock()");
-                    LogUtility.Log($"[BridgeAttest] CONSENSUS STATE: FAILED to insert VBTCBridgeLockState. lockId={lockId}, txHash={tx.Hash}", "StateData.ApplyVBTCBridgeLock");
-                }
-                else
-                {
-                    BridgeLockRecord.TryMarkVfxLockConfirmed(lockId, tx.Hash, tx.Height);
-                    LogUtility.Log($"[BridgeAttest] CONSENSUS STATE: Bridge lock CONFIRMED on-chain. lockId={lockId}, owner={tx.FromAddress}, amount={amount.Value} BTC, amountSats={amountSats.Value}, evmDest={evmDestination}, txHash={tx.Hash}, blockHeight={tx.Height}, scUID={scUID}. Balance deducted from owner. Validators can now sign attestation requests for this lockId.", "StateData.ApplyVBTCBridgeLock");
-                }
+                BridgeLockRecord.TryMarkVfxLockConfirmed(lockId, tx.Hash, tx.Height);
+                LogUtility.Log($"[BridgeAttest] CONSENSUS STATE: Bridge lock CONFIRMED on-chain. lockId={lockId}, owner={tx.FromAddress}, amount={amount.Value} BTC, amountSats={amountSats.Value}, evmDest={evmDestination}, txHash={tx.Hash}, blockHeight={tx.Height}, scUID={scUID}. Balance deducted from owner. Validators can now sign attestation requests for this lockId.", "StateData.ApplyVBTCBridgeLock");
 
                 SCLogUtility.Log($"ApplyVBTCBridgeLock: lockId={lockId}, amount={amount.Value} BTC, owner={tx.FromAddress}, scUID={scUID}",
                     "StateData.ApplyVBTCBridgeLock()");
@@ -3841,7 +4208,8 @@ namespace VerifiedXCore.Data
                         AllocationsJson = JsonConvert.SerializeObject(new List<PoolUnlockAllocation>
                         {
                             new PoolUnlockAllocation { LockId = lockId.Trim(), SmartContractUID = scUID, UnlockAmount = amount.Value }
-                        })
+                        }),
+                        DrawnAllocationsJson = "[]", // this shape draws no lock: nothing is signed for it
                     };
                     VBTCBridgeBtcExitState.TryInsert(st);
                     SCLogUtility.Log($"ApplyVBTCBridgeExitToBTC (legacy): burn={baseBurnTxHash}, lockId={lockId}", "StateData.ApplyVBTCBridgeExitToBTC()");
@@ -3882,7 +4250,9 @@ namespace VerifiedXCore.Data
                     return;
                 }
 
-                // Process each allocation: apply partial unlock to each lock
+                // Process each allocation: apply partial unlock to each lock. What is drawn is recorded with the exit: the
+                // signers sign only for that (a part whose lock was gone or already freed drew nothing).
+                var drawnAllocations = new List<PoolUnlockAllocation>();
                 foreach (var alloc in allocations)
                 {
                     var rec = VBTCBridgeLockState.GetByLockId(alloc.LockId);
@@ -3899,6 +4269,8 @@ namespace VerifiedXCore.Data
                     {
                         ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTC: failed to apply partial unlock for lock {alloc.LockId}", "StateData.ApplyVBTCBridgeExitToBTC()");
                     }
+                    else
+                        drawnAllocations.Add(alloc);
 
                     BridgeLockRecord.FinalizeFromChainUnlockIfPending(alloc.LockId);
                 }
@@ -3917,7 +4289,8 @@ namespace VerifiedXCore.Data
                     ExitTxHash = tx.Hash,
                     CreatedTimestamp = tx.Timestamp,
                     IsComplete = false,
-                    AllocationsJson = JsonConvert.SerializeObject(allocations)
+                    AllocationsJson = JsonConvert.SerializeObject(allocations),
+                    DrawnAllocationsJson = JsonConvert.SerializeObject(drawnAllocations)
                 };
                 if (VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(tx.Height))
                     exitState.ExitVfxHeight = tx.Height;
@@ -4169,7 +4542,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
-                NoteApplyStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
+                NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
                 ErrorLogUtility.LogError($"RequestVBTCV2Withdrawal error: {ex.Message}", "StateData.RequestVBTCV2Withdrawal()");
             }
         }
@@ -4277,7 +4650,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
-                NoteApplyStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
+                NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only: flagged, not left as other state than its peers' (fourth review, round 3)
                 ErrorLogUtility.LogError($"RequestVBTCV2WithdrawalMulti error: {ex.Message}", "StateData.RequestVBTCV2WithdrawalMulti()");
             }
         }
@@ -4397,6 +4770,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only (a data fault stays a no-op everywhere)
                 ErrorLogUtility.LogError($"CompleteVBTCV2Withdrawal error: {ex.Message}", "StateData.CompleteVBTCV2Withdrawal()");
             }
         }
@@ -4501,6 +4875,7 @@ namespace VerifiedXCore.Data
             }
             catch (Exception ex)
             {
+                NoteWithdrawalStoreStepFailed(tx.Height, ex); // a fault on this node only (a data fault stays a no-op everywhere)
                 ErrorLogUtility.LogError($"CancelVBTCV2Withdrawal error: {ex.Message}", "StateData.CancelVBTCV2Withdrawal()");
             }
         }
@@ -4690,7 +5065,7 @@ namespace VerifiedXCore.Data
             {
                 // A vote this node could not judge (the validator set is read from committed blocks and a read error is
                 // thrown, not answered "no") leaves its state unlike its peers': marked, so a restart rebuilds state.
-                NoteApplyStepFailed(tx.Height, ex);
+                NoteWithdrawalStoreStepFailed(tx.Height, ex);
                 ErrorLogUtility.LogError($"VoteOnVBTCV2Cancellation error: {ex.Message}", "StateData.VoteOnVBTCV2Cancellation()");
             }
         }

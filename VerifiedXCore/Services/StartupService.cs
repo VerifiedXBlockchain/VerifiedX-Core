@@ -127,6 +127,9 @@ namespace VerifiedXCore.Services
         {
             ConsoleWriterService.Output("Initializing VerifiedX Database...");
             DbContext.Initialize();
+            // A stop left by a restore that failed after wiping the state holds from the first moment the node can take
+            // a block, not only once the startup restore attempt runs.
+            SnapshotRestoreUtility.RecallStateDestroyed();
             // NEW-01: remove private keys that older builds wrote to the wallet database in plaintext.
             KeyPersistenceScrub.Run(DbContext.DB_Wallet, GetPathUtility.GetDatabasePath() + DbContext.RSRV_DB_WALLET_NAME);
             var peerDb = Peers.GetAll();
@@ -334,7 +337,9 @@ namespace VerifiedXCore.Services
                     var randString = RandomStringUtility.GetRandomString(8);
 
                     var signature = SignatureService.CreateSignature(randString, privateKey, account.PublicKey);
-                    var sigVerify = SignatureService.VerifySignature(account.Address, randString, signature);
+                    // The signature alone proves nothing when the account's key is still stored in plaintext.
+                    var sigVerify = SignatureService.VerifySignature(account.Address, randString, signature)
+                        && !WalletEncryptionService.RefusesUnlock(password);
 
                     if(sigVerify)
                     {
@@ -389,7 +394,9 @@ namespace VerifiedXCore.Services
                     var randString = RandomStringUtility.GetRandomString(8);
 
                     var signature = SignatureService.CreateSignature(randString, privateKey, account.PublicKey);
-                    var sigVerify = SignatureService.VerifySignature(account.Address, randString, signature);
+                    // The signature alone proves nothing when the account's key is still stored in plaintext.
+                    var sigVerify = SignatureService.VerifySignature(account.Address, randString, signature)
+                        && !WalletEncryptionService.RefusesUnlock(password);
 
                     if (sigVerify)
                     {
@@ -494,6 +501,15 @@ namespace VerifiedXCore.Services
             {
                 if(keystore.FindAll().Count() > 0)
                     Globals.IsWalletEncrypted = true;
+            }
+
+            // A password given with encpass= is set before the database opens, unchecked; the GUI and plain wallet
+            // starts never reach the checked prompts. Not this wallet's password: the wallet stays locked.
+            if (Globals.EncryptPassword.Length > 0 && WalletEncryptionService.RefusesUnlock(Globals.EncryptPassword.ToUnsecureString()))
+            {
+                Globals.EncryptPassword = new System.Security.SecureString();
+                ErrorLogUtility.LogError("The encpass start argument is not this wallet's password; the wallet stays locked.", "StartupService.EncryptedWalletCheck()");
+                Console.WriteLine("The encpass password is not this wallet's password; the wallet stays locked.");
             }
         }
         internal static void SetBlockchainChainRef()
@@ -1090,8 +1106,7 @@ namespace VerifiedXCore.Services
         internal static void StartupMemBlocks()
         {
             var blockChain = BlockchainData.GetBlocks();
-            Globals.MemBlocks = new ConcurrentDictionary<string, long>(blockChain.Find(LiteDB.Query.All(LiteDB.Query.Descending)).Take(400)
-                .Select(x => x.Transactions.Select(y => new { y.Hash, x.Height})).SelectMany(x => x).ToDictionary(x => x.Hash, x => x.Height));
+            TxHashGuard.Load(blockChain.Find(LiteDB.Query.All(LiteDB.Query.Descending)));
         }
 
         internal static void StartupMemMultiTransfer()
@@ -1246,6 +1261,11 @@ namespace VerifiedXCore.Services
                 var blockCount = BlockchainData.GetBlocks().Count();
                 if (blockCount > 0)
                 {
+                    StateSnapshotService.ResetAfterFormatChange();
+                    var storedTip = BlockchainData.GetLastBlock()?.Height;
+                    if (storedTip != null)
+                        StateSnapshotService.DropDeletionRecordsAbove(storedTip.Value);
+
                     var treiStatus = StateTreiStatusService.GetStatus();
                     if (treiStatus == null || !treiStatus.IsSynced)
                     {
@@ -1330,12 +1350,22 @@ namespace VerifiedXCore.Services
                                 // instead of a full genesis replay (~45 min). Crash-recovery case, so
                                 // the target is the current local tip.
                                 var restoreTarget = BlockchainData.GetLastBlock()?.Height ?? Globals.LastBlock.Height;
+                                SnapshotRestoreUtility.RecallStateDestroyed(); // a stop from before the restart holds unless this restore succeeds
                                 var restored = await SnapshotRestoreUtility.TryRestoreAsync(restoreTarget);
                                 if (restored)
                                 {
                                     ConsoleWriterService.Output($"[STARTUP] Snapshot restore complete at height {restoreTarget}. Proceeding with block downloads.");
                                     LogUtility.Log(
                                         $"[STARTUP] Snapshot restore succeeded at height {restoreTarget}.",
+                                        "StartupService.DownloadBlocksOnStart");
+                                }
+                                else if (SnapshotRestoreUtility.StateDestroyedByFailedRestore)
+                                {
+                                    ConsoleWriterService.Output(
+                                        $"[STARTUP] ERROR: A snapshot restore or state rebuild did not finish after wiping the state. This node will not validate blocks. " +
+                                        $"Restart it with the 'rebuildstate' argument.");
+                                    ErrorLogUtility.LogError(
+                                        $"[STARTUP] Snapshot restore to {restoreTarget} failed after wiping the state; block validation is stopped until a rebuild.",
                                         "StartupService.DownloadBlocksOnStart");
                                 }
                                 else

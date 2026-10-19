@@ -36,11 +36,38 @@ namespace VerifiedXCore.Bitcoin.Models
             return h;
         }
 
+        /// <summary>
+        /// Whether two normalized burn ids name the same burn, or may: the same id, or a transaction's hash and one of its
+        /// burns named by position (BaseBridgeService.BurnId). Redeemed under one spelling, a burn is not redeemed again
+        /// under the other (#277).
+        /// </summary>
+        internal static bool Overlaps(string a, string b)
+        {
+            if (a == b) return true;
+            var ca = a.IndexOf(':');
+            var cb = b.IndexOf(':');
+            if (ca < 0 && cb >= 0) return b[..cb] == a;
+            if (cb < 0 && ca >= 0) return a[..ca] == b;
+            return false;
+        }
+
         public static bool IsConsumed(string? hash)
         {
             var n = Normalize(hash);
             if (n.Length == 0) return false;
-            try { return GetCollection().FindOne(x => x.BaseBurnTxHash == n) != null; }
+            try
+            {
+                var c = GetCollection();
+                if (c.FindOne(x => x.BaseBurnTxHash == n) != null) return true;
+                var colon = n.IndexOf(':');
+                if (colon >= 0)
+                {
+                    var bare = n[..colon];
+                    return c.FindOne(x => x.BaseBurnTxHash == bare) != null;
+                }
+                var positioned = n + ":";
+                return c.Exists(x => x.BaseBurnTxHash.StartsWith(positioned));
+            }
             catch { return false; }
         }
 
@@ -56,13 +83,13 @@ namespace VerifiedXCore.Bitcoin.Models
             try
             {
                 // A FAILED exit restored its locks and paid nothing: the burn is still redeemable.
-                if (VBTCBridgeBtcExitState.GetCollection().FindAll().Any(x => Normalize(x.BaseBurnTxHash) == n && !x.IsFailedRecord))
+                if (VBTCBridgeBtcExitState.GetCollection().FindAll().Any(x => Overlaps(Normalize(x.BaseBurnTxHash), n) && !x.IsFailedRecord))
                     return true;
             }
             catch { }
             try
             {
-                if (VBTCBridgeLockState.GetCollection().FindAll().Any(x => !string.IsNullOrEmpty(x.ExitBurnTxHash) && Normalize(x.ExitBurnTxHash) == n))
+                if (VBTCBridgeLockState.GetCollection().FindAll().Any(x => !string.IsNullOrEmpty(x.ExitBurnTxHash) && Overlaps(Normalize(x.ExitBurnTxHash), n)))
                     return true;
             }
             catch { }

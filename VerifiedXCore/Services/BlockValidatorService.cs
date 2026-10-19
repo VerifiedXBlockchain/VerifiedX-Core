@@ -59,6 +59,56 @@ namespace VerifiedXCore.Services
         public const int RECOVERY_EXHAUSTED_LOG_INTERVAL_MINUTES = 5;
         private static DateTime _lastRecoveryExhaustedLogUtc = DateTime.MinValue;
 
+        /// <summary>Tests only: forget when each validator last re-joined through a heartbeat.</summary>
+        internal static void ResetHeartbeatRejoinsForTests() => _lastHeartbeatRejoin.Clear();
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _lastHeartbeatRejoin = new(StringComparer.Ordinal);
+        /// <summary>One re-join per validator per this many blocks. An honest validator heartbeats every HEARTBEAT_TX_INTERVAL (500) blocks or on reactivation.</summary>
+        internal const long HeartbeatRejoinMinBlocks = 30;
+
+        /// <summary>
+        /// VALIDATOR-REJOIN: a heartbeat in a committed block is the strongest proof of liveness, so it returns the validator
+        /// to this node's NetworkValidators pool (re-added if evicted, IP updated, failure count and winner failures reset).
+        /// At most once per <see cref="HeartbeatRejoinMinBlocks"/> blocks per validator: heartbeats are free and a validator
+        /// can have one in every block, so one that failed every round it won reset its failures before they could count
+        /// and stayed in the pool for good. This node's memory only; what a block means is unchanged.
+        /// </summary>
+        internal static void ApplyHeartbeatRejoin(string validatorAddress, string ipAddress, long height)
+        {
+            if (_lastHeartbeatRejoin.TryGetValue(validatorAddress, out var last) && height >= last && height - last < HeartbeatRejoinMinBlocks)
+                return;
+            _lastHeartbeatRejoin[validatorAddress] = height;
+            var cleanIP = ipAddress.Replace("::ffff:", "");
+            var now = TimeUtil.GetTime();
+            if (Globals.NetworkValidators.TryGetValue(validatorAddress, out var existingNv))
+            {
+                // Update existing entry — reset fail counts, update IP if changed
+                existingNv.IPAddress = cleanIP;
+                existingNv.IsFullyTrusted = true;
+                existingNv.LastSeen = now;
+                existingNv.CheckFailCount = 0;
+                Globals.NetworkValidators[validatorAddress] = existingNv;
+            }
+            else
+            {
+                // Add new entry — validator just heartbeated on-chain
+                var nv = new NetworkValidator
+                {
+                    Address = validatorAddress,
+                    IPAddress = cleanIP,
+                    PublicKey = "", // Will be populated via P2P handshake or proof generation fallback
+                    IsFullyTrusted = true,
+                    LastSeen = now,
+                    FirstSeenAtHeight = height,
+                    CheckFailCount = 0,
+                };
+                Globals.NetworkValidators.TryAdd(validatorAddress, nv);
+            }
+            // Clear any winner failure tracking for this validator
+            Nodes.BlockcasterNode.ClearWinnerFailures(validatorAddress);
+            Utilities.ProofUtility.ClearProofGenerationCache();
+            LogUtility.Log($"VALIDATOR-REJOIN: Hydrated NetworkValidators from HEARTBEAT TX for {validatorAddress} (IP: {cleanIP}) at block {height}", "BlockValidatorService");
+        }
+
         /// <summary>
         /// STATE-CORRUPTION-SIGNAL: only TX rejections that can be explained by a wrong state trie
         /// should feed the rebuild counter. A replay-guard hit ("already been sent") or an in-block
@@ -76,6 +126,10 @@ namespace VerifiedXCore.Services
                 return false;
             if (reason.StartsWith("Duplicate withdrawal request", StringComparison.Ordinal))
                 return false;
+            // A withdrawal row this node's table lacks: a snapshot of the same store would not bring it back (only a full
+            // state rebuild does, which the refusal reports), so it does not drive the snapshot restore.
+            if (reason.StartsWith(TransactionValidatorService.NoWithdrawalRequestPrefix, StringComparison.Ordinal))
+                return false;
             // Bridge intra-block conflicts are producer-selection faults, not local state corruption.
             if (reason.StartsWith("Duplicate Base burn", StringComparison.Ordinal))
                 return false;
@@ -87,6 +141,19 @@ namespace VerifiedXCore.Services
             if (reason.StartsWith(LedgerIntegrityRules.SameDepositAddressInBlock, StringComparison.Ordinal))
                 return false;
             if (reason.StartsWith(SameBlockDebitGuard.ReasonPrefix, StringComparison.Ordinal))
+                return false;
+            if (reason.StartsWith(Bitcoin.Services.BridgeIntraBlockGuard.ExitAlreadyFailedPrefix, StringComparison.Ordinal))
+                return false;
+            if (reason.StartsWith(LedgerIntegrityRules.NftMoveAndSaleInBlock, StringComparison.Ordinal))
+                return false;
+            if (reason.StartsWith(LedgerIntegrityRules.NftMovedTwiceInBlock, StringComparison.Ordinal))
+                return false;
+            // A private transaction's proof - missing, failing, or one this node cannot verify (no PLONK params) - says
+            // nothing about this node's state: a restore or rebuild would refuse the block the same way. (A Merkle root
+            // this node's pool does not hold may be its own tree going wrong, and stays a signal.)
+            if (reason == Privacy.PlonkProofVerifier.VerifierUnavailableReason
+                || reason.StartsWith(Privacy.PlonkProofVerifier.MissingProofReason, StringComparison.Ordinal)
+                || reason.StartsWith(Privacy.PlonkProofVerifier.FailedProofPrefix, StringComparison.Ordinal))
                 return false;
             return true;
         }
@@ -139,17 +206,59 @@ namespace VerifiedXCore.Services
             return (!StateTreiStatusService.IsSynced(), _cleanBlockStreak);
         }
 
-        public static void UpdateMemBlocks(Block block)
+        /// <summary>
+        /// STATE PROBATION: with automatic rebuilds removed, a dirty-flagged node keeps running on its existing state. Each
+        /// cleanly applied block is evidence of consistency; after a clean streak, re-mark synced so snapshots resume.
+        /// </summary>
+        internal static void AdvanceProbation(Block block, bool stateApplied)
         {
-            foreach (var trans in block.Transactions)
-                Globals.MemBlocks[trans.Hash] = block.Height;
+            if (_stateStatusVerified)
+                return;
 
-            var HeightDiff = Globals.LastBlock.Height - 400;
-            foreach(var pair in Globals.MemBlocks.Where(x => x.Value <= HeightDiff))
+            if (StateTreiStatusService.IsSynced())
             {
-                Globals.MemBlocks.TryRemove(pair.Key, out _);
-            }            
+                _stateStatusVerified = true;
+            }
+            else if (!stateApplied)
+            {
+                _cleanBlockStreak = 0;
+            }
+            // State built under other attestation settings stays marked failed until it is rebuilt: blocks that
+            // apply without an error do not make its bonds and signer sets the network's (fourth review, round 5).
+            else if (VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.BuiltUnderOtherSettings(block.Height) != null)
+            {
+                _cleanBlockStreak = 0;
+            }
+            // Writes a block omitted are missing until a rebuild or a restore: clean blocks after it do not bring them back.
+            else if (StateTreiStatusService.NeedsRepair())
+            {
+                _cleanBlockStreak = 0;
+            }
+            // A failed restore's stop is lifted only by a restore that succeeds or a rebuild, never by a
+            // clean streak on the wiped state.
+            else if (SnapshotRestoreUtility.StateDestroyedByFailedRestore || StateTreiStatusService.GetStatus() is { } st && (st.RestoreDestroyed == true || st.RebuildInProgress == true))
+            {
+                _cleanBlockStreak = 0;
+            }
+            else if (++_cleanBlockStreak >= STATE_PROBATION_BLOCKS)
+            {
+                StateTreiStatusService.SetSynced(block.Height);
+                _stateStatusVerified = true;
+                LogUtility.Log(
+                    $"[ValidateBlock] STATE-PROBATION-PASSED: {STATE_PROBATION_BLOCKS} consecutive blocks applied cleanly on an " +
+                    $"unverified state trie — marking synced at height {block.Height}. Snapshot protection resumes.",
+                    "BlockValidatorService");
+            }
         }
+
+        /// <summary>Test seam: forgets the probation streak and verdict.</summary>
+        internal static void ResetProbationForTests()
+        {
+            _cleanBlockStreak = 0;
+            _stateStatusVerified = false;
+        }
+
+        public static void UpdateMemBlocks(Block block) => TxHashGuard.Add(block, Globals.LastBlock);
 
         public static void UpdateMemMultiTransfers(Block block)
         {
@@ -297,6 +406,29 @@ namespace VerifiedXCore.Services
         internal enum CasterGate { Allow, HashMismatch, Pending, Uncertified }
 
         /// <summary>
+        /// The order block validation reads a block's transactions in: by sender, then nonce. The per-block guards (debits,
+        /// bridge state, nullifiers, one report per block) keep running state, so their verdicts depend on this order, and
+        /// a producer that judged its transactions in another order could build a block every receiver refuses.
+        /// </summary>
+        public static List<Transaction> InValidationOrder(IEnumerable<Transaction> transactions)
+            => transactions.OrderBy(x => x.FromAddress).ThenBy(x => x.Nonce).ToList();
+
+        /// <summary>How old this node's tip may be for the next block to count as the live edge.</summary>
+        internal const long LiveEdgeTipAgeSeconds = 120;
+
+        /// <summary>
+        /// Whether a block is the next one at the live edge: it extends our tip, and our tip is recent. There its
+        /// committee certificate is in hand (on the block, or in the attestation store and peers' for the retention
+        /// window), so the download path requires it too. A node catching up from an older tip fetches blocks whose
+        /// certificates no longer exist, and keeps the download exemption.
+        /// </summary>
+        internal static bool AtLiveEdge(long blockHeight, long tipHeight, long tipTimestamp, long now)
+            => blockHeight == tipHeight + 1 && now - tipTimestamp <= LiveEdgeTipAgeSeconds;
+
+        internal static bool AtLiveEdge(Block block)
+            => Globals.LastBlock != null && AtLiveEdge(block.Height, Globals.LastBlock.Height, Globals.LastBlock.Timestamp, TimeUtil.GetTime());
+
+        /// <summary>
         /// A caster's commit rule (pure). With an agreed hash for the height, the block must match it — at the live tip
         /// even when the caller asked to skip the caster check (the download loop does). Without one, a live-tip block
         /// is refused on the normal commit path (agreement still pending), and accepted from a download only when it
@@ -315,6 +447,17 @@ namespace VerifiedXCore.Services
             if (!skipCasterCheck && !blockDownloads) return CasterGate.Pending;
             return hasValidCertificate() ? CasterGate.Allow : CasterGate.Uncertified;
         }
+
+        /// <summary>How far past this node's clock a block's timestamp may be.</summary>
+        internal const int FutureBlockAllowanceSeconds = 60;
+
+        /// <summary>
+        /// A block stamped more than FutureBlockAllowanceSeconds past this node's clock is refused. No deterministic "now"
+        /// exists to judge it by, so it reads the local clock; the refusal is not sticky (ValidateBlocks drops the block with
+        /// no ban and remembers nothing), so a node whose clock is behind accepts the block once its clock passes it. A wider
+        /// allowance would loosen every window that reads the block's timestamp.
+        /// </summary>
+        internal static bool IsAheadOfClock(long blockTimestamp, long now) => blockTimestamp > now + FutureBlockAllowanceSeconds;
 
         public static async Task ValidateBlocks(bool skipCasterCheck = false)
         {
@@ -353,12 +496,21 @@ namespace VerifiedXCore.Services
                         var ipAddress = competingBlocks.FirstOrDefault(b => b.block.Hash == block.Hash).IPAddress ?? "unknown";
 
                         var startupDownload = Globals.BlocksDownloadSlim.CurrentCount == 0 ? true : false;
+                        // At the live edge a downloaded block's certificate is required (ValidateBlock): complete a
+                        // missing or short one first, as the broadcast path does.
+                        if (startupDownload && AtLiveEdge(block))
+                            await ConsensusCertificateHelper.TryCompleteCertificateAsync(block);
                         var stopwatch1 = new Stopwatch();
                         stopwatch1.Start();
                         var result = await ValidateBlock(block, false, startupDownload, false, false, skipCasterCheck, source: $"BlockDict:{ipAddress}");
                         stopwatch1.Stop();
                         if (!result && block.Height == Globals.LastBlock.Height + 1)
                         {
+                            // A pin naming the block just refused at our tip is withdrawn, whichever path pinned it (the
+                            // gossip gate, our round's agreement): left, it made the gate refuse every other block at the
+                            // height until the next agreement. Without it a block there needs a majority attestation.
+                            if (Globals.IsBlockCaster)
+                                Nodes.BlockcasterNode.ReleaseRefusedCommitPin(block.Height, block.Hash, triedAtTip: true);
                             if (Globals.AdjudicateAccount != null)
                                 continue;
                             //TESTING! Removing ban logic for now.
@@ -409,6 +561,24 @@ namespace VerifiedXCore.Services
                 try { ValidateBlocksSemaphore.Release(); } catch { }
             }
         }
+        /// <summary>
+        /// Applies a committed block to the state. A throw counts as an incomplete apply (false), so the caller flags the
+        /// state; before, it escaped to the outer catch, which only logged, and the node went on (and snapshotted) on state
+        /// missing part of the block.
+        /// </summary>
+        internal static async Task<bool> ApplyStateAsync(Block block)
+        {
+            try
+            {
+                return await StateData.UpdateTreis(block);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"[ValidateBlock] Applying block {block.Height} to the state threw: {ex.Message}", "BlockValidatorService.ApplyStateAsync()");
+                return false;
+            }
+        }
+
         public static async Task<bool> ValidateBlock(Block block, bool ignoreAdjSignatures, bool blockDownloads = false, bool validateOnly = false, bool updateCLI = false, bool skipCasterCheck = false, string? source = null)
         {
             // ═══════════════════════════════════════════════════════════════
@@ -429,6 +599,18 @@ namespace VerifiedXCore.Services
                 return false; // Always block during full state rebuild / snapshot restore — no exceptions
             }
 
+            // A restore that failed after wiping the state leaves state that matches no chain: no block is judged on it.
+            if (SnapshotRestoreUtility.StateDestroyedByFailedRestore)
+            {
+                return false;
+            }
+
+            // Nor on a withdrawal store a rebuild left unfinished (it is rebuilt again meanwhile).
+            if (VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.HoldsBlocks())
+            {
+                return false;
+            }
+
             if ((Globals.IsResyncing || ForkRecoveryUtility.IsRecoveryInProgress)
                 && !ForkRecoveryUtility.IsInDownloadPhase)
             {
@@ -437,10 +619,15 @@ namespace VerifiedXCore.Services
 
             await ValidateBlockSemaphore.WaitAsync();
 
+            long? committedHeight = null; // set once the block is written: from then on a failure leaves the state behind it
+
             try
             {
-                // Double-check after acquiring semaphore (recovery may have started while waiting)
-                if (BlockRollbackUtility.IsResetTreisRunning || SnapshotRestoreUtility.IsRestoreRunning)
+                // Double-check after acquiring semaphore (recovery may have started while waiting, or a withdrawal-store
+                // rebuild held the lock and did not finish)
+                if (BlockRollbackUtility.IsResetTreisRunning || SnapshotRestoreUtility.IsRestoreRunning
+                    || SnapshotRestoreUtility.StateDestroyedByFailedRestore
+                    || VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.HoldsBlocks())
                 {
                     return false;
                 }
@@ -495,7 +682,9 @@ namespace VerifiedXCore.Services
                     //Genesis Block
                     result = true;
                     await BlockchainData.AddBlock(block);
-                    await StateData.UpdateTreis(block);
+                    committedHeight = block.Height;
+                    if (!await ApplyStateAsync(block))
+                        StateTreiStatusService.SetIncompleteApply($"Incomplete state application at block {block.Height}.");
                     foreach (Transaction transaction in block.Transactions)
                     {
                         //Adds receiving TX to wallet
@@ -584,7 +773,9 @@ namespace VerifiedXCore.Services
                 // blockDownloads is exempt: certs are not part of the block hash and attestations are
                 // in-memory with a short retention window, so historical blocks fetched during sync can
                 // never have their certs re-verified (or repaired) — enforcement is live-broadcast only.
-                if (!validateOnly && !blockDownloads && !ConsensusCertificateVerifier.VerifyOrNotRequired(block))
+                // Except at the live edge: any peer could start a download on a synced node, and the next block then
+                // came in uncertified. There the certificate exists (ValidateBlocks tops it up first) and is required.
+                if (!validateOnly && (!blockDownloads || AtLiveEdge(block)) && !ConsensusCertificateVerifier.VerifyOrNotRequired(block))
                 {
                     DbContext.Rollback("BlockValidatorService.ValidateBlock()-cert");
                     return result;
@@ -594,8 +785,7 @@ namespace VerifiedXCore.Services
                 if (block.Height != 0)
                 {
                     var prevTimestamp = Globals.LastBlock.Timestamp;
-                    var currentTimestamp = TimeUtil.GetTime(60);
-                    if (prevTimestamp > block.Timestamp || block.Timestamp > currentTimestamp)
+                    if (prevTimestamp > block.Timestamp || IsAheadOfClock(block.Timestamp, TimeUtil.GetTime()))
                     {
                         DbContext.Rollback("BlockValidatorService.ValidateBlock()-9");
                         return result;
@@ -907,6 +1097,12 @@ namespace VerifiedXCore.Services
                             return result;
                         }
 
+                        if (LedgerIntegrityRules.OverTransactionCap(block.Transactions.Count, block.Height))
+                        {
+                            DbContext.Rollback("BlockValidatorService.ValidateBlock()-transactionCap");
+                            return result;
+                        }
+
                         if (!blockDownloads && block.Transactions.Any(t =>
                             t.FromAddress != "Coinbase_TrxFees" && t.FromAddress != "Coinbase_BlkRwd"
                             && PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)))
@@ -941,6 +1137,7 @@ namespace VerifiedXCore.Services
                         // NEW-07: one running debit per (ledger, contract, holder) across every debit-writing type.
                         var blockDebitState = new SameBlockDebitGuard.State { BlockHeight = block.Height };
                         var blockAttestState = new VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.State(); // one Bitcoin report per block
+                        var blockNftSteps = new LedgerIntegrityRules.NftStepState(); // D18: a contract moved or sold, not both
                         var uniqueAddresses = block.Transactions
                             .Where(x => x.FromAddress != "Coinbase_TrxFees" && x.FromAddress != "Coinbase_BlkRwd")
                             .Select(x => x.FromAddress)
@@ -958,10 +1155,7 @@ namespace VerifiedXCore.Services
                         // Process transactions ordered by nonce to ensure sequential validation
                         // NEW-13: the apply and the guard read tx.Height, which no hash covers - use the block's height.
                         LedgerIntegrityRules.NormalizeTransactionHeights(block);
-                        var orderedTransactions = block.Transactions
-                            .OrderBy(x => x.FromAddress)
-                            .ThenBy(x => x.Nonce)
-                            .ToList();
+                        var orderedTransactions = InValidationOrder(block.Transactions);
                         
                         // Each vBTC transfer's outflows read once for the block: the same-sender check below read every sibling's
                         // data again for each transfer, so one sender's 1,400 transfers were about 2 million parses on every
@@ -1030,6 +1224,9 @@ namespace VerifiedXCore.Services
                                     if (duplicateCreation != null)
                                         effectiveTxResult = (false, duplicateCreation);
                                 }
+
+                                if (effectiveTxResult.Item1 && LedgerIntegrityRules.RegisterNftStepInBlock(blkTransaction, blockNftSteps, block.Height) is { } nftStep)
+                                    effectiveTxResult = (false, nftStep);
 
                                 // NEW-07: debits by one holder on one contract within the block may not exceed its balance.
                                 if (effectiveTxResult.Item1)
@@ -1488,12 +1685,13 @@ namespace VerifiedXCore.Services
                         //}
 
                         await BlockchainData.AddBlock(block, updateCLI);//add block to chain.
+                        committedHeight = block.Height;
                         Nodes.BlockcasterNode.NoteBlockCommitted(); // DESYNC-CLOCK-FIX: every commit path (message 7, gossip, HeightSync, download) refreshes the stall clock
                         UpdateMemBlocks(block);//update mem blocks
                         UpdateMemBlocksHashes(block);
                         CleanupMempoolAfterBlock(block);//cleanup duplicate withdrawal requests from mempool
 
-                        var stateApplied = await StateData.UpdateTreis(block); //update treis
+                        var stateApplied = await ApplyStateAsync(block); //update treis
                         if (!stateApplied)
                         {
                             // ROOT-CAUSE GUARD: The block was just committed to the chain DB, but one or
@@ -1507,39 +1705,11 @@ namespace VerifiedXCore.Services
                                 $"[ValidateBlock] STATE-APPLY-INCOMPLETE: Block {block.Height} committed but not all " +
                                 $"transactions applied to the state trie. Flagging state trie for rebuild.",
                                 "BlockValidatorService.ValidateBlock()");
-                            StateTreiStatusService.SetFailed($"Incomplete state application at block {block.Height}.");
+                            StateTreiStatusService.SetIncompleteApply($"Incomplete state application at block {block.Height}.");
                         }
                         await ReserveService.Run(); //updates treis for reserve pending txs
 
-                        // STATE PROBATION: with automatic rebuilds removed, a dirty-flagged node keeps
-                        // running on its existing state. Each cleanly applied block is evidence of
-                        // consistency; after a clean streak, re-mark synced so snapshots resume.
-                        if (!_stateStatusVerified)
-                        {
-                            if (StateTreiStatusService.IsSynced())
-                            {
-                                _stateStatusVerified = true;
-                            }
-                            else if (!stateApplied)
-                            {
-                                _cleanBlockStreak = 0;
-                            }
-                            // State built under other attestation settings stays marked failed until it is rebuilt: blocks that
-                            // apply without an error do not make its bonds and signer sets the network's (fourth review, round 5).
-                            else if (VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.BuiltUnderOtherSettings(block.Height) != null)
-                            {
-                                _cleanBlockStreak = 0;
-                            }
-                            else if (++_cleanBlockStreak >= STATE_PROBATION_BLOCKS)
-                            {
-                                StateTreiStatusService.SetSynced(block.Height);
-                                _stateStatusVerified = true;
-                                LogUtility.Log(
-                                    $"[ValidateBlock] STATE-PROBATION-PASSED: {STATE_PROBATION_BLOCKS} consecutive blocks applied cleanly on an " +
-                                    $"unverified state trie — marking synced at height {block.Height}. Snapshot protection resumes.",
-                                    "BlockValidatorService");
-                            }
-                        }
+                        AdvanceProbation(block, stateApplied);
 
                         // Process vBTC V2 validator registration/exit transactions
                         if (block.Transactions.Count() > 0)
@@ -1677,38 +1847,7 @@ namespace VerifiedXCore.Services
                                         // This is the primary mechanism for returning validators to re-enter the
                                         // in-memory NetworkValidators pool after being evicted or after a full restart.
                                         if (!string.IsNullOrEmpty(validatorAddress) && !string.IsNullOrEmpty(ipAddress))
-                                        {
-                                            var cleanIP = ipAddress.Replace("::ffff:", "");
-                                            var now = TimeUtil.GetTime();
-                                            if (Globals.NetworkValidators.TryGetValue(validatorAddress, out var existingNv))
-                                            {
-                                                // Update existing entry — reset fail counts, update IP if changed
-                                                existingNv.IPAddress = cleanIP;
-                                                existingNv.IsFullyTrusted = true;
-                                                existingNv.LastSeen = now;
-                                                existingNv.CheckFailCount = 0;
-                                                Globals.NetworkValidators[validatorAddress] = existingNv;
-                                            }
-                                            else
-                                            {
-                                                // Add new entry — validator just heartbeated on-chain
-                                                var nv = new NetworkValidator
-                                                {
-                                                    Address = validatorAddress,
-                                                    IPAddress = cleanIP,
-                                                    PublicKey = "", // Will be populated via P2P handshake or proof generation fallback
-                                                    IsFullyTrusted = true,
-                                                    LastSeen = now,
-                                                    FirstSeenAtHeight = block.Height,
-                                                    CheckFailCount = 0,
-                                                };
-                                                Globals.NetworkValidators.TryAdd(validatorAddress, nv);
-                                            }
-                                            // Clear any winner failure tracking for this validator
-                                            Nodes.BlockcasterNode.ClearWinnerFailures(validatorAddress);
-                                            Utilities.ProofUtility.ClearProofGenerationCache();
-                                            LogUtility.Log($"VALIDATOR-REJOIN: Hydrated NetworkValidators from HEARTBEAT TX for {validatorAddress} (IP: {cleanIP}) at block {block.Height}", "BlockValidatorService");
-                                        }
+                                            ApplyHeartbeatRejoin(validatorAddress, ipAddress, block.Height);
 
                                         //LogUtility.Log($"Processed VBTC V2 validator heartbeat/reactivation for {validatorAddress} (IP: {ipAddress}) at block {block.Height}", "BlockValidatorService");
                                     }
@@ -1916,7 +2055,9 @@ namespace VerifiedXCore.Services
                     //Genesis Block
                     result = true;
                     await BlockchainData.AddBlock(block);
-                    await StateData.UpdateTreis(block);
+                    committedHeight = block.Height;
+                    if (!await ApplyStateAsync(block))
+                        StateTreiStatusService.SetIncompleteApply($"Incomplete state application at block {block.Height}.");
                     DbContext.Commit();
                     return result;
                 }
@@ -1924,8 +2065,14 @@ namespace VerifiedXCore.Services
 
             }
             catch (Exception ex) {
+                // The block and the state are separate stores: a failure after the block was written leaves the state behind
+                // it. Flagged first, so it is not snapshotted or trusted as synced whatever the rollback below does.
+                if (committedHeight != null)
+                    StateTreiStatusService.SetFailed($"An error after block {committedHeight} was committed: {ex.Message}");
                 DbContext.Rollback("BlockValidatorService.ValidateBlock()-14");
                 Console.WriteLine($"Error: {ex.ToString()}");
+                if (committedHeight != null)
+                    ErrorLogUtility.LogError($"[ValidateBlock] An error after block {committedHeight} was committed: {ex.Message}. The state trie is flagged.", "BlockValidatorService.ValidateBlock()");
             }
             finally
             {
@@ -1958,8 +2105,7 @@ namespace VerifiedXCore.Services
             {
                 //ensures the timestamps being produced are correct
                 var prevTimestamp = Globals.LastBlock.Timestamp;
-                var currentTimestamp = TimeUtil.GetTime(60);
-                if (prevTimestamp > block.Timestamp || block.Timestamp > currentTimestamp)
+                if (prevTimestamp > block.Timestamp || IsAheadOfClock(block.Timestamp, TimeUtil.GetTime()))
                 {
                     return result;
                 }
@@ -2017,6 +2163,9 @@ namespace VerifiedXCore.Services
                 if (block.Transactions.Count(t => PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)) > Globals.MaxPrivateTxPerBlock)
                     return result;
 
+                if (LedgerIntegrityRules.OverTransactionCap(block.Transactions.Count, block.Height))
+                    return result;
+
                 if (!blockDownloads && block.Transactions.Any(t =>
                     t.FromAddress != "Coinbase_TrxFees" && t.FromAddress != "Coinbase_BlkRwd"
                     && PrivateTransactionTypes.IsPrivateTransaction(t.TransactionType)))
@@ -2032,8 +2181,11 @@ namespace VerifiedXCore.Services
                 var blockBridgeStateTask = new Bitcoin.Services.BridgeIntraBlockGuard.State();
                 var blockDebitStateTask = new SameBlockDebitGuard.State { BlockHeight = block.Height }; // NEW-07
                 var blockAttestStateTask = new VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.State(); // one Bitcoin report per block
+                var blockNftStepsTask = new LedgerIntegrityRules.NftStepState(); // D18: a contract moved or sold, not both
                 LedgerIntegrityRules.NormalizeTransactionHeights(block); // NEW-13
-                foreach (Transaction transaction in block.Transactions)
+                // In the order receivers validate it (ValidateBlock): the running per-block guards give their verdicts in
+                // that order, and the producer checks its own block with this method.
+                foreach (Transaction transaction in InValidationOrder(block.Transactions))
                 {
                     if (transaction.FromAddress != "Coinbase_TrxFees" && transaction.FromAddress != "Coinbase_BlkRwd")
                     {
@@ -2060,6 +2212,8 @@ namespace VerifiedXCore.Services
                             var (attestOk, attestReason) = VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.TryRegister(transaction, blockAttestStateTask);
                             if (!attestOk) effectiveTxResult = (false, attestReason);
                         }
+                        if (effectiveTxResult.Item1 && LedgerIntegrityRules.RegisterNftStepInBlock(transaction, blockNftStepsTask, block.Height) is { } nftStepTask)
+                            effectiveTxResult = (false, nftStepTask);
                         rejectBlock = effectiveTxResult.Item1 == false ? rejectBlock = true : false;
                         if (rejectBlock)
                         {

@@ -218,6 +218,39 @@ namespace VerifiedXCore.Tests
             Assert.Equal(0, again.RequestsInserted);
             Assert.Equal(0, again.AttestedOutcomesApplied);
             Assert.Equal(before, requests.Select(Of).ToList());
+
+            // A request on a watched vault that live processing gave no row (its escrow debit was not written, so it
+            // was never recorded in the attestation table either) gets none from the rebuild.
+            VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()!.DeleteAll();
+            DbContext.DB_BtcAttest.GetCollection(BtcAttestStore.Withdrawals).Delete(BtcWithdrawals.RefOf(open.Hash, vault.Uid));
+            var withoutRecord = await VBTCWithdrawalStoreRebuildService.RebuildFromChainAsync("test, a request live never wrote");
+            Assert.True(withoutRecord.Success, withoutRecord.Message);
+            Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash(open.Hash, vault.Uid));
+            Assert.NotNull(VBTCWithdrawalRequest.GetByTransactionHash(paid.Hash, vault.Uid));
+        }
+
+        [Fact]
+        public void ABlockThatAppliedTheForgedVfxBurn_IsNotUndoneOneTransactionAtATime()
+        {
+            var prior = new System.Collections.Generic.Dictionary<string, decimal>(Globals.ForgedVfxBurns);
+            try
+            {
+                Globals.ForgedVfxBurns.Clear();
+                Globals.ForgedVfxBurns["RBurnedAddress"] = 100M;
+                VerifiedXCore.Models.WorldTrei.GetWorldTrei().DeleteAll();
+                VerifiedXCore.Models.WorldTrei.GetWorldTrei().Insert(new VerifiedXCore.Models.WorldTrei { StateRoot = "r", ForgedVfxBurnAppliedHeight = 500 });
+
+                Assert.Contains("forged-VFX burn", BlockRollbackUtility.WhyNotIncremental(new[] { PlainBlock(500) }, 499) ?? "");
+                Assert.DoesNotContain("forged-VFX burn", BlockRollbackUtility.WhyNotIncremental(new[] { PlainBlock(503) }, 502) ?? ""); // above the burn
+
+                Globals.ForgedVfxBurns.Clear(); // testnet: nothing listed
+                Assert.DoesNotContain("forged-VFX burn", BlockRollbackUtility.WhyNotIncremental(new[] { PlainBlock(500) }, 499) ?? "");
+            }
+            finally
+            {
+                Globals.ForgedVfxBurns.Clear();
+                foreach (var kv in prior) Globals.ForgedVfxBurns[kv.Key] = kv.Value;
+            }
         }
     }
 }

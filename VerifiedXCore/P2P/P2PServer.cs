@@ -252,7 +252,7 @@ namespace VerifiedXCore.P2P
 
                             // VX-19: header hash, signature, version, local size and known producer; then de-duplicated,
                             // capped staging. A block that fails is neither staged nor re-gossiped.
-                            if (!BlockStaging.PassesGossipPreChecks(nextBlock, out _) || !BlockStaging.TryStageGossip(nextBlock, IP))
+                            if (!BlockcasterNode.StageGossipOrWithdrawPin(nextBlock, IP))
                                 return false;
 
                             await BlockValidatorService.ValidateBlocks();
@@ -477,11 +477,7 @@ namespace VerifiedXCore.P2P
                                     try
                                     {
                                         ErrorLogUtility.LogError($"TX Failed From Remote Node: {txResult.Item2}", "P2PServer.SendTxToMempool()-3");
-                                        // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
-                                        // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
-                                        // carrying a real transaction's hash remove it (and free its claims) during propagation.
-                                        if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
-                                            TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                        TransactionData.RemoveRefusedFromPool(mempool, txReceived); // only the row identical to this copy
                                     }
                                     catch (Exception ex)
                                     {
@@ -496,37 +492,13 @@ namespace VerifiedXCore.P2P
 
                                 if (txResult.Item1 == true && dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
                                 {
-                                    // HAL-071 Fix: Validate minimum fee and enforce mempool limits
-                                    var feeValidation = MempoolEvictionUtility.ValidateMinimumFee(txReceived);
-                                    if (!feeValidation.isValid)
+                                    // HAL-071 Fix: fee floor and mempool caps
+                                    if (!MempoolEvictionUtility.TryAdmitAndInsert(txReceived, mempool))
                                     {
                                         VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(txReceived.Hash); // verified but not pooled: claims nothing (round 32)
-                                        return "TFVP"; // Transaction failed - fee below minimum
+                                        return "TFVP";
                                     }
 
-                                    var stats = MempoolEvictionUtility.GetMempoolStats();
-                                    var canAdd = MempoolEvictionUtility.CanAddToMempool(txReceived, stats.count, stats.sizeBytes);
-                                    
-                                    if (!canAdd.canAdd)
-                                    {
-                                        // Try to evict lower priority transactions to make room
-                                        MempoolEvictionUtility.EvictLowestPriority(
-                                            targetCount: (int)(Globals.MaxMempoolEntries * 0.95),
-                                            targetSize: (long)(Globals.MaxMempoolSizeBytes * 0.95)
-                                        );
-                                        
-                                        // Check again after eviction
-                                        stats = MempoolEvictionUtility.GetMempoolStats();
-                                        canAdd = MempoolEvictionUtility.CanAddToMempool(txReceived, stats.count, stats.sizeBytes);
-                                        
-                                        if (!canAdd.canAdd)
-                                        {
-                                            VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(txReceived.Hash); // verified but not pooled: claims nothing (round 32)
-                                            return "TFVP"; // Mempool full, cannot add
-                                        }
-                                    }
-
-                                    mempool.InsertSafe(txReceived);
                                 
                                     // HAL-16 Fix: Broadcast guard - check if we should broadcast
                                     // Store broadcast decision but DON'T execute yet (release semaphore first)
@@ -576,11 +548,7 @@ namespace VerifiedXCore.P2P
                                     try
                                     {
                                         ErrorLogUtility.LogError($"TX Failed From Remote Node. Rating {rating}, DoubleSpend {dblspndChk}, Crafted {isCraftedIntoBlock}", "P2PServer.SendTxToMempool()-1");
-                                        // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
-                                        // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
-                                        // carrying a real transaction's hash remove it (and free its claims) during propagation.
-                                        if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
-                                            TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                        TransactionData.RemoveRefusedFromPool(mempool, txReceived); // only the row identical to this copy
                                     }
                                     catch (Exception ex)
                                     {
@@ -643,11 +611,7 @@ namespace VerifiedXCore.P2P
                                 try
                                 {
                                     ErrorLogUtility.LogError($"TX Failed From Remote Node: {txResult.Item2}", "P2PServer.SendTxToMempool()-4");
-                                    // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
-                                    // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
-                                    // carrying a real transaction's hash remove it (and free its claims) during propagation.
-                                    if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
-                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                    TransactionData.RemoveRefusedFromPool(mempool, txReceived); // only the row identical to this copy
                                 }
                                 catch { }
 
@@ -660,37 +624,13 @@ namespace VerifiedXCore.P2P
 
                             if (txResult.Item1 == true && dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
                             {
-                                // HAL-071 Fix: Validate minimum fee and enforce mempool limits
-                                var feeValidation = MempoolEvictionUtility.ValidateMinimumFee(txReceived);
-                                if (!feeValidation.isValid)
+                                // HAL-071 Fix: fee floor and mempool caps
+                                if (!MempoolEvictionUtility.TryAdmitAndInsert(txReceived, mempool))
                                 {
                                     VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(txReceived.Hash); // verified but not pooled: claims nothing (round 32)
-                                    return "TFVP"; // Transaction failed - fee below minimum
+                                    return "TFVP";
                                 }
 
-                                var stats = MempoolEvictionUtility.GetMempoolStats();
-                                var canAdd = MempoolEvictionUtility.CanAddToMempool(txReceived, stats.count, stats.sizeBytes);
-                                
-                                if (!canAdd.canAdd)
-                                {
-                                    // Try to evict lower priority transactions to make room
-                                    MempoolEvictionUtility.EvictLowestPriority(
-                                        targetCount: (int)(Globals.MaxMempoolEntries * 0.95),
-                                        targetSize: (long)(Globals.MaxMempoolSizeBytes * 0.95)
-                                    );
-                                    
-                                    // Check again after eviction
-                                    stats = MempoolEvictionUtility.GetMempoolStats();
-                                    canAdd = MempoolEvictionUtility.CanAddToMempool(txReceived, stats.count, stats.sizeBytes);
-                                    
-                                    if (!canAdd.canAdd)
-                                    {
-                                        VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(txReceived.Hash); // verified but not pooled: claims nothing (round 32)
-                                        return "TFVP"; // Mempool full, cannot add
-                                    }
-                                }
-
-                                mempool.InsertSafe(txReceived);
                                 
                                 // HAL-16 Fix: Broadcast guard - check if we should broadcast
                                 // Store broadcast decision but DON'T execute yet (release semaphore first)
@@ -740,11 +680,7 @@ namespace VerifiedXCore.P2P
                                 try
                                 {
                                     ErrorLogUtility.LogError($"TX Failed From Remote Node. Rating {rating}, DoubleSpend {dblspndChk}, Crafted {isCraftedIntoBlock}", "P2PServer.SendTxToMempool()-2");
-                                    // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
-                                    // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
-                                    // carrying a real transaction's hash remove it (and free its claims) during propagation.
-                                    if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
-                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                    TransactionData.RemoveRefusedFromPool(mempool, txReceived); // only the row identical to this copy
                                 }
                                 catch { }
 

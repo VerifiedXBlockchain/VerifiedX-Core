@@ -138,6 +138,164 @@ namespace VerifiedXCore.Tests
         private async Task<decimal> Spendable(string vault, V who) =>
             (await VBTCService.TryGetAvailableTransparentVbtcBalance(vault, who.Address)).availableBalance;
 
+        // ── This node's storage failing during a block ──────────────────────────────────────────────────────
+
+        private static int EscrowDebits(string vault, string address, decimal amount) =>
+            SmartContractStateTrei.GetSmartContractState(vault)!.SCStateTreiTokenizationTXes?.Count(x => x.FromAddress == address && x.ToAddress == "-" && x.Amount == -amount) ?? 0;
+
+        /// <summary>A withdrawal request of the holder's, judged valid for the next block but not applied: the test applies its block itself.</summary>
+        private async Task<VfxTx> ValidRequest(string vault, decimal amount)
+        {
+            var request = SignedBy(_holder, _holder.Address, TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                new { Function = "VBTCWithdrawalRequest()", ContractUID = vault, BTCAddress = BtcDest, Amount = amount, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") });
+            var (ok, why) = await Verify(request, Tip + 1);
+            Assert.True(ok, why);
+            return request;
+        }
+
+        /// <summary>The chain as the node stores it (blocks are committed before they are applied), the state marked good, the holder holding vBTC on a funded vault.</summary>
+        private async Task<(string Uid, string Address, NBitcoin.Script Script)> StoredChainWithAFundedVault()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await MineAndReport(Pay(vault.Script, 100_000));
+            await Mine(Transfer(vault.Uid, 0.0005M));
+            foreach (var block in AppliedBlocks) BlockchainData.GetBlocks().InsertSafe(block);
+            StateTreiStatusService.SetSynced(Tip);
+            return vault;
+        }
+
+        /// <summary>Applies the next block with <paramref name="tx"/> while the storage loses every write of a request row; the block is stored first, as the node stores it.</summary>
+        private static async Task<(VerifiedXCore.Models.Block Block, bool Applied)> ApplyLosingTheRequestRow(VfxTx tx)
+        {
+            var block = new VerifiedXCore.Models.Block { Height = Tip + 1, Hash = $"b{Tip + 1}", StateRoot = "root" + (Tip + 1), Timestamp = TimeUtil.GetTime(), Transactions = new List<VfxTx> { tx } };
+            BlockchainData.GetBlocks().InsertSafe(block);
+            VBTCWithdrawalRequest.FailWriteForTests = () => true;
+            bool applied;
+            try { applied = await StateData.UpdateTreis(block); }
+            finally { VBTCWithdrawalRequest.FailWriteForTests = null; }
+            Globals.LastBlock = block;
+            return (block, applied);
+        }
+
+        /// <summary>
+        /// A rewind whose take-back fails on this node's storage is not applied (nothing is taken back), and blocks are
+        /// held until the state is rebuilt: a rewind taken back half-way is state no other node has. A fault in what the
+        /// rewind says fails the block too, as before, without holding blocks for a rebuild of a store it did not touch.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task ARewindThatFailsPartWay_IsNotApplied_AndALocalFaultHoldsBlocksUntilTheStateIsRebuilt(bool localFault)
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var deposit = Pay(vault.Script, 40_000);
+            var at = await MineAndReport(deposit);
+            var branch = _btc.ForkAfter(at - 1);
+            branch.MineEmpty((int)(_btc.Tip - (at - 1)) + 2);
+            var rewind = RewindTo(branch, at - 1);
+            var (ok, why) = await Verify(rewind, Tip + 1);
+            Assert.True(ok, why);
+            StateTreiStatusService.SetSynced(Tip);
+
+            var block = new VerifiedXCore.Models.Block { Height = Tip + 1, Hash = $"b{Tip + 1}", StateRoot = "root", Timestamp = TimeUtil.GetTime(), Transactions = new List<VfxTx> { rewind } };
+            BtcWithdrawals.RewindStepForTests = _ => throw (localFault ? new System.IO.IOException("disk") : new FormatException("data"));
+            bool applied;
+            try { applied = await StateData.UpdateTreis(block); }
+            finally { BtcWithdrawals.RewindStepForTests = null; }
+            try
+            {
+                Assert.False(applied);
+                Assert.Equal(at, Meta.EventsThroughHeight);                      // nothing was taken back
+                Assert.Equal(VaultCoinStatus.Unspent, Coin(deposit, 0).Status);
+                Assert.Equal(localFault, VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+                Assert.Equal(!localFault, StateTreiStatusService.IsSynced());
+            }
+            finally { VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests(); }
+        }
+
+        /// <summary>
+        /// End to end on a watched vault: a request's escrow debit is written and then the write of its row is lost on
+        /// this node. The block is not applied and blocks are held; the ledger and the store disagree (the debit is there,
+        /// the request is not), and a rebuild of the store's rows alone would not mend that. A full state rebuild replays
+        /// the stored chain: the row is back, the ledger holds the debit exactly once, and the hold lifts.
+        /// </summary>
+        [Fact]
+        public async Task ARequestWhoseRowWriteWasLost_IsRepairedByAStateRebuild_WithRowAndLedgerAgreeing()
+        {
+            var vault = await StoredChainWithAFundedVault();
+            var request = await ValidRequest(vault.Uid, 0.0003M);
+            var (block, applied) = await ApplyLosingTheRequestRow(request);
+            try
+            {
+                Assert.False(applied);
+                Assert.True(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+                Assert.False(StateTreiStatusService.IsSynced());
+                Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash(request.Hash, vault.Uid));
+                Assert.Equal(1, EscrowDebits(vault.Uid, _holder.Address, 0.0003M));   // the ledger moved, the store did not
+
+                BlockRollbackUtility.StateWipedForTests = () =>
+                {
+                    SeedAccounts();                                                 // balances no block of this test creates
+                    StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = _holder.Address, Balance = 100M, Nonce = 0 });
+                };
+                try { Assert.True(await BlockRollbackUtility.ResetTreis()); }
+                finally { BlockRollbackUtility.StateWipedForTests = null; }
+
+                var row = VBTCWithdrawalRequest.GetByTransactionHash(request.Hash, vault.Uid);
+                Assert.NotNull(row);
+                Assert.Equal(0.0003M, row!.Amount);
+                Assert.Equal(VBTCWithdrawalStatus.Requested, row.Status);
+                Assert.Equal(block.Height, row.RequestBlockHeight);
+                Assert.Equal(1, EscrowDebits(vault.Uid, _holder.Address, 0.0003M));   // once: the wipe took the first, the replay wrote it again
+                Assert.NotNull(BtcAttestStore.Withdrawal(BtcWithdrawals.RefOf(request.Hash, vault.Uid)));
+                Assert.Equal(0.0002M, await Spendable(vault.Uid, _holder));            // 0.0005 held - 0.0003 in escrow
+                Assert.False(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+                Assert.True(StateTreiStatusService.IsSynced());
+            }
+            finally { VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests(); }
+        }
+
+        /// <summary>
+        /// The same loss, mended at a restart by a snapshot restore: the slot taken before the fault (none is taken after
+        /// it) brings back the store and the ledger as one, the stored block is replayed on them, and row and ledger
+        /// agree - the request's row with its one escrow debit. The hold lifts.
+        /// </summary>
+        [Fact]
+        public async Task ARequestWhoseRowWriteWasLost_IsRepairedByASnapshotRestore_WithRowAndLedgerAgreeing()
+        {
+            var vault = await StoredChainWithAFundedVault();
+            var slotHeight = Tip;
+            await StateSnapshotService.UpdateCycleAsync(slotHeight, Globals.LastBlock.Hash);
+            Assert.Equal(slotHeight, StateSnapshotService.PickVerifiedSlotForRestore(slotHeight + 1)?.Height);
+
+            var request = await ValidRequest(vault.Uid, 0.0003M);
+            var (block, applied) = await ApplyLosingTheRequestRow(request);
+            try
+            {
+                Assert.False(applied);
+                Assert.True(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+                Assert.Equal(1, EscrowDebits(vault.Uid, _holder.Address, 0.0003M));
+                // No slot is taken while the store is marked: the one to restore from predates the fault.
+                await StateSnapshotService.UpdateCycleAsync(block.Height, block.Hash);
+                Assert.Equal(slotHeight, StateSnapshotService.PickVerifiedSlotForRestore(block.Height)?.Height);
+
+                Assert.True(await SnapshotRestoreUtility.TryRestoreAsync(block.Height));
+
+                var row = VBTCWithdrawalRequest.GetByTransactionHash(request.Hash, vault.Uid);
+                Assert.NotNull(row);
+                Assert.Equal(0.0003M, row!.Amount);
+                Assert.Equal(VBTCWithdrawalStatus.Requested, row.Status);
+                Assert.Equal(1, EscrowDebits(vault.Uid, _holder.Address, 0.0003M));
+                Assert.NotNull(BtcAttestStore.Withdrawal(BtcWithdrawals.RefOf(request.Hash, vault.Uid)));
+                Assert.Equal(0.0002M, await Spendable(vault.Uid, _holder));
+                Assert.False(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+                Assert.True(StateTreiStatusService.IsSynced());
+            }
+            finally { VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests(); }
+        }
+
         // ── Deposits ────────────────────────────────────────────────────────────────────────────────────────
 
         [Fact]
@@ -190,6 +348,99 @@ namespace VerifiedXCore.Tests
         }
 
         // ── Completions ─────────────────────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// C-202: a vault created in a block is registered for watching as the block is applied. A decompile that failed
+        /// for a reason of this node (its disk: the interpreter's submissions folder, raced by two decompiles at once) was
+        /// answered "not a vault", so the vault stayed unwatched on this node alone and the block counted as applied. Such a
+        /// fault is now passed on: the block is not applied and is flagged. Code that fails on every node is still "not a
+        /// vault", without a flag (round 32: one cheap undecompilable mint must not mark every node's state failed).
+        /// </summary>
+        [Fact]
+        public async Task AVaultWhoseDecompileFailsOnThisNodesDisk_IsNotLeftUnwatched_TheBlockIsFlagged()
+        {
+            await Start();
+            var uid = VerifiedXCore.Bitcoin.FROST.FrostDkgAttestation.NewContractUid();
+            var body = VbtcTestContracts.VaultContractData(uid, Minter.Address, NewTaprootAddress());
+            var create = new VfxTx
+            {
+                Timestamp = TimeUtil.GetTime(), FromAddress = Minter.Address, ToAddress = Minter.Address, Amount = 0M, Fee = 0M, Nonce = 0,
+                TransactionType = TransactionType.VBTC_V2_CONTRACT_CREATE,
+                Data = JsonConvert.SerializeObject(new[] { new { Function = "Mint()", ContractUID = uid, Data = body, MD5List = "NA" } }),
+            };
+            create.Build();
+            var block = new VerifiedXCore.Models.Block { Height = Tip + 1, Hash = $"b{Tip + 1}", StateRoot = "root", Timestamp = TimeUtil.GetTime(), Transactions = new List<VfxTx> { create } };
+            var priorFailedAt = StateData.BlockStartFailedAtHeight;
+            VerifiedXCore.Models.SmartContracts.SmartContractMain.DecompileForTests = text =>
+            {
+                if (text == body) throw new System.Reflection.TargetInvocationException(new UnauthorizedAccessException("Access to the path 'Submissions' is denied."));
+            };
+            try
+            {
+                Assert.False(await StateData.UpdateTreis(block));
+                Assert.Equal(block.Height, StateData.BlockStartFailedAtHeight);
+                Assert.Null(BtcAttestStore.ScriptRowForVault(uid));
+
+                // The same fault answered by the code itself (it fails on every node) is "not a vault", and nothing throws.
+                VerifiedXCore.Models.SmartContracts.SmartContractMain.DecompileForTests = text => { if (text == body) throw new FormatException("not base64"); };
+                Assert.False(VBTCService.IsVbtcV2Contract(new SmartContractStateTrei { SmartContractUID = uid + "x", ContractData = body }));
+            }
+            finally
+            {
+                VerifiedXCore.Models.SmartContracts.SmartContractMain.DecompileForTests = null;
+                StateData.BlockStartFailedAtHeight = priorFailedAt;
+                VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests();
+            }
+            Assert.True(VBTCService.IsVbtcV2Contract(new SmartContractStateTrei { SmartContractUID = uid + "y", ContractData = body }));   // decompiles once the disk is free
+        }
+
+        /// <summary>
+        /// C-187: a watched withdrawal's request row is gone only by a fault of this node's store, and Settle / Unsettle
+        /// went on without it: the attested row was settled (or reopened) while the request row the owner's balance adds
+        /// back was not, so this node alone judged the owner's debits wrongly. Either is now a storage fault: the block is
+        /// not applied, and blocks are held until the state is rebuilt.
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task ASettlementOrRewindWhoseRequestRowIsGone_IsNotApplied_AndHoldsBlocks(bool settling)
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var deposit = Pay(vault.Script, 150_000);
+            await MineAndReport(deposit);
+            var request = await Request(vault.Uid, 0.001M);
+            var paying = BtcTx.Parse(Assert.Single(Row(request, vault.Uid).Pins).TxHex, Network.Main);
+
+            VfxTx next;
+            if (settling)
+            {
+                var height = _btc.Mine(paying);
+                _btc.MineEmpty(Depth);
+                next = Signed(Assert.Single(BtcBlockScanner.BuildForward(_btc.Block(height), height, _btc.HeaderHexes(Meta.TipHeight + 1, height + Depth), BtcAttestRules.EpochOf(Tip + 1))));
+            }
+            else
+            {
+                var at = await MineAndReport(paying);
+                Assert.Equal(VaultWithdrawalState.Settled, Row(request, vault.Uid).State);
+                var branch = _btc.ForkAfter(at - 1);
+                branch.MineEmpty((int)(_btc.Tip - (at - 1)) + 2);
+                next = RewindTo(branch, at - 1);
+            }
+            var (ok, why) = await Verify(next, Tip + 1);
+            Assert.True(ok, why);                                                    // a healthy node takes it
+
+            VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()!.DeleteMany(x => x.TransactionHash == request.Hash);
+            StateTreiStatusService.SetSynced(Tip);
+            var block = new VerifiedXCore.Models.Block { Height = Tip + 1, Hash = $"b{Tip + 1}", StateRoot = "root", Timestamp = TimeUtil.GetTime(), Transactions = new List<VfxTx> { next } };
+            try
+            {
+                Assert.False(await StateData.UpdateTreis(block));
+                Assert.True(VBTCWithdrawalStoreRebuildService.HoldsBlocks());
+                Assert.False(StateTreiStatusService.IsSynced());
+            }
+            finally { VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests(); }
+        }
 
         [Fact]
         public async Task ACompletedWithdrawal_IsPinnedAgain_AndCompletedAgainByTheSameTransaction()
@@ -484,6 +735,25 @@ namespace VerifiedXCore.Tests
             await Apply(Tip + 1, good);
             Assert.Equal(coinsBefore.Replace($"\"LastModifiedHeight\":{Tip}", ""), JsonConvert.SerializeObject(BtcAttestStore.CoinsOf(vault.Uid)).Replace($"\"LastModifiedHeight\":{Tip}", ""));
             Assert.Equal(at - 1, Meta.EventsThroughHeight);
+        }
+
+        /// <summary>#171: a coin frozen by a spend too large to carry comes back when Bitcoin drops the block of that spend.</summary>
+        [Fact]
+        public async Task ARewindBelowAFreeze_UnfreezesTheCoin_AndItCountsAgain()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var a = Pay(vault.Script, 50_000);
+            await MineAndReport(a);
+            var other = Elsewhere();
+            var at = await MineAndReport(Pay(new[] { new OutPoint(a.GetHash(), 0) }, Enumerable.Range(0, 3_300).Select(_ => (other, 1_000L)).ToArray()));
+            Assert.Equal(VaultCoinStatus.Frozen, Coin(a, 0).Status);
+            Assert.Equal(0, BtcAttestStore.Total(vault.Uid).HeldSats);
+
+            await Reorganise(at - 1);
+            Assert.Equal(VaultCoinStatus.Unspent, Coin(a, 0).Status);
+            Assert.Null(Coin(a, 0).SpentByTxid);
+            Assert.Equal(50_000, BtcAttestStore.Total(vault.Uid).HeldSats);
         }
 
         [Fact]

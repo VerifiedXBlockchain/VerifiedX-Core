@@ -294,6 +294,12 @@ namespace VerifiedXCore.Engines
                                 var listing = listings?.Where(x => x.Id == buyNow.ListingId).FirstOrDefault();
                                 if (listing != null)
                                 {
+                                    if (ListingClosed(listing, buyNow: true))
+                                    {
+                                        AuctionLogUtility.Log($"Buy Now Rejected - the listing has closed. Listing: {buyNow.ListingId}", "AuctionEngine.ProcessBuyNowQueue()");
+                                        DequeueBuyNowBid(buyNow, BidStatus.Rejected);
+                                        continue;
+                                    }
                                     if(listing.BuyNowPrice == null)
                                     {
                                         AuctionLogUtility.Log($"Buy Now Rejected - Buy Now Price was Null. Listing: {buyNow.ListingId}", "AuctionEngine.ProcessBuyNowQueue()");
@@ -400,6 +406,15 @@ namespace VerifiedXCore.Engines
                 }
             }
         }
+        /// <summary>
+        /// Whether a listing takes no more bids: cancelled, ended, or past its end time. Auctions are closed by the auctioneer
+        /// every 10 seconds, and the bid queue accepted bids for a listing past its end until then. A buy-now on a
+        /// buy-now-only listing is not judged by its end time.
+        /// </summary>
+        internal static bool ListingClosed(Listing listing, bool buyNow = false) =>
+            listing.IsCancelled || listing.IsAuctionEnded
+            || ((!buyNow || !listing.IsBuyNowOnly) && listing.EndDate <= DateTime.UtcNow);
+
         public static void ProcessBidQueue()
         {
             var bidQueueList = Globals.BidQueue.ToList();
@@ -425,6 +440,12 @@ namespace VerifiedXCore.Engines
                                         var listing = listings?.Where(x => x.Id == bid.ListingId).FirstOrDefault();
                                         if(listing != null)
                                         {
+                                            if (ListingClosed(listing))
+                                            {
+                                                AuctionLogUtility.Log($"Bid Rejected - the listing has closed. Listing: {bid.ListingId}", "AuctionEngine.ProcessBidQueue()");
+                                                DequeueBid(bid, BidStatus.Rejected);
+                                                continue;
+                                            }
                                             // VX-10 (defence in depth; the UDP handler checks first): the bidder must have
                                             // signed this listing's purchase key and the price being committed.
                                             if (DST.DstBidAuthorization.Validate(bid, listing, isBuyNow: false, out var committedBidPrice) != null)

@@ -38,6 +38,28 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         /// <summary>Timestamp when this backup was received</summary>
         public long StoredTimestamp { get; set; }
 
+        /// <summary>When the owner was first found missing from the active validators (unix seconds); 0 while it is there.</summary>
+        public long MissingSince { get; set; }
+
+        /// <summary>
+        /// Filed under an id that named no contract on chain when it was stored: a ceremony's session id before its vault
+        /// exists, or an id nobody's vault has. Such backups count toward <see cref="MaxUnboundBackupsPerOwner"/>.
+        /// </summary>
+        public bool Unbound { get; set; }
+
+        /// <summary>
+        /// Most unbound backups one owner keeps on this node; storing another removes the owner's oldest. Each contract on
+        /// chain holds one backup per owner, but ids that name no contract were unlimited: one registered validator could
+        /// fill every peer's store with made-up ones (#274, C-162). An owner's ceremonies under way are far fewer.
+        /// </summary>
+        public const int MaxUnboundBackupsPerOwner = 16;
+
+        /// <summary>
+        /// How long an owner may be absent from the active set before its backups are deleted. A backup exists for the
+        /// owner whose machine is gone; deleting it after a day's outage lost the share for good.
+        /// </summary>
+        public const long StaleGraceSeconds = 30L * 24 * 60 * 60;
+
         #region Database Methods
 
         private static ILiteCollection<FrostPeerKeyBackup> GetDb()
@@ -82,6 +104,40 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
             {
                 ErrorLogUtility.LogError($"Failed to save FROST peer backup: {ex.Message}", "FrostPeerKeyBackup.SaveBackup");
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// After an unbound backup is stored: the owner's unbound backups beyond <see cref="MaxUnboundBackupsPerOwner"/>
+        /// are removed, oldest first, except one whose id has since come to name a contract (<paramref name="namesAContract"/>).
+        /// Returns how many were removed.
+        /// </summary>
+        public static int TrimUnbound(string ownerAddress, Func<string, bool> namesAContract)
+        {
+            try
+            {
+                var db = GetDb();
+                var unbound = db.Find(x => x.OwnerAddress == ownerAddress && x.Unbound)
+                    .OrderByDescending(x => x.StoredTimestamp).ThenByDescending(x => x.Id).ToList();
+                var removed = 0;
+                foreach (var old in unbound.Skip(MaxUnboundBackupsPerOwner))
+                {
+                    if (namesAContract(old.SmartContractUID))
+                    {
+                        old.Unbound = false;
+                        db.UpdateSafe(old);
+                        continue;
+                    }
+                    if (db.Delete(old.Id)) removed++;
+                }
+                if (removed > 0)
+                    LogUtility.Log($"[FROST Backup] Removed {removed} oldest backup(s) of {ownerAddress} filed under ids that name no contract (cap {MaxUnboundBackupsPerOwner}).", "FrostPeerKeyBackup.TrimUnbound");
+                return removed;
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Trimming unbound FROST peer backups of {ownerAddress} failed: {ex.Message}", "FrostPeerKeyBackup.TrimUnbound");
+                return 0;
             }
         }
 
@@ -162,13 +218,15 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         }
 
         /// <summary>
-        /// Remove backups for validators no longer in the active set.
-        /// Called periodically to prevent unbounded storage growth.
+        /// Remove backups whose owner has been absent from the active set for <see cref="StaleGraceSeconds"/>. The first
+        /// sweep that misses an owner stamps <see cref="MissingSince"/> on its backups, a sweep that finds it again clears
+        /// the stamp, and only a stamp older than the grace deletes. Called periodically to bound storage.
         /// </summary>
-        public static int DeleteStaleBackups(List<string> activeValidatorAddresses)
+        public static int DeleteStaleBackups(List<string> activeValidatorAddresses, long? nowUnix = null)
         {
             try
             {
+                var now = nowUnix ?? TimeUtil.GetTime();
                 var db = GetDb();
                 var activeSet = new HashSet<string>(activeValidatorAddresses);
                 var allBackups = db.FindAll().ToList();
@@ -176,7 +234,20 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
 
                 foreach (var backup in allBackups)
                 {
-                    if (!activeSet.Contains(backup.OwnerAddress))
+                    if (activeSet.Contains(backup.OwnerAddress))
+                    {
+                        if (backup.MissingSince != 0)
+                        {
+                            backup.MissingSince = 0;
+                            db.UpdateSafe(backup);
+                        }
+                    }
+                    else if (backup.MissingSince == 0)
+                    {
+                        backup.MissingSince = now;
+                        db.UpdateSafe(backup);
+                    }
+                    else if (now - backup.MissingSince > StaleGraceSeconds)
                     {
                         db.DeleteSafe(backup.Id);
                         staleCount++;
@@ -185,7 +256,7 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
 
                 if (staleCount > 0)
                 {
-                    LogUtility.Log($"[FROST Backup] Cleaned up {staleCount} stale peer backups",
+                    LogUtility.Log($"[FROST Backup] Cleaned up {staleCount} peer backups whose owner has been inactive for over {StaleGraceSeconds / 86400} days",
                         "FrostPeerKeyBackup.DeleteStaleBackups");
                 }
 

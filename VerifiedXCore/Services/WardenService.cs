@@ -8,6 +8,30 @@ namespace VerifiedXCore.Services
 {
     public class WardenService
     {
+        /// <summary>
+        /// The child node's start info. Each argument is passed as given (ArgumentList): joined with spaces, an apitoken= or
+        /// encpass= value containing a space reached the child as two arguments.
+        /// </summary>
+        internal static ProcessStartInfo ChildStartInfo(string fileName, IEnumerable<string> args, string? workingDirectory)
+        {
+            var info = new ProcessStartInfo
+            {
+                FileName = fileName,
+                UseShellExecute = false,
+                RedirectStandardOutput = false,
+                RedirectStandardError = false,
+                CreateNoWindow = false,
+            };
+            if (workingDirectory != null) info.WorkingDirectory = workingDirectory;
+            foreach (var a in args) info.ArgumentList.Add(a);
+            return info;
+        }
+
+        /// <summary>The arguments as they may be logged: credential values replaced.</summary>
+        internal static IEnumerable<string> RedactCredentials(IEnumerable<string> args) =>
+            args.Select(a => StartArgs.TryGetValue(a, "apitoken", out _) ? "apitoken=***"
+                : StartArgs.TryGetValue(a, "encpass", out _) ? "encpass=***" : a);
+
         private static Process? _childProcess;
         private static HttpClient? _httpClient;
         private static bool _isRunning = true;
@@ -27,89 +51,18 @@ namespace VerifiedXCore.Services
                 argsList.Add("logmemory");
             }
 
-            if(Globals.IsTestNet)
-            {
-                //Globals.IsCustomTestNet = true; //devnet only
-                Globals.V4Height = Globals.IsTestNet ? 1 : 3_074_181;//change for mainnet.
-                Globals.V2ValHeight = Globals.IsTestNet ? 0 : 3_074_180;//change for mainnet.
-                Globals.SpecialBlockHeight = Globals.IsTestNet ? 2000 : 3_074_185;//change for mainnet.
-                Globals.GenesisValidator = Globals.IsTestNet ? "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" : "RBdwbhyqwJCTnoNe1n7vTXPJqi5HKc6NTH";
-                Globals.TXHeightRule5 = Globals.IsTestNet ? 746313 : Globals.TXHeightRule5;
-                Globals.VbtcPrivacyDisableHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-                Globals.V2WithdrawalExpiryFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-                Globals.V2WithdrawalOwnerAddBackFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-                Globals.VbtcLegacyTransferBypassFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-                Globals.V2TransferMultiHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-                Globals.BridgeBurnBindingHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-                Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 7_296_200L;
-                Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 7_296_200L;
-                Globals.VbtcWithdrawalConcurrencyHeight = Globals.VbtcWithdrawalConcurrencyHeight; // TODO testnet height (above the tip at deploy)
-                Globals.VbtcCancellationVoteRulesHeight = Globals.VbtcCancellationVoteRulesHeight; // TODO testnet height (same value as Program.cs)
-                Globals.PrivateTxSupplyRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PrivateTxSupplyRulesHeight; // fund-loss audit (Oct 2026)
-                Globals.AddressFreezeHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.AddressFreezeHeight;
-                Globals.SaleCompleteContractRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.SaleCompleteContractRulesHeight;
-                Globals.ReserveRecoverRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ReserveRecoverRulesHeight;
-                Globals.VaultRewriteRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.VaultRewriteRulesHeight;
-                Globals.VaultBurnRuleHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.VaultBurnRuleHeight;
-                Globals.PathAuditRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PathAuditRulesHeight;
-                Globals.ValidatorBondHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight - 1 : Globals.ValidatorBondHeight;
-                Globals.ValidatorBondGrandfatherHeight = Globals.IsTestNet ? Globals.BitcoinAttestationObserveTestnetHeight : Globals.ValidatorBondGrandfatherHeight;
-                Globals.SaleStartBidRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.SaleStartBidRulesHeight;
-                Globals.WithdrawalUniqueIdRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.WithdrawalUniqueIdRulesHeight;
-                Globals.RoyaltyRewriteRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.RoyaltyRewriteRulesHeight;
-                Globals.ReserveTokenRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ReserveTokenRulesHeight;
-                Globals.ForgedVfxBurnHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ForgedVfxBurnHeight;
-                if (Globals.IsTestNet) Globals.ForgedVfxBurns.Clear(); // the forged VFX exists on mainnet only
-                Globals.PrivateTxProofRulesHeight = Globals.IsTestNet ? Globals.PrivateTxProofRulesHeight /* TODO testnet stage-2 height */ : Globals.PrivateTxProofRulesHeight;
-                if (Globals.IsTestNet) Globals.ShieldedSupplyCorrections.Clear(); // the testnet pool was never forged against
-                // Bitcoin attestation (plan 8.4): observe from the tip of 2026-10-13, record with the fund-loss rules, enforce three days later.
-                Globals.BitcoinAttestationObserveHeight = Globals.IsTestNet ? Globals.BitcoinAttestationObserveTestnetHeight : Globals.BitcoinAttestationObserveHeight;
-                Globals.BitcoinAttestationRecordHeight = Globals.IsTestNet ? Globals.BitcoinAttestationRecordTestnetHeight : Globals.BitcoinAttestationRecordHeight;
-                Globals.BitcoinAttestationHeight = Globals.IsTestNet ? Globals.BitcoinAttestationTestnetHeight : Globals.BitcoinAttestationHeight;
-            }
-            else
-            {
-                Globals.V4Height = Globals.IsTestNet ? 1 : 3_074_181;//change for mainnet.
-                Globals.V2ValHeight = Globals.IsTestNet ? 0 : 3_074_180;//change for mainnet.
-                Globals.SpecialBlockHeight = Globals.IsTestNet ? 2000 : 3_074_185;//change for mainnet.
-                Globals.GenesisValidator = Globals.IsTestNet ? "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" : "RBdwbhyqwJCTnoNe1n7vTXPJqi5HKc6NTH";
-                Globals.TXHeightRule5 = Globals.IsTestNet ? 746313 : Globals.TXHeightRule5;
-                Globals.VbtcPrivacyDisableHeight = Globals.IsTestNet ? 1L : 7_281_000L;
-                Globals.V2WithdrawalExpiryFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-                Globals.V2WithdrawalOwnerAddBackFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-                Globals.VbtcLegacyTransferBypassFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-                Globals.V2TransferMultiHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-                Globals.BridgeBurnBindingHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-                Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 7_296_200L;
-                Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 7_296_200L;
-                Globals.VbtcWithdrawalConcurrencyHeight = Globals.VbtcWithdrawalConcurrencyHeight; // TODO mainnet height (at or after WithdrawalEscrowHeight)
-                Globals.VbtcCancellationVoteRulesHeight = Globals.VbtcCancellationVoteRulesHeight; // TODO mainnet height (same value as Program.cs)
-                Globals.PrivateTxSupplyRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PrivateTxSupplyRulesHeight; // fund-loss audit (Oct 2026)
-                Globals.AddressFreezeHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.AddressFreezeHeight;
-                Globals.SaleCompleteContractRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.SaleCompleteContractRulesHeight;
-                Globals.ReserveRecoverRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ReserveRecoverRulesHeight;
-                Globals.VaultRewriteRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.VaultRewriteRulesHeight;
-                Globals.VaultBurnRuleHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.VaultBurnRuleHeight;
-                Globals.PathAuditRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PathAuditRulesHeight;
-                Globals.ValidatorBondHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight - 1 : Globals.ValidatorBondHeight;
-                Globals.ValidatorBondGrandfatherHeight = Globals.IsTestNet ? Globals.BitcoinAttestationObserveTestnetHeight : Globals.ValidatorBondGrandfatherHeight;
-                Globals.SaleStartBidRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.SaleStartBidRulesHeight;
-                Globals.WithdrawalUniqueIdRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.WithdrawalUniqueIdRulesHeight;
-                Globals.RoyaltyRewriteRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.RoyaltyRewriteRulesHeight;
-                Globals.ReserveTokenRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ReserveTokenRulesHeight;
-                Globals.ForgedVfxBurnHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ForgedVfxBurnHeight;
-                if (Globals.IsTestNet) Globals.ForgedVfxBurns.Clear(); // the forged VFX exists on mainnet only
-                Globals.PrivateTxProofRulesHeight = Globals.IsTestNet ? Globals.PrivateTxProofRulesHeight /* TODO testnet stage-2 height */ : Globals.PrivateTxProofRulesHeight;
-                if (Globals.IsTestNet) Globals.ShieldedSupplyCorrections.Clear(); // the testnet pool was never forged against
-                // Bitcoin attestation (plan 8.4): observe from the tip of 2026-10-13, record with the fund-loss rules, enforce three days later.
-                Globals.BitcoinAttestationObserveHeight = Globals.IsTestNet ? Globals.BitcoinAttestationObserveTestnetHeight : Globals.BitcoinAttestationObserveHeight;
-                Globals.BitcoinAttestationRecordHeight = Globals.IsTestNet ? Globals.BitcoinAttestationRecordTestnetHeight : Globals.BitcoinAttestationRecordHeight;
-                Globals.BitcoinAttestationHeight = Globals.IsTestNet ? Globals.BitcoinAttestationTestnetHeight : Globals.BitcoinAttestationHeight;
-            }
+            Globals.ApplyNetworkHeights(); // the same heights Program.cs sets; the child process sets its own at startup
 
             Config.Config.EstablishConfigFile();
             Config.Config.EstablishABLFile();
             var config = Config.Config.ReadConfigFile();
+            var configMismatch = Config.Config.TestnetConfigMismatch(config);
+            if (configMismatch != null)
+            {
+                Console.WriteLine(configMismatch);
+                ErrorLogUtility.LogError(configMismatch, "Config.TestnetConfigMismatch()");
+                Environment.Exit(1);
+            }
             Config.Config.ProcessConfig(config);
             Config.Config.ProcessABL();
 
@@ -209,18 +162,9 @@ namespace VerifiedXCore.Services
                     var allArgs = new List<string> { dllPath };
                     allArgs.AddRange(args);
                     
-                    startInfo = new ProcessStartInfo
-                    {
-                        FileName = "dotnet",
-                        Arguments = string.Join(" ", allArgs),
-                        UseShellExecute = false,
-                        RedirectStandardOutput = false,
-                        RedirectStandardError = false,
-                        CreateNoWindow = false,
-                        WorkingDirectory = exeLocation
-                    };
-                    
-                    LogUtility.Log($"Starting child process on Linux: dotnet {string.Join(" ", allArgs)}", "WardenService.StartChildProcess()");
+                    startInfo = ChildStartInfo("dotnet", allArgs, exeLocation);
+
+                    LogUtility.Log($"Starting child process on Linux: dotnet {string.Join(" ", RedactCredentials(allArgs))}", "WardenService.StartChildProcess()");
                 }
                 else
                 {
@@ -232,17 +176,9 @@ namespace VerifiedXCore.Services
                         return;
                     }
 
-                    startInfo = new ProcessStartInfo
-                    {
-                        FileName = executablePath,
-                        Arguments = string.Join(" ", args),
-                        UseShellExecute = false,
-                        RedirectStandardOutput = false,
-                        RedirectStandardError = false,
-                        CreateNoWindow = false
-                    };
+                    startInfo = ChildStartInfo(executablePath, args, null);
                     
-                    LogUtility.Log($"Starting child process on Windows: {executablePath} {string.Join(" ", args)}", "WardenService.StartChildProcess()");
+                    LogUtility.Log($"Starting child process on Windows: {executablePath} {string.Join(" ", RedactCredentials(args))}", "WardenService.StartChildProcess()");
                 }
 
                 _childProcess = new Process { StartInfo = startInfo };

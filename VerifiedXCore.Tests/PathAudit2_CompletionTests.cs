@@ -136,6 +136,109 @@ namespace VerifiedXCore.Tests
             Globals.LastBlock = block;
         }
 
+        /// <summary>
+        /// C-062: a completion sent by a validator (not the requester) was judged against the validator set scanned from
+        /// this node's own tip, and that set is empty while the node is not synced: a node downloading the block refused a
+        /// completion every synced node had accepted, and stopped there. The sender is judged against the set as it stood
+        /// before the block (VBTCValidatorRegistry.GetValidatorAt), so every node gives the same verdict for the block,
+        /// synced or not, and a validator registered in the block itself does not count yet.
+        /// </summary>
+        [Fact]
+        public async Task AValidatorsCompletion_IsJudgedByTheSetBeforeTheBlock_SyncedOrNot()
+        {
+            const string Refused = "or an active vBTC validator can complete this withdrawal";
+            Assert.True(VBTCWithdrawalRequest.Save(new VBTCWithdrawalRequest
+            {
+                RequestorAddress = _requester.Address, SmartContractUID = _vault, Amount = 0.25M, BTCDestination = "tb1q066af78la3rqmnchc396keujllva6turs52749",
+                FeeRate = 10, Timestamp = 1_755_000_150, TransactionHash = _requestHash, Status = VBTCWithdrawalStatus.Requested, RequestBlockHeight = 150,
+            }));
+            var validator = NewKey();
+            var late = NewKey();
+            foreach (var who in new[] { validator, late })
+                StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = who.Address, Balance = 10M, Nonce = 0 });
+            void Register(string address, long height) => BlockchainData.GetBlocks().InsertSafe(new Block
+            {
+                Height = height, Hash = $"h{height}-{Guid.NewGuid():N}",
+                Transactions = new List<Transaction>
+                {
+                    new Transaction
+                    {
+                        TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = address, ToAddress = address, Hash = "r" + height,
+                        Data = JsonConvert.SerializeObject(new { ValidatorAddress = address, IPAddress = "10.0.0.1", FrostPublicKey = "pk-" + address, IsS3C = false }),
+                    },
+                },
+            });
+            Register(validator.Address, 250);
+            Register(late.Address, 260);
+
+            var priorSynced = Globals.IsChainSynced;
+            try
+            {
+                foreach (var synced in new[] { false, true })
+                {
+                    Globals.IsChainSynced = synced;
+                    var (_, byValidator) = await VerifyInBlock(Complete(validator, _vault, new string('c', 64)), 260);
+                    Assert.DoesNotContain(Refused, byValidator);                         // a validator before the block
+
+                    var (anyoneOk, byAnyone) = await VerifyInBlock(Complete(_anyone, _vault, new string('c', 64)), 260);
+                    Assert.False(anyoneOk);
+                    Assert.Contains(Refused, byAnyone);
+
+                    var (lateOk, byLate) = await VerifyInBlock(Complete(late, _vault, new string('c', 64)), 260);
+                    Assert.False(lateOk);
+                    Assert.Contains(Refused, byLate);                                   // registered in the block itself
+                }
+            }
+            finally { Globals.IsChainSynced = priorSynced; }
+        }
+
+        /// <summary>
+        /// C-244: validation let an active validator complete a withdrawal it did not request, while apply and the store
+        /// rebuild honour only the requester's completion: the validator's was mined and changed nothing. From the path-audit
+        /// rules only the requester completes, in a block and at admission; below them history is judged as before, and the
+        /// requester's own completion still completes the row.
+        /// </summary>
+        [Fact]
+        public async Task FromThePathAuditRules_OnlyTheRequesterCompletesAWithdrawal()
+        {
+            Assert.True(VBTCWithdrawalRequest.Save(new VBTCWithdrawalRequest
+            {
+                RequestorAddress = _requester.Address, SmartContractUID = _vault, Amount = 0.25M, BTCDestination = "tb1q066af78la3rqmnchc396keujllva6turs52749",
+                FeeRate = 10, Timestamp = 1_755_000_150, TransactionHash = _requestHash, Status = VBTCWithdrawalStatus.Requested, RequestBlockHeight = 150,
+            }));
+            var validator = NewKey();
+            StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = validator.Address, Balance = 10M, Nonce = 0 });
+            BlockchainData.GetBlocks().InsertSafe(new Block
+            {
+                Height = 250, Hash = $"h250-{Guid.NewGuid():N}",
+                Transactions = new List<Transaction>
+                {
+                    new Transaction
+                    {
+                        TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = validator.Address, ToAddress = validator.Address, Hash = "r250",
+                        Data = JsonConvert.SerializeObject(new { ValidatorAddress = validator.Address, IPAddress = "10.0.0.1", FrostPublicKey = "pk-" + validator.Address, IsS3C = false }),
+                    },
+                },
+            });
+            const string Requester = "Only the original requester";
+            var byValidator = Complete(validator, _vault, new string('c', 64));
+
+            var (atRule, atRuleWhy) = await VerifyInBlock(byValidator, Rule + 10);
+            Assert.False(atRule);
+            Assert.Contains("can complete this withdrawal", atRuleWhy);
+            Assert.DoesNotContain("or an active vBTC validator", atRuleWhy);
+            Globals.LastBlock = new Block { Height = Rule + 9 };
+            var (admitted, admittedWhy) = await TransactionValidatorService.VerifyTX(Complete(validator, _vault, new string('c', 64)));
+            Assert.False(admitted);
+            Assert.Contains(Requester, admittedWhy);
+
+            var (_, belowWhy) = await VerifyInBlock(Complete(validator, _vault, new string('c', 64)), Rule - 1);
+            Assert.DoesNotContain(Requester, belowWhy);                                    // history: a validator passed this check
+
+            var (_, ownWhy) = await VerifyInBlock(Complete(_requester, _vault, new string('d', 64)), Rule + 10);
+            Assert.DoesNotContain(Requester, ownWhy);                                      // the requester still completes
+        }
+
         [Theory]
         [InlineData(VBTCWithdrawalStatus.Completed)]
         [InlineData(VBTCWithdrawalStatus.Cancelled)]
@@ -175,17 +278,28 @@ namespace VerifiedXCore.Tests
             Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash(_requestHash, _other));
         }
 
+        /// <summary>
+        /// Round 37: a node whose table lacks the row (a damaged store: the request is on chain) cannot judge a completion as
+        /// the network does, so it refuses it in a block rather than guess, writes nothing, and says so. Once its store is
+        /// healed it accepts the same completion; the recovery never reopens a row that has since ended.
+        /// </summary>
         [Fact]
-        public async Task ANodeWhoseTableLacksTheRow_StillAcceptsTheRealCompletionInABlock_AndRebuildsOnlyWhatIsMissing()
+        public async Task ANodeWhoseTableLacksTheRow_RefusesTheCompletionInABlock_UntilItsStoreIsHealed()
         {
-            // This node's store never got the row (a database copied from elsewhere): the request is on chain.
             Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash(_requestHash, _vault));
             var real = Complete(_requester, _vault, new string('b', 64));
 
             var (ok, why) = await VerifyInBlock(real, Rule);
-            Assert.True(ok, why);
-            // Validation wrote nothing (a block that is then refused must leave no trace); the row is rebuilt at apply.
-            Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash(_requestHash, _vault));
+            Assert.False(ok);
+            Assert.Equal($"No withdrawal request {_requestHash} exists on contract {_vault}.", why);
+            var (okForeign, _) = await VerifyInBlock(Complete(_anyone, _vault, new string('b', 64)), Rule);
+            Assert.False(okForeign);
+            Assert.Null(VBTCWithdrawalRequest.GetByTransactionHash(_requestHash, _vault)); // validation wrote nothing
+
+            // Healed (the row as the chain wrote it), the node judges as every other node does.
+            Assert.NotNull(VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain(_requestHash, Rule, _vault));
+            var (okHealed, whyHealed) = await VerifyInBlock(real, Rule);
+            Assert.True(okHealed, whyHealed);
 
             await Apply(Rule, real);
             Assert.Equal(VBTCWithdrawalStatus.Completed, Row().Status);
@@ -196,6 +310,14 @@ namespace VerifiedXCore.Tests
             Assert.Equal(VBTCWithdrawalStatus.Completed, Row().Status);
             Assert.Null(VBTCWithdrawalStoreRebuildService.TryRecoverRequestRowFromChain(_requestHash, Rule + 5, _other));
             Assert.Equal(VBTCWithdrawalStatus.Completed, Row().Status);
+        }
+
+        /// <summary>A missing-row refusal does not drive the automatic snapshot restore: a snapshot of the same store cannot heal it.</summary>
+        [Fact]
+        public void AMissingRowRefusal_IsNotAStateCorruptionSignal()
+        {
+            Assert.False(BlockValidatorService.IsStateCorruptionSignal(TransactionValidatorService.NoWithdrawalRequestReason(_requestHash, _vault)));
+            Assert.True(BlockValidatorService.IsStateCorruptionSignal("This is a new account with no balance."));
         }
 
         /// <summary>

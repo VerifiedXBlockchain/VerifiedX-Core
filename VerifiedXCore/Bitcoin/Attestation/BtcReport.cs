@@ -24,6 +24,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public const int QuietBlocks = 144;
         public const int MaxEventsPerReport = 2000;
         /// <summary>
+        /// The most vault coins one spend-only event names (about 150,000 characters); more are frozen by later backfill
+        /// reports of the same block.
+        /// </summary>
+        public const int MaxSpendsPerEvent = 2000;
+        /// <summary>
         /// The size cap of a report or rewind transaction. One part must hold the most a single event can need: 500
         /// headers (80,000 characters), the coinbase proof (20,000), one transaction of
         /// <see cref="BtcTxInclusion.MaxTxBytes"/> with its branch (201,000), and the signatures of two thirds of the
@@ -51,6 +56,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// may be fixed on them (plan 5.5).
         /// </summary>
         public static int StuckPinBlocks => StuckPinBlocksOverride ?? 2160;
+
+        /// <summary>
+        /// How deep the spend that voided a bridge exit's part must be buried before the part is fixed again on other coins
+        /// (about a day). Its earlier transaction stays signed: a Bitcoin reorganisation that drops that spend lets it
+        /// confirm, and a transaction on other coins fixed meanwhile would pay the part a second time. Until then a rewind
+        /// that drops the spend makes the earlier transaction the part's payment again.
+        /// </summary>
+        public static int ExitReopenBurialBlocks => ExitReopenBurialBlocksOverride ?? QuietBlocks;
+        /// <summary>Tests only.</summary>
+        internal static int? ExitReopenBurialBlocksOverride;
         /// <summary>Tests only: a shorter wait, so that a run of a few hundred blocks reaches it.</summary>
         internal static int? StuckPinBlocksOverride;
         /// <summary>How often the withdrawals still waiting for coins are tried against coins that have become takeable, in VFX blocks.</summary>
@@ -111,6 +126,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <summary>The transaction without witness data, hex.</summary>
         [JsonProperty(Order = 2)] public string? TxHex { get; set; }
         [JsonProperty(Order = 3)] public List<string>? Branch { get; set; }
+        /// <summary>
+        /// A spend-only event (a transaction larger than <see cref="BtcTxInclusion.MaxTxBytes"/>, too large to carry): its
+        /// id, proven to be in the block by <see cref="Branch"/>. <see cref="TxHex"/> is then null.
+        /// </summary>
+        [JsonProperty(Order = 4)] public string? Txid { get; set; }
+        /// <summary>
+        /// A spend-only event: the recorded vault coins the transaction spends ("txid:vout", ordinal order, each once). Its
+        /// bytes are not carried, so these are the signers' word: the coins are frozen, never spent (#171).
+        /// </summary>
+        [JsonProperty(Order = 5)] public List<string>? Spends { get; set; }
     }
 
     /// <summary>

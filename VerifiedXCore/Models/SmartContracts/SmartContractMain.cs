@@ -530,8 +530,12 @@ namespace VerifiedXCore.Models.SmartContracts
             }
         }
 
+        /// <summary>Tests only: runs as a contract is decompiled (a fault of the decompiler or of this node).</summary>
+        internal static Action<string>? DecompileForTests;
+
         public static SmartContractMain GenerateSmartContractInMemory(string scText)
         {
+            DecompileForTests?.Invoke(scText);
             var byteArrayFromBase64 = scText.FromBase64ToByteArray();
             var decompressedByteArray = SmartContractUtility.Decompress(byteArrayFromBase64);
             var textFromByte = Encoding.Unicode.GetString(decompressedByteArray);

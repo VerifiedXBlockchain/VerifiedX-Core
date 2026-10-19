@@ -169,10 +169,19 @@ namespace VerifiedXCore.Services
                                 // A watched vault whose owner balance fell since the bid (round 30): not paid for automatically.
                                 SCLogUtility.Log($"Incoming Sale_Start for {scUID}: {shrank}", "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                             }
+                            else if (amountSoldFor.HasValue && Bid.HasLocalSentBid(toAddress ?? account.Address, keySign, amountSoldFor.Value, scUID)
+                                && Bid.ContentChangedSinceBid(toAddress ?? account.Address, keySign, scUID) is { } changed)
+                            {
+                                // The asset is not the one bid on (an Update() since the bid): not paid for automatically.
+                                SCLogUtility.Log($"Incoming Sale_Start for {scUID}: {changed}", "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            }
                             else if (amountSoldFor.HasValue && Bid.HasLocalSentBid(toAddress ?? account.Address, keySign, amountSoldFor.Value, scUID))
                             {
                                 //if you have a bid or buy now this should auto start the process.
-                                _ = SmartContractService.CompleteSaleSmartContractTX(scUID, tx.FromAddress, amountSoldFor.Value, keySign);
+                                // Marked first: the bid then pays automatically once; a later Sale_Start under the same
+                                // signature (after a cancel) is left for the owner to complete by hand.
+                                Bid.MarkAutoCompleted(toAddress ?? account.Address, keySign, scUID);
+                                _ = SmartContractService.CompleteSaleSmartContractTX(scUID, tx.FromAddress, amountSoldFor.Value, keySign, expectedBuyer: toAddress ?? account.Address);
                             }
                             else
                             {
@@ -1568,6 +1577,11 @@ namespace VerifiedXCore.Services
                             if (function == "Sale_Complete()" || function == "M_Sale_Complete()")
                             {
                                 var localFromAddress = AccountData.GetSingleAccount(tx.FromAddress);
+                                // This wallet's completion, mined: its bid is used, whatever route the completion took (sent
+                                // from this node, signed elsewhere, or relayed by another node), so a re-minted UID cannot
+                                // have it paid again.
+                                if (localFromAddress != null)
+                                    VerifiedXCore.Models.DST.Bid.MarkUsedByCompletion(tx);
 
                                 var scUID = (string?)jobj["ContractUID"];
                                 if(scUID != null)
@@ -1649,7 +1663,7 @@ namespace VerifiedXCore.Services
                             if (!string.IsNullOrWhiteSpace(name))
                             {
                                 if (!name.Contains(".rbx") && !name.Contains(".vfx"))
-                                    name = Globals.LastBlock.Height < Globals.V4Height ? name + ".rbx" : name + ".vfx";
+                                    name = blockHeight < Globals.V4Height ? name + ".rbx" : name + ".vfx";
                                 await Account.AddAdnrToAccount(tx.FromAddress, name);
                             }
                         }

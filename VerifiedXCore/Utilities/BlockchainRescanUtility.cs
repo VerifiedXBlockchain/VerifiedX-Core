@@ -133,6 +133,8 @@ namespace VerifiedXCore.Utilities
                     {
                         foreach(var tx in fromTxs)
                         {
+                            // A sale completion this account sent uses its bid, as when it was first mined.
+                            VerifiedXCore.Models.DST.Bid.MarkUsedByCompletion(tx);
                             tx.Amount = tx.Amount * -1.0M;
                             tx.Fee = tx.Fee * -1.0M;
                             tx.TransactionStatus = Models.TransactionStatus.Success;

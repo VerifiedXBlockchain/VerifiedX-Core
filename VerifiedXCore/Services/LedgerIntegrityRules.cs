@@ -180,8 +180,12 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static string? VbtcDataKeysAreDistinct(Transaction tx, long height)
         {
-            if (tx?.Data == null || height < Globals.PathAuditRulesHeight) return null;
-            if (!tx.TransactionType.ToString().StartsWith("VBTC_V2_", StringComparison.Ordinal) || VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType)) return null;
+            if (tx?.Data == null || VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType)) return null;
+            // From Globals.VbtcEnvelopeRulesHeight a vBTC transfer sent as a contract call is held to the same rule.
+            if (tx.TransactionType.ToString().StartsWith("VBTC_V2_", StringComparison.Ordinal)
+                    ? height < Globals.PathAuditRulesHeight
+                    : height < Globals.VbtcEnvelopeRulesHeight || DispatchedCall(tx.Data).Function is not ("TransferVBTCV2()" or "TransferVBTCMultiV2()"))
+                return null;
             JToken root;
             try { root = JToken.Parse(tx.Data); }
             catch { return null; } // not JSON: the type's own rules judge it
@@ -251,6 +255,13 @@ namespace VerifiedXCore.Services
                     fields.Add(Read(() => j["DecShop"]?.ToObject<DecShop>()?.DecShopURL));
                     break;
                 case TransactionType.FTKN_TX:
+                // The token functions run by Data.Function for every contract-call type (VerifyTX's contract switch and
+                // UpdateTreis' dispatch), not for FTKN_TX alone: a vote under any of them is a real vote.
+                case TransactionType.NFT_TX: case TransactionType.NFT_MINT: case TransactionType.NFT_BURN:
+                case TransactionType.FTKN_MINT: case TransactionType.FTKN_BURN:
+                case TransactionType.TKNZ_TX: case TransactionType.TKNZ_MINT: case TransactionType.TKNZ_BURN:
+                case TransactionType.SC_TX: case TransactionType.SC_MINT: case TransactionType.SC_BURN:
+                case TransactionType.TKNZ_WD_ARB: case TransactionType.TKNZ_WD_OWNER:
                     // Token votes and transfers (round 27): a topic id is checked against votes through the collation,
                     // and a transfer's own recipient and sender are looked up through it.
                     fields.Add(Read(() => j["TopicUID"]?.ToString()));
@@ -300,7 +311,8 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static string? TokenDocumentLimits(Transaction tx, long height)
         {
-            if (tx == null || height < Globals.PathAuditRulesHeight || tx.TransactionType != TransactionType.FTKN_TX || string.IsNullOrEmpty(tx.Data))
+            // Every type the token functions run for, not FTKN_TX alone: VerifyTX and UpdateTreis dispatch them by Function.
+            if (tx == null || height < Globals.PathAuditRulesHeight || !ContractFunctionTypes.Contains(tx.TransactionType) || string.IsNullOrEmpty(tx.Data))
                 return null;
             JObject j;
             try { j = JObject.Parse(tx.Data); }
@@ -413,6 +425,81 @@ namespace VerifiedXCore.Services
                 : "VFX can only be sent to a VFX address (not a shielded address or a name): nobody could spend it there.";
         }
 
+        /// <summary>
+        /// From Globals.ReserveNonTransferAmountHeight a reserve (xRBX) sender's transaction other than a TX carries no
+        /// Amount. The apply debits a non-TX amount at once without locking it, and CallBack() and Recover() return only
+        /// TX amounts, so a stolen vault key destroyed the balance the recovery key exists to save. Register() still pays
+        /// the registration cost: it is sent before the reserve has a recovery address. Null when the rule passes.
+        /// </summary>
+        public static string? ReserveMovesVfxOnlyByTransfer(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.ReserveNonTransferAmountHeight) return null;
+            if (!(tx.FromAddress ?? "").StartsWith("xRBX") || tx.TransactionType == TransactionType.TX || tx.Amount == 0M) return null;
+            if (tx.TransactionType == TransactionType.RESERVE && DispatchedCall(tx.Data).Function == "Register()") return null;
+            return "A reserve account sends VFX only in a TX: its other transactions carry no amount.";
+        }
+
+        /// <summary>
+        /// A transaction's ToAddress is this network's: from Globals.RecipientNetworkByteHeight in a block, and at every
+        /// height at admission (a node does not admit what would strand the sender's funds). Validation checked only an
+        /// address's length, Base58 form and checksum, so a testnet address on mainnet, or a Bitcoin-style version-0 one,
+        /// was credited and nobody could ever spend it. Base sentinels, reserve (xRBX) and shielded addresses and names
+        /// keep their own rules; private transactions other than unshields have their own address rules. Null when it passes.
+        /// </summary>
+        public static string? RecipientIsThisNetworks(Transaction tx, long height, bool admission)
+        {
+            if (tx == null || (!admission && height < Globals.RecipientNetworkByteHeight)) return null;
+            if (VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType)
+                && tx.TransactionType != TransactionType.VFX_UNSHIELD && tx.TransactionType != TransactionType.VBTC_V2_UNSHIELD)
+                return null;
+            if (PlaceholderRecipients.Contains(tx.ToAddress ?? "")) return null;
+            return AddressValidateUtility.IsOtherNetworksAddress(tx.ToAddress)
+                ? "The recipient is an address of another network: nothing sent there could ever be spent."
+                : null;
+        }
+
+        /// <summary>
+        /// From Globals.PathAuditRulesHeight no transaction (other than a private one, which has its own address rules) is
+        /// addressed to a registered name: validation resolved the name through the node's own name table and accepted it,
+        /// but every apply credits or assigns the ToAddress as written, so the VFX, token, NFT or name went to the literal
+        /// string, and the verdict depended on the local table. Null when the rule passes.
+        /// </summary>
+        public const string RecipientIsANameReason = "A transaction is addressed to the address a name resolves to, not to the name.";
+
+        public static string? RecipientIsNotAName(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.PathAuditRulesHeight) return null;
+            if (VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType)) return null;
+            var to = tx.ToAddress ?? "";
+            if (PlaceholderRecipients.Contains(to)) return null;
+            var looksLikeName = to.Contains(".vfx", StringComparison.OrdinalIgnoreCase) || to.Contains(".rbx", StringComparison.OrdinalIgnoreCase);
+            return looksLikeName && !AddressValidateUtility.ValidateRBXAddress(to)
+                ? RecipientIsANameReason
+                : null;
+        }
+
+        /// <summary>The contract functions whose apply reads its Data only in the array form.</summary>
+        public static readonly string[] ArrayFormContractFunctions = { "Update()", "Transfer()", "Burn()", "Evolve()", "Devolve()", "ChangeEvolveStateSpecific()" };
+
+        /// <summary>
+        /// From Globals.ContractPayloadArrayHeight a call to one of <see cref="ArrayFormContractFunctions"/> carries its Data as
+        /// an array whose first element is the call: their applies read nothing else, so any other shape was mined with no
+        /// effect. Null when the rule passes.
+        /// </summary>
+        public static string? ContractCallIsArrayForm(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.ContractPayloadArrayHeight) return null;
+            if (!ContractCallTypes.Contains(tx.TransactionType)) return null;
+            var function = DispatchedCall(tx.Data).Function;
+            if (function == null || !ArrayFormContractFunctions.Contains(function)) return null;
+            try
+            {
+                if (Newtonsoft.Json.JsonConvert.DeserializeObject<JArray>(tx.Data!)![0] is JObject) return null;
+            }
+            catch { }
+            return $"{function} carries its call as an array whose first element is the call.";
+        }
+
         public static string? VbtcRecipientCanHoldIt(Transaction tx, long height)
         {
             if (tx == null || height < Globals.PathAuditRulesHeight) return null;
@@ -478,6 +565,16 @@ namespace VerifiedXCore.Services
         }
 
         private const string VaultCreatedBefore = "This vBTC V2 vault was created before; a vault's UID is never created twice.";
+
+        /// <summary>From Globals.PathAuditRulesHeight nothing is created under a UID a Burn() retired (RetiredContractUid).</summary>
+        public static string? CreatedUidWasNeverBurned(Transaction tx, long height)
+        {
+            if (height < Globals.PathAuditRulesHeight) return null;
+            var uid = CreatedContractUid(tx);
+            return uid != null && RetiredContractUid.IsRetired(uid)
+                ? $"Contract UID {uid} was burned; a burned contract's UID is never created again."
+                : null;
+        }
 
         /// <summary>
         /// No contract is created under the UID of a vault the chain watches or ever watched: its deposit script, its
@@ -589,26 +686,64 @@ namespace VerifiedXCore.Services
         /// Royalty feature exactly (present or not, amount, pay-to address). Evolve()/Devolve() check only not-locked,
         /// sender == minter and recipient == owner, then overwrite the body, and a sale reads the royalty from the current
         /// body: the original minter could rewrite a sold NFT to a 99.99% royalty to itself whenever it was unlocked. A
-        /// body identical to the stored one is never decompiled. Null when the rule passes.
+        /// body identical to the stored one is never decompiled. An empty or missing body is written over the stored one
+        /// too, so it is a body with no royalty: skipped, it let a royalty-free rewrite after it pass as "none to none"
+        /// (#208, D18). Null when the rule passes.
         /// </summary>
         public static string? RoyaltyUnchangedByRewrite(Transaction tx, long height)
         {
             if (tx?.Data == null || height < Globals.RoyaltyRewriteRulesHeight) return null;
             var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
             if (payload.Function == null || !ContractRewritingFunctions.Contains(payload.Function)
-                || string.IsNullOrEmpty(payload.ContractUID) || string.IsNullOrEmpty(payload.Data))
+                || string.IsNullOrEmpty(payload.ContractUID))
                 return null;
             var stored = SmartContractStateTrei.GetSmartContractState(payload.ContractUID);
-            if (stored == null || string.Equals(payload.Data, stored.ContractData, StringComparison.Ordinal))
+            if (stored == null || string.Equals(payload.Data ?? "", stored.ContractData ?? "", StringComparison.Ordinal))
                 return null;
             var before = RoyaltyOf(stored.ContractData);
-            var after = RoyaltyOf(payload.Data);
+            // An empty body is written over the stored one as it is, so it carries no Royalty: passing it let the next
+            // rewrite be compared against a body that had already lost it.
+            var after = string.IsNullOrEmpty(payload.Data) ? null : RoyaltyOf(payload.Data);
             if (before == null && after == null) return null;
             if (before != null && after != null
                 && before.Value.Amount == after.Value.Amount
                 && string.Equals(before.Value.PayTo, after.Value.PayTo, StringComparison.Ordinal))
                 return null;
             return $"A contract's Royalty feature cannot be changed after creation (stored: {Describe(before)}; carried: {Describe(after)}).";
+        }
+
+        /// <summary>The functions through which a contract's minter rewrites a sold NFT's body.</summary>
+        private static readonly HashSet<string> EvolutionFunctions = new(StringComparer.Ordinal) { "Evolve()", "Devolve()", "ChangeEvolveStateSpecific()" };
+
+        /// <summary>
+        /// From Globals.EvolveRulesHeight Evolve(), Devolve() and ChangeEvolveStateSpecific() apply only to a contract with
+        /// the Evolving feature, and carry a whole body that keeps it. They are the minter's, with no owner signature, and
+        /// the apply writes the carried body over the stored one: the minter of any NFT could replace or wipe what it had
+        /// sold. Null when the rule passes.
+        /// </summary>
+        public static string? EvolutionNeedsAnEvolvingContract(Transaction tx, long height)
+        {
+            if (tx?.Data == null || height < Globals.EvolveRulesHeight || !ContractFunctionTypes.Contains(tx.TransactionType)) return null;
+            var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+            if (payload.Function == null || !EvolutionFunctions.Contains(payload.Function) || string.IsNullOrEmpty(payload.ContractUID)) return null;
+            var stored = SmartContractStateTrei.GetSmartContractState(payload.ContractUID);
+            if (stored == null) return null; // the function's own rule refuses a contract that does not exist
+            if (!HasEvolvingFeature(stored.ContractData))
+                return "Only a contract with the Evolving feature can be evolved or devolved.";
+            if (!HasEvolvingFeature(payload.Data))
+                return "An evolution carries the contract's whole body, Evolving feature included.";
+            return null;
+        }
+
+        /// <summary>Whether a contract body decompiles with the Evolving feature. Never throws.</summary>
+        private static bool HasEvolvingFeature(string? body)
+        {
+            if (string.IsNullOrEmpty(body)) return false;
+            try
+            {
+                return SmartContractMain.GenerateSmartContractInMemory(body)?.Features?.Any(f => f != null && f.FeatureName == FeatureName.Evolving) == true;
+            }
+            catch (Exception) { return false; }
         }
 
         private static string Describe((decimal Amount, string PayTo)? r) => r == null ? "none" : $"{r.Value.Amount} to {r.Value.PayTo}";
@@ -878,6 +1013,10 @@ namespace VerifiedXCore.Services
         /// words inside a broken multi-line string (e.g. "do" in a description) must not refuse it. No mainnet or testnet
         /// body uses these, so there is no activation height. Null when the rule passes.
         /// </summary>
+        /// <summary>Replaceable for tests: the node's parse of a contract body.</summary>
+        internal static Func<string, global::Trillium.Syntax.SyntaxTree> ParseContractBody =
+            text => global::Trillium.Syntax.SyntaxTree.Parse(text, preventLoopsAndRecursion: true);
+
         public static string? ContractBodyAllowed(Transaction tx, long height = 0)
         {
             var alsoRefused = height >= Globals.PathAuditRulesHeight ? ProcessBoundBuiltins : Array.Empty<string>();
@@ -886,20 +1025,30 @@ namespace VerifiedXCore.Services
                 string text;
                 try { text = System.Text.Encoding.Unicode.GetString(SmartContractUtility.Decompress(Convert.FromBase64String(body))); }
                 catch { continue; } // not a contract body: nothing ever runs it
-                var tree = global::Trillium.Syntax.SyntaxTree.Parse(text, preventLoopsAndRecursion: true); // as the node parses it
-                if (tree.Diagnostics.Length > 0) continue;
-                var pending = new Stack<global::Trillium.Syntax.SyntaxNode>();
-                pending.Push(tree.Root);
-                while (pending.Count > 0)
+                // A parser fault is a refusal, as in NotTimelessBecause: thrown, it left VerifyTX as an exception (which
+                // already made a block carrying it invalid, so validity is unchanged).
+                try
                 {
-                    var node = pending.Pop();
-                    if (node is global::Trillium.Syntax.DoWhileStatementSyntax)
-                        return "Contract code may not use a do-while loop.";
-                    if (node is global::Trillium.Syntax.CallExpressionSyntax call
-                        && (NondeterministicBuiltins.Contains(call.Identifier.Text) || alsoRefused.Contains(call.Identifier.Text)))
-                        return $"Contract code may not call {call.Identifier.Text}().";
-                    foreach (var child in node.GetChildren())
-                        pending.Push(child);
+                    var tree = ParseContractBody(text); // as the node parses it
+                    if (tree.Diagnostics.Length > 0) continue;
+                    var pending = new Stack<global::Trillium.Syntax.SyntaxNode>();
+                    pending.Push(tree.Root);
+                    while (pending.Count > 0)
+                    {
+                        var node = pending.Pop();
+                        if (node is global::Trillium.Syntax.DoWhileStatementSyntax)
+                            return "Contract code may not use a do-while loop.";
+                        if (node is global::Trillium.Syntax.CallExpressionSyntax call
+                            && (NondeterministicBuiltins.Contains(call.Identifier.Text) || alsoRefused.Contains(call.Identifier.Text)))
+                            return $"Contract code may not call {call.Identifier.Text}().";
+                        foreach (var child in node.GetChildren())
+                            pending.Push(child);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Contract body of {tx?.Hash} could not be read: {ex.Message}", "LedgerIntegrityRules.ContractBodyAllowed()");
+                    return "Contract code cannot be read.";
                 }
             }
             return null;
@@ -986,6 +1135,20 @@ namespace VerifiedXCore.Services
             return null;
         }
 
+        /// <summary>
+        /// From Globals.FeeBelowOneVfxHeight a transaction's fee is below 1 VFX. Amount and Fee are joined in the hash with
+        /// no separator, so trailing amount digits can move into the fee's whole part ("1.2345" + "0.00000602" hashes like
+        /// "1.2" + "3450.00000602"): same hash and signature, and the sender's balance burned as fee. Every such variant
+        /// gives a fee of 1 VFX or more (a decimal is never written with a leading zero), while the fee calculator's fee
+        /// for the largest transaction is far below it. Private transactions hash otherwise. Null when the rule passes.
+        /// </summary>
+        public static string? FeeBelowOneVfx(Transaction tx, long height)
+        {
+            if (tx == null || height < Globals.FeeBelowOneVfxHeight) return null;
+            if (VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType)) return null;
+            return tx.Fee >= 1M ? "A transaction's fee must be below 1 VFX (ambiguous hash)." : null;
+        }
+
         // ── NEW-17: NFT sale amounts ─────────────────────────────────────────────────────────────────────────────
 
         /// <summary>
@@ -1010,6 +1173,26 @@ namespace VerifiedXCore.Services
                         return "Every sale payment must have a positive amount and a non-negative fee.";
             }
             catch { }
+            return null;
+        }
+
+        /// <summary>
+        /// Every entry a sale completion carries has a non-negative amount and fee, paid or not. The buyer's balance is
+        /// checked against the sum of all entries while the apply pays only the selected ones, so an entry that is never
+        /// paid could lower that sum below what the apply takes (round 37). With every entry non-negative the sum is at
+        /// least what is paid. Refused at admission at every height; in blocks from Globals.SaleCompleteContractRulesHeight. Null when
+        /// the rule passes.
+        /// </summary>
+        public static string? SaleEntriesNonNegative(Transaction tx, long? blockHeight)
+        {
+            if (tx?.TransactionType != TransactionType.NFT_SALE || string.IsNullOrEmpty(tx.Data)) return null;
+            if (blockHeight != null && blockHeight.Value < Globals.SaleCompleteContractRulesHeight) return null;
+            List<Transaction>? entries = null;
+            try { entries = JObject.Parse(tx.Data)["Transactions"]?.ToObject<List<Transaction>?>(); } catch { }
+            if (entries == null) return null;
+            foreach (var e in entries)
+                if (e == null || e.Amount < 0M || e.Fee < 0M)
+                    return "Every entry of a sale completion must have a non-negative amount and fee.";
             return null;
         }
 
@@ -1219,6 +1402,152 @@ namespace VerifiedXCore.Services
             // watch, reading the first one's Bitcoin.
             if (uid != null && height >= Globals.PathAuditRulesHeight && CreatedVaultDepositScript(tx) is { } script && !createdInBlock.Add("script:" + script))
                 return SameDepositAddressInBlock;
+            return null;
+        }
+
+        /// <summary>A block carries a move (Transfer() or Burn()) and a sale of the same contract.</summary>
+        public const string NftMoveAndSaleInBlock = "An NFT transfer or burn and a sale of the same contract within block";
+
+        /// <summary>A block carries two moves (Transfer() or Burn()) of the same contract.</summary>
+        public const string NftMovedTwiceInBlock = "Two transfers or burns of the same contract within block";
+
+        /// <summary>
+        /// The transaction types StateData runs a contract's functions for (UpdateTreis' dispatch). Only these move a
+        /// contract by Transfer() or Burn(); the same text in another transaction's Data (a plain payment) does nothing.
+        /// </summary>
+        private static readonly HashSet<TransactionType> ContractFunctionTypes = new()
+        {
+            TransactionType.NFT_TX, TransactionType.NFT_MINT, TransactionType.NFT_BURN,
+            TransactionType.FTKN_MINT, TransactionType.FTKN_TX, TransactionType.FTKN_BURN,
+            TransactionType.TKNZ_MINT, TransactionType.TKNZ_TX, TransactionType.TKNZ_BURN,
+            TransactionType.SC_MINT, TransactionType.SC_TX, TransactionType.SC_BURN,
+            TransactionType.VBTC_V2_CONTRACT_CREATE, TransactionType.TKNZ_WD_ARB, TransactionType.TKNZ_WD_OWNER,
+        };
+
+        /// <summary>The sale functions StateData runs for an NFT_SALE (UpdateTreis' sale dispatch); any other function does nothing.</summary>
+        private static readonly HashSet<string> SaleFunctions = new(StringComparer.Ordinal)
+        {
+            "Sale_Start()", "M_Sale_Start()", "Sale_Complete()", "M_Sale_Complete()", "Sale_Cancel()",
+        };
+
+        /// <summary>Per-block register of the contracts a block moves (Transfer(), Burn()) and sells (NFT_SALE), and of the token votes it casts.</summary>
+        public sealed class NftStepState
+        {
+            public readonly HashSet<string> Moves = new(StringComparer.OrdinalIgnoreCase);
+            public readonly HashSet<string> Sales = new(StringComparer.OrdinalIgnoreCase);
+            /// <summary>(holder, topic) pairs a block's TokenVoteTopicCast() calls vote for.</summary>
+            public readonly HashSet<string> TokenVotes = new(StringComparer.Ordinal);
+            /// <summary>The token contracts a block's TokenMint() calls mint.</summary>
+            public readonly HashSet<string> TokenMints = new(StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static readonly System.Text.RegularExpressions.Regex AdnrNameGrammar =
+            new(@"\A[a-z0-9-]+\z", System.Text.RegularExpressions.RegexOptions.CultureInvariant); // \z: "$" also matches before a final newline
+
+        /// <summary>
+        /// From Globals.AdnrNameGrammarHeight an AdnrCreate() name is lowercase a-z, 0-9 and '-', 1 to Globals.ADNRLimit
+        /// characters, with no suffix (the chain adds ".vfx"): consensus checked only that a name was free, so a raw
+        /// transaction registered empty, suffixed, markup or unbounded names. The wallet already builds names this way.
+        /// Null when the name passes.
+        /// </summary>
+        public static string? AdnrNameError(string? name, long height)
+        {
+            if (height < Globals.AdnrNameGrammarHeight) return null;
+            return !string.IsNullOrEmpty(name) && name.Length <= Globals.ADNRLimit && AdnrNameGrammar.IsMatch(name)
+                ? null
+                : $"A name is lowercase letters, digits and '-', 1 to {Globals.ADNRLimit} characters, with no suffix.";
+        }
+
+        /// <summary>
+        /// From Globals.TokenMintRulesHeight a TokenMint() is refused on a paused contract (every other token function
+        /// already is), with more decimals than the token's DecimalPlaces (the remainder could never be transferred), or
+        /// when the supply or the holder's balance would overflow (the apply wrote the balance, then threw before the
+        /// supply, so the two disagreed). Null when the mint passes.
+        /// </summary>
+        public static string? TokenMintRefusal(VerifiedXCore.Models.SmartContracts.TokenDetails details, decimal amount, decimal holderBalance, long height)
+        {
+            if (height < Globals.TokenMintRulesHeight) return null;
+            if (details.IsPaused) return "Contract is paused. NO TXs may go through.";
+            if (details.DecimalPlaces < 0 || decimal.Round(amount, Math.Min(details.DecimalPlaces, 28)) != amount)
+                return $"A mint has at most {details.DecimalPlaces} decimal places, the token's.";
+            if (amount > decimal.MaxValue - details.CurrentSupply || amount > decimal.MaxValue - holderBalance)
+                return "A mint cannot take the supply or a balance past the largest amount.";
+            return null;
+        }
+
+        /// <summary>Whether a block of <paramref name="transactionCount"/> transactions at <paramref name="height"/> is over the per-block cap (Globals.BlockTransactionCapHeight).</summary>
+        public static bool OverTransactionCap(int transactionCount, long height) =>
+            height >= Globals.BlockTransactionCapHeight && transactionCount > Globals.MaxTransactionsPerBlock;
+
+        /// <summary>
+        /// What a producer may put after its coinbase in a block at <paramref name="height"/>: below the cap height
+        /// everything, from it no more than the cap leaves room for, in the order given.
+        /// </summary>
+        public static List<Transaction> WithinTransactionCap(List<Transaction> afterCoinbase, int alreadyInBlock, long height) =>
+            height >= Globals.BlockTransactionCapHeight
+                ? afterCoinbase.Take(Math.Max(0, Globals.MaxTransactionsPerBlock - alreadyInBlock)).ToList()
+                : afterCoinbase;
+
+        public const string TokenMintedTwiceInBlock = "A block carries one TokenMint() per token contract";
+
+        public const string TokenVotedTwiceInBlock = "A block carries one token vote per holder and topic";
+
+        /// <summary>The (holder, topic) a TokenVoteTopicCast() votes for, read as its apply reads it; null for any other transaction.</summary>
+        public static string? TokenVoteKey(Transaction tx)
+        {
+            if (tx?.Data == null || !ContractFunctionTypes.Contains(tx.TransactionType)) return null;
+            try
+            {
+                var jobj = JObject.Parse(tx.Data);
+                if ((string?)jobj["Function"] != "TokenVoteTopicCast()") return null;
+                var holder = jobj["FromAddress"]?.ToObject<string?>();
+                var topic = jobj["TopicUID"]?.ToObject<string?>();
+                return string.IsNullOrEmpty(holder) || string.IsNullOrEmpty(topic) ? null : $"{holder}\u001d{topic}";
+            }
+            catch (Exception ex) when (ex is Newtonsoft.Json.JsonException || ex is ArgumentException || ex is FormatException || ex is InvalidCastException)
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// From PathAuditRulesHeight one contract is either moved or sold within a block, not both, and from
+        /// OneMovePerContractHeight it is moved at most once. Each is judged against
+        /// the owner before the block, so an owner's Transfer() to B and its own M_Sale_Start to an accomplice both passed
+        /// in one block: B then owned an NFT locked into the sale A set up, at A's price. Honest blocks never pair them: a
+        /// transfer or burn needs the contract unlocked, and a sale's completion or cancel needs it locked.
+        /// </summary>
+        public static string? RegisterNftStepInBlock(Transaction tx, NftStepState state, long height)
+        {
+            // From VoteTopicRulesHeight one TokenVoteTopicCast() per (holder, topic) in a block: each was judged against
+            // the votes stored before the block, and the apply counts every one, so two raised the tally by two while one
+            // vote row was kept.
+            if (height >= Globals.VoteTopicRulesHeight && TokenVoteKey(tx) is { } voteKey)
+                return state.TokenVotes.Add(voteKey) ? null : $"{TokenVotedTwiceInBlock}: {voteKey.Replace('\u001d', '/')}";
+            // From TokenMintRulesHeight one TokenMint() per contract in a block: each is judged against the supply and
+            // balance before the block, so a second could overflow at apply after the first (balance written, supply not).
+            if (height >= Globals.TokenMintRulesHeight && ContractFunctionTypes.Contains(tx.TransactionType)
+                && DispatchedCall(tx.Data) is { Function: "TokenMint()", ContractUID: { Length: > 0 } mintedUid })
+                return state.TokenMints.Add(mintedUid) ? null : $"{TokenMintedTwiceInBlock}: {mintedUid}";
+            var moveOrSale = height >= Globals.PathAuditRulesHeight;
+            var oneMove = height >= Globals.OneMovePerContractHeight;
+            if (!moveOrSale && !oneMove) return null;
+            var (ok, _, uid, function, _) = TransactionUtility.GetSCTXFunctionAndUID(tx);
+            if (!ok) return null;
+            // A sale, like a move, is one the chain runs: an NFT_SALE carrying another function does nothing, and
+            // registering it let anyone crowd an owner's transfer or burn out of a block.
+            var isSale = tx.TransactionType == TransactionType.NFT_SALE;
+            if (isSale && !SaleFunctions.Contains(function)) return null;
+            // A move is a Transfer() or Burn() the chain runs: a payment that only carries that text in its Data moves
+            // nothing, and registering it let anyone crowd an owner's sale out of a block.
+            if (!isSale && (!ContractFunctionTypes.Contains(tx.TransactionType) || (function != "Transfer()" && function != "Burn()"))) return null;
+            uid = SmartContractStateTrei.GetSmartContractState(uid)?.SmartContractUID ?? uid;
+            if (moveOrSale && (isSale ? state.Moves : state.Sales).Contains(uid)) return $"{NftMoveAndSaleInBlock}: {uid}";
+            // From OneMovePerContractHeight a contract is moved once per block: each move was judged against the owner
+            // before the block, so an owner's second Transfer() (or a Burn()) undid a confirmed one. The type-pair check
+            // in ValidateBlock missed pairs such as FTKN_TX beside FTKN_BURN.
+            if (!isSale && oneMove && state.Moves.Contains(uid)) return $"{NftMovedTwiceInBlock}: {uid}";
+            (isSale ? state.Sales : state.Moves).Add(uid);
             return null;
         }
 

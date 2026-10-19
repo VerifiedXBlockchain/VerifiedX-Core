@@ -118,50 +118,7 @@ namespace VerifiedXCore
             Globals.IsTestNet = true;
 
 
-            //Globals.IsCustomTestNet = true;
-            Globals.V4Height = Globals.IsTestNet ? 1 : 3_074_181;//change for mainnet.
-            Globals.V2ValHeight = Globals.IsTestNet ? 0 : 3_074_180;//change for mainnet.
-            Globals.SpecialBlockHeight = Globals.IsTestNet ? 2000 : 3_074_185;//change for mainnet.
-            Globals.GenesisValidator = Globals.IsTestNet ? "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" : "RBdwbhyqwJCTnoNe1n7vTXPJqi5HKc6NTH";
-            Globals.TXHeightRule5 = Globals.IsTestNet ? 746313 : Globals.TXHeightRule5;
-            Globals.VbtcPrivacyDisableHeight = Globals.IsTestNet ? 1 /* TODO set testnet disable height */ : 7_281_000L;
-            Globals.V2WithdrawalExpiryFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-            Globals.V2WithdrawalOwnerAddBackFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-            Globals.VbtcLegacyTransferBypassFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-            Globals.V2TransferMultiHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-            Globals.BridgeBurnBindingHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-            Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 7_296_200L;
-            Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 7_296_200L;
-            // TODO set both: testnet must be ABOVE its tip at deploy (block 1,017,408 holds a request the fee floor refuses).
-            Globals.VbtcWithdrawalConcurrencyHeight = Globals.IsTestNet ? 1_018_000 : Globals.VbtcWithdrawalConcurrencyHeight;
-            // Must be above the tip when every node runs this build (see Globals.VbtcCancellationVoteRulesHeight).
-            Globals.VbtcCancellationVoteRulesHeight = Globals.IsTestNet ? 1_019_000 : Globals.VbtcCancellationVoteRulesHeight;
-            Globals.VbtcV2DkgAttestationHeight = Globals.IsTestNet ? 1_002_979 : Globals.VbtcV2DkgAttestationHeight;
-            Globals.VbtcV1RetirementHeight = Globals.IsTestNet ? 1_002_979 : Globals.VbtcV1RetirementHeight;
-            Globals.VbtcVaultTxSizeHeight = Globals.IsTestNet ? 1 : Globals.VbtcVaultTxSizeHeight;
-            // Fund-loss audit (Oct 2026): one activation for all its rules (Globals.FundLossAuditTestnetHeight, reset 2026-10-13).
-            Globals.PrivateTxSupplyRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PrivateTxSupplyRulesHeight;
-            Globals.AddressFreezeHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.AddressFreezeHeight;
-            Globals.SaleCompleteContractRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.SaleCompleteContractRulesHeight;
-            Globals.ReserveRecoverRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ReserveRecoverRulesHeight;
-            Globals.VaultRewriteRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.VaultRewriteRulesHeight;
-            Globals.VaultBurnRuleHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.VaultBurnRuleHeight;
-            Globals.PathAuditRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PathAuditRulesHeight;
-            Globals.ValidatorBondHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight - 1 : Globals.ValidatorBondHeight;
-            Globals.ValidatorBondGrandfatherHeight = Globals.IsTestNet ? Globals.BitcoinAttestationObserveTestnetHeight : Globals.ValidatorBondGrandfatherHeight;
-            Globals.SaleStartBidRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.SaleStartBidRulesHeight;
-            Globals.WithdrawalUniqueIdRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.WithdrawalUniqueIdRulesHeight;
-            Globals.RoyaltyRewriteRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.RoyaltyRewriteRulesHeight;
-            Globals.ReserveTokenRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ReserveTokenRulesHeight;
-            Globals.ForgedVfxBurnHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ForgedVfxBurnHeight;
-            if (Globals.IsTestNet) Globals.ForgedVfxBurns.Clear(); // the forged VFX exists on mainnet only
-            // Privacy stage 2 on testnet: with the fund-loss rules (reset 2026-10-13 from 1,099,400, which had passed).
-            Globals.PrivateTxProofRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PrivateTxProofRulesHeight;
-            // Bitcoin attestation (plan 8.4): observe from the tip of 2026-10-13, record with the fund-loss rules, enforce three days later.
-            Globals.BitcoinAttestationObserveHeight = Globals.IsTestNet ? Globals.BitcoinAttestationObserveTestnetHeight : Globals.BitcoinAttestationObserveHeight;
-            Globals.BitcoinAttestationRecordHeight = Globals.IsTestNet ? Globals.BitcoinAttestationRecordTestnetHeight : Globals.BitcoinAttestationRecordHeight;
-            Globals.BitcoinAttestationHeight = Globals.IsTestNet ? Globals.BitcoinAttestationTestnetHeight : Globals.BitcoinAttestationHeight;
-            if (Globals.IsTestNet) Globals.ShieldedSupplyCorrections.Clear(); // the testnet pool was never forged against
+            Globals.ApplyNetworkHeights(); // every per-network activation height, in one place (the Warden calls it too)
 
             //Perform network time sync
             _ = NetworkTimeService.Run();
@@ -288,10 +245,8 @@ namespace VerifiedXCore
                     {
                         skipStateSync = true;
                     }
-                    if (argC.Contains("encpass"))
+                    if (StartArgs.TryGetValue(x, "encpass", out var encPassword))
                     {
-                        var encPassSplit = argC.Split(new char[] { '=' });
-                        var encPassword = encPassSplit[1];
                         Globals.EncryptPassword = encPassword.ToSecureString();
                     }
                     if(argC.Contains("openapi"))
@@ -306,10 +261,8 @@ namespace VerifiedXCore
                     {
                         await Task.Delay(5000);//give previous session time to close.
                     }
-                    if(argC.Contains("apitoken"))
+                    if (StartArgs.TryGetValue(x, "apitoken", out var apiToken))
                     {
-                        var apiTokens = argC.Split(new char[] { '=' });
-                        var apiToken = apiTokens[1];
                         Globals.APIToken = apiToken.ToSecureString();
                     }
                     if(argC.Contains("blockseedcalls"))
@@ -392,6 +345,13 @@ namespace VerifiedXCore
             Config.Config.EstablishConfigFile();
             Config.Config.EstablishABLFile();
             var config = Config.Config.ReadConfigFile();
+            var configMismatch = Config.Config.TestnetConfigMismatch(config);
+            if (configMismatch != null)
+            {
+                Console.WriteLine(configMismatch);
+                ErrorLogUtility.LogError(configMismatch, "Config.TestnetConfigMismatch()");
+                Environment.Exit(1);
+            }
             Config.Config.ProcessConfig(config);
             if (argList.Any(x => string.Equals(x?.Trim(), "casterlog", StringComparison.OrdinalIgnoreCase)))
                 Globals.CasterLogEnabled = true;
@@ -459,6 +419,7 @@ namespace VerifiedXCore
                     Globals.FrostFFIAvailable = frostResult.AllChecksPassed;
                     Globals.FrostFFIVersion = frostResult.LibraryVersion;
                     Globals.FrostFFICheckSummary = frostResult.Summary;
+                    Bitcoin.FROST.FrostLibraryGate.CheckFinished();
                     LogUtility.Log(frostResult.Summary, "FrostFFICheck");
                     if (frostResult.AllChecksPassed)
                     {
@@ -468,14 +429,17 @@ namespace VerifiedXCore
                     {
                         Console.WriteLine("[FROST FFI] Health check FAILED — see logs for details");
                         ErrorLogUtility.LogError($"FROST FFI check failed: {string.Join("; ", frostResult.Errors)}", "FrostFFICheck");
+                        Bitcoin.FROST.FrostLibraryGate.ReportCheckFailed(string.Join("; ", frostResult.Errors));
                     }
                 }
                 catch (Exception ex)
                 {
                     Globals.FrostFFIAvailable = false;
                     Globals.FrostFFICheckSummary = $"FROST FFI check error: {ex.Message}";
+                    Bitcoin.FROST.FrostLibraryGate.CheckFinished();
                     ErrorLogUtility.LogError($"FROST FFI check error: {ex}", "FrostFFICheck");
                     Console.WriteLine($"[FROST FFI] Health check ERROR: {ex.Message}");
+                    Bitcoin.FROST.FrostLibraryGate.ReportCheckFailed(ex.Message);
                 }
             });
 
@@ -505,6 +469,7 @@ namespace VerifiedXCore
                     else if (rebuildStateRequested)
                     {
                         Console.WriteLine($"[REVERT] No snapshot covers height {revertToHeight.Value} — rebuildstate passed, running full revert + genesis replay...");
+                        StateTreiStatusService.SetRebuildStarted(); // before the blocks go: a crash from here on leaves the node stopped
 
                         var revertBlocks = Block.GetBlocks();
                         var deletedBlocks = revertBlocks.DeleteManySafe(x => x.Height > revertToHeight.Value);
@@ -520,8 +485,16 @@ namespace VerifiedXCore
                     }
                     else
                     {
-                        Console.WriteLine($"[REVERT] REFUSED: no snapshot slot covers height {revertToHeight.Value} and rebuildstate was not passed.");
-                        Console.WriteLine($"[REVERT] Nothing was deleted. To force a full revert + genesis state replay (can take an hour or more),");
+                        if (SnapshotRestoreUtility.StateDestroyedByFailedRestore)
+                        {
+                            Console.WriteLine($"[REVERT] The snapshot restore to {revertToHeight.Value} failed after wiping the state. This node will not validate blocks.");
+                            Console.WriteLine($"[REVERT] To rebuild it and complete the revert,");
+                        }
+                        else
+                        {
+                            Console.WriteLine($"[REVERT] REFUSED: no snapshot slot covers height {revertToHeight.Value} and rebuildstate was not passed.");
+                            Console.WriteLine($"[REVERT] Nothing was deleted. To force a full revert + genesis state replay (can take an hour or more),");
+                        }
                         Console.WriteLine($"[REVERT] restart with BOTH arguments: revertblock={revertToHeight.Value} rebuildstate");
                     }
                 }

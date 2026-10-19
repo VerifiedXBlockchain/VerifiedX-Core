@@ -222,8 +222,38 @@ namespace VerifiedXCore.Bitcoin.Services
 
         private static string NormalizeTxHash(string txHash)
         {
-            var h = txHash.Trim();
+            var h = SplitBurnId(txHash).TxHash;
             return h.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? h : "0x" + h;
+        }
+
+        /// <summary>
+        /// A bridge burn's id: its Base transaction's hash when that transaction holds one bridge burn, and "{hash}:{n}" for
+        /// the n-th (from 0, in the order the transaction emitted them, both kinds counted) when it holds several: keyed on
+        /// the hash alone, the second burn of a batched transaction was taken for the first and never redeemed (#277). The
+        /// position inside the transaction does not change if Base includes it in another block; a log's index does.
+        /// </summary>
+        public static string BurnId(string txHash, int position, int burnsInTransaction) =>
+            burnsInTransaction <= 1 ? txHash : $"{txHash}:{position}";
+
+        /// <summary>A burn id's Base transaction hash and, for one of several burns in it, its position (<see cref="BurnId"/>).</summary>
+        public static (string TxHash, int? Position) SplitBurnId(string? burnId)
+        {
+            var id = (burnId ?? "").Trim();
+            var colon = id.IndexOf(':');
+            if (colon < 0) return (id, null);
+            return int.TryParse(id.AsSpan(colon + 1), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var n)
+                ? (id[..colon], n) : (id, null);
+        }
+
+        /// <summary>
+        /// The burn id's part in a bridge exit's signing reference ("btcexit_{this}_{contract}"): the hash's first 16
+        /// characters, and the position of one of several burns, so two exits of one transaction are told apart.
+        /// </summary>
+        public static string BurnSigningPrefix(string burnId)
+        {
+            var (hash, position) = SplitBurnId(burnId);
+            var prefix = hash[..Math.Min(16, hash.Length)];
+            return position is int n ? $"{prefix}:{n}" : prefix;
         }
 
         /// <summary>
@@ -283,38 +313,55 @@ namespace VerifiedXCore.Bitcoin.Services
                     // which is what proves the burn came from the bridge contract (smart-contract
                     // wallets call it indirectly).
 
-                    BurnEventInfo? info = null;
-                    int matches = 0;
-                    if (vfxExit)
+                    // Every bridge burn of the transaction, both kinds, in the order it emitted them (BurnId).
+                    var burns = new List<(BigInteger LogIndex, bool Vfx, BurnEventInfo? Info)>();
+                    foreach (var ev in r.DecodeAllEvents<BaseBridgeExitWatchService.VfxExitBurnedEventDTO>())
                     {
-                        foreach (var ev in r.DecodeAllEvents<BaseBridgeExitWatchService.VfxExitBurnedEventDTO>())
-                        {
-                            if (!string.Equals(ev.Log.Address, ContractAddress, StringComparison.OrdinalIgnoreCase)) continue;
-                            var amt = ev.Event.Amount;
-                            if (amt <= 0 || amt > long.MaxValue) return (false, null, "Burn amount out of range");
-                            matches++;
-                            info = new BurnEventInfo { AmountSats = (long)amt, Destination = ev.Event.VfxDestinationAddress?.Trim() ?? "", Burner = ev.Event.Burner ?? "" };
-                        }
+                        if (!string.Equals(ev.Log.Address, ContractAddress, StringComparison.OrdinalIgnoreCase)) continue;
+                        var amt = ev.Event.Amount;
+                        burns.Add((ev.Log.LogIndex?.Value ?? BigInteger.Zero, true, amt <= 0 || amt > long.MaxValue ? null
+                            : new BurnEventInfo { AmountSats = (long)amt, Destination = ev.Event.VfxDestinationAddress?.Trim() ?? "", Burner = ev.Event.Burner ?? "" }));
                     }
-                    else
+                    foreach (var ev in r.DecodeAllEvents<BaseBridgeExitWatchService.BTCExitBurnedEventDTO>())
                     {
-                        foreach (var ev in r.DecodeAllEvents<BaseBridgeExitWatchService.BTCExitBurnedEventDTO>())
-                        {
-                            if (!string.Equals(ev.Log.Address, ContractAddress, StringComparison.OrdinalIgnoreCase)) continue;
-                            var amt = ev.Event.Amount;
-                            if (amt <= 0 || amt > long.MaxValue) return (false, null, "Burn amount out of range");
-                            matches++;
-                            info = new BurnEventInfo { AmountSats = (long)amt, Destination = ev.Event.BtcDestination?.Trim() ?? "", Burner = ev.Event.Burner ?? "" };
-                        }
+                        if (!string.Equals(ev.Log.Address, ContractAddress, StringComparison.OrdinalIgnoreCase)) continue;
+                        var amt = ev.Event.Amount;
+                        burns.Add((ev.Log.LogIndex?.Value ?? BigInteger.Zero, false, amt <= 0 || amt > long.MaxValue ? null
+                            : new BurnEventInfo { AmountSats = (long)amt, Destination = ev.Event.BtcDestination?.Trim() ?? "", Burner = ev.Event.Burner ?? "" }));
                     }
-
-                    if (matches == 0) return (false, null, "No matching burn event emitted by the bridge contract");
-                    if (matches > 1) return (false, null, "Multiple burn events in one receipt");
-                    return (true, info, "");
+                    return BurnAt(burns.OrderBy(b => b.LogIndex).Select(b => (b.Vfx, b.Info)).ToList(), SplitBurnId(txHash).Position, vfxExit);
                 }
                 catch (Exception ex) { lastErr = ex.Message; }
             }
             return (false, null, $"Could not read Base receipt: {lastErr}");
+        }
+
+        /// <summary>
+        /// The burn a burn id names among its transaction's bridge burns (both kinds, in emitted order; Info null for an
+        /// amount out of range). Each burn has one id (<see cref="BurnId"/>): a position names one of several, from the
+        /// path-audit rules; the bare hash names the transaction's only burn, and from those rules a transaction with
+        /// several burns of any kind is not named by its hash, so no burn can be redeemed under two ids.
+        /// </summary>
+        /// <summary>A positioned burn id read before the path-audit rules: not yet, rather than no (#291).</summary>
+        public const string PositionBeforeRules = "A burn is named by its position in its transaction only from the path-audit rules";
+
+        internal static (bool Ok, BurnEventInfo? Info, string Reason) BurnAt(IReadOnlyList<(bool Vfx, BurnEventInfo? Info)> burns, int? position, bool vfxExit)
+        {
+            var pathAudit = (Globals.LastBlock?.Height ?? -1) + 1 >= Globals.PathAuditRulesHeight;
+            if (position is int n)
+            {
+                if (!pathAudit) return (false, null, PositionBeforeRules);
+                if (burns.Count < 2) return (false, null, $"A burn named by its position is one of several in its transaction; this one holds {burns.Count}");
+                if (n >= burns.Count) return (false, null, $"No burn at position {n}: the transaction holds {burns.Count}");
+                if (burns[n].Vfx != vfxExit) return (false, null, "No matching burn event emitted by the bridge contract");
+                return burns[n].Info is { } at ? (true, at, "") : (false, null, "Burn amount out of range");
+            }
+            var mine = burns.Where(b => b.Vfx == vfxExit).ToList();
+            if (mine.Any(b => b.Info == null)) return (false, null, "Burn amount out of range");
+            if (mine.Count == 0) return (false, null, "No matching burn event emitted by the bridge contract");
+            if (mine.Count > 1 || (pathAudit && burns.Count > 1))
+                return (false, null, pathAudit ? "Multiple burn events in one receipt: each is named {hash}:{position}" : "Multiple burn events in one receipt");
+            return (true, mine[0].Info, "");
         }
 
         /// <summary>True when at least one log in the receipt was emitted by the bridge contract.</summary>

@@ -2,9 +2,9 @@ name: .NET Build and Unit Test Run
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, testnet, testnet-staging ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, testnet, testnet-staging ]
 
 jobs:
   build:

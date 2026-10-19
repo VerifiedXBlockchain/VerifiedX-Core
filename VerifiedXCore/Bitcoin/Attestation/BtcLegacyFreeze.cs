@@ -12,7 +12,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
     /// A vault created before the recording height is not watched: the chain has no record of its Bitcoin, so an
     /// owner debit on it can only be judged the old way, by the block producer's word. From the enforcement height
     /// such a vault is frozen: nothing debits a balance on it, for the owner or for a holder. People move to a vault
-    /// created after the recording height before then; what is left on an old vault stays there.
+    /// created after the recording height before then; what is left on an old vault stays there. Two settlements still
+    /// move vBTC between holders inside such a vault, leaving its total unchanged: a reserve's delayed send that falls due
+    /// after the height, and a reserve's Recover() sweep to its recovery address; the new holder can take nothing off it.
     ///
     /// The bridge follows: no exit to Bitcoin and no unlock back to VFX may draw on a lock that belongs to such a
     /// vault (an unlock would hand somebody vBTC on a frozen vault).
@@ -77,7 +79,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     foreach (var vault in vaults)
                         if (IsLegacyVault(vault)) return Frozen(vault!);
                 }
-                catch { }
+                // What the transaction says that cannot be read is no vault here; a fault of this node's disk while a
+                // vault is decompiled is passed on (VBTCService.DecompileFaultIsNodeLocal), not read as "not frozen".
+                catch (Exception ex) when (!VBTCService.DecompileFaultIsNodeLocal(ex)) { }
             }
 
             if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)

@@ -134,14 +134,6 @@ namespace VerifiedXCore.P2P
                     return;
                 }
 
-                // HUB-SPLIT (Sep 2026): own registry — see Globals.P2PCasterDict.
-                Globals.P2PCasterDict.TryAdd(peerIP, Context);
-
-                if (Globals.P2PCasterDict.TryGetValue(peerIP, out var context) && context.ConnectionId != Context.ConnectionId)
-                {
-                    context.Abort();
-                }
-
                 // Updated signed message to include nonce
                 var SignedMessage = address + ":" + time + ":" + publicKey + ":" + nonce;
 
@@ -202,6 +194,14 @@ namespace VerifiedXCore.P2P
                         $"Insufficient balance for address: " + address);
                     return;
                 }
+
+                // Registered only now that the connection has authenticated: a socket from the same IP (a shared NAT or
+                // host) used to abort the session already here before its own signature was checked.
+                // HUB-SPLIT (Sep 2026): own registry — see Globals.P2PCasterDict.
+                var previousOnIp = Globals.P2PCasterDict.TryGetValue(peerIP, out var prior) ? prior : null;
+                Globals.P2PCasterDict[peerIP] = Context;
+                if (previousOnIp != null && previousOnIp.ConnectionId != Context.ConnectionId)
+                    previousOnIp.Abort();
 
                 var fortisPools = new FortisPool();
                 fortisPools.IpAddress = peerIP;
@@ -421,7 +421,7 @@ namespace VerifiedXCore.P2P
                                 _ = BlockDownloadService.GetAllBlocks();
                                 return false;
                             }
-                            if (!BlockStaging.PassesGossipPreChecks(nextBlock, out _) || !BlockStaging.TryStageGossip(nextBlock, IP))
+                            if (!BlockcasterNode.StageGossipOrWithdrawPin(nextBlock, IP))
                                 return false;
 
                             await Task.Delay(2000);

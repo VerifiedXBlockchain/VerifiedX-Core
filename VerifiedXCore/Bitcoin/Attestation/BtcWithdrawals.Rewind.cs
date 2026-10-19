@@ -42,12 +42,54 @@ namespace VerifiedXCore.Bitcoin.Attestation
             // flagged (a rewind taken back half-way is state no other node has). It does not stop the chain.
             try
             {
+                RewindStepForTests?.Invoke(vfxHeight);
                 TakeBack(bitcoinHeight, rewind, vfxHeight, db);
             }
             catch (Exception ex)
             {
+                VerifiedXCore.Data.StateData.NoteWithdrawalStoreStepFailed(vfxHeight, ex); // taking back writes the request rows
                 ErrorLogUtility.LogError($"Bitcoin rewind to {bitcoinHeight} ({rewind?.Hash}) failed part-way: {ex}", "BtcWithdrawals.OnRewind()");
                 throw;
+            }
+        }
+
+        internal static Action<long>? RewindStepForTests;
+
+        /// <summary>
+        /// A bridge exit's part voided by a spend that this rewind drops, and still waiting to be fixed again on other coins:
+        /// its earlier transaction can confirm again, so it is the part's payment again (its pins live, the part pinned on
+        /// its coins), rather than a second transaction on other coins paying it twice.
+        /// </summary>
+        private static void ReviveVoidedExitParts(List<VaultCoinRow> touched, long bitcoinHeight, LiteDatabase? db)
+        {
+            var unspent = touched.Where(c => c.Status == VaultCoinStatus.Spent && c.SpentInHeight > bitcoinHeight && c.CreatedInHeight <= bitcoinHeight)
+                .Select(c => c.Outpoint).ToHashSet(StringComparer.Ordinal);
+            if (unspent.Count == 0) return;
+            bool Available(string o) => unspent.Contains(o)
+                || BtcAttestStore.Coin(o, db) is { } c && c.CreatedInHeight <= bitcoinHeight && c.Status is VaultCoinStatus.Unspent or VaultCoinStatus.Pinned;
+            foreach (var reference in new SortedSet<string>(touched.Where(c => unspent.Contains(c.Outpoint)).SelectMany(RefsOn), StringComparer.Ordinal))
+            {
+                var row = BtcAttestStore.Withdrawal(reference, db);
+                if (row == null || !row.IsBridgeExit || row.State != VaultWithdrawalState.Waiting || row.ReopenedAtBitcoinHeight == 0) continue;
+                var revived = row.Pins.Where(p => p.Dead && !p.IsRelease && p.Inputs.Any(unspent.Contains) && p.Inputs.All(Available)).ToList();
+                if (revived.Count == 0) continue;
+                foreach (var pin in revived) pin.Dead = false;
+                row.State = VaultWithdrawalState.Pinned;
+                row.ClosedAtVfxHeight = 0;
+                row.ReopenedAtBitcoinHeight = 0;
+                row.WaitingReason = null;
+                BtcAttestStore.SaveWithdrawal(row, db);
+                // Its other coins are held for it again; the coins this rewind frees are held by SetHolders below.
+                foreach (var o in revived.SelectMany(p => p.Inputs).Distinct(StringComparer.Ordinal).Where(o => !unspent.Contains(o)))
+                {
+                    var coin = BtcAttestStore.Coin(o, db)!;
+                    var next = Copy(coin);
+                    if (coin.Status == VaultCoinStatus.Pinned && coin.PinnedToRef != null && coin.PinnedToRef != row.Ref)
+                        next.AlsoPinnedTo = (coin.AlsoPinnedTo ?? new List<string>()).Where(r => r != row.Ref).Append(row.Ref).ToList();
+                    else { next.Status = VaultCoinStatus.Pinned; next.PinnedToRef = row.Ref; }
+                    BtcAttestStore.SaveCoin(next, coin, db);
+                }
+                ErrorLogUtility.LogError($"Bitcoin rewind to {bitcoinHeight}: the spend that voided the part of bridge exit {row.ExitBurnHash} on {row.SmartContractUID} is gone; its earlier transaction is its payment again.", "BtcWithdrawals.TakeBack()");
             }
         }
 
@@ -70,12 +112,14 @@ namespace VerifiedXCore.Bitcoin.Attestation
             foreach (var row in completed.Values)
                 Unsettle(row, bitcoinHeight, rewind, db);
 
+            ReviveVoidedExitParts(touched, bitcoinHeight, db);
+
             // Coins.
             var vaults = new SortedSet<string>(StringComparer.Ordinal);
             foreach (var coin in touched)
             {
                 var next = Copy(coin);
-                var wasSpentAbove = coin.Status == VaultCoinStatus.Spent && coin.SpentInHeight > bitcoinHeight;
+                var wasSpentAbove = (coin.Status == VaultCoinStatus.Spent || coin.Status == VaultCoinStatus.Frozen) && coin.SpentInHeight > bitcoinHeight; // a freeze too (#171)
                 if (wasSpentAbove)
                 {
                     next.SpentByTxid = null;
@@ -143,10 +187,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
             var request = VBTCWithdrawalRequest.GetByTransactionHash(row.RequestHash, row.SmartContractUID);
             if (request == null)
-            {
-                ErrorLogUtility.LogError($"Withdrawal {row.Ref} was un-completed by a Bitcoin rewind but its request row is missing.", "BtcWithdrawals.Unsettle()");
-                return;
-            }
+                // As in Settle: gone only by a fault of this node's store. OnRewind reports it and passes it on.
+                throw new System.IO.IOException($"Withdrawal {row.Ref} was un-completed by a Bitcoin rewind but its request row is missing.");
             request.Status = VBTCWithdrawalStatus.Requested;
             request.IsCompleted = false;
             request.BTCTxHash = null;

@@ -120,17 +120,15 @@ namespace VerifiedXCore
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
         public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
         {
-            if (env.IsDevelopment())
+            // An unhandled exception returns 500 with no body in every environment, as on the P2P hosts: the developer
+            // exception page (Development) handed callers the stack trace, source paths and request values.
+            app.UseExceptionHandler(errorApp => errorApp.Run(context =>
             {
-                app.UseDeveloperExceptionPage();
-            }
+                context.Response.StatusCode = 500;
+                return Task.CompletedTask;
+            }));
 
             //app.UseElmah();
-            app.UseSwagger();
-            app.UseSwaggerUI(c => {
-                c.SwaggerEndpoint("/swagger/v1/swagger.json", "VerifiedX API v1");
-                c.DisplayRequestDuration();
-            });
 
             // VX-03: refuse cross-origin browser requests and (unless openapi) non-loopback Host headers
             // before anything else runs. See ApiRequestGuard for why this cannot break a working client.
@@ -149,6 +147,33 @@ namespace VerifiedXCore
                 return func.Invoke();
             });
 
+            // Under openapi the API description is for token holders, like the API itself (Swagger does not run the MVC
+            // filter): served only with the configured token, and not at all when the node has none (a per-request API
+            // password cannot be checked here). A loopback-only node keeps it open to its operator's browser.
+            app.Use((context, func) =>
+            {
+                if (Globals.OpenAPI && context.Request.Path.StartsWithSegments("/swagger")
+                    && (Globals.APIToken == null || Globals.APIToken.Length == 0 || context.Request.Headers["apitoken"] != Globals.APIToken.ToUnsecureString()))
+                {
+                    context.Response.StatusCode = 403;
+                    return Task.CompletedTask;
+                }
+                return func.Invoke();
+            });
+
+            // After the guard, so the API description gets the same Host and cross-origin protection as every route.
+            app.UseSwagger();
+            app.UseSwaggerUI(c => {
+                c.SwaggerEndpoint("/swagger/v1/swagger.json", "VerifiedX API v1");
+                c.DisplayRequestDuration();
+            });
+
+            //if(Globals.TestURL)
+                //app.UseHttpsRedirection();
+
+            app.UseRouting();
+
+            // Runs after UseRouting so the password-window exemption can check which action was selected.
             app.Use((context, func) =>
             {
                 // VX-03: only the read-only explorer and the browser-wallet HTML shell skip the API gate.
@@ -172,8 +197,7 @@ namespace VerifiedXCore
                     else
                     {
                         var now = DateTime.UtcNow;
-                        var target = context.Request.Path.HasValue ? context.Request.Path.Value.ToLower() : "NA";
-                        if(target.Contains("/api/v1/unlockwallet/"))
+                        if (ApiRequestGuard.IsUnlockWalletEndpoint(context.Request.Method, context.GetEndpoint()))
                         {
                             return func.Invoke();
                         }
@@ -191,11 +215,6 @@ namespace VerifiedXCore
                 context.Response.StatusCode = 403;//if u want to return specific status code when not ready to accept requests
                 return Task.CompletedTask;
             });
-
-            //if(Globals.TestURL)
-                //app.UseHttpsRedirection();
-
-            app.UseRouting();
 
             app.UseAuthorization();
 

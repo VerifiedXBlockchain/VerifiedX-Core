@@ -13,8 +13,15 @@ namespace VerifiedXCore.Services
     /// </summary>
     public static class ForkCorrectionService
     {
-        /// <summary>Prevents concurrent fork corrections.</summary>
-        private static int _correctionInProgress; // 0 = idle, 1 = running
+        /// <summary>Replaceable for tests: whether the block carries a valid committee certificate (strict).</summary>
+        internal static Func<Block, bool> HasValidCertificate = ConsensusCertificateVerifier.HasValidCertificate;
+
+        /// <summary>
+        /// Replaceable for tests: the bounded reorg onto the corrected block. It shares the recovery interlock, opens the
+        /// download phase so the block is accepted, validates it fully and checks the result; the earlier in-house
+        /// rollback left the node resyncing, so the replacement block was always refused and never applied.
+        /// </summary>
+        internal static Func<long, string, string, string, Block?, Task<bool>> Reorg = Utilities.ForkRecoveryUtility.ReorgToBranchAsync;
 
         /// <summary>
         /// Handles an incoming fork correction from a caster.
@@ -70,6 +77,32 @@ namespace VerifiedXCore.Services
                     }
                 }
 
+                // The block must be the one the message names and must hash to its own hash: the rollback depth comes
+                // from the height, and a signature over an arbitrary hash proves nothing about the block's content.
+                if (correctBlock.Height != height || correctBlock.GetBlockHash() != correctBlock.Hash)
+                {
+                    LogUtility.Log($"[ForkCorrection] Rejecting correction from {casterIP}: block height or hash does not match (message height {height}).", "ForkCorrectionService");
+                    return;
+                }
+
+                // The hash (and so the certificate) covers the merkle root, not the transactions: a certified header with
+                // other transactions would roll the node back and only then fail validation.
+                if (correctBlock.Transactions == null || correctBlock.NumOfTx != correctBlock.Transactions.Count
+                    || correctBlock.MerkleRootOf() != correctBlock.MerkleRoot)
+                {
+                    LogUtility.Log($"[ForkCorrection] Rejecting correction from {casterIP}: the block's transactions do not match its header (height {height}).", "ForkCorrectionService");
+                    return;
+                }
+
+                // The merkle root covers each transaction's carried hash, not its body: every body must hash to it, and every
+                // signature (outside the hash) must verify, before anything is rolled back.
+                var txError = TransactionIntegrityError(correctBlock);
+                if (txError != null)
+                {
+                    LogUtility.Log($"[ForkCorrection] Rejecting correction from {casterIP} at height {height}: {txError}", "ForkCorrectionService");
+                    return;
+                }
+
                 var myHeight = Globals.LastBlock.Height;
 
                 // Case 1: The correction is for a block we already have — check if hash matches
@@ -89,12 +122,15 @@ namespace VerifiedXCore.Services
                         $"from caster {casterIP}. Initiating correction.",
                         "ForkCorrectionService");
 
-                    await ApplyCorrectionAsync(height, correctBlock, casterIP);
+                    await ReorgOntoAsync(correctBlock, casterIP);
                 }
                 // Case 2: The correction is for a height we haven't reached yet — just queue it
                 else if (height == myHeight + 1)
                 {
-                    // This is the next expected block — add to download dict for normal processing
+                    // This is the next expected block — add to download dict for normal processing. A certified one is the
+                    // committee's approval for its height, as for a rollback below.
+                    if (HasValidCertificate(correctBlock))
+                        ApproveCertified(correctBlock);
                     BlockStaging.Stage(correctBlock, casterIP); // VX-19: de-duplicated staging
 
                     await BlockValidatorService.ValidateBlocks();
@@ -114,11 +150,10 @@ namespace VerifiedXCore.Services
                         $"[ForkCorrection] Correction for past height {height} (we're at {myHeight}). " +
                         $"Our hash at {height}={ourBlock?.Hash?[..Math.Min(16, ourBlock?.Hash?.Length ?? 0)]} " +
                         $"Correct hash={correctBlock.Hash?[..Math.Min(16, correctBlock.Hash?.Length ?? 0)]}. " +
-                        $"Rolling back {myHeight - height + 1} block(s).",
+                        $"Correcting {myHeight - height + 1} block(s).",
                         "ForkCorrectionService");
 
-                    var blocksToRollback = (int)(myHeight - height + 1);
-                    await ApplyDeepCorrectionAsync(height, correctBlock, blocksToRollback, casterIP);
+                    await ReorgOntoAsync(correctBlock, casterIP);
                 }
                 else
                 {
@@ -135,130 +170,199 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
-        /// Applies a fork correction by rolling back the current tip and applying the correct block.
-        /// Used when the correction is for our current height.
+        /// Whether each transaction in <paramref name="block"/> carries the hash its content gives and the signature that hash
+        /// needs, checked the way block validation checks it for the transaction's kind; null when they all do.
         /// </summary>
-        private static async Task ApplyCorrectionAsync(long height, Block correctBlock, string casterIP)
+        internal static string? TransactionIntegrityError(Block block)
         {
-            if (Interlocked.CompareExchange(ref _correctionInProgress, 1, 0) != 0)
+            // Validation measures and applies each transaction at its block's height (tx.Height is in no hash); so does this.
+            LedgerIntegrityRules.NormalizeTransactionHeights(block);
+            foreach (var tx in block.Transactions)
             {
-                LogUtility.Log("[ForkCorrection] Correction already in progress, skipping.", "ForkCorrectionService");
-                return;
-            }
+                // Validation skips an honored whitelist entry; so does this.
+                if (LedgerIntegrityRules.IsHonoredWhitelistEntry(tx, block.Height))
+                    continue;
 
-            try
-            {
-                var wasResyncing = Globals.IsResyncing;
-                Globals.IsResyncing = true;
+                // VerifyTX reads Data and UnlockTime one way only (they are joined without a separator in the hash).
+                if (tx.FromAddress != "Coinbase_BlkRwd" && tx.FromAddress != "Coinbase_TrxFees"
+                    && LedgerIntegrityRules.CanonicalPreimage(tx) is { } preimageError)
+                    return $"transaction {tx.Hash}: {preimageError}";
 
-                try
+                // Sender-less, and no signature covers a reward's amount: the hash only, with its own values.
+                if (tx.FromAddress == "Coinbase_BlkRwd" || tx.FromAddress == "Coinbase_TrxFees")
                 {
-                    // Rollback the bad block (1 block from tip)
-                    var rollbackResult = await BlockRollbackUtility.RollbackBlocksFast(1, manageIsResyncing: false);
-                    if (!rollbackResult)
-                    {
-                        LogUtility.Log("[ForkCorrection] Rollback failed.", "ForkCorrectionService");
-                        return;
-                    }
-
-                    // Apply the correct block
-                    var validateResult = await BlockValidatorService.ValidateBlock(correctBlock, false, false, false);
-                    
-                    LogUtility.Log(
-                        $"[ForkCorrection] Correction applied for height {height}: success={validateResult}. " +
-                        $"New tip: height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
-                        "ForkCorrectionService");
-                    ConsoleWriterService.Output(
-                        $"[ForkCorrection] Applied correction from caster {casterIP} at height {height}.");
-
-                    // Re-download any subsequent blocks
-                    if (validateResult)
-                    {
-                        try { await BlockDownloadService.GetAllBlocks(); } catch { }
-                    }
+                    if (!RewardHashMatches(tx))
+                        return $"transaction {tx.Hash} does not hash to its carried hash.";
+                    // The recipient and amount are joined in the hash: digits could move between them unless the recipient
+                    // is a whole address, and between amount and fee unless the fee is written as validation requires.
+                    if (!AddressValidateUtility.ValidateAddress(tx.ToAddress) || LedgerIntegrityRules.CanonicalPreimage(tx) != null)
+                        return $"reward {tx.Hash} does not read one way.";
+                    continue;
                 }
-                finally
+                if (VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(tx.TransactionType))
                 {
-                    Globals.IsResyncing = wasResyncing;
+                    if (!string.Equals(tx.Hash, tx.GetHash(), StringComparison.Ordinal))
+                        return $"transaction {tx.Hash} does not hash to its carried hash.";
+                    var envelopeError = VerifiedXCore.Bitcoin.Attestation.BtcAttestTxValidator.EnvelopeError(tx);
+                    if (envelopeError != null)
+                        return $"transaction {tx.Hash}: {envelopeError}";
+                    if (!TransactionValidatorService.VerifyTXSize(tx, VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.MaxReportTxBytes))
+                        return $"transaction {tx.Hash} is larger than validation allows.";
+                    continue;
                 }
+
+                if (VerifiedXCore.Privacy.PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType))
+                {
+                    if (!TransactionValidatorService.VerifyTXSize(tx, LedgerIntegrityRules.DefaultMaxTxSizeBytes))
+                        return $"private transaction {tx.Hash} is larger than validation allows.";
+
+                    if (!VerifiedXCore.Privacy.PrivateTransactionValidatorService.VerifyPrivateHash(tx, block.Height))
+                        return $"private transaction {tx.Hash} does not hash to its carried hash.";
+                    var signatureOk = VerifiedXCore.Privacy.PrivateTransactionTypes.IsTransparentShield(tx.TransactionType)
+                        ? !string.IsNullOrEmpty(tx.Signature) && SignatureService.VerifySignature(tx.FromAddress, tx.Hash, tx.Signature)
+                        : tx.Signature == VerifiedXCore.Privacy.PrivacyConstants.PlonkSignatureSentinel;
+                    if (!signatureOk)
+                        return $"private transaction {tx.Hash} has no valid signature.";
+                    // The private hash leaves out the recipient (and, past a shield, the sender, amount, nonce and fee):
+                    // those are held to the values the validator requires.
+                    if ((tx.FromAddress ?? "").StartsWith("xRBX") || (tx.ToAddress ?? "").StartsWith("xRBX"))
+                        return $"private transaction {tx.Hash} involves a reserve (xRBX) address.";
+                    if (VerifiedXCore.Privacy.PrivateTransactionTypes.IsTransparentShield(tx.TransactionType))
+                    {
+                        if (tx.ToAddress != VerifiedXCore.Privacy.PrivacyConstants.ShieldedPoolAddress)
+                            return $"private transaction {tx.Hash} is a shield not sent to the shielded pool.";
+                        // Below ShieldFeeSignedHeight the fee is outside the hash: held to the shield validator's rule.
+                        if (tx.Fee <= 0 || (Globals.LastBlock.Height > Globals.TXHeightRule2 && tx.Fee < Globals.MinFeePerKB))
+                            return $"private transaction {tx.Hash} is a shield without the fee validation requires.";
+                    }
+                    else
+                    {
+                        if (!VerifiedXCore.Privacy.PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _) || payload == null)
+                            return $"private transaction {tx.Hash} carries no readable payload.";
+                        var (envelopeOk, envelopeMessage) = VerifiedXCore.Privacy.PrivateTransactionValidatorService.ValidateZkPrivate(tx, payload);
+                        if (!envelopeOk)
+                            return $"private transaction {tx.Hash}: {envelopeMessage}";
+                        // An unshield's outer recipient and amount are its payload's, on the heights validation holds them to it.
+                        if ((block.Height >= Globals.PrivateTxSupplyRulesHeight || block.Height <= VerifiedXCore.Privacy.PrivateTxSupplyRules.UnshieldBindingScannedThrough)
+                            && VerifiedXCore.Privacy.PrivateTxSupplyRules.OuterFieldsError(tx, payload) is { } outerError)
+                            return $"private transaction {tx.Hash}: {outerError}";
+                    }
+                    continue;
+                }
+
+                if (!HashMatchesStrictly(tx))
+                    return $"transaction {tx.Hash} does not hash to its carried hash.";
+                // The recipient and amount are joined in the hash: a whole recipient keeps digits from moving between them.
+                // A name resolves against chain state, and the state in hand is the branch being replaced, so a name is
+                // left to full validation (from PathAuditRulesHeight a name is refused outright, without state).
+                if (LedgerIntegrityRules.RecipientIsNotAName(tx, block.Height) is { } nameError)
+                    return $"transaction {tx.Hash}: {nameError}";
+                if (!IsNameRecipient(tx.ToAddress) && TransactionValidatorService.RecipientError(tx) is { } recipientError)
+                    return $"transaction {tx.Hash}: {recipientError}";
+                if (!TransactionValidatorService.VerifyTXSize(tx, LargestSizeCap(tx, block.Height)))
+                    return $"transaction {tx.Hash} is larger than validation allows."; // whitespace inside the signature's Base64 still verifies
+                // A delayed reserve send's settlement time: with none, its digits could have moved into Data (the preimage
+                // joins them). Reserve control transactions (Register, CallBack, Recover) carry none.
+                if ((tx.FromAddress ?? "").StartsWith("xRBX") && tx.TransactionType != TransactionType.RESERVE && tx.UnlockTime == null)
+                    return $"reserve transaction {tx.Hash} has no unlock time.";
+                var signatureError = TransactionValidatorService.SignatureError(tx);
+                if (signatureError != null)
+                    return $"transaction {tx.Hash}: {signatureError}";
             }
-            catch (Exception ex)
-            {
-                LogUtility.Log($"[ForkCorrection] Error during correction: {ex.Message}", "ForkCorrectionService");
-            }
-            finally
-            {
-                Interlocked.Exchange(ref _correctionInProgress, 0);
-            }
+            return null;
         }
 
         /// <summary>
-        /// Applies a deep fork correction by rolling back multiple blocks.
-        /// Used when the correction is for a height below our current tip.
+        /// The standard hash check without its zero-amount fallback for a non-whole amount: VerifyTX re-hashes such an
+        /// amount as 0, so a carried fraction passes it against a signature over 0 and is refused only by later rules. Here,
+        /// before a rollback, the amount must be the one that was hashed (or its "N.0" spelling, or a zero amount).
         /// </summary>
-        private static async Task ApplyDeepCorrectionAsync(long height, Block correctBlock, int blocksToRollback, string casterIP)
+        private static bool HashMatchesStrictly(Transaction tx)
         {
-            if (Interlocked.CompareExchange(ref _correctionInProgress, 1, 0) != 0)
-            {
-                LogUtility.Log("[ForkCorrection] Correction already in progress, skipping.", "ForkCorrectionService");
-                return;
-            }
+            if (string.Equals(tx.Hash, tx.GetHash(), StringComparison.Ordinal))
+                return true;
+            if (tx.Amount % 1 != 0)
+                return false;
+            return TransactionValidatorService.StandardHashMatches(tx);
+        }
 
+        /// <summary>Whether AddressValidateUtility.ValidateAddress would look this recipient up as a registered name.</summary>
+        private static bool IsNameRecipient(string? to) =>
+            !string.IsNullOrEmpty(to)
+            && !to.StartsWith(VerifiedXCore.Privacy.ShieldedAddressConstants.Prefix, StringComparison.Ordinal)
+            && (to.ToLower().Contains(".rbx") || to.ToLower().Contains(".vfx"));
+
+        /// <summary>
+        /// Whether a block reward hashes to its carried hash with the values it carries. A whole number built with no decimal
+        /// places (32, 0) reads 32.0 and 0.0 once the block has crossed the wire, so each of Amount and Fee is also tried
+        /// without trailing zeros: the same values, never another one.
+        /// </summary>
+        /// <summary>
+        /// The largest size validation can allow this transaction, without reading state: the state in hand before a
+        /// rollback is the branch being replaced, and MaxTxSizeBytes reads the vault a transfer moves. From
+        /// VbtcVaultTxSizeHeight a vault creation, or a TKNZ/NFT Transfer() that carries a contract's code (the shape
+        /// MaxTxSizeBytes then compares with the stored vault), may be as large as a vault; anything else is 30 KB.
+        /// </summary>
+        private static int LargestSizeCap(Transaction tx, long height)
+        {
+            if (height < Globals.VbtcVaultTxSizeHeight)
+                return LedgerIntegrityRules.DefaultMaxTxSizeBytes;
+            if (tx.TransactionType == TransactionType.VBTC_V2_CONTRACT_CREATE)
+                return Globals.MaxVbtcVaultTxSizeBytes;
+            if ((tx.TransactionType != TransactionType.TKNZ_TX && tx.TransactionType != TransactionType.NFT_TX) || tx.Data == null)
+                return LedgerIntegrityRules.DefaultMaxTxSizeBytes;
             try
             {
-                // Safety: don't roll back too many blocks from a single correction message.
-                // Wave 5: raised 5→MAX_REORG_DEPTH (10) — safe now that senders are verified
-                // casters (A1 IP check + Wave 3 committee-membership check at both handlers),
-                // and 10 matches the single reorg bound used everywhere else.
-                if (blocksToRollback > Utilities.ForkChoiceUtility.MAX_REORG_DEPTH)
-                {
-                    LogUtility.Log(
-                        $"[ForkCorrection] Deep correction requires {blocksToRollback} blocks — too deep. " +
-                        $"Max allowed is {Utilities.ForkChoiceUtility.MAX_REORG_DEPTH}. Ignoring to prevent potential attack.",
-                        "ForkCorrectionService");
-                    return;
-                }
+                var payload = SmartContractDeployBinding.ReadPayload(tx.Data);
+                return payload.Function == "Transfer()" && !string.IsNullOrEmpty(payload.ContractUID) && !string.IsNullOrEmpty(payload.Data)
+                    ? Globals.MaxVbtcVaultTxSizeBytes
+                    : LedgerIntegrityRules.DefaultMaxTxSizeBytes;
+            }
+            catch { return LedgerIntegrityRules.DefaultMaxTxSizeBytes; }
+        }
 
-                var wasResyncing = Globals.IsResyncing;
-                Globals.IsResyncing = true;
-
-                try
+        private static bool RewardHashMatches(Transaction tx)
+        {
+            foreach (var amount in new[] { tx.Amount, tx.Amount / 1.000000000000000000000000000000000m })
+                foreach (var fee in new[] { tx.Fee, tx.Fee / 1.000000000000000000000000000000000m })
                 {
-                    var rollbackResult = await BlockRollbackUtility.RollbackBlocksFast(blocksToRollback, manageIsResyncing: false);
-                    if (!rollbackResult)
+                    var probe = new Transaction
                     {
-                        LogUtility.Log("[ForkCorrection] Deep rollback failed.", "ForkCorrectionService");
-                        return;
-                    }
-
-                    // Apply the correct block
-                    var validateResult = await BlockValidatorService.ValidateBlock(correctBlock, false, false, false);
-
-                    LogUtility.Log(
-                        $"[ForkCorrection] Deep correction applied for height {height}: success={validateResult}. " +
-                        $"Rolled back {blocksToRollback} block(s). " +
-                        $"New tip: height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
-                        "ForkCorrectionService");
-
-                    // Re-download subsequent blocks from peers
-                    if (validateResult)
-                    {
-                        try { await BlockDownloadService.GetAllBlocks(); } catch { }
-                    }
+                        Timestamp = tx.Timestamp, FromAddress = tx.FromAddress, ToAddress = tx.ToAddress, Amount = amount, Fee = fee,
+                        Nonce = tx.Nonce, TransactionType = tx.TransactionType, Data = tx.Data, UnlockTime = tx.UnlockTime,
+                    };
+                    if (string.Equals(tx.Hash, probe.GetHash(), StringComparison.Ordinal))
+                        return true;
                 }
-                finally
-                {
-                    Globals.IsResyncing = wasResyncing;
-                }
-            }
-            catch (Exception ex)
+            return false;
+        }
+
+        /// <summary>
+        /// The certificate is the committee's approval of the block: a hash a caster approved earlier for its height (or
+        /// for the heights above it) would otherwise make validation refuse it.
+        /// </summary>
+        internal static void ApproveCertified(Block certified)
+        {
+            Globals.CasterApprovedBlockHashDict[certified.Height] = certified.Hash;
+            foreach (var stale in Globals.CasterApprovedBlockHashDict.Keys.Where(h => h > certified.Height).ToList())
+                Globals.CasterApprovedBlockHashDict.TryRemove(stale, out _);
+        }
+
+        /// <summary>
+        /// Rolls back to and adopts the corrected block, only when it carries a valid committee certificate: a block a
+        /// single key signed made every recipient roll back. Without one, the fork is left to ForkChoice and recovery.
+        /// </summary>
+        private static async Task ReorgOntoAsync(Block correctBlock, string casterIP)
+        {
+            if (!HasValidCertificate(correctBlock))
             {
-                LogUtility.Log($"[ForkCorrection] Error during deep correction: {ex.Message}", "ForkCorrectionService");
+                LogUtility.Log($"[ForkCorrection] Not rolling back for the correction from {casterIP} at height {correctBlock.Height}: it carries no valid committee certificate.", "ForkCorrectionService");
+                return;
             }
-            finally
-            {
-                Interlocked.Exchange(ref _correctionInProgress, 0);
-            }
+            ApproveCertified(correctBlock);
+
+            var adopted = await Reorg(correctBlock.Height, correctBlock.Hash, casterIP, "ForkCorrection", correctBlock);
+            LogUtility.Log($"[ForkCorrection] Correction at height {correctBlock.Height} from {casterIP}: {(adopted ? "adopted" : "not adopted")}.", "ForkCorrectionService");
         }
     }
 }

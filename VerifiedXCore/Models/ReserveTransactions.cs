@@ -78,6 +78,31 @@ namespace VerifiedXCore.Models
         #endregion
 
         #region Get ReserveTransactions transaction
+        /// <summary>Tests only: runs as the row is read for a block's apply (a fault of this node's storage).</summary>
+        internal static Action? TestReadFault;
+
+        /// <summary>
+        /// The row a call-back names, for a block's apply. A fault of this node's storage is passed on, not read as "no
+        /// such row": a call-back that found no row was skipped, the block counted as applied, and the row later settled
+        /// to its payee here while peers refunded the sender. The apply catches it and reports the block's apply
+        /// incomplete. The read takes nothing from the transaction but the hash, so any failure of it - a lock timeout, a
+        /// corrupt page (LiteDB's own exceptions included) - is this node's storage, and is passed on as one.
+        /// (Validation and the API keep GetTransactions, which reads any fault as "no such row" and so refuses.)
+        /// </summary>
+        public static ReserveTransactions? GetTransactionsForApply(string hash)
+        {
+            var db = GetReserveTransactionsDb() ?? throw new System.IO.IOException("The reserve transactions store is not open.");
+            try
+            {
+                TestReadFault?.Invoke();
+                return db.Query().Where(x => x.Hash == hash).FirstOrDefault();
+            }
+            catch (Exception ex) when (ex is not System.IO.IOException)
+            {
+                throw new System.IO.IOException($"Reserve transaction {hash} could not be read: {ex.Message}", ex);
+            }
+        }
+
         public static ReserveTransactions? GetTransactions(string hash)
         {
             try
@@ -100,23 +125,43 @@ namespace VerifiedXCore.Models
         #endregion
 
         #region Get ReserveTransactions transaction list
-        public static IEnumerable<ReserveTransactions>? GetTransactionList(string fromAddress)
+        /// <summary>
+        /// A reserve's rows, for Recover()'s apply (its only caller). Read whole here, and any failure of the read - a
+        /// lock timeout, a corrupt page (LiteDB's own exceptions included), a store that is not open - is passed on as a
+        /// fault of this node's storage: it was read as "no rows", so Recover() swept nothing on this node while its peers
+        /// swept the reserve, and the block counted as applied. The apply reports it (StateData.RecoverReserveAccountTx).
+        /// </summary>
+        public static List<ReserveTransactions> GetTransactionList(string fromAddress)
         {
+            var db = GetReserveTransactionsDb() ?? throw new System.IO.IOException("The reserve transactions store is not open.");
             try
             {
-                var db = GetReserveTransactionsDb();
-                var rec = db.Query().Where(x => x.FromAddress == fromAddress).ToEnumerable();
-                if (rec != null)
-                {
-                    return rec;
-                }
-                return null;
+                TestReadFault?.Invoke();
+                return db.Query().Where(x => x.FromAddress == fromAddress).ToList();
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not System.IO.IOException)
             {
-
+                throw new System.IO.IOException($"The rows of reserve {fromAddress} could not be read: {ex.Message}", ex);
             }
-            return null;
+        }
+
+        /// <summary>
+        /// A row's current state, for its settlement as it falls due. The read takes nothing but the row's own id, so any
+        /// failure of it is this node's storage and is passed on as one (StateData.UpdateTreiFromReserve marks the state
+        /// failed); it was read as a fault of no kind, and the settlement counted as applied with the row left behind.
+        /// </summary>
+        public static ReserveTransactions? GetRowForApply(LiteDB.ILiteCollection<ReserveTransactions>? col, Guid id)
+        {
+            if (col == null) throw new System.IO.IOException("The reserve transactions store is not open.");
+            try
+            {
+                TestReadFault?.Invoke();
+                return col.Query().Where(x => x.Id == id).FirstOrDefault();
+            }
+            catch (Exception ex) when (ex is not System.IO.IOException)
+            {
+                throw new System.IO.IOException($"Reserve row {id} could not be read: {ex.Message}", ex);
+            }
         }
 
         #endregion

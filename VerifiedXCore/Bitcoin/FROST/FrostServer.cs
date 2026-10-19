@@ -35,8 +35,11 @@ namespace VerifiedXCore.Bitcoin.FROST
                         .ConfigureLogging(loggingBuilder => loggingBuilder.ClearProviders());
                     });
 
+                    // Signing records from here on are under exact spellings only (older ones may hide an overwritten one):
+                    // stamped before the server takes a request.
+                    VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.EnsureExactSpellingSince();
                     _ = builder.RunConsoleAsync();
-                    
+
                     // Pins live in memory; rebuild them from the durable signed evidence so a restart cannot
                     // let a new withdrawal spend the coins of a signed transaction that is still out there.
                     try { FrostStartup.RestorePinsFromEvidence(); }
@@ -103,8 +106,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                     return;
 
                 Console.WriteLine("[FROST Backup] Auto-recovery: No local FROST key packages found but this is an active validator. Attempting peer recovery...");
-                var recoveredCount = await VerifiedXCore.Bitcoin.Services.FrostKeyBackupService.RecoverKeysFromPeers(
-                    Globals.ValidatorAddress, activeValidators);
+                var recoveredCount = (await VerifiedXCore.Bitcoin.Services.FrostKeyBackupService.RecoverKeysFromPeersWithRetry(
+                    Globals.ValidatorAddress, activeValidators)).Restored;
 
                 if (recoveredCount > 0)
                     Console.WriteLine($"[FROST Backup] Auto-recovery: Successfully recovered {recoveredCount} FROST key package(s) from peers!");

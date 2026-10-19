@@ -265,16 +265,17 @@ namespace VerifiedXCore
         // mainnet height. Each rule keeps its own constant (so one can be moved alone if ever needed); all are set to
         // FundLossAuditHeight. Must be above the tip when every validator runs this build. Testnet values in Program.cs.
         /// <summary>
-        /// Shared mainnet activation height of the fund-loss audit rules. Reset 2026-10-13: the first value (7,472,000,
-        /// set 2026-10-08) passed before the build was on the network. Tip 7,496,705 on 2026-10-13 plus three days
-        /// (~6,300 blocks/day over the last five). The same height as <see cref="BitcoinAttestationRecordHeight"/>.
+        /// Shared mainnet activation height of the fund-loss audit rules. NOT SET: a placeholder far above the chain
+        /// until the release goes to mainnet, when it is set to the tip plus a few days (it was 7,517,000, reset
+        /// 2026-10-13, and the chain passed it on 2026-10-16 before the build was deployed). The same height as
+        /// <see cref="BitcoinAttestationRecordHeight"/>.
         /// </summary>
-        public const long FundLossAuditHeight = 7_517_000L;
+        public const long FundLossAuditHeight = 999_999_999L; // TODO set before the mainnet release: tip plus a few days
         /// <summary>
-        /// Testnet activation of the same rules (Program.cs / WardenService). Reset 2026-10-13 from 1,099,400: tip
-        /// 1,124,010 on 2026-10-13 plus three days (~6,300 blocks/day).
+        /// Testnet activation of the same rules (Program.cs / WardenService). Reset 2026-10-17 from 1,143,500, which the
+        /// chain had passed before the build was deployed: tip 1,151,481 on 2026-10-17 plus three days (~6,800 blocks/day).
         /// </summary>
-        public const long FundLossAuditTestnetHeight = 1_143_500L;
+        public const long FundLossAuditTestnetHeight = 1_172_000L;
 
         /// <summary>
         /// Item 1 (stage 1): a ZK-authorized private transaction (VFX/vBTC unshield, private transfer) may not take more
@@ -298,6 +299,13 @@ namespace VerifiedXCore
         {
             ["VFX"] = 100_033.000012M,
         };
+
+        /// <summary>
+        /// The block of the last forged debit the correction adds back (7,257,080). A pool counter last written before it
+        /// does not hold those debits - a privacy rebuild that stopped early, or a row made again from nothing - and gets
+        /// no correction: added to it, the correction is supply that was never in the pool.
+        /// </summary>
+        public static long ShieldedSupplyCorrectionsThroughHeight = 7_257_080L;
 
         /// <summary>
         /// Item 2: Sale_Complete / M_Sale_Complete naming a contract with no state record is refused (every sale check sat
@@ -347,6 +355,183 @@ namespace VerifiedXCore
         /// The same fork point as the rest.
         /// </summary>
         public static long PathAuditRulesHeight = FundLossAuditHeight;
+
+        /// <summary>
+        /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
+        /// a row whose Data was not an array of objects made the recovery throw part-way, so every later row, the balance
+        /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Not active yet.
+        /// </summary>
+        public static long ReserveRecoverReadsEveryRowHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height a vBTC V2 transfer sent as a contract call (Function "TransferVBTCV2()" or
+        /// "TransferVBTCMultiV2()" under another transaction type) is held to the rules the typed VBTC_V2_TRANSFER
+        /// already meets: its Data names each key once, in one spelling. The apply reads the last of a repeated key while
+        /// other readers may take the first. Not active yet.
+        /// </summary>
+        public static long VbtcEnvelopeRulesHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height a reserve's transaction other than a TX (or its Register()) carries no Amount: the apply burned
+        /// it at once and CallBack()/Recover() return only TX amounts (LedgerIntegrityRules.ReserveMovesVfxOnlyByTransfer).
+        /// Not active yet.
+        /// </summary>
+        public static long ReserveNonTransferAmountHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height a transaction's fee is below 1 VFX, so amount digits cannot move into it under the same hash
+        /// (LedgerIntegrityRules.FeeBelowOneVfx). Not active yet.
+        /// </summary>
+        public static long FeeBelowOneVfxHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height a block moves (Transfer() or Burn()) a contract at most once: each move was judged against the
+        /// owner before the block, so a second one undid a confirmed transfer (LedgerIntegrityRules.RegisterNftStepInBlock).
+        /// Not active yet.
+        /// </summary>
+        public static long OneMovePerContractHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height a block producer's VRF is seeded from its epoch's anchor block, not the parent's hash, which the
+        /// previous producer could grind (VrfSeed). Height h is in epoch (h - VrfSeedHeight) / VrfEpochBlocks; the epoch's
+        /// anchor is VrfAnchorLagBlocks below its first height, deeper than any reorg by the time the epoch starts, and only a
+        /// validator registered before its epoch's anchor produces in it. Not active yet.
+        /// </summary>
+        public static long VrfSeedHeight = 999_999_999_999;
+
+        /// <summary>The length of a VRF seed epoch, in blocks (about a day at 10 s blocks).</summary>
+        public const long VrfEpochBlocks = 8_640;
+
+        /// <summary>How far below an epoch's first height its anchor block lies: above ForkChoiceUtility.MAX_REORG_DEPTH.</summary>
+        public const long VrfAnchorLagBlocks = 100;
+
+        /// <summary>
+        /// From this height the recent-transaction-hash replay guard holds every block within the transaction time window
+        /// of the newest block, by block timestamp, and never fewer than 400 blocks (TxHashGuard). Not active yet.
+        /// </summary>
+        public static long TxHashGuardByTimeHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height owner fields carried in a transaction's Data are bound to the signed transaction: a
+        /// DecShopCreate()'s owner is its sender, and a TokenContractOwnerChange()'s new owner is its recipient
+        /// (TransactionValidatorService.DecShopOwnerRefusal, TokenOwnerChangeRefusal). Not active yet.
+        /// </summary>
+        public static long DataOwnerBoundHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height a token transfer writes the recipient's record first and debits the sender only once that write
+        /// succeeded (StateData.TokenTransferRecipientFirst). Not active yet.
+        /// </summary>
+        public static long TokenTransferRecipientFirstHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height an AdnrCreate() name is lowercase letters, digits and '-', 1 to ADNRLimit characters, with no
+        /// suffix (LedgerIntegrityRules.AdnrNameError): consensus checked only that the name was free. Not active yet.
+        /// </summary>
+        public static long AdnrNameGrammarHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height a TokenMint() is refused on a paused contract, with more decimals than the token's
+        /// DecimalPlaces, or when it would overflow the supply or the holder's balance (LedgerIntegrityRules.TokenMintRefusal).
+        /// Not active yet.
+        /// </summary>
+        public static long TokenMintRulesHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height a block carries at most MaxTransactionsPerBlock transactions, its coinbase included: the 10 MB
+        /// size bound alone let one block multiply every per-transaction cost (verification, state writes, proofs).
+        /// Not active yet.
+        /// </summary>
+        public static long BlockTransactionCapHeight = 999_999_999_999;
+
+        /// <summary>
+        /// The most transactions a block carries from BlockTransactionCapHeight. A producer fills its block from at most
+        /// 1 MB of pool, which holds fewer than this, so no block an honest producer builds reaches it.
+        /// </summary>
+        public const int MaxTransactionsPerBlock = 3_000;
+
+        /// <summary>
+        /// From this height a transaction carrying a non-whole Amount must hash with that Amount: VerifyTX's re-hash
+        /// fallback read it as 0 and accepted a signature over "0" (TransactionValidatorService.StandardHashMatches).
+        /// Not active yet.
+        /// </summary>
+        public static long FractionalAmountRehashHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height a transaction's ToAddress carries this network's version byte (LedgerIntegrityRules.
+        /// RecipientIsThisNetworks; admission refuses another network's address at every height). Not active yet.
+        /// </summary>
+        public static long RecipientNetworkByteHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height a VOTE_TOPIC's Function is TopicAdd() (admission refuses another at every height), and a new
+        /// topic's owner, tally, creation time and validator count are set by the apply (StateData.NormalizeNewTopic), not
+        /// taken from its creator. Not active yet.
+        /// </summary>
+        public static long VoteTopicRulesHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height a TopicAdd() is judged only on what every node holds alike (TransactionValidatorService.
+        /// TopicAddRefusal): the signature, the validator balance, one open topic per owner at the block's time, and an
+        /// AdjVoteIn topic's specs, in live apply and in a rebuild or replay alike. The sender need not have crafted a
+        /// recent block, and the topic's height need not be in the node's recent-block window: both read node-local state.
+        /// Not active yet.
+        /// </summary>
+        public static long TopicAddDeterministicHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height AdnrCreate() of a label is refused while the label's legacy "label.rbx" (registered before
+        /// V4Height) exists: the duplicate check matched only the bare label and "label.vfx". Not active yet.
+        /// </summary>
+        public static long LegacyNameReservedHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height Evolve(), Devolve() and ChangeEvolveStateSpecific() need a contract with the Evolving feature
+        /// and carry a body that keeps it (LedgerIntegrityRules.EvolutionNeedsAnEvolvingContract). Not active yet.
+        /// </summary>
+        public static long EvolveRulesHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height a shield carries no nullifier, fee-leg nullifier or spent position (PrivateTxProofRules.
+        /// ShieldSpendsNothing; admission refuses one at every height). Not active yet.
+        /// </summary>
+        public static long ShieldSpendsNothingHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height the Bitcoin-report signer set taken before the validator bonds' first look holds only the
+        /// grandfathered bonds (ValidatorBond.SignerEligible): a validator registered after the grandfather height
+        /// entered the epoch-zero set without waiting its age. Not active yet.
+        /// </summary>
+        public static long SignerAgeFromEpochZeroHeight = 999_999_999_999;
+
+        /// <summary>
+        /// The addresses whose signature over a release asset's SHA-256 lets self-update install it (Utilities.ReleaseSignature).
+        /// A dedicated release key, never a validator key. Empty: self-update refuses and says to download manually.
+        /// </summary>
+        public static string[] ReleaseSignerAddresses = Array.Empty<string>();
+
+        /// <summary>
+        /// From this height a smart contract's Update(), Transfer(), Burn(), Evolve(), Devolve() or
+        /// ChangeEvolveStateSpecific() must carry its Data in the array form those applies read. Validation also accepted
+        /// a single object, which every apply then skips, so the transaction was mined with no effect. Not active yet.
+        /// </summary>
+        public static long ContractPayloadArrayHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height a BTC name transfer to a Bitcoin address that already holds a name is skipped at apply.
+        /// Validation reads the names as they were before the block, so two transfers to one address in one block both
+        /// passed and left two records on it, and deleting either then removed both. From the same height a BTC name
+        /// delete or transfer acts only on the sender's own record at the address. Not active yet.
+        /// </summary>
+        public static long BtcNameOneRecordPerAddressHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height a BTC name create is signed by the key of the Bitcoin address it names, and a transfer by the key
+        /// of the address it moves to. Each signed message names the VFX owner and the name (BtcNameSignatures), so a
+        /// signature can't be reused for another owner or name. Validation checked the create signature only against the
+        /// key the signature itself carries, and a transfer's destination not at all. Not active yet.
+        /// </summary>
+        public static long BtcNameSignerOwnsAddressHeight = 999_999_999_999;
 
         /// <summary>
         /// The validator stake is bonded from this height (Services.ValidatorBond; owner decision 2026-10-13): a
@@ -426,9 +611,11 @@ namespace VerifiedXCore
         /// shielded pool is reset and the circuit-compatible tree starts (leaf 0 = the public dummy note); no private
         /// transaction is valid in that block. From the next block a ZK-authorized private transaction must carry a PLONK
         /// proof that verifies against VFXPI1 version-2 public inputs rebuilt from its own fields, and a node whose native
-        /// library cannot verify (no VXPLNK05 params, or a library without the v2 owner-bound circuits) refuses it (fail closed).
+        /// library cannot verify (no VXPLNK06 params, or a library without the v2 owner-bound circuits) refuses it (fail closed).
         /// Notes shielded before the height can never be proven and are abandoned (owner decision: test funds, ~4.1 VFX).
         /// Sentinel 999,999,999,999 = inert; set at the stage-2 release, above the tip when every validator runs it.
+        /// Release rule: a later params file or native library that changes what a proof verifies against ships with its own
+        /// activation height, and nodes keep the prior params to judge blocks below it.
         /// </summary>
         public static long PrivateTxProofRulesHeight = 999_999_999_999L;
         public static Dictionary<string, decimal> ForgedVfxBurns = new(StringComparer.Ordinal)
@@ -458,7 +645,7 @@ namespace VerifiedXCore
         /// <summary>The three attestation heights on testnet (applied in Program.cs and WardenService): the tip of 2026-10-13, tip plus three days, and three days after that (plan 8.4).</summary>
         public const long BitcoinAttestationObserveTestnetHeight = 1_124_000L;
         public const long BitcoinAttestationRecordTestnetHeight = FundLossAuditTestnetHeight;
-        public const long BitcoinAttestationTestnetHeight = 1_163_000L;
+        public const long BitcoinAttestationTestnetHeight = 1_192_500L; // H1 plus three days (reset 2026-10-17 with H1)
         /// <summary>
         /// H1, recording: the Bitcoin report and rewind transactions are accepted and applied, and a vault created from
         /// this height on is watched: its deposit script is in state, its owner's balance is its attested coins, and its
@@ -473,10 +660,10 @@ namespace VerifiedXCore
         /// H2, enforcement: vaults created before H1 are frozen (nothing debits a balance on them, and no bridge exit or
         /// unlock draws on their locks), and the transactions only the earlier way of working needs (withdrawal
         /// completion, cancellation vote, bridge exit completion) are refused for every vault. The time between H1 and
-        /// H2 is for moving to a new vault: two weeks on mainnet, three days on testnet (plan 8.4). Set 2026-10-13:
-        /// H1 plus two weeks at ~6,400 blocks/day.
+        /// H2 is for moving to a new vault: two weeks on mainnet, three days on testnet (plan 8.4). H1 plus two weeks at
+        /// ~6,400 blocks/day; it follows H1, which is not set on mainnet yet.
         /// </summary>
-        public static long BitcoinAttestationHeight = 7_607_000L;
+        public static long BitcoinAttestationHeight = FundLossAuditHeight + 90_000L;
 
         /// <summary>The major version peers were required to run before this release.</summary>
         public const int PriorMajorVer = 8;
@@ -832,10 +1019,21 @@ namespace VerifiedXCore
             && !IsDeparting
             && !Utilities.ForkRecoveryUtility.IsRecoveryInProgress
             && !Utilities.SnapshotRestoreUtility.IsRestoreRunning
+            && !Utilities.SnapshotRestoreUtility.StateDestroyedByFailedRestore
             && !Services.BlockValidatorService.GetProbationStatus().Active
+            // It judges no block while its withdrawal store is rebuilt or left unfinished.
+            && !Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning
             // STALL-RESOLVE: a node whose tip has not moved while the network is ahead is
             // stranded on a dead branch — casters must not select it as a winner.
-            && !Services.ForkDetectionService.IsStalled;
+            && !Services.ForkDetectionService.IsStalled
+            && ProofVerifierReady;
+
+        /// <summary>
+        /// From the proof-rules height a node refuses every block with a private transaction until its PLONK verifier is
+        /// loaded, so until then it is not ready to produce or cast. Always true below the height.
+        /// </summary>
+        public static bool ProofVerifierReady =>
+            !Privacy.PrivacyEpoch.ProofRulesActive((LastBlock?.Height ?? 0) + 1) || Privacy.PlonkProofVerifier.VerifierAvailable();
 
         /// <summary>Legacy proofs, GET block fallback, optional cert skip, and seed peer injection apply only for seed casters when the tip looks stopped. Other nodes always use normal snapshot/signed paths and discovery.
         /// Phase E: additionally requires a signed ≥2-of-3 seed agreement (<see cref="Services.BootstrapCoordinationService.AgreementActive"/>) — bootstrap is never entered unilaterally.</summary>

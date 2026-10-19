@@ -89,6 +89,13 @@ namespace VerifiedXCore.Services
 		internal static void ResetPasswordChecks() => _passwordChecks.Clear();
 
 		/// <summary>
+		/// Whether an unlock with this password must be refused: the wallet is encrypted and the password opens none of its
+		/// keystore records. The unlock routes proved the password by signing with the first account, which proves nothing
+		/// when that account's key is still stored in plaintext (an account from before encryption): any password unlocked.
+		/// </summary>
+		public static bool RefusesUnlock(string? password) => Globals.IsWalletEncrypted && !IsWalletPassword(password);
+
+		/// <summary>
 		/// VX-13 (follow-up): true when <paramref name="password"/> is this wallet's encryption password — it opens a
 		/// keystore record and that record's data key opens its stored private key. Anything that seals keys under the
 		/// in-memory password must check this first: the password can be set before it is verified (encpass= at startup,

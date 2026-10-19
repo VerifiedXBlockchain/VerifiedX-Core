@@ -561,6 +561,29 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Sorted(_old), ValidatorBond.SignerEligible(VBTCValidatorRegistry.GetActiveValidatorsAt(Rule - 1), Rule - 1).Select(v => v.ValidatorAddress).OrderBy(a => a, StringComparer.Ordinal).ToList());
         }
 
+        /// <summary>
+        /// From SignerAgeFromEpochZeroHeight the first signer set, taken before the first look at the stakes, holds only
+        /// the grandfathered bonds: a validator that registered after the grandfather height waits its age like any other.
+        /// </summary>
+        [Fact]
+        public async Task TheFirstSignerSet_HoldsOnlyGrandfatheredBonds_FromTheRule()
+        {
+            var prior = Globals.SignerAgeFromEpochZeroHeight;
+            try
+            {
+                Globals.SignerAgeFromEpochZeroHeight = Rule + 1;
+                var late = NewKey();
+                Fund(late, Stake + 1M);
+                Lifecycle(late, TransactionType.VBTC_V2_VALIDATOR_REGISTER, Grandfather + 5);
+                Globals.BitcoinAttestationRecordHeight = Rule + 1;
+                await StartTheRule();
+
+                Assert.Equal(Sorted(_old), SignerSet(Rule + 1));
+                Assert.DoesNotContain(late.Address, SignerSet(Rule + 1));
+            }
+            finally { Globals.SignerAgeFromEpochZeroHeight = prior; }
+        }
+
         // ── How the bonds start (second path audit, 14 October 2026) ────────────────────────────────────────
 
         /// <summary>
@@ -628,7 +651,7 @@ namespace VerifiedXCore.Tests
             BlockchainData.GetBlocks().InsertSafe(block);
             Assert.False(await StateData.UpdateTreis(block));
             Assert.Null(ValidatorBond.Row(_old[0].Address));
-            Assert.Throws<InvalidOperationException>(() => ValidatorBond.OnBlockStart(Rule + 6));
+            Assert.Throws<NodeStateFaultException>(() => ValidatorBond.OnBlockStart(Rule + 6));
             Assert.Equal(Rule + 5, StateData.BlockStartFailedAtHeight);
         }
 

@@ -162,12 +162,14 @@ namespace VerifiedXCore.Utilities
         }
 
         /// <summary>
-        /// The fork-choice rule can say LocalWins on certificate weight. A node whose tip has not
-        /// moved while a confirmed majority is more than a full reorg window ahead cannot be
-        /// "winning" — its branch is dead. In that case we follow the majority regardless.
+        /// A node whose tip has not moved while a confirmed majority is more than a full reorg window
+        /// ahead follows the majority even when the fork-choice rule says LocalWins on height or hash.
+        /// Not when it says LocalWins on certificate weight: the majority is a count of peers that
+        /// answered a probe, which proves nothing, while the local block carries more valid committee
+        /// attestations than the majority's. Below CertEnforceHeight no branch is decided on weight.
         /// </summary>
-        public static bool ShouldOverrideLocalWin(bool stalled, long localTip, long remoteTip)
-            => stalled && remoteTip - localTip > ForkChoiceUtility.MAX_REORG_DEPTH;
+        public static bool ShouldOverrideLocalWin(bool stalled, long localTip, long remoteTip, bool decidedOnCertWeight)
+            => !decidedOnCertWeight && stalled && remoteTip - localTip > ForkChoiceUtility.MAX_REORG_DEPTH;
 
         /// <summary>Backoff between resolution attempts while stalled: 10s, 30s, 60s, then 120s forever.</summary>
         public static int NextBackoffSeconds(int attemptsSoFar)

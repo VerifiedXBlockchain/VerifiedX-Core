@@ -148,6 +148,33 @@ namespace VerifiedXCore.Tests
             Assert.True(VBTCService.DeclaresVbtcV1(new SmartContractMain { Features = new List<SmartContractFeatures> { V1Feature() } }));
         }
 
+        /// <summary>
+        /// C-202 spin-off: a V1 contract whose decompile failed for a reason of this node (its disk) was answered "not a V1
+        /// contract", so from the retirement height a transaction naming it passed the freeze on this node alone. The fault
+        /// is passed on, as for V2 (the block is not taken now); code that fails on every node is still "not V1".
+        /// </summary>
+        [Fact]
+        public void AV1ContractWhoseDecompileFailsOnThisNodesDisk_IsNotTakenForAnotherContract()
+        {
+            var body = SmartContractStateTrei.GetSmartContractState(V1)!.ContractData;
+            var uid = Guid.NewGuid().ToString("N") + ":1736000001";                    // not in the decompile cache
+            SmartContractStateTrei.SaveSmartContract(new SmartContractStateTrei { SmartContractUID = uid, ContractData = body, MinterAddress = _owner.Address, OwnerAddress = _owner.Address });
+            var transfer = Tx(new[] { new { Function = "Transfer()", ContractUID = uid, ToAddress = _other.Address, Data = V1Body(uid) } }, TransactionType.TKNZ_TX);
+            try
+            {
+                SmartContractMain.DecompileForTests = text =>
+                {
+                    if (text == body) throw new System.Reflection.TargetInvocationException(new UnauthorizedAccessException("Access to the path 'Submissions' is denied."));
+                };
+                Assert.ThrowsAny<Exception>(() => LedgerIntegrityRules.VbtcV1Frozen(transfer, _gate));    // not "not V1"
+
+                SmartContractMain.DecompileForTests = text => { if (text == body) throw new FormatException("not base64"); };
+                Assert.False(VBTCService.IsVbtcV1Contract(new SmartContractStateTrei { SmartContractUID = uid + "x", ContractData = body }));
+            }
+            finally { SmartContractMain.DecompileForTests = null; }
+            Assert.Equal(LedgerIntegrityRules.VbtcV1RetiredMessage, LedgerIntegrityRules.VbtcV1Frozen(transfer, _gate));
+        }
+
         [Theory]
         [MemberData(nameof(V1Actions))]
         public async Task AtTheRetirementHeight_EveryV1ActionIsRefused_InABlockAndAtAdmission(string kind, TransactionType type)
@@ -210,8 +237,8 @@ namespace VerifiedXCore.Tests
         {
             Assert.Equal(Globals.VbtcV2DkgAttestationHeight, Globals.VbtcV1RetirementHeight);
             var root = Path.GetDirectoryName(Path.GetDirectoryName(ThisFile()))!;
-            var program = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Program.cs"));
-            Assert.Contains("Globals.VbtcV1RetirementHeight = Globals.IsTestNet ? 1_002_979 : Globals.VbtcV1RetirementHeight;", program);
+            var heights = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "GlobalsNetworkHeights.cs")); // the one place per-network heights are set
+            Assert.Contains("Globals.VbtcV1RetirementHeight = Globals.IsTestNet ? 1_002_979 : Globals.VbtcV1RetirementHeight;", heights);
         }
 
         // ── wallet side: refused at once, no height ──

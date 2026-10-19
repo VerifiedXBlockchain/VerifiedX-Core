@@ -127,6 +127,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
             catch (Exception ex)
             {
+                // Applied, this answer skips the cancel: a fault of this node's storage counts as a lost write to the
+                // withdrawal store, so the block is not taken as applied (validation, which only refuses, is unchanged).
+                if (StateData.IsNodeLocalFault(ex)) VerifiedXCore.Extensions.DbExtensions.NoteFailure(DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS);
                 return $"The withdrawal transaction could not be read: {ex.Message}";
             }
         }
@@ -199,7 +202,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 && tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
                 return false;
             try { return BtcAttestBalance.IsAttestedVault(Stored(JObject.Parse(tx.Data)["ContractUID"]?.ToObject<string?>())); }
-            catch { return false; }
+            catch (Exception ex)
+            {
+                // "Not watched" on a fault of this node's storage sends a block's apply down the other vault kind's path:
+                // counted as a lost write to the withdrawal store, so that block is not taken as applied.
+                if (StateData.IsNodeLocalFault(ex)) VerifiedXCore.Extensions.DbExtensions.NoteFailure(DbContext.RSRV_VBTC_WITHDRAWAL_REQUESTS);
+                return false;
+            }
         }
 
         /// <summary>The contract's UID as state holds it (a lookup ignores case; the tables here are keyed by the stored spelling).</summary>
@@ -272,7 +281,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     ErrorLogUtility.LogError($"Fixing withdrawal {requested.Ref} on coins at block {vfxHeight} failed: {ex}", "BtcWithdrawals.OnBlockTransactionsApplied()");
                 }
             }
-            if (failed != null) throw new InvalidOperationException($"a withdrawal requested in block {vfxHeight} could not be fixed on coins", failed);
+            if (failed != null) throw new VerifiedXCore.Data.NodeStateFaultException($"a withdrawal requested in block {vfxHeight} could not be fixed on coins", failed);
         }
 
         /// <summary>
@@ -289,7 +298,14 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 foreach (var spend in effects.Where(e => e.IsSpend))
                 {
                     var coin = BtcAttestStore.Coin(spend.Outpoint, db);
-                    if (coin?.PinnedToRef == null) continue; // not pinned: the Bitcoin left, nothing was owed for it (plan 5.7)
+                    if (coin == null) continue;
+                    if (coin.PinnedToRef == null)
+                    {
+                        // Not pinned: the Bitcoin left, nothing was owed for it (plan 5.7). Unless it is a transaction of a
+                        // withdrawal that had stopped holding the coin (#262).
+                        ShownWithoutAHolder(coin, spend, report, vfxHeight, db);
+                        continue;
+                    }
 
                     // Nearly always one withdrawal holds the coin. After a takeover several do, and Bitcoin has now
                     // confirmed the transaction of one of them (or of none).
@@ -299,7 +315,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         // Two withdrawals to the same address for the same amount, on the same coins at the same fee,
                         // are the same Bitcoin transaction. It paid once: it answers the first, and is a foreign spend
                         // to the other.
-                        var shown = answered ? null : row.Pins.FirstOrDefault(p => !p.Dead && p.Txid == spend.Txid);
+                        // A transaction of its own that was voided pays it as well: a Bitcoin reorganisation dropped the spend
+                        // that voided it (#262).
+                        var shown = answered ? null : row.Pins.FirstOrDefault(p => !p.Dead && p.Txid == spend.Txid)
+                            ?? row.Pins.FirstOrDefault(p => p.Dead && !p.IsRelease && p.Txid == spend.Txid);
                         if (shown != null)
                         {
                             answered = true;
@@ -315,6 +334,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         else
                             BtcAttestStore.SaveWithdrawal(row, db);
                     }
+                    if (!answered)
+                        ShownWithoutAHolder(coin, spend, report, vfxHeight, db);
                 }
 
                 RetryWaiting(vaults, vfxHeight, db);
@@ -324,9 +345,38 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
             catch (Exception ex)
             {
-                VerifiedXCore.Data.StateData.NoteApplyStepFailed(vfxHeight, ex);
+                VerifiedXCore.Data.StateData.NoteWithdrawalStoreStepFailed(vfxHeight, ex); // settling writes the request rows
                 ErrorLogUtility.LogError($"Settling withdrawals after Bitcoin report {report?.Hash} failed: {ex}", "BtcWithdrawals.OnCoinsChanged()");
             }
+        }
+
+        /// <summary>
+        /// Bitcoin shows a transaction of a withdrawal that did not hold the coin it spends: one voided by a spend that a
+        /// Bitcoin reorganisation later dropped (#262). A withdrawal still open is paid by it, and settled: its other
+        /// transactions' coins are freed, so no validator signs them. One already paid or closed was paid again from the
+        /// vault: nothing was owed for it, and the payment is recorded on it (<see cref="VaultWithdrawalRow.UnowedPaymentTxids"/>).
+        /// </summary>
+        private static void ShownWithoutAHolder(VaultCoinRow coin, BtcCoinEffect spend, Transaction report, long vfxHeight, LiteDatabase? db)
+        {
+            foreach (var state in Enum.GetValues<VaultWithdrawalState>())
+                foreach (var row in BtcAttestStore.WithdrawalsOf(coin.SmartContractUID, state, db).OrderBy(r => r.Ref, StringComparer.Ordinal))
+                {
+                    var pin = row.Pins.FirstOrDefault(p => !p.IsRelease && p.Txid == spend.Txid && p.Inputs.Contains(spend.Outpoint));
+                    if (pin == null || row.SettledTxid == spend.Txid) continue;
+                    if (row.State is VaultWithdrawalState.Waiting or VaultWithdrawalState.Pinned)
+                    {
+                        ErrorLogUtility.LogError($"Withdrawal {row.Ref} on {row.SmartContractUID} is paid by its earlier transaction {spend.Txid}, voided before by a spend Bitcoin no longer contains; its other transactions are given up.",
+                            "BtcWithdrawals.ShownWithoutAHolder()");
+                        Settle(row, spend.Txid, report, vfxHeight, db);
+                        continue;
+                    }
+                    row.UnowedPaymentTxids ??= new List<string>();
+                    if (row.UnowedPaymentTxids.Contains(spend.Txid, StringComparer.Ordinal)) continue;
+                    row.UnowedPaymentTxids.Add(spend.Txid);
+                    BtcAttestStore.SaveWithdrawal(row, db);
+                    ErrorLogUtility.LogError($"UNOWED PAYMENT: vault {row.SmartContractUID} paid withdrawal {row.Ref}{(row.IsBridgeExit ? $" (bridge exit {row.ExitBurnHash})" : "")} again: Bitcoin transaction {spend.Txid} confirmed after it was {row.State}{(row.SettledTxid != null ? $" by {row.SettledTxid}" : "")}. {pin.DestinationSats} sats left the vault for nothing owed.",
+                        "BtcWithdrawals.ShownWithoutAHolder()");
+                }
         }
 
         /// <summary>
@@ -377,6 +427,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             {
                 // Passed on: what this does is consensus state, and a failure here counts against the block's
                 // application (it used to be swallowed, leaving this node with other withdrawals than its peers).
+                VerifiedXCore.Data.StateData.NoteWithdrawalStoreStepFailed(vfxHeight, ex); // closing writes the request rows
                 ErrorLogUtility.LogError($"Expiring unpinned withdrawals at {vfxHeight} failed: {ex}", "BtcWithdrawals.OnBlockStart()");
                 throw;
             }
@@ -399,7 +450,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
             catch (Exception ex)
             {
-                VerifiedXCore.Data.StateData.NoteApplyStepFailed(vfxHeight, ex);
+                VerifiedXCore.Data.StateData.NoteWithdrawalStoreStepFailed(vfxHeight, ex); // closing writes the request row
                 ErrorLogUtility.LogError($"Cancelling a withdrawal ({tx.Hash}) failed: {ex}", "BtcWithdrawals.ApplyCancel()");
             }
             return true;
@@ -472,6 +523,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             });
             row.State = VaultWithdrawalState.Pinned;
             row.WaitingReason = null;
+            row.ReopenedAtBitcoinHeight = 0; // a part fixed again after its wait (#262)
             BtcAttestStore.SaveWithdrawal(row, db);
         }
 
@@ -496,10 +548,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
             var request = VBTCWithdrawalRequest.GetByTransactionHash(row.RequestHash, row.SmartContractUID);
             if (request == null)
-            {
-                ErrorLogUtility.LogError($"Withdrawal {row.Ref} settled by {txid} but its request row is missing.", "BtcWithdrawals.Settle()");
-                return;
-            }
+                // Every withdrawal recorded here was recorded from its request's row (OnRequestApplied), and that row is never
+                // deleted: it is gone only by a fault of this node's store. Settled without it, the owner's add-back was
+                // missing here alone and this node judged the owner's debits apart from its peers. A storage fault:
+                // OnCoinsChanged reports it, the block is not applied and blocks are held until the state is rebuilt.
+                throw new System.IO.IOException($"Withdrawal {row.Ref} settled by {txid} but its request row is missing.");
             // Completed is what the owner's balance adds back (VBTCWithdrawalRequest.GetCompletedWithdrawalAmount): the
             // Bitcoin has left the vault's coins in this same block, so the two always move together.
             request.Status = VBTCWithdrawalStatus.Completed;

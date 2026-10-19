@@ -1,3 +1,6 @@
+using Microsoft.AspNetCore.Mvc.Controllers;
+using VerifiedXCore.Controllers;
+
 namespace VerifiedXCore.Utilities
 {
     /// <summary>
@@ -100,6 +103,20 @@ namespace VerifiedXCore.Utilities
             if (!HttpMethodsIsGet(method)) return false;
             var p = (path ?? "").ToLowerInvariant();
             return p == "/wallet" || p == "/wallet/" || p == "/explorer" || p.StartsWith("/explorer/");
+        }
+
+        /// <summary>
+        /// True only when routing selected V1Controller.UnlockWallet for a GET: the one action that may run while the
+        /// API-password window is closed. It is decided on the resolved endpoint, not the path, because V1 also routes
+        /// api/V1/{somePassword}/{action}, so paths that start "api/V1/UnlockWallet/" also reach other V1 actions.
+        /// </summary>
+        public static bool IsUnlockWalletEndpoint(string method, Endpoint? endpoint)
+        {
+            if (!string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase)) return false;
+            var action = endpoint?.Metadata.GetMetadata<ControllerActionDescriptor>();
+            return action != null &&
+                action.ControllerTypeInfo.AsType() == typeof(V1Controller) &&
+                action.MethodInfo.Name == nameof(V1Controller.UnlockWallet);
         }
 
         private static bool HttpMethodsIsGet(string method) =>

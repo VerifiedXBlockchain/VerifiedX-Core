@@ -263,6 +263,86 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task ARollback_DropsDeletionsFromTheDiscardedBlocks_AndKeepsTheOnesBelowIt()
+        {
+            DbContext.DB = _live; // anchored slots, so slot 40 diffs forward instead of being copied whole
+            try
+            {
+                var blocks = _live.GetCollection<Block>(DbContext.RSRV_BLOCKS);
+                StateWriteContext.SetHeight(35);
+                SmartContractStateTrei.SaveSmartContract(NewContract("sc:nft"));
+                SmartContractStateTrei.SaveSmartContract(NewContract("sc:burned"));
+                StateWriteContext.Clear();
+                foreach (var h in new long[] { 40, 50, 60 })
+                {
+                    blocks.Insert(new Block { Height = h, Hash = $"canon-{h}", Transactions = new List<Transaction>() });
+                    await StateSnapshotService.UpdateCycleAsync(h, $"canon-{h}");
+                }
+
+                // Burned at 61 on the chain that stays; sc:nft burned at 65 on a branch that is then rolled back to 62.
+                StateWriteContext.SetHeight(61);
+                SmartContractStateTrei.DeleteSmartContract(NewContract("sc:burned"));
+                StateWriteContext.SetHeight(65);
+                SmartContractStateTrei.DeleteSmartContract(NewContract("sc:nft"));
+                StateWriteContext.Clear();
+
+                StateSnapshotService.InvalidateAbove(62);
+                // The rollback brings sc:nft back with its original stamp, below every slot height.
+                StateWriteContext.SetHeight(35);
+                SmartContractStateTrei.SaveSmartContract(NewContract("sc:nft"));
+                StateWriteContext.Clear();
+
+                blocks.Insert(new Block { Height = 70, Hash = "canon-70", Transactions = new List<Transaction>() });
+                await StateSnapshotService.UpdateCycleAsync(70, "canon-70"); // slot 40 diffs forward to 70
+
+                var rolled = StateSnapshotService.GetSlots().Single(x => x.Height == 70);
+                Assert.Equal(SnapshotSlotStatus.Valid, rolled.Status);
+                Assert.Equal(1, SlotCount(rolled.SlotId, "scstate", "sc:nft"));
+                Assert.Equal(0, SlotCount(rolled.SlotId, "scstate", "sc:burned"));
+            }
+            finally
+            {
+                DbContext.DB = null;
+            }
+        }
+
+        [Fact]
+        public void DeletionRecordsAboveTheStoredTip_AreDropped_AtOrBelowItKept()
+        {
+            var tombstones = StateTombstone.GetTombstones()!;
+            tombstones.Insert(new StateTombstone { SourceColl = StateTombstone.COLL_SCSTATE, Key = "at-tip", Height = 60 });
+            tombstones.Insert(new StateTombstone { SourceColl = StateTombstone.COLL_SCSTATE, Key = "orphan", Height = 61 });
+
+            StateSnapshotService.DropDeletionRecordsAbove(60);
+
+            Assert.Equal(new[] { "at-tip" }, tombstones.FindAll().Select(x => x.Key).ToArray());
+        }
+
+        [Fact]
+        public async Task TheFirstStartAfterAFormatChange_DropsEveryDeletionRecord_AndLaterStartsKeepThem()
+        {
+            SeedAccount("alice", 100m, stamp: 35);
+            await StateSnapshotService.UpdateCycleAsync(40);
+            await StateSnapshotService.UpdateCycleAsync(50);
+            var tombstones = StateTombstone.GetTombstones()!;
+            tombstones.Insert(new StateTombstone { SourceColl = StateTombstone.COLL_SCSTATE, Key = "left-over", Height = 45 }); // below the tip
+
+            // A later start with slots in the current format keeps the records.
+            StateSnapshotService.ResetAfterFormatChange();
+            Assert.Equal(1, tombstones.Count());
+
+            // A slot written by an older build: the first start of this one drops them all and invalidates the slots.
+            var old = StateSnapshotService.GetSlots().First(x => x.Status == SnapshotSlotStatus.Valid);
+            old.SchemaVersion = SnapshotManifest.CurrentSchemaVersion - 1;
+            SnapshotManifest.GetManifest()!.Upsert(old);
+
+            StateSnapshotService.ResetAfterFormatChange();
+
+            Assert.Equal(0, tombstones.Count());
+            Assert.False(StateSnapshotService.HasValidSlot());
+        }
+
+        [Fact]
         public async Task UpdateCycle_SkipsWhenStateNotSynced()
         {
             StateTreiStatusService.SetFailed("test: dirty state");
@@ -350,6 +430,95 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        /// <summary>
+        /// A slot taken on a branch a fast rollback removed: its anchor block was replaced, so the next cycle rebuilds it
+        /// rather than diffing forward from its height (which kept the dead branch's state and re-anchored it).
+        /// </summary>
+        [Fact]
+        public async Task UpdateCycle_RebuildsASlotWhoseAnchorBlockWasReplaced()
+        {
+            DbContext.DB = _live;
+            try
+            {
+                var blocks = _live.GetCollection<Block>(DbContext.RSRV_BLOCKS);
+                blocks.Insert(new Block { Height = 40, Hash = "fork-40", Transactions = new List<Transaction>() });
+                SeedAccount("alice", 100m, stamp: 35);
+                await StateSnapshotService.UpdateCycleAsync(40, "fork-40");
+                foreach (var h in new long[] { 50, 60 })
+                {
+                    blocks.Insert(new Block { Height = h, Hash = $"canon-{h}", Transactions = new List<Transaction>() });
+                    await StateSnapshotService.UpdateCycleAsync(h, $"canon-{h}");
+                }
+
+                // Block 40 is rolled back and replaced; the replacement's write is stamped at 40.
+                blocks.DeleteMany(x => x.Height == 40);
+                blocks.Insert(new Block { Height = 40, Hash = "canon-40", Transactions = new List<Transaction>() });
+                SeedAccount("alice", 70m, stamp: 40);
+                blocks.Insert(new Block { Height = 70, Hash = "canon-70", Transactions = new List<Transaction>() });
+
+                await StateSnapshotService.UpdateCycleAsync(70, "canon-70"); // rolls the oldest slot (40) forward
+
+                var rolled = StateSnapshotService.GetSlots().Single(x => x.Height == 70);
+                Assert.Equal(70m, SlotBalance(rolled.SlotId, "alice"));
+            }
+            finally
+            {
+                DbContext.DB = null;
+            }
+        }
+
+        [Fact]
+        public async Task ASlotFromBeforeTheAnchorCheck_IsNotRestored_AndIsRebuilt()
+        {
+            SeedAccount("alice", 100m, stamp: 35);
+            await StateSnapshotService.UpdateCycleAsync(40);
+            var manifest = SnapshotManifest.GetManifest()!;
+            var old = StateSnapshotService.GetSlots().Single(x => x.Height == 40);
+            old.SchemaVersion = 1; // written by a build before the anchor check
+            manifest.Upsert(old);
+
+            Assert.Null(StateSnapshotService.PickSlotForRestore(45));
+
+            SeedAccount("alice", 70m, stamp: 40); // what the slot's diff from 40 would miss
+            await StateSnapshotService.UpdateCycleAsync(50);
+            await StateSnapshotService.UpdateCycleAsync(60);
+            await StateSnapshotService.UpdateCycleAsync(70); // reaches the old slot: rebuilt, not diffed
+
+            var slots = StateSnapshotService.GetSlots();
+            Assert.All(slots.Where(x => x.Status == SnapshotSlotStatus.Valid), x => Assert.Equal(SnapshotManifest.CurrentSchemaVersion, x.SchemaVersion));
+            Assert.Equal(70m, SlotBalance(slots.Single(x => x.SlotId == old.SlotId).SlotId, "alice"));
+        }
+
+        [Fact]
+        public async Task UpdateCycle_StillRollsAnAnchoredSlotForwardOnALinearChain()
+        {
+            DbContext.DB = _live;
+            try
+            {
+                var blocks = _live.GetCollection<Block>(DbContext.RSRV_BLOCKS);
+                SeedAccount("alice", 100m, stamp: 35);
+                foreach (var h in new long[] { 40, 50, 60 })
+                {
+                    blocks.Insert(new Block { Height = h, Hash = $"canon-{h}", Transactions = new List<Transaction>() });
+                    await StateSnapshotService.UpdateCycleAsync(h, $"canon-{h}");
+                }
+                SeedAccount("alice", 999m, stamp: 65);
+                blocks.Insert(new Block { Height = 70, Hash = "canon-70", Transactions = new List<Transaction>() });
+
+                await StateSnapshotService.UpdateCycleAsync(70, "canon-70");
+
+                var rolled = StateSnapshotService.GetSlots().Single(x => x.Height == 70);
+                Assert.Equal(SnapshotSlotStatus.Valid, rolled.Status);
+                Assert.Equal("canon-70", rolled.BlockHash);
+                Assert.Equal(999m, SlotBalance(rolled.SlotId, "alice"));
+                Assert.NotNull(StateSnapshotService.PickVerifiedSlotForRestore(70));
+            }
+            finally
+            {
+                DbContext.DB = null;
+            }
+        }
+
         [Fact]
         public async Task CrashMidUpdate_SlotLeftUpdating_IsSkippedAndRebuilt()
         {
@@ -398,6 +567,21 @@ namespace VerifiedXCore.Tests
             Assert.Equal(100m, alice.Balance);
             Assert.Null(Accounts().FindOne(x => x.Key == "mallory"));
             Assert.NotNull(Contracts().FindOne(x => x.SmartContractUID == "sc:keep"));
+        }
+
+        /// <summary>The burned-UID retirements (C-169) are chain state: a snapshot holds them and a restore brings them back.</summary>
+        [Fact]
+        public async Task RetiredContractUids_AreSnapshot_AndRestored()
+        {
+            RetiredContractUid.Retire("abc:1", 35, "burn");
+            await StateSnapshotService.UpdateCycleAsync(40);
+            var slot = StateSnapshotService.PickSlotForRestore(40)!;
+            _live.GetCollection(RetiredContractUid.CollectionName).DeleteAll();
+            Assert.False(RetiredContractUid.IsRetired("abc:1"));
+
+            Assert.True(StateSnapshotService.RestoreSlotToLive(slot.SlotId));
+
+            Assert.True(RetiredContractUid.IsRetired("abc:1"));
         }
 
         /// <summary>

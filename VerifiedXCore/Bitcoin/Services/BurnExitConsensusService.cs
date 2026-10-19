@@ -102,12 +102,20 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// The committee an exit's casters elect, verify and count against: that of the next block, the block whose
+        /// validation checks the exit's votes and the height its signers check the leader at
+        /// (FrostSigningAuthorization.IsCommitteeCaster). Read at the tip, a rotation taking effect at the next block made
+        /// the elected handler one the signers refused, and a one-vault exit failed (#292).
+        /// </summary>
+        internal static HashSet<string> ExitCommittee() => BridgeCasterConsensus.GetCommitteeForHeight((Globals.LastBlock?.Height ?? 0) + 1);
+
+        /// <summary>
         /// Adaptive majority of the COMMITTEE for the current height — the same set and threshold
         /// consensus validation applies to the votes, so a handler never ships a vote set its own
         /// admission would reject.
         /// </summary>
         public static int RequiredCasterSignatures =>
-            BridgeCasterConsensus.RequiredVotesFor(BridgeCasterConsensus.GetCommitteeForHeight(Globals.LastBlock?.Height ?? 0));
+            BridgeCasterConsensus.RequiredVotesFor(ExitCommittee());
 
         /// <summary>
         /// Background loop: catch-up sync on startup, then monitor pending burns and drive consensus.
@@ -334,7 +342,7 @@ namespace VerifiedXCore.Bitcoin.Services
             var (alertOk, alertReason) = BridgeCasterConsensus.VerifyBurnAlert(
                 alert.BaseBurnTxHash, BurnTypeString(alert.ExitType), (long)(alert.Amount * 100_000_000M), alertDest,
                 alert.SenderCasterAddress, alert.Timestamp, alert.Signature,
-                BridgeCasterConsensus.GetCommitteeForHeight(Globals.LastBlock?.Height ?? 0), TimeUtil.GetTime());
+                ExitCommittee(), TimeUtil.GetTime());
             if (!alertOk)
             {
                 LogUtility.Log($"[BurnExitConsensus] REJECTED BurnAlert for {alert.BaseBurnTxHash} from {alert.SenderCasterAddress}: {alertReason}", "BurnExitConsensusService");
@@ -431,7 +439,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
 
             // Only committee casters can be elected handler (intake already filters; defend here too).
-            var electionCommittee = BridgeCasterConsensus.GetCommitteeForHeight(Globals.LastBlock?.Height ?? 0);
+            var electionCommittee = ExitCommittee();
             var winnerAddress = BridgeCasterConsensus.SelectHandler(allProposals.Select(p => (p.ProposerCasterAddress, p.ProposerHash)), electionCommittee);
             if (winnerAddress == null)
             {
@@ -541,7 +549,7 @@ namespace VerifiedXCore.Bitcoin.Services
             // SECURITY: only a committee caster's fresh, signed proposal with the deterministic hash counts.
             var (propOk, propReason) = BridgeCasterConsensus.VerifyProposal(
                 proposal.BaseBurnTxHash, proposal.ProposerCasterAddress, proposal.ProposerHash, proposal.Timestamp, proposal.Signature,
-                BridgeCasterConsensus.GetCommitteeForHeight(Globals.LastBlock?.Height ?? 0), TimeUtil.GetTime());
+                ExitCommittee(), TimeUtil.GetTime());
             if (!propOk)
             {
                 LogUtility.Log($"[BurnExitConsensus] REJECTED proposal for {proposal.BaseBurnTxHash} from {proposal.ProposerCasterAddress}: {propReason}", "BurnExitConsensusService");
@@ -572,7 +580,7 @@ namespace VerifiedXCore.Bitcoin.Services
             var (confOk, confReason) = BridgeCasterConsensus.VerifyConfirmation(
                 confirmation.ConfirmingCasterAddress, confirmation.BaseBurnTxHash, BurnTypeString(localRecord.ExitType),
                 (long)(localRecord.Amount * 100_000_000M), localDest, confirmation.Timestamp, confirmation.Signature,
-                BridgeCasterConsensus.GetCommitteeForHeight(Globals.LastBlock?.Height ?? 0));
+                ExitCommittee());
             if (!confOk)
             {
                 LogUtility.Log($"[BurnExitConsensus] REJECTED confirmation for {confirmation.BaseBurnTxHash} from {confirmation.ConfirmingCasterAddress}: {confReason}", "BurnExitConsensusService");
@@ -998,7 +1006,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     {
                         record.Status = BurnExitStatus.FrostInProgress;
 
-                        var syntheticHash = $"btcexit_{record.BaseBurnTxHash[..Math.Min(16, record.BaseBurnTxHash.Length)]}_{scUID[..Math.Min(8, scUID.Length)]}";
+                        var syntheticHash = Attestation.BtcWithdrawals.ExitSigningReference(record.BaseBurnTxHash, scUID); // the signers' canonical spelling
 
                         var frostResult = await VBTCService.CompleteWithdrawal(
                             scUID, syntheticHash,
@@ -1438,6 +1446,10 @@ namespace VerifiedXCore.Bitcoin.Services
                 // are answers: the alert pointed at something that is not a burn of this type.
                 var transient = reason.StartsWith("Could not read", StringComparison.OrdinalIgnoreCase)
                                 || reason.IndexOf("receipt not found", StringComparison.OrdinalIgnoreCase) >= 0;
+                // A positioned id met before the path-audit rules (a caster a block behind the one that named it) is
+                // asked again once they are reached, not failed and pruned (#291).
+                if (string.Equals(reason, BaseBridgeService.PositionBeforeRules, StringComparison.Ordinal))
+                    return (false, true, $"burn evidence not yet: {reason}", null);
                 // The type comes from Base too, like the amount and destination: a committee caster's alert naming the
                 // other type had every caster that took it fail the burn and skip it for good (fifth review, round 21).
                 if (!transient)

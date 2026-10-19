@@ -18,7 +18,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
     /// <list type="bullet">
     /// <item><b>Whole or not at all.</b> An exit that draws on several vaults is pinned on all of them in the same
     /// block, or on none. So an exit with nothing pinned has no signature anywhere and can be failed as a whole; an
-    /// exit with pins will be paid in full. There is no state in which one part can be paid and another given up.</item>
+    /// exit with pins will be paid in full. There is no state in which one part can be paid and another given up: a
+    /// part voided while another is paid or pinned is fixed again on its own vault.</item>
     /// <item><b>Failed by rule.</b> An exit that could not be pinned within the expiry window is failed by every node
     /// at the same block: its locks are restored and its record marked failed, which lets the casters make it again
     /// from other locks. The caster-sent failure and completion transactions are refused for these exits.</item>
@@ -64,9 +65,14 @@ namespace VerifiedXCore.Bitcoin.Attestation
         private static bool IsPartOf(VaultWithdrawalRow part, VBTCBridgeBtcExitState exit) =>
             part.RequestHash == exit.ExitTxHash && part.RequestVfxHeight == exit.ExitVfxHeight;
 
-        /// <summary>The reference the signing ceremony uses for one vault's part of an exit (as the casters have always named it).</summary>
+        /// <summary>
+        /// The reference the signing ceremony uses for one vault's part of an exit (as the casters have always named it): the
+        /// burn's first 16 characters, and for one of several burns in a Base transaction its position too
+        /// (<see cref="Services.BaseBridgeService.BurnSigningPrefix"/>); without it the signers refused a positioned exit as
+        /// not canonical (#290).
+        /// </summary>
         public static string ExitSigningReference(string burnHash, string scUID) =>
-            $"{FROST.FrostSigningAuthorization.BtcExitPrefix}{burnHash[..Math.Min(16, burnHash.Length)]}_{scUID[..Math.Min(8, scUID.Length)]}";
+            $"{FROST.FrostSigningAuthorization.BtcExitPrefix}{Services.BaseBridgeService.BurnSigningPrefix(burnHash)}_{scUID[..Math.Min(8, scUID.Length)]}";
 
         private static List<PoolUnlockAllocation> AllocationsOf(VBTCBridgeBtcExitState? exit)
         {
@@ -248,16 +254,28 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
         /// <summary>
         /// Pins every part of an exit, or none: the transactions are worked out for all of its vaults first, and
-        /// recorded only if every one of them can be built from that vault's free coins.
+        /// recorded only if every one of them can be built from that vault's free coins. An exit already paying (a part
+        /// pinned or paid) whose part was voided and fixed again (<see cref="VoidExitPart"/>) pins that part on its own.
         /// </summary>
         private static bool TryPinExit(VaultWithdrawalRow anyPart, long vfxHeight, LiteDatabase? db)
         {
             var parts = BtcAttestStore.ExitParts(anyPart.RequestHash, anyPart.RequestVfxHeight, db).OrderBy(p => p.Ref, StringComparer.Ordinal).ToList();
-            if (parts.Count == 0 || parts.Any(p => p.State != VaultWithdrawalState.Waiting)) return false;
+            if (parts.Count == 0) return false;
+            var committed = parts.Any(p => p.State is VaultWithdrawalState.Pinned or VaultWithdrawalState.Settled);
+            if (!committed && parts.Any(p => p.State != VaultWithdrawalState.Waiting)) return false;
 
             var built = new List<(VaultWithdrawalRow Row, BtcCanonicalTx? Tx, string? Reason)>();
-            foreach (var part in parts)
+            foreach (var part in parts.Where(p => p.State == VaultWithdrawalState.Waiting))
             {
+                // A part reopened after its transactions were voided waits until the voiding spend is buried: its earlier
+                // transaction is signed, and a rewind that drops that spend lets it confirm - a transaction on other coins
+                // fixed meanwhile would pay it twice. A rewind during the wait brings the earlier one back instead.
+                if (committed && part.ReopenedAtBitcoinHeight > 0
+                    && (BtcAttestStore.GetMeta(db)?.EventsThroughHeight ?? 0) < part.ReopenedAtBitcoinHeight + BtcAttestRules.ExitReopenBurialBlocks)
+                {
+                    built.Add((part, null, $"its transaction was voided by a Bitcoin spend through block {part.ReopenedAtBitcoinHeight}; it is fixed again on other coins once that spend has {BtcAttestRules.ExitReopenBurialBlocks} blocks on it, so the voided transaction cannot also confirm"));
+                    continue;
+                }
                 string? reason = "the destination is not a Bitcoin address on this network";
                 // As for a withdrawal: not on a key that cannot sign (the exit then fails by rule and its locks are
                 // restored), and leaving its share of a sweep shortfall in the vault.
@@ -267,9 +285,28 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 var tx = string.IsNullOrEmpty(part.DestinationScriptHex) || cannotSign != null
                     ? null
                     : BtcCanonicalWithdrawal.Build(part.SmartContractUID, part.DestinationScriptHex, PayableSats(part), part.FeeRate, out reason, db);
+                // MinExitPartSats is sized for one coin. A part is first pinned only if it bears the rule's doublings on the
+                // coins it would really spend (which coins does not depend on the rate, so this is the transaction the last
+                // raise would build): fixed on many small coins it could be raised fewer times or never, and nothing else
+                // moves a pinned part. Not pinned, it waits, and the exit fails by rule and its locks come back. A part fixed
+                // again while its exit is paying is pinned as it can be: it never expires, and pays once fees fall.
+                if (tx != null && !committed
+                    && BtcCanonicalWithdrawal.Build(part.SmartContractUID, part.DestinationScriptHex, PayableSats(part), part.FeeRate << ExitPartBearsDoublings, out var bears, db) == null)
+                {
+                    reason = $"on the {tx.Inputs.Count} coin(s) it would spend, its fee could not be raised to {part.FeeRate << ExitPartBearsDoublings} sat/vB ({bears})";
+                    tx = null;
+                }
                 built.Add((part, tx, reason));
             }
 
+            if (committed)
+            {
+                var any = false;
+                foreach (var (row, tx, reason) in built)
+                    if (tx == null) NoteWaiting(row, reason, db);
+                    else { Pin(row, tx, vfxHeight, db); any = true; }
+                return any;
+            }
             if (built.Any(b => b.Tx == null))
             {
                 foreach (var (row, tx, reason) in built)
@@ -375,29 +412,55 @@ namespace VerifiedXCore.Bitcoin.Attestation
         }
 
         /// <summary>
-        /// One vault's part of an exit can never be paid: a coin pinned to it was spent by another transaction. That
-        /// takes signatures the vault's signers do not give (they sign only what is pinned), so it is not expected;
-        /// if it happens the part's locks are restored and taken out of use, and the exit is marked failed when no part
-        /// of it was or will be paid, so that it can be made again from other locks.
+        /// One vault's part of an exit can never be paid: a coin pinned to it was spent by another transaction, or it
+        /// rested on a coin that can never exist (a Bitcoin reorganisation). When another part of the exit is paid or
+        /// pinned, the exit is paying in full and its burn may already be used, so the part is fixed again on its own
+        /// vault's free coins (<see cref="TryPinExit"/>, this same report or when the vault next has coins), its locks
+        /// still drawn: left voided, the burner's vBTC was burned on Base and that part never paid, retried or failed.
+        /// Otherwise the part's locks are restored and taken out of use and the exit is marked failed, so that it can be
+        /// made again from other locks; a part fixed again earlier is given up with it.
         /// </summary>
         private static void VoidExitPart(VaultWithdrawalRow row, long vfxHeight, LiteDatabase? db, string why)
         {
             var exit = VBTCBridgeBtcExitState.GetByBurnHash(row.ExitBurnHash ?? "");
             if (exit == null || !IsPartOf(row, exit)) return;
+            var parts = BtcAttestStore.ExitParts(row.RequestHash, row.RequestVfxHeight, db);
+            var others = parts.Where(p => p.Ref != row.Ref).ToList();
+            if (row.State == VaultWithdrawalState.Void && !exit.IsComplete
+                && others.Any(p => p.State is VaultWithdrawalState.Settled or VaultWithdrawalState.Pinned))
+            {
+                row.State = VaultWithdrawalState.Waiting;
+                row.ClosedAtVfxHeight = 0;
+                row.ReopenedAtBitcoinHeight = BtcAttestStore.GetMeta(db)?.EventsThroughHeight ?? 0; // saved before the coins changed: the voiding report's block
+                row.WaitingReason = $"its transaction was voided ({why}); fixed again on the vault's free coins once that spend is buried";
+                BtcAttestStore.SaveWithdrawal(row, db);
+                ErrorLogUtility.LogError($"Bridge exit for burn {exit.BaseBurnTxHash}: the part on vault {row.SmartContractUID} was voided ({why}). Other parts are paid or pinned, so it is fixed again on its vault's free coins.",
+                    "BtcWithdrawals.VoidExitPart()");
+                return;
+            }
+
             foreach (var allocation in AllocationsOf(exit).Where(a => VaultOfLock(a) == row.SmartContractUID))
                 VBTCBridgeLockState.BlacklistLock(allocation.LockId, allocation.UnlockAmount, SatsOf(allocation.UnlockAmount), $"exit voided: {why}");
-
-            var parts = BtcAttestStore.ExitParts(row.RequestHash, row.RequestVfxHeight, db);
             var anyOpen = parts.Any(p => p.State == VaultWithdrawalState.Pinned);
             var anyPaid = parts.Any(p => p.State == VaultWithdrawalState.Settled);
             if (!anyOpen && !anyPaid && !exit.IsComplete)
             {
+                // A part fixed again earlier (waiting, with dead pins) goes with the exit: it is made again from other locks.
+                foreach (var refixed in others.Where(p => p.State == VaultWithdrawalState.Waiting && p.Pins.Count > 0))
+                {
+                    refixed.State = VaultWithdrawalState.Void;
+                    refixed.ClosedAtVfxHeight = vfxHeight;
+                    refixed.WaitingReason = $"the exit failed: {why}";
+                    BtcAttestStore.SaveWithdrawal(refixed, db);
+                    foreach (var allocation in AllocationsOf(exit).Where(a => VaultOfLock(a) == refixed.SmartContractUID))
+                        VBTCBridgeLockState.BlacklistLock(allocation.LockId, allocation.UnlockAmount, SatsOf(allocation.UnlockAmount), $"exit voided: {why}");
+                }
                 exit.IsComplete = true;
                 exit.BtcTxHash = $"{VBTCBridgeBtcExitState.FailedMarkerPrefix}void@{vfxHeight}";
                 VBTCBridgeBtcExitState.Update(exit);
             }
             ErrorLogUtility.LogError($"Bridge exit for burn {exit.BaseBurnTxHash}: the part on vault {row.SmartContractUID} was voided ({why}). Its locks were restored and taken out of use."
-                + (anyOpen || anyPaid ? " Other parts of this exit are paid or will be: the remainder needs an operator." : " The exit was marked failed and can be made again."),
+                + (anyOpen || anyPaid ? " Other parts of this exit are paid or will be." : " The exit was marked failed and can be made again."),
                 "BtcWithdrawals.VoidExitPart()");
         }
     }

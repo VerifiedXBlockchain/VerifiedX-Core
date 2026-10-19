@@ -339,6 +339,21 @@ namespace VerifiedXCore.Data
                 catch (Exception ex) { ErrorLogUtility.LogError($"Rating transaction {transaction.Hash} failed: {ex.Message}", "TransactionData.AddToPool()"); }
             }
 
+            if (IsPoolConflict(transaction))
+                return;
+
+            await TransactionPool.InsertSafeAsync(transaction);
+        }
+
+        /// <summary>
+        /// Whether <paramref name="transaction"/> conflicts with a transaction already in the mempool: an EXIT_TO_BTC on the
+        /// same Base burn or lock, or a second POOL_UNLOCK for one burn. Every route that inserts a submitted transaction
+        /// asks this first.
+        /// </summary>
+        internal static bool IsPoolConflict(Transaction transaction)
+        {
+            var TransactionPool = GetPool();
+
             // ===== EXIT_TO_BTC MEMPOOL CONFLICT DETECTION =====
             // Reject EXIT_TO_BTC transactions that overlap with existing mempool TXs
             // on BaseBurnTxHash or LockId to prevent double-spend of FIFO allocations.
@@ -365,7 +380,7 @@ namespace VerifiedXCore.Data
                                 {
                                     LogUtility.Log($"[Mempool] Rejecting EXIT_TO_BTC {transaction.Hash}: duplicate BaseBurnTxHash {newBurnHash} already in mempool ({existing.Hash})",
                                         "TransactionData.AddToPool()");
-                                    return;
+                                    return true;
                                 }
                             }
 
@@ -377,7 +392,7 @@ namespace VerifiedXCore.Data
                                 {
                                     LogUtility.Log($"[Mempool] Rejecting EXIT_TO_BTC {transaction.Hash}: overlapping lock IDs with mempool TX {existing.Hash}",
                                         "TransactionData.AddToPool()");
-                                    return;
+                                    return true;
                                 }
                             }
                         }
@@ -406,7 +421,7 @@ namespace VerifiedXCore.Data
                         {
                             LogUtility.Log($"[Mempool] Rejecting POOL_UNLOCK {transaction.Hash}: duplicate ExitBurnTxHash {newBurnHash} already in mempool",
                                 "TransactionData.AddToPool()");
-                            return;
+                            return true;
                         }
                     }
                 }
@@ -416,7 +431,7 @@ namespace VerifiedXCore.Data
                 }
             }
 
-            await TransactionPool.InsertSafeAsync(transaction);
+            return false;
         }
 
         /// <summary>
@@ -475,6 +490,39 @@ namespace VerifiedXCore.Data
         /// <summary>Call when a transaction is removed from the mempool so private nullifier reservations can be cleared.</summary>
         public static void ReleasePrivateMempoolNullifiersForTx(string txHash) =>
             MempoolNullifierTracker.ReleaseClaimsForTxHash(txHash);
+
+        /// <summary>
+        /// Removes from the mempool the transaction a received copy was refused as, and releases its nullifier claims. Only
+        /// a row identical to that copy (same hash, signature and hashed fields) is removed: a different transaction that
+        /// carries the same hash and signature is not the one refused, and its refusal says nothing about the pooled row.
+        /// </summary>
+        public static int RemoveRefusedFromPool(LiteDB.ILiteCollection<Transaction> mempool, Transaction received)
+        {
+            var removed = 0;
+            foreach (var row in mempool.Find(x => x.Hash == received.Hash && x.Signature == received.Signature).ToList())
+            {
+                if (SameHashedFields(row, received) && mempool.DeleteSafe(row.Id))
+                    removed++;
+            }
+            if (removed > 0)
+                ReleasePrivateMempoolNullifiersForTx(received.Hash);
+            return removed;
+        }
+
+        // Field by field and case-sensitive: the hash preimage concatenates fields without separators, so two transactions
+        // can share it, and the mempool lookup ignores case.
+        private static bool SameHashedFields(Transaction a, Transaction b) =>
+            string.Equals(a.Hash, b.Hash, StringComparison.Ordinal)
+            && string.Equals(a.Signature, b.Signature, StringComparison.Ordinal)
+            && a.Timestamp == b.Timestamp
+            && string.Equals(a.FromAddress, b.FromAddress, StringComparison.Ordinal)
+            && string.Equals(a.ToAddress, b.ToAddress, StringComparison.Ordinal)
+            && a.Amount.ToString() == b.Amount.ToString()
+            && a.Fee.ToString() == b.Fee.ToString()
+            && a.Nonce == b.Nonce
+            && a.TransactionType == b.TransactionType
+            && string.Equals(a.Data, b.Data, StringComparison.Ordinal)
+            && a.UnlockTime == b.UnlockTime;
 
         public static LiteDB.ILiteCollection<Transaction> GetPool()
         {
@@ -535,6 +583,59 @@ namespace VerifiedXCore.Data
             return null;
         }
 
+        /// <summary>The Bitcoin address a BTC name create or transfer gives a name to; null for any other call.</summary>
+        internal static string? BtcNameTargetAddress(string? function, JObject call) =>
+            function == "BTCAdnrCreate()" ? (string?)call["BTCAddress"]
+            : function == "BTCAdnrTransfer()" ? (string?)call["BTCToAddress"] : null;
+
+        /// <summary>
+        /// Name (ADNR) and shop (DSTR) registrations in the order this node first saw them, each in a slot one of them held:
+        /// the pool is sorted by the sender's Timestamp, so a registration backdated by up to the age limit sorted ahead of
+        /// an earlier one for the same name, which was then dropped. A pool row's id is made when it is inserted. Everything
+        /// else keeps its place. Producer-local: no block's validity changes.
+        /// </summary>
+        /// <summary>
+        /// Of the pool's ADNR transactions naming one name, or DSTR transactions naming one shop URL (any case), the one this
+        /// node saw first; later ones for it stay in the pool and wait for a later block. Everything else passes as it is.
+        /// Producer-local: no block's validity changes.
+        /// </summary>
+        internal static List<Transaction> EarliestRegistrationPerName(List<Transaction> pool)
+        {
+            static string? NameOf(Transaction t)
+            {
+                if (string.IsNullOrEmpty(t.Data)) return null;
+                try
+                {
+                    // A name (ADNR) and a shop URL (DSTR) are claimed first come, so each is keyed by what it claims.
+                    if (t.TransactionType == TransactionType.ADNR)
+                        return ((string?)JObject.Parse(t.Data)["Name"]) is { Length: > 0 } name ? "adnr|" + name.ToLowerInvariant() : null;
+                    if (t.TransactionType == TransactionType.DSTR)
+                        return ((string?)JObject.Parse(t.Data)["DecShop"]?["DecShopURL"]) is { Length: > 0 } url ? "dstr|" + url.ToLowerInvariant() : null;
+                    return null;
+                }
+                catch (Exception ex) when (ex is Newtonsoft.Json.JsonException || ex is InvalidCastException || ex is ArgumentException || ex is InvalidOperationException) { return null; }
+            }
+            var earliest = new Dictionary<string, Transaction>(StringComparer.Ordinal);
+            foreach (var t in pool)
+                if (NameOf(t) is { Length: > 0 } name
+                    && (!earliest.TryGetValue(name, out var kept) || (t.Id ?? LiteDB.ObjectId.Empty).CompareTo(kept.Id ?? LiteDB.ObjectId.Empty) < 0))
+                    earliest[name] = t;
+            return pool.Where(t => NameOf(t) is not { Length: > 0 } name || ReferenceEquals(earliest[name], t)).ToList();
+        }
+
+        internal static List<Transaction> RegistrationsInArrivalOrder(List<Transaction> txs)
+        {
+            static bool IsRegistration(Transaction t) => t.TransactionType == TransactionType.ADNR || t.TransactionType == TransactionType.DSTR;
+            var slots = new List<int>();
+            for (var i = 0; i < txs.Count; i++)
+                if (IsRegistration(txs[i])) slots.Add(i);
+            if (slots.Count < 2) return txs;
+            var arrived = slots.Select(i => txs[i]).OrderBy(t => t.Id ?? LiteDB.ObjectId.Empty).ToList();
+            var result = new List<Transaction>(txs);
+            for (var k = 0; k < slots.Count; k++) result[slots[k]] = arrived[k];
+            return result;
+        }
+
         public static async Task<List<Transaction>> ProcessTxPool()
         {
             // Block proposal: an owner debit whose Bitcoin deposit no Electrum server can confirm is left out of this
@@ -574,7 +675,9 @@ namespace VerifiedXCore.Data
             }
 
             //Size the pool to 1mb
-            var sizedMempoolList = MempoolSizeUtility.SizeMempoolDown(memPoolTxList);
+            // Earliest registration per name first, over the whole pool: the size cut below keeps the pool's first 1 MB in
+            // Timestamp order, so a backdated registration could fit while the earlier one for its name was cut.
+            var sizedMempoolList = RegistrationsInArrivalOrder(MempoolSizeUtility.SizeMempoolDown(EarliestRegistrationPerName(memPoolTxList)));
 
             var approvedMemPoolList = new List<Transaction>();
             // Bridge conflicts within the batch we are about to propose: the block-level guard
@@ -587,6 +690,7 @@ namespace VerifiedXCore.Data
             queuedMempoolTxList = Globals.NetworkBlockQueue.Values.SelectMany(x => x.Transactions).ToList();
 
             var adnrNameList = new List<string>();
+            var btcNameAddressList = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // as the name table matches addresses
 
             if(sizedMempoolList.Count() > 0)
             {
@@ -766,6 +870,18 @@ namespace VerifiedXCore.Data
                                             {
                                                 adnrNameList.Add(name.ToLower());
                                             }
+                                        }
+
+                                        // One BTC name per Bitcoin address in a block: a create or transfer to an address
+                                        // another one in this block already names is dropped, as validation refuses it once
+                                        // the first has applied.
+                                        var btcAddress = BtcNameTargetAddress(function, jobj);
+                                        if (!reject && !string.IsNullOrWhiteSpace(btcAddress))
+                                        {
+                                            if (btcNameAddressList.Contains(btcAddress))
+                                                reject = true;
+                                            else
+                                                btcNameAddressList.Add(btcAddress);
                                         }
                                     }
                                 }
@@ -1219,12 +1335,111 @@ namespace VerifiedXCore.Data
             // see BlockValidatorService). Keep the first; drop a later one AND that sender's later transactions so the
             // proposal has no nonce gap. The dropped creation stays in the mempool and fails as "already deployed".
             // NEW-07: likewise for debits that together overspend a holder's balance on one contract.
-            return VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.KeepOnePerBlock(SameBlockDebitGuard.DropSameBlockOverspends(DropDuplicateContractCreations(approvedMemPoolList)));
+            // ... and for a Transfer() or Burn() that shares its contract with another of the sender's contract
+            // transactions in the block, which block validation refuses whatever their order.
+            return ClosingPasses(approvedMemPoolList);
+        }
+
+        /// <summary>
+        /// The proposal's closing passes, run in the order block validation reads a block (by sender, then nonce), so what
+        /// they keep is what every receiver's running per-block guards accept.
+        /// </summary>
+        public static List<Transaction> ClosingPasses(List<Transaction> approved)
+        {
+            var inValidationOrder = BlockValidatorService.InValidationOrder(approved);
+            return DropContractSiblingConflicts(VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.KeepOnePerBlock(SameBlockDebitGuard.DropSameBlockOverspends(DropDuplicateContractCreations(inValidationOrder))));
+        }
+
+        /// <summary>The types BlockValidatorService.ValidateBlock does not read as a contract call (besides attestations).</summary>
+        private static readonly HashSet<TransactionType> NotContractCallTypes = new()
+        {
+            TransactionType.TX, TransactionType.ADNR, TransactionType.VOTE, TransactionType.VOTE_TOPIC, TransactionType.DSTR,
+            TransactionType.RESERVE, TransactionType.NFT_SALE, TransactionType.VBTC_V2_VALIDATOR_REGISTER,
+            TransactionType.VBTC_V2_VALIDATOR_EXIT, TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT, TransactionType.VBTC_V2_CONTRACT_CREATE,
+            TransactionType.VBTC_V2_TRANSFER, TransactionType.VBTC_V2_WITHDRAWAL_REQUEST, TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE,
+            TransactionType.VBTC_V2_WITHDRAWAL_CANCEL, TransactionType.VBTC_V2_COIN_PIN, TransactionType.VBTC_V2_WITHDRAWAL_VOTE,
+            TransactionType.VBTC_V2_BRIDGE_LOCK, TransactionType.VBTC_V2_BRIDGE_UNLOCK, TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK,
+            TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC, TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE,
+            TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL, TransactionType.VFX_SHIELD, TransactionType.VFX_UNSHIELD,
+            TransactionType.VFX_PRIVATE_TRANSFER, TransactionType.VBTC_V2_SHIELD, TransactionType.VBTC_V2_UNSHIELD,
+            TransactionType.VBTC_V2_PRIVATE_TRANSFER,
+        };
+
+        /// <summary>The sibling types BlockValidatorService.ValidateBlock compares a Transfer() or Burn() with.</summary>
+        private static readonly TransactionType[] ContractSiblingTypes =
+        {
+            TransactionType.NFT_TX, TransactionType.NFT_BURN, TransactionType.NFT_MINT,
+            TransactionType.TKNZ_TX, TransactionType.TKNZ_BURN, TransactionType.TKNZ_MINT,
+            TransactionType.SC_TX, TransactionType.SC_BURN, TransactionType.SC_MINT,
+        };
+
+        /// <summary>
+        /// Block validation's Transfer()/Burn() rule (BlockValidatorService.ValidateBlock): a block is refused when a
+        /// Transfer() or Burn() and another contract transaction of the same sender, of <see cref="ContractSiblingTypes"/>,
+        /// name the same ContractUID, in either order. The proposal checked only siblings approved before it, so a Transfer()
+        /// followed by an Update() of the same contract was proposed and every validator, the producer's own self-check
+        /// included, refused the block.
+        /// </summary>
+        internal static bool ConflictsWithContractSibling(Transaction tx, IReadOnlyCollection<Transaction> block)
+        {
+            if (tx.Data == null || NotContractCallTypes.Contains(tx.TransactionType) || VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(tx.TransactionType))
+                return false;
+            try
+            {
+                var scInfo = TransactionUtility.GetSCTXFunctionAndUID(tx);
+                if (!scInfo.Item1 || scInfo.Item5 == null || !scInfo.Item2)
+                    return false;
+                var scData = scInfo.Item5[0];
+                var function = (string?)scData["Function"];
+                if (function != "Transfer()" && function != "Burn()")
+                    return false;
+                var scUID = (string?)scData["ContractUID"];
+                foreach (var otx in block)
+                {
+                    if (otx.FromAddress != tx.FromAddress || otx.Hash == tx.Hash || !ContractSiblingTypes.Contains(otx.TransactionType) || otx.Data == null)
+                        continue;
+                    if (!TransactionUtility.GetSCTXFunctionAndUID(otx).Item2)
+                        continue;
+                    var otxData = JsonConvert.DeserializeObject<JArray>(otx.Data)?[0];
+                    if (otxData == null)
+                        continue;
+                    if (!string.IsNullOrWhiteSpace((string?)otxData["Function"]) && (string?)otxData["ContractUID"] == scUID)
+                        return true;
+                }
+                return false;
+            }
+            catch (Exception)
+            {
+                return true; // the validator's read throws here too, and refuses the block
+            }
+        }
+
+        /// <summary>
+        /// Drops each Transfer() or Burn() that <see cref="ConflictsWithContractSibling"/> finds in the proposal, with its
+        /// sender's later transactions so the proposal has no nonce gap. It stays in the mempool for a later block.
+        /// </summary>
+        public static List<Transaction> DropContractSiblingConflicts(List<Transaction> approved)
+        {
+            var kept = new List<Transaction>(approved);
+            var blockedSenders = new HashSet<string>(StringComparer.Ordinal);
+            for (var i = 0; i < kept.Count;)
+            {
+                var tx = kept[i];
+                if (tx.FromAddress != null && (blockedSenders.Contains(tx.FromAddress) || ConflictsWithContractSibling(tx, kept)))
+                {
+                    blockedSenders.Add(tx.FromAddress);
+                    kept.RemoveAt(i);
+                    continue;
+                }
+                i++;
+            }
+            return kept;
         }
 
         public static List<Transaction> DropDuplicateContractCreations(List<Transaction> approved)
         {
             var created = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // LiteDB lookups ignore case
+            var nftSteps = new LedgerIntegrityRules.NftStepState();               // D18: a contract moved or sold, not both
             var blockedSenders = new HashSet<string>(StringComparer.Ordinal);
             var result = new List<Transaction>();
             foreach (var tx in approved)
@@ -1235,7 +1450,11 @@ namespace VerifiedXCore.Data
                 // Globals.PathAuditRulesHeight one per vault deposit address), so a proposal never carries what its own
                 // validation refuses: two such creations in the mempool would otherwise have every producer build a
                 // block it then rejects, for as long as both sat there.
-                var duplicate = LedgerIntegrityRules.RegisterCreationInBlock(tx, created, (Globals.LastBlock?.Height ?? 0) + 1);
+                var nextHeight = (Globals.LastBlock?.Height ?? 0) + 1;
+                // Likewise a transfer or burn and a sale of one NFT: an owner who lists an NFT and then sends it has both
+                // admitted; the later one waits for the next block instead of making every producer's block refused.
+                var duplicate = LedgerIntegrityRules.RegisterCreationInBlock(tx, created, nextHeight)
+                                ?? LedgerIntegrityRules.RegisterNftStepInBlock(tx, nftSteps, nextHeight);
                 if (duplicate != null)
                 {
                     if (tx.FromAddress != null) blockedSenders.Add(tx.FromAddress);

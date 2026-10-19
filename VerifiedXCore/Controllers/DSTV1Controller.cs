@@ -1336,7 +1336,7 @@ namespace VerifiedXCore.Controllers
 
                     var thirdPartyBid = bidPayload.BidStatus == BidStatus.Accepted || bidPayload.BidStatus == BidStatus.Rejected ? true : false;
 
-                    var bidBuild = bidPayload.Build(thirdPartyBid);
+                    var bidBuild = bidPayload.Build(thirdPartyBid, Globals.DecShopData);
 
                     if (bidBuild == false)
                         return JsonConvert.SerializeObject(new { Success = false, Message = "Failed to build bid." });
@@ -1378,7 +1378,7 @@ namespace VerifiedXCore.Controllers
         {
             try
             {
-                var bid = Bid.GetSingleBid(bidId);
+                var bid = Bid.ReopenForResend(bidId);
                 if (bid != null)
                 {
                     var bidJson = JsonConvert.SerializeObject(bid);
@@ -1438,7 +1438,7 @@ namespace VerifiedXCore.Controllers
 
                     var thirdPartyBid = bidPayload.BidStatus == BidStatus.Accepted || bidPayload.BidStatus == BidStatus.Rejected ? true : false;
 
-                    var bidBuild = bidPayload.Build(thirdPartyBid);
+                    var bidBuild = bidPayload.Build(thirdPartyBid, Globals.DecShopData);
 
                     if(bidPayload.IsBuyNow != true)
                         return JsonConvert.SerializeObject(new { Success = false, Message = "IsBuyNow must be set to 'true'." });

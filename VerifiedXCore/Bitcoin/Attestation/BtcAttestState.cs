@@ -79,6 +79,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// back under the same outpoint.
         /// </summary>
         Orphaned = 3,
+        /// <summary>
+        /// Spent by a Bitcoin transaction too large to prove (#171), on the signers' word: it counts for nothing and is
+        /// never selected or signed. SpentByTxid and SpentInHeight name that transaction. A proven spend settles it; a
+        /// rewind below SpentInHeight unfreezes it. Its holders are kept: a pinned withdrawal is neither voided nor
+        /// refunded, since the pinned transaction may still confirm if the claim was false.
+        /// </summary>
+        Frozen = 4,
     }
 
     /// <summary>One Bitcoin output held by a vault. The id is the outpoint, "txid:vout", lowercase.</summary>
@@ -258,6 +265,19 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public List<VaultPin> Pins { get; set; } = new();
         public string? SettledTxid { get; set; }
         public long ClosedAtVfxHeight { get; set; }
+        /// <summary>
+        /// A bridge exit's part reopened after its transactions were voided (another part of its exit is paid): the Bitcoin
+        /// height the voiding spend was reported through. It is fixed again on other coins only once that spend is buried
+        /// <see cref="BtcAttestRules.ExitReopenBurialBlocks"/> deeper; 0 otherwise.
+        /// </summary>
+        public long ReopenedAtBitcoinHeight { get; set; }
+
+        /// <summary>
+        /// Transactions of this withdrawal that Bitcoin showed after it was already paid or closed: each paid its destination
+        /// again from the vault, for nothing owed. Reached only when a Bitcoin reorganisation drops the spend that voided one
+        /// of its transactions after it was fixed again on other coins (#262).
+        /// </summary>
+        public List<string>? UnowedPaymentTxids { get; set; }
         /// <summary>Why it is not pinned, or why it was closed. For people; nothing reads it.</summary>
         public string? WaitingReason { get; set; }
         public long LastModifiedHeight { get; set; }

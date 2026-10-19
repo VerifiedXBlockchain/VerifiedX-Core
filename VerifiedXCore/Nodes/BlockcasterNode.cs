@@ -1226,7 +1226,9 @@ namespace VerifiedXCore.Nodes
                 // Strict OR (not the StopAllTimers && !IsChainSynced idiom) because casting must
                 // pause during a mid-life resync even if IsChainSynced was true earlier. In-loop
                 // placement means fork recovery setting IsResyncing pauses casting automatically.
-                if (Globals.StopAllTimers || !Globals.IsChainSynced || Globals.IsResyncing)
+                // From the proof-rules height, a caster without its PLONK verifier would refuse every block with a private
+                // transaction, so it does not cast until the verifier is loaded.
+                if (Globals.StopAllTimers || !Globals.IsChainSynced || Globals.IsResyncing || !Globals.ProofVerifierReady)
                 {
                     await Task.Delay(2000);
                     continue;
@@ -2398,7 +2400,10 @@ namespace VerifiedXCore.Nodes
         /// FIX (Issue 3): Cross-validates downloaded blocks against multiple peers to avoid
         /// accepting a bad block from a single malicious/forked peer.
         /// </summary>
-        private static async Task SyncHeightWithPeersAsync()
+        /// <param name="approveCertifiedAt">During this caster's fork recovery, the height it rolled back: the block fetched
+        /// there is checked for a valid committee certificate and, with one, becomes the approved hash before it is validated
+        /// (as for a fork correction), so it is adopted rather than left pending without an approval.</param>
+        private static async Task SyncHeightWithPeersAsync(long? approveCertifiedAt = null)
         {
             try
             {
@@ -2515,6 +2520,8 @@ namespace VerifiedXCore.Nodes
                                             }
                                         }
 
+                                        if (approveCertifiedAt == block.Height)
+                                            ForkRecoveryUtility.ApproveIfCertified(block);
                                         var result = await BlockValidatorService.ValidateBlock(block, true, false, false, true, source: $"HeightSync:{bestPeerIP}");
                                         if (result)
                                         {
@@ -3466,6 +3473,7 @@ namespace VerifiedXCore.Nodes
                 // Case 3: No agreed hash + no CasterRoundDict entry → accept ONLY with majority attestations (A4)
                 // Case 4: No agreed hash + CasterRoundDict entry exists → spin-wait, then accept ONLY with majority attestations (A4)
                 string? agreedHashForGate = null;
+                var pinnedHere = false; // the hash was registered here, for this broadcast (cases 3 and 4)
                 Globals.CasterApprovedBlockHashDict.TryGetValue(nextBlock.Height, out agreedHashForGate);
 
                 bool hasCasterRoundEntry = Globals.CasterRoundDict.ContainsKey(nextBlock.Height);
@@ -3488,8 +3496,10 @@ namespace VerifiedXCore.Nodes
                     {
                         // A4 FIX: mid-round accept now requires a majority of casters to have attested
                         // this exact block — never a blind accept.
-                        var attested = await ConsensusCertificateHelper.TryGetMajorityAttestationsAsync(
-                            nextBlock.Height, nextBlock.Hash, nextBlock.Validator, nextBlock.PrevHash);
+                        // Its hash is registered as the agreed one on acceptance: only for a block that is exactly that hash.
+                        var attested = nextBlock.GetBlockHash() == nextBlock.Hash
+                            && await ConsensusCertificateHelper.TryGetMajorityAttestationsAsync(
+                                nextBlock.Height, nextBlock.Hash, nextBlock.Validator, nextBlock.PrevHash);
                         if (!attested)
                         {
                             ConsoleWriterService.OutputValCaster($"[Consensus Gate] Mid-round REJECT: height {nextBlock.Height} — no agreement after {spin.ElapsedMilliseconds}ms spin and no majority attestation quorum. Round retry will resolve.");
@@ -3502,6 +3512,7 @@ namespace VerifiedXCore.Nodes
                         // SPLIT-GUARD: publish the attested hash so ValidateBlock's caster gate (which now
                         // refuses a live commit with NO agreed hash) sees this as the agreed block.
                         RegisterPendingCasterBlockHash(nextBlock.Height, nextBlock.Hash);
+                        pinnedHere = true;
                     }
                 }
                 else if (Globals.IsBlockCaster && nextBlock.Height == lastBlockHeight + 1
@@ -3509,8 +3520,10 @@ namespace VerifiedXCore.Nodes
                 {
                     // Case 3: No CasterRoundDict entry — we missed/haven't started this round.
                     // A4 FIX: require a majority attestation quorum instead of trusting the broadcast.
-                    var attested = await ConsensusCertificateHelper.TryGetMajorityAttestationsAsync(
-                        nextBlock.Height, nextBlock.Hash, nextBlock.Validator, nextBlock.PrevHash);
+                    // Its hash is registered as the agreed one on acceptance: only for a block that is exactly that hash.
+                    var attested = nextBlock.GetBlockHash() == nextBlock.Hash
+                        && await ConsensusCertificateHelper.TryGetMajorityAttestationsAsync(
+                            nextBlock.Height, nextBlock.Hash, nextBlock.Validator, nextBlock.PrevHash);
                     if (!attested)
                     {
                         ConsoleWriterService.OutputValCaster($"[Consensus Gate] No-round REJECT: height {nextBlock.Height} — no majority attestation quorum for peer broadcast. Reconcile will resolve.");
@@ -3522,6 +3535,7 @@ namespace VerifiedXCore.Nodes
                     CasterLogUtility.Log($"MSG7 case3 ACCEPT (attested): h={nextBlock.Height} hash={nextBlock.Hash?[..Math.Min(16, nextBlock.Hash?.Length ?? 0)]} by {nextBlock.Validator} from {senderIp}.", "MSG7");
                     // SPLIT-GUARD: see mid-round accept above.
                     RegisterPendingCasterBlockHash(nextBlock.Height, nextBlock.Hash);
+                    pinnedHere = true;
                 }
 
                 // Case 2: Agreed hash exists but doesn't match → reject (actual fork)
@@ -3594,6 +3608,10 @@ namespace VerifiedXCore.Nodes
                 {
                     // Validation failed — reset _acceptedHeight so the correct block can try
                     Interlocked.CompareExchange(ref _acceptedHeight, currentAccepted, nextBlock.Height);
+                    // The pin this broadcast earned above goes with it, or the gate would refuse every other block at
+                    // the height. A pin from our own round's agreement is the commit path's to withdraw.
+                    if (pinnedHere)
+                        ReleaseRefusedCommitPin(nextBlock.Height, nextBlock.Hash, triedAtTip: true);
                 }
             }
         }
@@ -3631,9 +3649,9 @@ namespace VerifiedXCore.Nodes
                                 var rating = await TransactionRatingService.GetTransactionRating(transaction);
                                 transaction.TransactionRating = rating;
 
-                                if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
+                                if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
+                                    && MempoolEvictionUtility.TryAdmitAndInsert(transaction, mempool))
                                 {
-                                    mempool.InsertSafe(transaction);
                                     _ = Broadcast("7777", data, "SendTxToMempoolVals");
 
                                 }
@@ -3673,9 +3691,9 @@ namespace VerifiedXCore.Nodes
                             var rating = await TransactionRatingService.GetTransactionRating(transaction);
                             transaction.TransactionRating = rating;
 
-                            if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
+                            if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
+                                && MempoolEvictionUtility.TryAdmitAndInsert(transaction, mempool))
                             {
-                                mempool.InsertSafe(transaction);
                             }
                             else
                             {
@@ -4432,9 +4450,27 @@ namespace VerifiedXCore.Nodes
             }
         }
 
+        /// <summary>Whether <paramref name="hash"/> is spelled as a block hash is computed: 64 lowercase hex characters.</summary>
+        internal static bool IsBlockHashSpelling(string? hash) =>
+            hash != null && hash.Length == 64 && hash.All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
+
         private static void ClearPendingCasterBlockHash(long height)
         {
             Globals.CasterApprovedBlockHashDict.TryRemove(height, out _);
+        }
+
+        /// <summary>
+        /// After an agreed block was validated at our tip and refused, its pin is withdrawn: left in place, the gossip gate
+        /// refused every other block at that height until the next agreement, and the tip stayed wedged. Without the pin a
+        /// block there still needs a majority attestation. A block not yet tried (we are behind and downloading) keeps its
+        /// pin, which admits it when the download reaches it; a pin since replaced by another hash is left alone.
+        /// </summary>
+        internal static void ReleaseRefusedCommitPin(long height, string? hash, bool triedAtTip)
+        {
+            if (!triedAtTip || string.IsNullOrEmpty(hash))
+                return;
+            if (Globals.CasterApprovedBlockHashDict.TryRemove(new KeyValuePair<long, string>(height, hash)))
+                CasterLogUtility.Log($"COMMIT-FAILED: h={height} agreed hash {hash[..Math.Min(16, hash.Length)]} withdrawn after validation refused it.", "ROUND");
         }
 
         /// <summary>
@@ -4466,6 +4502,34 @@ namespace VerifiedXCore.Nodes
         /// validator gate sees it as agreed. Non-casters and non-live heights are always admitted
         /// (the download / gap paths own those).
         /// </summary>
+        /// <summary>Pins this gate registered for a gossiped block (height → hash), so a refused staging can withdraw them.</summary>
+        private static readonly ConcurrentDictionary<long, string> _gossipPins = new();
+
+        /// <summary>
+        /// Stages an admitted gossip block (pre-checks, then the capped staging). When staging refuses it and no copy of it
+        /// is staged, the pin the gossip gate registered for it is withdrawn: it was set before the block was known to
+        /// reach validation, so a block refused by the staging cap left the gate refusing every other block at the height
+        /// until the next agreement. A pin from our own round's agreement is left alone.
+        /// </summary>
+        /// <summary>Registers the hash of an attested gossip block as the agreed one, remembered as the gossip gate's.</summary>
+        internal static void RegisterGossipPin(long height, string hash)
+        {
+            RegisterPendingCasterBlockHash(height, hash);
+            _gossipPins[height] = hash;
+        }
+
+        internal static bool StageGossipOrWithdrawPin(Block block, string sourceIp)
+        {
+            if (BlockStaging.PassesGossipPreChecks(block, out _) && BlockStaging.TryStageGossip(block, sourceIp))
+                return true;
+            if (string.IsNullOrEmpty(block.Hash) || BlockStaging.IsStaged(block))
+                return false;
+            if (_gossipPins.TryRemove(new KeyValuePair<long, string>(block.Height, block.Hash))
+                && Globals.CasterApprovedBlockHashDict.TryRemove(new KeyValuePair<long, string>(block.Height, block.Hash)))
+                CasterLogUtility.Log($"GOSSIP-GATE: h={block.Height} pin {block.Hash[..Math.Min(16, block.Hash.Length)]} withdrawn — the block was not staged.", "GOSSIP-GATE");
+            return false;
+        }
+
         internal static async Task<bool> TryAdmitLiveBlockAsCasterAsync(Block? block, string source)
         {
             if (block == null || !Globals.IsBlockCaster)
@@ -4484,10 +4548,16 @@ namespace VerifiedXCore.Nodes
             }
 
             var hasRoundEntry = Globals.CasterRoundDict.ContainsKey(block.Height);
+            // Its hash is registered as the agreed one below: only for a block that is exactly that hash.
+            if (block.GetBlockHash() != block.Hash)
+            {
+                CasterLogUtility.Log($"GOSSIP-GATE REFUSE: h={block.Height} hash={shortHash} from {source} — the block is not its own hash.", "GOSSIP-GATE");
+                return false;
+            }
             var attested = await ConsensusCertificateHelper.TryGetMajorityAttestationsAsync(block.Height, block.Hash, block.Validator, block.PrevHash);
             if (attested)
             {
-                RegisterPendingCasterBlockHash(block.Height, block.Hash);
+                RegisterGossipPin(block.Height, block.Hash!);
                 CasterLogUtility.Log($"GOSSIP-GATE ADMIT (attested): h={block.Height} hash={shortHash} by {block.Validator} from {source} — majority attestations verified; hash registered. roundEntry={hasRoundEntry}.", "GOSSIP-GATE");
                 return true;
             }
@@ -4505,6 +4575,13 @@ namespace VerifiedXCore.Nodes
         {
             if (block == null || string.IsNullOrEmpty(producerIp))
                 return;
+            if (block.GetBlockHash() != block.Hash) // registered as the approval below
+            {
+                // Not adopted: an approval already published for this hash (by the agreement) is withdrawn, not left to hold out the real block.
+                if (Globals.CasterApprovedBlockHashDict.TryGetValue(block.Height, out var published) && published == block.Hash)
+                    ClearPendingCasterBlockHash(block.Height);
+                return;
+            }
 
             while (true)
             {
@@ -4598,6 +4675,7 @@ namespace VerifiedXCore.Nodes
                     $"hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}. Failure counters stay armed.",
                     "ROUND");
                 ProofUtility.TrackRoundFailure(currentHeight);
+                ReleaseRefusedCommitPin(currentHeight, block.Hash, triedAtTip: nextHeight == currentHeight);
                 return;
             }
 
@@ -4678,8 +4756,22 @@ namespace VerifiedXCore.Nodes
             if (Interlocked.CompareExchange(ref _forkRecoveryInProgress, 1, 0) != 0)
                 return;
 
+            var holdsRecovery = false;
             try
             {
+                // One rollback writer at a time. A desync reconcile, a readiness recovery or a fork-correction reorg on
+                // this node holds the same interlock; two writers that each read the tip before either removed it
+                // reversed its transactions twice in state (a payment refunded twice). This self-heal stands down for the
+                // round and the next stuck round tries again. It holds the interlock for its rollback only: block
+                // validation drops blocks while a recovery holds it outside a download phase, so the resync below runs
+                // without it, as before.
+                if (!ForkRecoveryUtility.TryEnterRecovery())
+                {
+                    CasterLogUtility.Log($"FORK-RECOVERY: another recovery or reorg is running at height {stuckHeight}; this self-heal stands down.", "FORK-RECOVERY");
+                    return;
+                }
+                holdsRecovery = true;
+
                 CasterLogUtility.Log(
                     $"FORK-RECOVERY: Initiating self-heal at height {stuckHeight}. " +
                     $"Stuck for {_forkStuckRounds} rounds. Hash sync failed {_hashSyncFailCount} times.",
@@ -4694,9 +4786,16 @@ namespace VerifiedXCore.Nodes
                 // Step 2: Roll back the bad block using fast incremental path
                 CasterLogUtility.Log($"FORK-RECOVERY: Rolling back 1 block from height {stuckHeight} (fast path)...", "FORK-RECOVERY");
                 var preRecoveryHash = Globals.LastBlock.Hash;
-                var rollbackResult = await BlockRollbackUtility.RollbackBlocksFast(1);
+                bool rollbackResult;
+                try { rollbackResult = await BlockRollbackUtility.RollbackBlocksFast(1); }
+                finally
+                {
+                    ForkRecoveryUtility.ExitRecovery();
+                    holdsRecovery = false;
+                }
                 if (rollbackResult)
                 {
+                    ForkRecoveryUtility.DropApprovalOfRolledBack(stuckHeight, preRecoveryHash);
                     CasterLogUtility.Log(
                         $"FORK-RECOVERY: Rollback succeeded. New lastBlock height={Globals.LastBlock.Height} hash={Globals.LastBlock.Hash?[..Math.Min(16, Globals.LastBlock.Hash?.Length ?? 0)]}",
                         "FORK-RECOVERY");
@@ -4708,7 +4807,7 @@ namespace VerifiedXCore.Nodes
 
                 // Step 3: Sync height with peers and download the correct block
                 CasterLogUtility.Log($"FORK-RECOVERY: Syncing height with peers...", "FORK-RECOVERY");
-                await SyncHeightWithPeersAsync();
+                await SyncHeightWithPeersAsync(approveCertifiedAt: stuckHeight);
 
                 CasterLogUtility.Log($"FORK-RECOVERY: Downloading blocks from peers...", "FORK-RECOVERY");
                 try { await BlockDownloadService.GetAllBlocks(); } catch { }
@@ -4754,6 +4853,7 @@ namespace VerifiedXCore.Nodes
             }
             finally
             {
+                if (holdsRecovery) ForkRecoveryUtility.ExitRecovery();
                 Interlocked.Exchange(ref _forkRecoveryInProgress, 0);
             }
         }
@@ -4777,6 +4877,12 @@ namespace VerifiedXCore.Nodes
         /// </summary>
         private static async Task<Block?> VerifyBlockHashAgreementAsync(Block block, long height, string terminalWinner)
         {
+            // The draft's hash is published and voted on as the round's approval: only for a block that is exactly that hash.
+            if (block == null || block.GetBlockHash() != block.Hash)
+            {
+                CasterLogUtility.Log($"HASH-AGREEMENT: the draft at {height} from {terminalWinner} is not its own hash; no agreement.", "CONSENSUS");
+                return null;
+            }
             // Wave 3: quorum N + eligible voters come from the membership committee when active.
             var (casters, committeeCount) = GetQuorumCasters(height);
             if (committeeCount <= 1)
@@ -4837,7 +4943,8 @@ namespace VerifiedXCore.Nodes
 
                 foreach (var r in results)
                 {
-                    if (r.hash != null)
+                    // A block hash has one spelling (64 lowercase hex): a vote for any other names no block.
+                    if (r.hash != null && IsBlockHashSpelling(r.hash))
                     {
                         if (!hashVotes.ContainsKey(r.hash))
                             hashVotes[r.hash] = 0;
@@ -4886,7 +4993,9 @@ namespace VerifiedXCore.Nodes
                     new Peers { PeerIP = sourceIP },
                     height,
                     terminalWinner);
-                if (peerBlock != null && peerBlock.Hash == majorityHash && IsVoteForWinner(peerBlock.Validator, terminalWinner))
+                if (peerBlock != null && peerBlock.Hash == majorityHash && peerBlock.GetBlockHash() == peerBlock.Hash
+                    && SignatureService.VerifySignature(peerBlock.Validator, peerBlock.Hash, peerBlock.ValidatorSignature)
+                    && IsVoteForWinner(peerBlock.Validator, terminalWinner))
                 {
                     CasterRoundAudit?.AddStep($"[BlockHashAgreement] Replaced local block with majority block from {sourceIP}.", true);
                     _consecutiveMajorityBlockFetchFailures = 0;

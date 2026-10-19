@@ -102,6 +102,10 @@ namespace VerifiedXCore.Services
             if (!Globals.IsBlockCaster)
                 return false;
 
+            // A caster that cannot verify private-tx proofs from the proof-rules height does not attest to a block.
+            if (!Globals.ProofVerifierReady)
+                return false;
+
             var acc = AccountData.GetLocalValidator();
             if (acc == null || acc.GetPrivKey == null)
                 return false;

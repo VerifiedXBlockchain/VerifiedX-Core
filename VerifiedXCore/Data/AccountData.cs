@@ -185,7 +185,7 @@ namespace VerifiedXCore.Data
             Account account = new Account();
             try
             {
-                BigInteger b1 = KeyParsing.ParseLegacy(privKey); //legacy: signed hex parse
+                BigInteger b1 = KeyParsing.ParseLegacy(KeyParsing.LegacyDigits(privKey)); //legacy: signed hex parse
                 PrivateKey privateKey = new PrivateKey("secp256k1", b1);
                 var privKeySecretHex = privateKey.secret.ToString("x");
                 var pubKey = privateKey.publicKey();

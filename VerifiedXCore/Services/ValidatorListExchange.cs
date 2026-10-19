@@ -108,6 +108,10 @@ namespace VerifiedXCore.Services
         /// <summary>
         /// Distinct committee casters (other than this node) that must report the same entry: two, or every other
         /// caster when fewer exist (a two-caster committee has only one other voice).
+        /// Trust assumption: in a two-caster committee one report is enough, because there is no second voice to ask.
+        /// What bounds it is the rest of the gate, not the count: the entry's key must derive its address, the address must
+        /// hold the validator balance, and this node's own liveness probe must reach it; and NetworkValidators is this
+        /// node's own view, not consensus state. If the committee minimum rises to three, require two again.
         /// </summary>
         public static int RequiredCorroboration()
         {

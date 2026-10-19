@@ -416,6 +416,24 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// Sends this node's signature to the signers whose signature it lacks, and keeps what they answer with.
         /// A signer is asked again no more often than every few loops.
         /// </summary>
+        /// <summary>
+        /// One signer's answer to this node's signature: read only as far as an answer holding every member's signature
+        /// goes (a signer could answer with gigabytes; fourth review, round 2), and within one deadline for the whole
+        /// exchange, body included. Under ResponseHeadersRead the client's Timeout ends at the headers, so a signer that
+        /// sent headers and then nothing held the gossip, and with it this node's report loop, for good: every honest
+        /// validator gossips to a signer that never signs, so one such signer stopped them all. Null when there is none.
+        /// </summary>
+        internal static async Task<string?> AskForSignaturesAsync(string url, string body, int maxBytes, CancellationToken ct)
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            deadline.CancelAfter(Http.Timeout);
+            using var content = new StringContent(body, Encoding.UTF8, "application/json");
+            using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
+            using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+            if (!response.IsSuccessStatusCode) return null;
+            return await Net.BtcValidatorSource.ReadBoundedAsync(response.Content, maxBytes, deadline.Token);
+        }
+
         private static async Task GossipOverHttpAsync(BtcReport report, string reportHash, BtcReportSignature? mine, CancellationToken ct)
         {
             if (mine == null) return; // a node that is not a signer has nothing to offer
@@ -440,14 +458,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 try
                 {
                     var ip = validator.IPAddress.Replace("::ffff:", "");
-                    using var content = new StringContent(body, Encoding.UTF8, "application/json");
-                    using var request = new HttpRequestMessage(HttpMethod.Post, $"http://{ip}:{Globals.FrostValidatorPort}/frost/btcreport/signature") { Content = content };
-                    // Read only as far as an answer holding every member's signature goes, and look at no more entries
-                    // than the set has members, each member once: a signer could answer with gigabytes, or with
-                    // thousands of entries that each cost a signature check (fourth review, round 2).
-                    using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
-                    if (!response.IsSuccessStatusCode) return;
-                    var text = await Net.BtcValidatorSource.ReadBoundedAsync(response.Content, MaxAnswerBytes(members.Count), ct);
+                    var text = await AskForSignaturesAsync($"http://{ip}:{Globals.FrostValidatorPort}/frost/btcreport/signature", body, MaxAnswerBytes(members.Count), ct);
                     if (text == null) return;
                     var answer = JsonConvert.DeserializeObject<SignatureAnswer>(text);
                     var seen = new HashSet<string>(StringComparer.Ordinal);

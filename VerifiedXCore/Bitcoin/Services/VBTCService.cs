@@ -173,6 +173,23 @@ namespace VerifiedXCore.Bitcoin.Services
         internal static bool DecompileFailureSettled(string key) =>
             _decompileFailures.AddOrUpdate(key, 1, (_, n) => n + 1) >= 3;
 
+        /// <summary>
+        /// A decompile that failed for a reason of this node, not of the code: its disk. Every run resets the interpreter,
+        /// which creates and deletes its submissions folder, and two decompiles at once race on it (access denied, wrapped
+        /// by the meta-command's reflection call). Passed on rather than answered "not a vault", which left a vault created
+        /// in a block unwatched on this node alone, silently: in a block's apply the step fails and the block is flagged
+        /// (StateData.NoteApplyStepFailed); in validation the block is not taken now and is asked again. Code that fails on
+        /// every node (bad encoding, an interpreter error, running out of memory) is still answered "not a vault": flagging
+        /// it let one cheap transaction mark every node's state failed (round 32).
+        /// </summary>
+        internal static bool DecompileFaultIsNodeLocal(Exception? ex)
+        {
+            for (var e = ex; e != null; e = e.InnerException)
+                if ((e is System.IO.IOException && e is not System.IO.EndOfStreamException) || e is UnauthorizedAccessException)
+                    return true;
+            return false;
+        }
+
         public static bool IsVbtcV2Contract(SmartContractStateTrei? scState)
         {
             if (scState == null || string.IsNullOrEmpty(scState.SmartContractUID) || string.IsNullOrEmpty(scState.ContractData))
@@ -198,7 +215,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (isV2 && plain)
                     isV2 = VerifiedXCore.Services.LedgerIntegrityRules.VaultCodeIsPlain(scMain, scState.ContractData);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!DecompileFaultIsNodeLocal(ex))
             {
                 ErrorLogUtility.LogError($"IsVbtcV2Contract: contract {scState.SmartContractUID} could not be decompiled: {ex.Message}",
                     "VBTCService.IsVbtcV2Contract()");
@@ -233,7 +250,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
             bool isV1;
             try { isV1 = DeclaresVbtcV1(SmartContractMain.GenerateSmartContractInMemory(scState.ContractData)); }
-            catch
+            catch (Exception ex) when (!DecompileFaultIsNodeLocal(ex)) // a fault of this node's disk is passed on, as for V2
             {
                 if (!DecompileFailureSettled("v1|" + scState.SmartContractUID + "|" + digest))
                     return false; // not cached: asked again next time (round 28)
@@ -2276,12 +2293,16 @@ namespace VerifiedXCore.Bitcoin.Services
                         var anyPinnedUnspent = pinLookup.Success && parsedPinnedCoins.Any(c =>
                             pinLookup.Utxos.Any(u => $"{u.TxHash}:{u.TxPos}".ToLowerInvariant() == c.ToOutpointKey()));
 
-                        var pinnedTxId = withdrawalRequest.LastSignedBtcTxId;
-                        int? pinnedTxConfirmations = 0;
+                        // The pinned transaction's own id: LastSignedBtcTxId is written only after a broadcast reported
+                        // success, so a broadcast that timed out but went through left it empty and the paid withdrawal
+                        // read as "conflicted away" (rebuilt, and the rebuild refused by the validators holding the pin).
+                        var pinnedTxId = PinnedTxIdOf(withdrawalRequest.PinnedUnsignedTxHex, withdrawalRequest.LastSignedBtcTxId);
+                        int? pinnedTxConfirmations = string.IsNullOrEmpty(pinnedTxId) ? null : 0; // no id at all: unknown, so reuse
                         if (pinLookup.Success && !anyPinnedUnspent && !string.IsNullOrEmpty(pinnedTxId))
                         {
-                            var confLookup = await BitcoinTransactionService.GetTransactionConfirmationsResilient(pinnedTxId);
-                            pinnedTxConfirmations = confLookup.Confirmations;
+                            // "Paid" submits the completion, which no block validation re-asks Bitcoin about: two hosts
+                            // must agree. One host alone reads as unknown, so the pinned transaction is reused (not rebuilt).
+                            pinnedTxConfirmations = await BitcoinTransactionService.GetAgreedConfirmations(pinnedTxId);
                         }
 
                         var disposition = DecidePinnedTxDisposition(pinLookup.Success, anyPinnedUnspent, pinnedTxConfirmations);
@@ -2312,7 +2333,7 @@ namespace VerifiedXCore.Bitcoin.Services
                                 withdrawalRequest.PinnedUnsignedTxHex = null;
                                 withdrawalRequest.PinnedCoinsJson = null;
                                 if (!isTransientRequest)
-                                    VBTCWithdrawalRequest.Save(withdrawalRequest, true);
+                                    ClearPinnedBuild(withdrawalRequestHash, scUID, deferredToo: false);
                                 break;
                         }
                     }
@@ -2504,24 +2525,26 @@ namespace VerifiedXCore.Bitcoin.Services
         /// rebuild when it can never confirm (the withheld tx won: an input is spent by a confirmed tx) — the fields
         /// are then cleared, and validators allow a new tx on the same evidence.
         /// </summary>
-        private static async Task<(DeferredCompletionAction Action, string Message)> ResolveDeferredCompletion(VBTCWithdrawalRequest row, string depositAddress)
+        internal static async Task<(DeferredCompletionAction Action, string Message)> ResolveDeferredCompletion(VBTCWithdrawalRequest row, string depositAddress)
         {
             var txid = row.CompleteAfterBtcTxId!;
 
             if (HasPendingCompletion(row.TransactionHash, row.SmartContractUID))
                 return (DeferredCompletionAction.Wait, $"The completion for withdrawal {row.TransactionHash} is already in the mempool.");
 
-            var lookup = await BitcoinTransactionService.GetTransactionConfirmationsResilient(txid);
-            if (lookup.Confirmations >= 1)
+            // The completion is submitted only once two hosts have the reclaim in a block: one server's word submitted it
+            // while the withheld transaction could still replace the reclaim, and the completion then stood unpaid.
+            var confirmations = await BitcoinTransactionService.GetAgreedConfirmations(txid);
+            if (confirmations >= 1)
                 return (DeferredCompletionAction.Submit, string.Empty);
-            if (lookup.Confirmations == 0)
+            if (confirmations == 0)
                 return (DeferredCompletionAction.Wait, AwaitingConfirmationMessage(txid, "is in the mempool, waiting for its first confirmation"));
 
             // Unknown to every server: never broadcast (coordinator died after signing), evicted, or replaced.
             var coins = string.IsNullOrEmpty(row.PinnedCoinsJson)
                 ? new List<PinnedWithdrawalCoin>()
                 : JsonConvert.DeserializeObject<List<PinnedWithdrawalCoin>>(row.PinnedCoinsJson) ?? new List<PinnedWithdrawalCoin>();
-            var (verdict, detail) = await BitcoinTransactionService.GetOutpointSpendVerdict(depositAddress, coins.Select(c => c.ToOutpointKey()));
+            var (verdict, detail) = await BitcoinTransactionService.GetOutpointSpendVerdict(depositAddress, coins.Select(c => c.ToOutpointKey()), txid);
             if (verdict == BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed)
             {
                 SCLogUtility.Log($"Reclaim tx {txid} for withdrawal {row.TransactionHash} can never confirm ({detail}); rebuilding.", "VBTCService.ResolveDeferredCompletion()");
@@ -2530,7 +2553,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 row.DeferredSignedTxHex = null;
                 row.PinnedUnsignedTxHex = null;
                 row.PinnedCoinsJson = null;
-                VBTCWithdrawalRequest.Save(row, true);
+                ClearPinnedBuild(row.TransactionHash, row.SmartContractUID, deferredToo: true);
                 return (DeferredCompletionAction.Rebuild, string.Empty);
             }
 
@@ -2678,14 +2701,12 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
-                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
-                if (storedRequest == null)
-                    return;
-
-                storedRequest.LastSigningFailureCode = ceremony?.FailureCode.ToString() ?? "Unknown";
-                storedRequest.LastSigningFailureAt = TimeUtil.GetTime();
-                storedRequest.LastSigningSessionId = ceremony?.SessionId ?? string.Empty;
-                VBTCWithdrawalRequest.Save(storedRequest, true);
+                VBTCWithdrawalRequest.UpdateLocalFields(withdrawalRequestHash, scUID, storedRequest =>
+                {
+                    storedRequest.LastSigningFailureCode = ceremony?.FailureCode.ToString() ?? "Unknown";
+                    storedRequest.LastSigningFailureAt = TimeUtil.GetTime();
+                    storedRequest.LastSigningSessionId = ceremony?.SessionId ?? string.Empty;
+                });
             }
             catch (Exception ex)
             {
@@ -2714,6 +2735,20 @@ namespace VerifiedXCore.Bitcoin.Services
         /// (FIND-028), deadlocking the withdrawal until their pin cleared. Reuse is always safe:
         /// re-signing the identical tx is idempotent under the validators' sighash rules.
         /// </summary>
+        /// <summary>
+        /// The id of a pinned withdrawal transaction, from its unsigned bytes: the vault's inputs are Taproot, and an id
+        /// does not cover the witness, so the signed transaction has this id. Falls back to the id recorded at signing.
+        /// </summary>
+        internal static string? PinnedTxIdOf(string? pinnedUnsignedTxHex, string? lastSignedBtcTxId)
+        {
+            if (!string.IsNullOrEmpty(pinnedUnsignedTxHex))
+            {
+                try { return NBitcoin.Transaction.Parse(pinnedUnsignedTxHex, Globals.BTCNetwork ?? NBitcoin.Network.Main).GetHash().ToString(); }
+                catch { }
+            }
+            return string.IsNullOrEmpty(lastSignedBtcTxId) ? null : lastSignedBtcTxId;
+        }
+
         public static PinnedReuseDecision DecidePinnedTxDisposition(bool utxoLookupSucceeded, bool anyPinnedOutpointUnspent, int? pinnedTxConfirmations)
         {
             // Inconclusive UTXO view, or the pinned tx can still confirm as-is → reuse it verbatim.
@@ -2733,6 +2768,33 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// Local-only: drops the stored request's pinned build (and its deferred completion), on the row as it is now. A
+        /// request object held across a Bitcoin lookup may predate the row's cancellation or completion; saving it whole
+        /// wrote its old status back over the closed row.
+        /// </summary>
+        private static void ClearPinnedBuild(string withdrawalRequestHash, string scUID, bool deferredToo)
+        {
+            try
+            {
+                VBTCWithdrawalRequest.UpdateLocalFields(withdrawalRequestHash, scUID, storedRequest =>
+                {
+                    storedRequest.PinnedUnsignedTxHex = null;
+                    storedRequest.PinnedCoinsJson = null;
+                    if (deferredToo)
+                    {
+                        storedRequest.CompleteAfterConfirmation = false;
+                        storedRequest.CompleteAfterBtcTxId = null;
+                        storedRequest.DeferredSignedTxHex = null;
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                SCLogUtility.Log($"Failed to clear pinned build on request {withdrawalRequestHash}: {ex.Message}", "VBTCService.ClearPinnedBuild()");
+            }
+        }
+
+        /// <summary>
         /// FIND-028: persist the exact unsigned tx (and its coins) about to be announced to the
         /// validators, so any retry re-signs the identical sighashes instead of rebuilding.
         /// Written BEFORE the first announce; local-only, never consensus-read.
@@ -2741,17 +2803,15 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
-                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
-                if (storedRequest == null)
-                    return;
-
-                storedRequest.PinnedUnsignedTxHex = unsignedTxHex;
-                storedRequest.PinnedCoinsJson = JsonConvert.SerializeObject(coins);
-                // A retry reuses this exact tx, so it must keep waiting for confirmation too.
-                storedRequest.CompleteAfterConfirmation = reclaimBuild;
-                storedRequest.CompleteAfterBtcTxId = null;
-                storedRequest.DeferredSignedTxHex = null;
-                VBTCWithdrawalRequest.Save(storedRequest, true);
+                VBTCWithdrawalRequest.UpdateLocalFields(withdrawalRequestHash, scUID, storedRequest =>
+                {
+                    storedRequest.PinnedUnsignedTxHex = unsignedTxHex;
+                    storedRequest.PinnedCoinsJson = JsonConvert.SerializeObject(coins);
+                    // A retry reuses this exact tx, so it must keep waiting for confirmation too.
+                    storedRequest.CompleteAfterConfirmation = reclaimBuild;
+                    storedRequest.CompleteAfterBtcTxId = null;
+                    storedRequest.DeferredSignedTxHex = null;
+                });
             }
             catch (Exception ex)
             {
@@ -2767,14 +2827,12 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
-                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
-                if (storedRequest == null)
-                    return;
-
-                storedRequest.CompleteAfterConfirmation = true;
-                storedRequest.CompleteAfterBtcTxId = btcTxId;
-                storedRequest.DeferredSignedTxHex = signedTxHex;
-                VBTCWithdrawalRequest.Save(storedRequest, true);
+                VBTCWithdrawalRequest.UpdateLocalFields(withdrawalRequestHash, scUID, storedRequest =>
+                {
+                    storedRequest.CompleteAfterConfirmation = true;
+                    storedRequest.CompleteAfterBtcTxId = btcTxId;
+                    storedRequest.DeferredSignedTxHex = signedTxHex;
+                });
             }
             catch (Exception ex)
             {
@@ -2793,12 +2851,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (string.IsNullOrEmpty(btcTxHash))
                     return;
 
-                var storedRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
-                if (storedRequest == null)
-                    return;
-
-                storedRequest.LastSignedBtcTxId = btcTxHash;
-                VBTCWithdrawalRequest.Save(storedRequest, true);
+                VBTCWithdrawalRequest.UpdateLocalFields(withdrawalRequestHash, scUID, storedRequest => storedRequest.LastSignedBtcTxId = btcTxHash);
             }
             catch (Exception ex)
             {
@@ -3046,14 +3099,15 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// S3C §7.4/§8: resolve a contract's DKG validator snapshot — local record first, else
-        /// state-trei decompile (works on any node). Empty list if none (legacy no-snapshot).
+        /// S3C §7.4/§8: resolve a contract's DKG validator snapshot — state-trei decompile (works on any
+        /// node), the local record only for a contract not on chain yet. Empty list if none (legacy no-snapshot).
+        /// <paramref name="localIfNotOnChain"/> false: chain state only. A contract with no state row may also be one
+        /// that was burned, which this node's own record cannot tell apart.
         /// </summary>
-        public static List<string> ResolveContractSnapshot(string scUID)
+        public static List<string> ResolveContractSnapshot(string scUID, bool localIfNotOnChain = true)
         {
-            var local = VBTCContractV2.GetContract(scUID);
-            if (local != null && local.ValidatorAddressesSnapshot != null && local.ValidatorAddressesSnapshot.Count > 0)
-                return local.ValidatorAddressesSnapshot;
+            // Chain state first: who may vote on a cancellation, and the share that decides it, are read from here by
+            // block validation, and a record in this node's own wallet tables must not decide what a block is.
             try
             {
                 var scState = SmartContractStateTrei.GetSmartContractState(scUID);
@@ -3069,8 +3123,17 @@ namespace VerifiedXCore.Bitcoin.Services
                 // A later key of a watched vault (plan 8.8) is no contract: its holders are recorded with it.
                 var key = Attestation.BtcVaultKeys.KeyRow(scUID);
                 if (key != null && key.Generation > 0) return Attestation.BtcVaultKeys.Holders(key);
+                if (scState != null) return new List<string>();
             }
-            catch { }
+            catch
+            {
+                // A contract that is on chain and cannot be read is not answered for from this node's own records.
+                if (SmartContractStateTrei.GetSmartContractState(scUID) != null) return new List<string>();
+            }
+            if (!localIfNotOnChain) return new List<string>();
+            var local = VBTCContractV2.GetContract(scUID);
+            if (local != null && local.ValidatorAddressesSnapshot != null && local.ValidatorAddressesSnapshot.Count > 0)
+                return local.ValidatorAddressesSnapshot;
             return new List<string>();
         }
 
@@ -3086,7 +3149,8 @@ namespace VerifiedXCore.Bitcoin.Services
         /// </remarks>
         public static HashSet<string> ResolveCancellationVoterSet(string scUID, long? asOfHeight = null)
         {
-            var snapshot = ResolveContractSnapshot(scUID);
+            // Chain state only: a vault with withdrawals to cancel is on chain, or was and has been burned.
+            var snapshot = ResolveContractSnapshot(scUID, localIfNotOnChain: false);
             if (snapshot.Count > 0)
                 return new HashSet<string>(snapshot);
             var publicSet = asOfHeight is long h

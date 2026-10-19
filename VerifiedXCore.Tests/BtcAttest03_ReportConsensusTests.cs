@@ -1009,6 +1009,121 @@ namespace VerifiedXCore.Tests
             Assert.Empty(BtcBlockScanner.VaultsWithUnrecordedEvents(_btc.Block(next), next));   // and no backfill is looked for
         }
 
+        /// <summary>A Bitcoin transaction spending these coins, padded past what a report can carry.</summary>
+        private static NBitcoin.Transaction Padded(params NBitcoin.Transaction[] spent)
+        {
+            var other = Elsewhere();
+            return Pay(spent.Select(t => new OutPoint(t.GetHash(), 0)), Enumerable.Range(0, 3_300).Select(_ => (other, 1_000L)).ToArray());
+        }
+
+        /// <summary>
+        /// #171: a spend of a recorded vault coin inside a transaction too large to carry was never reported, so the coin
+        /// kept counting as backing after it had left: a vault's key holders and one miner could leave the owner's vBTC
+        /// with nothing behind it. Such a transaction is reported spend-only (its id, proven, and the coins it spends) and
+        /// the coins are frozen: no longer backing, never selected, on the signers' word that they were spent.
+        /// </summary>
+        [Fact]
+        public async Task ASpendTooLargeToCarry_OfARecordedCoin_IsReportedSpendOnly_AndFreezesIt()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var a = Pay(vault.Script, 50_000);
+            var at = _btc.Mine(a);
+            _btc.MineEmpty(3);
+            await Apply(H1 + 2, Signed(Forward(at)));
+            Assert.Equal(50_000, BtcAttestStore.Total(vault.Uid).HeldSats);
+
+            var padded = Padded(a);
+            Assert.True(padded.WithOptions(TransactionOptions.None).ToBytes().Length > BtcTxInclusion.MaxTxBytes);
+            var next = _btc.Mine(padded);
+            _btc.MineEmpty(3);
+            var ev = Assert.Single(Forward(next).Events);
+            Assert.Null(ev.TxHex);
+            Assert.Equal(padded.GetHash().ToString(), ev.Txid);
+            Assert.Equal(new[] { Outpoint(a, 0) }, ev.Spends);
+
+            var tx = Signed(Forward(next));
+            await Refused(tx, H1 - 1, "before the recording height");
+            await Accepted(tx, H1 + 3);
+            await Apply(H1 + 3, tx);
+
+            var coin = BtcAttestStore.Coin(Outpoint(a, 0))!;
+            Assert.Equal(VaultCoinStatus.Frozen, coin.Status);
+            Assert.Equal(padded.GetHash().ToString(), coin.SpentByTxid);
+            Assert.Equal(0, BtcAttestStore.Total(vault.Uid).HeldSats);                     // no longer backing
+            Assert.Equal(0M, BtcAttestBalance.DepositBtc(vault.Uid));
+            Assert.Empty(BtcAttestStore.FreeCoinsOf(vault.Uid));                            // never selected
+            Assert.Empty(BtcBlockScanner.VaultsWithUnrecordedEvents(_btc.Block(next), next)); // nothing left to backfill
+        }
+
+        /// <summary>
+        /// #171: a spend-only event names a proven, non-coinbase transaction of the block and recorded live coins, each
+        /// once, in order; an event carrying bytes names neither. Which coins the transaction spends cannot be checked
+        /// without its bytes: that is the signers' word, and it freezes, never spends.
+        /// </summary>
+        [Fact]
+        public async Task ASpendOnlyEvent_NamesRecordedLiveCoinsOnce_AtAProvenNonCoinbasePosition()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var a = Pay(vault.Script, 50_000);
+            var b = Pay(vault.Script, 20_000);
+            var at = _btc.Mine(a, b);
+            _btc.MineEmpty(3);
+            await Apply(H1 + 2, Signed(Forward(at)));
+            var next = _btc.Mine(Padded(a));
+            _btc.MineEmpty(3);
+            BtcReport With(Action<BtcReportEvent> change) { var r = Forward(next); change(r.Events[0]); return r; }
+
+            await Refused(Signed(With(e => e.Spends = new() { BtcAttestStore.OutpointKey(new uint256(RandomUtils.GetBytes(32)).ToString(), 0) })), H1 + 3, "not a recorded unspent or pinned coin");
+            await Refused(Signed(With(e => e.Spends = new() { Outpoint(a, 0), Outpoint(a, 0) })), H1 + 3, "once each, in ordinal order");
+            await Refused(Signed(With(e => e.Spends = new() { Outpoint(a, 0).ToUpperInvariant() })), H1 + 3, "is not an outpoint");
+            await Refused(Signed(With(e => e.Spends = new())), H1 + 3, "names its txid and the vault coins");
+            await Refused(Signed(With(e => e.Position = 0)), H1 + 3, "position 0 is the coinbase");
+            await Refused(Signed(With(e => e.Txid = b.GetHash().ToString())), H1 + 3, "is not in block");
+            await Refused(Signed(With(e => e.TxHex = "00")), H1 + 3, "names no txid or coins");
+            await Accepted(Signed(With(e => e.Spends = new() { Outpoint(b, 0) })), H1 + 3);   // the signers' word: it would freeze b
+            await Apply(H1 + 3, Signed(Forward(next)));
+
+            var c = Pay(vault.Script, 5_000);
+            var again = _btc.Mine(Padded(a), c);                                            // the frozen coin, named again
+            _btc.MineEmpty(3);
+            var forged = Forward(again);
+            var ids = _btc.Block(again).Transactions.Select(t => t.GetHash().ToString()).ToList();
+            forged.Events.Insert(0, new BtcReportEvent { Position = 1, Txid = ids[1], Spends = new() { Outpoint(a, 0) }, Branch = BtcMerkle.BranchFor(ids, 1) });
+            await Refused(Signed(forged), H1 + 4, "not a recorded unspent or pinned coin");
+        }
+
+        /// <summary>
+        /// #293: a spend-only event bound the coins it froze to nothing, not even time: a backfill of an older block could
+        /// name a coin created after it and freeze it. A coin is frozen only by a transaction in its own block or a later one.
+        /// </summary>
+        [Fact]
+        public async Task ASpendOnlyEvent_CannotFreezeACoinMadeAfterItsBlock()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var earlyDeposit = Pay(vault.Script, 10_000);
+            var filler = Pay(Elsewhere(), 1_000);
+            var early = _btc.Mine(earlyDeposit, filler);
+            _btc.MineEmpty(3);
+            await Apply(H1 + 2, Signed(Forward(early)));
+            var later = Pay(vault.Script, 50_000);
+            var at = _btc.Mine(later);
+            _btc.MineEmpty(3);
+            await Apply(H1 + 3, Signed(Forward(at)));
+            Assert.Equal(VaultCoinStatus.Unspent, BtcAttestStore.Coin(Outpoint(later, 0))!.Status);
+
+            BtcReport BackfillOfEarly(string coin) => new()
+            {
+                Scope = vault.Uid, BlockHeight = early, BlockHash = _btc.Header(early).Hash,
+                CoinbaseTxHex = BtcTxInclusion.ToStrippedHex(_btc.Block(early).Transactions[0]), CoinbaseBranch = EventFor(_btc.Block(early), 0).Branch,
+                Events = { new BtcReportEvent { Position = 2, Txid = filler.GetHash().ToString(), Spends = new() { coin }, Branch = EventFor(_btc.Block(early), 2).Branch } },
+            };
+            await Refused(Signed(BackfillOfEarly(Outpoint(later, 0))), H1 + 4, "not a recorded unspent or pinned coin");   // made after that block
+            await Accepted(Signed(BackfillOfEarly(Outpoint(earlyDeposit, 0))), H1 + 4);                                  // same block: the signers' word, as before
+        }
+
         [Fact]
         public async Task ACoinbasePayingAVault_IsACoin_MarkedAsOne()
         {

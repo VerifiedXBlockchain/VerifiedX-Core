@@ -1,3 +1,6 @@
+using System.Buffers.Binary;
+using System.Collections.Concurrent;
+using System.Security.Cryptography;
 using VerifiedXCore.Models;
 using VerifiedXCore.Models.Privacy;
 
@@ -10,19 +13,21 @@ namespace VerifiedXCore.Privacy
     /// forged mainnet unshields passed); that behaviour is kept for history. From the height (fund-loss audit item 1,
     /// stage 2) a ZK-authorized private transaction - and a shield - must carry a proof that verifies against the VFXPI1
     /// version-2 public inputs rebuilt from its own fields (<see cref="PlonkPublicInputsV2"/>), and a node whose native
-    /// library cannot verify (no VXPLNK05 params loaded, or a library without the v2 circuits) refuses the transaction
+    /// library cannot verify (no VXPLNK06 params loaded, or a library without the v2 circuits) refuses the transaction
     /// rather than letting it through. Historical sync (<c>blockDownloads</c>) still skips proofs: those blocks were
     /// accepted by the validators of their time.
     /// </summary>
     public static class PlonkProofVerifier
     {
-        public const string VerifierUnavailableReason = "This node cannot verify PLONK proofs (VXPLNK05 params not loaded or the native library lacks the v2 owner-bound circuits); private transactions are refused until it can.";
+        public const string MissingProofReason = "A private transaction must carry a PLONK proof (proof_b64).";
+        public const string FailedProofPrefix = "PLONK proof verification failed";
+        public const string VerifierUnavailableReason = "This node cannot verify PLONK proofs (VXPLNK06 params not loaded, or the native library lacks the v2 owner-bound circuits or is a circuit generation this build does not pin); private transactions are refused until it can.";
 
         /// <summary>Replaceable for tests: whether this node can verify v1 proofs against version-2 public inputs.</summary>
         internal static Func<bool> VerifierAvailable = () =>
         {
             PLONKSetup.RefreshVerificationCapability();
-            return PLONKSetup.IsV1CircuitsLoaded && PLONKSetup.IsVfxPi2VerifyAvailable && PLONKSetup.IsV2CircuitsAvailable;
+            return PLONKSetup.IsCircuitVersionPinned && PLONKSetup.IsV1CircuitsLoaded && PLONKSetup.IsVfxPi2VerifyAvailable && PLONKSetup.IsV2CircuitsAvailable;
         };
 
         /// <summary>
@@ -52,16 +57,56 @@ namespace VerifiedXCore.Privacy
             return (true, "");
         }
 
+        /// <summary>Replaceable for tests: the native verifier call.</summary>
+        internal static Func<byte, byte[], byte[], int> NativeVerify = (circuit, p, pi) =>
+            PlonkNative.plonk_verify(circuit, p, (nuint)p.Length, pi, (nuint)pi.Length);
+
+        /// <summary>
+        /// Keys of (circuit, proof, public inputs) triples the native verifier has accepted. Verification is a pure function
+        /// of that triple, so a hit returns exactly what the verifier would; it spares re-verifying the same proof at every
+        /// relay hop, every proposal pass over the mempool and block validation. Only Valid results are cached.
+        /// </summary>
+        private static readonly ConcurrentDictionary<string, byte> VerifiedProofs = new(StringComparer.Ordinal);
+        internal const int VerifiedProofsMax = 8192;
+
+        internal static void ClearVerifiedProofCache() => VerifiedProofs.Clear();
+
+        private static string VerifiedProofKey(byte circuit, byte[] proof, byte[] publicInputs)
+        {
+            using var sha = SHA256.Create();
+            var header = new byte[9];
+            header[0] = circuit;
+            BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(1), proof.Length);
+            BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(5), publicInputs.Length);
+            sha.TransformBlock(header, 0, header.Length, null, 0);
+            sha.TransformBlock(proof, 0, proof.Length, null, 0);
+            sha.TransformFinalBlock(publicInputs, 0, publicInputs.Length);
+            return Convert.ToHexString(sha.Hash!);
+        }
+
         public static PlonkVerifyResult VerifyRaw(PlonkCircuitType circuitType, ReadOnlySpan<byte> proof, ReadOnlySpan<byte> publicInputs)
         {
             var p = proof.ToArray();
             var pi = publicInputs.ToArray();
-            int code = PlonkNative.plonk_verify((byte)circuitType, p, (nuint)p.Length, pi, (nuint)pi.Length);
+            var key = VerifiedProofKey((byte)circuitType, p, pi);
+            if (VerifiedProofs.ContainsKey(key))
+                return PlonkVerifyResult.Valid;
+
+            int code = NativeVerify((byte)circuitType, p, pi);
             if (code == PlonkNative.ErrNotImplemented)
                 return PlonkVerifyResult.NotImplemented;
             if (code == 1)
+            {
+                if (VerifiedProofs.Count >= VerifiedProofsMax)
+                    VerifiedProofs.Clear();
+                VerifiedProofs[key] = 0;
                 return PlonkVerifyResult.Valid;
-            if (code == 0)
+            }
+            // A proof the library refuses - it panicked on it (ErrPanic, where it used to abort the node) or could not
+            // read it (ErrCrypto) - is an invalid proof, as one that fails verification is: it says nothing about this
+            // node's state, so it is not taken for a sign of local corruption. Public inputs the library rejects are the
+            // node's own, and stay a native error.
+            if (code == 0 || code == PlonkNative.ErrPanic || code == PlonkNative.ErrCrypto)
                 return PlonkVerifyResult.Invalid;
             return PlonkVerifyResult.NativeError;
         }
@@ -97,7 +142,7 @@ namespace VerifiedXCore.Privacy
                 return (true, "");
 
             if (string.IsNullOrWhiteSpace(payload.ProofB64))
-                return (false, "A private transaction must carry a PLONK proof (proof_b64).");
+                return (false, MissingProofReason);
             if (PlonkCircuitHelper.UsesFeeProof(tx.TransactionType) && string.IsNullOrWhiteSpace(payload.FeeProofB64))
                 return (false, "A vBTC private transaction must carry its VFX fee-leg proof (fee_proof_b64).");
 
@@ -128,7 +173,7 @@ namespace VerifiedXCore.Privacy
 
         private static string Describe(PlonkVerifyResult r, string which) => r switch
         {
-            PlonkVerifyResult.Invalid => $"PLONK proof verification failed ({which}).",
+            PlonkVerifyResult.Invalid => $"{FailedProofPrefix} ({which}).",
             PlonkVerifyResult.NotImplemented => VerifierUnavailableReason,
             _ => $"PLONK verifier returned an error ({which}).",
         };

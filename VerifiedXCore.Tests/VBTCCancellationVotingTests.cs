@@ -351,6 +351,30 @@ namespace VerifiedXCore.Tests
             Assert.True(row.IsCompleted);
         }
 
+        /// <summary>
+        /// Round 37: from the path-audit height, a node whose table lacks a vote's withdrawal row (a damaged store) refuses
+        /// the vote in a block rather than count it without cancelling the row or refunding its escrow. A node holding the
+        /// row counts it.
+        /// </summary>
+        [Fact]
+        public void AVoteWhoseWithdrawalRowIsMissing_IsRefusedFromThePathAuditHeight()
+        {
+            var priorGate = Globals.PathAuditRulesHeight;
+            Globals.PathAuditRulesHeight = CancelHeight;
+            try
+            {
+                var c = OpenCancellation();
+                var vote = VoteTx(c.CancellationUID, "xVal1", true, CancelHeight + 1);
+                Assert.Null(VerifiedXCore.Services.TransactionValidatorService.VoteWithdrawalRowMissing(vote, CancelHeight + 1, inBlock: true)); // the row is here
+
+                VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()!.DeleteMany(x => x.TransactionHash == RequestHash);
+                Assert.Equal($"No withdrawal request {RequestHash} exists on contract {Vault}.",
+                    VerifiedXCore.Services.TransactionValidatorService.VoteWithdrawalRowMissing(vote, CancelHeight + 1, inBlock: true));
+                Assert.Null(VerifiedXCore.Services.TransactionValidatorService.VoteWithdrawalRowMissing(vote, CancelHeight - 1, inBlock: true)); // below the height
+            }
+            finally { Globals.PathAuditRulesHeight = priorGate; }
+        }
+
         [Fact]
         public void RejectNamingTheSignedTx_RejectsAtOnce_AndTheWithdrawalStaysOpen()
         {
@@ -406,6 +430,39 @@ namespace VerifiedXCore.Tests
 
             Assert.Equal(VBTCWithdrawalStatus.Completed, VBTCWithdrawalRequest.GetByTransactionHash(RequestHash, Vault)!.Status);
             Assert.Null(VBTCCancellationVoting.RefundDueFor(deciding));
+        }
+
+        /// <summary>
+        /// A deciding vote whose write to the store is partly lost (the first or the second write of the cancellation) is
+        /// still decided, by that vote, once it is applied again (a store rebuild replays it): the vote and the decision
+        /// are one write. Written apart, a vote counted without its decision was refused on replay as a second vote by
+        /// that validator, and the cancellation stayed undecided.
+        /// </summary>
+        [Theory]
+        [InlineData(1)]
+        [InlineData(2)]
+        public void ADecidingVoteWhoseWriteWasLost_IsDecidedByThatVoteOnReplay(int lostWrite)
+        {
+            var c = OpenCancellation();
+            VBTCCancellationVoting.ApplyVote(VoteTx(c.CancellationUID, "xVal1", true, CancelHeight + 1));
+            VBTCCancellationVoting.ApplyVote(VoteTx(c.CancellationUID, "xVal2", true, CancelHeight + 1));
+            var deciding = VoteTx(c.CancellationUID, "xVal3", true, CancelHeight + 2);
+            var writes = 0;
+            VBTCWithdrawalCancellation.FailWriteForTests = () => ++writes == lostWrite;
+            VBTCCancellationVoting.VoteResult first;
+            try { first = VBTCCancellationVoting.ApplyVote(deciding); }
+            finally { VBTCWithdrawalCancellation.FailWriteForTests = null; }
+            // One write now: losing it records nothing and the vote is not taken as applied; the second write of the
+            // old two-step order (vote, then decision) no longer exists.
+            if (lostWrite == 1) Assert.False(first.Applied);
+
+            VBTCCancellationVoting.ApplyVote(deciding);   // applied again
+            var after = VBTCWithdrawalCancellation.GetCancellation(c.CancellationUID)!;
+            Assert.True(after.IsProcessed);
+            Assert.True(after.IsApproved);
+            Assert.Equal(deciding.Hash, after.DecidedByTxHash);
+            Assert.Equal(3, after.ApproveCount);
+            Assert.Equal(VBTCWithdrawalStatus.Cancelled, VBTCWithdrawalRequest.GetByTransactionHash(RequestHash, Vault)!.Status);
         }
 
         // ── The refund (StateData) ──────────────────────────────────────────────────────────────
@@ -467,6 +524,42 @@ namespace VerifiedXCore.Tests
             StateDataApply("VoteOnVBTCV2Cancellation", deciding);
 
             Assert.Equal(0.001M, LedgerBalance(Vault, Requester));
+        }
+
+        /// <summary>
+        /// The approving vote's block, applied while this node's storage fails to read the refund due: the block is not
+        /// taken as applied (it was, with no credit written), and the withdrawal store is marked to be rebuilt. A fault in
+        /// what the vote says still answers "no refund" and the block applies.
+        /// </summary>
+        [Theory]
+        [InlineData("io")]
+        [InlineData("ensure")]
+        [InlineData("data")]
+        public async Task StateData_ARefundThatCannotBeRead_FailsTheApprovingVotesBlock(string fault)
+        {
+            var localFault = fault != "data";
+            var c = OpenCancellation();
+            VBTCCancellationVoting.ApplyVote(VoteTx(c.CancellationUID, "xVal1", true, CancelHeight + 1));
+            VBTCCancellationVoting.ApplyVote(VoteTx(c.CancellationUID, "xVal2", true, CancelHeight + 1));
+            var deciding = VoteTx(c.CancellationUID, "xVal3", true, CancelHeight + 2);
+            Assert.Equal(VBTCCancellationVoting.Outcome.Approved, VBTCCancellationVoting.ApplyVote(deciding).Outcome);
+            var block = new Block { Height = CancelHeight + 2, Hash = "vote-block", PrevHash = "prev", Timestamp = TimeUtil.GetTime(), Transactions = new List<Transaction> { deciding } };
+
+            // "ensure": LiteDB 5.0.15's page-integrity check, a plain Exception with this prefix.
+            VBTCCancellationVoting.RefundReadForTests = _ => throw (fault switch
+            {
+                "io" => new System.IO.IOException("disk"),
+                "ensure" => new Exception(StateData.LiteDbEnsurePrefix + "page type must be data page"),
+                _ => new FormatException("data"),
+            });
+            bool applied;
+            try { applied = await StateData.UpdateTreis(block); }
+            finally { VBTCCancellationVoting.RefundReadForTests = null; }
+
+            Assert.Equal(!localFault, applied);
+            Assert.Equal(localFault, VBTCWithdrawalStoreRebuildService.IsUnfinished);
+            Assert.Equal(0.0006M, LedgerBalance(Vault, Requester));   // no credit either way; a failed block is not counted
+            VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests();
         }
 
         [Fact]

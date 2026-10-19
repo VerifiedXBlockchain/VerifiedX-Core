@@ -234,6 +234,19 @@ namespace VerifiedXCore.Config
 			return config;
 		}
 
+		/// <summary>
+		/// Why this config cannot be applied, or null. TestNet=true and TestNetName select testnet only after every
+		/// activation height was set from the network the node started on, so a node started for mainnet would run
+		/// testnet with mainnet heights (and in the mainnet data folder). Testnet is chosen with the 'testnet' argument.
+		/// </summary>
+		public static string? TestnetConfigMismatch(Config config)
+		{
+			if (Globals.IsTestNet) return null;
+			if (config.TestNet == true || !string.IsNullOrEmpty(config.TestNetName))
+				return "config.txt selects testnet (TestNet=true or TestNetName) but the node was started for mainnet. Start it with the 'testnet' argument instead.";
+			return null;
+		}
+
 		public static void ProcessConfig(Config config)
         {
 			Globals.Port = config.Port;

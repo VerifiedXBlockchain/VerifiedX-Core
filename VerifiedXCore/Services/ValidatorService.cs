@@ -243,6 +243,16 @@ namespace VerifiedXCore.Services
         {
             try
             {
+                // A validator whose FROST library has not passed its check neither registers nor reactivates: peers would
+                // pick it for ceremonies it cannot take part in (FrostLibraryGate). This runs once at startup, so it waits
+                // for the check, which runs alongside.
+                await Bitcoin.FROST.FrostLibraryGate.WaitForCheckAsync(TimeSpan.FromMinutes(2));
+                if (!Bitcoin.FROST.FrostLibraryGate.Ready)
+                {
+                    LogUtility.Log($"Cannot send vBTC V2 registration - {Bitcoin.FROST.FrostLibraryGate.Unavailable}.", "ValidatorService.SendVBTCV2RegistrationTx()");
+                    return;
+                }
+
                 // Wait for ports to be verified open before sending any registration/heartbeat TXs
                 var portWaitAttempts = 0;
                 while (!Globals.PortsOpened && portWaitAttempts < 30)
@@ -262,13 +272,13 @@ namespace VerifiedXCore.Services
                 {
                     // Wait briefly for IP to be discovered before making decisions
                     var quickIpWait = 0;
-                    while (string.IsNullOrEmpty(Globals.ReportedIP) && quickIpWait < 6)
+                    while (string.IsNullOrEmpty(P2PClient.ValidatorReportedIP()) && quickIpWait < 6)
                     {
                         quickIpWait++;
                         await Task.Delay(5000);
                     }
 
-                    var currentIp = Globals.ReportedIP;
+                    var currentIp = P2PClient.ValidatorReportedIP();
 
                     if (existingValidator.IsActive)
                     {
@@ -311,7 +321,7 @@ namespace VerifiedXCore.Services
 
                 // Wait for IP to be discovered (up to 90 seconds)
                 var ipWaitAttempts = 0;
-                while (string.IsNullOrEmpty(Globals.ReportedIP) && ipWaitAttempts < 18)
+                while (string.IsNullOrEmpty(P2PClient.ValidatorReportedIP()) && ipWaitAttempts < 18)
                 {
                     ipWaitAttempts++;
                     LogUtility.Log($"Waiting for IP discovery before vBTC V2 registration (attempt {ipWaitAttempts}/18)...",
@@ -341,7 +351,7 @@ namespace VerifiedXCore.Services
                     await Task.Delay(5000);
                 }
 
-                var ipAddress = Globals.ReportedIP;
+                var ipAddress = P2PClient.ValidatorReportedIP();
                 if (string.IsNullOrEmpty(ipAddress))
                 {
                     LogUtility.Log($"Cannot send vBTC V2 registration - IP address not reported yet",
@@ -434,6 +444,13 @@ namespace VerifiedXCore.Services
         {
             try
             {
+                // Nor while the FROST library has not passed its check: peers would pick this validator (FrostLibraryGate).
+                if (!Bitcoin.FROST.FrostLibraryGate.Ready)
+                {
+                    LogUtility.Log($"Cannot send vBTC V2 reactivation - {Bitcoin.FROST.FrostLibraryGate.Unavailable}.", "ValidatorService.SendVBTCV2ReactivationTx()");
+                    return;
+                }
+
                 // Don't send reactivation TX if ports aren't verified open
                 if (!Globals.PortsOpened)
                 {
@@ -450,7 +467,7 @@ namespace VerifiedXCore.Services
 
                 // Wait for IP to be discovered (up to 90 seconds)
                 var ipWaitAttempts = 0;
-                while (string.IsNullOrEmpty(Globals.ReportedIP) && ipWaitAttempts < 18)
+                while (string.IsNullOrEmpty(P2PClient.ValidatorReportedIP()) && ipWaitAttempts < 18)
                 {
                     ipWaitAttempts++;
                     LogUtility.Log($"Waiting for IP discovery before vBTC V2 reactivation (attempt {ipWaitAttempts}/18)...",
@@ -480,7 +497,7 @@ namespace VerifiedXCore.Services
                     await Task.Delay(5000);
                 }
 
-                var ipAddress = Globals.ReportedIP;
+                var ipAddress = P2PClient.ValidatorReportedIP();
                 if (string.IsNullOrEmpty(ipAddress))
                 {
                     LogUtility.Log($"Cannot send vBTC V2 reactivation - IP address not reported yet",

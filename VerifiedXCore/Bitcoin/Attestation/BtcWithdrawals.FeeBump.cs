@@ -39,8 +39,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// </summary>
         public const int MaxReleasePins = 4;
 
-        /// <summary>Whether the withdrawal may have one more payment transaction pinned.</summary>
-        public static bool HasRoomForPayment(VaultWithdrawalRow row) => row.Pins.Count(p => !p.IsRelease) < MaxPins;
+        /// <summary>
+        /// Whether the withdrawal may have one more payment transaction pinned. Only live ones count: an exit's part that
+        /// was voided while another part was paid is fixed again on its vault's free coins and keeps its dead pins, and
+        /// counted with them it could reach the limit at its first new pin and never have its fee raised again. (An open
+        /// withdrawal otherwise has no dead pins: its pins spend the same coins and die together, and it closes.)
+        /// </summary>
+        public static bool HasRoomForPayment(VaultWithdrawalRow row) => row.Pins.Count(p => !p.IsRelease && !p.Dead) < MaxPins;
         /// <summary>Whether the withdrawal may have one more release transaction pinned.</summary>
         public static bool HasRoomForRelease(VaultWithdrawalRow row) => row.Pins.Count(p => p.IsRelease) < MaxReleasePins;
 

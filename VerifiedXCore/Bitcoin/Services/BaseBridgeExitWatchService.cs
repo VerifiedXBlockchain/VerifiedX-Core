@@ -161,11 +161,60 @@ namespace VerifiedXCore.Bitcoin.Services
             BridgeExitSyncState.Save(state);
         }
 
+        /// <summary>Base blocks (about ten minutes) read again once when the path-audit rules begin; see <see cref="ConsumeRulesFlip"/>.</summary>
+        internal const long RulesFlipRewindBlocks = 300;
+        private static bool? _positionedSeen;
+
+        /// <summary>
+        /// When this node sees the path-audit rules begin (a burn of a batched transaction is named by its position from
+        /// them, <see cref="BurnIdsOf"/>), the last <see cref="RulesFlipRewindBlocks"/> Base blocks are read once more. A
+        /// batch named by its bare hash just before and checked just after was refused as "multiple burn events" and
+        /// failed for good; read again it is named by position, new keys its failed record does not block, and a burn the
+        /// bare hash already redeemed stays redeemed (VBTCBridgeConsumedBurn.Overlaps) (#294).
+        /// </summary>
+        internal static void ConsumeRulesFlip(BridgeExitSyncState state)
+        {
+            var positioned = (Globals.LastBlock?.Height ?? -1) + 1 >= Globals.PathAuditRulesHeight; // as BurnIdsOf judges it
+            var before = _positionedSeen;
+            _positionedSeen = positioned;
+            if (before != false || !positioned) return; // only a flip this process saw
+            var back = Math.Max(0, state.LastScannedBlock - RulesFlipRewindBlocks);
+            if (back >= state.LastScannedBlock) return;
+            LogUtility.Log($"[BaseBridgeExit] The path-audit rules have begun: reading Base again from block {back + 1} (cursor was {state.LastScannedBlock}).",
+                "BaseBridgeExitWatchService.PollOnceInternal");
+            state.LastScannedBlock = back;
+            BridgeExitSyncState.Save(state);
+        }
+
         /// <summary>Test seam: forget the start and handling history.</summary>
         internal static void ResetRewindForTests()
         {
             _started = false;
             _cursorWhenNotHandling = null;
+            _positionedSeen = null;
+        }
+
+        /// <summary>A burn log's place: its transaction and its index (logs of one transaction share a block).</summary>
+        private static (string TxHash, BigInteger LogIndex) BurnLogKey(FilterLog log) =>
+            (log.TransactionHash.ToLowerInvariant(), log.LogIndex?.Value ?? BigInteger.Zero);
+
+        /// <summary>
+        /// Each bridge burn log's id (<see cref="BaseBridgeService.BurnId"/>): its transaction's hash, or with its position
+        /// among that transaction's bridge burns (both kinds, in emitted order) when it holds several. Before the path-audit
+        /// rules, which a position is named under, every burn is its transaction's hash, as it was: a positioned id was
+        /// refused by every caster's receipt check and both burns of the transaction failed for good (#291).
+        /// </summary>
+        internal static Dictionary<(string TxHash, BigInteger LogIndex), string> BurnIdsOf(IEnumerable<FilterLog> logs)
+        {
+            var positioned = (Globals.LastBlock?.Height ?? -1) + 1 >= Globals.PathAuditRulesHeight; // as BaseBridgeService.BurnAt judges it
+            var ids = new Dictionary<(string TxHash, BigInteger LogIndex), string>();
+            foreach (var tx in logs.Where(l => l != null && !string.IsNullOrEmpty(l.TransactionHash)).GroupBy(l => l.TransactionHash.ToLowerInvariant()))
+            {
+                var ordered = tx.GroupBy(BurnLogKey).Select(g => g.First()).OrderBy(l => l.LogIndex?.Value ?? BigInteger.Zero).ToList();
+                for (var i = 0; i < ordered.Count; i++)
+                    ids[BurnLogKey(ordered[i])] = BaseBridgeService.BurnId(ordered[i].TransactionHash, i, positioned ? ordered.Count : 1);
+            }
+            return ids;
         }
 
         private static async Task<(int Processed, long ScannedToBlock, string Message)> PollOnceInternal()
@@ -205,6 +254,7 @@ namespace VerifiedXCore.Bitcoin.Services
             // stretch is counted from where the cursor stood when the node last did not handle burns, so burns passed
             // over while it was not a caster (at start, or after losing its place) are read again too.
             ConsumeRewind(state, Globals.IsBlockCaster && Globals.IsChainSynced);
+            ConsumeRulesFlip(state);
 
             var from = state.LastScannedBlock + 1;
             if (from > latest)
@@ -216,19 +266,42 @@ namespace VerifiedXCore.Bitcoin.Services
             var processed = 0;
             var scanFailed = false;
 
-            // --- VfxExitBurned events (V3 burnForVfxExit → pool-based unlock) ---
+            // Both kinds of burn are read before either is handled: a burn's id counts every bridge burn of its transaction
+            // (BaseBridgeService.BurnId). A range one kind of which could not be read is read again, both kinds.
+            var v3Contract = BaseBridgeService.ContractAddress;
+            var v2Contract = BaseBridgeService.ContractAddress; // also scan the V2 contract if configured
+            var btcExitContract = !string.IsNullOrEmpty(v2Contract) ? v2Contract : contract;
+            var vfxExitLogs = new List<Nethereum.Contracts.EventLog<VfxExitBurnedEventDTO>>();
+            var btcLogs = new List<Nethereum.Contracts.EventLog<BTCExitBurnedEventDTO>>();
             try
             {
-                var v3Contract = BaseBridgeService.ContractAddress;
                 if (!string.IsNullOrEmpty(v3Contract))
                 {
                     var vfxExitHandler = web3.Eth.GetEvent<VfxExitBurnedEventDTO>(v3Contract);
-                    var vfxExitFilter = vfxExitHandler.CreateFilterInput(
+                    vfxExitLogs = await vfxExitHandler.GetAllChangesAsync(vfxExitHandler.CreateFilterInput(
                         new BlockParameter(new HexBigInteger(from)),
-                        new BlockParameter(new HexBigInteger(to)));
+                        new BlockParameter(new HexBigInteger(to))));
+                }
+                var btcEventHandler = web3.Eth.GetEvent<BTCExitBurnedEventDTO>(btcExitContract);
+                btcLogs = await btcEventHandler.GetAllChangesAsync(btcEventHandler.CreateFilterInput(
+                    new BlockParameter(new HexBigInteger(from)),
+                    new BlockParameter(new HexBigInteger(to))));
+            }
+            catch (Exception readEx)
+            {
+                scanFailed = true;
+                vfxExitLogs.Clear();
+                btcLogs.Clear();
+                LogUtility.Log($"[BaseBridgeExit] Burn log query error: {readEx.Message}",
+                    "BaseBridgeExitWatchService.PollOnceInternal");
+            }
+            var burnIds = BurnIdsOf(vfxExitLogs.Select(e => e.Log).Concat(btcLogs.Select(e => e.Log)));
 
-                    var vfxExitLogs = await vfxExitHandler.GetAllChangesAsync(vfxExitFilter);
-
+            // --- VfxExitBurned events (V3 burnForVfxExit → pool-based unlock) ---
+            try
+            {
+                if (!string.IsNullOrEmpty(v3Contract))
+                {
                     foreach (var ev in vfxExitLogs)
                     {
                         var log = ev.Log;
@@ -238,8 +311,8 @@ namespace VerifiedXCore.Bitcoin.Services
                         if (string.IsNullOrEmpty(burner) || string.IsNullOrEmpty(vfxDest)) continue;
                         if (amount > long.MaxValue || amount <= 0) continue;
 
-                        var txHash = log.TransactionHash;
-                        if (string.IsNullOrEmpty(txHash)) continue;
+                        if (string.IsNullOrEmpty(log.TransactionHash)) continue;
+                        var txHash = burnIds[BurnLogKey(log)]; // the burn's id: its transaction's hash, with its position when that holds several
 
                         if (BurnExitConsensusService.IsAlreadyProcessed(txHash))
                             continue;
@@ -278,17 +351,6 @@ namespace VerifiedXCore.Bitcoin.Services
             // --- BTCExitBurned events (burnForBTCExit → direct BTC withdrawal) ---
             try
             {
-                // Also scan the V2 contract if configured
-                var v2Contract = BaseBridgeService.ContractAddress;
-                var btcExitContract = !string.IsNullOrEmpty(v2Contract) ? v2Contract : contract;
-
-                var btcEventHandler = web3.Eth.GetEvent<BTCExitBurnedEventDTO>(btcExitContract);
-                var btcFilter = btcEventHandler.CreateFilterInput(
-                    new BlockParameter(new HexBigInteger(from)),
-                    new BlockParameter(new HexBigInteger(to)));
-
-                var btcLogs = await btcEventHandler.GetAllChangesAsync(btcFilter);
-
                 foreach (var ev in btcLogs)
                 {
                     var log = ev.Log;
@@ -298,8 +360,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (string.IsNullOrEmpty(burner) || string.IsNullOrEmpty(btcDest)) continue;
                     if (amount > long.MaxValue || amount <= 0) continue;
 
-                    var txHash = log.TransactionHash;
-                    if (string.IsNullOrEmpty(txHash)) continue;
+                    if (string.IsNullOrEmpty(log.TransactionHash)) continue;
+                    var txHash = burnIds[BurnLogKey(log)]; // the burn's id: its transaction's hash, with its position when that holds several
 
                     if (BurnExitConsensusService.IsAlreadyProcessed(txHash))
                         continue;

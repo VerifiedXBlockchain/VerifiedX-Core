@@ -304,6 +304,52 @@ namespace VerifiedXCore.Tests
             Assert.Equal(new[] { "aa", "cc", "dd" }, ordered.Skip(1).Select(u => u.TxHash));
         }
 
+        /// <summary>
+        /// C-060: a coin still in the mempool (Electrum height 0) or with an unconfirmed parent (-1) never funds a
+        /// withdrawal: its sender could replace it and void the payout after the COMPLETE burned the holder's vBTC.
+        /// Before, it was ordered like any other coin, and a deposit just above the amount was picked first.
+        /// </summary>
+        [Fact]
+        public void Selection_UnconfirmedCoinsNeverFundAWithdrawal()
+        {
+            var replaceable = new BlockchainScripthashListunspentResult { TxHash = "ee", TxPos = 0, Value = 55_000, Height = 0 };
+            var unconfirmedParent = new BlockchainScripthashListunspentResult { TxHash = "ff", TxPos = 0, Value = 2_000_000, Height = -1 };
+            var utxos = new[] { Utxo("aa", 0, 1_000_000), replaceable, unconfirmedParent, Utxo("bb", 0, 60_000) };
+
+            foreach (var active in new[] { true, false })
+            {
+                var ordered = BitcoinTransactionService.OrderUtxosForSelection(utxos, 50_000, null, smallestSufficientFirst: active);
+                Assert.DoesNotContain(ordered, u => u.Height <= 0);
+                Assert.Equal(active ? new[] { "bb", "aa" } : new[] { "aa", "bb" }, ordered.Select(u => u.TxHash));
+            }
+        }
+
+        /// <summary>
+        /// A shortfall that only coins still waiting for their first confirmation would cover is transient (the caller
+        /// retries; a bridge exit must not blacklist the vault for a day while its change confirms). One that no coin
+        /// covers is plain insufficient funds.
+        /// </summary>
+        [Fact]
+        public void Shortfall_CoveredOnlyByUnconfirmedCoins_IsTransient()
+        {
+            var change = new BlockchainScripthashListunspentResult { TxHash = "cc", TxPos = 1, Value = 90_000, Height = 0 };
+            var coins = new[] { Utxo("aa", 0, 20_000), change };
+            var waiting = BitcoinTransactionService.ShortfallReason(coins, coins, 20_000, 50_000);
+            Assert.Contains(BitcoinTransactionService.TransientUtxoErrorMarker, waiting);
+            Assert.Contains("confirmation", waiting);
+
+            var notEnough = BitcoinTransactionService.ShortfallReason(coins, coins, 20_000, 500_000);
+            Assert.DoesNotContain(BitcoinTransactionService.TransientUtxoErrorMarker, notEnough);
+            Assert.StartsWith("Insufficient funds", notEnough);
+
+            // Held (another withdrawal's pin) and unconfirmed together: neither alone covers it, both together do.
+            var held = Utxo("hh", 0, 30_000);
+            var all = new[] { Utxo("aa", 0, 20_000), held, new BlockchainScripthashListunspentResult { TxHash = "cc", TxPos = 1, Value = 30_000, Height = 0 } };
+            var free = all.Where(u => u.TxHash != "hh").ToArray();
+            var mixed = BitcoinTransactionService.ShortfallReason(all, free, 20_000, 75_000);
+            Assert.Contains(BitcoinTransactionService.TransientUtxoErrorMarker, mixed);
+        }
+
         [Fact]
         public void Selection_Active_NoSingleCoinCovers_LargestFirst()
         {
@@ -351,7 +397,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void Spend_AllUnspent_NotSpent()
         {
-            var verdict = BitcoinTransactionService.ClassifyOutpointSpends(new[] { "t:0", "t:1" }, new HashSet<string> { "t:0", "t:1" }, new HashSet<string>());
+            var verdict = BitcoinTransactionService.ClassifyOutpointSpends(new[] { "t:0", "t:1" }, new HashSet<string> { "t:0", "t:1" }, new HashSet<string>(), new HashSet<string> { "t:0", "t:1" });
             Assert.Equal(BitcoinTransactionService.OutpointSpendVerdict.NotSpentByConfirmed, verdict);
         }
 
@@ -359,7 +405,7 @@ namespace VerifiedXCore.Tests
         public void Spend_MissingOnlyBecauseAMempoolTxSpendsIt_NotDead()
         {
             // The double-payout case: the spender can still be evicted or replaced, and the signed tx confirm.
-            var verdict = BitcoinTransactionService.ClassifyOutpointSpends(new[] { "t:0", "t:1" }, new HashSet<string>(), new HashSet<string> { "t:0", "t:1" });
+            var verdict = BitcoinTransactionService.ClassifyOutpointSpends(new[] { "t:0", "t:1" }, new HashSet<string>(), new HashSet<string> { "t:0", "t:1" }, new HashSet<string> { "t:0", "t:1" });
             Assert.Equal(BitcoinTransactionService.OutpointSpendVerdict.NotSpentByConfirmed, verdict);
         }
 
@@ -367,14 +413,14 @@ namespace VerifiedXCore.Tests
         public void Spend_OneInputSpentByConfirmedTx_Dead()
         {
             // Partial overlap is enough: a tx whose input is gone for good can never confirm.
-            var verdict = BitcoinTransactionService.ClassifyOutpointSpends(new[] { "t:0", "t:1" }, new HashSet<string> { "t:1" }, new HashSet<string>());
+            var verdict = BitcoinTransactionService.ClassifyOutpointSpends(new[] { "t:0", "t:1" }, new HashSet<string> { "t:1" }, new HashSet<string>(), new HashSet<string> { "t:0", "t:1" });
             Assert.Equal(BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed, verdict);
         }
 
         [Fact]
         public void Spend_MempoolUnreadable_Inconclusive()
         {
-            var verdict = BitcoinTransactionService.ClassifyOutpointSpends(new[] { "t:0" }, new HashSet<string>(), null);
+            var verdict = BitcoinTransactionService.ClassifyOutpointSpends(new[] { "t:0" }, new HashSet<string>(), null, new HashSet<string> { "t:0" });
             Assert.Equal(BitcoinTransactionService.OutpointSpendVerdict.Inconclusive, verdict);
         }
 
@@ -518,6 +564,49 @@ namespace VerifiedXCore.Tests
 
             var only = Assert.Single(overlapping);
             Assert.Equal("w1", only.WithdrawalRequestHash);
+        }
+
+        /// <summary>
+        /// C-048: a contract pin (and every rival pin on its coins) was released as soon as Electrum said the pinned
+        /// transaction was in a block - first one server's word, then two hosts', but hosts are not authenticated, so a
+        /// path to them could speak for any of them and free the coins while the pinned transaction was unconfirmed. Electrum
+        /// is no longer asked, at any height: only a confirmed spend proven to the attested headers releases a pin.
+        /// </summary>
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task APin_IsNeverReleasedOnElectrumsWord(bool headersAttested)
+        {
+            ConcurrencyOn();
+            var priorServers = Globals.ClientSettings;
+            var priorQuery = BitcoinTransactionService.QueryConfirms;
+            var priorRecord = Globals.BitcoinAttestationRecordHeight;
+            var asked = 0;
+            try
+            {
+                Globals.BitcoinAttestationRecordHeight = headersAttested ? 1 : long.MaxValue;
+                FrostWithdrawalSigningTracker.ResetForTests();
+                Assert.True(FrostWithdrawalSigningTracker.RestorePin(ScUID, "w1", "btcA", new List<string> { "c1:0" }, TimeUtil.GetTime()));
+                Assert.True(FrostWithdrawalSigningTracker.RestorePin(ScUID, "w2", "btcB", new List<string> { "c1:0" }, TimeUtil.GetTime()));
+                Globals.ClientSettings = new List<VerifiedXCore.Bitcoin.ElectrumX.ClientSettings>
+                {
+                    new() { Host = $"a-{Guid.NewGuid():N}", Port = 50002, UseSsl = true },
+                    new() { Host = $"b-{Guid.NewGuid():N}", Port = 50002, UseSsl = true },
+                    new() { Host = $"c-{Guid.NewGuid():N}", Port = 50002, UseSsl = true },
+                };
+                BitcoinTransactionService.QueryConfirms = (_, _) => { asked++; return Task.FromResult((true, 6)); };   // every host: "in a block"
+
+                await FrostStartup.TryReleaseContractPinIfObservedOnChain(ScUID);
+
+                Assert.Equal(2, FrostWithdrawalSigningTracker.GetContractPins(ScUID).Count(p => p.WithdrawalRequestHash is "w1" or "w2"));
+                Assert.Equal(0, asked);
+            }
+            finally
+            {
+                BitcoinTransactionService.QueryConfirms = priorQuery;
+                Globals.ClientSettings = priorServers;
+                Globals.BitcoinAttestationRecordHeight = priorRecord;
+            }
         }
 
         [Fact]
