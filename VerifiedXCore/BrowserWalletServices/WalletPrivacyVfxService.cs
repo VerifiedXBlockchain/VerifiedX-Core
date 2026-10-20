@@ -356,15 +356,17 @@ namespace VerifiedXCore.BrowserWalletServices
 
         public static object GetShieldedPoolState()
         {
-            var pool = ShieldedPoolService.GetOrCreateState("VFX");
+            // Read only, as the vBTC route (#208 D16): GetOrCreateState inserted an empty pool row into the consensus privacy
+            // store from a route a locked wallet may call (#296). No row reads as an empty pool.
+            var pool = ShieldedPoolService.GetState("VFX");
             return new
             {
                 success = true,
-                assetType = pool.AssetType,
-                totalCommitments = pool.TotalCommitments,
-                totalShieldedSupply = pool.TotalShieldedSupply,
-                currentMerkleRoot = pool.CurrentMerkleRoot,
-                lastUpdateHeight = pool.LastUpdateHeight
+                assetType = pool?.AssetType ?? "VFX",
+                totalCommitments = pool?.TotalCommitments ?? 0L,
+                totalShieldedSupply = pool?.TotalShieldedSupply ?? 0M,
+                currentMerkleRoot = pool?.CurrentMerkleRoot,
+                lastUpdateHeight = pool?.LastUpdateHeight ?? 0L
             };
         }
     }
