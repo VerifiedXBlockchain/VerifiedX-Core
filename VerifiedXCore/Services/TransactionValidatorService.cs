@@ -746,6 +746,10 @@ namespace VerifiedXCore.Services
                                             if (amount.Value < 1.0M)
                                                 return (txResult, "You must mint at least 1 token.");
 
+                                            var holderBalance = StateData.GetSpecificAccountStateTrei(fromAddress)?.TokenAccounts?.FirstOrDefault(x => x.SmartContractUID == scUID)?.Balance ?? 0M;
+                                            if (LedgerIntegrityRules.TokenMintRefusal(scStateTreiRec.TokenDetails, amount.Value, holderBalance, blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) is { } mintRefusal)
+                                                return (txResult, mintRefusal);
+
                                             if (txRequest.ToAddress != "Token_Base")
                                                 return (txResult, "To Address must be 'Token_Base'.");
 
@@ -1057,6 +1061,14 @@ namespace VerifiedXCore.Services
 
                                             if(voteExist)
                                                 return (txResult, "Token Holder has already voted.");
+
+                                            // A block carries one vote per holder and topic (LedgerIntegrityRules.RegisterNftStepInBlock):
+                                            // at admission a second one waiting in the pool is refused.
+                                            if (blockHeight == null && !blockDownloads && !blockVerify
+                                                && (Globals.LastBlock?.Height ?? 0) + 1 >= Globals.VoteTopicRulesHeight
+                                                && LedgerIntegrityRules.TokenVoteKey(txRequest) is { } voteKey
+                                                && TransactionData.GetPool().Find(x => x.FromAddress == txRequest.FromAddress && x.Hash != txRequest.Hash).Any(p => LedgerIntegrityRules.TokenVoteKey(p) == voteKey))
+                                                return (txResult, $"{LedgerIntegrityRules.TokenVotedTwiceInBlock}: this holder's vote on this topic is already pending.");
 
                                             break;
                                         }
@@ -2108,6 +2120,8 @@ namespace VerifiedXCore.Services
                                     return (txResult, "A reserve account may not create an ADNR.");
 
                                 var name = (string)jobj["Name"];
+                                if (LedgerIntegrityRules.AdnrNameError(name, blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) is { } nameGrammar)
+                                    return (txResult, nameGrammar);
 
                                 var adnrList = Adnr.GetAdnr();
                                 if (adnrList != null)

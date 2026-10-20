@@ -118,7 +118,7 @@ namespace VerifiedXCore.Data
                         //transactionList.Add(coinbase_tx);
                         transactionList.Add(coinbase_tx2);
 
-                        transactionList.AddRange(PrivateTransactionTypes.TakeWhilePrivateTxCap(processedTxPool));
+                        transactionList.AddRange(LedgerIntegrityRules.WithinTransactionCap(PrivateTransactionTypes.TakeWhilePrivateTxCap(processedTxPool), transactionList.Count, height));
 
                         //need to only delete processed mempool tx's in event new ones get added while creating block.
                         //delete after block is added, so they can't  be re-added before block is over.
@@ -246,7 +246,7 @@ namespace VerifiedXCore.Data
                         //transactionList.Add(coinbase_tx);
                         transactionList.Add(coinbase_tx2);
 
-                        transactionList.AddRange(PrivateTransactionTypes.TakeWhilePrivateTxCap(processedTxPool));
+                        transactionList.AddRange(LedgerIntegrityRules.WithinTransactionCap(PrivateTransactionTypes.TakeWhilePrivateTxCap(processedTxPool), transactionList.Count, height));
 
                         //need to only delete processed mempool tx's in event new ones get added while creating block.
                         //delete after block is added, so they can't  be re-added before block is over.
@@ -390,7 +390,7 @@ namespace VerifiedXCore.Data
 
                         //We will skip during proof generation
                         if(!skipTXs)
-                            transactionList.AddRange(PrivateTransactionTypes.TakeWhilePrivateTxCap(processedTxPool));
+                            transactionList.AddRange(LedgerIntegrityRules.WithinTransactionCap(PrivateTransactionTypes.TakeWhilePrivateTxCap(processedTxPool), transactionList.Count, height));
                     }
                     else
                     {

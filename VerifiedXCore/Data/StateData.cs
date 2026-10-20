@@ -1457,9 +1457,14 @@ namespace VerifiedXCore.Data
                         // not just NFT_TX — a called-back TKNZ_TX/SC_TX transfer previously left
                         // NextOwner set + IsLocked=true forever, permanently bricking the contract
                         // (any further Transfer() is rejected while locked/NextOwner is set).
+                        // From ReserveRecoverReadsEveryRowHeight under every type a contract call travels in: the
+                        // dispatcher runs a Transfer() carried as FTKN_TX (or any other contract type) and locks the
+                        // contract, and the callback left it locked with the thief as NextOwner.
+                        var everyContractType = height >= Globals.ReserveRecoverReadsEveryRowHeight;
                         if(rTX.TransactionType == TransactionType.NFT_TX ||
                            rTX.TransactionType == TransactionType.TKNZ_TX ||
-                           rTX.TransactionType == TransactionType.SC_TX)
+                           rTX.TransactionType == TransactionType.SC_TX ||
+                           (everyContractType && LedgerIntegrityRules.ContractCallTypes.Contains(rTX.TransactionType)))
                         {
                           // Own try/catch: some legacy TKNZ_TX rows carry flat-JObject data and
                           // the JArray parse throws — that must NEVER skip the unconditional
@@ -1467,10 +1472,19 @@ namespace VerifiedXCore.Data
                           // applies a transfer that was called back.
                           try
                           {
-                            var scDataArray = JsonConvert.DeserializeObject<JArray>(rTX.Data);
-                            var scData = scDataArray[0];
-                            var function = (string?)scData["Function"];
-                            var scUID = (string?)scData["ContractUID"];
+                            string? function, scUID;
+                            if (everyContractType)
+                            {
+                                // Read as the dispatcher reads it (an array or a single object).
+                                (function, scUID) = LedgerIntegrityRules.DispatchedCall(rTX.Data);
+                            }
+                            else
+                            {
+                                var scDataArray = JsonConvert.DeserializeObject<JArray>(rTX.Data);
+                                var scData = scDataArray[0];
+                                function = (string?)scData["Function"];
+                                scUID = (string?)scData["ContractUID"];
+                            }
 
                             if(scUID != null)
                             {
@@ -1680,14 +1694,19 @@ namespace VerifiedXCore.Data
                             }
                         }
 
-                        if (rTX.TransactionType == TransactionType.NFT_TX)
+                        // From ReserveRecoverReadsEveryRowHeight a pending transfer is taken back under every type a contract
+                        // call travels in, read as the dispatcher reads it, not only an NFT_TX in the array shape.
+                        if (rTX.TransactionType == TransactionType.NFT_TX
+                            || (height >= Globals.ReserveRecoverReadsEveryRowHeight && LedgerIntegrityRules.ContractCallTypes.Contains(rTX.TransactionType)))
                         {
                             string? scUID;
                             if (height >= Globals.ReserveRecoverReadsEveryRowHeight)
                             {
                                 // A row whose call cannot be read names no contract to take back (the sweep below still
                                 // takes back what the reserve owns), and no longer stops the recovery of everything after it.
-                                scUID = ReserveRowCall(rTX.Data).ContractUID;
+                                scUID = rTX.TransactionType == TransactionType.NFT_TX
+                                    ? ReserveRowCall(rTX.Data).ContractUID
+                                    : LedgerIntegrityRules.DispatchedCall(rTX.Data).ContractUID;
                             }
                             else
                             {

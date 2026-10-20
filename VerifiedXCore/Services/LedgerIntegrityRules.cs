@@ -698,10 +698,12 @@ namespace VerifiedXCore.Services
                 || string.IsNullOrEmpty(payload.ContractUID))
                 return null;
             var stored = SmartContractStateTrei.GetSmartContractState(payload.ContractUID);
-            if (stored == null || string.Equals(payload.Data, stored.ContractData, StringComparison.Ordinal))
+            if (stored == null || string.Equals(payload.Data ?? "", stored.ContractData ?? "", StringComparison.Ordinal))
                 return null;
             var before = RoyaltyOf(stored.ContractData);
-            var after = RoyaltyOf(payload.Data);
+            // An empty body is written over the stored one as it is, so it carries no Royalty: passing it let the next
+            // rewrite be compared against a body that had already lost it.
+            var after = string.IsNullOrEmpty(payload.Data) ? null : RoyaltyOf(payload.Data);
             if (before == null && after == null) return null;
             if (before != null && after != null
                 && before.Value.Amount == after.Value.Amount
@@ -1428,11 +1430,84 @@ namespace VerifiedXCore.Services
             "Sale_Start()", "M_Sale_Start()", "Sale_Complete()", "M_Sale_Complete()", "Sale_Cancel()",
         };
 
-        /// <summary>Per-block register of the contracts a block moves (Transfer(), Burn()) and sells (NFT_SALE).</summary>
+        /// <summary>Per-block register of the contracts a block moves (Transfer(), Burn()) and sells (NFT_SALE), and of the token votes it casts.</summary>
         public sealed class NftStepState
         {
             public readonly HashSet<string> Moves = new(StringComparer.OrdinalIgnoreCase);
             public readonly HashSet<string> Sales = new(StringComparer.OrdinalIgnoreCase);
+            /// <summary>(holder, topic) pairs a block's TokenVoteTopicCast() calls vote for.</summary>
+            public readonly HashSet<string> TokenVotes = new(StringComparer.Ordinal);
+            /// <summary>The token contracts a block's TokenMint() calls mint.</summary>
+            public readonly HashSet<string> TokenMints = new(StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static readonly System.Text.RegularExpressions.Regex AdnrNameGrammar =
+            new(@"\A[a-z0-9-]+\z", System.Text.RegularExpressions.RegexOptions.CultureInvariant); // \z: "$" also matches before a final newline
+
+        /// <summary>
+        /// From Globals.AdnrNameGrammarHeight an AdnrCreate() name is lowercase a-z, 0-9 and '-', 1 to Globals.ADNRLimit
+        /// characters, with no suffix (the chain adds ".vfx"): consensus checked only that a name was free, so a raw
+        /// transaction registered empty, suffixed, markup or unbounded names. The wallet already builds names this way.
+        /// Null when the name passes.
+        /// </summary>
+        public static string? AdnrNameError(string? name, long height)
+        {
+            if (height < Globals.AdnrNameGrammarHeight) return null;
+            return !string.IsNullOrEmpty(name) && name.Length <= Globals.ADNRLimit && AdnrNameGrammar.IsMatch(name)
+                ? null
+                : $"A name is lowercase letters, digits and '-', 1 to {Globals.ADNRLimit} characters, with no suffix.";
+        }
+
+        /// <summary>
+        /// From Globals.TokenMintRulesHeight a TokenMint() is refused on a paused contract (every other token function
+        /// already is), with more decimals than the token's DecimalPlaces (the remainder could never be transferred), or
+        /// when the supply or the holder's balance would overflow (the apply wrote the balance, then threw before the
+        /// supply, so the two disagreed). Null when the mint passes.
+        /// </summary>
+        public static string? TokenMintRefusal(VerifiedXCore.Models.SmartContracts.TokenDetails details, decimal amount, decimal holderBalance, long height)
+        {
+            if (height < Globals.TokenMintRulesHeight) return null;
+            if (details.IsPaused) return "Contract is paused. NO TXs may go through.";
+            if (details.DecimalPlaces < 0 || decimal.Round(amount, Math.Min(details.DecimalPlaces, 28)) != amount)
+                return $"A mint has at most {details.DecimalPlaces} decimal places, the token's.";
+            if (amount > decimal.MaxValue - details.CurrentSupply || amount > decimal.MaxValue - holderBalance)
+                return "A mint cannot take the supply or a balance past the largest amount.";
+            return null;
+        }
+
+        /// <summary>Whether a block of <paramref name="transactionCount"/> transactions at <paramref name="height"/> is over the per-block cap (Globals.BlockTransactionCapHeight).</summary>
+        public static bool OverTransactionCap(int transactionCount, long height) =>
+            height >= Globals.BlockTransactionCapHeight && transactionCount > Globals.MaxTransactionsPerBlock;
+
+        /// <summary>
+        /// What a producer may put after its coinbase in a block at <paramref name="height"/>: below the cap height
+        /// everything, from it no more than the cap leaves room for, in the order given.
+        /// </summary>
+        public static List<Transaction> WithinTransactionCap(List<Transaction> afterCoinbase, int alreadyInBlock, long height) =>
+            height >= Globals.BlockTransactionCapHeight
+                ? afterCoinbase.Take(Math.Max(0, Globals.MaxTransactionsPerBlock - alreadyInBlock)).ToList()
+                : afterCoinbase;
+
+        public const string TokenMintedTwiceInBlock = "A block carries one TokenMint() per token contract";
+
+        public const string TokenVotedTwiceInBlock = "A block carries one token vote per holder and topic";
+
+        /// <summary>The (holder, topic) a TokenVoteTopicCast() votes for, read as its apply reads it; null for any other transaction.</summary>
+        public static string? TokenVoteKey(Transaction tx)
+        {
+            if (tx?.Data == null || !ContractFunctionTypes.Contains(tx.TransactionType)) return null;
+            try
+            {
+                var jobj = JObject.Parse(tx.Data);
+                if ((string?)jobj["Function"] != "TokenVoteTopicCast()") return null;
+                var holder = jobj["FromAddress"]?.ToObject<string?>();
+                var topic = jobj["TopicUID"]?.ToObject<string?>();
+                return string.IsNullOrEmpty(holder) || string.IsNullOrEmpty(topic) ? null : $"{holder}\u001d{topic}";
+            }
+            catch (Exception ex) when (ex is Newtonsoft.Json.JsonException || ex is ArgumentException || ex is FormatException || ex is InvalidCastException)
+            {
+                return null;
+            }
         }
 
         /// <summary>
@@ -1444,6 +1519,16 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static string? RegisterNftStepInBlock(Transaction tx, NftStepState state, long height)
         {
+            // From VoteTopicRulesHeight one TokenVoteTopicCast() per (holder, topic) in a block: each was judged against
+            // the votes stored before the block, and the apply counts every one, so two raised the tally by two while one
+            // vote row was kept.
+            if (height >= Globals.VoteTopicRulesHeight && TokenVoteKey(tx) is { } voteKey)
+                return state.TokenVotes.Add(voteKey) ? null : $"{TokenVotedTwiceInBlock}: {voteKey.Replace('\u001d', '/')}";
+            // From TokenMintRulesHeight one TokenMint() per contract in a block: each is judged against the supply and
+            // balance before the block, so a second could overflow at apply after the first (balance written, supply not).
+            if (height >= Globals.TokenMintRulesHeight && ContractFunctionTypes.Contains(tx.TransactionType)
+                && DispatchedCall(tx.Data) is { Function: "TokenMint()", ContractUID: { Length: > 0 } mintedUid })
+                return state.TokenMints.Add(mintedUid) ? null : $"{TokenMintedTwiceInBlock}: {mintedUid}";
             var moveOrSale = height >= Globals.PathAuditRulesHeight;
             var oneMove = height >= Globals.OneMovePerContractHeight;
             if (!moveOrSale && !oneMove) return null;

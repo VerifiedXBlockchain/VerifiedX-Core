@@ -424,6 +424,32 @@ namespace VerifiedXCore
         public static long TokenTransferRecipientFirstHeight = 999_999_999_999;
 
         /// <summary>
+        /// From this height an AdnrCreate() name is lowercase letters, digits and '-', 1 to ADNRLimit characters, with no
+        /// suffix (LedgerIntegrityRules.AdnrNameError): consensus checked only that the name was free. Not active yet.
+        /// </summary>
+        public static long AdnrNameGrammarHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height a TokenMint() is refused on a paused contract, with more decimals than the token's
+        /// DecimalPlaces, or when it would overflow the supply or the holder's balance (LedgerIntegrityRules.TokenMintRefusal).
+        /// Not active yet.
+        /// </summary>
+        public static long TokenMintRulesHeight = 999_999_999_999;
+
+        /// <summary>
+        /// From this height a block carries at most MaxTransactionsPerBlock transactions, its coinbase included: the 10 MB
+        /// size bound alone let one block multiply every per-transaction cost (verification, state writes, proofs).
+        /// Not active yet.
+        /// </summary>
+        public static long BlockTransactionCapHeight = 999_999_999_999;
+
+        /// <summary>
+        /// The most transactions a block carries from BlockTransactionCapHeight. A producer fills its block from at most
+        /// 1 MB of pool, which holds fewer than this, so no block an honest producer builds reaches it.
+        /// </summary>
+        public const int MaxTransactionsPerBlock = 3_000;
+
+        /// <summary>
         /// From this height a transaction carrying a non-whole Amount must hash with that Amount: VerifyTX's re-hash
         /// fallback read it as 0 and accepted a signature over "0" (TransactionValidatorService.StandardHashMatches).
         /// Not active yet.
