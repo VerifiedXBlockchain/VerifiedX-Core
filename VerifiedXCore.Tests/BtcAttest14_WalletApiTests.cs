@@ -65,6 +65,20 @@ namespace VerifiedXCore.Tests
             Assert.Null(VerifiedXCore.Privacy.ShieldedPoolService.GetState(asset));            // nothing was written
         }
 
+        /// <summary>#296: the wallet's VFX pool-state route, the twin of the vBTC one, created the VFX pool row when there was none. It reads only.</summary>
+        [Fact]
+        public void TheVfxPoolStateRoute_ReadsOnly_AndNoPoolIsAnEmptyPool()
+        {
+            var stored = VerifiedXCore.Privacy.ShieldedPoolService.GetState("VFX");
+            if (stored != null) VerifiedXCore.Data.DbContext.DB_Privacy.GetCollection<VerifiedXCore.Models.Privacy.ShieldedPoolState>(VerifiedXCore.Privacy.PrivacyDbContext.PRIV_POOL_STATE).DeleteMany(x => x.AssetType == "VFX");
+            var result = new VerifiedXCore.Controllers.WalletController().GetShieldedPoolState();
+            var body = JObject.FromObject(Assert.IsType<Microsoft.AspNetCore.Mvc.OkObjectResult>(result).Value!);
+            Assert.True(body["success"]!.Value<bool>());
+            Assert.Equal("VFX", body["assetType"]!.Value<string>());
+            Assert.Equal(0L, body["totalCommitments"]!.Value<long>());
+            Assert.Null(VerifiedXCore.Privacy.ShieldedPoolService.GetState("VFX"));             // nothing was written
+        }
+
         /// <summary>The browser wallet's amounts: "0,5" was read as 5 (a comma taken as a thousands separator; round 19).</summary>
         [Fact]
         public void TheBrowserWalletsAmounts_AreDigitsAndOneDecimalPoint()
