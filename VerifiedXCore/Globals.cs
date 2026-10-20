@@ -265,17 +265,16 @@ namespace VerifiedXCore
         // mainnet height. Each rule keeps its own constant (so one can be moved alone if ever needed); all are set to
         // FundLossAuditHeight. Must be above the tip when every validator runs this build. Testnet values in Program.cs.
         /// <summary>
-        /// Shared mainnet activation height of the fund-loss audit rules. NOT SET: a placeholder far above the chain
-        /// until the release goes to mainnet, when it is set to the tip plus a few days (it was 7,517,000, reset
-        /// 2026-10-13, and the chain passed it on 2026-10-16 before the build was deployed). The same height as
-        /// <see cref="BitcoinAttestationRecordHeight"/>.
+        /// Shared mainnet activation height of the fund-loss audit rules: tip 7,540,524 on 2026-10-20 02:15 UTC plus 48 hours
+        /// (~12.6 s/block, ~13,700 blocks). It was 7,517,000 (reset 2026-10-13; the chain passed it on 2026-10-16 before
+        /// the build was deployed), then a placeholder. The same height as <see cref="BitcoinAttestationRecordHeight"/>.
         /// </summary>
-        public const long FundLossAuditHeight = 999_999_999L; // TODO set before the mainnet release: tip plus a few days
+        public const long FundLossAuditHeight = 7_554_250L;
         /// <summary>
-        /// Testnet activation of the same rules (Program.cs / WardenService). Reset 2026-10-17 from 1,143,500, which the
-        /// chain had passed before the build was deployed: tip 1,151,481 on 2026-10-17 plus three days (~6,800 blocks/day).
+        /// Testnet activation of the same rules (GlobalsNetworkHeights / WardenService): tip 1,167,760 on 2026-10-20 02:15
+        /// UTC plus about an hour (~12.7 s/block), for the coordinated restart of every testnet validator. It was 1,172,000.
         /// </summary>
-        public const long FundLossAuditTestnetHeight = 1_172_000L;
+        public const long FundLossAuditTestnetHeight = 1_168_050L;
 
         /// <summary>
         /// Item 1 (stage 1): a ZK-authorized private transaction (VFX/vBTC unshield, private transfer) may not take more

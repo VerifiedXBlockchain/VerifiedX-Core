@@ -37,7 +37,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(8, Globals.PriorMajorVer);
 
             // Mainnet (the defaults a node starts with).
-            Assert.Equal(999_999_999, Globals.FundLossAuditHeight);   // not set on mainnet yet (set at the mainnet release)
+            Assert.Equal(7_554_250, Globals.FundLossAuditHeight);     // set 2026-10-20: tip plus 48 hours
             Assert.Equal(Globals.FundLossAuditHeight, _priorRecordHeight);
             Assert.True(Globals.BitcoinAttestationObserveHeight < _priorRecordHeight);
             Assert.True(_priorRecordHeight < Globals.BitcoinAttestationHeight);
@@ -46,7 +46,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Globals.FundLossAuditHeight, Globals.PathAuditRulesHeight);
             Assert.True(Globals.ValidatorBondGrandfatherHeight < Globals.ValidatorBondHeight);
             // Testnet (applied at startup).
-            Assert.Equal(1_172_000, Globals.FundLossAuditTestnetHeight);
+            Assert.Equal(1_168_050, Globals.FundLossAuditTestnetHeight);
             Assert.Equal(Globals.FundLossAuditTestnetHeight, Globals.BitcoinAttestationRecordTestnetHeight);
             Assert.True(Globals.BitcoinAttestationObserveTestnetHeight < Globals.BitcoinAttestationRecordTestnetHeight);
             Assert.True(Globals.BitcoinAttestationRecordTestnetHeight < Globals.BitcoinAttestationTestnetHeight);
