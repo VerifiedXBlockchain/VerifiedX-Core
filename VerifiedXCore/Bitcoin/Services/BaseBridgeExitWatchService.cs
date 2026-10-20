@@ -81,7 +81,8 @@ namespace VerifiedXCore.Bitcoin.Services
         public static async Task BridgeExitScanLoop()
         {
             LoadStartBlockOverride();
-            while (!Globals.StopAllTimers)
+            // Paused, not ended, while startup sync holds StopAllTimers (PausableLoop).
+            await PausableLoop.RunAsync(async () =>
             {
                 try
                 {
@@ -92,9 +93,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 {
                     LogUtility.Log($"[BaseBridgeExit] Poll error: {ex.Message}", "BaseBridgeExitWatchService.BridgeExitScanLoop");
                 }
-
-                await Task.Delay(12_000);
-            }
+            }, 12_000, "BaseBridgeExitWatchService.BridgeExitScanLoop");
         }
 
         /// <summary>Reset the scan cursor to rescan from a specific block. Next poll will start from fromBlock.</summary>

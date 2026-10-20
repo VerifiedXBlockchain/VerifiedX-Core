@@ -298,7 +298,8 @@ namespace VerifiedXCore.Bitcoin.Services
         public static async Task ProcessPendingAttestationsLoop()
         {
             await Task.Delay(20_000);
-            while (!Globals.StopAllTimers)
+            // Paused, not ended, while startup sync holds StopAllTimers (PausableLoop).
+            await PausableLoop.RunAsync(async () =>
             {
                 try
                 {
@@ -316,8 +317,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 {
                     LogUtility.Log($"[BaseBridgeAttestation] {ex.Message}", "BaseBridgeAttestationService.ProcessPendingAttestationsLoop");
                 }
-                await Task.Delay(45_000);
-            }
+            }, 45_000, "BaseBridgeAttestationService.ProcessPendingAttestationsLoop");
         }
 
         private static void WriteAddress20(MemoryStream ms, string? addr)
