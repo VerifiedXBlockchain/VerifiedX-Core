@@ -206,9 +206,20 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        /// <summary>Clients that reach the loopback caster only: every other destination (the bootstrap seeds, the record's 10.0.0.1) is refused at once, so the tests never leave the machine or wait on a timeout.</summary>
         private sealed class PlainHttpClientFactory : System.Net.Http.IHttpClientFactory
         {
-            public System.Net.Http.HttpClient CreateClient(string name) => new();
+            public System.Net.Http.HttpClient CreateClient(string name) => new(new LoopbackOnlyHandler());
+
+            private sealed class LoopbackOnlyHandler : System.Net.Http.DelegatingHandler
+            {
+                public LoopbackOnlyHandler() : base(new System.Net.Http.HttpClientHandler()) { }
+
+                protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request, System.Threading.CancellationToken cancellationToken) =>
+                    System.Net.IPAddress.TryParse(request.RequestUri?.Host, out var ip) && System.Net.IPAddress.IsLoopback(ip)
+                        ? base.SendAsync(request, cancellationToken)
+                        : throw new System.Net.Http.HttpRequestException($"{request.RequestUri?.Host} is not the loopback caster of this test.");
+            }
         }
     }
 }
