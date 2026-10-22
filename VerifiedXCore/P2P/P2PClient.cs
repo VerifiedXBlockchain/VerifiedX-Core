@@ -1100,8 +1100,12 @@ namespace VerifiedXCore.P2P
         #endregion
 
         #region Connect Beacon ConnectBeacon_New
+        /// <summary>How long <see cref="ConnectBeacon_New"/> waits for a beacon to connect and take the connection.</summary>
+        private static readonly TimeSpan BeaconConnectTimeout = TimeSpan.FromSeconds(10);
+
         public static async Task<bool> ConnectBeacon_New(string url, Beacons beacon, string uplReq = "n", string dwnlReq = "n")
         {
+            HubConnection? beaconHubConnection = null;
             try
             {
                 var beaconRef = Globals.BeaconReference.Reference;
@@ -1110,7 +1114,11 @@ namespace VerifiedXCore.P2P
                     return false;
                 }
 
-                var beaconHubConnection = new HubConnectionBuilder()
+                // The handshake completes before the beacon decides: it answers "status" when it takes the connection and
+                // "disconnect" when it does not, so only "status" makes the connection usable.
+                var beaconAnswer = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+                beaconHubConnection = new HubConnectionBuilder()
                 .WithUrl(url, options => {
                     options.Headers.Add("beaconRef", beaconRef);
                     options.Headers.Add("walver", Globals.CLIVersion);
@@ -1139,6 +1147,7 @@ namespace VerifiedXCore.P2P
 
                 beaconHubConnection.Closed += (sender) =>
                 {
+                    beaconAnswer.TrySetResult(false);
                     LogUtility.Log("Closed to Beacon", "ConnectBeacon()");
                     Console.WriteLine("[" + DateTime.Now.ToString() + "] Connection to Beacon has been closed.");
                     return Task.CompletedTask;
@@ -1155,6 +1164,7 @@ namespace VerifiedXCore.P2P
                         switch (message)
                         {
                             case "status":
+                                beaconAnswer.TrySetResult(true);
                                 Console.WriteLine(data);
                                 LogUtility.Log("Success! Connected to Beacon", "ConnectBeacon()");
                                 break;
@@ -1165,16 +1175,23 @@ namespace VerifiedXCore.P2P
                                 //await BeaconProcessor.ProcessData(message, data);
                                 break;
                             case "disconnect":
+                                beaconAnswer.TrySetResult(false);
                                 await DisconnectBeacon();
                                 break;
                         }
                     }
                 });
 
-                await beaconHubConnection.StartAsync().WaitAsync(new TimeSpan(0,0,3)); // wait 3 seconds to connect. Should happen faster, but giving some room.
+                // One bound for the connect and the beacon's answer, generous enough for a node's first connect of a session.
+                // An attempt that misses it is disposed, not left to finish unregistered.
+                using var connectCts = new CancellationTokenSource(BeaconConnectTimeout);
+                await beaconHubConnection.StartAsync(connectCts.Token);
 
-                if (string.IsNullOrEmpty(beaconHubConnection.ConnectionId))
+                if (string.IsNullOrEmpty(beaconHubConnection.ConnectionId) || !await beaconAnswer.Task.WaitAsync(connectCts.Token))
+                {
+                    await beaconHubConnection.DisposeAsync();
                     return false;
+                }
 
                 BeaconNodeInfo nBeacon = new BeaconNodeInfo
                 {
@@ -1193,6 +1210,8 @@ namespace VerifiedXCore.P2P
             }
             catch (Exception ex)
             {
+                if (beaconHubConnection != null)
+                    await beaconHubConnection.DisposeAsync();
                 ValidatorLogUtility.Log("Failed! Connecting to Adjudicator: Reason - " + ex.ToString(), "ConnectAdjudicator()");
                 return false;
             }
