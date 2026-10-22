@@ -18,6 +18,10 @@ namespace VerifiedXCore.Services
         #region Process Incoming (to) Transactions
         public static async Task ProcessIncomingTransactions(Transaction tx, Account account, long blockHeight)
         {
+            // An unshield pays a transparent account as a send does.
+            if (tx.TransactionType == TransactionType.VFX_UNSHIELD)
+                await AccountData.UpdateLocalBalanceAdd(tx.ToAddress, tx.Amount);
+
             if (tx.TransactionType == TransactionType.TX)
             {
                 var isReserveSend = tx.FromAddress.StartsWith("xRBX") ? true : false;
@@ -1358,7 +1362,16 @@ namespace VerifiedXCore.Services
                 TransactionStatus = tx.TransactionStatus
             };
 
+            // A shield's transparent debit is not taken when it is broadcast (only its record is saved), so it is taken here,
+            // once: a record already Success has been counted, and one first seen here is set from state by the call below.
+            var shieldNotYetCounted = Privacy.PrivateTransactionTypes.IsTransparentShield(tx.TransactionType)
+                && TransactionData.GetAll().FindOne(x => x.Hash == tx.Hash) is { } localShield
+                && localShield.TransactionStatus != TransactionStatus.Success;
+
             TransactionData.UpdateTxStatusAndHeight(fromTx, TransactionStatus.Success, blockHeight);
+
+            if (shieldNotYetCounted)
+                await AccountData.UpdateLocalBalance(tx.FromAddress, tx.Amount + tx.Fee);
 
             // vBTC V2 transfer (single or multi shape): the ledger debits were applied at
             // state-apply before this wallet pass runs, so if this send fully consumed the
