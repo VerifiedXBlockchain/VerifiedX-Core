@@ -264,8 +264,9 @@ namespace VerifiedXCore.Controllers
                 if (!PrivacyApiHelper.TryGetKeyMaterial(w, req.WalletPassword, out var keys, out var kmErr))
                     return Fail(kmErr ?? "Keys");
 
+                // A zero-value note (the change output the epoch circuit always has) stays stored but is never merged.
                 var vfx = (w.UnspentCommitments ?? new List<UnspentCommitment>())
-                    .Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal))
+                    .Where(c => c != null && !c.IsSpent && c.Amount > 0 && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal))
                     .OrderBy(c => c!.Amount)
                     .ThenBy(c => c!.TreePosition)
                     .Cast<UnspentCommitment>()
@@ -333,7 +334,8 @@ namespace VerifiedXCore.Controllers
                 if (w == null)
                     return Task.FromResult(Ok(new { ShieldedBalances = new Dictionary<string, decimal>(), UnspentCommitments = 0 }));
 
-                var unspentOnly = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent).ToList() ?? new List<UnspentCommitment>();
+                // Zero-value notes (the change output the epoch circuit always has) stay stored but are not counted.
+                var unspentOnly = w.UnspentCommitments?.Where(c => c != null && !c.IsSpent && c.Amount > 0).ToList() ?? new List<UnspentCommitment>();
                 var sum = unspentOnly.Sum(c => c.Amount);
                 object payload = includeCommitments
                     ? new

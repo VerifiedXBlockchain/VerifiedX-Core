@@ -29,7 +29,7 @@ namespace VerifiedXCore.BrowserWalletServices
                     transparentSourceAddress = w.TransparentSourceAddress ?? "",
                     vfxShieldedBalance = vfxBal,
                     unspentNotes = (w.UnspentCommitments ?? new List<UnspentCommitment>())
-                        .Count(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)),
+                        .Count(c => c != null && !c.IsSpent && c.Amount > 0 && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)),
                     lastScannedBlock = w.LastScannedBlock,
                     isViewOnly = w.IsViewOnly
                 };
@@ -61,7 +61,7 @@ namespace VerifiedXCore.BrowserWalletServices
                 return new { success = false, message = "Wallet not found." };
 
             var vfxNotes = (wallet.UnspentCommitments ?? new List<UnspentCommitment>())
-                .Where(c => c != null && !c.IsSpent && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)).ToList();
+                .Where(c => c != null && !c.IsSpent && c.Amount > 0 && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)).ToList();
 
             return new
             {

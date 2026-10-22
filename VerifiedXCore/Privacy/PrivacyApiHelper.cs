@@ -624,7 +624,7 @@ namespace VerifiedXCore.Privacy
             result.Success = true;
             result.LastScannedBlock = w.LastScannedBlock;
             result.FinalBalance = w.ShieldedBalances;
-            result.FinalUnspentCount = w.UnspentCommitments.Count(uc => uc != null && !uc.IsSpent);
+            result.FinalUnspentCount = w.UnspentCommitments.Count(uc => uc != null && !uc.IsSpent && uc.Amount > 0);
 
             } // end try
             finally
