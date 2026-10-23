@@ -46,7 +46,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Globals.FundLossAuditHeight, Globals.PathAuditRulesHeight);
             Assert.True(Globals.ValidatorBondGrandfatherHeight < Globals.ValidatorBondHeight);
             // Testnet (applied at startup).
-            Assert.Equal(1_168_050, Globals.FundLossAuditTestnetHeight);
+            Assert.Equal(400, Globals.FundLossAuditTestnetHeight);   // reset to genesis 2026-10-22: bonds at 399, recording at 400
             Assert.Equal(Globals.FundLossAuditTestnetHeight, Globals.BitcoinAttestationRecordTestnetHeight);
             Assert.True(Globals.BitcoinAttestationObserveTestnetHeight < Globals.BitcoinAttestationRecordTestnetHeight);
             Assert.True(Globals.BitcoinAttestationRecordTestnetHeight < Globals.BitcoinAttestationTestnetHeight);

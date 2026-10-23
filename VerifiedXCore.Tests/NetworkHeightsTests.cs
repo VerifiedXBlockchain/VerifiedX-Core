@@ -54,8 +54,8 @@ namespace VerifiedXCore.Tests
             Globals.ApplyNetworkHeights();
 
             Assert.Equal(Globals.FundLossAuditTestnetHeight, Globals.PrivateTxProofRulesHeight);
-            Assert.Equal(1_002_979, Globals.VbtcV1RetirementHeight);
-            Assert.Equal(1_002_979, Globals.VbtcV2DkgAttestationHeight);
+            Assert.Equal(1, Globals.VbtcV1RetirementHeight);
+            Assert.Equal(1, Globals.VbtcV2DkgAttestationHeight);
             Assert.Equal(1, Globals.VbtcVaultTxSizeHeight);
         }
 

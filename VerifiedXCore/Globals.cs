@@ -271,10 +271,14 @@ namespace VerifiedXCore
         /// </summary>
         public const long FundLossAuditHeight = 7_554_250L;
         /// <summary>
-        /// Testnet activation of the same rules (GlobalsNetworkHeights / WardenService): tip 1,167,760 on 2026-10-20 02:15
-        /// UTC plus about an hour (~12.7 s/block), for the coordinated restart of every testnet validator. It was 1,172,000.
+        /// Testnet activation of the same rules (GlobalsNetworkHeights / WardenService). Set 2026-10-22 for the testnet
+        /// reset to genesis (the move to the VFX signet): block 400, one block after the validator bonds start (399) and
+        /// 100 after the bond grandfather height (<see cref="BitcoinAttestationObserveTestnetHeight"/>, 300), so the
+        /// validators registered and funded before block 300 count as aged at once and vBTC works from block 400. It
+        /// cannot be 1: the bonds would start at block 0, which genesis never applies, and every node would stop at block 1.
+        /// It was 1,168,050 on the chain before the reset.
         /// </summary>
-        public const long FundLossAuditTestnetHeight = 1_168_050L;
+        public const long FundLossAuditTestnetHeight = 400L;
 
         /// <summary>
         /// Item 1 (stage 1): a ZK-authorized private transaction (VFX/vBTC unshield, private transfer) may not take more
@@ -641,10 +645,15 @@ namespace VerifiedXCore
         /// Program.cs (<see cref="BitcoinAttestationObserveTestnetHeight"/>).
         /// </summary>
         public static long BitcoinAttestationObserveHeight = 7_496_000L;
-        /// <summary>The three attestation heights on testnet (applied in Program.cs and WardenService): the tip of 2026-10-13, tip plus three days, and three days after that (plan 8.4).</summary>
-        public const long BitcoinAttestationObserveTestnetHeight = 1_124_000L;
+        /// <summary>
+        /// The three attestation heights on testnet (applied in GlobalsNetworkHeights), set 2026-10-22 for the reset to
+        /// genesis. Observation at 300, which is also the bond grandfather height: validators active there are aged at
+        /// the first look. Recording at 400 (with the fund-loss rules). Enforcement one block later, at 401: a vault made
+        /// before recording is unwatched and frozen from there, and no older vaults exist on the new chain.
+        /// </summary>
+        public const long BitcoinAttestationObserveTestnetHeight = 300L;
         public const long BitcoinAttestationRecordTestnetHeight = FundLossAuditTestnetHeight;
-        public const long BitcoinAttestationTestnetHeight = 1_192_500L; // H1 plus three days (reset 2026-10-17 with H1)
+        public const long BitcoinAttestationTestnetHeight = 401L;
         /// <summary>
         /// H1, recording: the Bitcoin report and rewind transactions are accepted and applied, and a vault created from
         /// this height on is watched: its deposit script is in state, its owner's balance is its attested coins, and its
