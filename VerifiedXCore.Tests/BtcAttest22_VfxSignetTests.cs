@@ -140,6 +140,17 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void OnTheSignet_HeadersComeOnlyFromItsOwnHosts_NeverFromOtherValidators()
+        {
+            // Aaron on #65: at the signet's limit a forged heavier branch takes seconds, and a validator serving it
+            // would move the attested chain. Mainnet (real proof of work) keeps asking validators.
+            Assert.False(BtcLightClient.AsksValidators(Network.VfxSignet));
+            Assert.True(BtcLightClient.AsksValidators(Network.Main));
+            Assert.True(BtcLightClient.AsksValidators(Network.TestNet4));
+            Assert.Empty(Network.VfxSignet.SeedNodes);
+        }
+
+        [Fact]
         public void TheSignetsEndpoints_AreItsOwn()
         {
             Assert.Equal(new[] { "signet.verifiedx.io", "signet-2.verifiedx.io" }, VfxSignet.Hosts);
