@@ -628,6 +628,16 @@ namespace VerifiedXCore.Tests
             Assert.True((bool)multi["NothingToDo"]!);
             Assert.Contains("closed without being paid", (string)share["ErrorMessage"]!);
             Assert.Contains("closed and refunded", (string)multi["Message"]!);
+
+            // No such request: Unknown, as the single-contract completion says.
+            var unknown = Assert.Single((JArray)JObject.Parse(await _api.CompleteWithdrawalMulti(new VBTCWithdrawalCompleteMultiPayload { WithdrawalRequestHash = new string('f', 64) }))["Results"]!);
+            Assert.False((bool)unknown["Paid"]!);
+            Assert.Equal("Unknown", (string)unknown["Status"]!);
+
+            // An older vault's share sent on this call is Pending_BTC, as the single-contract completion answers.
+            Assert.Equal("Pending_BTC", VBTCService.ShareStatus(success: true, watched: false, beingPaid: false, pinned: null));
+            Assert.Equal("Completed", VBTCService.ShareStatus(success: true, watched: true, beingPaid: false, pinned: null));
+            Assert.Equal("Failed", VBTCService.ShareStatus(success: false, watched: false, beingPaid: false, pinned: null));
         }
 
         /// <summary>
