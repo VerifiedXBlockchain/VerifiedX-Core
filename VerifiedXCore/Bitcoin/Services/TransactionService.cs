@@ -345,14 +345,60 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (transaction == null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Transaction for TXID: {txid} was null." });
 
+                // A replacement spends exactly the original's inputs (so it conflicts with every one of them and evicts it),
+                // pays the original's recipient outputs unchanged, and takes the higher fee out of the original's change.
+                if (transaction.IsConfirmed || transaction.ConfirmedHeight > 0)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "This transaction is already confirmed and cannot be replaced." });
+
+                if (transaction.TransactionType != BTCTransactionType.Send && transaction.TransactionType != BTCTransactionType.SameWalletTransaction)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Only a pending send can be replaced. This transaction is {transaction.TransactionType}." });
+
                 var btcAccount = BitcoinAccount.GetBitcoinAccount(transaction.FromAddress);
-                var receiverAccount = BitcoinAccount.GetBitcoinAccount(transaction.ToAddress);
 
                 if (btcAccount == null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Could not find a bitcoin account for the following address: {transaction.FromAddress}" });
 
-                if (btcAccount.Balance <= transaction.Amount)
-                    return JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient Balance: {btcAccount.Balance}" });
+                if (string.IsNullOrEmpty(transaction.Signature))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "The original transaction's signed data is not stored, so it cannot be replaced." });
+
+                var original = NBitcoin.Transaction.Parse(transaction.Signature, Globals.BTCNetwork);
+                if (original.GetHash().ToString() != transaction.Hash)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "The stored transaction data does not match its TXID, so it cannot be replaced." });
+
+                BitcoinAddress senderAddress = BitcoinAddress.Create(transaction.FromAddress, Globals.BTCNetwork);
+
+                var originalCoins = new List<Coin>();
+                foreach (var input in original.Inputs)
+                {
+                    var utxo = transaction.BitcoinUTXOs?.FirstOrDefault(x => x.TxId == input.PrevOut.Hash.ToString() && x.Vout == input.PrevOut.N);
+                    if (utxo == null)
+                        return JsonConvert.SerializeObject(new { Success = false, Message = $"The value of input {input.PrevOut} is not stored, so the transaction cannot be replaced." });
+                    originalCoins.Add(new Coin(input.PrevOut, new TxOut(Money.Satoshis(utxo.Value), senderAddress.ScriptPubKey)));
+                }
+
+                var changeOutputs = original.Outputs.Where(x => x.ScriptPubKey == senderAddress.ScriptPubKey).ToList();
+                if (changeOutputs.Count != 1)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = "The original transaction has no change output to pay a higher fee from, so it cannot be replaced." });
+                var changeOutput = changeOutputs[0];
+
+                long originalFee = originalCoins.Sum(x => x.Amount.Satoshi) - original.Outputs.Sum(x => x.Value.Satoshi);
+                int transactionSize = FeeCalcService.EstimateTransactionSize(original.Inputs.Count, original.Outputs.Count);
+                long newFee = (long)new FeeRate(nFeeRate * 1000).GetFee(transactionSize).Satoshi;
+
+                // BIP 125: the replacement pays a higher rate and at least the original fee plus its own size at 1 sat/vB.
+                if (nFeeRate <= transaction.FeeRate || newFee < originalFee + transactionSize)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"The new fee rate must be higher than the original's ({transaction.FeeRate} sat/vB). A fee of {newFee} sats does not replace a fee of {originalFee} sats." });
+
+                long feeIncrease = newFee - originalFee;
+                long newChange = changeOutput.Value.Satoshi - feeIncrease;
+                if (newChange < VerifiedXCore.Bitcoin.Attestation.BtcCanonicalWithdrawal.DustSats)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = $"The original transaction's change ({changeOutput.Value.Satoshi} sats) cannot cover the higher fee of {newFee} sats." });
+
+                long recipientTotal = original.Outputs.Where(x => x != changeOutput).Sum(x => x.Value.Satoshi);
+
+                // VX-18: the replacement's total fee is bounded relative to the amount unless explicitly allowed.
+                if (!BitcoinFeePolicy.TryValidateTotalFee((ulong)newFee, (ulong)recipientTotal, allowHighFee, out var totalFeeError))
+                    return JsonConvert.SerializeObject(new { Success = false, Message = totalFeeError });
 
                 Console.WriteLine($"Account Checks Passed.");
 
@@ -361,112 +407,32 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (string.IsNullOrEmpty(senderPrivateKeyHex))
                     return JsonConvert.SerializeObject(new { Success = false, Message = "You must type in your encryption password first!" });
 
-                BitcoinAddress senderAddress = BitcoinAddress.Create(transaction.FromAddress, Globals.BTCNetwork);
-                BitcoinAddress recipientAddress = BitcoinAddress.Create(transaction.ToAddress, Globals.BTCNetwork);
-
-                ulong amountToSend = Convert.ToUInt32(transaction.Amount * BTCMultiplier);
-                ulong feeEstimate = 0;
-                bool sufficientInputsFound = false;
-                List<Coin> unspentCoins = new List<Coin>();
-                List<BitcoinUTXO> coinListBtcUTXOs = new List<BitcoinUTXO>();
-                ulong previousTotalInputAmount = 0;
-                decimal sendAmount = transaction.Amount;
-                string sender = transaction.FromAddress;
-
-                while (!sufficientInputsFound)
-                {
-                    var coinList = GetUnspentCoins(sender, senderAddress, sendAmount + feeEstimate);
-                    unspentCoins = coinList.Item1;
-
-                    if (!unspentCoins.Any())
-                        return JsonConvert.SerializeObject(new { Success = false, Message = "Could not find any UTXOs for inputs." });
-
-                    // Check if the coin list has changed
-                    ulong totalInputAmount = (ulong)unspentCoins.Sum(x => x.Amount.Satoshi);
-
-                    // Check if the total input amount is unchanged
-                    if (totalInputAmount == previousTotalInputAmount)
-                    {
-                        // If total input amount is unchanged, no more UTXOs are available
-                        return JsonConvert.SerializeObject(new { Success = false, Message = $"Not enough UTXOs to cover the amount and fees. Fee: {feeEstimate} Sats" });
-                    }
-
-                    previousTotalInputAmount = totalInputAmount;
-
-                    int inputCount = unspentCoins.Count();
-                    int outputCount = 2; // one for recipient, one for change
-
-                    FeeRate feeRateCalc = new FeeRate(nFeeRate * 1000);
-
-                    // Estimate the transaction size
-                    int transactionSize = FeeCalcService.EstimateTransactionSize(inputCount, outputCount);
-
-                    // Calculate the fee (in satoshis)
-                    feeEstimate = feeRateCalc.GetFee(transactionSize);
-
-                    ulong totalAmountRequired = amountToSend + feeEstimate;
-
-                    if (totalInputAmount >= totalAmountRequired)
-                    {
-                        sufficientInputsFound = true;
-                        coinListBtcUTXOs = coinList.Item2;
-                    }
-                    else
-                    {
-                        // If inputs are not sufficient, try to get more or larger UTXOs
-                        sendAmount += (decimal)feeEstimate / BTCMultiplier; // Increment the amount to cover fee in next iteration
-                    }
-
-                }
-
-                var txBuilder = Globals.BTCNetwork.CreateTransactionBuilder();
-
-                unspentCoins.ForEach(x => {
-                    txBuilder.AddCoin(x);
-                });
-
-                txBuilder
-                    .Send(recipientAddress, new Money(amountToSend, MoneyUnit.Satoshi))
-                    .SetChange(senderAddress);
+                var replacement = Globals.BTCNetwork.CreateTransaction();
+                replacement.Version = original.Version;
+                replacement.LockTime = original.LockTime;
+                foreach (var input in original.Inputs)
+                    replacement.Inputs.Add(new TxIn(input.PrevOut) { Sequence = new Sequence(0xfffffffd) });
+                foreach (var output in original.Outputs)
+                    replacement.Outputs.Add(new TxOut(output == changeOutput ? Money.Satoshis(newChange) : output.Value, output.ScriptPubKey));
 
                 Console.WriteLine($"TX builder Done.");
-
-                // Get the count of inputs and outputs
-                int finalInputCount = unspentCoins.Count();
-                int finalOutputCount = 2; // one for recipient, one for change
-
-                FeeRate feeRate = new FeeRate(nFeeRate * 1000);
-
-                int finalTransactionSize = FeeCalcService.EstimateTransactionSize(finalInputCount, finalOutputCount);
-                ulong finalFee = feeRate.GetFee(finalTransactionSize);
-
-                decimal totalAmountSpent = (amountToSend + finalFee) * SatoshiMultiplier;
-                decimal originalAmountSpent = (transaction.Amount + transaction.Fee);
-
-                // VX-18: the replacement's total fee is bounded relative to the amount unless explicitly allowed.
-                if (!BitcoinFeePolicy.TryValidateTotalFee(finalFee, amountToSend, allowHighFee, out var totalFeeError))
-                    return JsonConvert.SerializeObject(new { Success = false, Message = totalFeeError });
 
                 byte[] privateKeyBytes = senderPrivateKeyHex.HexToByteArray();
                 Key senderKey = new Key(privateKeyBytes);
 
-                Console.WriteLine($"Fees calculated...");
-
-                var signedTransaction = txBuilder
-                    .AddKeys(senderKey)
-                    .SendFees(new Money(finalFee, MoneyUnit.Satoshi))
-                    .SetOptInRBF(true)
-                    .BuildTransaction(true);
+                var txBuilder = Globals.BTCNetwork.CreateTransactionBuilder();
+                txBuilder.AddCoins(originalCoins.ToArray());
+                txBuilder.AddKeys(senderKey);
+                var signedTransaction = txBuilder.SignTransaction(replacement);
 
                 Console.WriteLine($"Tx Has been signed");
 
-                var txVerified = txBuilder.Verify(signedTransaction);
+                var txVerified = ValidateTransaction(signedTransaction, txBuilder);
 
-                if (txVerified)
+                if (txVerified.Item1)
                 {
                     Console.WriteLine($"Tx Has been verified.");
-                    btcAccount.Balance += originalAmountSpent;
-                    btcAccount.Balance -= totalAmountSpent;
+                    btcAccount.Balance -= feeIncrease * SatoshiMultiplier;
                     var btcDb = BitcoinAccount.GetBitcoin();
                     if (btcDb != null)
                         btcDb.UpdateSafe(btcAccount);
@@ -474,19 +440,15 @@ namespace VerifiedXCore.Bitcoin.Services
                     transaction.TransactionType = BTCTransactionType.Replaced;
                     BitcoinTransaction.UpdateBitcoinTX(transaction);
 
-                    if (coinListBtcUTXOs.Any())
-                    {
-                        coinListBtcUTXOs.ForEach(x =>
-                        {
-                            BitcoinUTXO.SpendUTXO(x.TxId, x.Address);
-                        });
-                    }
+                    // The original's outputs disappear with it: its change must not be offered as an input again.
+                    BitcoinUTXO.SpendUTXO(transaction.Hash, transaction.FromAddress);
+                    BitcoinUTXO.SpendUTXO(transaction.Hash, transaction.ToAddress);
 
                     var hexTx = signedTransaction.ToHex();
 
                     var tx = new BitcoinTransaction
                     {
-                        Fee = (finalFee * SatoshiMultiplier),
+                        Fee = (newFee * SatoshiMultiplier),
                         Amount = transaction.Amount,
                         FromAddress = transaction.FromAddress,
                         ToAddress = transaction.ToAddress,
@@ -495,7 +457,7 @@ namespace VerifiedXCore.Bitcoin.Services
                         Signature = hexTx,
                         Timestamp = TimeUtil.GetTime(),
                         TransactionType = BTCTransactionType.Send,
-                        BitcoinUTXOs = coinListBtcUTXOs
+                        BitcoinUTXOs = transaction.BitcoinUTXOs
                     };
 
                     BitcoinTransaction.SaveBitcoinTX(tx);
@@ -509,11 +471,11 @@ namespace VerifiedXCore.Bitcoin.Services
                     return JsonConvert.SerializeObject(new { Success = true, Message = $"RBF Transaction Broadcasted.", tx.Hash });
                 }
 
-                return JsonConvert.SerializeObject(new { Success = true, Message = $"TX not verified" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"TX not verified: {txVerified.Item2}" });
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new { Success = true, Message = $"TX not verified. ERROR: {ApiErrorText.For(ex)}" });
+                return JsonConvert.SerializeObject(new { Success = false, Message = $"TX not verified. ERROR: {ApiErrorText.For(ex)}" });
             }
 
         }
