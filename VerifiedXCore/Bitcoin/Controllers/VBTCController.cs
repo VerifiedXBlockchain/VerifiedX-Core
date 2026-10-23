@@ -1756,10 +1756,11 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 if (!success)
                     return JsonConvert.SerializeObject(new { Success = false, Message = result });
 
+                var attestedContracts = allocations?.Where(a => VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(a.SCUID)).Select(a => a.SCUID).ToList() ?? new List<string>();
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
-                    Message = "vBTC V2 multi-contract withdrawal request created successfully",
+                    Message = MultiWithdrawalRequestMessage(allocations?.Count ?? 0, attestedContracts.Count, raw: false),
                     RequestHash = result,
                     TotalAmount = payload.Amount,
                     Destination = payload.BTCAddress,
@@ -1769,7 +1770,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Status = "Requested",
                     // Shares on vaults the chain watches are paid by those vaults' signers; CompleteWithdrawalMulti is
                     // needed only for the others (it reports where the watched ones stand).
-                    AttestedContracts = allocations?.Where(a => VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(a.SCUID)).Select(a => a.SCUID).ToList()
+                    AttestedContracts = attestedContracts
                 });
             }
             catch (Exception ex)
@@ -1779,10 +1780,37 @@ namespace VerifiedXCore.Bitcoin.Controllers
         }
 
         /// <summary>
-        /// Complete every outstanding share of a withdrawal request: one FROST ceremony, one
-        /// Bitcoin transaction and one WITHDRAWAL_COMPLETE per contract. Shares are independent —
-        /// a share that fails leaves the others paid and can simply be retried by calling this
-        /// again. Works for single-contract requests too (one share).
+        /// What a multi-contract withdrawal request's answer tells its caller: whether one contract covered the amount
+        /// (the request then has the single shape) and what is left to do once it is mined. Shares on vaults the chain
+        /// watches need nothing more; shares on older vaults are completed, by CompleteWithdrawalMulti on this node or the
+        /// raw completion routes for a wallet that signs elsewhere.
+        /// </summary>
+        internal static string MultiWithdrawalRequestMessage(int contracts, int attested, bool raw)
+        {
+            var created = raw
+                ? "Sign the Hash field and submit via SendRawRequestWithdrawalTx."
+                : contracts == 1
+                    ? "vBTC V2 withdrawal request created successfully (one contract covers the amount)."
+                    : $"vBTC V2 multi-contract withdrawal request created successfully ({contracts} contracts).";
+            var follow = "Follow it with GetWithdrawalRequestShares, or GetWithdrawalPin for each contract.";
+            if (contracts > 0 && attested == contracts)
+                return $"{created} Nothing more is needed once it is mined: each contract's Bitcoin transaction is fixed by the chain, signed by the vault's signers and completed when Bitcoin confirms it. {follow}";
+            var complete = raw
+                ? "complete them via PrepareCompleteWithdrawalRaw/ExecuteCompleteWithdrawalRaw"
+                : "complete them with CompleteWithdrawalMulti";
+            return attested == 0
+                ? $"{created} Once mined, {complete}. {follow}"
+                : $"{created} Once mined, the contracts in AttestedContracts need nothing more; for the others, {complete}. {follow}";
+        }
+
+        /// <summary>
+        /// Complete every outstanding share of a withdrawal request, and say where each stands. A share on a vault the
+        /// chain watches needs nothing: its Bitcoin transaction is fixed by the chain, signed by the vault's signers and
+        /// completed when Bitcoin confirms it, so its result is Paid with BTCTxHash, or BeingPaid with the transaction it
+        /// waits on in PinnedBTCTransactionHash. A share on an older vault gets one FROST ceremony, one Bitcoin
+        /// transaction and one WITHDRAWAL_COMPLETE. Shares are independent: a share that fails leaves the others and can
+        /// be retried by calling this again. Success means every share is paid; NothingToDo that none needs a retry.
+        /// Works for single-contract requests too (one share).
         /// </summary>
         [HttpPost("CompleteWithdrawalMulti")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
@@ -1808,6 +1836,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     Success = allSucceeded,
                     Message = allSucceeded ? "All withdrawal shares completed" : string.Join("; ", parts),
                     WithdrawalRequestHash = payload.WithdrawalRequestHash,
+                    // Every share paid (as Success). NothingToDo: every share is paid, being paid or closed, so the
+                    // caller only waits; false while a share failed and calling again would retry it.
+                    AllPaid = allSucceeded,
+                    NothingToDo = failed == 0 && results.Count > 0 && results.All(r => r.Success || r.BeingPaid || r.Refunded),
                     Paid = paidCount,
                     BeingPaid = beingPaid,
                     Refunded = refunded,
@@ -3289,6 +3321,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
                 _pendingRawVbtcTxs[tx.Hash] = tx;
 
+                var attestedContracts = allocations.Where(a => VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(a.SCUID)).Select(a => a.SCUID).ToList();
                 return JsonConvert.SerializeObject(new
                 {
                     Success = true,
@@ -3310,7 +3343,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     BitcoinTransactions = allocations.Count,
                     TotalAmount = payload.TotalAmount,
                     Destination = btcAddress,
-                    Message = "Sign the Hash field and submit via SendRawRequestWithdrawalTx. Once mined, complete EACH contract in Allocations via PrepareCompleteWithdrawalRaw/ExecuteCompleteWithdrawalRaw (or list them with GetWithdrawalRequestShares)."
+                    AttestedContracts = attestedContracts,
+                    Message = MultiWithdrawalRequestMessage(allocations.Count, attestedContracts.Count, raw: true)
                 });
             }
             catch (Exception ex)
