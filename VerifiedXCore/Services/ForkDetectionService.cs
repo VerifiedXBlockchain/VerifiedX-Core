@@ -86,6 +86,14 @@ namespace VerifiedXCore.Services
                     return;
                 }
 
+                // Without a membership record fork choice cannot weigh certificates and falls to lowest-hash-wins: a
+                // node waits for the record its peers hold before it chooses between branches.
+                if (CasterMembershipStore.MissingWhilePeersHaveOne())
+                {
+                    LogIfBlockedWhileStuck(myTip);
+                    return;
+                }
+
                 // STARTUP: IsChainSynced only flips true when the startup download loop finishes,
                 // and on a stranded node it never finishes (every block fails PREVHASH). So the
                 // unsynced guard is waived once the tip has been still for STALL_SECONDS — a node

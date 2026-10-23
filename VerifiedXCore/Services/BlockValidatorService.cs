@@ -780,6 +780,14 @@ namespace VerifiedXCore.Services
                     return result;
                 }
 
+                // Without a membership record no certificate is required at all, so a synced node waits for the record
+                // its peers hold (ValidatorMembershipPull, every minute) before it takes the next block.
+                if (!validateOnly && AtSyncedTip(block) && CasterMembershipStore.MissingWhilePeersHaveOne())
+                {
+                    DbContext.Rollback("BlockValidatorService.ValidateBlock()-noRecord");
+                    return result;
+                }
+
                 //ensures the timestamps being produced are correct
                 if (block.Height != 0)
                 {

@@ -744,6 +744,20 @@ namespace VerifiedXCore.Services
             return tipHeight >= existing.EffectiveFromHeight + SignedMarkReleaseMarginBlocks;
         }
 
+        /// <summary>
+        /// Pure: this node has no membership record while a majority (at least two) of the peers it last asked report
+        /// one. Without a record certificate enforcement is not armed: the node takes the next block uncertified and
+        /// fork choice falls through to lowest-hash-wins. Mainnet 7,562,232 (23 October 2026): 66 of one operator's 70
+        /// validators had no record and switched to the uncertified block that way. When peers report none either (the
+        /// legacy era, or seeds restarting a chain before they mint the genesis record), this is false.
+        /// </summary>
+        internal static bool MissingWhilePeersHaveOne(long? localSeq, IReadOnlyList<long> peerHeads)
+            => localSeq == null && peerHeads.Count >= 2 && peerHeads.Count(h => h >= 0) * 2 > peerHeads.Count;
+
+        /// <summary>This node, against the record heads its last membership pull observed.</summary>
+        internal static bool MissingWhilePeersHaveOne()
+            => MissingWhilePeersHaveOne(GetCurrent()?.RecordSeq, CasterDiscoveryService.LastObservedPeerHeads);
+
         /// <summary>Test/diagnostic support: clears the in-memory head cache (persisted data untouched).</summary>
         public static void InvalidateCache()
         {
