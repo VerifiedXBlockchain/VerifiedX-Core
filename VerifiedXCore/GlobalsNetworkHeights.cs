@@ -13,8 +13,8 @@ namespace VerifiedXCore
             Globals.V2ValHeight = Globals.IsTestNet ? 0 : 3_074_180;//change for mainnet.
             Globals.SpecialBlockHeight = Globals.IsTestNet ? 2000 : 3_074_185;//change for mainnet.
             Globals.GenesisValidator = Globals.IsTestNet ? "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" : "RBdwbhyqwJCTnoNe1n7vTXPJqi5HKc6NTH";
-            Globals.TXHeightRule5 = Globals.IsTestNet ? 746313 : Globals.TXHeightRule5;
-            Globals.VbtcPrivacyDisableHeight = Globals.IsTestNet ? 1 /* TODO set testnet disable height */ : 7_281_000L;
+            Globals.TXHeightRule5 = Globals.IsTestNet ? 1 : Globals.TXHeightRule5;
+            Globals.VbtcPrivacyDisableHeight = Globals.IsTestNet ? 1 : 7_281_000L;
             Globals.V2WithdrawalExpiryFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
             Globals.V2WithdrawalOwnerAddBackFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
             Globals.VbtcLegacyTransferBypassFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
@@ -22,14 +22,14 @@ namespace VerifiedXCore
             Globals.BridgeBurnBindingHeight = Globals.IsTestNet ? 1 : 7_281_000L;
             Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 7_296_200L;
             Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 7_296_200L;
-            // TODO set both: testnet must be ABOVE its tip at deploy (block 1,017,408 holds a request the fee floor refuses).
-            Globals.VbtcWithdrawalConcurrencyHeight = Globals.IsTestNet ? 1_018_000 : Globals.VbtcWithdrawalConcurrencyHeight;
-            // Must be above the tip when every node runs this build (see Globals.VbtcCancellationVoteRulesHeight).
-            Globals.VbtcCancellationVoteRulesHeight = Globals.IsTestNet ? 1_019_000 : Globals.VbtcCancellationVoteRulesHeight;
-            Globals.VbtcV2DkgAttestationHeight = Globals.IsTestNet ? 1_002_979 : Globals.VbtcV2DkgAttestationHeight;
-            Globals.VbtcV1RetirementHeight = Globals.IsTestNet ? 1_002_979 : Globals.VbtcV1RetirementHeight;
+            // Testnet restarted from genesis on 2026-10-22 (the move to the VFX signet): the rules that were active on the
+            // old chain start at block 1. The bonds and the Bitcoin attestation are staged at 300/400 (Globals.FundLossAuditTestnetHeight).
+            Globals.VbtcWithdrawalConcurrencyHeight = Globals.IsTestNet ? 1 : Globals.VbtcWithdrawalConcurrencyHeight;
+            Globals.VbtcCancellationVoteRulesHeight = Globals.IsTestNet ? 1 : Globals.VbtcCancellationVoteRulesHeight;
+            Globals.VbtcV2DkgAttestationHeight = Globals.IsTestNet ? 1 : Globals.VbtcV2DkgAttestationHeight;
+            Globals.VbtcV1RetirementHeight = Globals.IsTestNet ? 1 : Globals.VbtcV1RetirementHeight;
             Globals.VbtcVaultTxSizeHeight = Globals.IsTestNet ? 1 : Globals.VbtcVaultTxSizeHeight;
-            // Fund-loss audit (Oct 2026): one activation for all its rules (Globals.FundLossAuditTestnetHeight, reset 2026-10-13).
+            // Fund-loss audit (Oct 2026): one activation for all its rules (Globals.FundLossAuditTestnetHeight, 400 since the 2026-10-22 reset).
             Globals.PrivateTxSupplyRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PrivateTxSupplyRulesHeight;
             Globals.AddressFreezeHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.AddressFreezeHeight;
             Globals.SaleCompleteContractRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.SaleCompleteContractRulesHeight;

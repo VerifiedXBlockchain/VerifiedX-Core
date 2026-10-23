@@ -265,17 +265,20 @@ namespace VerifiedXCore
         // mainnet height. Each rule keeps its own constant (so one can be moved alone if ever needed); all are set to
         // FundLossAuditHeight. Must be above the tip when every validator runs this build. Testnet values in Program.cs.
         /// <summary>
-        /// Shared mainnet activation height of the fund-loss audit rules. NOT SET: a placeholder far above the chain
-        /// until the release goes to mainnet, when it is set to the tip plus a few days (it was 7,517,000, reset
-        /// 2026-10-13, and the chain passed it on 2026-10-16 before the build was deployed). The same height as
-        /// <see cref="BitcoinAttestationRecordHeight"/>.
+        /// Shared mainnet activation height of the fund-loss audit rules: tip 7,540,524 on 2026-10-20 02:15 UTC plus 48 hours
+        /// (~12.6 s/block, ~13,700 blocks). It was 7,517,000 (reset 2026-10-13; the chain passed it on 2026-10-16 before
+        /// the build was deployed), then a placeholder. The same height as <see cref="BitcoinAttestationRecordHeight"/>.
         /// </summary>
-        public const long FundLossAuditHeight = 999_999_999L; // TODO set before the mainnet release: tip plus a few days
+        public const long FundLossAuditHeight = 7_554_250L;
         /// <summary>
-        /// Testnet activation of the same rules (Program.cs / WardenService). Reset 2026-10-17 from 1,143,500, which the
-        /// chain had passed before the build was deployed: tip 1,151,481 on 2026-10-17 plus three days (~6,800 blocks/day).
+        /// Testnet activation of the same rules (GlobalsNetworkHeights / WardenService). Set 2026-10-22 for the testnet
+        /// reset to genesis (the move to the VFX signet): block 400, one block after the validator bonds start (399) and
+        /// 100 after the bond grandfather height (<see cref="BitcoinAttestationObserveTestnetHeight"/>, 300), so the
+        /// validators registered and funded before block 300 count as aged at once and vBTC works from block 400. It
+        /// cannot be 1: the bonds would start at block 0, which genesis never applies, and every node would stop at block 1.
+        /// It was 1,168,050 on the chain before the reset.
         /// </summary>
-        public const long FundLossAuditTestnetHeight = 1_172_000L;
+        public const long FundLossAuditTestnetHeight = 400L;
 
         /// <summary>
         /// Item 1 (stage 1): a ZK-authorized private transaction (VFX/vBTC unshield, private transfer) may not take more
@@ -642,10 +645,15 @@ namespace VerifiedXCore
         /// Program.cs (<see cref="BitcoinAttestationObserveTestnetHeight"/>).
         /// </summary>
         public static long BitcoinAttestationObserveHeight = 7_496_000L;
-        /// <summary>The three attestation heights on testnet (applied in Program.cs and WardenService): the tip of 2026-10-13, tip plus three days, and three days after that (plan 8.4).</summary>
-        public const long BitcoinAttestationObserveTestnetHeight = 1_124_000L;
+        /// <summary>
+        /// The three attestation heights on testnet (applied in GlobalsNetworkHeights), set 2026-10-22 for the reset to
+        /// genesis. Observation at 300, which is also the bond grandfather height: validators active there are aged at
+        /// the first look. Recording at 400 (with the fund-loss rules). Enforcement one block later, at 401: a vault made
+        /// before recording is unwatched and frozen from there, and no older vaults exist on the new chain.
+        /// </summary>
+        public const long BitcoinAttestationObserveTestnetHeight = 300L;
         public const long BitcoinAttestationRecordTestnetHeight = FundLossAuditTestnetHeight;
-        public const long BitcoinAttestationTestnetHeight = 1_192_500L; // H1 plus three days (reset 2026-10-17 with H1)
+        public const long BitcoinAttestationTestnetHeight = 401L;
         /// <summary>
         /// H1, recording: the Bitcoin report and rewind transactions are accepted and applied, and a vault created from
         /// this height on is watched: its deposit script is in state, its owner's balance is its attested coins, and its
@@ -703,24 +711,25 @@ namespace VerifiedXCore
             "0020082039fa7abdc6f212da89c3a260148f33c60644b71b61710000000000000000000042359bc9481c2d090a7ec11d036b19df3eb0c852313bbc855c2305bd53cdff2a50abc06ac51e021700f0e9ae" +
             "00000038c8423e19b206b534b9ddfb365c407b6b05cc85f6301b000000000000000000003234e2a63c1c7d747fb8076515d0f46a8f1403b6f292291fa30d9e66380ad07e88abc06ac51e0217183e320e" +
             "00e00020ea7409145abed3693b6aa5e269dea055406e0962804301000000000000000000a8f40cc468f3aa4518fdc368e37fc7aff01eb12b293885f847517602a96e3a93d4abc06af01e021779d3a409";
-        /// <summary>As <see cref="BitcoinCheckpointHeightMainnet"/>, for Bitcoin testnet4 (the VFX testnet).</summary>
-        public static long BitcoinCheckpointHeightTestnet = 155_232;
-        /// <summary>As <see cref="BitcoinCheckpointHeadersMainnet"/>, for Bitcoin testnet4.</summary>
-        /// Set 2026-10-13: testnet4 blocks 155,221 to 155,232 (the last is 0000000000000002314dc5b90175408b22d2c80dfe99979629b40e572d40345b),
-        /// read from mempool.space and checked against two other explorers.
+        /// <summary>As <see cref="BitcoinCheckpointHeightMainnet"/>, for the VFX signet (the VFX testnet's Bitcoin).</summary>
+        public static long BitcoinCheckpointHeightTestnet = 2_016;
+        /// <summary>As <see cref="BitcoinCheckpointHeadersMainnet"/>, for the VFX signet.</summary>
+        /// Set 2026-10-22: VFX signet blocks 2,005 to 2,016 (the last is 0000027cac5b1c96e3459b40b572662d7e9d2014336ef73362befaca43a9ba9a),
+        /// read from the signer's bitcoind (manage.py signet_status in vfx-node-farm). Height 2,016 is the signet's first
+        /// retarget, where the farm's catch-up mining ended; blocks are ten minutes apart from there on.
         public static string BitcoinCheckpointHeadersTestnet =
-            "00e00422464783a8ec0371af02e41bb89392469b2f6a65200583b20254fbcc0000000000d832ee5d0c0dcbb6f499c5fcbcd499139d8843b5df506aaa0bea03a0b621abcd7687c36affff001d2801efd9" +
-            "0000002041ae6a0e6fe359b11225bae36bf2c210a02e56c5ea26e76ba0b88d0000000000d3669166e10d36c7e658abce1cc92b28f1560d5b2dafcdf34cf1160567e48454278cc36affff001d521685b1" +
-            "00000020e4a00ad2bb9c5b9f35f6c7b5e65b5ea1f762845b2abc0b42a9b389ae0000000030589a3a2c971f7a60ab872b1be254358d68e4df6d429be7930b156d4eec9c7bd890c36affff001d121abfab" +
-            "000000200f3846f43fc05f736ef711f077a84e0904e9efd1a5c747619d07dc0c00000000fa4993dca019ec9e1cfe6640d035886085b3bbe459643416b4dc806eafe530638995c36affff001d5e0ddf82" +
-            "0000002042f469d300162601f3b66b19c9915ad375fd061812c3799ebc9d5c0000000000e7a35434b8bf5a818f5c481005ac912d772d0dcfa97dd0a7fe66a8372d8cd0133a9ac36affff001dabb8bc2f" +
-            "000000209a801d1145f0d940659d1b9508a2bf5efb77a5f61876c697fde2d7520000000023f24e1b201f144cb51a1d4f2f71df7e82849440501d7ca42667ea46190a135feb9ec36affff001d119a4cab" +
-            "00c0fd29be213abfa1ac7bdcdb675bb814f6851fccd4e500fe9adbdf3e771e80000000008649813182029ed592553819b46a475d769640f537239a90aed932daca8c29247787c36a6e3f031938fb3930" +
-            "000056209e1c2b12ed97d68554b079472eecc622ed2418fa257d5b35000000000000000043b4ff5885eefeabaaaa4f6bad4749cd2db4b9ab6e0c1ec220f542fe6f1d4391288cc36affff001db8004c4c" +
-            "0040bf21aa63f10433621af301e2040935c393ad6429ca1fafea8076b854d800000000007646430c9d1d20eb71e253b454ecdca1bfb8ff3f20e5ac0412c9e21d23ca4ae6d990c36affff001d4b18987f" +
-            "00205622c641616194c97c09763dec871693c7e668f8f5889bfbb0907fbdaa0000000000e6aff20aa01019f5f19c1f39cb548eb5ef270885017e0e427ea995e9bcdaf74b8a95c36affff001d6c391966" +
-            "0040dd21c2f8139c10fec685a51b67b3c5b85a798c5a161234776e042ac28b00000000005514adc04431860a2c882aaf0decd5ea573999052e193077c495028162439fe03b9ac36affff001d6e00c924" +
-            "00c01133a4b225a064922585bd9db58ad1cb7127031c8ba15252c0db7a31cc00000000007f6bf7535d4eb0882eb99466ccacdc6f6848c61d4936aec2e67c75e233f7c363e397c36a437e0319e11e4279";
+            "0000002099f97d53425a68a48cfa3e730cb54d0c649c40991145db6542de0bac1601000093bfead530fed3c8986d6af585f750695cecb21e3584919c59438ac077c7ee7c723dda6aae77031e364f1000" +
+            "00000020d428476aba2bc2fa4b3b05557afc3f4ed9a43c524586271f3b1d6bf36a03000088624549173c2676841a9bfdf9107d555075fb866607cc13063c3871d0e27d6aca3fda6aae77031e199d5b00" +
+            "0000002057152bf0f67c7f5b2a625783bc8a7d457644a2bdaf61762ca6be8d19eb00000057ce32cda9fa6d10f488bad2ae15dc5c37d22a254c42491c37bd76afa7fddab62242da6aae77031e3d790100" +
+            "00000020cd700d6ee5af0368984e378734892603a307ba095421cc74838a751111030000f8c2520c61b82662fed075d2b43b6103691977797655bf937479779138f3b6597a44da6aae77031ef5964800" +
+            "000000207c3aa9dfc63e28d750f305a682c4585b8030e06805d350e7b74d87964d01000046e0f5fef886b02bfaf6d01169545bcdf75145e32562c58766e6130d0db70407d246da6aae77031eec00d700" +
+            "00000020d9d5723c063dc7b49c0e8a04c8d68af207df3abe3625df94b9b28c58630000000d437da8615a70dfa824e2d40a7e40bbe94276fdabf6008ecd1583c7d7aed5492a49da6aae77031ef63b1600" +
+            "00000020bc39ad65f211c1b696e48c723c7e5e0b2fb1f7aa4cc4d572e9dd1dbc1e010000918227fa0b8608e1b51183800480516c7401f7fbbf4e345aba541435e1ac6745824bda6aae77031ef3ae6000" +
+            "000000203224dccc8d2d4a7b5ff21d8895a0d1cbdb7ebbde5cf3f31aaea1209b76010000cc39ea73aef3b0b717ea8f5e591f97e2714d9f241f4e12ecd564b90873548b7ada4dda6aae77031e4c1fa300" +
+            "00000020a7cd2537a5038d97cf9ec5d235e7a5222061256a58207a6bd506198adf010000a0b991beb23ccb55fa6d251f6c04d95bdce6588251d06d1e61496952b0711bb43250da6aae77031ec34da500" +
+            "000000200462b4f4add7ca5ee13ce0825ae690abd78a23240368e9ec42be91e76e0200005309c5ba35428e159e44b7c987d92fc3f0c7821149c49e1a0ee6f85a101c903c8a52da6aae77031ecf043300" +
+            "000000201f3dd59ff1b48d7bafc354e0edf5b6744bfb1b5712ea71da4c7ad2b72e020000ea2522ca833fa2a0f488ecce772157cfad3e5d0d5590d6de504d634a24837a1ee254da6aae77031ec24a5a00" +
+            "000000201fdbedb23b6f5ae64a0f0c947d8c54c6d6748959e167b98cc0ed1e33c50000003ec29d5530eafe3f13e05d1edc07473247efd923920809fcbdb6603526a622363a57da6aae77031eeab41f00";
         public static readonly HashSet<string> FrozenAddresses = new(StringComparer.Ordinal)
         {
             "RB3eeBH258arkuePCJf5NMVMSaUyhyy9g6",

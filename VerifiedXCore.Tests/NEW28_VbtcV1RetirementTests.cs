@@ -238,7 +238,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Globals.VbtcV2DkgAttestationHeight, Globals.VbtcV1RetirementHeight);
             var root = Path.GetDirectoryName(Path.GetDirectoryName(ThisFile()))!;
             var heights = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "GlobalsNetworkHeights.cs")); // the one place per-network heights are set
-            Assert.Contains("Globals.VbtcV1RetirementHeight = Globals.IsTestNet ? 1_002_979 : Globals.VbtcV1RetirementHeight;", heights);
+            Assert.Contains("Globals.VbtcV1RetirementHeight = Globals.IsTestNet ? 1 : Globals.VbtcV1RetirementHeight;", heights);
         }
 
         // ── wallet side: refused at once, no height ──

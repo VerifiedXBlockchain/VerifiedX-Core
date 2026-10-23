@@ -18,6 +18,7 @@ namespace VerifiedXCore.Tests
     {
         private const long MainnetCheckpoint = 967_680;
         private const long Testnet4Checkpoint = 153_216;
+        private const long SignetCheckpoint = 2_016;
 
         private static SortedDictionary<long, BtcHeader> Load(string file)
         {
@@ -226,7 +227,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void TheConfiguredCheckpoint_ComesFromTheNetworksSettings()
         {
-            var all = Load("btc-headers-testnet4.txt");
+            var all = Load("btc-headers-vfx-signet.txt");
             var priorNet = Globals.IsTestNet; var priorH = Globals.BitcoinCheckpointHeightTestnet; var priorHex = Globals.BitcoinCheckpointHeadersTestnet;
             try
             {
@@ -236,12 +237,12 @@ namespace VerifiedXCore.Tests
                 Assert.Null(BtcCheckpoint.Configured(out var unset));
                 Assert.Contains("no checkpoint headers are set", unset);
 
-                Globals.BitcoinCheckpointHeightTestnet = Testnet4Checkpoint;
-                Globals.BitcoinCheckpointHeadersTestnet = string.Join("", Enumerable.Range(0, 12).Select(i => all[Testnet4Checkpoint - 11 + i].Hex));
+                Globals.BitcoinCheckpointHeightTestnet = SignetCheckpoint;
+                Globals.BitcoinCheckpointHeadersTestnet = string.Join("", Enumerable.Range(0, 12).Select(i => all[SignetCheckpoint - 11 + i].Hex));
                 var configured = BtcCheckpoint.Configured(out var reason);
                 Assert.True(configured != null, reason);
-                Assert.Equal(all[Testnet4Checkpoint].Hash, configured!.Tip.Hash);
-                Assert.Same(BtcChainRules.Testnet4, BtcChainRules.Current);
+                Assert.Equal(all[SignetCheckpoint].Hash, configured!.Tip.Hash);
+                Assert.Same(BtcChainRules.Signet, BtcChainRules.Current);
             }
             finally
             {

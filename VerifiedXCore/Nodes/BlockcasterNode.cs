@@ -253,6 +253,10 @@ namespace VerifiedXCore.Nodes
 
                 if (!Globals.IsBlockCaster)
                 {
+                    // A validator that does not cast keeps its membership record current here; its only other adoption is
+                    // GetBlockcasters at startup, and a record minted after that never reached it (ValidatorMembershipPull).
+                    await ValidatorMembershipPull.PullIfDueAsync();
+
                     // FIX 4: Self-recovery heartbeat — poll a peer caster's /GetCasters endpoint.
                     // If our address appears in their caster list, we were promoted but missed the notification.
                     // Flip IsBlockCaster=true and merge the caster list so we can begin consensus.
