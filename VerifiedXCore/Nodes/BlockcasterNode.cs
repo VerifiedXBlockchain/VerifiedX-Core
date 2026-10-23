@@ -4759,6 +4759,13 @@ namespace VerifiedXCore.Nodes
         /// </summary>
         private static async Task ForkRecoveryAsync(long stuckHeight)
         {
+            var certifiedTip = ForkRecoveryUtility.CertifiedTipRefusal(Globals.LastBlock);
+            if (certifiedTip != null)
+            {
+                ForkRecoveryUtility.LogCertifiedTipRefusal("CasterSelfHeal", certifiedTip);
+                return;
+            }
+
             // Prevent concurrent recovery attempts
             if (Interlocked.CompareExchange(ref _forkRecoveryInProgress, 1, 0) != 0)
                 return;
