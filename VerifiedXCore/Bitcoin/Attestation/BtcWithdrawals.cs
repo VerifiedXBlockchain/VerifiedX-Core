@@ -138,7 +138,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// The Bitcoin address rules of a withdrawal request (see <see cref="Refusal"/>), with the same answers, for the
         /// routes that build a request before its requester signs it: an address that is not one on this network, one
         /// with spaces around it, or the deposit address of a watched vault it withdraws from is refused there, so a
-        /// signer is never handed a transaction the chain will not accept. Null when the address passes.
+        /// signer is never handed a transaction the chain will not accept. The routes apply them to every vault, a
+        /// little stricter than the chain, which applies them only to watched vaults: an older vault's withdrawal to
+        /// such an address could never be paid either. Null when the address passes.
         /// </summary>
         public static string? DestinationRefusal(string? address, IEnumerable<string?> vaults)
         {

@@ -3144,7 +3144,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient balance. Available: {balResult.availableBalance}, Requested: {payload.Amount}" });
 
                 var btcAddress = payload.BTCAddress.ToBTCAddressNormalize();
-                // The address rules the chain applies to the request, checked before anything is handed out to sign.
+                // The chain's address rules for the request (on every vault), checked before anything is handed out to sign.
                 var destinationError = VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.DestinationRefusal(btcAddress, new[] { payload.SmartContractUID });
                 if (destinationError != null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = destinationError });
@@ -3271,7 +3271,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 }
 
                 var btcAddress = payload.BTCAddress.ToBTCAddressNormalize();
-                // The address rules the chain applies to the request, checked before anything is handed out to sign.
+                // The chain's address rules for the request (on every vault), checked before anything is handed out to sign.
                 var destinationError = VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.DestinationRefusal(btcAddress, allocations.Select(a => (string?)a.SCUID));
                 if (destinationError != null)
                     return JsonConvert.SerializeObject(new { Success = false, Message = destinationError });
