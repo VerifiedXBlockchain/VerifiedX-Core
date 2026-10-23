@@ -43,15 +43,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public bool EnforceBip94 { get; }
         /// <summary>Test networks only: the target never changes (every header carries <see cref="LimitBits"/>).</summary>
         public bool NoRetarget { get; }
-        /// <summary>
-        /// Signets: a header buries a block only once its own block is held, and so has passed the signature check
-        /// (<see cref="Net.BtcBlockCheck"/>). A header carries no signature, and proof of work at a signet's limit is
-        /// nearly free. Read by the report planner only: a signer signs only what it plans, while consensus
-        /// (<see cref="BtcReportVerifier"/>) holds headers, never blocks.
-        /// </summary>
-        public bool BurialNeedsHeldBlocks { get; }
 
-        private BtcChainRules(string name, uint limitBits, BigInteger limit, bool allowMinDifficulty, bool enforceBip94, bool noRetarget, bool burialNeedsHeldBlocks = false)
+        private BtcChainRules(string name, uint limitBits, BigInteger limit, bool allowMinDifficulty, bool enforceBip94, bool noRetarget)
         {
             Name = name;
             LimitBits = limitBits;
@@ -59,7 +52,6 @@ namespace VerifiedXCore.Bitcoin.Attestation
             AllowMinDifficulty = allowMinDifficulty;
             EnforceBip94 = enforceBip94;
             NoRetarget = noRetarget;
-            BurialNeedsHeldBlocks = burialNeedsHeldBlocks;
         }
 
         private static readonly BigInteger MainLimit = (BigInteger.One << 224) - BigInteger.One;
@@ -76,7 +68,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// second of one CPU, so it is not what secures these blocks: each fetched block must also carry the farm's
         /// signature (<see cref="Net.BtcBlockCheck"/>).
         /// </summary>
-        public static readonly BtcChainRules Signet = new("vfx-signet", SignetLimitBits, new BigInteger(0x0377ae) << 216, allowMinDifficulty: false, enforceBip94: false, noRetarget: false, burialNeedsHeldBlocks: true);
+        public static readonly BtcChainRules Signet = new("vfx-signet", SignetLimitBits, new BigInteger(0x0377ae) << 216, allowMinDifficulty: false, enforceBip94: false, noRetarget: false);
 
         /// <summary>
         /// Tests only: regtest's easiest target with the testnet rule that a block more than twenty minutes after its
@@ -90,9 +82,6 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// chains of headers. Reachable only through <see cref="OverrideForTests"/>, which production never sets.
         /// </summary>
         internal static readonly BtcChainRules Regtest = new("regtest", 0x207fffff, (BigInteger.One << 255) - BigInteger.One, allowMinDifficulty: false, enforceBip94: false, noRetarget: true);
-
-        /// <summary>Tests only: <see cref="Regtest"/> with a signet's burial rule (<see cref="BurialNeedsHeldBlocks"/>).</summary>
-        internal static readonly BtcChainRules RegtestSigned = new("regtest-signed", 0x207fffff, (BigInteger.One << 255) - BigInteger.One, allowMinDifficulty: false, enforceBip94: false, noRetarget: true, burialNeedsHeldBlocks: true);
 
         /// <summary>Tests only. Null in every production process.</summary>
         internal static BtcChainRules? OverrideForTests;
