@@ -85,6 +85,7 @@ namespace VerifiedXCore.Tests
                 accepted[height] = header;
                 Assert.Equal(BtcChainRules.SignetLimitBits, header.Bits);
                 Assert.True(BtcChainRules.Signet.CountsTowardBurial(header));
+                Assert.True(BtcChainRules.Signet.BurialNeedsHeldBlocks);
             }
             Assert.True(accepted.Keys.Max() > Checkpoint + 25);
         }

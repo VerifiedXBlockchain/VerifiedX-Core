@@ -167,11 +167,16 @@ namespace VerifiedXCore.Bitcoin.Attestation
             // A block is reported once it is buried: `depth` headers that count are above it (on testnet4 a
             // minimum-difficulty header does not count, so the burying header can be further up than h + depth).
             var rules = BtcChainRules.Current;
+            // On a signet a header counts toward burial only once its block is held (fetched and its signature checked):
+            // otherwise headers anyone can make would bury a real deposit before the chain has. Asking queues the fetch.
+            Func<long, BtcHeader?> burying = rules.BurialNeedsHeldBlocks
+                ? x => view.BlockAt(x) != null ? view.HeaderAt(x) : null
+                : view.HeaderAt;
             var quietThrough = meta.EventsThroughHeight + BtcAttestRules.QuietBlocks;
             var last = meta.EventsThroughHeight;
             for (var h = meta.EventsThroughHeight + 1; h <= quietThrough; h++)
             {
-                var buriedAt = rules.BuriedAt(h, view.TipHeight, depth, view.HeaderAt);
+                var buriedAt = rules.BuriedAt(h, view.TipHeight, depth, burying);
                 if (buriedAt == null) break; // not buried yet, and so nothing above it is
                 last = h;
                 var header = view.HeaderAt(h);
@@ -203,7 +208,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             // ── 3c. A whole quiet range, buried, with no event ──────────────────────────────────────────────
             if (last == quietThrough)
             {
-                var quietBuriedAt = rules.BuriedAt(last, view.TipHeight, depth, view.HeaderAt)!.Value;
+                var quietBuriedAt = rules.BuriedAt(last, view.TipHeight, depth, burying)!.Value;
                 var headers = Hexes(view, meta.TipHeight + 1, quietBuriedAt);
                 if (headers == null)
                 {

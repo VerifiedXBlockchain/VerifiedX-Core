@@ -123,6 +123,32 @@ namespace VerifiedXCore.Tests
             Assert.Equal(49_000, BtcAttestStore.Total(vault.Uid).HeldSats);
         }
 
+        /// <summary>
+        /// Greptile on #65: on a signet, headers anyone can make must not bury a real deposit. A header counts only once
+        /// its block is held (and so signed); the same view on rules without that requirement reports at once.
+        /// </summary>
+        [Fact]
+        public async Task OnASignet_AHeaderWhoseBlockIsNotHeld_BuriesNothing()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var at = _btc.Mine(Pay(vault.Script, 40_000));
+            _btc.MineEmpty(BtcAttestRules.Depth);
+            var view = new View(_btc);
+            view.NotFetched.Add(at + BtcAttestRules.Depth); // the header that would complete the burial
+
+            Assert.Single(new BtcReportPlanner().Plan(view, Tip).Reports); // header-only rules: buried already
+
+            BtcChainRules.OverrideForTests = BtcChainRules.RegtestSigned;
+            var plan = _planner.Plan(view, Tip);
+            Assert.Empty(plan.Reports);
+            Assert.Contains(at + BtcAttestRules.Depth, view.Asked); // its fetch is asked for
+
+            view.NotFetched.Clear();
+            Assert.Equal(new[] { BtcPlannedReport.Forward }, await Drive(view));
+            Assert.Equal(40_000, BtcAttestStore.Total(vault.Uid).HeldSats);
+        }
+
         [Fact]
         public async Task ABlockThatHasNotBeenFetched_IsWaitedFor_NeverSkipped()
         {
