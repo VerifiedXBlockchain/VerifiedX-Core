@@ -1726,7 +1726,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
         /// transaction (see CompleteWithdrawalMulti), so the requestor pays one miner fee per
         /// contract used and the payout can settle partially.
         /// </summary>
-        /// <param name="payload">Withdrawal request details (SmartContractUID is ignored)</param>
+        /// <param name="payload">Withdrawal request details. SmartContractUID is not needed and is ignored if sent.</param>
         /// <returns>The request hash plus the per-contract allocation the request opened</returns>
         [HttpPost("RequestWithdrawalMulti")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
@@ -6008,7 +6008,11 @@ namespace VerifiedXCore.Bitcoin.Controllers
 
     public class VBTCWithdrawalPayload
     {
-        public string SmartContractUID { get; set; }
+        /// <summary>
+        /// The contract to withdraw from. RequestWithdrawal needs it; RequestWithdrawalMulti does not use it (it allocates
+        /// across every contract the requestor holds), so it is optional here and each route checks it itself.
+        /// </summary>
+        public string? SmartContractUID { get; set; }
         /// <summary>
         /// The VFX address requesting withdrawal. Can be any address with a vBTC balance — not just the contract owner.
         /// </summary>
