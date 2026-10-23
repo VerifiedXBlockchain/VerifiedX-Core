@@ -30,12 +30,14 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
     /// <summary>
     /// A fetched block proves itself against a header already validated (plan 2.3): it must carry that header, start
     /// with the only coinbase transaction, and its transactions must hash to the header's Merkle root. A copy that
-    /// repeats transactions (which can keep the root unchanged) is refused.
+    /// repeats transactions (which can keep the root unchanged) is refused. On a signet the block must also be signed
+    /// by the network's challenge (BIP 325): there, proof of work is nearly free, and the signature is what makes a
+    /// block one of the chain's, so a heavier chain anyone can make carries no block a deposit or spend is read from.
     /// </summary>
     public static class BtcBlockCheck
     {
-        /// <summary>Null when <paramref name="block"/> is the block of <paramref name="header"/>.</summary>
-        public static string? Verify(Block? block, BtcHeader header)
+        /// <summary>Null when <paramref name="block"/> is the block of <paramref name="header"/> on <paramref name="network"/>.</summary>
+        public static string? Verify(Block? block, BtcHeader header, Network network)
         {
             if (block == null) return "no block";
             string headerHex;
@@ -55,9 +57,12 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
                 if (!seen.Add(id)) return "the block repeats a transaction";
                 ids.Add(id);
             }
-            return string.Equals(BtcMerkle.RootOf(ids), header.MerkleRoot, StringComparison.Ordinal)
-                ? null
-                : "the block's transactions do not hash to the header's Merkle root";
+            if (!string.Equals(BtcMerkle.RootOf(ids), header.MerkleRoot, StringComparison.Ordinal))
+                return "the block's transactions do not hash to the header's Merkle root";
+
+            if (network.Consensus.SignetChallenge != null && !SignetSolution.Verify(block, network, out var unsigned))
+                return $"the block is not signed for {network.Name}: {unsigned}";
+            return null;
         }
     }
 
@@ -276,11 +281,13 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
             _network = network;
         }
 
-        /// <summary>The explorers for a network (testnet4 is served by mempool.space only).</summary>
+        /// <summary>The explorers for a network: the public ones on mainnet, the signet's own on the VFX signet.</summary>
         public static List<BtcEsploraSource> For(Network network) =>
             network == Network.Main
                 ? new List<BtcEsploraSource> { new("https://mempool.space/api", network), new("https://blockstream.info/api", network) }
-                : new List<BtcEsploraSource> { new("https://mempool.space/testnet4/api", network) };
+                : network == Network.TestNet4
+                    ? new List<BtcEsploraSource> { new("https://mempool.space/testnet4/api", network) }
+                    : new List<BtcEsploraSource> { new(VfxSignet.EsploraUrl, network) };
 
         /// <summary>A few headers at a time: enough for a fallback, never the bulk of a sync.</summary>
         public const int HeadersPerCall = 12;

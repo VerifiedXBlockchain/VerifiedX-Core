@@ -89,12 +89,13 @@ namespace VerifiedXCore.Tests
         // ---------- Esplora cross-check routing ----------
 
         [Fact]
-        public void EsploraCrossCheck_NotSupportedOnTestnet4()
+        public void EsploraCrossCheck_NotSupportedOnTestnet4OrTheVfxSignet()
         {
             // Both Esplora integrations route non-mainnet to TESTNET3 URLs, so on testnet4 their
-            // answers are wrong-chain poison for DecideEmptyVerdict — the cross-check must be
+            // answers (and on the VFX signet) are wrong-chain poison for DecideEmptyVerdict — the cross-check must be
             // skipped entirely (Electrum quorum only).
             Assert.False(BitcoinTransactionService.IsEsploraCrossCheckSupported(NBitcoin.Network.TestNet4));
+            Assert.False(BitcoinTransactionService.IsEsploraCrossCheckSupported(NBitcoin.Network.VfxSignet));
         }
 
         [Fact]

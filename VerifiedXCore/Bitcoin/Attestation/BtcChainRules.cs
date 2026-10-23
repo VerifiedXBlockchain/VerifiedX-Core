@@ -3,7 +3,8 @@ using System.Numerics;
 namespace VerifiedXCore.Bitcoin.Attestation
 {
     /// <summary>
-    /// Bitcoin's header rules for the two networks this chain follows: mainnet, and testnet4 (BIP 94). A header is
+    /// Bitcoin's header rules for the networks this chain follows: mainnet, and on the VFX testnet the VFX signet (its
+    /// testnet4 rules, BIP 94, stay for the record and the tests). A header is
     /// accepted into the attested chain only when it extends the stored tip and passes every rule here. The rules read
     /// nothing but earlier headers, so every node reaches the same verdict with no network.
     ///
@@ -58,6 +59,17 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public static readonly BtcChainRules Mainnet = new("mainnet", PowLimitBits, MainLimit, allowMinDifficulty: false, enforceBip94: false, noRetarget: false);
         public static readonly BtcChainRules Testnet4 = new("testnet4", PowLimitBits, MainLimit, allowMinDifficulty: true, enforceBip94: true, noRetarget: false);
 
+        /// <summary>The easiest target a signet allows, compact form (00000377ae...).</summary>
+        public const uint SignetLimitBits = 0x1e0377ae;
+
+        /// <summary>
+        /// The VFX signet (BIP 325): mainnet's rules (no easy blocks, no BIP 94) at a signet's easiest target, which
+        /// is where its blocks stay with one signer mining every ten minutes. Proof of work at that target costs a
+        /// second of one CPU, so it is not what secures these blocks: each fetched block must also carry the farm's
+        /// signature (<see cref="Net.BtcBlockCheck"/>).
+        /// </summary>
+        public static readonly BtcChainRules Signet = new("vfx-signet", SignetLimitBits, new BigInteger(0x0377ae) << 216, allowMinDifficulty: false, enforceBip94: false, noRetarget: false);
+
         /// <summary>
         /// Tests only: regtest's easiest target with the testnet rule that a block more than twenty minutes after its
         /// parent uses it, so that tests can produce chains mixing blocks of full difficulty (any harder target, fixed
@@ -74,8 +86,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <summary>Tests only. Null in every production process.</summary>
         internal static BtcChainRules? OverrideForTests;
 
-        /// <summary>The rules for the Bitcoin network this node's chain follows (testnet4 on VFX testnet, mainnet otherwise).</summary>
-        public static BtcChainRules Current => OverrideForTests ?? (Globals.IsTestNet ? Testnet4 : Mainnet);
+        /// <summary>The rules for the Bitcoin network this node's chain follows (the VFX signet on VFX testnet, mainnet otherwise).</summary>
+        public static BtcChainRules Current => OverrideForTests ?? (Globals.IsTestNet ? Signet : Mainnet);
 
         /// <summary>
         /// Whether a header counts toward the burial of the blocks below it. On a network with the testnet rule a

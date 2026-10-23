@@ -127,7 +127,7 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
         private async Task<List<IPEndPoint>> DiscoverFromSeedsAsync(CancellationToken ct)
         {
             var found = new List<IPEndPoint>();
-            foreach (var seed in _network == Network.Main ? MainnetSeeds : Testnet4Seeds)
+            foreach (var seed in _network == Network.Main ? MainnetSeeds : _network == Network.TestNet4 ? Testnet4Seeds : VfxSignet.Hosts)
             {
                 try
                 {
@@ -170,7 +170,7 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
                 try
                 {
                     var block = Block.Load(File.ReadAllBytes(path), _network);
-                    if (BtcBlockCheck.Verify(block, header) == null)
+                    if (BtcBlockCheck.Verify(block, header, _network) == null)
                     {
                         Remember(header.Hash, block);
                         return block;
@@ -359,7 +359,7 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
                         continue;
                     }
                     _blockMisses.TryRemove(source, out _);
-                    var problem = BtcBlockCheck.Verify(candidate, header);
+                    var problem = BtcBlockCheck.Verify(candidate, header, _network);
                     if (problem != null)
                     {
                         if (IsPeer(source)) Drop(source, $"served a wrong block for {height}: {problem}", TimeSpan.FromHours(6));

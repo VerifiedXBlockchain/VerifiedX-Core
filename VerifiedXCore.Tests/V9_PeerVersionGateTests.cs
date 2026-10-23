@@ -55,8 +55,9 @@ namespace VerifiedXCore.Tests
             Assert.Equal(969_696, mainnet!.Height);
             Assert.Equal("000000000000000000001e39df127cbab82a824ac43cfcdbf62e59f6a08b9f0b", mainnet.Tip.Hash);
             Assert.True(VerifiedXCore.Bitcoin.Attestation.BtcCheckpoint.TryParse(Globals.BitcoinCheckpointHeightTestnet, Globals.BitcoinCheckpointHeadersTestnet, out var testnet, out why), why);
-            Assert.Equal(155_232, testnet!.Height);
-            Assert.Equal("0000000000000002314dc5b90175408b22d2c80dfe99979629b40e572d40345b", testnet.Tip.Hash);
+            // The VFX testnet's Bitcoin is the VFX signet: its checkpoint is the signet's first retarget.
+            Assert.Equal(2_016, testnet!.Height);
+            Assert.Equal("0000027cac5b1c96e3459b40b572662d7e9d2014336ef73362befaca43a9ba9a", testnet.Tip.Hash);
         }
 
         [Fact]

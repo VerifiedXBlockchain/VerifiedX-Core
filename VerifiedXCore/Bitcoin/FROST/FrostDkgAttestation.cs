@@ -225,7 +225,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         public static string NewContractUid() => Guid.NewGuid().ToString("N") + ":" + VerifiedXCore.Utilities.TimeUtil.GetTime().ToString();
 
         /// <summary>The Bitcoin network consensus uses: fixed by the chain, not by configuration.</summary>
-        public static Network ConsensusNetwork => Globals.IsTestNet ? Network.TestNet4 : Network.Main;
+        public static Network ConsensusNetwork => Globals.IsTestNet ? Network.VfxSignet : Network.Main;
 
         /// <summary>
         /// Taproot address of a FROST group key (32-byte x-only or 33-byte compressed hex). The FROST signer signs with the

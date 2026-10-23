@@ -188,24 +188,24 @@ namespace VerifiedXCore.Tests
             var header = _btc.Header(at);
             BtcBlock Copy(long height) => BtcBlock.Load(_btc.Block(height).ToBytes(), Network.Main);
 
-            Assert.Null(BtcBlockCheck.Verify(Copy(at), header));
-            Assert.Equal("no block", BtcBlockCheck.Verify(null, header));
-            Assert.Contains("does not carry the header", BtcBlockCheck.Verify(Copy(other), header));
+            Assert.Null(BtcBlockCheck.Verify(Copy(at), header, Network.Main));
+            Assert.Equal("no block", BtcBlockCheck.Verify(null, header, Network.Main));
+            Assert.Contains("does not carry the header", BtcBlockCheck.Verify(Copy(other), header, Network.Main));
 
             // A transaction swapped for another: the header no longer commits to the content.
             var swapped = Copy(at);
             swapped.Transactions[1] = Pay(vault, 9_999_999);
-            Assert.Contains("Merkle root", BtcBlockCheck.Verify(swapped, header));
+            Assert.Contains("Merkle root", BtcBlockCheck.Verify(swapped, header, Network.Main));
 
             // Bitcoin's tree pairs the last transaction of an odd row with itself, so repeating it keeps the root.
             var repeated = Copy(at);
             repeated.Transactions.Add(repeated.Transactions[2]);
             Assert.Equal(BtcMerkle.RootOf(repeated.Transactions.Select(t => t.GetHash().ToString()).ToList()), header.MerkleRoot);
-            Assert.Contains("repeats a transaction", BtcBlockCheck.Verify(repeated, header));
+            Assert.Contains("repeats a transaction", BtcBlockCheck.Verify(repeated, header, Network.Main));
 
             var noCoinbase = Copy(at);
             noCoinbase.Transactions.RemoveAt(0);
-            Assert.Contains("not a coinbase", BtcBlockCheck.Verify(noCoinbase, header));
+            Assert.Contains("not a coinbase", BtcBlockCheck.Verify(noCoinbase, header, Network.Main));
         }
 
         // ── The light client, against sources the test controls ─────────────────────────────────────────────
@@ -450,7 +450,7 @@ namespace VerifiedXCore.Tests
             await client.RunOnceAsync(CancellationToken.None);
             var block = client.BlockAt(at);
             Assert.NotNull(block);
-            Assert.Null(BtcBlockCheck.Verify(block, _btc.Header(at)));
+            Assert.Null(BtcBlockCheck.Verify(block, _btc.Header(at), Network.Main));
             Assert.Equal(1, peer.BlockRequests);
             Assert.Single(Directory.GetFiles(_blockDir, "*.blk"));
 
@@ -497,7 +497,7 @@ namespace VerifiedXCore.Tests
             var block = client.BlockAt(at);
             Assert.NotNull(block);
             Assert.Equal(3, block!.Transactions.Count);
-            Assert.Null(BtcBlockCheck.Verify(block, _btc.Header(at)));
+            Assert.Null(BtcBlockCheck.Verify(block, _btc.Header(at), Network.Main));
             Assert.Equal(1, liar.BlockRequests);
             Assert.False(liar.IsAlive);
             Assert.Contains("served a wrong block", client.LastProblem);
@@ -511,7 +511,7 @@ namespace VerifiedXCore.Tests
             await both.RunOnceAsync(CancellationToken.None);
             Assert.Null(both.BlockAt(at));
             await both.RunOnceAsync(CancellationToken.None);
-            Assert.Null(BtcBlockCheck.Verify(both.BlockAt(at), _btc.Header(at)));
+            Assert.Null(BtcBlockCheck.Verify(both.BlockAt(at), _btc.Header(at), Network.Main));
             Assert.Equal(liar2.BlockRequests == 1, !liar2.IsAlive); // asked means caught
         }
 
@@ -568,7 +568,7 @@ namespace VerifiedXCore.Tests
 
         /// <summary>
         /// The real thing, when asked for (set VFX_BTC_LIVE=1; it needs the Internet): real peers found through the DNS
-        /// seeds, on mainnet and on testnet4, from the real checkpoints in the fixtures. The header chain must pass the
+        /// seeds, on mainnet, on testnet4 and on the VFX signet, from the real checkpoints in the fixtures. The header chain must pass the
         /// fixture's last header and agree with it, and a recent block must arrive and check out against its header.
         /// </summary>
         [Fact]
@@ -580,6 +580,7 @@ namespace VerifiedXCore.Tests
             {
                 (Network.Main, BtcChainRules.Mainnet, "btc-headers-mainnet.txt", 967_680L),
                 (Network.TestNet4, BtcChainRules.Testnet4, "btc-headers-testnet4.txt", 153_216L),
+                (Network.VfxSignet, BtcChainRules.Signet, "btc-headers-vfx-signet.txt", 2_016L),
             })
             {
                 var known = new Dictionary<long, BtcHeader>();
@@ -606,7 +607,7 @@ namespace VerifiedXCore.Tests
                     await client.RunOnceAsync(CancellationToken.None);
                 var block = client.BlockAt(recent);
                 Assert.True(block != null, $"{network.Name}: block {recent} did not arrive ({client.LastProblem})");
-                Assert.Null(BtcBlockCheck.Verify(block, client.HeaderAt(recent)!));
+                Assert.Null(BtcBlockCheck.Verify(block, client.HeaderAt(recent)!, network));
                 Assert.DoesNotContain(block!.Transactions, t => t.HasWitness); // asked for without witness data
             }
         }
@@ -621,10 +622,12 @@ namespace VerifiedXCore.Tests
         {
             if (Environment.GetEnvironmentVariable("VFX_BTC_LIVE") != "1") return;
 
-            foreach (var (network, rules, height, hex) in new[]
+            // The signet's checkpoint is its first retarget, set on the day the chain started: only a handful of blocks
+            // (one every ten minutes) can follow it yet.
+            foreach (var (network, rules, height, hex, past) in new[]
             {
-                (Network.Main, BtcChainRules.Mainnet, Globals.BitcoinCheckpointHeightMainnet, Globals.BitcoinCheckpointHeadersMainnet),
-                (Network.TestNet4, BtcChainRules.Testnet4, Globals.BitcoinCheckpointHeightTestnet, Globals.BitcoinCheckpointHeadersTestnet),
+                (Network.Main, BtcChainRules.Mainnet, Globals.BitcoinCheckpointHeightMainnet, Globals.BitcoinCheckpointHeadersMainnet, 500),
+                (Network.VfxSignet, BtcChainRules.Signet, Globals.BitcoinCheckpointHeightTestnet, Globals.BitcoinCheckpointHeadersTestnet, 25),
             })
             {
                 Assert.True(BtcCheckpoint.TryParse(height, hex, out var checkpoint, out var why), why);
@@ -637,7 +640,7 @@ namespace VerifiedXCore.Tests
                     await client.RunOnceAsync(CancellationToken.None);
                 }
                 Assert.True(client.PeerCount >= 1, $"{network.Name}: no Bitcoin peer ({client.LastProblem})");
-                Assert.True(client.TipHeight > height + 500, $"{network.Name}: headers stopped at {client.TipHeight}, checkpoint {height} ({client.LastProblem})");
+                Assert.True(client.TipHeight > height + past, $"{network.Name}: headers stopped at {client.TipHeight}, checkpoint {height} ({client.LastProblem})");
                 Assert.Equal(checkpoint!.Tip.Hash, client.HeaderAt(height)!.Hash);
 
                 var recent = client.TipHeight - 3;
@@ -645,7 +648,7 @@ namespace VerifiedXCore.Tests
                     await client.RunOnceAsync(CancellationToken.None);
                 var block = client.BlockAt(recent);
                 Assert.True(block != null, $"{network.Name}: block {recent} did not arrive ({client.LastProblem})");
-                Assert.Null(BtcBlockCheck.Verify(block, client.HeaderAt(recent)!));
+                Assert.Null(BtcBlockCheck.Verify(block, client.HeaderAt(recent)!, network));
                 Assert.True(client.TipHeight > height, $"{network.Name}: checkpoint {height}, followed to {client.TipHeight} from {client.PeerCount} peer(s)");
             }
         }
