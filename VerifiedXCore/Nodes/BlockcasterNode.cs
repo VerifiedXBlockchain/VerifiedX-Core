@@ -2390,11 +2390,22 @@ namespace VerifiedXCore.Nodes
 
         private static string Short16(string? hash) => string.IsNullOrEmpty(hash) ? "" : hash[..Math.Min(16, hash.Length)];
 
-        /// <summary>The block this caster signed at the height when it is not the committed one, else null.</summary>
+        /// <summary>
+        /// The block this caster signed at the height when it is not the committed one, else null. Not when the committed
+        /// block is our tip and carries a valid committee certificate: a quorum signed it, and this caster's one signature
+        /// for another block does not outrank that. Without this release the hold had no exit but a restart (which no
+        /// longer clears the stored claim): mainnet 7,562,232 (23 October 2026), every caster that signed the losing block
+        /// sat out until it was restarted.
+        /// </summary>
         internal static string? SignedElsewhere(long height, string? committedHash)
         {
             var signed = AttestationGuard.SignedAt(height);
-            return !string.IsNullOrEmpty(signed) && !string.Equals(signed, committedHash, StringComparison.Ordinal) ? signed : null;
+            if (string.IsNullOrEmpty(signed) || string.Equals(signed, committedHash, StringComparison.Ordinal))
+                return null;
+            var tip = Globals.LastBlock;
+            if (tip != null && tip.Height == height && tip.Hash == committedHash && ForkRecoveryUtility.CertifiedTipRefusal(tip) != null)
+                return null;
+            return signed;
         }
 
         #endregion
