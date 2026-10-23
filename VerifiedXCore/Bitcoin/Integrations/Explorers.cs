@@ -20,9 +20,9 @@ namespace VerifiedXCore.Bitcoin.Integrations
                 await Blockstream.GetAddressBalance(address, vfxAddress, isTokenAddress);
                 ExplorerDictionary.TryUpdate(explorer.Key, (explorer.Value + 1), explorer.Value);
             }
-            else if (explorer.Key == ExplorersEnum.MempoolSpaceTestnet4)
+            else if (explorer.Key == ExplorersEnum.MempoolSpaceSignet)
             {
-                await MempoolSpaceTestnet4.GetAddressBalance(address, vfxAddress, isTokenAddress);
+                await MempoolSpaceSignet.GetAddressBalance(address, vfxAddress, isTokenAddress);
                 ExplorerDictionary.TryUpdate(explorer.Key, (explorer.Value + 1), explorer.Value);
             }
             else
@@ -43,9 +43,9 @@ namespace VerifiedXCore.Bitcoin.Integrations
                 await Blockstream.GetAddressUTXO(address);
                 ExplorerDictionary.TryUpdate(explorerUTXO.Key, (explorerUTXO.Value + 1), explorerUTXO.Value);
             }
-            else if (explorerUTXO.Key == ExplorersEnum.MempoolSpaceTestnet4)
+            else if (explorerUTXO.Key == ExplorersEnum.MempoolSpaceSignet)
             {
-                await MempoolSpaceTestnet4.GetAddressUTXO(address);
+                await MempoolSpaceSignet.GetAddressUTXO(address);
                 ExplorerDictionary.TryUpdate(explorerUTXO.Key, (explorerUTXO.Value + 1), explorerUTXO.Value);
             }
             else
@@ -59,7 +59,7 @@ namespace VerifiedXCore.Bitcoin.Integrations
         {
             Blockstream,
             MempoolSpace,
-            MempoolSpaceTestnet4
+            MempoolSpaceSignet
         }
 
         public static void PopulateExplorerDictionary()
@@ -73,9 +73,9 @@ namespace VerifiedXCore.Bitcoin.Integrations
             }
             else
             {
-                if (Globals.BTCNetwork == NBitcoin.Network.TestNet4)
+                if (Globals.BTCNetwork == NBitcoin.Network.VfxSignet)
                 {
-                    ExplorerDictionary.TryAdd(ExplorersEnum.MempoolSpaceTestnet4, 0);
+                    ExplorerDictionary.TryAdd(ExplorersEnum.MempoolSpaceSignet, 0);
                 }
                 else
                 {

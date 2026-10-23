@@ -83,7 +83,7 @@ Paths are under `VerifiedXCore/`. "consensus" means a bug can fork the chain; "f
 
 The repo-root folders `ReserveBlockCore/` and `VerfiedXCore.Tests/` (misspelled) hold only old build output. Ignore them.
 
-Testnet uses ports 13338 (P2P) and 17292 (API), addresses that start with `x`, and Bitcoin TestNet4. Mainnet uses 3338 and 7292. Runtime data lives in `~/rbx` or `~/rbxtest` on macOS, and under `LocalApplicationData/RBX` or `RBXTest` elsewhere.
+Testnet uses ports 13338 (P2P) and 17292 (API), addresses that start with `x`, and the VFX signet (`Network.VfxSignet`, a private Bitcoin signet run by the node farm; `Bitcoin/VfxSignet.cs`). Mainnet uses 3338 and 7292. Runtime data lives in `~/rbx` or `~/rbxtest` on macOS, and under `LocalApplicationData/RBX` or `RBXTest` elsewhere.
 
 ## Platform context (optional)
 

@@ -121,18 +121,18 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Both honor mainnet/testnet via their GetBaseURL().
         /// </summary>
         /// <summary>
-        /// Whether the Esplora cross-check has a usable provider for the given network.
-        /// TestNet4 has none: MempoolSpace/Blockstream route all non-mainnet requests to
-        /// TESTNET3 URLs (blockstream.info has no testnet4 Esplora at all), so their answers
-        /// are wrong-chain poison for DecideEmptyVerdict — an answered-empty from the wrong
-        /// chain can upgrade a single lagging Electrum "empty" into ConfirmedEmpty on a funded
-        /// vault. Skipping keeps the check Electrum-quorum-only there (2+ servers must agree),
-        /// and per project policy we minimize third-party reliance rather than extend it.
+        /// Whether the Esplora cross-check has a usable provider for the given network. TestNet4 and
+        /// the VFX signet have none: MempoolSpace/Blockstream route all non-mainnet requests to
+        /// TESTNET3 URLs, so on those chains their answers are wrong-chain poison for DecideEmptyVerdict — an
+        /// answered-empty from the wrong chain can upgrade a single lagging Electrum "empty" into
+        /// ConfirmedEmpty on a funded vault. Skipping keeps the check Electrum-quorum-only there
+        /// (2+ servers must agree; the signet runs two), and per project policy we minimize
+        /// third-party reliance rather than extend it.
         /// Pure function so the routing rule is unit-testable.
         /// </summary>
         public static bool IsEsploraCrossCheckSupported(Network network)
         {
-            return network != Network.TestNet4;
+            return network != Network.TestNet4 && network != Network.VfxSignet;
         }
 
         private static async Task<(List<BlockchainScripthashListunspentResult> Utxos, bool Answered)> GetUTXOsFromEsplora(string address)

@@ -4,7 +4,8 @@ using System.Linq;
 
 namespace VerifiedXCore.Bitcoin.Integrations
 {
-    public class MempoolSpaceTestnet4
+    /// <summary>The VFX testnet's Bitcoin explorer: the VFX signet's own mempool.space (Esplora) instance.</summary>
+    public class MempoolSpaceSignet
     {
         public static async Task GetAddressBalance(string address, string vfxAddress, bool isTokenAddress = false)
         {
@@ -145,6 +146,9 @@ namespace VerifiedXCore.Bitcoin.Integrations
         {
             if (Globals.BTCNetwork == NBitcoin.Network.Main)
                 return "https://mempool.space/api";
+
+            if(Globals.BTCNetwork == NBitcoin.Network.VfxSignet)
+                return VfxSignet.EsploraUrl;
 
             if(Globals.BTCNetwork == NBitcoin.Network.TestNet4)
                 return "https://mempool.space/testnet4/api";

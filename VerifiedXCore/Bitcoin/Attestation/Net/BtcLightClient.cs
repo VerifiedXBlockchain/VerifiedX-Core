@@ -84,7 +84,7 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
             Func<Network, IPEndPoint, IBtcSource?>? connect = null, Func<CancellationToken, Task<List<IPEndPoint>>>? discover = null,
             List<IBtcSource>? fallbacks = null, Func<List<IBtcSource>>? validators = null)
         {
-            _validators = validators ?? (connect == null ? SomeActiveValidators : () => new List<IBtcSource>());
+            _validators = validators ?? (connect == null && AsksValidators(network) ? SomeActiveValidators : () => new List<IBtcSource>());
             _network = network;
             _chain = chain;
             _blockDir = blockDir;
@@ -98,6 +98,14 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
         {
             lock (_peerLock) return _peers.Contains(source);
         }
+
+        /// <summary>
+        /// Whether other validators are asked for their headers. Not on a signet: there a header costs a second of CPU
+        /// and only the signer's blocks are real, so a validator could hand out a heavier forged branch in seconds and
+        /// the attested chain would follow it (rewinding deposits). On the VFX signet headers come only from its own
+        /// bitcoinds (the seeds) and its own explorer.
+        /// </summary>
+        internal static bool AsksValidators(Network network) => network.Consensus.SignetChallenge == null;
 
         /// <summary>A few of the active validators other than this one, chosen anew every round.</summary>
         private static List<IBtcSource> SomeActiveValidators()
@@ -127,7 +135,7 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
         private async Task<List<IPEndPoint>> DiscoverFromSeedsAsync(CancellationToken ct)
         {
             var found = new List<IPEndPoint>();
-            foreach (var seed in _network == Network.Main ? MainnetSeeds : Testnet4Seeds)
+            foreach (var seed in _network == Network.Main ? MainnetSeeds : _network == Network.TestNet4 ? Testnet4Seeds : VfxSignet.Hosts)
             {
                 try
                 {
@@ -170,7 +178,7 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
                 try
                 {
                     var block = Block.Load(File.ReadAllBytes(path), _network);
-                    if (BtcBlockCheck.Verify(block, header) == null)
+                    if (BtcBlockCheck.Verify(block, header, _network) == null)
                     {
                         Remember(header.Hash, block);
                         return block;
@@ -359,7 +367,7 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
                         continue;
                     }
                     _blockMisses.TryRemove(source, out _);
-                    var problem = BtcBlockCheck.Verify(candidate, header);
+                    var problem = BtcBlockCheck.Verify(candidate, header, _network);
                     if (problem != null)
                     {
                         if (IsPeer(source)) Drop(source, $"served a wrong block for {height}: {problem}", TimeSpan.FromHours(6));

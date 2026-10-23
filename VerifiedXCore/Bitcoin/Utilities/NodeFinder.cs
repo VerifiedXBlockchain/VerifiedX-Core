@@ -25,11 +25,8 @@ namespace VerifiedXCore.Bitcoin.Utilities
             "seed.testnet.bitcoin.sprovoost.nl",
             "testnet-seed.bluematt.me"
         };
-        public static string[] Testnet4DnsSeeds = new string[]
-        {
-            "seed.testnet4.bitcoin.sprovoost.nl",
-            "seed.testnet4.wiz.biz",
-        };
+        /// <summary>The VFX signet's bitcoinds: the VFX testnet's Bitcoin has no public DNS seeds.</summary>
+        public static string[] SignetSeeds = VfxSignet.Hosts;
 
         public static string Node = "NA";
 
@@ -54,13 +51,13 @@ namespace VerifiedXCore.Bitcoin.Utilities
                 }
                 Node = nodeIp;
             }
-            else if(Globals.BTCNetwork == NBitcoin.Network.TestNet4)
+            else if(Globals.BTCNetwork == NBitcoin.Network.VfxSignet)
             {
                 if (Node == "NA")
                     nodeIp = await GetTestnetNode();
                 else
                 {
-                    var testNode = PortUtility.IsPortOpen(Node, 48333);
+                    var testNode = PortUtility.IsPortOpen(Node, NBitcoin.Network.VfxSignet.DefaultPort);
                     if (testNode)
                     {
                         nodeIp = Node;
@@ -144,15 +141,15 @@ namespace VerifiedXCore.Bitcoin.Utilities
         private static async Task<string> GetTestnetNode()
         {
             string nodeIp = "NA";
-            int portNumber = 48333;
+            int portNumber = NBitcoin.Network.VfxSignet.DefaultPort;
             bool nodeFound = false;
 
             while(!nodeFound)
             {
                 Random rand = new Random();
-                int randomIndex = rand.Next(0, Testnet4DnsSeeds.Length);
+                int randomIndex = rand.Next(0, SignetSeeds.Length);
 
-                string randomSeed = Testnet4DnsSeeds[randomIndex];
+                string randomSeed = SignetSeeds[randomIndex];
 
                 try
                 {
@@ -231,7 +228,7 @@ namespace VerifiedXCore.Bitcoin.Utilities
         {
             List<IPAddress> nodeIp = new List<IPAddress>();
 
-            foreach(var seed in Testnet4DnsSeeds)
+            foreach(var seed in SignetSeeds)
             {
                 try
                 {
