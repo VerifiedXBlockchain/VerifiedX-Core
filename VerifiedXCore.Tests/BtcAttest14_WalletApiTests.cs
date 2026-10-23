@@ -526,6 +526,47 @@ namespace VerifiedXCore.Tests
         // ── What the routes must not get wrong ──────────────────────────────────────────────────────────────
 
         /// <summary>
+        /// A wallet that signs elsewhere signs whatever a raw builder hands it. A withdrawal request the chain would refuse
+        /// for its Bitcoin address is refused by both raw builders before anything is signed, with the chain's own answer,
+        /// and a good address still builds.
+        /// </summary>
+        [Fact]
+        public async Task TheRawWithdrawalBuilders_RefuseABitcoinAddressTheChainRefuses_BeforeItIsSigned()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 150_000);
+
+            async Task<JObject> Single(string address) => JObject.Parse(await _api.GetRawRequestWithdrawalTxData(new VBTCWithdrawalPayload
+                { SmartContractUID = vault.Uid, RequestorAddress = Minter.Address, BTCAddress = address, Amount = 0.0005M, FeeRate = 10 }));
+            async Task<JObject> Multi(string address) => JObject.Parse(await _api.GetRawRequestWithdrawalMultiTxData(new VBTCWithdrawalMultiRawPayload
+                { RequestorAddress = Minter.Address, BTCAddress = address, TotalAmount = 0.0005M, FeeRate = 10 }));
+
+            const string NotAnAddress = "bc1qnotreal";
+            foreach (var build in new Func<string, Task<JObject>>[] { Single, Multi })
+            {
+                var refused = await build(NotAnAddress);
+                Assert.False((bool)refused["Success"]!, refused.ToString());
+                Assert.Equal($"The withdrawal's Bitcoin address is not an address on this network: {NotAnAddress}", (string)refused["Message"]!);
+                Assert.Null(refused["Hash"]);
+
+                Assert.Equal("The withdrawal's Bitcoin address has spaces around it.", (string)(await build(" " + BtcDest))["Message"]!);
+                Assert.Contains($"is the deposit address of vault {vault.Uid}", (string)(await build(vault.Address))["Message"]!);
+
+                var good = await build(BtcDest);
+                Assert.True((bool)good["Success"]!, good.ToString());
+                Assert.False(string.IsNullOrEmpty((string?)good["Hash"]));
+            }
+
+            // The chain's answer to the same address, signed and submitted, is the one the builders give.
+            var signed = SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                new { Function = "VBTCWithdrawalRequest()", ContractUID = vault.Uid, BTCAddress = NotAnAddress, Amount = 0.0005M, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") });
+            var (ok, why) = await Verify(signed, Tip + 1);
+            Assert.False(ok);
+            Assert.Equal($"The withdrawal's Bitcoin address is not an address on this network: {NotAnAddress}", why);
+        }
+
+        /// <summary>
         /// A caller that polls the multi-vault completion route records a payout when a share reads as a success. A
         /// share that was closed and refunded was not paid, and must not read as one.
         /// </summary>
@@ -538,17 +579,36 @@ namespace VerifiedXCore.Tests
             var paid = await Request(vault.Uid, 0.001M);
             var waiting = await Request(vault.Uid, 0.0002M);                   // waits for the change; never pinned
 
-            // Being paid: not a success yet, and said to be in the chain's hands.
+            // Being paid: not a success yet, and said to be in the chain's hands, with the transaction it waits on.
             var multi = JObject.Parse(await _api.CompleteWithdrawalMulti(new VBTCWithdrawalCompleteMultiPayload { WithdrawalRequestHash = paid.Hash }));
             Assert.False((bool)multi["Success"]!);
+            Assert.False((bool)multi["AllPaid"]!);
+            Assert.True((bool)multi["NothingToDo"]!);
             Assert.Equal(1, (int)multi["BeingPaid"]!);
-            Assert.True((bool)Assert.Single((JArray)multi["Results"]!)["BeingPaid"]!);
+            var beingPaid = Assert.Single((JArray)multi["Results"]!);
+            Assert.True((bool)beingPaid["BeingPaid"]!);
+            Assert.False((bool)beingPaid["Paid"]!);
+            Assert.Equal("Awaiting_BTC_Confirmation", (string)beingPaid["Status"]!);
+            Assert.Equal(Row(paid, vault.Uid).Pins[0].Txid, (string)beingPaid["PinnedBTCTransactionHash"]!);
+            Assert.Equal(JTokenType.Null, beingPaid["BTCTxHash"]!.Type);
+
+            // Waiting for the vault's coins: in the chain's hands too, with no transaction yet.
+            var queued = Assert.Single((JArray)JObject.Parse(await _api.CompleteWithdrawalMulti(new VBTCWithdrawalCompleteMultiPayload { WithdrawalRequestHash = waiting.Hash }))["Results"]!);
+            Assert.True((bool)queued["BeingPaid"]!);
+            Assert.Equal("Awaiting_BTC_Transaction", (string)queued["Status"]!);
+            Assert.Equal(JTokenType.Null, queued["PinnedBTCTransactionHash"]!.Type);
 
             // Paid.
             await Confirm(Row(paid, vault.Uid).Pins[0].TxHex);
             multi = JObject.Parse(await _api.CompleteWithdrawalMulti(new VBTCWithdrawalCompleteMultiPayload { WithdrawalRequestHash = paid.Hash }));
             Assert.True((bool)multi["Success"]!);
+            Assert.True((bool)multi["AllPaid"]!);
             Assert.Equal(1, (int)multi["Paid"]!);
+            var settled = Assert.Single((JArray)multi["Results"]!);
+            Assert.True((bool)settled["Paid"]!);
+            Assert.Equal("Completed", (string)settled["Status"]!);
+            Assert.Equal(Row(paid, vault.Uid).SettledTxid, (string)settled["BTCTxHash"]!);
+            Assert.Equal(JTokenType.Null, settled["PinnedBTCTransactionHash"]!.Type);
 
             // Expired and refunded: it was never paid and never will be.
             var late = await Request(vault.Uid, 0.0003M);                      // the change is held by the request before it; waits
@@ -563,9 +623,55 @@ namespace VerifiedXCore.Tests
             Assert.False((bool)share["Success"]!);
             Assert.False((bool)share["AlreadyComplete"]!);
             Assert.True((bool)share["Refunded"]!);
+            Assert.False((bool)share["Paid"]!);
+            Assert.Equal("Closed", (string)share["Status"]!);
+            Assert.True((bool)multi["NothingToDo"]!);
             Assert.Contains("closed without being paid", (string)share["ErrorMessage"]!);
             Assert.Contains("closed and refunded", (string)multi["Message"]!);
-            _ = waiting;
+
+            // No such request: Unknown, as the single-contract completion says.
+            var unknown = Assert.Single((JArray)JObject.Parse(await _api.CompleteWithdrawalMulti(new VBTCWithdrawalCompleteMultiPayload { WithdrawalRequestHash = new string('f', 64) }))["Results"]!);
+            Assert.False((bool)unknown["Paid"]!);
+            Assert.Equal("Unknown", (string)unknown["Status"]!);
+
+            // An older vault's share sent on this call is Pending_BTC, as the single-contract completion answers.
+            Assert.Equal("Pending_BTC", VBTCService.ShareStatus(success: true, watched: false, beingPaid: false, pinned: null));
+            Assert.Equal("Completed", VBTCService.ShareStatus(success: true, watched: true, beingPaid: false, pinned: null));
+            Assert.Equal("Failed", VBTCService.ShareStatus(success: false, watched: false, beingPaid: false, pinned: null));
+        }
+
+        /// <summary>
+        /// The answers to a multi-contract withdrawal request tell the caller what is left to do: for vaults the chain
+        /// watches, nothing (their Bitcoin transactions are fixed and signed without anyone completing them), and a
+        /// request one contract covered says so.
+        /// </summary>
+        [Fact]
+        public async Task TheMultiRequestAnswers_SayWhatIsLeftToDo()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 150_000);
+            AccountData.GetAccounts().InsertSafe(new Account { Address = Minter.Address, PublicKey = Minter.Pub, PrivateKey = "0" + Minter.Key.secret.ToString("x") });
+
+            var raw = JObject.Parse(await _api.GetRawRequestWithdrawalMultiTxData(new VBTCWithdrawalMultiRawPayload
+                { RequestorAddress = Minter.Address, BTCAddress = BtcDest, TotalAmount = 0.0005M, FeeRate = 10 }));
+            Assert.True((bool)raw["Success"]!, raw.ToString());
+            Assert.Equal(vault.Uid, (string)Assert.Single((JArray)raw["AttestedContracts"]!)!);
+            Assert.Contains("Nothing more is needed once it is mined", (string)raw["Message"]!);
+            Assert.DoesNotContain("PrepareCompleteWithdrawalRaw", (string)raw["Message"]!);
+
+            var local = JObject.Parse(await _api.RequestWithdrawalMulti(new VBTCWithdrawalPayload
+                { RequestorAddress = Minter.Address, BTCAddress = BtcDest, Amount = 0.0005M, FeeRate = 10 }));
+            Assert.True((bool)local["Success"]!, local.ToString());
+            Assert.StartsWith("vBTC V2 withdrawal request created successfully (one contract covers the amount).", (string)local["Message"]!);
+            Assert.Contains("Nothing more is needed once it is mined", (string)local["Message"]!);
+            Assert.DoesNotContain("multi-contract", (string)local["Message"]!);
+
+            // Shares on older vaults are still completed, each by its own route.
+            Assert.Contains("complete them with CompleteWithdrawalMulti", VBTCController.MultiWithdrawalRequestMessage(2, 0, raw: false));
+            Assert.Contains("complete them via PrepareCompleteWithdrawalRaw/ExecuteCompleteWithdrawalRaw", VBTCController.MultiWithdrawalRequestMessage(2, 0, raw: true));
+            Assert.Contains("the contracts in AttestedContracts need nothing more", VBTCController.MultiWithdrawalRequestMessage(2, 1, raw: true));
+            Assert.StartsWith("vBTC V2 multi-contract withdrawal request created successfully (2 contracts).", VBTCController.MultiWithdrawalRequestMessage(2, 2, raw: false));
         }
 
         [Fact]

@@ -1894,15 +1894,36 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             public string SmartContractUID { get; set; } = "";
             public decimal Amount { get; set; }
+            /// <summary>The share is paid (as <see cref="Paid"/>). False while it is being paid: a caller that records a payout on it records none early.</summary>
             public bool Success { get; set; }
+            /// <summary>
+            /// The share's payment is recorded (its transaction is <see cref="BTCTxHash"/>): on a vault the chain watches,
+            /// Bitcoin has confirmed it; on an older vault, its Bitcoin transaction was sent and its completion recorded
+            /// (Status Pending_BTC on the call that sent it). The field the single-contract completion answers with.
+            /// </summary>
+            public bool Paid { get; set; }
+            /// <summary>
+            /// Where the share stands, in the words of the single-contract completion: Completed, Pending_BTC (an older
+            /// vault's share sent by this call), Awaiting_BTC_Confirmation (its Bitcoin transaction is fixed:
+            /// <see cref="PinnedBTCTransactionHash"/>), Awaiting_BTC_Transaction (waiting for the vault's coins), Closed
+            /// (refunded), Failed (retry it), or Unknown (no such request).
+            /// </summary>
+            public string Status { get; set; } = "";
             public string? VFXTxHash { get; set; }
+            /// <summary>The Bitcoin transaction that paid the share; null until it is paid.</summary>
             public string? BTCTxHash { get; set; }
+            /// <summary>
+            /// A share being paid: the Bitcoin transaction fixed for it, which pays it once Bitcoin confirms it. Until then
+            /// a fee raise can replace it or a release give it up, so it is named apart from <see cref="BTCTxHash"/>.
+            /// </summary>
+            public string? PinnedBTCTransactionHash { get; set; }
             public string? ErrorMessage { get; set; }
             /// <summary>True when the contract's share was already completed before this call.</summary>
             public bool AlreadyComplete { get; set; }
             /// <summary>
-            /// A vault the chain watches: the share is not paid yet and nothing is wrong. Its Bitcoin transaction is
-            /// being fixed, signed or confirmed by the chain; ask again later. Success is false until Bitcoin has paid.
+            /// The share is not paid yet and nothing is wrong: its Bitcoin transaction is being fixed, signed or confirmed
+            /// (a vault the chain watches), or awaits its first confirmation; ask again later. Success is false until
+            /// Bitcoin has paid.
             /// </summary>
             public bool BeingPaid { get; set; }
             /// <summary>
@@ -1913,9 +1934,20 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
-        /// Complete every outstanding share of a (possibly multi-contract) withdrawal request: for
-        /// each contract row minted by the REQUEST tx, run its own FROST ceremony, broadcast its own
-        /// Bitcoin transaction and mine its own VBTC_V2_WITHDRAWAL_COMPLETE.
+        /// The Status of a share this call tried to complete. A watched vault's share that succeeds was completed by
+        /// Bitcoin. An older vault's share that succeeds had its Bitcoin transaction sent by this call, so it is
+        /// Pending_BTC, as the single-contract completion answers.
+        /// </summary>
+        internal static string ShareStatus(bool success, bool watched, bool beingPaid, string? pinned) =>
+            success ? (watched ? "Completed" : "Pending_BTC")
+            : !beingPaid ? "Failed" : pinned != null ? "Awaiting_BTC_Confirmation" : "Awaiting_BTC_Transaction";
+
+        /// <summary>
+        /// Complete every outstanding share of a (possibly multi-contract) withdrawal request, and say where each stands.
+        /// A share on a vault the chain watches needs nothing: its Bitcoin transaction is fixed by the chain, signed by
+        /// the vault's signers and completed when Bitcoin confirms it, so it is reported (paid, or being paid with its
+        /// pinned transaction). A share on an older vault runs its own FROST ceremony, broadcasts its own Bitcoin
+        /// transaction and mines its own VBTC_V2_WITHDRAWAL_COMPLETE.
         ///
         /// Deliberately NOT all-or-nothing, mirroring the bridge BTC-exit executor: one vault's
         /// ceremony failing (unreachable validators, Electrum blip, thin UTXO set) must not strand
@@ -1934,6 +1966,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 results.Add(new MultiWithdrawalCompletionResult
                 {
                     Success = false,
+                    Status = "Unknown",
                     ErrorMessage = $"Withdrawal request not found for hash: {withdrawalRequestHash}"
                 });
                 return (false, results);
@@ -1951,6 +1984,8 @@ namespace VerifiedXCore.Bitcoin.Services
                         SmartContractUID = row.SmartContractUID,
                         Amount = row.Amount,
                         Success = paid,
+                        Paid = paid,
+                        Status = paid ? "Completed" : "Closed",
                         AlreadyComplete = paid,
                         Refunded = !paid,
                         BTCTxHash = paid ? row.BTCTxHash : null,
@@ -1962,16 +1997,23 @@ namespace VerifiedXCore.Bitcoin.Services
                 try
                 {
                     var (success, vfxTxHash, btcTxHash, error, _) = await CompleteWithdrawal(row.SmartContractUID, withdrawalRequestHash);
+                    var beingPaid = !success && Attestation.BtcVaultView.IsInTheChainsHands(error);
+                    // Being paid on a fixed transaction: the service names it (a watched vault's pin, or a reclaim
+                    // awaiting its first confirmation); waiting for the vault's coins, it names none.
+                    var pinned = beingPaid && !string.IsNullOrEmpty(btcTxHash) ? btcTxHash : null;
 
                     results.Add(new MultiWithdrawalCompletionResult
                     {
                         SmartContractUID = row.SmartContractUID,
                         Amount = row.Amount,
                         Success = success,
+                        Paid = success,
+                        Status = ShareStatus(success, Attestation.BtcAttestBalance.IsAttestedVault(row.SmartContractUID), beingPaid, pinned),
                         VFXTxHash = success ? vfxTxHash : null,
                         BTCTxHash = success ? btcTxHash : null,
+                        PinnedBTCTransactionHash = pinned,
                         ErrorMessage = success ? null : error,
-                        BeingPaid = !success && Attestation.BtcVaultView.IsInTheChainsHands(error),
+                        BeingPaid = beingPaid,
                     });
 
                     if (!success && !Attestation.BtcVaultView.IsInTheChainsHands(error))
@@ -1987,6 +2029,7 @@ namespace VerifiedXCore.Bitcoin.Services
                         SmartContractUID = row.SmartContractUID,
                         Amount = row.Amount,
                         Success = false,
+                        Status = "Failed",
                         ErrorMessage = $"Error: {ex.Message}"
                     });
                 }
