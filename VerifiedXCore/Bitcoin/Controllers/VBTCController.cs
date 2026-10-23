@@ -3112,6 +3112,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                     return JsonConvert.SerializeObject(new { Success = false, Message = $"Insufficient balance. Available: {balResult.availableBalance}, Requested: {payload.Amount}" });
 
                 var btcAddress = payload.BTCAddress.ToBTCAddressNormalize();
+                // The address rules the chain applies to the request, checked before anything is handed out to sign.
+                var destinationError = VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.DestinationRefusal(btcAddress, new[] { payload.SmartContractUID });
+                if (destinationError != null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = destinationError });
 
                 // Build unsigned transaction. UniqueId is carried in tx.Data so the mined record's
                 // OriginalUniqueId matches any RequestWithdrawalRaw pre-registration row and the
@@ -3235,6 +3239,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 }
 
                 var btcAddress = payload.BTCAddress.ToBTCAddressNormalize();
+                // The address rules the chain applies to the request, checked before anything is handed out to sign.
+                var destinationError = VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.DestinationRefusal(btcAddress, allocations.Select(a => (string?)a.SCUID));
+                if (destinationError != null)
+                    return JsonConvert.SerializeObject(new { Success = false, Message = destinationError });
 
                 // One vault covers it — emit the SINGLE shape; identical on-chain result for one
                 // contract.

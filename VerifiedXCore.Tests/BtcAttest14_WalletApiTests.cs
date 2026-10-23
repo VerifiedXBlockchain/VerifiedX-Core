@@ -526,6 +526,47 @@ namespace VerifiedXCore.Tests
         // ── What the routes must not get wrong ──────────────────────────────────────────────────────────────
 
         /// <summary>
+        /// A wallet that signs elsewhere signs whatever a raw builder hands it. A withdrawal request the chain would refuse
+        /// for its Bitcoin address is refused by both raw builders before anything is signed, with the chain's own answer,
+        /// and a good address still builds.
+        /// </summary>
+        [Fact]
+        public async Task TheRawWithdrawalBuilders_RefuseABitcoinAddressTheChainRefuses_BeforeItIsSigned()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 150_000);
+
+            async Task<JObject> Single(string address) => JObject.Parse(await _api.GetRawRequestWithdrawalTxData(new VBTCWithdrawalPayload
+                { SmartContractUID = vault.Uid, RequestorAddress = Minter.Address, BTCAddress = address, Amount = 0.0005M, FeeRate = 10 }));
+            async Task<JObject> Multi(string address) => JObject.Parse(await _api.GetRawRequestWithdrawalMultiTxData(new VBTCWithdrawalMultiRawPayload
+                { RequestorAddress = Minter.Address, BTCAddress = address, TotalAmount = 0.0005M, FeeRate = 10 }));
+
+            const string NotAnAddress = "bc1qnotreal";
+            foreach (var build in new Func<string, Task<JObject>>[] { Single, Multi })
+            {
+                var refused = await build(NotAnAddress);
+                Assert.False((bool)refused["Success"]!, refused.ToString());
+                Assert.Equal($"The withdrawal's Bitcoin address is not an address on this network: {NotAnAddress}", (string)refused["Message"]!);
+                Assert.Null(refused["Hash"]);
+
+                Assert.Equal("The withdrawal's Bitcoin address has spaces around it.", (string)(await build(" " + BtcDest))["Message"]!);
+                Assert.Contains($"is the deposit address of vault {vault.Uid}", (string)(await build(vault.Address))["Message"]!);
+
+                var good = await build(BtcDest);
+                Assert.True((bool)good["Success"]!, good.ToString());
+                Assert.False(string.IsNullOrEmpty((string?)good["Hash"]));
+            }
+
+            // The chain's answer to the same address, signed and submitted, is the one the builders give.
+            var signed = SignedBy(Minter, Minter.Address, TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
+                new { Function = "VBTCWithdrawalRequest()", ContractUID = vault.Uid, BTCAddress = NotAnAddress, Amount = 0.0005M, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") });
+            var (ok, why) = await Verify(signed, Tip + 1);
+            Assert.False(ok);
+            Assert.Equal($"The withdrawal's Bitcoin address is not an address on this network: {NotAnAddress}", why);
+        }
+
+        /// <summary>
         /// A caller that polls the multi-vault completion route records a payout when a share reads as a success. A
         /// share that was closed and refunded was not paid, and must not read as one.
         /// </summary>
