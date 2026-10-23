@@ -2234,8 +2234,11 @@ namespace VerifiedXCore.Nodes
                             var body = await resp.Content.ReadAsStringAsync();
                             if (!string.IsNullOrEmpty(body) && body != "0")
                             {
-                                var peerResult = JsonConvert.DeserializeAnonymousType(body, new { Hash = "", Validator = "", Height = 0L });
-                                if (peerResult != null && peerResult.Height == myHeight && !string.IsNullOrEmpty(peerResult.Hash))
+                                // Only a block the peer committed counts. A peer still one behind answers with its round
+                                // draft for this height (Committed=false): at mainnet 7,562,232 three such drafts read as
+                                // "3 of 5 hold another block" against our certified tip, and we rolled it back.
+                                var peerResult = JsonConvert.DeserializeAnonymousType(body, new { Hash = "", Validator = "", Height = 0L, Committed = (bool?)null });
+                                if (peerResult != null && peerResult.Height == myHeight && !string.IsNullOrEmpty(peerResult.Hash) && peerResult.Committed != false)
                                     return peerResult.Hash;
                             }
                         }
