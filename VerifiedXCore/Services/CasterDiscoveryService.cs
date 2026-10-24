@@ -2285,8 +2285,47 @@ namespace VerifiedXCore.Services
         /// adopted at or above a contested seq (<see cref="ContestedSeq"/>): that is logged and raised to the operator as
         /// a membership fork, and the next pull asks again. Returns the number of records applied.
         /// </summary>
+        /// <summary>
+        /// A node with no record asks for every record from genesis, and peers on different eras (each started by a
+        /// seed-signed genesis at a coordinated restart) answer with different records at seq 0. That made seq 0
+        /// contested and the node adopted nothing, pull after pull, for as long as one peer it asked was on an older era
+        /// (mainnet, 24 October 2026: two casters still served the era of 7,414,847). Eras only move forward, so the newest
+        /// genesis that is valid and not ended by an operator reset is the seeds' latest restart: only its responders are
+        /// adopted from. Two acceptable geneses at the same height cannot be told apart, and the responders are left as
+        /// they are (seq 0 stays contested). A node that holds a record asks from its head and sees no genesis.
+        /// </summary>
+        internal static List<(string Ip, long HeadSeq, List<CasterMembershipRecord> Records)> NewestEraResponses(
+            long localHeadSeq, List<(string Ip, long HeadSeq, List<CasterMembershipRecord> Records)> responses,
+            Func<CasterMembershipRecord, bool> genesisAcceptable)
+        {
+            if (localHeadSeq >= 0)
+                return responses;
+            var withGenesis = responses
+                .Select(r => (Response: r, Genesis: r.Records.FirstOrDefault(rec => rec != null && rec.RecordSeq == 0)))
+                .Where(x => x.Genesis != null)
+                .ToList();
+            var acceptable = withGenesis.Select(x => x.Genesis!)
+                .GroupBy(g => g.RecordHash, StringComparer.Ordinal).Select(g => g.First())
+                .Where(genesisAcceptable)
+                .OrderByDescending(g => g.EffectiveFromHeight)
+                .ToList();
+            if (acceptable.Count == 0 || (acceptable.Count > 1 && acceptable[1].EffectiveFromHeight == acceptable[0].EffectiveFromHeight))
+                return responses;
+            var newest = acceptable[0];
+            var chosen = withGenesis.Where(x => x.Genesis!.RecordHash == newest.RecordHash).Select(x => x.Response).ToList();
+            var leftOut = withGenesis.Where(x => x.Genesis!.RecordHash != newest.RecordHash).ToList();
+            if (leftOut.Count > 0)
+                CasterLogUtility.Log(
+                    $"MEMBERSHIP: adopting the newest era (genesis effective at {newest.EffectiveFromHeight}); left out {leftOut.Count} responder(s) on other eras: " +
+                    string.Join(", ", leftOut.Select(x => $"{x.Response.Ip}=genesis {x.Genesis!.EffectiveFromHeight}")) + ".",
+                    "MEMBERSHIP");
+            return chosen;
+        }
+
         internal static int AdoptResponses(long localHeadSeq, List<(string Ip, long HeadSeq, List<CasterMembershipRecord> Records)> responses)
         {
+            responses = NewestEraResponses(localHeadSeq, responses,
+                g => g.EffectiveFromHeight > CasterMembershipStore.ClearedGenesisFromHeight() && CasterMembershipStore.ValidateSuccessor(null, g, out _));
             var contested = ContestedSeq(localHeadSeq, responses);
             if (contested is { } seq)
             {
