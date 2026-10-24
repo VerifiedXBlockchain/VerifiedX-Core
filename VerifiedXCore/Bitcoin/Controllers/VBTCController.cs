@@ -2198,7 +2198,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var preRegConcurrencyActive = Services.VBTCService.WithdrawalConcurrencyActive(Services.VBTCService.NextBlockHeight);
                 if (preRegConcurrencyActive)
                 {
-                    var floorError = Services.VBTCService.GetWithdrawalFeeFloorError(payload.Amount, payload.FeeRate, "vBTC V2 withdrawal request");
+                    var floorError = Services.VBTCService.GetWithdrawalFeeFloorError(payload.Amount, payload.FeeRate, "vBTC V2 withdrawal request", Services.VBTCService.MinWithdrawalPayoutSats(payload.SmartContractUID));
                     if (floorError != null)
                         return JsonConvert.SerializeObject(new { Success = false, Message = floorError });
                 }
@@ -3114,7 +3114,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var rawConcurrencyActive = Services.VBTCService.WithdrawalConcurrencyActive(Services.VBTCService.NextBlockHeight);
                 if (rawConcurrencyActive)
                 {
-                    var floorError = Services.VBTCService.GetWithdrawalFeeFloorError(payload.Amount, payload.FeeRate, "vBTC V2 withdrawal request");
+                    var floorError = Services.VBTCService.GetWithdrawalFeeFloorError(payload.Amount, payload.FeeRate, "vBTC V2 withdrawal request", Services.VBTCService.MinWithdrawalPayoutSats(payload.SmartContractUID));
                     if (floorError != null)
                         return JsonConvert.SerializeObject(new { Success = false, Message = floorError });
                 }
@@ -3264,7 +3264,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 {
                     foreach (var allocation in allocations)
                     {
-                        var floorError = Services.VBTCService.GetWithdrawalFeeFloorError(allocation.Amount, payload.FeeRate, $"Withdrawal share from contract {allocation.SCUID}");
+                        var floorError = Services.VBTCService.GetWithdrawalFeeFloorError(allocation.Amount, payload.FeeRate, $"Withdrawal share from contract {allocation.SCUID}", Services.VBTCService.MinWithdrawalPayoutSats(allocation.SCUID));
                         if (floorError != null)
                             return JsonConvert.SerializeObject(new { Success = false, Message = floorError });
                     }
@@ -6083,8 +6083,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
         public string SmartContractUID { get; set; }
         public string OwnerAddress { get; set; }
         public string WithdrawalRequestHash { get; set; }
-        public string BTCTxHash { get; set; }
-        public string FailureProof { get; set; }
+        // Optional: CancelWithdrawal reads neither. Declared as plain strings they were required by model validation, so a
+        // request without them (a watched vault's cancel has neither) was answered 400 before the action ran.
+        public string? BTCTxHash { get; set; }
+        public string? FailureProof { get; set; }
     }
 
     public class VBTCCancellationVotePayload
@@ -6131,8 +6133,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
         public string SmartContractUID { get; set; }
         public string OwnerAddress { get; set; }
         public string WithdrawalRequestHash { get; set; }
-        public string BTCTxHash { get; set; }
-        public string FailureProof { get; set; }         // Proof of BTC TX failure
+        public string? BTCTxHash { get; set; }           // Optional, as on VBTCCancellationPayload (signed as "" when absent)
+        public string? FailureProof { get; set; }        // Optional; proof of BTC TX failure
         public long Timestamp { get; set; }
         public string UniqueId { get; set; }
         public string OwnerSignature { get; set; }       // VFX signature

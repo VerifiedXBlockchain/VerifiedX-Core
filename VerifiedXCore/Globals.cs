@@ -628,11 +628,11 @@ namespace VerifiedXCore
         /// proof that verifies against VFXPI1 version-2 public inputs rebuilt from its own fields, and a node whose native
         /// library cannot verify (no VXPLNK06 params, or a library without the v2 owner-bound circuits) refuses it (fail closed).
         /// Notes shielded before the height can never be proven and are abandoned (owner decision: test funds, ~4.1 VFX).
-        /// Sentinel 999,999,999,999 = inert; set at the stage-2 release, above the tip when every validator runs it.
+        /// Mainnet: LedgerRulesBatchHeight (set 2026-10-24 with that batch); above the tip when every validator runs it.
         /// Release rule: a later params file or native library that changes what a proof verifies against ships with its own
         /// activation height, and nodes keep the prior params to judge blocks below it.
         /// </summary>
-        public static long PrivateTxProofRulesHeight = 999_999_999_999L;
+        public static long PrivateTxProofRulesHeight = LedgerRulesBatchHeight;
         public static Dictionary<string, decimal> ForgedVfxBurns = new(StringComparer.Ordinal)
         {
             ["RB3eeBH258arkuePCJf5NMVMSaUyhyy9g6"] = 100_033.000012M,

@@ -2285,8 +2285,49 @@ namespace VerifiedXCore.Services
         /// adopted at or above a contested seq (<see cref="ContestedSeq"/>): that is logged and raised to the operator as
         /// a membership fork, and the next pull asks again. Returns the number of records applied.
         /// </summary>
+        /// <summary>
+        /// A node with no record asks for every record from genesis, and peers on different eras (each started by a
+        /// seed-signed genesis at a coordinated restart) answer with different records at seq 0. That made seq 0
+        /// contested and the node adopted nothing, pull after pull, for as long as one peer it asked was on an older era
+        /// (mainnet, 24 October 2026: two casters still served the era of 7,414,847). Eras only move forward, so the newest
+        /// genesis that is valid and not ended by an operator reset is the seeds' latest restart: only its responders are
+        /// adopted from. Two acceptable geneses at the same height cannot be told apart, and the responders are left as
+        /// they are (seq 0 stays contested). A node that holds a record asks from its head and sees no genesis.
+        /// </summary>
+        internal static List<(string Ip, long HeadSeq, List<CasterMembershipRecord> Records)> NewestEraResponses(
+            long localHeadSeq, List<(string Ip, long HeadSeq, List<CasterMembershipRecord> Records)> responses,
+            Func<CasterMembershipRecord, bool> genesisAcceptable)
+        {
+            if (localHeadSeq >= 0)
+                return responses;
+            var withGenesis = responses
+                .Select(r => (Response: r, Genesis: r.Records.FirstOrDefault(rec => rec != null && rec.RecordSeq == 0)))
+                .Where(x => x.Genesis != null)
+                .ToList();
+            // Each copy is judged before copies are merged: a record's hash leaves out its signatures, so an unsigned copy
+            // and a signed one share it, and judging only the first copy let a stripped copy hide the newest valid era.
+            var acceptable = withGenesis.Select(x => x.Genesis!)
+                .Where(genesisAcceptable)
+                .GroupBy(g => g.RecordHash, StringComparer.Ordinal).Select(g => g.First())
+                .OrderByDescending(g => g.EffectiveFromHeight)
+                .ToList();
+            if (acceptable.Count == 0 || (acceptable.Count > 1 && acceptable[1].EffectiveFromHeight == acceptable[0].EffectiveFromHeight))
+                return responses;
+            var newest = acceptable[0];
+            var chosen = withGenesis.Where(x => x.Genesis!.RecordHash == newest.RecordHash).Select(x => x.Response).ToList();
+            var leftOut = withGenesis.Where(x => x.Genesis!.RecordHash != newest.RecordHash).ToList();
+            if (leftOut.Count > 0)
+                CasterLogUtility.Log(
+                    $"MEMBERSHIP: adopting the newest era (genesis effective at {newest.EffectiveFromHeight}); left out {leftOut.Count} responder(s) on other eras: " +
+                    string.Join(", ", leftOut.Select(x => $"{x.Response.Ip}=genesis {x.Genesis!.EffectiveFromHeight}")) + ".",
+                    "MEMBERSHIP");
+            return chosen;
+        }
+
         internal static int AdoptResponses(long localHeadSeq, List<(string Ip, long HeadSeq, List<CasterMembershipRecord> Records)> responses)
         {
+            responses = NewestEraResponses(localHeadSeq, responses,
+                g => g.EffectiveFromHeight > CasterMembershipStore.ClearedGenesisFromHeight() && CasterMembershipStore.ValidateSuccessor(null, g, out _));
             var contested = ContestedSeq(localHeadSeq, responses);
             if (contested is { } seq)
             {
@@ -2304,13 +2345,41 @@ namespace VerifiedXCore.Services
             {
                 var records = contested is { } floor ? r.Records.Where(rec => rec != null && rec.RecordSeq < floor).ToList() : r.Records;
                 if (records.Count == 0) continue;
-                var applied = CasterMembershipStore.TryAppendChain(records);
+                var applied = CasterMembershipStore.TryAppendChain(records, out var refusal, GenesisHolders(responses, records));
                 total += applied;
                 if (applied > 0)
                     CasterLogUtility.Log($"MEMBERSHIP: adopted {applied} record(s) from {r.Ip} (their head {r.HeadSeq}).", "MEMBERSHIP");
+                else if (refusal != null && r.HeadSeq > (CasterMembershipStore.GetCurrent()?.RecordSeq ?? -1))
+                {
+                    // Said out loud: a node that cannot adopt the record its peers hold waits at the tip, and the reason was
+                    // thrown away, so it looked like a silent stall (mainnet, 24 October 2026).
+                    LastAdoptionRefusal = $"{r.Ip} (their head {r.HeadSeq}): {refusal}";
+                    CasterLogUtility.Log($"MEMBERSHIP: nothing adopted from {LastAdoptionRefusal}.", "MEMBERSHIP");
+                }
             }
             return total;
         }
+
+        /// <summary>
+        /// How many responders hold a valid copy of the genesis in <paramref name="records"/> (0 when it has none): what an
+        /// older reset marker asks of a genesis below it (CasterMembershipStore.LegacyResetHeight).
+        /// </summary>
+        internal static int GenesisHolders(List<(string Ip, long HeadSeq, List<CasterMembershipRecord> Records)> responses, List<CasterMembershipRecord> records)
+        {
+            var genesis = records.FirstOrDefault(rec => rec != null && rec.RecordSeq == 0);
+            if (genesis == null)
+                return 0;
+            return responses
+                .Where(r => r.Records.Any(rec => rec != null && rec.RecordSeq == 0
+                    && string.Equals(rec.RecordHash, genesis.RecordHash, StringComparison.Ordinal)
+                    && CasterMembershipStore.ValidateSuccessor(null, rec, out _)))
+                .Select(r => r.Ip)
+                .Distinct(StringComparer.Ordinal)
+                .Count();
+        }
+
+        /// <summary>The last time a peer's records above our head were all refused: who, and why. Diagnostics.</summary>
+        internal static string? LastAdoptionRefusal { get; private set; }
 
         /// <summary>
         /// Wave 3: record-era adoption. Pulls membership records after our head from up to 10 peers
