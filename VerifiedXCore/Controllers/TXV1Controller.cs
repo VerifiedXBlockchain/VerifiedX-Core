@@ -638,7 +638,10 @@ namespace VerifiedXCore.Controllers
                                 return output;
                             }
                         }
-                        else
+
+                        // Carry on after a fresh connection too: the upload used to sit in an else
+                        // branch, so a call that had to connect first answered "Process Failed" and
+                        // only the next call uploaded (VerifiedX-Issues#366).
                         {
                             var connectedBeacon = Globals.Beacon.Values.Where(x => x.IsConnected).FirstOrDefault();
                             if (connectedBeacon == null)

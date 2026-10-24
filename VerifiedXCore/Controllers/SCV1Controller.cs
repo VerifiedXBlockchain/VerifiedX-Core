@@ -945,13 +945,20 @@ namespace VerifiedXCore.Controllers
 
                             if (result == true)
                             {
-                                var aqResult = AssetQueue.CreateAssetQueueItem(sc.SmartContractUID, toAddress, connectedBeacon.Beacons.BeaconLocator, md5List, assets,
+                                // Nothing is uploaded for a recipient in this wallet, so no upload is queued: an
+                                // item nothing completes would refuse the next transfer of this contract.
+                                var aqResult = localAddress != null || AssetQueue.CreateAssetQueueItem(sc.SmartContractUID, toAddress, connectedBeacon.Beacons.BeaconLocator, md5List, assets,
                                     AssetQueue.TransferType.Upload);
                                 SCLogUtility.Log($"NFT Asset Queue Items Completed. SCUID: {sc.SmartContractUID}", "SCV1Controller.TransferNFT()");
 
                                 if (aqResult)
                                 {
-                                    _ = Task.Run(() => SmartContractService.TransferSmartContract(sc, toAddress, connectedBeacon, md5List, backupURL));
+                                    // A recipient in this wallet already has the assets on this node, and no upload
+                                    // was registered with the beacon for it, so it is sent without one: uploading
+                                    // to the beacon anyway was refused (403) and terminated the transfer
+                                    // (VerifiedX-Issues#365).
+                                    var transferBeacon = localAddress == null ? connectedBeacon : null;
+                                    _ = Task.Run(() => SmartContractService.TransferSmartContract(sc, toAddress, transferBeacon, md5List, backupURL));
                                         
                                     var success = JsonConvert.SerializeObject(new {Result = "Success", Message = "NFT Transfer has been started." });
                                     output = success;
