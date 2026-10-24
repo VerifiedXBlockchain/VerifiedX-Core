@@ -2304,9 +2304,11 @@ namespace VerifiedXCore.Services
                 .Select(r => (Response: r, Genesis: r.Records.FirstOrDefault(rec => rec != null && rec.RecordSeq == 0)))
                 .Where(x => x.Genesis != null)
                 .ToList();
+            // Each copy is judged before copies are merged: a record's hash leaves out its signatures, so an unsigned copy
+            // and a signed one share it, and judging only the first copy let a stripped copy hide the newest valid era.
             var acceptable = withGenesis.Select(x => x.Genesis!)
-                .GroupBy(g => g.RecordHash, StringComparer.Ordinal).Select(g => g.First())
                 .Where(genesisAcceptable)
+                .GroupBy(g => g.RecordHash, StringComparer.Ordinal).Select(g => g.First())
                 .OrderByDescending(g => g.EffectiveFromHeight)
                 .ToList();
             if (acceptable.Count == 0 || (acceptable.Count > 1 && acceptable[1].EffectiveFromHeight == acceptable[0].EffectiveFromHeight))

@@ -128,6 +128,40 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void AnUnsignedCopyOfTheNewestGenesis_DoesNotHideTheSignedOne()
+        {
+            // A record's hash leaves out its signatures: the stripped copy and the signed one share it. Listed first, the
+            // stripped copy used to have the whole era judged by it, and the older era was chosen.
+            var stripped = SignedGenesis(2_000, signed: false);
+            var signed = SignedGenesis(2_000);
+            Assert.Equal(stripped.RecordHash, signed.RecordHash);
+            var responses = new List<(string Ip, long HeadSeq, List<CasterMembershipRecord> Records)>
+            {
+                (ThirdPeer, 6, new List<CasterMembershipRecord> { stripped }),
+                (NewEraPeer, 6, new List<CasterMembershipRecord> { signed }),
+                (OldEraPeer, 16, new List<CasterMembershipRecord> { SignedGenesis(1_000) }),
+            };
+
+            var chosen = CasterDiscoveryService.NewestEraResponses(-1, responses, g => CasterMembershipStore.ValidateSuccessor(null, g, out _));
+
+            Assert.DoesNotContain(chosen, r => r.Ip == OldEraPeer);
+            Assert.Contains(chosen, r => r.Ip == NewEraPeer);
+        }
+
+        [Fact]
+        public async Task WithAStrippedCopyServedToo_TheNewestValidEraIsAdopted()
+        {
+            await PullFrom(new Dictionary<string, string>
+            {
+                [ThirdPeer] = Response(6, SignedGenesis(2_000, signed: false)),
+                [NewEraPeer] = Response(6, SignedGenesis(2_000)),
+                [OldEraPeer] = Response(16, SignedGenesis(1_000)),
+            });
+
+            Assert.Equal(2_000, CasterMembershipStore.GetCurrent()?.EffectiveFromHeight);
+        }
+
+        [Fact]
         public void TwoValidGenesesAtTheSameHeight_AreLeftContested()
         {
             var a = SignedGenesis(2_000);
