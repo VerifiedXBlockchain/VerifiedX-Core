@@ -265,11 +265,12 @@ namespace VerifiedXCore
         // mainnet height. Each rule keeps its own constant (so one can be moved alone if ever needed); all are set to
         // FundLossAuditHeight. Must be above the tip when every validator runs this build. Testnet values in Program.cs.
         /// <summary>
-        /// Shared mainnet activation height of the fund-loss audit rules: tip 7,540,524 on 2026-10-20 02:15 UTC plus 48 hours
-        /// (~12.6 s/block, ~13,700 blocks). It was 7,517,000 (reset 2026-10-13; the chain passed it on 2026-10-16 before
-        /// the build was deployed), then a placeholder. The same height as <see cref="BitcoinAttestationRecordHeight"/>.
+        /// Shared mainnet activation height of the fund-loss audit rules: tip 7,567,040 on 2026-10-24 00:00 UTC plus about
+        /// 4.5 hours (~12.4 s/block over the 3,000 blocks before it, ~1,310 blocks), for 2026-10-23 23:30 CDT. It was
+        /// 7,554,250 (set 2026-10-20; the chain passed it before the build was deployed), before that 7,517,000 (reset
+        /// 2026-10-13, also passed). The same height as <see cref="BitcoinAttestationRecordHeight"/>.
         /// </summary>
-        public const long FundLossAuditHeight = 7_554_250L;
+        public const long FundLossAuditHeight = 7_568_350L;
         /// <summary>
         /// Testnet activation of the same rules (GlobalsNetworkHeights / WardenService). Set 2026-10-22 for the testnet
         /// reset to genesis (the move to the VFX signet): block 400, one block after the validator bonds start (399) and
