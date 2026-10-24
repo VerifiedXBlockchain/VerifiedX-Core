@@ -2198,7 +2198,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var preRegConcurrencyActive = Services.VBTCService.WithdrawalConcurrencyActive(Services.VBTCService.NextBlockHeight);
                 if (preRegConcurrencyActive)
                 {
-                    var floorError = Services.VBTCService.GetWithdrawalFeeFloorError(payload.Amount, payload.FeeRate, "vBTC V2 withdrawal request");
+                    var floorError = Services.VBTCService.GetWithdrawalFeeFloorError(payload.Amount, payload.FeeRate, "vBTC V2 withdrawal request", Services.VBTCService.MinWithdrawalPayoutSats(payload.SmartContractUID));
                     if (floorError != null)
                         return JsonConvert.SerializeObject(new { Success = false, Message = floorError });
                 }
@@ -3114,7 +3114,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 var rawConcurrencyActive = Services.VBTCService.WithdrawalConcurrencyActive(Services.VBTCService.NextBlockHeight);
                 if (rawConcurrencyActive)
                 {
-                    var floorError = Services.VBTCService.GetWithdrawalFeeFloorError(payload.Amount, payload.FeeRate, "vBTC V2 withdrawal request");
+                    var floorError = Services.VBTCService.GetWithdrawalFeeFloorError(payload.Amount, payload.FeeRate, "vBTC V2 withdrawal request", Services.VBTCService.MinWithdrawalPayoutSats(payload.SmartContractUID));
                     if (floorError != null)
                         return JsonConvert.SerializeObject(new { Success = false, Message = floorError });
                 }
@@ -3264,7 +3264,7 @@ namespace VerifiedXCore.Bitcoin.Controllers
                 {
                     foreach (var allocation in allocations)
                     {
-                        var floorError = Services.VBTCService.GetWithdrawalFeeFloorError(allocation.Amount, payload.FeeRate, $"Withdrawal share from contract {allocation.SCUID}");
+                        var floorError = Services.VBTCService.GetWithdrawalFeeFloorError(allocation.Amount, payload.FeeRate, $"Withdrawal share from contract {allocation.SCUID}", Services.VBTCService.MinWithdrawalPayoutSats(allocation.SCUID));
                         if (floorError != null)
                             return JsonConvert.SerializeObject(new { Success = false, Message = floorError });
                     }

@@ -56,17 +56,28 @@ namespace VerifiedXCore.Bitcoin.Services
         /// every node agrees. A request that passes can still need more inputs (and fee) when the vault's coins are small;
         /// that request fails at signing and blocks no one but its requester.
         /// </summary>
-        public static string? GetWithdrawalFeeFloorError(decimal amount, long feeRate, string context)
+        /// <param name="minPayoutSats">The smallest payout: <see cref="TaprootDustSats"/> for the consensus rule; a request
+        /// builder passes the vault's own (<see cref="MinWithdrawalPayoutSats"/>).</param>
+        public static string? GetWithdrawalFeeFloorError(decimal amount, long feeRate, string context, long minPayoutSats = TaprootDustSats)
         {
             if (feeRate <= 0 || amount <= 0M)
                 return null; // the amount and fee-rate rules report these
             var minFeeSats = (decimal)feeRate * MinWithdrawalTxVBytes;
             var payoutSats = amount * 100_000_000M - minFeeSats;
-            if (payoutSats >= TaprootDustSats)
+            if (payoutSats >= minPayoutSats)
                 return null;
-            var minAmount = (minFeeSats + TaprootDustSats) / 100_000_000M;
-            return $"{context}: {amount:0.########} BTC cannot pay a Bitcoin withdrawal at {feeRate} sat/vB. The smallest withdrawal transaction costs {minFeeSats:0} sats in fees and the payout must be at least {TaprootDustSats} sats, so the minimum at this fee rate is {minAmount:0.########} BTC. Raise the amount or lower the fee rate.";
+            var minAmount = (minFeeSats + minPayoutSats) / 100_000_000M;
+            return $"{context}: {amount:0.########} BTC cannot pay a Bitcoin withdrawal at {feeRate} sat/vB. The smallest withdrawal transaction costs {minFeeSats:0} sats in fees and the payout must be at least {minPayoutSats} sats, so the minimum at this fee rate is {minAmount:0.########} BTC. Raise the amount or lower the fee rate.";
         }
+
+        /// <summary>
+        /// The smallest payout a withdrawal from this vault may leave after the fee: a vault the chain watches refuses a
+        /// request that leaves less than <see cref="Attestation.BtcCanonicalWithdrawal.DustSats"/> (BtcWithdrawals.Refusal),
+        /// a legacy vault's send path <see cref="TaprootDustSats"/>. The request builders check against it, so they do not
+        /// build a request that its own vault then refuses.
+        /// </summary>
+        public static long MinWithdrawalPayoutSats(string? scUID) =>
+            Attestation.BtcAttestBalance.IsAttestedVault(scUID) ? Attestation.BtcCanonicalWithdrawal.DustSats : TaprootDustSats;
 
         /// <summary>
         /// Balance-endpoint view of the escrow a holder has in open withdrawal requests on one contract: the total, the
@@ -1385,7 +1396,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 var concurrencyActive = WithdrawalConcurrencyActive(NextBlockHeight);
                 if (concurrencyActive)
                 {
-                    var floorError = GetWithdrawalFeeFloorError(amount, feeRate, "vBTC V2 withdrawal request");
+                    var floorError = GetWithdrawalFeeFloorError(amount, feeRate, "vBTC V2 withdrawal request", MinWithdrawalPayoutSats(scUID));
                     if (floorError != null)
                         return (false, floorError);
                 }
@@ -1621,7 +1632,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 {
                     foreach (var allocation in allocations)
                     {
-                        var floorError = GetWithdrawalFeeFloorError(allocation.Amount, feeRate, $"Withdrawal share from contract {allocation.SCUID}");
+                        var floorError = GetWithdrawalFeeFloorError(allocation.Amount, feeRate, $"Withdrawal share from contract {allocation.SCUID}", MinWithdrawalPayoutSats(allocation.SCUID));
                         if (floorError != null)
                             return (false, $"{floorError} (The total was split across {allocations.Count} contracts; each share pays its own Bitcoin fee.)", allocations);
                     }
@@ -1829,7 +1840,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     return (false, "Input amounts cannot have more than 8 decimal places for multi-contract vBTC withdrawal.");
                 if (concurrencyActive)
                 {
-                    var floorError = GetWithdrawalFeeFloorError(input.Amount, feeRate, $"Multi-contract vBTC withdrawal input {input.SCUID}");
+                    var floorError = GetWithdrawalFeeFloorError(input.Amount, feeRate, $"Multi-contract vBTC withdrawal input {input.SCUID}", MinWithdrawalPayoutSats(input.SCUID));
                     if (floorError != null)
                         return (false, floorError);
                 }
