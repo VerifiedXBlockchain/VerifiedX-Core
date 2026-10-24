@@ -2250,9 +2250,9 @@ namespace VerifiedXCore.Services
 
         /// <summary>
         /// The membership-record head sequence each peer reported on the round loop's last pull (-1 = no record).
-        /// Unverified claims: callers act on a majority of them, never on one peer's. Only that pull writes this — it
-        /// asks the live casters and record members; other callers ask other peers (any validator, or a single caster)
-        /// and used to overwrite it.
+        /// Unverified claims: callers act on a majority of them, never on one peer's. Only that pull writes this, and on a
+        /// node that does not cast ValidatorMembershipPull — both ask the live casters and record members; other callers
+        /// ask other peers (any validator, or a single caster) and used to overwrite it.
         /// </summary>
         public static IReadOnlyList<long> LastObservedPeerHeads { get; private set; } = Array.Empty<long>();
 

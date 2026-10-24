@@ -2234,8 +2234,11 @@ namespace VerifiedXCore.Nodes
                             var body = await resp.Content.ReadAsStringAsync();
                             if (!string.IsNullOrEmpty(body) && body != "0")
                             {
-                                var peerResult = JsonConvert.DeserializeAnonymousType(body, new { Hash = "", Validator = "", Height = 0L });
-                                if (peerResult != null && peerResult.Height == myHeight && !string.IsNullOrEmpty(peerResult.Hash))
+                                // Only a block the peer committed counts. A peer still one behind answers with its round
+                                // draft for this height (Committed=false): at mainnet 7,562,232 three such drafts read as
+                                // "3 of 5 hold another block" against our certified tip, and we rolled it back.
+                                var peerResult = JsonConvert.DeserializeAnonymousType(body, new { Hash = "", Validator = "", Height = 0L, Committed = (bool?)null });
+                                if (peerResult != null && peerResult.Height == myHeight && !string.IsNullOrEmpty(peerResult.Hash) && peerResult.Committed != false)
                                     return peerResult.Hash;
                             }
                         }
@@ -2387,11 +2390,22 @@ namespace VerifiedXCore.Nodes
 
         private static string Short16(string? hash) => string.IsNullOrEmpty(hash) ? "" : hash[..Math.Min(16, hash.Length)];
 
-        /// <summary>The block this caster signed at the height when it is not the committed one, else null.</summary>
+        /// <summary>
+        /// The block this caster signed at the height when it is not the committed one, else null. Not when the committed
+        /// block is our tip and carries a valid committee certificate: a quorum signed it, and this caster's one signature
+        /// for another block does not outrank that. Without this release the hold had no exit but a restart (which no
+        /// longer clears the stored claim): mainnet 7,562,232 (23 October 2026), every caster that signed the losing block
+        /// sat out until it was restarted.
+        /// </summary>
         internal static string? SignedElsewhere(long height, string? committedHash)
         {
             var signed = AttestationGuard.SignedAt(height);
-            return !string.IsNullOrEmpty(signed) && !string.Equals(signed, committedHash, StringComparison.Ordinal) ? signed : null;
+            if (string.IsNullOrEmpty(signed) || string.Equals(signed, committedHash, StringComparison.Ordinal))
+                return null;
+            var tip = Globals.LastBlock;
+            if (tip != null && tip.Height == height && tip.Hash == committedHash && ForkRecoveryUtility.CertifiedTipRefusal(tip) != null)
+                return null;
+            return signed;
         }
 
         #endregion
@@ -4756,6 +4770,13 @@ namespace VerifiedXCore.Nodes
         /// </summary>
         private static async Task ForkRecoveryAsync(long stuckHeight)
         {
+            var certifiedTip = ForkRecoveryUtility.CertifiedTipRefusal(Globals.LastBlock);
+            if (certifiedTip != null)
+            {
+                ForkRecoveryUtility.LogCertifiedTipRefusal("CasterSelfHeal", certifiedTip);
+                return;
+            }
+
             // Prevent concurrent recovery attempts
             if (Interlocked.CompareExchange(ref _forkRecoveryInProgress, 1, 0) != 0)
                 return;

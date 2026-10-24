@@ -135,6 +135,26 @@ namespace VerifiedXCore.Bitcoin.Attestation
         }
 
         /// <summary>
+        /// The Bitcoin address rules of a withdrawal request (see <see cref="Refusal"/>), with the same answers, for the
+        /// routes that build a request before its requester signs it: an address that is not one on this network, one
+        /// with spaces around it, or the deposit address of a watched vault it withdraws from is refused there, so a
+        /// signer is never handed a transaction the chain will not accept. The routes apply them to every vault, a
+        /// little stricter than the chain, which applies them only to watched vaults: an older vault's withdrawal to
+        /// such an address could never be paid either. Null when the address passes.
+        /// </summary>
+        public static string? DestinationRefusal(string? address, IEnumerable<string?> vaults)
+        {
+            if (!BtcCanonicalWithdrawal.TryDestinationScript(address, out var script))
+                return $"The withdrawal's Bitcoin address is not an address on this network: {address}";
+            if (address != address!.Trim())
+                return "The withdrawal's Bitcoin address has spaces around it.";
+            foreach (var vault in vaults)
+                if (BtcAttestBalance.IsAttestedVault(Stored(vault)) && BtcAttestStore.ScriptRowsForVault(Stored(vault)).Any(k => k.ScriptHex == script))
+                    return $"The withdrawal's Bitcoin address is the deposit address of vault {vault}, which it withdraws from. Bitcoin that is to stay in the vault is not withdrawn.";
+            return null;
+        }
+
+        /// <summary>
         /// Whether <paramref name="txid"/> is the Bitcoin transaction fixed in state for this withdrawal: the only one
         /// a signer of the vault may sign for it. The reason when it is not.
         /// </summary>

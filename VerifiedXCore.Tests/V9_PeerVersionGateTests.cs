@@ -37,7 +37,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(8, Globals.PriorMajorVer);
 
             // Mainnet (the defaults a node starts with).
-            Assert.Equal(7_554_250, Globals.FundLossAuditHeight);     // set 2026-10-20: tip plus 48 hours
+            Assert.Equal(7_568_350, Globals.FundLossAuditHeight);     // set 2026-10-23: tip plus 4.5 hours, for 23:30 CDT
             Assert.Equal(Globals.FundLossAuditHeight, _priorRecordHeight);
             Assert.True(Globals.BitcoinAttestationObserveHeight < _priorRecordHeight);
             Assert.True(_priorRecordHeight < Globals.BitcoinAttestationHeight);
