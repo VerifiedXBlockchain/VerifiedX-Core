@@ -639,14 +639,24 @@ namespace VerifiedXCore.Services
         /// <summary>
         /// Verifies and appends an ordered chain of records (catch-up). Returns how many were applied.
         /// </summary>
-        public static int TryAppendChain(List<CasterMembershipRecord> records)
+        public static int TryAppendChain(List<CasterMembershipRecord> records) => TryAppendChain(records, out _);
+
+        /// <summary>
+        /// As <see cref="TryAppendChain(List{CasterMembershipRecord})"/>, and names the first record above our head that was
+        /// refused, with the reason (null when none was). A record at or below our head is not a refusal: we have it.
+        /// </summary>
+        public static int TryAppendChain(List<CasterMembershipRecord> records, out string? firstRefusal)
         {
+            firstRefusal = null;
             var applied = 0;
             foreach (var r in records.OrderBy(x => x.RecordSeq))
             {
+                var headSeq = GetCurrent()?.RecordSeq ?? -1;
                 // Wave 6: genesis is appended like any record — validated by seed signatures.
-                if (TryAppend(r, out _, fromSync: true))
+                if (TryAppend(r, out var why, fromSync: true))
                     applied++;
+                else if (firstRefusal == null && r.RecordSeq > headSeq)
+                    firstRefusal = $"seq {r.RecordSeq}: {why}";
             }
             return applied;
         }

@@ -21,10 +21,40 @@ namespace VerifiedXCore.Services
         /// <summary>Seconds between pulls; the same as the caster loop's RECORD_PULL_SECONDS.</summary>
         public const int PullSeconds = 60;
 
+        /// <summary>
+        /// Seconds after the last pull at which a requested pull (<see cref="RequestSoon"/>) runs: a node refusing blocks
+        /// for want of a record asks again this soon, not a full <see cref="PullSeconds"/> later.
+        /// </summary>
+        public const int RetrySeconds = 10;
+
         private static DateTime _lastPullUtc = DateTime.MinValue;
+        private static DateTime _nextDueUtc = DateTime.MinValue;
+        private static readonly object DueLock = new();
         private static readonly SemaphoreSlim Gate = new(1, 1);
 
-        internal static void ResetForTests() => _lastPullUtc = DateTime.MinValue;
+        internal static void ResetForTests()
+        {
+            lock (DueLock) { _lastPullUtc = DateTime.MinValue; _nextDueUtc = DateTime.MinValue; }
+        }
+
+        /// <summary>Seconds until the next pull may run (0 when it is due).</summary>
+        internal static double SecondsUntilDue()
+        {
+            lock (DueLock) return Math.Max(0, (_nextDueUtc - DateTime.UtcNow).TotalSeconds);
+        }
+
+        /// <summary>
+        /// Brings the next pull forward to <see cref="RetrySeconds"/> after the last one, never later than it was. Block
+        /// validation calls this when it refuses the next block because this node has no record while its peers do.
+        /// </summary>
+        public static void RequestSoon()
+        {
+            lock (DueLock)
+            {
+                var soon = _lastPullUtc == DateTime.MinValue ? DateTime.MinValue : _lastPullUtc.AddSeconds(RetrySeconds);
+                if (soon < _nextDueUtc) _nextDueUtc = soon;
+            }
+        }
 
         /// <summary>The peers asked: known casters, the head record's members and the bootstrap seeds, never this node.</summary>
         public static List<string> PeerIps()
@@ -49,13 +79,17 @@ namespace VerifiedXCore.Services
         {
             if (Globals.IsBlockCaster || string.IsNullOrEmpty(Globals.ValidatorAddress))
                 return false;
-            if ((DateTime.UtcNow - _lastPullUtc).TotalSeconds < PullSeconds)
+            if (SecondsUntilDue() > 0)
                 return false;
             if (!await Gate.WaitAsync(0))
                 return false;
             try
             {
-                _lastPullUtc = DateTime.UtcNow;
+                lock (DueLock)
+                {
+                    _lastPullUtc = DateTime.UtcNow;
+                    _nextDueUtc = _lastPullUtc.AddSeconds(PullSeconds);
+                }
                 var peers = PeerIps();
                 if (peers.Count == 0)
                     return false;

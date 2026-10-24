@@ -784,6 +784,7 @@ namespace VerifiedXCore.Services
                 // its peers hold (ValidatorMembershipPull, every minute) before it takes the next block.
                 if (!validateOnly && AtSyncedTip(block) && CasterMembershipStore.MissingWhilePeersHaveOne())
                 {
+                    ValidatorMembershipPull.RequestSoon(); // ask again within seconds, not at the next minute
                     DbContext.Rollback("BlockValidatorService.ValidateBlock()-noRecord");
                     return result;
                 }

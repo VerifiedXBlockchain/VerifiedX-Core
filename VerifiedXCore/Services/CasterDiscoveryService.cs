@@ -2343,13 +2343,23 @@ namespace VerifiedXCore.Services
             {
                 var records = contested is { } floor ? r.Records.Where(rec => rec != null && rec.RecordSeq < floor).ToList() : r.Records;
                 if (records.Count == 0) continue;
-                var applied = CasterMembershipStore.TryAppendChain(records);
+                var applied = CasterMembershipStore.TryAppendChain(records, out var refusal);
                 total += applied;
                 if (applied > 0)
                     CasterLogUtility.Log($"MEMBERSHIP: adopted {applied} record(s) from {r.Ip} (their head {r.HeadSeq}).", "MEMBERSHIP");
+                else if (refusal != null && r.HeadSeq > (CasterMembershipStore.GetCurrent()?.RecordSeq ?? -1))
+                {
+                    // Said out loud: a node that cannot adopt the record its peers hold waits at the tip, and the reason was
+                    // thrown away, so it looked like a silent stall (mainnet, 24 October 2026).
+                    LastAdoptionRefusal = $"{r.Ip} (their head {r.HeadSeq}): {refusal}";
+                    CasterLogUtility.Log($"MEMBERSHIP: nothing adopted from {LastAdoptionRefusal}.", "MEMBERSHIP");
+                }
             }
             return total;
         }
+
+        /// <summary>The last time a peer's records above our head were all refused: who, and why. Diagnostics.</summary>
+        internal static string? LastAdoptionRefusal { get; private set; }
 
         /// <summary>
         /// Wave 3: record-era adoption. Pulls membership records after our head from up to 10 peers
