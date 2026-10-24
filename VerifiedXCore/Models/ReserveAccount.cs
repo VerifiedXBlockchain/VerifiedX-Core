@@ -1057,13 +1057,16 @@ namespace VerifiedXCore.Models
 
                     if (result == true)
                     {
-                        var aqResult = AssetQueue.CreateAssetQueueItem(sc.SmartContractUID, toAddress, connectedBeacon.Beacons.BeaconLocator, md5List, assets,
+                        // As SCV1Controller.TransferNFT (VerifiedX-Issues#365): a recipient in this wallet already has
+                        // the assets on this node and no upload was registered for it, so nothing is queued or uploaded.
+                        var aqResult = localAddress != null || AssetQueue.CreateAssetQueueItem(sc.SmartContractUID, toAddress, connectedBeacon.Beacons.BeaconLocator, md5List, assets,
                             AssetQueue.TransferType.Upload);
                         SCLogUtility.Log($"NFT Asset Queue Items Completed. SCUID: {sc.SmartContractUID}", "SCV1Controller.TransferNFT()");
 
                         if (aqResult)
                         {
-                            _ = Task.Run(() => SmartContractService.TransferSmartContract(sc, toAddress, connectedBeacon, md5List, backupURL, true, key, sendNFTTransferPayload.UnlockDelayHours));
+                            var transferBeacon = localAddress == null ? connectedBeacon : null;
+                            _ = Task.Run(() => SmartContractService.TransferSmartContract(sc, toAddress, transferBeacon, md5List, backupURL, true, key, sendNFTTransferPayload.UnlockDelayHours));
 
                             var success = JsonConvert.SerializeObject(new { Success = true, Message = "NFT Transfer has been started." });
                             SCLogUtility.Log($"NFT Process Completed in CLI. SCUID: {sc.SmartContractUID}. Response: NFT Transfer has been started.", "SCV1Controller.TransferNFT()");

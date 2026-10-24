@@ -22,17 +22,46 @@ namespace VerifiedXCore.Services
         private const string SIGNED_MARKER_COLLECTION = "rsrv_membership_signed";
         private const string RESET_MARKER_COLLECTION = "rsrv_membership_reset";
 
-        /// <summary>Where this node's operator last reset the membership store: the tip at the reset.</summary>
+        /// <summary>Where this node's operator last reset the membership store.</summary>
         public class ResetMarker
         {
             public int Id { get; set; } = 1;
+            /// <summary>The tip at the reset. Kept for diagnostics; no rule reads it.</summary>
             public long ResetAtHeight { get; set; }
+            /// <summary>
+            /// The effective height of the genesis this node held when it was reset (the highest over all its resets): that
+            /// era and every older one stay ended. 0 when no reset ever cleared a genesis.
+            /// </summary>
+            public long ClearedGenesisFromHeight { get; set; }
+            /// <summary>
+            /// True for a marker written since resets record the era they end. False for an older marker, which holds only
+            /// the tip: it cannot say which era it ended (<see cref="LegacyResetHeight"/>).
+            /// </summary>
+            public bool RecordsClearedEra { get; set; }
+        }
+
+        /// <summary>How many peers must hold a genesis below <see cref="LegacyResetHeight"/> before it is adopted.</summary>
+        public const int LegacyResetGenesisMinHolders = 2;
+
+        /// <summary>
+        /// The tip of a reset made before resets recorded the era they end, or 0. Such a marker cannot tell the era it ended
+        /// from the network's current one when both take effect below it, so a genesis there is adopted only from at least
+        /// <see cref="LegacyResetGenesisMinHolders"/> peers (as the newest valid era they offer): one peer cannot hand the
+        /// node back the era its reset ended, and a node reset after the current genesis was minted still recovers.
+        /// </summary>
+        public static long LegacyResetHeight()
+        {
+            var marker = ResetCollection()?.FindById(1);
+            return marker != null && !marker.RecordsClearedEra ? marker.ResetAtHeight : 0;
         }
 
         private static LiteDB.ILiteCollection<ResetMarker>? ResetCollection() => DbContext.DB_Config?.GetCollection<ResetMarker>(RESET_MARKER_COLLECTION);
 
         /// <summary>The tip at this node's last operator reset, or 0 when it never had one.</summary>
         public static long LastOperatorResetHeight() => ResetCollection()?.FindById(1)?.ResetAtHeight ?? 0;
+
+        /// <summary>The effective height of the newest genesis an operator reset on this node cleared, or 0.</summary>
+        public static long ClearedGenesisFromHeight() => ResetCollection()?.FindById(1)?.ClearedGenesisFromHeight ?? 0;
         public const string GenesisPrevHash = "GENESIS";
 
         private static readonly object Mut = new object();
@@ -309,12 +338,23 @@ namespace VerifiedXCore.Services
             {
                 int removed = 0;
                 var col = Collection();
+                var clearedGenesis = col?.FindById(0L);
                 if (col != null)
                     removed = col.DeleteAll();
                 MarkerCollection()?.DeleteAll();
-                // A genesis from before the reset stays validly signed forever: remembered here, so it cannot re-arm the
-                // era this reset was meant to end (TryAppend refuses a genesis that takes effect below it).
-                ResetCollection()?.Upsert(new ResetMarker { Id = 1, ResetAtHeight = Globals.LastBlock?.Height ?? 0 });
+                // The genesis cleared here stays validly signed forever: its height is remembered, so neither it nor an older
+                // era can re-arm the node (TryAppend refuses a genesis at or below it). A newer era, minted at a later
+                // restart, is still adopted. This used to remember the TIP, which refused every genesis below it: a node
+                // reset after the seeds minted the current genesis could never adopt it (mainnet, 24 October 2026).
+                // Over an older marker, a reset that clears no genesis learns nothing new: the older marker stays as it is.
+                if (clearedGenesis != null || LegacyResetHeight() == 0)
+                {
+                    var cleared = Math.Max(ClearedGenesisFromHeight(), clearedGenesis?.EffectiveFromHeight ?? 0);
+                    ResetCollection()?.Upsert(new ResetMarker
+                    {
+                        Id = 1, ResetAtHeight = Globals.LastBlock?.Height ?? 0, ClearedGenesisFromHeight = cleared, RecordsClearedEra = true,
+                    });
+                }
                 _cachedHead = null;
                 _armed = false;
                 Globals.CertEnforceHeight = long.MaxValue;
@@ -555,7 +595,9 @@ namespace VerifiedXCore.Services
         /// membership sync (<paramref name="fromSync"/>) is applied as the peers that hold it applied it, so a lagging
         /// node catches up.
         /// </summary>
-        public static bool TryAppend(CasterMembershipRecord candidate, out string reason, bool fromSync = false)
+        /// <param name="genesisHolders">For a genesis: how many peers hold a valid copy of it (membership sync counts them;
+        /// a single announce or this node's own genesis is one). Read only against an older reset marker.</param>
+        public static bool TryAppend(CasterMembershipRecord candidate, out string reason, bool fromSync = false, int genesisHolders = 1)
         {
             lock (Mut)
             {
@@ -596,9 +638,15 @@ namespace VerifiedXCore.Services
                     }
                     reason = $"stale seq {candidate.RecordSeq} (head {head.RecordSeq})"; return false;
                 }
-                if (candidate.RecordSeq == 0 && candidate.EffectiveFromHeight < LastOperatorResetHeight())
+                if (candidate.RecordSeq == 0 && candidate.EffectiveFromHeight <= ClearedGenesisFromHeight())
                 {
-                    reason = $"genesis effective at {candidate.EffectiveFromHeight} is from before this node's operator reset at {LastOperatorResetHeight()}";
+                    reason = $"genesis effective at {candidate.EffectiveFromHeight} belongs to an era this node's operator reset ended (cleared genesis effective at {ClearedGenesisFromHeight()})";
+                    CasterLogUtility.Log($"MEMBERSHIP: REJECTED pre-reset GENESIS — {reason}.", "MEMBERSHIP");
+                    return false;
+                }
+                if (candidate.RecordSeq == 0 && candidate.EffectiveFromHeight < LegacyResetHeight() && genesisHolders < LegacyResetGenesisMinHolders)
+                {
+                    reason = $"genesis effective at {candidate.EffectiveFromHeight} is below this node's operator reset at {LegacyResetHeight()}, made before resets recorded the era they end; it is adopted only from {LegacyResetGenesisMinHolders} or more peers that hold it ({genesisHolders} here)";
                     CasterLogUtility.Log($"MEMBERSHIP: REJECTED pre-reset GENESIS — {reason}.", "MEMBERSHIP");
                     return false;
                 }
@@ -626,14 +674,25 @@ namespace VerifiedXCore.Services
         /// <summary>
         /// Verifies and appends an ordered chain of records (catch-up). Returns how many were applied.
         /// </summary>
-        public static int TryAppendChain(List<CasterMembershipRecord> records)
+        public static int TryAppendChain(List<CasterMembershipRecord> records) => TryAppendChain(records, out _);
+
+        /// <summary>
+        /// As <see cref="TryAppendChain(List{CasterMembershipRecord})"/>, and names the first record above our head that was
+        /// refused, with the reason (null when none was). A record at or below our head is not a refusal: we have it.
+        /// </summary>
+        /// <param name="genesisHolders">How many peers hold a valid copy of the chain's genesis (see <see cref="TryAppend"/>).</param>
+        public static int TryAppendChain(List<CasterMembershipRecord> records, out string? firstRefusal, int genesisHolders = 1)
         {
+            firstRefusal = null;
             var applied = 0;
             foreach (var r in records.OrderBy(x => x.RecordSeq))
             {
+                var headSeq = GetCurrent()?.RecordSeq ?? -1;
                 // Wave 6: genesis is appended like any record — validated by seed signatures.
-                if (TryAppend(r, out _, fromSync: true))
+                if (TryAppend(r, out var why, fromSync: true, genesisHolders: genesisHolders))
                     applied++;
+                else if (firstRefusal == null && r.RecordSeq > headSeq)
+                    firstRefusal = $"seq {r.RecordSeq}: {why}";
             }
             return applied;
         }
