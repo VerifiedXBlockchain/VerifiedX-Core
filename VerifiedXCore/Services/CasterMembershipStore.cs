@@ -22,17 +22,26 @@ namespace VerifiedXCore.Services
         private const string SIGNED_MARKER_COLLECTION = "rsrv_membership_signed";
         private const string RESET_MARKER_COLLECTION = "rsrv_membership_reset";
 
-        /// <summary>Where this node's operator last reset the membership store: the tip at the reset.</summary>
+        /// <summary>Where this node's operator last reset the membership store.</summary>
         public class ResetMarker
         {
             public int Id { get; set; } = 1;
+            /// <summary>The tip at the reset. Kept for diagnostics; no rule reads it.</summary>
             public long ResetAtHeight { get; set; }
+            /// <summary>
+            /// The effective height of the genesis this node held when it was reset (the highest over all its resets): that
+            /// era and every older one stay ended. 0 when no reset ever cleared a genesis.
+            /// </summary>
+            public long ClearedGenesisFromHeight { get; set; }
         }
 
         private static LiteDB.ILiteCollection<ResetMarker>? ResetCollection() => DbContext.DB_Config?.GetCollection<ResetMarker>(RESET_MARKER_COLLECTION);
 
         /// <summary>The tip at this node's last operator reset, or 0 when it never had one.</summary>
         public static long LastOperatorResetHeight() => ResetCollection()?.FindById(1)?.ResetAtHeight ?? 0;
+
+        /// <summary>The effective height of the newest genesis an operator reset on this node cleared, or 0.</summary>
+        public static long ClearedGenesisFromHeight() => ResetCollection()?.FindById(1)?.ClearedGenesisFromHeight ?? 0;
         public const string GenesisPrevHash = "GENESIS";
 
         private static readonly object Mut = new object();
@@ -309,12 +318,16 @@ namespace VerifiedXCore.Services
             {
                 int removed = 0;
                 var col = Collection();
+                var clearedGenesis = col?.FindById(0L);
                 if (col != null)
                     removed = col.DeleteAll();
                 MarkerCollection()?.DeleteAll();
-                // A genesis from before the reset stays validly signed forever: remembered here, so it cannot re-arm the
-                // era this reset was meant to end (TryAppend refuses a genesis that takes effect below it).
-                ResetCollection()?.Upsert(new ResetMarker { Id = 1, ResetAtHeight = Globals.LastBlock?.Height ?? 0 });
+                // The genesis cleared here stays validly signed forever: its height is remembered, so neither it nor an older
+                // era can re-arm the node (TryAppend refuses a genesis at or below it). A newer era, minted at a later
+                // restart, is still adopted. This used to remember the TIP, which refused every genesis below it: a node
+                // reset after the seeds minted the current genesis could never adopt it (mainnet, 24 October 2026).
+                var cleared = Math.Max(ClearedGenesisFromHeight(), clearedGenesis?.EffectiveFromHeight ?? 0);
+                ResetCollection()?.Upsert(new ResetMarker { Id = 1, ResetAtHeight = Globals.LastBlock?.Height ?? 0, ClearedGenesisFromHeight = cleared });
                 _cachedHead = null;
                 _armed = false;
                 Globals.CertEnforceHeight = long.MaxValue;
@@ -596,9 +609,9 @@ namespace VerifiedXCore.Services
                     }
                     reason = $"stale seq {candidate.RecordSeq} (head {head.RecordSeq})"; return false;
                 }
-                if (candidate.RecordSeq == 0 && candidate.EffectiveFromHeight < LastOperatorResetHeight())
+                if (candidate.RecordSeq == 0 && candidate.EffectiveFromHeight <= ClearedGenesisFromHeight())
                 {
-                    reason = $"genesis effective at {candidate.EffectiveFromHeight} is from before this node's operator reset at {LastOperatorResetHeight()}";
+                    reason = $"genesis effective at {candidate.EffectiveFromHeight} belongs to an era this node's operator reset ended (cleared genesis effective at {ClearedGenesisFromHeight()})";
                     CasterLogUtility.Log($"MEMBERSHIP: REJECTED pre-reset GENESIS — {reason}.", "MEMBERSHIP");
                     return false;
                 }
