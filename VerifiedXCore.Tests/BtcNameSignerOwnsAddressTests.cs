@@ -64,9 +64,9 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public void TheRuleShipsNotActive_UntilAHeightIsChosen()
+        public void TheRuleActivatesWithTheLedgerRulesBatch()
         {
-            Assert.Equal(999_999_999_999, Globals.BtcNameSignerOwnsAddressHeight);
+            Assert.Equal(Globals.LedgerRulesBatchHeight, Globals.BtcNameSignerOwnsAddressHeight);
         }
     }
 }
