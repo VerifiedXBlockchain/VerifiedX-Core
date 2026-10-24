@@ -86,6 +86,14 @@ namespace VerifiedXCore.Services
                     return;
                 }
 
+                // Without a membership record fork choice cannot weigh certificates and falls to lowest-hash-wins: a
+                // node waits for the record its peers hold before it chooses between branches.
+                if (CasterMembershipStore.MissingWhilePeersHaveOne())
+                {
+                    LogIfBlockedWhileStuck(myTip);
+                    return;
+                }
+
                 // STARTUP: IsChainSynced only flips true when the startup download loop finishes,
                 // and on a stranded node it never finishes (every block fails PREVHASH). So the
                 // unsynced guard is waived once the tip has been still for STALL_SECONDS — a node
@@ -485,8 +493,10 @@ namespace VerifiedXCore.Services
                 if (!resp.IsSuccessStatusCode) return null;
                 var body = await resp.Content.ReadAsStringAsync();
                 if (string.IsNullOrEmpty(body) || body == "0") return null;
-                var parsed = JsonConvert.DeserializeAnonymousType(body, new { Hash = "", Validator = "", Height = 0L });
-                return parsed?.Hash;
+                // A peer's round draft for a height above its tip (Committed=false) is not a block it holds: counted, it
+                // made a quorum of casters still one behind read as the majority against a certified tip (mainnet 7,562,232).
+                var parsed = JsonConvert.DeserializeAnonymousType(body, new { Hash = "", Validator = "", Height = 0L, Committed = (bool?)null });
+                return parsed?.Committed == false ? null : parsed?.Hash;
             }
             catch { return null; }
         }

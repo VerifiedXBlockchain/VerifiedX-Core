@@ -60,7 +60,8 @@ namespace VerifiedXCore.Services
                 if (peers.Count == 0)
                     return false;
                 var before = CasterMembershipStore.GetCurrent()?.RecordSeq ?? -1;
-                await CasterDiscoveryService.FetchAndAdoptMembershipAsync(peers, reconcileWhenUnchanged: false);
+                // The heads peers report tell block validation whether a record exists that this node lacks.
+                await CasterDiscoveryService.FetchAndAdoptMembershipAsync(peers, reconcileWhenUnchanged: false, observeHeads: true);
                 var after = CasterMembershipStore.GetCurrent()?.RecordSeq ?? -1;
                 if (after != before)
                     CasterLogUtility.Log($"MEMBERSHIP: validator pull moved the record head from seq {before} to seq {after}; the caster list now follows the record.", "MEMBERSHIP");

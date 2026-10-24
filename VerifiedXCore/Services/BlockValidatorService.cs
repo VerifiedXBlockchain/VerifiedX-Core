@@ -413,20 +413,19 @@ namespace VerifiedXCore.Services
         public static List<Transaction> InValidationOrder(IEnumerable<Transaction> transactions)
             => transactions.OrderBy(x => x.FromAddress).ThenBy(x => x.Nonce).ToList();
 
-        /// <summary>How old this node's tip may be for the next block to count as the live edge.</summary>
-        internal const long LiveEdgeTipAgeSeconds = 120;
-
         /// <summary>
-        /// Whether a block is the next one at the live edge: it extends our tip, and our tip is recent. There its
-        /// committee certificate is in hand (on the block, or in the attestation store and peers' for the retention
-        /// window), so the download path requires it too. A node catching up from an older tip fetches blocks whose
-        /// certificates no longer exist, and keeps the download exemption.
+        /// Whether a block is the next one on a synced node: startup sync has finished and the block extends our tip. There
+        /// its committee certificate is required on every path, the download path included (a committed block is served
+        /// with its certificate, and ValidateBlocks tops a short one up first). How old the tip is does not matter: this
+        /// used to hold only while the tip was under 120 s old, so a stall switched it off — and a stall is when a
+        /// competing block turns up. Mainnet 7,562,232 (23 October 2026): after a 120 s stall nodes downloaded an
+        /// uncertified round draft over the certified block. Startup catch-up keeps the download exemption.
         /// </summary>
-        internal static bool AtLiveEdge(long blockHeight, long tipHeight, long tipTimestamp, long now)
-            => blockHeight == tipHeight + 1 && now - tipTimestamp <= LiveEdgeTipAgeSeconds;
+        internal static bool AtSyncedTip(long blockHeight, long tipHeight, bool chainSynced)
+            => chainSynced && blockHeight == tipHeight + 1;
 
-        internal static bool AtLiveEdge(Block block)
-            => Globals.LastBlock != null && AtLiveEdge(block.Height, Globals.LastBlock.Height, Globals.LastBlock.Timestamp, TimeUtil.GetTime());
+        internal static bool AtSyncedTip(Block block)
+            => Globals.LastBlock != null && AtSyncedTip(block.Height, Globals.LastBlock.Height, Globals.IsChainSynced);
 
         /// <summary>
         /// A caster's commit rule (pure). With an agreed hash for the height, the block must match it — at the live tip
@@ -496,9 +495,9 @@ namespace VerifiedXCore.Services
                         var ipAddress = competingBlocks.FirstOrDefault(b => b.block.Hash == block.Hash).IPAddress ?? "unknown";
 
                         var startupDownload = Globals.BlocksDownloadSlim.CurrentCount == 0 ? true : false;
-                        // At the live edge a downloaded block's certificate is required (ValidateBlock): complete a
+                        // On a synced node the next block's certificate is required (ValidateBlock): complete a
                         // missing or short one first, as the broadcast path does.
-                        if (startupDownload && AtLiveEdge(block))
+                        if (startupDownload && AtSyncedTip(block))
                             await ConsensusCertificateHelper.TryCompleteCertificateAsync(block);
                         var stopwatch1 = new Stopwatch();
                         stopwatch1.Start();
@@ -773,11 +772,19 @@ namespace VerifiedXCore.Services
                 // blockDownloads is exempt: certs are not part of the block hash and attestations are
                 // in-memory with a short retention window, so historical blocks fetched during sync can
                 // never have their certs re-verified (or repaired) — enforcement is live-broadcast only.
-                // Except at the live edge: any peer could start a download on a synced node, and the next block then
-                // came in uncertified. There the certificate exists (ValidateBlocks tops it up first) and is required.
-                if (!validateOnly && (!blockDownloads || AtLiveEdge(block)) && !ConsensusCertificateVerifier.VerifyOrNotRequired(block))
+                // Except for the next block on a synced node (AtSyncedTip), whatever the path and however long the chain
+                // has stalled: there the certificate exists (ValidateBlocks tops it up first) and is required.
+                if (!validateOnly && (!blockDownloads || AtSyncedTip(block)) && !ConsensusCertificateVerifier.VerifyOrNotRequired(block))
                 {
                     DbContext.Rollback("BlockValidatorService.ValidateBlock()-cert");
+                    return result;
+                }
+
+                // Without a membership record no certificate is required at all, so a synced node waits for the record
+                // its peers hold (ValidatorMembershipPull, every minute) before it takes the next block.
+                if (!validateOnly && AtSyncedTip(block) && CasterMembershipStore.MissingWhilePeersHaveOne())
+                {
+                    DbContext.Rollback("BlockValidatorService.ValidateBlock()-noRecord");
                     return result;
                 }
 

@@ -122,6 +122,13 @@ namespace VerifiedXCore.Utilities
             if (WaitsForWithdrawalStore(caller, "FORK-RECOVERY"))
                 return false;
 
+            var certifiedTip = CertifiedTipRefusal(Globals.LastBlock);
+            if (certifiedTip != null)
+            {
+                LogCertifiedTipRefusal(caller, certifiedTip);
+                return false;
+            }
+
             // Prevent concurrent recovery attempts
             if (Interlocked.CompareExchange(ref _recoveryInProgress, 1, 0) != 0)
             {
@@ -717,6 +724,37 @@ namespace VerifiedXCore.Utilities
         /// In a reorg onto the expected block at <paramref name="height"/>: an approval of another hash there named a block
         /// the reorg replaced, and is dropped so the expected block is judged without it (with or without a certificate).
         /// </summary>
+        /// <summary>
+        /// Why a blind self-heal (roll the tip back, download it again) must not run, or null. A tip carrying a valid
+        /// committee certificate was agreed and signed by a quorum, and a self-heal does not roll it back. Mainnet 7,562,232
+        /// (23 October 2026): a caster's self-heal rolled its certified block back again and again on a "majority" of
+        /// uncommitted drafts, re-adopting it each time, and the chain stood still. A competing block that is certified
+        /// too means two certificates at one height: fork choice (ForkDetectionService) weighs them and reorgs through
+        /// the shared bounded reorg, which this does not stop.
+        /// </summary>
+        internal static string? CertifiedTipRefusal(Models.Block? tip)
+        {
+            if (tip == null || string.IsNullOrEmpty(tip.Hash) || tip.Height <= 0)
+                return null;
+            var stored = tip.ConsensusCertificate != null ? tip : BlockchainData.GetBlockByHeight(tip.Height);
+            if (stored == null || stored.Hash != tip.Hash || !Services.ForkCorrectionService.HasValidCertificate(stored))
+                return null;
+            return $"tip {tip.Height} {tip.Hash[..Math.Min(16, tip.Hash.Length)]} carries a valid committee certificate; a self-heal does not roll it back (fork choice weighs a certified competitor)";
+        }
+
+        private static long _lastCertifiedTipRefusalLog;
+
+        /// <summary>Logs a refusal at most every 30 s: the stuck-round loops ask again every round.</summary>
+        internal static void LogCertifiedTipRefusal(string caller, string refusal)
+        {
+            var now = Environment.TickCount64;
+            if (now - Interlocked.Read(ref _lastCertifiedTipRefusalLog) < 30_000)
+                return;
+            Interlocked.Exchange(ref _lastCertifiedTipRefusalLog, now);
+            LogUtility.Log($"[{caller}] FORK-RECOVERY: refused — {refusal}.", $"{caller}.ForkRecovery");
+            CasterLogUtility.Log($"[{caller}] FORK-RECOVERY: refused — {refusal}.", "FORK-RECOVERY");
+        }
+
         internal static void DropApprovalOtherThan(long height, string expectedHash)
         {
             if (Globals.CasterApprovedBlockHashDict.TryGetValue(height, out var approved) && approved != expectedHash)
