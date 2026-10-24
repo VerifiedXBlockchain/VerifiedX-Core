@@ -2345,7 +2345,7 @@ namespace VerifiedXCore.Services
             {
                 var records = contested is { } floor ? r.Records.Where(rec => rec != null && rec.RecordSeq < floor).ToList() : r.Records;
                 if (records.Count == 0) continue;
-                var applied = CasterMembershipStore.TryAppendChain(records, out var refusal);
+                var applied = CasterMembershipStore.TryAppendChain(records, out var refusal, GenesisHolders(responses, records));
                 total += applied;
                 if (applied > 0)
                     CasterLogUtility.Log($"MEMBERSHIP: adopted {applied} record(s) from {r.Ip} (their head {r.HeadSeq}).", "MEMBERSHIP");
@@ -2358,6 +2358,24 @@ namespace VerifiedXCore.Services
                 }
             }
             return total;
+        }
+
+        /// <summary>
+        /// How many responders hold a valid copy of the genesis in <paramref name="records"/> (0 when it has none): what an
+        /// older reset marker asks of a genesis below it (CasterMembershipStore.LegacyResetHeight).
+        /// </summary>
+        internal static int GenesisHolders(List<(string Ip, long HeadSeq, List<CasterMembershipRecord> Records)> responses, List<CasterMembershipRecord> records)
+        {
+            var genesis = records.FirstOrDefault(rec => rec != null && rec.RecordSeq == 0);
+            if (genesis == null)
+                return 0;
+            return responses
+                .Where(r => r.Records.Any(rec => rec != null && rec.RecordSeq == 0
+                    && string.Equals(rec.RecordHash, genesis.RecordHash, StringComparison.Ordinal)
+                    && CasterMembershipStore.ValidateSuccessor(null, rec, out _)))
+                .Select(r => r.Ip)
+                .Distinct(StringComparer.Ordinal)
+                .Count();
         }
 
         /// <summary>The last time a peer's records above our head were all refused: who, and why. Diagnostics.</summary>
