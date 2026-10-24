@@ -1383,9 +1383,6 @@ namespace VerifiedXCore.P2P
                         {
                             var errorMsg = string.Format("Failed to talk to beacon.");
                             ErrorLogUtility.LogError(errorMsg, "P2PClient.BeaconUploadRequest(List<BeaconInfo.BeaconInfoJson> locators, List<string> assets, string scUID) - try");
-                            // A refused request leaves nothing registered on the beacon, so an upload would
-                            // be refused too: report it instead of starting the transfer.
-                            return false;
                         }
 
                         Globals.Beacon.TryGetValue(beaconNode.IPAddress, out var globalBeacon);

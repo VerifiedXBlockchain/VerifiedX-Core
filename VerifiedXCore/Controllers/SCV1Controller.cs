@@ -945,7 +945,9 @@ namespace VerifiedXCore.Controllers
 
                             if (result == true)
                             {
-                                var aqResult = AssetQueue.CreateAssetQueueItem(sc.SmartContractUID, toAddress, connectedBeacon.Beacons.BeaconLocator, md5List, assets,
+                                // Nothing is uploaded for a recipient in this wallet, so no upload is queued: an
+                                // item nothing completes would refuse the next transfer of this contract.
+                                var aqResult = localAddress != null || AssetQueue.CreateAssetQueueItem(sc.SmartContractUID, toAddress, connectedBeacon.Beacons.BeaconLocator, md5List, assets,
                                     AssetQueue.TransferType.Upload);
                                 SCLogUtility.Log($"NFT Asset Queue Items Completed. SCUID: {sc.SmartContractUID}", "SCV1Controller.TransferNFT()");
 
