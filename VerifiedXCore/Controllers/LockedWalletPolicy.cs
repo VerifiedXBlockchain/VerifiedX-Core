@@ -94,6 +94,9 @@ namespace VerifiedXCore.Controllers
             // ── Privacy (reads) ─────────────────────────────────────────────────────────────
             "PrivacyV1.GetPlonkStatus", "PrivacyV1.GetShieldedBalance", "PrivacyV1.GetShieldedPoolState",
             "PrivacyV1.GetShieldedVbtcBalance", "PrivacyV1.GetVbtcShieldedPoolState",
+            // Raw shielded flows: keys come from the caller, nothing on this node is unlocked or signed.
+            "PrivacyV1.GetRawShieldTxData", "PrivacyV1.GetShieldedNotesRaw", "PrivacyV1.GetRawUnshieldTxData",
+            "PrivacyV1.GetRawPrivateTransferTxData", "PrivacyV1.VerifyRawPrivateTx", "PrivacyV1.SendRawPrivateTx",
 
             // ── Bitcoin (reads; key-returning account routes are NOT listed) ─────────────────
             "BTCV2.Get", "BTCV2.GetDefaultAddressType", "BTCV2.GetAddressUTXOList", "BTCV2.GetAddressTXList",
@@ -119,10 +122,17 @@ namespace VerifiedXCore.Controllers
             "VBTC.SendRawRequestWithdrawalTx", "VBTC.PrepareCompleteWithdrawalRaw", "VBTC.ExecuteCompleteWithdrawalRaw",
             "VBTC.GetRawCompleteWithdrawalTxData", "VBTC.SendRawCompleteWithdrawalTx", "VBTC.CancelWithdrawalRaw",
             "VBTC.GetRawCancelWithdrawalTxData", "VBTC.SendRawCancelWithdrawalTx",
+            // The rest of a withdrawal's life on a vault the chain watches, for a wallet that signs elsewhere: following
+            // it, raising its fee, giving it up. (They were missing: a locked node let such a wallet request and cancel
+            // a withdrawal and then refused everything it needed once the withdrawal was pinned.)
+            "VBTC.GetWithdrawalPin", "VBTC.GetVaultBitcoin", "VBTC.GetBitcoinAttestationStatus", "VBTC.GetBridgeExit",
+            "VBTC.GetRawBumpWithdrawalFeeTxData", "VBTC.SendRawBumpWithdrawalFeeTx",
+            "VBTC.GetRawReleaseWithdrawalTxData", "VBTC.SendRawReleaseWithdrawalTx",
+            "VBTC.GetValidatorBond",
 
             // ── Browser wallet (reads) and explorer ─────────────────────────────────────────
             "Wallet.Index", "Wallet.GetAccounts", "Wallet.GetTransactions", "Wallet.GetNFTs", "Wallet.GetBitcoinAccounts",
-            "Wallet.GetBitcoinBaseBalances", "Wallet.GetVBTC", "Wallet.VBTCWithdrawStatus", "Wallet.VBTCBridgePreflight",
+            "Wallet.GetBitcoinBaseBalances", "Wallet.GetVBTC", "Wallet.VBTCWithdrawStatus", "Wallet.VBTCWithdrawPin", "Wallet.VBTCBridgePreflight",
             "Wallet.VBTCBridgeLockStatus", "Wallet.VBTCBaseBalance", "Wallet.GetShieldedAddresses",
             "Wallet.GetShieldedBalance", "Wallet.GetPlonkStatus", "Wallet.GetShieldedPoolState",
             "Wallet.GetShieldedVbtcBalance", "Wallet.GetVbtcShieldedPoolState", "Wallet.GetBaseAddress",

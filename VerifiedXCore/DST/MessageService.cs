@@ -134,6 +134,12 @@ namespace VerifiedXCore.DST
                                 case MessageType.Ping:
                                     _ = Ping(message, endPoint, udpClient);
                                     break;
+                                case MessageType.STUNSecret:
+                                    ReceiveStunSecret(message, endPoint, udpClient);
+                                    break;
+                                case MessageType.STUNSecretConfirm:
+                                    ConfirmStunSecret(message, endPoint, udpClient);
+                                    break;
                                 default:
                                     break;
                             }
@@ -159,7 +165,9 @@ namespace VerifiedXCore.DST
 
                 if (Globals.ConnectedShops.TryGetValue(message.Data, out var shop))
                 {
-                    if (shop.IsConnected)
+                    // Only a shop that returned the secret issued to its endpoint registered from there; the punch is
+                    // signed with it, so the shop can tell it from a datagram that merely claims this server's address.
+                    if (shop.IsConnected && shop.StunSecretConfirmed && !string.IsNullOrEmpty(shop.StunSecret))
                     {
                         //create ack packet to send
                         var successMessage = Encoding.UTF8.GetBytes("ack");
@@ -167,11 +175,8 @@ namespace VerifiedXCore.DST
                         var dataString = $"{endPoint.Address}:{endPoint.Port}";
 
                         //create message for to send to shop to initiate the punch
-                        var remoteMessage = new Message { 
-                            Type = MessageType.PunchClient,
-                            Data = dataString
-                        };
-                        var remoteDataPayload = GenerateMessage(remoteMessage, false);
+                        var remoteMessage = DstSessionAuth.SignedPunch(shop.StunSecret, dataString);
+                        var remoteDataPayload = JsonConvert.SerializeObject(remoteMessage);
                         var remoteClientPunchmessage = Encoding.UTF8.GetBytes(remoteDataPayload);
 
                         //parse the clients sent shop IP:Port into an IPEndpoint to send UDP packet
@@ -196,19 +201,29 @@ namespace VerifiedXCore.DST
             }
         }
 
+        // The punch handlers send to an endpoint the datagram names. Answered for anyone, they let a spoofed datagram
+        // aim this node's packets at any address (PunchClient) or any port of the sender's address (AssetPunchClient).
+
+        /// <summary>Whether a datagram came from the STUN server this node registered with (or a configured one).</summary>
+        internal static bool IsFromStunServer(IPEndPoint endPoint)
+        {
+            var from = endPoint.ToString();
+            return (Globals.STUNServer?.IPAddress == from) || Globals.STUNServers.Any(s => s?.ServerIPPort == from);
+        }
+
         public static void PunchClient(Message message, IPEndPoint endPoint, UdpClient udpClient)
         {
-            var punchMessage = Encoding.UTF8.GetBytes("ack");
-            var remoteEndPoint = IPEndPoint.Parse(message.Data);
-            udpClient.Send(punchMessage, remoteEndPoint);
+            if (!IsFromStunServer(endPoint) || !DstSessionAuth.PunchIsAuthentic(message, endPoint.ToString(), TimeUtil.GetTime())
+                || !IPEndPoint.TryParse(message.Data ?? "", out var remoteEndPoint) || remoteEndPoint.Port == 0)
+                return;
+            udpClient.Send(Encoding.UTF8.GetBytes("ack"), remoteEndPoint);
         }
         public static void AssetPunchClient(Message message, IPEndPoint endPoint, UdpClient udpClient)
         {
-            var punchMessage = Encoding.UTF8.GetBytes("echo");
-            var ipArray = endPoint.ToString().Split(':');
-            var ip = ipArray[0];
-            var remoteEndPoint = IPEndPoint.Parse($"{ip}:{message.Data}");
-            udpClient.Send(punchMessage, remoteEndPoint);
+            if (!Globals.ConnectedClients.ContainsKey(endPoint.ToString())
+                || !int.TryParse(message.Data, out var port) || port < IPEndPoint.MinPort + 1 || port > IPEndPoint.MaxPort)
+                return;
+            udpClient.Send(Encoding.UTF8.GetBytes("echo"), new IPEndPoint(endPoint.Address, port));
         }
         /// <summary>NEW-21: bound on the DST connection tables (entries were never pruned).</summary>
         public const int MaxDstConnections = 1000;
@@ -224,11 +239,12 @@ namespace VerifiedXCore.DST
         {
             if (message.Data == "helo" && CanTrack(Globals.ConnectedShops, endPoint.ToString()))
             {
-                Globals.ConnectedShops.TryGetValue(message.IPAddress, out var shop);
+                // Keyed by the endpoint the helo came from, never by the address it names: the entry holds the secret
+                // issued to that endpoint.
+                Globals.ConnectedShops.TryGetValue(endPoint.ToString(), out var shop);
                 if (shop != null)
                 {
                     shop.LastReceiveMessage = TimeUtil.GetTime();
-                    Globals.ConnectedShops[endPoint.ToString()] = shop;
                 }
                 else
                 {
@@ -238,19 +254,34 @@ namespace VerifiedXCore.DST
                         ConnectDate = TimeUtil.GetTime(),
                         IPAddress = endPoint.ToString(),
                         InitialMessage = Bounded(message),
-                        ConnectionId = RandomStringUtility.GetRandomString(12, true)
+                        ConnectionId = RandomStringUtility.GetRandomString(12, true),
+                        StunSecret = DstSessionAuth.NewSecret()
                     };
                 }
 
                 Globals.ConnectedShops[endPoint.ToString()] = shop;
                 var successMessage = Encoding.UTF8.GetBytes("echo");
                 udpClient.Send(successMessage, endPoint);
+                // The secret goes in its own datagram after "echo", which a registering shop waits for byte for byte.
+                var secret = new Message { Type = MessageType.STUNSecret, Data = shop.StunSecret, ResponseMessage = true };
+                secret.Build();
+                udpClient.Send(Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(secret)), endPoint);
             }
         }
         public static void ShopConnect(Message message, IPEndPoint endPoint, UdpClient udpClient)
         {
             if(message.Data == "helo" && CanTrack(Globals.ConnectedClients, endPoint.ToString()))
             {
+                // A helo is accepted only with the cookie this shop sent to its source endpoint, so the source can receive
+                // there; without one it gets the cookie and nothing is recorded.
+                if (!DstSessionAuth.CookieIsValid(message.Auth, endPoint.ToString(), TimeUtil.GetTime()))
+                {
+                    var cookie = new Message { Type = MessageType.ShopCookie, Data = DstSessionAuth.Cookie(endPoint.ToString(), TimeUtil.GetTime()), ResponseMessage = true };
+                    cookie.Build();
+                    udpClient.Send(Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(cookie)), endPoint);
+                    return;
+                }
+
                 Globals.ConnectedClients.TryGetValue(message.IPAddress, out var client);
                 if(client != null)
                 {
@@ -274,6 +305,44 @@ namespace VerifiedXCore.DST
                 TcpClient tcpClient = new TcpClient();
                 udpClient.Send(successMessage, endPoint);
             }
+        }
+
+        /// <summary>Shop side: the secret the STUN server it registered with issued; kept and returned to confirm the registration.</summary>
+        public static void ReceiveStunSecret(Message message, IPEndPoint endPoint, UdpClient udpClient)
+        {
+            if (!IsFromStunServer(endPoint) || string.IsNullOrEmpty(message.Data) || message.Data.Length > 64)
+                return;
+            DstSessionAuth.StunSecrets[endPoint.ToString()] = message.Data;
+            var confirm = new Message { Type = MessageType.STUNSecretConfirm, Data = message.Data, ResponseMessage = true };
+            confirm.Build();
+            udpClient.Send(Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(confirm)), endPoint);
+        }
+
+        /// <summary>
+        /// STUN side: a shop returning the secret issued to its endpoint. From then on punches are forwarded to it and it is
+        /// kept alive, which starts here if its keep-alive request came before the confirmation.
+        /// </summary>
+        public static void ConfirmStunSecret(Message message, IPEndPoint endPoint, UdpClient udpClient)
+        {
+            if (Globals.ConnectedShops.TryGetValue(endPoint.ToString(), out var shop) && !string.IsNullOrEmpty(shop.StunSecret)
+                && !string.IsNullOrEmpty(message.Data) && message.Data.Length == shop.StunSecret.Length
+                && CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(message.Data), Encoding.UTF8.GetBytes(shop.StunSecret)))
+            {
+                shop.StunSecretConfirmed = true;
+                StartShopKeepAlive(shop, endPoint, udpClient);
+            }
+        }
+
+        /// <summary>STUN side: keeps a confirmed shop alive and lists it among the connected endpoints.</summary>
+        private static void StartShopKeepAlive(DSTConnection shop, IPEndPoint endPoint, UdpClient udpClient)
+        {
+            shop.LastReceiveMessage = TimeUtil.GetTime();
+            if (!shop.KeepAliveStarted)
+            {
+                shop.KeepAliveStarted = true;
+                _ = KeepAliveService.KeepAlive(7, endPoint, udpClient, shop.ConnectionId, true);
+            }
+            Globals.ConnectedClients[endPoint.ToString()] = shop;
         }
 
         public static void KeepAlive(Message message, IPEndPoint endPoint, UdpClient udpClient, string shopURL = "NA")
@@ -332,20 +401,11 @@ namespace VerifiedXCore.DST
             {
                 message.ReceivedTimestamp = TimeUtil.GetTime();
 
-                if (Globals.ConnectedShops.TryGetValue(endPoint.ToString(), out var shop))
-                {
-                    if (shop != null)
-                    {
-                        shop.LastReceiveMessage = TimeUtil.GetTime();
-                        if (!shop.KeepAliveStarted)
-                        {
-                            shop.KeepAliveStarted = true;
-                            _ = KeepAliveService.KeepAlive(7, endPoint, udpClient, shop.ConnectionId, true);
-                        }
-
-                        Globals.ConnectedClients[endPoint.ToString()] = shop;
-                    }
-                }
+                // Only a shop that returned its registration secret showed it receives at this endpoint: an unconfirmed
+                // entry (a helo from a spoofed source) gets no keep-alive loop and is not listed as a client, which
+                // AssetPunchClient would echo to.
+                if (Globals.ConnectedShops.TryGetValue(endPoint.ToString(), out var shop) && shop != null && shop.StunSecretConfirmed)
+                    StartShopKeepAlive(shop, endPoint, udpClient);
             }
         }
 
@@ -369,6 +429,12 @@ namespace VerifiedXCore.DST
 
         public static void DecShopMessage(Message message, IPEndPoint endPoint, UdpClient udpClient, string shopURL = "NA")
         {
+            // A request is answered only to a sender that completed the shop handshake, as AssetReq and Bid are. The reply
+            // goes to the datagram's source address, which a UDP sender can forge, so answering anyone made the shop send
+            // multi-KB listings to addresses that never asked.
+            if (message.ComType == MessageComType.Request && !Globals.ConnectedClients.ContainsKey(endPoint.ToString()))
+                return;
+
             var respMessage = DecShopMessageService.ProcessMessage(message, shopURL);
 
             if(respMessage != null)
@@ -625,14 +691,7 @@ namespace VerifiedXCore.DST
                         var isEnumStringParsed = Enum.TryParse(dataSplit[1], true, out BidStatus bidStatus);
 
                         if(isEnumStringParsed)
-                        {
-                            var bid = Bid.GetSingleBid(bidId);
-                            if (bid != null)
-                            {
-                                bid.BidStatus = bidStatus;
-                                Bid.SaveBid(bid);
-                            }
-                        }
+                            Bid.ApplyShopResponse(bidId, bidStatus);
                     }
                     catch { }
                 }
@@ -699,14 +758,7 @@ namespace VerifiedXCore.DST
                         var isEnumStringParsed = Enum.TryParse(dataSplit[1], true, out BidStatus bidStatus);
 
                         if (isEnumStringParsed)
-                        {
-                            var bid = Bid.GetSingleBid(bidId);
-                            if (bid != null)
-                            {
-                                bid.BidStatus = bidStatus;
-                                Bid.SaveBid(bid);
-                            }
-                        }
+                            Bid.ApplyShopResponse(bidId, bidStatus);
                     }
                 }
                 catch { }
@@ -775,10 +827,37 @@ namespace VerifiedXCore.DST
             var output = "";
             message.Build();
 
-            Globals.ClientMessageDict.TryAdd(message.Id, new MessageState { Message = message, MessageId = message.Id, MessageSentTimestamp = TimeUtil.GetTime() });
+            // A reply is looked up by the id of the request it answers, never by its own, so only messages that may be
+            // answered are kept. The table was never pruned: every reply the shop sent stayed in it for good.
+            if (!message.ResponseMessage)
+            {
+                if (Globals.ClientMessageDict.Count >= MaxClientMessages)
+                    PruneClientMessages(TimeUtil.GetTime());
+                Globals.ClientMessageDict.TryAdd(message.Id, new MessageState { Message = message, MessageId = message.Id, MessageSentTimestamp = TimeUtil.GetTime() });
+            }
             output = JsonConvert.SerializeObject(message);
 
             return output;
+        }
+
+        /// <summary>Sent messages kept for matching their responses. Past this, older ones are dropped.</summary>
+        public const int MaxClientMessages = 10_000;
+
+        /// <summary>How long a sent message is kept for matching its response.</summary>
+        public const long ClientMessageTtlSeconds = 10 * 60;
+
+        /// <summary>Drops sent messages older than <see cref="ClientMessageTtlSeconds"/>, then the oldest until below <see cref="MaxClientMessages"/>.</summary>
+        internal static void PruneClientMessages(long now)
+        {
+            foreach (var kv in Globals.ClientMessageDict)
+                if (now - kv.Value.MessageSentTimestamp > ClientMessageTtlSeconds)
+                    Globals.ClientMessageDict.TryRemove(kv.Key, out _);
+
+            var excess = Globals.ClientMessageDict.Count - MaxClientMessages + 1;
+            if (excess <= 0)
+                return;
+            foreach (var key in Globals.ClientMessageDict.OrderBy(kv => kv.Value.MessageSentTimestamp).Take(excess).Select(kv => kv.Key).ToList())
+                Globals.ClientMessageDict.TryRemove(key, out _);
         }
     }
 }

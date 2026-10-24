@@ -1,0 +1,595 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+using VerifiedXCore;
+using VerifiedXCore.Data;
+using VerifiedXCore.Extensions;
+using VerifiedXCore.Models;
+using VerifiedXCore.Models.Privacy;
+using VerifiedXCore.Privacy;
+using VerifiedXCore.Services;
+using Xunit;
+
+namespace VerifiedXCore.Tests
+{
+    /// <summary>
+    /// Fund-loss audit item 1, stage 2: the proof-rules epoch's pool state. At PrivateTxProofRulesHeight every pool is
+    /// reset to the circuits' fixed-depth tree with the dummy note at leaf 0; from then on the ledger appends to that
+    /// tree, the dummy nullifier is never recorded, the rebuild reproduces the same roots, and the mainnet supply
+    /// correction no longer applies. Before the height nothing changes.
+    /// </summary>
+    [Collection("DbContextSequential")]
+    public class PrivacyStage2_EpochTreeTests : IDisposable
+    {
+        private const long Height = 5000;
+        private readonly string _tempRoot;
+        private readonly string? _priorCustomPath;
+        private readonly Block _priorLastBlock;
+        private readonly long _priorHeight;
+        private readonly long _priorSupplyGate;
+
+        public PrivacyStage2_EpochTreeTests()
+        {
+            _tempRoot = Path.Combine(Path.GetTempPath(), $"ps2e_{Guid.NewGuid():N}") + Path.DirectorySeparatorChar;
+            Directory.CreateDirectory(_tempRoot);
+            _priorCustomPath = Globals.CustomPath;
+            Globals.CustomPath = _tempRoot;
+            _priorLastBlock = Globals.LastBlock;
+            _priorHeight = Globals.PrivateTxProofRulesHeight;
+            _priorSupplyGate = Globals.PrivateTxSupplyRulesHeight;
+            Globals.PrivateTxProofRulesHeight = Height;
+            Globals.PrivateTxSupplyRulesHeight = 1;
+            DbContext.Initialize();
+        }
+
+        public void Dispose()
+        {
+            try { DbContext.CloseDB(); } catch { }
+            Globals.LastBlock = _priorLastBlock;
+            Globals.PrivateTxProofRulesHeight = _priorHeight;
+            Globals.PrivateTxSupplyRulesHeight = _priorSupplyGate;
+            Globals.CustomPath = _priorCustomPath;
+            try { Directory.Delete(_tempRoot, recursive: true); } catch { }
+        }
+
+        private static LiteDB.LiteDatabase Db => DbContext.DB_Privacy;
+
+        private static (byte[] G1, byte[] NoteHash, byte[] Rand) Note(ulong amountScaled)
+        {
+            var r = PrivacyField.RandomCanonical();
+            var g1 = new byte[PlonkNative.G1CompressedSize];
+            Assert.Equal(PlonkNative.Success, PlonkNative.pedersen_commit(amountScaled, r, g1));
+            return (g1, PoseidonV1.NoteHash(amountScaled, r), r);
+        }
+
+        private static Transaction Shield(decimal amount, byte[] g1, byte[] noteHash, string from = "RSHIELDER")
+        {
+            var payload = new PrivateTxPayload
+            {
+                Asset = "VFX", Kind = "shield",
+                Outs = { new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(g1), NoteHashB64 = Convert.ToBase64String(noteHash) } },
+                TransparentInput = from, TransparentAmount = amount,
+            };
+            return new Transaction { TransactionType = TransactionType.VFX_SHIELD, FromAddress = from, ToAddress = PrivacyConstants.ShieldedPoolAddress, Amount = amount, Data = PrivateTxPayloadCodec.SerializeToJson(payload), Hash = Guid.NewGuid().ToString("N"), Timestamp = 1 };
+        }
+
+        private static Transaction Unshield(decimal amount, IEnumerable<byte[]> nullifiers, byte[] root, (byte[] G1, byte[] NoteHash)? change = null, params long[] positions)
+        {
+            var payload = new PrivateTxPayload
+            {
+                Asset = "VFX", Kind = "unshield",
+                NullsB64 = nullifiers.Select(Convert.ToBase64String).ToList(),
+                MerkleRootB64 = Convert.ToBase64String(root), Fee = Globals.PrivateTxFixedFee,
+                TransparentOutput = "RRECIPIENT", TransparentAmount = amount,
+            };
+            payload.SpentCommitmentTreePositions = positions.Length > 0 ? positions.ToList() : payload.NullsB64.Select((_, i) => (long)i).ToList();
+            if (change != null)
+                payload.Outs.Add(new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(change.Value.G1), NoteHashB64 = Convert.ToBase64String(change.Value.NoteHash) });
+            return new Transaction { TransactionType = TransactionType.VFX_UNSHIELD, FromAddress = PrivacyConstants.ShieldedPoolAddress, ToAddress = "RRECIPIENT", Amount = amount, Data = PrivateTxPayloadCodec.SerializeToJson(payload), Hash = Guid.NewGuid().ToString("N"), Timestamp = 1, Signature = PrivacyConstants.PlonkSignatureSentinel };
+        }
+
+        private static Block BlockAt(long height, params Transaction[] txs) => new Block { Height = height, StateRoot = "root", Timestamp = 1_700_000_000 + height, Transactions = txs.ToList() };
+
+        private static async Task ApplyPrivacy(Block block)
+        {
+            foreach (var tx in block.Transactions)
+                await PrivateTxLedgerService.ApplyBlockTransactionAsync(tx, block, Db);
+        }
+
+        // ── The reset ─────────────────────────────────────────────────────────────────────────────────────────
+
+        [Fact]
+        public async Task AtTheHeight_EveryPoolIsReset_ToTheFixedDepthTreeWithTheDummyLeaf()
+        {
+            // Pre-epoch pool with two legacy-shaped notes and a non-zero supply.
+            var n1 = Note(100_000_000); var n2 = Note(200_000_000);
+            await ApplyPrivacy(BlockAt(Height - 10, Shield(1M, n1.G1, n1.NoteHash), Shield(2M, n2.G1, n2.NoteHash)));
+            var before = ShieldedPoolService.GetState("VFX", Db)!;
+            Assert.Equal(3M, before.TotalShieldedSupply);
+            Assert.Equal(2, before.TotalCommitments);
+            var oldRoot = before.CurrentMerkleRoot;
+
+            PrivacyEpochService.ApplyIfResetBlock(BlockAt(Height - 1), Db);
+            Assert.Equal(oldRoot, ShieldedPoolService.GetState("VFX", Db)!.CurrentMerkleRoot); // not yet
+
+            PrivacyEpochService.ApplyIfResetBlock(BlockAt(Height), Db);
+            var after = ShieldedPoolService.GetState("VFX", Db)!;
+            Assert.Equal(0M, after.TotalShieldedSupply);
+            Assert.Equal(1, after.TotalCommitments);
+            Assert.Equal(Height, after.LastUpdateHeight);
+            var expectedRoot = new FixedDepthMerkleTree(new[] { PrivacyEpoch.DummyNoteHash }).Root();
+            Assert.Equal(Convert.ToBase64String(expectedRoot), after.CurrentMerkleRoot);
+            var leaves = Db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS).Query().Where(x => x.AssetType == "VFX").ToList();
+            var dummy = Assert.Single(leaves);
+            Assert.Equal(0, dummy.TreePosition);
+            Assert.Equal(Convert.ToBase64String(PrivacyEpoch.DummyNoteHash), dummy.NoteHash);
+            Assert.Equal(Convert.ToBase64String(PrivacyEpoch.DummyCommitment), dummy.Commitment);
+            Assert.Equal(PrivacyEpoch.DummyCommitment.Length, PlonkNative.G1CompressedSize);
+        }
+
+        /// <summary>Re-audit (9 Oct 2026): the reset is the VFX pool's; a vBTC pool (privacy refused since VbtcPrivacyDisableHeight) is left as history.</summary>
+        /// <summary>
+        /// A pool's root after one more leaf costs that leaf's path, not the whole tree again: the root was recomputed from
+        /// every leaf for each private transaction applied (round 32). The root is still the tree's (checked against the
+        /// native path verifier).
+        /// </summary>
+        [Fact]
+        public void APoolsRoot_AfterAnAppend_HashesOnlyTheNewLeafsPath()
+        {
+            var store = new ShieldedMerkleStore("VFX", Db, fixedDepth: true);
+            byte[] last = Array.Empty<byte>();
+            for (var i = 0; i < 300; i++)
+            {
+                var n = Note((ulong)(i + 1));
+                store.AppendCommitment(n.G1, n.NoteHash, Height + 1, 1);
+                last = n.NoteHash;
+            }
+            store.GetRootBytes();
+            var next = Note(999);
+            store.AppendCommitment(next.G1, next.NoteHash, Height + 1, 1);
+            var before = ParentHashCache.ComputedOnThisThread;
+            var root = store.GetRootBytes()!;
+            Assert.InRange(ParentHashCache.ComputedOnThisThread - before, 1, FixedDepthMerkleTree.Depth);
+            Assert.True(store.TryGetInclusionProof(300, out var path, out var pathRoot));
+            Assert.Equal(root, pathRoot);
+            Assert.Equal(root, PoseidonV1.RootFromPath(next.NoteHash, 300, path));     // the native verifier agrees
+
+            // The pre-epoch tree too.
+            var legacy = new ShieldedMerkleStore("VBTC:cache-test", Db, fixedDepth: false);
+            for (var i = 0; i < 300; i++)
+                legacy.AppendG1Commitment(Note((ulong)(i + 1)).G1, Height - 5, 1);
+            legacy.GetRootBytes();
+            legacy.AppendG1Commitment(Note(999).G1, Height - 5, 1);
+            before = ParentHashCache.ComputedOnThisThread;
+            Assert.NotNull(legacy.GetRootBytes());
+            Assert.InRange(ParentHashCache.ComputedOnThisThread - before, 1, 2 * 10);
+        }
+
+        /// <summary>
+        /// A store reads only the rows after the leaves it read last, while the row at their end is the same row: every
+        /// private transaction applied read its pool's every leaf (round 32). A tail rolled back, or replaced by a replay
+        /// ending on the same note at the same position, is read in full; the leaves always equal the rows.
+        /// </summary>
+        [Fact]
+        public void APoolsLeaves_AreReadAfterTheLastRead_AndInFullAfterARollback()
+        {
+            var commitments = Db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS);
+            List<string> Rows() => commitments.Query().Where(x => x.AssetType == "VFX").OrderBy(x => x.TreePosition).ToList().Select(x => x.NoteHash).ToList();
+            List<string> Loaded()
+            {
+                var s = new ShieldedMerkleStore("VFX", Db, fixedDepth: true);
+                s.LoadLeavesFromCommitments();
+                return s.LeafDigests.Select(Convert.ToBase64String).ToList();
+            }
+            var writer = new ShieldedMerkleStore("VFX", Db, fixedDepth: true);
+            writer.LoadLeavesFromCommitments();
+            for (var i = 0; i < 40; i++)
+            {
+                var n = Note((ulong)(i + 1));
+                writer.AppendCommitment(n.G1, n.NoteHash, Height + 1 + i / 10, 1);
+            }
+            Assert.Equal(Rows(), Loaded());
+
+            // More leaves: only they are read.
+            var more = new ShieldedMerkleStore("VFX", Db, fixedDepth: true);
+            more.LoadLeavesFromCommitments();
+            var added = Note(500);
+            more.AppendCommitment(added.G1, added.NoteHash, Height + 5, 1);
+            var full = ShieldedMerkleStore.FullLeafLoadsOnThisThread;
+            Assert.Equal(Rows(), Loaded());
+            Assert.Equal(full, ShieldedMerkleStore.FullLeafLoadsOnThisThread);
+
+            // A rollback takes the last block's rows: read in full.
+            commitments.DeleteMany(x => x.AssetType == "VFX" && x.BlockHeight == Height + 5);
+            Assert.Equal(Rows(), Loaded());
+            Assert.Equal(full + 1, ShieldedMerkleStore.FullLeafLoadsOnThisThread);
+
+            // A replay ending on the same note at the same position, other notes before it, written under the cached
+            // leaves: read in full.
+            Assert.Equal(Rows(), Loaded());
+            var tail = commitments.Find(x => x.AssetType == "VFX" && x.BlockHeight == Height + 4).OrderBy(x => x.TreePosition).ToList();
+            commitments.DeleteMany(x => x.AssetType == "VFX" && x.BlockHeight == Height + 4);
+            foreach (var r in tail)
+            {
+                var replaced = r.TreePosition == tail[^1].TreePosition ? r.NoteHash : Convert.ToBase64String(Note((ulong)(700 + r.TreePosition)).NoteHash);
+                commitments.Insert(new CommitmentRecord { Commitment = r.Commitment, NoteHash = replaced, AssetType = "VFX", TreePosition = r.TreePosition, BlockHeight = Height + 4, Timestamp = 2 });
+            }
+            full = ShieldedMerkleStore.FullLeafLoadsOnThisThread;
+            Assert.Equal(Rows(), Loaded());
+            Assert.Equal(full + 1, ShieldedMerkleStore.FullLeafLoadsOnThisThread);
+        }
+
+        /// <summary>
+        /// The cached leaves take a row as the full load does, whatever the asset's letter case ("vfx" rows exist in
+        /// history): an exact comparison left a warm cache a leaf short of a node that read in full (round 33).
+        /// </summary>
+        [Fact]
+        public void APoolsCachedLeaves_TakeACaseVariantRow_AsTheFullLoadDoes()
+        {
+            var writer = new ShieldedMerkleStore("VFX", Db, fixedDepth: false);
+            writer.LoadLeavesFromCommitments();
+            for (var i = 0; i < 3; i++)
+                writer.AppendG1Commitment(Note((ulong)(i + 1)).G1, Height - 5, 1);
+            var warm = new ShieldedMerkleStore("VFX", Db, fixedDepth: false);
+            warm.LoadLeavesFromCommitments();                                   // the cache is warm
+            var variant = new ShieldedMerkleStore("vfx", Db, fixedDepth: false);
+            variant.LoadLeavesFromCommitments();
+            variant.AppendG1Commitment(Note(9).G1, Height - 4, 1);              // a "vfx" row after it
+            var full = Db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS).Query().Where(x => x.AssetType == "VFX").Count();
+            var cached = new ShieldedMerkleStore("VFX", Db, fixedDepth: false);
+            cached.LoadLeavesFromCommitments();
+            Assert.Equal(full, cached.LeafDigests.Count);
+            Assert.Equal(variant.LeafDigests.Count, cached.LeafDigests.Count);
+        }
+
+        /// <summary>
+        /// A pool's root from its frontier is the root computed level by level, at every size, for both tree shapes, in
+        /// the store that appends and in one that loads the pool afresh (round 33).
+        /// </summary>
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void APoolsFrontierRoot_IsTheFullRoot_AtEverySize(bool fixedDepth)
+        {
+            var asset = fixedDepth ? "VFX" : "VBTC:frontier-" + Guid.NewGuid().ToString("N");
+            var writer = new ShieldedMerkleStore(asset, Db, fixedDepth);
+            writer.LoadLeavesFromCommitments();
+            Assert.Equal(writer.FullRoot(), writer.GetRootBytes());
+            var random = new Random(7);
+            for (var n = 1; n <= 2100; n++)
+            {
+                if (fixedDepth)
+                    writer.AppendCommitment(new byte[PlonkNative.G1CompressedSize], PrivacyField.RandomCanonical(), Height + 1, 1);
+                else
+                {
+                    var g1 = new byte[PlonkNative.G1CompressedSize];
+                    random.NextBytes(g1);
+                    writer.AppendG1Commitment(g1, Height - 5, 1);
+                }
+                Assert.True(writer.RootFromFrontier);
+                if (n <= 300 || (n >= 510 && n <= 514) || (n >= 1022 && n <= 1026) || n >= 2046 && n <= 2050 || n == 2100)
+                    Assert.Equal(writer.FullRoot(), writer.GetRootBytes());
+                if (n == 1 || n == 2 || n == 3 || n == 64 || n == 777 || n == 2049)
+                {
+                    var reader = new ShieldedMerkleStore(asset, Db, fixedDepth);
+                    reader.LoadLeavesFromCommitments();
+                    Assert.Equal(n, reader.LeafDigests.Count);
+                    Assert.True(reader.RootFromFrontier);
+                    Assert.Equal(reader.FullRoot(), reader.GetRootBytes());
+                    Assert.Equal(writer.FullRoot(), reader.GetRootBytes());
+                }
+            }
+        }
+
+        /// <summary>A spent note is marked by its position and pool, as the database compares the pool (round 34: through the position index).</summary>
+        [Fact]
+        public void ASpentNote_IsMarkedByItsPositionAndPool()
+        {
+            var col = Db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS);
+            for (var i = 0; i < 10; i++) col.Insert(new CommitmentRecord { AssetType = "VFX", TreePosition = i, NoteHash = "n" + i });
+            col.Insert(new CommitmentRecord { AssetType = "VBTC:x", TreePosition = 5, NoteHash = "other" });
+            col.Insert(new CommitmentRecord { AssetType = "vfx", TreePosition = 7, NoteHash = "variant" });
+
+            CommitmentSpendService.TryMarkSpent("VFX", 5, Db);
+            Assert.True(col.FindOne(x => x.NoteHash == "n5").IsSpent);
+            Assert.False(col.FindOne(x => x.NoteHash == "other").IsSpent);
+            CommitmentSpendService.TryMarkSpent("VFX", 999, Db);                 // past the end: nothing
+            Assert.Equal(1, col.Find(x => x.IsSpent).Count());
+            CommitmentSpendService.TryMarkSpent("VFX", 7, Db);                   // two rows the collation matches: the earlier
+            Assert.True(col.FindOne(x => x.NoteHash == "n7").IsSpent);
+            Assert.False(col.FindOne(x => x.NoteHash == "variant").IsSpent);
+        }
+
+        [Fact]
+        public void AtTheHeight_OnlyTheVfxPoolIsReset_VbtcPoolRowsStay()
+        {
+            const string vbtc = "VBTC:test-vault";
+            var store = new ShieldedMerkleStore(vbtc, Db, fixedDepth: false);
+            var n = Note(50_000_000);
+            store.AppendCommitment(n.G1, n.NoteHash, Height - 10, 1);
+            var vbtcBefore = Db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS).Query().Where(x => x.AssetType == vbtc).ToList();
+            Assert.Single(vbtcBefore);
+            Assert.Contains(vbtc, PrivacyEpochService.PoolAssets(Db));
+
+            PrivacyEpochService.ApplyIfResetBlock(BlockAt(Height), Db);
+
+            var vbtcAfter = Db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS).Query().Where(x => x.AssetType == vbtc).ToList();
+            Assert.Equal(vbtcBefore.Single().Commitment, Assert.Single(vbtcAfter).Commitment);
+            var vfx = Db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS).Query().Where(x => x.AssetType == "VFX").ToList();
+            Assert.Equal(Convert.ToBase64String(PrivacyEpoch.DummyNoteHash), Assert.Single(vfx).NoteHash);
+            Assert.Equal(new[] { "VFX" }, PrivacyEpochService.ResetAssets);
+        }
+
+        // ── Appending in the epoch ────────────────────────────────────────────────────────────────────────────
+
+        [Fact]
+        public async Task EpochAppends_UseTheFixedDepthTree_AndDummyNullifierIsNeverRecorded()
+        {
+            PrivacyEpochService.ApplyIfResetBlock(BlockAt(Height), Db);
+            var a = Note(300_000_000); var b = Note(200_000_000);
+            await ApplyPrivacy(BlockAt(Height + 1, Shield(3M, a.G1, a.NoteHash), Shield(2M, b.G1, b.NoteHash)));
+
+            var tree = new FixedDepthMerkleTree(new[] { PrivacyEpoch.DummyNoteHash, a.NoteHash, b.NoteHash });
+            var state = ShieldedPoolService.GetState("VFX", Db)!;
+            Assert.Equal(Convert.ToBase64String(tree.Root()), state.CurrentMerkleRoot);
+            Assert.Equal(5M, state.TotalShieldedSupply);
+            Assert.Equal(3, state.TotalCommitments);
+
+            // The inclusion proof is the circuits' flat 32-level path and recomputes the same root natively.
+            Assert.True(ShieldedPoolService.TryGetInclusionProof("VFX", 1, Db, out var proof, out var root, Height + 2));
+            Assert.Equal(32 * 32, proof!.Length);
+            Assert.Equal(tree.Root(), root);
+            Assert.Equal(tree.Root(), PoseidonV1.RootFromPath(a.NoteHash, 1, proof));
+
+            // A single-note spend of `a` with the dummy as second input: the real nullifier is recorded, the dummy's is not.
+            var vk = PrivacyField.RandomCanonical();
+            var realNullifier = PoseidonV1.Nullifier(vk, a.NoteHash, 1);
+            var change = Note(300_000_000 - 100_000_000 - 300);
+            await ApplyPrivacy(BlockAt(Height + 2, Unshield(1M, new[] { realNullifier, PrivacyEpoch.DummyNullifier }, tree.Root(), (change.G1, change.NoteHash), 1, 0)));
+            Assert.True(NullifierService.IsNullifierSpentInDb(Convert.ToBase64String(realNullifier), "VFX", Db));
+            Assert.False(NullifierService.IsNullifierSpentInDb(PrivacyEpoch.DummyNullifierB64, "VFX", Db));
+            var leaf0 = Db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS).FindOne(x => x.AssetType == "VFX" && x.TreePosition == 0);
+            Assert.False(leaf0.IsSpent); // the dummy is never marked spent
+            // A second single-note spend by another wallet carries the same dummy nullifier and still applies.
+            // (An epoch unshield always carries its change output, here of amount zero: one without is not epoch-shaped and has no effect on the pool.)
+            var vk2 = PrivacyField.RandomCanonical();
+            var zeroChange = Note(0);
+            await ApplyPrivacy(BlockAt(Height + 3, Unshield(2M, new[] { PoseidonV1.Nullifier(vk2, b.NoteHash, 2), PrivacyEpoch.DummyNullifier }, tree.Root(), (zeroChange.G1, zeroChange.NoteHash), 2, 0)));
+            Assert.False(NullifierService.IsNullifierSpentInDb(PrivacyEpoch.DummyNullifierB64, "VFX", Db));
+            Assert.Equal(5M - 1M - 0.000003M - 2M - 0.000003M, ShieldedPoolService.GetState("VFX", Db)!.TotalShieldedSupply);
+        }
+
+        [Fact]
+        public async Task BeforeTheHeight_NothingChanges()
+        {
+            var a = Note(100_000_000);
+            await ApplyPrivacy(BlockAt(Height - 2, Shield(1M, a.G1, a.NoteHash)));
+            var legacy = new ShieldedMerkleStore("VFX", Db, fixedDepth: false);
+            legacy.LoadLeavesFromCommitments();
+            Assert.Equal(Convert.ToBase64String(legacy.GetRootBytes()!), ShieldedPoolService.GetState("VFX", Db)!.CurrentMerkleRoot);
+            Assert.NotEqual(Convert.ToBase64String(new FixedDepthMerkleTree(new[] { a.NoteHash }).Root()), ShieldedPoolService.GetState("VFX", Db)!.CurrentMerkleRoot);
+        }
+
+        // ── Rebuild reproduces live application ───────────────────────────────────────────────────────────────
+
+        [Fact]
+        public async Task Rebuild_ReproducesTheEpochRoot_AndResetsEvenWithoutLaterPrivateTransactions()
+        {
+            var pre = Note(100_000_000);
+            var a = Note(300_000_000);
+            var blocks = new List<Block> { BlockAt(Height - 5, Shield(1M, pre.G1, pre.NoteHash)), BlockAt(Height + 4, Shield(3M, a.G1, a.NoteHash)) };
+            // Live application in chain order: the pre-epoch shield, the reset block (no private tx), the epoch shield.
+            await ApplyPrivacy(blocks[0]);
+            PrivacyEpochService.ApplyIfResetBlock(BlockAt(Height), Db);
+            await ApplyPrivacy(blocks[1]);
+            var live = ShieldedPoolService.GetState("VFX", Db)!;
+
+            var (ok, msg) = await PrivacyDbRebuildService.TryReplayPrivateBlocksAsync(blocks, Db, default, tipHeight: Height + 10);
+            Assert.True(ok, msg);
+            var rebuilt = ShieldedPoolService.GetState("VFX", Db)!;
+            Assert.Equal(live.CurrentMerkleRoot, rebuilt.CurrentMerkleRoot);
+            Assert.Equal(new FixedDepthMerkleTree(new[] { PrivacyEpoch.DummyNoteHash, a.NoteHash }).Root(), Convert.FromBase64String(rebuilt.CurrentMerkleRoot));
+            Assert.Equal(3M, rebuilt.TotalShieldedSupply);
+
+            // Only pre-epoch history but a tip past the height: the rebuild still starts the epoch.
+            var (ok2, msg2) = await PrivacyDbRebuildService.TryReplayPrivateBlocksAsync(new[] { blocks[0] }, Db, default, tipHeight: Height + 1);
+            Assert.True(ok2, msg2);
+            var resetOnly = ShieldedPoolService.GetState("VFX", Db)!;
+            Assert.Equal(Convert.ToBase64String(new FixedDepthMerkleTree(new[] { PrivacyEpoch.DummyNoteHash }).Root()), resetOnly.CurrentMerkleRoot);
+            Assert.Equal(0M, resetOnly.TotalShieldedSupply);
+
+            // Pre-epoch only, tip below the height: the legacy tree, untouched.
+            var (ok3, msg3) = await PrivacyDbRebuildService.TryReplayPrivateBlocksAsync(new[] { blocks[0] }, Db, default, tipHeight: Height - 1);
+            Assert.True(ok3, msg3);
+            Assert.Equal(1M, ShieldedPoolService.GetState("VFX", Db)!.TotalShieldedSupply);
+            Assert.Equal(1, ShieldedPoolService.GetState("VFX", Db)!.TotalCommitments);
+        }
+
+        // ── The production entry point, with the tip not loaded (fourth review) ─────────────────────────────────
+
+        private static void StoreBlocks(params Block[] blocks)
+        {
+            foreach (var b in blocks)
+            {
+                b.Hash ??= "h" + b.Height;
+                BlockchainData.GetBlocks().InsertSafe(b);
+            }
+        }
+
+        private static readonly byte[] NonCanonical = Enumerable.Repeat((byte)0xFF, 32).ToArray(); // a legacy note hash: not a field element
+
+        private static Transaction VbtcShield(string uid, decimal amount, byte[] g1, byte[] noteHash)
+        {
+            var payload = new PrivateTxPayload
+            {
+                Asset = "VBTC:" + uid, Kind = "shield", VbtcContractUid = uid, VbtcTransparentAmount = amount, TransparentInput = "RSHIELDER",
+                Outs = { new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(g1), NoteHashB64 = Convert.ToBase64String(noteHash) } },
+            };
+            return new Transaction { TransactionType = TransactionType.VBTC_V2_SHIELD, FromAddress = "RSHIELDER", ToAddress = PrivacyConstants.ShieldedPoolAddress, Amount = 0M, Data = PrivateTxPayloadCodec.SerializeToJson(payload), Hash = Guid.NewGuid().ToString("N"), Timestamp = 1 };
+        }
+
+        /// <summary>
+        /// The one-time rebuild runs at startup BEFORE the tip is loaded into Globals.LastBlock (it is still Height -1). It
+        /// must read the tip from the stored blocks: a node that crossed the proof height on an older build, with no private
+        /// transaction since, otherwise keeps its pre-epoch pool and refuses every epoch transaction. (The earlier test
+        /// passed the tip in by hand, as the burn tests did.)
+        /// </summary>
+        [Fact]
+        public async Task StartupRebuild_ReadsTheStoredTip_WhileTheLiveTipIsStillUnloaded()
+        {
+            var prior = Globals.LastBlock;
+            try
+            {
+                Globals.LastBlock = new Block { Height = -1 }; // startup, before StartupService.SetLastBlock()
+                var pre = Note(100_000_000);
+                var preBlock = BlockAt(Height - 5, Shield(1M, pre.G1, pre.NoteHash));
+                StoreBlocks(preBlock, BlockAt(Height - 1), BlockAt(Height), BlockAt(Height + 3)); // the chain is past the height, nothing private since
+                await ApplyPrivacy(preBlock);                                                    // the pool as the old build left it
+                Assert.Equal(1M, ShieldedPoolService.GetState("VFX", Db)!.TotalShieldedSupply);
+
+                var (ok, msg) = await PrivacyDbRebuildService.TryRebuildFromBlocksAsync(Db);
+                Assert.True(ok, msg);
+                var vfx = ShieldedPoolService.GetState("VFX", Db)!;
+                Assert.Equal(Convert.ToBase64String(new FixedDepthMerkleTree(new[] { PrivacyEpoch.DummyNoteHash }).Root()), vfx.CurrentMerkleRoot);
+                Assert.Equal(0M, vfx.TotalShieldedSupply);
+                Assert.Equal(1, vfx.TotalCommitments);
+            }
+            finally { Globals.LastBlock = prior; }
+        }
+
+        /// <summary>
+        /// The epoch is the VFX pool only. A vBTC pool keeps its legacy tree: its leaves are legacy note hashes, which are
+        /// not field elements, so re-rooting it as an epoch tree throws and the whole rebuild fails (and is retried, and
+        /// fails, at every start).
+        /// </summary>
+        [Fact]
+        public async Task Rebuild_LeavesAVbtcPoolInItsLegacyShape_AndDoesNotFailOnItsLegacyLeaves()
+        {
+            var prior = Globals.LastBlock;
+            try
+            {
+                Globals.LastBlock = new Block { Height = -1 };
+                var n = Note(50_000_000);
+                var vfx = Note(100_000_000);
+                var shieldBlock = BlockAt(Height - 10, VbtcShield("vault-1", 0.5M, n.G1, NonCanonical), Shield(1M, vfx.G1, NonCanonical));
+                StoreBlocks(shieldBlock, BlockAt(Height + 2));
+
+                var (ok, msg) = await PrivacyDbRebuildService.TryRebuildFromBlocksAsync(Db);
+                Assert.True(ok, msg);
+
+                var vbtc = ShieldedPoolService.GetState("VBTC:vault-1", Db)!;
+                Assert.Equal(1, vbtc.TotalCommitments);
+                Assert.Equal(0.5M, vbtc.TotalShieldedSupply);
+                var legacy = new ShieldedMerkleStore("VBTC:vault-1", Db, fixedDepth: false);
+                legacy.LoadLeavesFromCommitments();
+                Assert.Equal(Convert.ToBase64String(legacy.GetRootBytes()!), vbtc.CurrentMerkleRoot);
+
+                var pool = ShieldedPoolService.GetState("VFX", Db)!;
+                Assert.Equal(Convert.ToBase64String(new FixedDepthMerkleTree(new[] { PrivacyEpoch.DummyNoteHash }).Root()), pool.CurrentMerkleRoot);
+                Assert.Equal(0M, pool.TotalShieldedSupply);
+                Assert.False(ShieldedMerkleStore.UsesFixedDepth("VBTC:vault-1", Height + 2));
+                Assert.True(ShieldedMerkleStore.UsesFixedDepth("VFX", Height + 2));
+                Assert.False(ShieldedMerkleStore.UsesFixedDepth("VFX", Height - 1));
+            }
+            finally { Globals.LastBlock = prior; }
+        }
+
+        /// <summary>
+        /// A block is applied with the tree of its own height, not the live tip: a full state rebuild replays pre-epoch
+        /// blocks while the tip is in the epoch. The VFX fee leg of a pre-epoch vBTC spend used the shape of the tip.
+        /// </summary>
+        [Fact]
+        public async Task APreEpochBlock_IsAppliedWithItsOwnTreeShape_WhateverTheLiveTipIs()
+        {
+            var prior = Globals.LastBlock;
+            try
+            {
+                Globals.LastBlock = new Block { Height = Height + 500 }; // the tip is in the epoch; the block being replayed is not
+                var vfx = Note(100_000_000);
+                await ApplyPrivacy(BlockAt(Height - 20, Shield(1M, vfx.G1, NonCanonical)));
+
+                var change = Note(40_000_000);
+                var payload = new PrivateTxPayload
+                {
+                    Asset = "VBTC:vault-1", Kind = "unshield", VbtcContractUid = "vault-1", VbtcTransparentAmount = 0.1M, TransparentOutput = "RRECIPIENT",
+                    NullsB64 = { Convert.ToBase64String(NonCanonical) }, SpentCommitmentTreePositions = { 0 }, Fee = Globals.PrivateTxFixedFee,
+                    FeeInputNullifierB64 = Convert.ToBase64String(Enumerable.Repeat((byte)0xEE, 32).ToArray()), FeeTreeMerkleRoot = "legacy-root", FeeInputSpentTreePosition = 0,
+                    FeeOutputCommitmentB64 = Convert.ToBase64String(change.G1), FeeOutputNoteHashB64 = Convert.ToBase64String(NonCanonical),
+                };
+                var spend = new Transaction { TransactionType = TransactionType.VBTC_V2_UNSHIELD, FromAddress = PrivacyConstants.ShieldedPoolAddress, ToAddress = "RRECIPIENT", Amount = 0M, Data = PrivateTxPayloadCodec.SerializeToJson(payload), Hash = Guid.NewGuid().ToString("N"), Timestamp = 1 };
+                PrivateTxLedgerService.ApplyPrivacyStore(spend, BlockAt(Height - 18, spend), payload, Db);
+
+                var pool = ShieldedPoolService.GetState("VFX", Db)!;
+                Assert.Equal(2, pool.TotalCommitments); // the shield and the fee change, in the legacy tree
+                Assert.Equal(1M - Globals.PrivateTxFixedFee, pool.TotalShieldedSupply);
+                var legacy = new ShieldedMerkleStore("VFX", Db, fixedDepth: false);
+                legacy.LoadLeavesFromCommitments();
+                Assert.Equal(Convert.ToBase64String(legacy.GetRootBytes()!), pool.CurrentMerkleRoot);
+            }
+            finally { Globals.LastBlock = prior; }
+        }
+
+        /// <summary>
+        /// History mined under the old rules after the height (by a node that had not upgraded) is not epoch-shaped. It has
+        /// no effect on the epoch pool, and it must not stop the rebuild or a replay.
+        /// </summary>
+        [Fact]
+        public async Task ALegacyShapedPrivateTransaction_PastTheHeight_DoesNotTouchTheEpochPool_OrBreakTheRebuild()
+        {
+            var prior = Globals.LastBlock;
+            try
+            {
+                Globals.LastBlock = new Block { Height = -1 };
+                var legacyNote = Note(100_000_000);
+                var good = Note(200_000_000);
+                var oldRules = BlockAt(Height + 2, Shield(1M, legacyNote.G1, NonCanonical));  // a legacy note hash: not a field element
+                var newRules = BlockAt(Height + 4, Shield(2M, good.G1, good.NoteHash));
+                StoreBlocks(oldRules, newRules);
+
+                var (ok, msg) = await PrivacyDbRebuildService.TryRebuildFromBlocksAsync(Db);
+                Assert.True(ok, msg);
+                var pool = ShieldedPoolService.GetState("VFX", Db)!;
+                Assert.Equal(2M, pool.TotalShieldedSupply);
+                Assert.Equal(new FixedDepthMerkleTree(new[] { PrivacyEpoch.DummyNoteHash, good.NoteHash }).Root(), Convert.FromBase64String(pool.CurrentMerkleRoot));
+                var rebuiltRoot = pool.CurrentMerkleRoot;
+
+                // Live application of the same history gives the same pool.
+                Db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS).DeleteAll();
+                Db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE).DeleteAll();
+                Db.GetCollection<MerkleTreeNodeRecord>(PrivacyDbContext.PRIV_MERKLE_NODES).DeleteAll();
+                PrivacyEpochService.ApplyIfResetBlock(BlockAt(Height), Db);
+                await ApplyPrivacy(oldRules);
+                await ApplyPrivacy(newRules);
+                var live = ShieldedPoolService.GetState("VFX", Db)!;
+                Assert.Equal(rebuiltRoot, live.CurrentMerkleRoot);
+                Assert.Equal(2M, live.TotalShieldedSupply);
+            }
+            finally { Globals.LastBlock = prior; }
+        }
+
+        // ── Supply floor in the epoch ─────────────────────────────────────────────────────────────────────────
+
+        [Fact]
+        public void SupplyCorrection_AppliesBeforeTheHeightOnly()
+        {
+            var prior = new Dictionary<string, decimal>(Globals.ShieldedSupplyCorrections, StringComparer.Ordinal);
+            try
+            {
+                Globals.ShieldedSupplyCorrections["VFX"] = 100M;
+                var pool = ShieldedPoolService.GetOrCreateState("VFX", Db);
+                pool.TotalShieldedSupply = -40M;
+                pool.LastUpdateHeight = Globals.ShieldedSupplyCorrectionsThroughHeight;   // written through the forged blocks
+                PrivacyDbContext.PoolState().Update(pool);
+                Assert.Equal(60M, PrivateTxSupplyRules.CommittedSupply("VFX", Height - 1));
+                Assert.Equal(-40M, PrivateTxSupplyRules.CommittedSupply("VFX", Height));
+            }
+            finally
+            {
+                Globals.ShieldedSupplyCorrections.Clear();
+                foreach (var (k, v) in prior) Globals.ShieldedSupplyCorrections[k] = v;
+            }
+        }
+    }
+}

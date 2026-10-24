@@ -33,6 +33,11 @@
     <ProjectReference Include="..\VerifiedXCore\VerifiedXCore.csproj" />
   </ItemGroup>
 
+  <!-- Real chain data the tests verify against (Bitcoin headers and proofs). -->
+  <ItemGroup>
+    <None Include="Fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup>
     <Reference Include="LiteDB">
       <HintPath>..\Assemblies\LiteDB.dll</HintPath>

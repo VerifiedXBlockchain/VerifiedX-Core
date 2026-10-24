@@ -408,6 +408,13 @@ namespace VerifiedXCore.Models
         #endregion
 
         #region Create New Reserve Account
+        /// <summary>
+        /// Said whenever a reserve key is restored. A reserve address is the same on mainnet and testnet and a reserve
+        /// transaction's signature names no network, so a transaction signed on one can be replayed on the other.
+        /// </summary>
+        public const string CrossNetworkKeyWarning =
+            "Never use this reserve key on both mainnet and testnet: a reserve address is the same on both networks, and a reserve transaction signed on one can be replayed on the other.";
+
         public static ReserveAccountInfo CreateNewReserveAccount(string encryptionPassword, bool storeRecoveryKey = false, bool skipSave = false, string privKey = "")
         {
             ReserveAccount rAccount = new ReserveAccount();
@@ -622,7 +629,7 @@ namespace VerifiedXCore.Models
                 // VX-11: raw keys typed by the user. Correct unsigned parse by default; the pre-fix derivation when
                 // forced, or when only its address has on-chain history (key used in an older wallet).
                 //Reserve Account - xRBX...
-                if (!KeyParsing.TryParseImportedKey(privKey, legacy, AccountData.HasOnChainFootprint, out var b1, out _, out var reserveKeyError))
+                if (!KeyParsing.TryParseImportedKey(privKey, legacy, AccountData.HasOnChainFootprint, out var b1, out _, out var reserveKeyError, ReserveAddressOf))
                     throw new ArgumentException(reserveKeyError);
                 PrivateKey privateKey = new PrivateKey("secp256k1", b1);
                 var privKeySecretHex = privateKey.secret.ToString("x");
@@ -719,6 +726,10 @@ namespace VerifiedXCore.Models
         #endregion
 
         #region Reserve Account Create Methods
+
+        /// <summary>The reserve (xRBX) address a private key controls.</summary>
+        internal static string ReserveAddressOf(System.Numerics.BigInteger scalar) =>
+            GetHumanAddress("04" + ByteToHex(new PrivateKey("secp256k1", scalar).publicKey().toString()));
 
         public static string GetHumanAddress(string pubKeyHash)
         {
@@ -929,7 +940,7 @@ namespace VerifiedXCore.Models
                 Fee = 0,
                 Nonce = AccountStateTrei.GetNextNonce(account.Address),
                 TransactionType = TransactionType.TX,
-                UnlockTime = TimeUtil.GetReserveTime(sendTxData.UnlockDelayHours),
+                UnlockTime = TimeUtil.GetReserveSendTime(sendTxData.UnlockDelayHours),
                 Data = null
             };
 

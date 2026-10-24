@@ -14,13 +14,55 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public List<string> ParticipantAddresses { get; set; }
         public int RequiredThreshold { get; set; }
         public long StartTimestamp { get; set; }
+        /// <summary>
+        /// The network the start came from (a leader's node): its /24 or /64, <see cref="VerifiedXCore.Utilities.RemoteIp.Group"/>.
+        /// Counted, so one host cannot take every place by using more of its addresses.
+        /// </summary>
+        public string? SourceIp { get; set; }
+        /// <summary>A re-key's ceremony: the vault the new key is for (signed into this validator's attestation).</summary>
+        public string? RekeyOf { get; set; }
+        /// <summary>The leader signed the start in full (<see cref="FrostDkgLeaderAuth"/>): its Round 2 set and share batch must be signed too.</summary>
+        public bool LeaderSigned { get; set; }
+        /// <summary>
+        /// The exact address the start came from (FrostSigningAuthorization.NormalizeRemoteIp). A session its leader did not
+        /// sign in full (a web wallet's creation) takes its Round 2 set and share batches from that endpoint only.
+        /// </summary>
+        public string? StartRemoteIp { get; set; }
+        /// <summary>The hash of the start this session was opened by: the same start sent again is answered, not refused.</summary>
+        public string? StartBodyHash { get; set; }
         
         // FROST native library state for this validator's participation
         public ushort MyParticipantIndex { get; set; }         // This validator's 1-based index
         public string? Round1SecretPackage { get; set; }       // Secret from DKGRound1Generate (kept private)
         public string? Round2Secret { get; set; }              // Secret from DKGRound2GenerateShares (kept private)
         public string? GeneratedSharesJson { get; set; }       // Shares this validator created for others
+        /// <summary>
+        /// This validator reported a dealer's share in this session (signed). It then never finishes the session and never
+        /// attests its key: a dealer reveals a share's sealing key against that report, so a key whose holders' reports
+        /// were revealed must be one that can never be used (consensus needs every participant's attestation). Without
+        /// this a leader could draw reports from participants after the ceremony had finished, have every dealer reveal,
+        /// and interpolate the key of a vault (fourth review, round 10).
+        /// </summary>
+        public bool Reported { get; set; }
+
+        /// <summary>
+        /// Taken around taking a share batch (and finishing) and around giving an attestation: two batches at once could
+        /// otherwise leave one session both reporting and attesting (fourth review, round 11).
+        /// </summary>
+        [Newtonsoft.Json.JsonIgnore]
+        public SemaphoreSlim Gate { get; } = new(1, 1);
+
+        /// <summary>The one-time key each of this validator's shares was sealed with, by recipient identifier (revealed only to settle that recipient's signed report).</summary>
+        [Newtonsoft.Json.JsonIgnore]
+        public ConcurrentDictionary<string, string> SealEphemerals { get; set; } = new();
         
+        /// <summary>
+        /// Each participant's verified key as this validator's registry gave it at the start: shares are sealed to these.
+        /// Read live at Round 2, a participant that left the registry in between (an exit, a lapsed heartbeat) failed every
+        /// honest dealer's Round 2 (fifth review, round 14).
+        /// </summary>
+        public ConcurrentDictionary<string, string> ParticipantKeys { get; set; } = new();
+
         // Round 1: Commitments (from all validators)
         public ConcurrentDictionary<string, string> Round1Commitments { get; set; } = new();
         
@@ -40,7 +82,16 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public string? FinalKeyPackage { get; set; }           // This validator's key package (for signing)
         public string? FinalPubkeyPackage { get; set; }        // Group pubkey package (for signature aggregation)
         public bool IsCompleted { get; set; }
-        
+
+        /// <summary>How far the ceremony has gone here: 0 started, then <see cref="FrostSessionStorage.DkgStage"/>. Each step is taken once.</summary>
+        public int Stage { get; set; }
+
+        /// <summary>When the ceremony last went a step further here (its start, until then).</summary>
+        public long LastProgressTimestamp { get; set; }
+
+        /// <summary>Its coordinator gave it up (<c>POST /frost/dkg/abort/{sessionId}</c>): it holds no place and its secrets are gone.</summary>
+        public bool IsAborted { get; set; }
+
         public DKGSession()
         {
             ParticipantAddresses = new List<string>();
@@ -60,6 +111,8 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public string MessageHash { get; set; }
         public string SmartContractUID { get; set; }
         public string LeaderAddress { get; set; }
+        /// <summary>Led by an address that holds no share of the vault's key and is no caster (a withdrawal's requester): counted in their shared room.</summary>
+        public bool LedByRequester { get; set; }
         /// <summary>
         /// FIND-028: VFX withdrawal request TX hash for dedup tracking. Null for non-withdrawal signings.
         /// </summary>
@@ -70,6 +123,14 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
 
         /// <summary>Timestamp from the leader's start message (the value the leader signed over).</summary>
         public long LeaderStartTimestamp { get; set; }
+        /// <summary>
+        /// The leader's signature over the whole start, when the session is a watched vault's (round 17). Such a session's
+        /// rounds and abort are proven by the leader's own signatures, not by the address that opened it: a signer that
+        /// sent the leader's exact start first held the session there, and the leader's rounds were refused (round 18).
+        /// </summary>
+        public string? StartContentSignature { get; set; }
+        /// <summary>The start's signed message (<see cref="FrostDkgLeaderAuth.SigningStartMessage"/>), for a watched vault's session.</summary>
+        public string? StartMessage { get; set; }
         /// <summary>Leader's start signature — round messages must replay it to prove leadership.</summary>
         public string? LeaderStartSignature { get; set; }
         /// <summary>
@@ -168,25 +229,316 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
     /// </summary>
     public static class FrostSessionStorage
     {
-        /// <summary>Maximum concurrent DKG sessions allowed</summary>
-        public const int MAX_DKG_SESSIONS = 50;
+        /// <summary>
+        /// Key ceremonies for vault creations that may be under way on this validator at once. Anyone may lead one (the
+        /// leader holds no key material), so the places are guarded by what follows rather than by who asks: a start
+        /// must be recent and not seen before, a ceremony holds its place only while it goes a step further every two
+        /// minutes (its few steps are each taken once), and one leader and one network (a /24 or /64) each hold only a
+        /// few. 50 places with none of that were filled, for fifteen minutes at a time, by thirteen made-up leader keys
+        /// from one machine (third pass, 14 October 2026). Re-keys do not use these places (<see cref="MAX_REKEY_DKG_SESSIONS"/>).
+        /// </summary>
+        public const int MAX_DKG_SESSIONS = 200;
+
+        /// <summary>A ceremony that has gone no step further here for this long no longer holds a place (it goes on if its leader comes back).</summary>
+        public const int DKG_UNPROGRESSED_SECONDS = 120;
+
+        /// <summary>Ceremonies under way that one network (a /24 or /64) may have started here.</summary>
+        public const int MAX_DKG_SESSIONS_PER_SOURCE = 8;
+
+        /// <summary>
+        /// Places kept for re-keys (plan 8.8), apart from creations': a vault whose key is losing its holders must get a
+        /// new one whoever is filling the creations' places. A re-key's ceremony is joined only for a vault the chain
+        /// says is due, led by a validator that may hold a key share (active, its stake bonded for two days), at most
+        /// <see cref="MAX_REKEY_DKG_SESSIONS_PER_LEADER"/> a leader. There is no limit per vault: a limit of two let one
+        /// validator restarting its own two starts keep every other leader off a vault (fourth review). Filling every
+        /// place takes fifty such validators.
+        /// </summary>
+        public const int MAX_REKEY_DKG_SESSIONS = 100;
+
+        /// <summary>Re-key ceremonies under way that one leader may have started here (an attempt and its retry).</summary>
+        public const int MAX_REKEY_DKG_SESSIONS_PER_LEADER = 2;
+
+        /// <summary>The steps a ceremony takes here, each once: its Round 2 shares made, every share for this validator received, its key made.</summary>
+        public static class DkgStage
+        {
+            public const int Round2 = 1;
+            public const int SharesIn = 2;
+            public const int Done = 3;
+        }
+
+        /// <summary>Records that a ceremony went a step further here. A step already taken changes nothing, so no message keeps a place by being sent again.</summary>
+        public static void MarkDkgStage(DKGSession s, int stage, long? nowSeconds = null)
+        {
+            if (stage <= s.Stage) return;
+            s.Stage = stage;
+            s.LastProgressTimestamp = nowSeconds ?? TimeUtil.GetTime();
+        }
+
+        /// <summary>
+        /// How far a ceremony start's timestamp may be from this validator's clock, in seconds (a web wallet signs its
+        /// start, then asks for the ceremony a while later). A start carries its leader's signature over the session
+        /// id and this timestamp and nothing else, so an old one could be sent again by anybody who had seen it (every
+        /// participant has): it opened a session under that leader, and since a leader's new start for a vault
+        /// replaces its earlier ones, it removed the ceremony that leader was running.
+        /// </summary>
+        public const int DKG_START_MAX_AGE_SECONDS = 1800;
+
+        /// <summary>Session ids of the starts this validator has accepted, kept twice as long as a start stays fresh.</summary>
+        private static readonly ConcurrentDictionary<string, long> SeenDkgStarts = new(StringComparer.Ordinal);
+
+        /// <summary>Records an accepted start. False when this session id was accepted before.</summary>
+        public static bool NoteDkgStart(string sessionId, long nowSeconds)
+        {
+            if (SeenDkgStarts.Count > 4096)
+                foreach (var old in SeenDkgStarts.Where(kv => kv.Value < nowSeconds - 2 * DKG_START_MAX_AGE_SECONDS).Select(kv => kv.Key).ToList())
+                    SeenDkgStarts.TryRemove(old, out _);
+            return SeenDkgStarts.TryAdd(sessionId, nowSeconds);
+        }
+
+        public static bool DkgStartWasSeen(string? sessionId) => !string.IsNullOrEmpty(sessionId) && SeenDkgStarts.ContainsKey(sessionId);
+
+        /// <summary>Forgets a start, so its session id can be opened again (an unsigned copy replaced by its leader's signed start).</summary>
+        public static void ForgetDkgStart(string sessionId) => SeenDkgStarts.TryRemove(sessionId, out _);
+
+        /// <summary>
+        /// The leader's signed start (<paramref name="signedHash"/>) replaces a session of the same id that a copy without the
+        /// leader's full signature opened, unless it is that very start with nothing done yet (then it is only marked
+        /// signed): a participant could otherwise open a validator's session first with content of its choosing, or the
+        /// leader's own content with a Round 2 set of its own, and the leader's start was refused or ran on that set
+        /// (fourth review, rounds 6 and 7). Never a signed session, a finished one, one that reported a share, or one of
+        /// this very start: a session that reported and was then replaced by a signed copy of its own start attested a key
+        /// its reports still opened (round 11). True when it was replaced (or there was nothing to replace).
+        /// </summary>
+        public static bool MakeWayForSignedStart(string sessionId, string signedHash)
+        {
+            if (!DKGSessions.TryGetValue(sessionId, out var held)) return true;
+            if (held.LeaderSigned || held.IsCompleted || held.Reported || held.StartBodyHash == signedHash) return false;
+            AbortDkg(held);
+            DKGSessions.TryRemove(sessionId, out _);
+            ForgetDkgStart(sessionId);
+            return true;
+        }
+
+        /// <summary>Tests only.</summary>
+        internal static void ForgetDkgStarts() => SeenDkgStarts.Clear();
+
+        /// <summary>
+        /// Whether a ceremony has gone a step further here than its start. Commitments posted with a Round 2 request are
+        /// not a step: anybody who knows the session id could post them (the session's own leader among them).
+        /// </summary>
+        public static bool DkgHasProgressed(DKGSession s) => s.Stage > 0;
+
+        /// <summary>
+        /// Whether a ceremony holds a place: not finished or given up, started within the window, and gone a step further
+        /// (or started) within the last <see cref="DKG_UNPROGRESSED_SECONDS"/>.
+        /// </summary>
+        public static bool DkgIsUnderWay(DKGSession s, long nowSeconds) =>
+            !s.IsCompleted && !s.IsAborted && s.StartTimestamp >= nowSeconds - DKG_LEADER_CAP_WINDOW_SECONDS
+            && Math.Max(s.StartTimestamp, s.LastProgressTimestamp) >= nowSeconds - DKG_UNPROGRESSED_SECONDS;
+
+        /// <summary>
+        /// Why a ceremony start is refused for want of room, age or novelty; null when it may go on. Counted over the
+        /// sessions given, so the rule can be tested without the store. With no leader given only what can be judged
+        /// before the leader's signature is checked (the validator's total, the start's age) is judged.
+        /// </summary>
+        /// <remarks>
+        /// A re-key's start (<paramref name="rekeyOf"/> set) is counted among re-keys only, and not per network: its leader
+        /// is a validator, checked by the caller (<see cref="RekeyLeaderRefusal"/>), and validators may share a host.
+        /// </remarks>
+        public static string? DkgStartRefusal(IEnumerable<DKGSession> sessions, long nowSeconds, string? sessionId, long startTimestamp, string? leaderAddress, string? sourceIp, string? rekeyOf = null)
+        {
+            if (Math.Abs(nowSeconds - startTimestamp) > DKG_START_MAX_AGE_SECONDS)
+                return "This ceremony start is not recent. Sign a new one.";
+            var rekey = !string.IsNullOrEmpty(rekeyOf);
+            var underWay = sessions.Where(s => DkgIsUnderWay(s, nowSeconds) && string.IsNullOrEmpty(s.RekeyOf) != rekey).ToList();
+            if (underWay.Count >= (rekey ? MAX_REKEY_DKG_SESSIONS : MAX_DKG_SESSIONS))
+                return rekey ? "Maximum concurrent re-key ceremonies reached. Try again later." : "Maximum concurrent DKG sessions reached. Try again later.";
+            if (string.IsNullOrEmpty(leaderAddress)) return null;
+            if (DkgStartWasSeen(sessionId))
+                return "This ceremony start was used before. Start again under a new session id.";
+            var perLeader = rekey ? MAX_REKEY_DKG_SESSIONS_PER_LEADER : MAX_DKG_SESSIONS_PER_LEADER;
+            if (underWay.Count(s => string.Equals(s.LeaderAddress, leaderAddress, StringComparison.Ordinal)) >= perLeader)
+                return $"Too many open DKG sessions for this leader (cap {perLeader}). Finish or abandon them first.";
+            if (!rekey && !string.IsNullOrEmpty(sourceIp) && underWay.Count(s => string.Equals(s.SourceIp, sourceIp, StringComparison.Ordinal)) >= MAX_DKG_SESSIONS_PER_SOURCE)
+                return $"Too many key ceremonies under way from this network (cap {MAX_DKG_SESSIONS_PER_SOURCE}). Try again shortly.";
+            return null;
+        }
+
+        /// <summary>
+        /// Why a re-key's start is not taken from this leader: only a validator that may hold a key share leads one (active,
+        /// funded, its stake bonded for the minimum age, as for a ceremony's participants). Null when it may.
+        /// </summary>
+        public static string? RekeyLeaderRefusal(string? leaderAddress, Func<string, bool>? mayHoldAShare = null)
+        {
+            if (string.IsNullOrEmpty(leaderAddress)) return "A re-key's ceremony needs a leader.";
+            var eligible = mayHoldAShare ?? (a =>
+            {
+                var v = VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.GetValidator(a);
+                return v?.IsActive == true && VerifiedXCore.Services.ValidatorBond.CeremonyEligible(new[] { v }, (Globals.LastBlock?.Height ?? 0) + 1).Count > 0;
+            });
+            return eligible(leaderAddress) ? null : "A re-key's ceremony is led by an active vBTC validator whose stake has been bonded for the minimum age.";
+        }
+
+        /// <summary>
+        /// Gives a ceremony up (its coordinator's attempt failed): it holds no place from now on and its secrets are
+        /// dropped. A finished ceremony is left alone: its key package may be the vault's. False when there is nothing to give up.
+        /// </summary>
+        public static bool AbortDkg(DKGSession s)
+        {
+            if (s.IsCompleted || s.IsAborted) return false;
+            s.IsAborted = true;
+            s.Round1SecretPackage = null;
+            s.Round2Secret = null;
+            s.GeneratedSharesJson = null;
+            s.ReceivedSharesJson.Clear();
+            s.ReceivedShares.Clear();
+            return true;
+        }
 
         /// <summary>
         /// Max IN-PROGRESS DKG sessions a single leader address may hold open. Without a per-leader
         /// cap, any address can fill the global cap and block legitimate contract creation. Must
         /// exceed the coordinator's own start-retry count (each retry opens a new session id under
         /// the same leader) or a legitimate retry would be refused by exactly the validators it needs.
+        /// The coordinator makes up to MaxDkgAttempts attempts, each a new session; a web wallet's (pre-signed) attempts are
+        /// not given up on the participants and hold their places for two minutes, so the fifth and sixth were refused (#274).
         /// </summary>
-        public const int MAX_DKG_SESSIONS_PER_LEADER = 4;
+        public const int MAX_DKG_SESSIONS_PER_LEADER = VerifiedXCore.Bitcoin.Services.FrostMPCService.MaxDkgAttempts + 1;
 
         /// <summary>An in-progress DKG session older than this no longer counts against its leader.</summary>
         public const int DKG_LEADER_CAP_WINDOW_SECONDS = 900;
         
-        /// <summary>Maximum concurrent signing sessions allowed</summary>
-        public const int MAX_SIGNING_SESSIONS = 50;
+        /// <summary>
+        /// Maximum concurrent signing sessions allowed. One session signs one input of one Bitcoin transaction, and a
+        /// vault the chain watches can have many withdrawals being signed at once, each led in turn by several of its
+        /// signers: 50 sessions kept for an hour were used up by a handful of ordinary withdrawals, and could be
+        /// filled on purpose by the requester of one small pinned withdrawal (second path audit, 14 October 2026).
+        /// </summary>
+        public const int MAX_SIGNING_SESSIONS = 500;
+
+        /// <summary>Signing sessions kept here at all, finished ones included (a finished session holds no place, but is kept for its ten minutes).</summary>
+        public const int MAX_SIGNING_SESSIONS_HELD = 2_000;
+
+        /// <summary>A signing session is dropped this long after it was started; a ceremony takes seconds.</summary>
+        public const int SIGNING_SESSION_SECONDS = 600;
+
+        /// <summary>Signing sessions one leader may have open on this validator.</summary>
+        public const int MAX_SIGNING_SESSIONS_PER_LEADER = 60;
+
+        /// <summary>
+        /// Signing sessions all requester-led ceremonies together may have open here; the rest of the room is kept for
+        /// the key's holders and casters, who lead the signing of every pinned transaction. Counted per leader only, nine
+        /// requester addresses with pinned withdrawals filled every validator's room and every payout stalled (fifth
+        /// review, round 24).
+        /// </summary>
+        public const int MAX_REQUESTER_LED_SIGNING_SESSIONS = 200;
+
+        /// <summary>
+        /// Signing sessions one leader may have open here for the same thing to sign (one input of one transaction): a
+        /// retry. Counted per leader: a limit across leaders let one leader's three sessions refuse every other leader
+        /// of that input for as long as it renewed them.
+        /// </summary>
+        public const int MAX_SIGNING_SESSIONS_PER_LEADER_AND_HASH = 2;
+
+        /// <summary>How far a signing start's timestamp may be from this validator's clock, in seconds: an old start cannot be sent again to use up its leader's room.</summary>
+        private static readonly ConcurrentDictionary<string, long> _signingStartsSeen = new(StringComparer.Ordinal);
+        private static readonly Dictionary<string, (long Timestamp, long SeenAt)> _newestStart = new(StringComparer.Ordinal);
+        private static readonly object _newestStartLock = new();
+
+        /// <summary>
+        /// A watched vault's verified start for (leader, vault, request, input): false when a newer start of the leader's for
+        /// the same input was verified here before. Otherwise it becomes the newest, whatever happens to it after (refused
+        /// for room or clock, or opened). Starts the leader gave up stay given up: a signer holding them could open them one
+        /// after another as each place came free and keep a recovered validator out of the leader's signing (round 20).
+        /// </summary>
+        public static bool TakeStartOrder(string leader, string? scUID, string? requestHash, int inputIndex, long timestamp)
+        {
+            var key = $"{leader}|{scUID}|{requestHash}|{inputIndex}";
+            var now = TimeUtil.GetTime();
+            lock (_newestStartLock)
+            {
+                if (_newestStart.TryGetValue(key, out var newest) && timestamp < newest.Timestamp)
+                    return false;
+                _newestStart[key] = (Math.Max(timestamp, newest.Timestamp), now);
+                if (_newestStart.Count > 10_000)
+                    foreach (var old in _newestStart.Where(kv => now - kv.Value.SeenAt > 2 * SIGNING_START_MAX_AGE_SECONDS).Select(kv => kv.Key).ToList())
+                        _newestStart.Remove(old);
+                return true;
+            }
+        }
+
+        /// <summary>The leader's sessions here for one input opened by starts older than <paramref name="timestamp"/>: given up by a newer start.</summary>
+        public static void DropSupersededSigningSessions(string leader, string? scUID, string? requestHash, int inputIndex, long timestamp)
+        {
+            foreach (var (id, s) in SigningSessions.Where(kv => kv.Value.LeaderAddress == leader && kv.Value.SmartContractUID == scUID
+                         && kv.Value.WithdrawalRequestHash == requestHash && kv.Value.InputIndex == inputIndex && kv.Value.LeaderStartTimestamp < timestamp).ToList())
+                SigningSessions.TryRemove(id, out _);
+        }
+
+        /// <summary>Notes a signing session id this validator opened (kept twice the longest a start's signature is in date).</summary>
+        public static void NoteSigningStart(string sessionId)
+        {
+            var now = TimeUtil.GetTime();
+            _signingStartsSeen[sessionId] = now;
+            if (_signingStartsSeen.Count > 10_000)
+                foreach (var old in _signingStartsSeen.Where(kv => now - kv.Value > 2 * SIGNING_START_MAX_AGE_SECONDS).Select(kv => kv.Key).ToList())
+                    _signingStartsSeen.TryRemove(old, out _);
+        }
+
+        /// <summary>Whether this validator opened a signing session under this id within twice a start's signature's life.</summary>
+        public static bool SigningStartSeen(string sessionId) =>
+            _signingStartsSeen.TryGetValue(sessionId, out var at) && TimeUtil.GetTime() - at <= 2 * SIGNING_START_MAX_AGE_SECONDS;
+
+        public const int SIGNING_START_MAX_AGE_SECONDS = 1800; // wide enough for a wallet that signs its start, then asks for the ceremony a while later
+
+        /// <summary>
+        /// Makes room under <see cref="MAX_SIGNING_SESSIONS_HELD"/> by dropping the oldest finished sessions (their share
+        /// given). Finished sessions are kept ten minutes and counted against the validator's total, though no per-leader
+        /// cap counts them: one leader starting, finishing and starting again (the same start may be sent again) filled
+        /// the total and every start here, the vault's holders' and the casters' included, was refused (fifth review,
+        /// round 35). Open sessions are never dropped.
+        /// </summary>
+        public static void DropFinishedForRoom()
+        {
+            var over = SigningSessions.Count - MAX_SIGNING_SESSIONS_HELD + 1;
+            if (over <= 0) return;
+            foreach (var finished in SigningSessions.Where(kv => kv.Value.NonceConsumed).OrderBy(kv => kv.Value.StartTimestamp).Take(over).Select(kv => kv.Key).ToList())
+                SigningSessions.TryRemove(finished, out _);
+        }
+
+        /// <summary>
+        /// Why a new signing session is refused for want of room; null when there is room. Counted over the sessions
+        /// given (the open ones), so the rule can be tested without the store. With no leader given only the
+        /// validator's total is judged (before the leader's signature has been checked).
+        /// </summary>
+        public static string? SigningStartRefusal(IEnumerable<SigningSession> open, string? leaderAddress, string? messageHash, bool ledByRequester = false)
+        {
+            var held = open as ICollection<SigningSession> ?? open.ToList();
+            if (held.Count >= MAX_SIGNING_SESSIONS_HELD)
+                return "Maximum concurrent signing sessions reached. Try again later.";
+            // A session whose share this validator has given is done here: it no longer holds a place. It held one for
+            // its full ten minutes, and a leader that had signed one 50-input transaction was refused for the next
+            // (fifth review, round 25). The finished ones are still kept (above) for their own ten minutes.
+            var sessions = held.Where(x => !x.NonceConsumed).ToList();
+            if (sessions.Count >= MAX_SIGNING_SESSIONS)
+                return "Maximum concurrent signing sessions reached. Try again later.";
+            if (string.IsNullOrEmpty(leaderAddress)) return null;
+            if (ledByRequester && sessions.Count(x => x.LedByRequester) >= MAX_REQUESTER_LED_SIGNING_SESSIONS)
+                return $"{MAX_REQUESTER_LED_SIGNING_SESSIONS} requester-led signing sessions are open here. Try again later; the vault's signers sign pinned transactions without you.";
+            if (sessions.Count(x => x.LeaderAddress == leaderAddress) >= MAX_SIGNING_SESSIONS_PER_LEADER)
+                return $"This leader already has {MAX_SIGNING_SESSIONS_PER_LEADER} signing sessions open here. Try again later.";
+            if (!string.IsNullOrEmpty(messageHash)
+                && sessions.Count(x => x.LeaderAddress == leaderAddress && string.Equals(x.MessageHash, messageHash, StringComparison.OrdinalIgnoreCase)) >= MAX_SIGNING_SESSIONS_PER_LEADER_AND_HASH)
+                return $"This leader already has {MAX_SIGNING_SESSIONS_PER_LEADER_AND_HASH} signing sessions open here for the same input. Try again later.";
+            return null;
+        }
         
-        /// <summary>Maximum number of participant addresses per session (supports mainnet scale)</summary>
-        public const int MAX_PARTICIPANTS = 200;
+        /// <summary>
+        /// Maximum number of participant addresses per session: the most a vault's key ceremony may have
+        /// (<see cref="FrostDkgAttestation.MaxParticipants"/>). A lower cap here refused, at the start of a ceremony, the
+        /// participant count consensus requires once the eligible validators outgrow it, so no public vault could be made.
+        /// </summary>
+        public const int MAX_PARTICIPANTS = FrostDkgAttestation.MaxParticipants;
         
         /// <summary>Minimum required threshold percentage</summary>
         public const int MIN_THRESHOLD = 51;
@@ -241,7 +593,11 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public static bool HasInProgressDkgForContractByOtherLeader(string? smartContractUID, string? leaderAddress, string? exceptSessionId)
         {
             if (string.IsNullOrEmpty(smartContractUID)) return false;
-            return DKGSessions.Values.Any(s => !s.IsCompleted
+            // Only a ceremony under way: an idle or given-up one kept another leader off the UID for an hour, and a
+            // validator could open such sessions under the UIDs it expected the next re-key leader to use (fourth review,
+            // round 5). Two that both finish cannot both keep a key under one UID (the key store refuses a second).
+            var now = TimeUtil.GetTime();
+            return DKGSessions.Values.Any(s => DkgIsUnderWay(s, now)
                                                && string.Equals(s.SmartContractUID, smartContractUID, StringComparison.Ordinal)
                                                && !string.Equals(s.SessionId, exceptSessionId, StringComparison.Ordinal)
                                                && !string.Equals(s.LeaderAddress, leaderAddress, StringComparison.Ordinal));
@@ -283,8 +639,9 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
                 DKGSessions.TryRemove(key, out _);
             }
             
-            // Cleanup signing sessions
-            var oldSigning = SigningSessions.Where(kvp => kvp.Value.StartTimestamp < oneHourAgo).Select(kvp => kvp.Key).ToList();
+            // Cleanup signing sessions (a shorter life than a key ceremony's: see SIGNING_SESSION_SECONDS)
+            var signingCutoff = currentTime - SIGNING_SESSION_SECONDS;
+            var oldSigning = SigningSessions.Where(kvp => kvp.Value.StartTimestamp < signingCutoff).Select(kvp => kvp.Key).ToList();
             foreach (var key in oldSigning)
             {
                 SigningSessions.TryRemove(key, out _);

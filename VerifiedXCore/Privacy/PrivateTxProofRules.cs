@@ -1,0 +1,120 @@
+using VerifiedXCore.Models;
+using VerifiedXCore.Models.Privacy;
+
+namespace VerifiedXCore.Privacy
+{
+    /// <summary>
+    /// Fund-loss audit item 1, stage 2 (Globals.PrivateTxProofRulesHeight): the shape every private transaction must
+    /// have once proofs are required, checked before the proof itself (<see cref="PlonkProofVerifier"/>):
+    /// <list type="bullet">
+    /// <item>no private transaction at all in the reset block (the pools restart in it);</item>
+    /// <item>every output carries a canonical note hash (the circuits bind note hashes, not Pedersen commitments);</item>
+    /// <item>a shield has one output; an unshield spends exactly two notes and has one change output (amount may be
+    /// zero); a private transfer spends exactly two notes and has two outputs;</item>
+    /// <item>the public dummy note's nullifier appears at most once, and a real nullifier is never the dummy's;</item>
+    /// <item>every nullifier (the fee leg's included) is the one Base64 spelling of a canonical field element, and no
+    /// note is named twice (<see cref="NullifierIdentityError"/>).</item>
+    /// </list>
+    /// Null when the rules do not apply (before the height) or pass.
+    /// </summary>
+    public static class PrivateTxProofRules
+    {
+        public const string ResetBlockReason = "No private transaction is valid in the block that starts the proof-rules epoch.";
+
+        public const string ShieldSpendsNothingReason = "A shield spends no note: it carries no nullifier, fee-leg nullifier or spent position.";
+
+        /// <summary>
+        /// A shield turns transparent value into one new note and spends none, so it names no nullifier, fee-leg nullifier,
+        /// spent position or spent commitment. Its proof binds only the amount and the output, and the apply recorded
+        /// whatever it named: a nullifier seen in the mempool, attached to a shield, stranded that note for good, and a
+        /// named position marked an unrelated tree row spent. Null when the shield passes, or the transaction is not one.
+        /// </summary>
+        public static string? ShieldSpendsNothing(Transaction tx, PrivateTxPayload payload)
+        {
+            if (tx == null || payload == null || !PrivateTransactionTypes.IsTransparentShield(tx.TransactionType)) return null;
+            return payload.NullsB64?.Count > 0 || !string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64)
+                   || payload.SpentCommitmentTreePositions?.Count > 0 || payload.SpentCommitmentB64s?.Count > 0
+                ? ShieldSpendsNothingReason
+                : null;
+        }
+
+        public static string? Check(Transaction tx, PrivateTxPayload payload, long height)
+        {
+            if (tx == null || payload == null || !PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType))
+                return null;
+            if (PrivacyEpoch.IsResetBlock(height))
+                return ResetBlockReason;
+            if (!PrivacyEpoch.ProofRulesActive(height))
+                return null;
+
+            foreach (var o in payload.Outs)
+            {
+                if (o == null) return "Private outputs cannot be null.";
+                var nh = o.NoteHashB64;
+                if (string.IsNullOrWhiteSpace(nh)) return "Every private output must carry its note_hash (the circuits bind note hashes).";
+                byte[] bytes;
+                try { bytes = Convert.FromBase64String(nh); } catch { return "An output note_hash is not valid Base64."; }
+                if (!PrivacyField.IsCanonicalLe(bytes)) return "An output note_hash must be a canonical 32-byte field element.";
+            }
+
+            switch (tx.TransactionType)
+            {
+                case TransactionType.VFX_SHIELD:
+                case TransactionType.VBTC_V2_SHIELD:
+                    if (payload.Outs.Count != 1) return "A shield carries exactly one output.";
+                    break;
+                case TransactionType.VFX_UNSHIELD:
+                case TransactionType.VBTC_V2_UNSHIELD:
+                    if (payload.NullsB64.Count != 2) return "An unshield spends exactly two notes (a single-note spend carries the public dummy note as its second input).";
+                    if (payload.Outs.Count != 1) return "An unshield carries exactly one change output (its amount may be zero).";
+                    if (UnshieldAmountPastEighthDecimal(tx, payload)) return UnshieldAmountDecimalsReason;
+                    break;
+                case TransactionType.VFX_PRIVATE_TRANSFER:
+                case TransactionType.VBTC_V2_PRIVATE_TRANSFER:
+                    if (payload.NullsB64.Count != 2) return "A private transfer spends exactly two notes (a single-note spend carries the public dummy note as its second input).";
+                    if (payload.Outs.Count != 2) return "A private transfer carries exactly two outputs (payment and change; the change may be zero).";
+                    break;
+            }
+
+            var dummies = payload.NullsB64.Count(PrivacyEpoch.IsDummyNullifier);
+            if (dummies > 1) return "The public dummy note can be spent only once per transaction.";
+            if (!string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64) && PrivacyEpoch.IsDummyNullifier(payload.FeeInputNullifierB64))
+                return "The VFX fee leg must spend a real note.";
+            return NullifierIdentityError(payload);
+        }
+
+        public const string UnshieldAmountDecimalsReason = "An unshield's amount has at most 8 decimal places, the precision its proof binds.";
+
+        /// <summary>
+        /// The proof binds an unshield's amount scaled by 10^8 (Globals.ToCircuitAmount truncates the rest), while the
+        /// transparent credit is the full decimal: digits past the eighth were credited unproven.
+        /// </summary>
+        public static bool UnshieldAmountPastEighthDecimal(Transaction tx, PrivateTxPayload payload)
+        {
+            foreach (var amount in new decimal?[] { tx.Amount, payload.TransparentAmount, payload.VbtcTransparentAmount })
+                if (amount is { } a && a != Math.Round(a, 8))
+                    return true;
+            return false;
+        }
+
+        public const string NonCanonicalNullifierReason = "Every nullifier is the one Base64 spelling of a canonical 32-byte field element.";
+
+        public const string RepeatedNullifierReason = "A private transaction spends each note once.";
+
+        /// <summary>
+        /// A nullifier is its 32 bytes, which is what the proof binds and every spelling of them decodes to. So each one the
+        /// transaction names (its spends and its fee leg) is in its canonical spelling, and no two of them are the same note;
+        /// the public dummy, shared by every single-note spend, may stand beside a real one. Null when they pass.
+        /// </summary>
+        public static string? NullifierIdentityError(PrivateTxPayload payload)
+        {
+            var named = new List<string>(payload.NullsB64 ?? new List<string>());
+            if (!string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64))
+                named.Add(payload.FeeInputNullifierB64);
+            if (named.Any(n => !NullifierService.IsCanonicalNullifier(n)))
+                return NonCanonicalNullifierReason;
+            var real = named.Where(n => !PrivacyEpoch.IsDummyNullifier(n)).ToList();
+            return real.Count != real.Distinct(StringComparer.Ordinal).Count() ? RepeatedNullifierReason : null;
+        }
+    }
+}

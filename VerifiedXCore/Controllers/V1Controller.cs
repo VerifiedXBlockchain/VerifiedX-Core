@@ -264,6 +264,8 @@ namespace VerifiedXCore.Controllers
 
                 if (!string.IsNullOrEmpty(password))
                 {
+                    if (VerifiedXCore.Services.WalletEncryptionService.RefusesUnlock(password))
+                        return JsonConvert.SerializeObject(new { Result = "Fail", Message = "Password was incorrect. Please attempt again" });
                     Globals.EncryptPassword = password.ToSecureString();
                     var account = AccountData.GetSingleAccount(Globals.ValidatorAddress);
                     BigInteger b1 = BigInteger.Parse(account.GetKey, NumberStyles.AllowHexSpecifier);//converts hex private key into big int.
@@ -465,6 +467,11 @@ namespace VerifiedXCore.Controllers
             {
                 if (!string.IsNullOrEmpty(password))
                 {
+                    if (VerifiedXCore.Services.WalletEncryptionService.RefusesUnlock(password))
+                    {
+                        password = "";
+                        return JsonConvert.SerializeObject(new { Result = "Fail", Message = "Password was incorrect. Please attempt again" });
+                    }
                     Globals.EncryptPassword = password.ToSecureString();
                     var accounts = AccountData.GetAccounts();
                     if (accounts != null)
@@ -601,10 +608,12 @@ namespace VerifiedXCore.Controllers
             var output = JsonConvert.SerializeObject(new { Result = "Fail", Message = "Update was not successful." });
             if (!Globals.UpToDate)
             {
-                var result = await VersionControlService.DownloadLatestAndUpdate(fileName, runUpdate);
+                var (ok, refusal) = await VersionControlService.DownloadLatestAndUpdateWithReason(fileName, runUpdate);
 
-                if (result)
+                if (ok)
                     output = JsonConvert.SerializeObject(new { Result = "Success", Message = "Update was successful. Please Restart CLI." });
+                else if (refusal != null)
+                    output = JsonConvert.SerializeObject(new { Result = "Fail", Message = refusal });
             }
             else
             {
@@ -766,6 +775,7 @@ namespace VerifiedXCore.Controllers
                             accounts.UpdateSafe(account);
                             Globals.ValidatorAddress = account.Address;  
                             Globals.ValidatorPublicKey = account.PublicKey;
+                            Globals.ValidatorExitSent = false; // validating again: announce as usual (an exit sent earlier in this run had silenced it)
                             output = "Success! The requested account has been turned on: " + account.Address;
                         }
                     }
@@ -799,9 +809,10 @@ namespace VerifiedXCore.Controllers
             if (presentValidator != null)
             {
                 
-                await ValidatorService.DoMasterNodeStop();
-                
-                output = "The validator has been turned off: " + presentValidator.Address;
+                // The operator's stop is the graceful exit: the on-chain exit goes out first (it frees a bonded stake after the wait).
+                var exitNote = await ValidatorService.DoMasterNodeStop(sendExit: true);
+
+                output = "The validator has been turned off: " + presentValidator.Address + (exitNote == null ? "" : ". " + exitNote);
             }
             else
             {
@@ -1302,7 +1313,8 @@ namespace VerifiedXCore.Controllers
         {
             string output = "";
 
-            var result = AddressValidateUtility.ValidateAddress(address);
+            // Another network's address is well formed but nothing sent to it could be spent here.
+            var result = AddressValidateUtility.ValidateAddress(address) && !AddressValidateUtility.IsOtherNetworksAddress(address);
 
             output = result.ToString();
 

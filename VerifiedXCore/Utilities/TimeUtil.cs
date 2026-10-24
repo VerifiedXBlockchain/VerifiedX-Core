@@ -57,6 +57,12 @@ namespace VerifiedXCore.Utilities
         {
             return DateTimeOffset.UtcNow.AddHours(24 + addHours).ToUnixTimeSeconds();
         }
+
+        /// <summary>
+        /// The unlock time a wallet gives a reserve send it builds: at least the 24-hour minimum. A negative delay put the
+        /// time on (or below) the admission floor, so the node's own mempool could refuse the send moments later.
+        /// </summary>
+        public static long GetReserveSendTime(int delayHours) => GetReserveTime(Math.Max(0, delayHours));
         public static DateTime ToDateTime(long unixTime)
         {
             DateTime frDateTime = new DateTime(1970, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc);

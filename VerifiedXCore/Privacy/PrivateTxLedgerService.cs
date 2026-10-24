@@ -21,30 +21,70 @@ namespace VerifiedXCore.Privacy
             if (!PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _) || payload == null || !payload.TryValidateStructure(out _))
                 return;
 
+            if (NamesAnotherPoolThanVfx(tx, payload, block.Height))
+            {
+                LogUtility.Log($"VFX private transaction {tx.Hash} at block {block.Height} names the {payload.Asset} pool; it has no effect.", "PrivateTxLedgerService.ApplyBlockTransactionAsync()");
+                return;
+            }
+
             var db = privacyDb ?? PrivacyDbContext.GetPrivacyDb();
             ApplyPrivacyStore(tx, block, payload, db);
             await ApplyTransparentLedgerAsync(tx, block, payload).ConfigureAwait(false);
         }
+
+        /// <summary>
+        /// From Globals.PathAuditRulesHeight a VFX private transaction names the VFX pool exactly, and validation refuses
+        /// one that does not (PrivateTransactionValidatorService.EncodingRefusal). Applying one anyway would be judged
+        /// against another pool's supply and paid in VFX, so it is applied to nothing, pools or ledger.
+        /// </summary>
+        private static bool NamesAnotherPoolThanVfx(Transaction tx, PrivateTxPayload payload, long height) =>
+            height >= Globals.PathAuditRulesHeight
+            && (tx.TransactionType == TransactionType.VFX_SHIELD || tx.TransactionType == TransactionType.VFX_UNSHIELD
+                || tx.TransactionType == TransactionType.VFX_PRIVATE_TRANSFER)
+            && !string.Equals(payload.Asset, "VFX", StringComparison.Ordinal);
 
         /// <summary>Applies nullifiers, marks spent commitments, appends outputs, refreshes pool Merkle row.</summary>
         public static void ApplyPrivacyStore(Transaction tx, Block block, PrivateTxPayload payload, LiteDatabase db)
         {
             var height = block.Height;
             var ts = tx.Timestamp;
+            if (NamesAnotherPoolThanVfx(tx, payload, height))
+                return;
+
+            // A private transaction in the proof-rules epoch that does not have the epoch's shape was mined under the old
+            // rules by a node that had not upgraded (current validation refuses it: PrivateTxProofRules, and the reset block
+            // admits none). It has no effect on any pool: its legacy note hashes are not field elements and cannot enter the
+            // circuits' tree, and the epoch pool holds only what the epoch's rules admitted. Without this, one such
+            // transaction in history stopped the store rebuild and threw in every replay. Its transparent side is the
+            // caller's (ApplyTransparentLedgerAsync) and still follows the chain.
+            if (PrivacyEpoch.ProofRulesActive(height))
+            {
+                var notEpochShaped = PrivateTxProofRules.Check(tx, payload, height);
+                if (notEpochShaped != null)
+                {
+                    LogUtility.Log($"Private transaction {tx.Hash} at block {height} is not epoch-shaped ({notEpochShaped}); it has no effect on the shielded pools.", "PrivateTxLedgerService.ApplyPrivacyStore()");
+                    return;
+                }
+            }
 
             var poolCol = db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE);
             var poolRow = poolCol.FindOne(x => x.AssetType == payload.Asset);
             var supply = poolRow?.TotalShieldedSupply ?? 0m;
             supply = ApplyShieldedSupplyDelta(tx, payload, supply);
 
+            var epoch = PrivacyEpoch.ProofRulesActive(height);
             for (var ni = 0; ni < payload.NullsB64.Count; ni++)
             {
+                // Stage 2: the public dummy note's nullifier is spent by every single-note spend; it is never recorded
+                // and leaf 0 is never marked spent.
+                if (epoch && PrivacyEpoch.IsDummyNullifier(payload.NullsB64[ni]))
+                    continue;
                 NullifierService.TryRecordNullifier(payload.NullsB64[ni], payload.Asset, height, ts, db);
                 if (payload.SpentCommitmentTreePositions.Count == payload.NullsB64.Count)
                     CommitmentSpendService.TryMarkSpent(payload.Asset, payload.SpentCommitmentTreePositions[ni], db);
             }
 
-            var store = new ShieldedMerkleStore(payload.Asset, db);
+            var store = new ShieldedMerkleStore(payload.Asset, db, ShieldedMerkleStore.UsesFixedDepth(payload.Asset, height));
             store.LoadLeavesFromCommitments();
 
             foreach (var o in payload.Outs.OrderBy(x => x.Index))
@@ -141,7 +181,7 @@ namespace VerifiedXCore.Privacy
             var poolCol = db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE);
             var vfxRow = poolCol.FindOne(x => x.AssetType == "VFX");
             var vfxSupply = (vfxRow?.TotalShieldedSupply ?? 0m) - fee;
-            var vfxStore = new ShieldedMerkleStore("VFX", db);
+            var vfxStore = new ShieldedMerkleStore("VFX", db, ShieldedMerkleStore.UsesFixedDepth("VFX", height)); // this block's tree, not the live tip's
             vfxStore.LoadLeavesFromCommitments();
             vfxStore.UpdatePoolStateRoot(height, vfxSupply, vfxStore.LeafDigests.Count);
         }
@@ -155,7 +195,7 @@ namespace VerifiedXCore.Privacy
             var poolCol = db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE);
             var vfxRow = poolCol.FindOne(x => x.AssetType == "VFX");
             var vfxSupply = (vfxRow?.TotalShieldedSupply ?? 0m) - fee;
-            var vfxStore = new ShieldedMerkleStore("VFX", db);
+            var vfxStore = new ShieldedMerkleStore("VFX", db, ShieldedMerkleStore.UsesFixedDepth("VFX", height)); // this block's tree, not the live tip's
             vfxStore.LoadLeavesFromCommitments();
 
             if (!string.IsNullOrWhiteSpace(payload.FeeOutputCommitmentB64))
@@ -171,7 +211,11 @@ namespace VerifiedXCore.Privacy
                             try
                             {
                                 var feeNh = Convert.FromBase64String(payload.FeeOutputNoteHashB64);
-                                if (feeNh.Length == PlonkNative.ScalarSize)
+                                if (vfxStore.FixedDepth && !PrivacyField.IsCanonicalLe(feeNh))
+                                {
+                                    // An epoch tree takes field elements only; a legacy fee-change hash is left out (vBTC privacy is refused in the epoch).
+                                }
+                                else if (feeNh.Length == PlonkNative.ScalarSize)
                                 {
                                     vfxStore.AppendCommitment(g, feeNh, height, ts);
                                 }

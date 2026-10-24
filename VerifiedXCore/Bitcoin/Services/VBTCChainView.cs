@@ -37,6 +37,9 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             if (state == null || string.IsNullOrEmpty(state.SmartContractUID) || string.IsNullOrEmpty(state.ContractData))
                 return null;
+            // One definition of "a vault" for every reader (deposit address, signers, registration for watching).
+            if (!VBTCService.IsVbtcV2Contract(state))
+                return null;
 
             var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(state.ContractData)));
             if (!_cache.TryGetValue(state.SmartContractUID, out var entry) || entry.Digest != digest)
@@ -51,7 +54,12 @@ namespace VerifiedXCore.Bitcoin.Services
                     name = sc?.Name ?? "";
                     description = sc?.Description ?? "";
                 }
-                catch { feature = null; }
+                catch (Exception ex) when (!VBTCService.DecompileFaultIsNodeLocal(ex))
+                {
+                    if (!VBTCService.DecompileFailureSettled("view|" + state.SmartContractUID + "|" + digest))
+                        return null; // not cached: asked again next time (round 28)
+                    feature = null;
+                }
                 entry = (digest, feature, name, description);
                 _cache[state.SmartContractUID] = entry;
             }
@@ -84,13 +92,18 @@ namespace VerifiedXCore.Bitcoin.Services
 
         /// <summary>Mined withdrawal rows for a contract (rows with no request hash exist only on the API node that served them).</summary>
         public static List<VBTCWithdrawalRequest> MinedWithdrawals(string scUID) =>
-            (VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb()?.Query().Where(x => x.SmartContractUID == scUID).ToList() ?? new List<VBTCWithdrawalRequest>())
+            (VBTCWithdrawalRequest.GetVBTCWithdrawalRequestDb() is { } requests ? VBTCWithdrawalRequest.RowsOfContract(requests, scUID) : new List<VBTCWithdrawalRequest>()) // in the scan's order (rounds 33, 34)
                 .Where(x => !string.IsNullOrEmpty(x.TransactionHash))
                 .OrderBy(x => x.RequestBlockHeight).ThenBy(x => x.Timestamp).ToList();
 
         /// <summary>The contract's withdrawal that is still open (not completed, not expired), if any.</summary>
         public static VBTCWithdrawalRequest? ActiveWithdrawal(string scUID)
         {
+            // A vault the chain watches: a request is open until consensus closes it (paid, void, expired unpinned,
+            // cancelled). A pinned one does not age out: it is still going to be paid.
+            if (Attestation.BtcAttestBalance.IsAttestedVault(scUID))
+                return MinedWithdrawals(scUID).LastOrDefault(r => !r.IsCompleted);
+
             var height = Globals.LastBlock?.Height ?? 0;
             var now = TimeUtil.GetTime();
             return MinedWithdrawals(scUID).LastOrDefault(r => VBTCWithdrawalRequest.IsStillBlocking(r, height, now));
@@ -131,6 +144,34 @@ namespace VerifiedXCore.Bitcoin.Services
                     RequestTime = r.Timestamp,
                     CompletionTime = r.CompletionTimestamp ?? known?.CompletionTime ?? 0,
                     FeeRate = r.FeeRate,
+                };
+            }).ToList();
+
+        /// <summary>
+        /// The contract's withdrawals that were closed without being paid: cancelled, expired before a Bitcoin
+        /// transaction was fixed, made void by another spend of their coins, or released by their requester. Each was
+        /// refunded in vBTC. The history above lists payments only, so these were shown nowhere once closed.
+        /// </summary>
+        public static List<object> WithdrawalsClosedWithoutPayment(string scUID) =>
+            MinedWithdrawals(scUID).Where(r => r.IsCompleted && r.Status != VBTCWithdrawalStatus.Completed).Select(r =>
+            {
+                var attested = Attestation.BtcAttestStore.Withdrawal(Attestation.BtcWithdrawals.RefOf(r.TransactionHash, scUID));
+                // A released withdrawal is refunded its amount less the Bitcoin fee of its release (round 18: the full
+                // amount was shown, and a wallet reconciling from this list would credit the fee too).
+                var releaseFee = attested?.State == Attestation.VaultWithdrawalState.Released
+                    ? Math.Min(Math.Max(attested.Pins.FirstOrDefault(p => p.IsRelease && p.Txid == attested.SettledTxid)?.FeeSats ?? 0, 0), attested.AmountSats) : 0;
+                return (object)new
+                {
+                    RequestHash = r.TransactionHash,
+                    r.Amount,
+                    Refunded = r.Amount - releaseFee / Attestation.BtcAttestBalance.SatsPerBtc,
+                    r.BTCDestination,
+                    RequestTime = r.Timestamp,
+                    r.RequestBlockHeight,
+                    r.FeeRate,
+                    Outcome = attested != null ? attested.State.ToString() : r.Status.ToString(),
+                    Why = attested?.WaitingReason,
+                    ClosedAtBlock = attested?.ClosedAtVfxHeight,
                 };
             }).ToList();
     }

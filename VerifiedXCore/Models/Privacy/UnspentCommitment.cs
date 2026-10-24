@@ -13,5 +13,11 @@ namespace VerifiedXCore.Models.Privacy
         public long TreePosition { get; set; }
         public long BlockHeight { get; set; }
         public bool IsSpent { get; set; }
+
+        /// <summary>
+        /// The tip height when this wallet marked the note spent for a transaction it sent; null once the chain settles it
+        /// (or for a note the chain spent). A spend never mined is undone from it (round 32).
+        /// </summary>
+        public long? SpendPendingSince { get; set; }
     }
 }

@@ -63,6 +63,9 @@ namespace VerifiedXCore.Tests
                 var sealedShares = FrostShareCrypto.SealAll(shares, session, idToAddr, a => keys[int.Parse(a.Substring(4))].PubHex, out var sealErr);
                 Assert.Null(sealErr);
                 Assert.DoesNotContain("signing_share", sealedShares);                            // coordinator's view
+                Assert.All(JObject.Parse(sealedShares!).Properties(), p => Assert.True(((string)p.Value!).Length < 1_000)); // far under the coordinator's bound
+                Assert.Null(VerifiedXCore.Bitcoin.Services.FrostMPCService.Round2OutputRefusal(sealedShares!,
+                    Enumerable.Range(1, 3).Where(j => j != dealer).Select(Id).ToList()));        // an honest output is taken (round 13)
                 sealedByDealer[dealer] = sealedShares!;
             }
 
@@ -91,6 +94,35 @@ namespace VerifiedXCore.Tests
                 groupKeys.Add(groupPubkey);
             }
             Assert.Single(groupKeys); // all three derived the same group key
+        }
+
+        /// <summary>
+        /// A dealer's Round 2 output was delivered whatever its size or shape; one too large to deliver failed every
+        /// recipient's batch with no report, and the recipients were dropped instead of the dealer (fifth review, round 13).
+        /// The coordinator takes only one sealed share for each other participant, each within the size a recipient opens.
+        /// </summary>
+        [Fact]
+        public void ADealersRound2Output_IsTakenOnlyAsOneSealedShareForEachOtherParticipant()
+        {
+            var ids = new List<string> { Id(2), Id(3) };
+            string Map(params (string Id, JToken Value)[] entries)
+            {
+                var o = new JObject();
+                foreach (var (id, value) in entries) o[id] = value;
+                return o.ToString(Newtonsoft.Json.Formatting.None);
+            }
+            JToken Sealed(int n = 400) => FrostShareCrypto.Prefix + new string('A', n);
+            string? Refusal(string shares) => VerifiedXCore.Bitcoin.Services.FrostMPCService.Round2OutputRefusal(shares, ids);
+
+            Assert.Null(Refusal(Map((Id(2), Sealed()), (Id(3), Sealed()))));
+            Assert.Contains("not a map", Refusal("not json"));
+            Assert.Contains("one share for each", Refusal(Map((Id(2), Sealed()))));
+            Assert.Contains("one share for each", Refusal(Map((Id(2), Sealed()), (Id(3), Sealed()), (Id(4), Sealed()))));
+            Assert.Contains("one share for each", Refusal(Map((Id(2), Sealed()), (Id(9), Sealed()))));
+            Assert.Contains("not sealed", Refusal(Map((Id(2), Sealed()), (Id(3), JToken.Parse("{\"signing_share\":\"00\"}")))));
+            Assert.Contains("not sealed", Refusal(Map((Id(2), Sealed()), (Id(3), "plain"))));
+            Assert.Contains("size", Refusal(Map((Id(2), Sealed()), (Id(3), Sealed(FrostDkgBlame.MaxDealerEntryLength)))));
+            Assert.Contains("far over", Refusal(Map((Id(2), Sealed()), (Id(3), Sealed(VerifiedXCore.Bitcoin.Services.FrostMPCService.MaxSealedShareLength)))));
         }
 
         [Fact]

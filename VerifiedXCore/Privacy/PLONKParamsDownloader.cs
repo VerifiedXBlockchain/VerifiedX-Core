@@ -6,24 +6,30 @@ namespace VerifiedXCore.Privacy
     /// <summary>
     /// Downloads PLONK universal parameters on first run and caches them permanently.
     /// The file is verified via a hardcoded SHA-256 hash before use.
+    /// Release rule: replacing this file (or the native library) changes every verifier key, so the change ships with its
+    /// own activation height and nodes keep the prior params to judge blocks below it (see Globals.PrivateTxProofRulesHeight).
     /// </summary>
     public static class PLONKParamsDownloader
     {
-        /// <summary>GitHub Release URL for the VXPLNK03 params file.</summary>
+        /// <summary>
+        /// GitHub Release URL for the VXPLNK06 params file: the v2 owner-bound circuits over the Zcash Sapling Powers of Tau
+        /// universal parameters, with a spend's position bound to its Merkle path (Oct 2026; the library refuses the earlier
+        /// VXPLNK03/04/05 files). 400 MB.
+        /// </summary>
         public const string DownloadUrl =
-            "https://github.com/VerifiedXBlockchain/plonk/releases/download/v1/vfx_plonk_v1.params";
+            "https://github.com/VerifiedXBlockchain/plonk/releases/download/v4/vfx_plonk_v4.params";
 
         /// <summary>Expected SHA-256 hash (lowercase hex) of the params file.</summary>
         public const string ExpectedSha256 =
-            "e4ea423e068eb949c5b1321908da1b263fd472700272e879058dc5f55166d85c";
+            "b62620e681f997f56a78bfda26bca0b6d540ded8b4f6bd1e3436deb5f9414d25";
 
         /// <summary>Local filename stored inside the PlonkParams directory.</summary>
-        public const string ParamsFileName = "vfx_plonk_v1.params";
+        public const string ParamsFileName = "vfx_plonk_v4.params";
 
         /// <summary>
         /// Ensures the PLONK params file is available locally.
         /// <list type="number">
-        ///   <item>If <c>VFX_PLONK_PARAMS_PATH</c> env var is set → use that (skip download).</item>
+        ///   <item>If <c>VFX_PLONK_PARAMS_PATH</c> names a file whose hash matches → use that (skip download).</item>
         ///   <item>If the file already exists at the default location and hash matches → return its path.</item>
         ///   <item>Otherwise download from GitHub Releases, verify SHA-256, and cache.</item>
         /// </list>
@@ -33,13 +39,10 @@ namespace VerifiedXCore.Privacy
         {
             try
             {
-                // 1. Honor explicit env-var override (existing behavior)
-                var envPath = Environment.GetEnvironmentVariable(PLONKSetup.ParamsPathEnvironmentVariable);
-                if (!string.IsNullOrWhiteSpace(envPath) && File.Exists(envPath))
-                {
-                    LogUtility.Log($"PLONK params: using VFX_PLONK_PARAMS_PATH = {envPath}", "PLONKParamsDownloader");
+                // 1. The operator's own copy, when it is the published file (see ResolveOperatorPath).
+                var envPath = ResolveOperatorPath();
+                if (envPath != null)
                     return envPath;
-                }
 
                 // 2. Check default cached location
                 var paramsDir = GetPathUtility.GetPlonkParamsPath();
@@ -61,7 +64,7 @@ namespace VerifiedXCore.Privacy
 
                 // 3. Download
                 LogUtility.Log($"PLONK params: downloading from {DownloadUrl} (one-time setup)...", "PLONKParamsDownloader");
-                Console.WriteLine("Downloading PLONK parameters (one-time setup, ~253 MB)...");
+                Console.WriteLine("Downloading PLONK parameters (one-time setup, ~400 MB)...");
 
                 var tempPath = localPath + ".downloading";
 
@@ -124,6 +127,27 @@ namespace VerifiedXCore.Privacy
                 ErrorLogUtility.LogError($"PLONK params download failed: {ex}", "PLONKParamsDownloader");
                 return null;
             }
+        }
+
+        /// <summary>
+        /// The file named by <c>VFX_PLONK_PARAMS_PATH</c>, when it exists and is the published params file; otherwise null and
+        /// the caller falls back to the cached / downloaded copy. The override saves an operator the download; it is not a
+        /// way to load different parameters (fourth review: this step returned the path unhashed).
+        /// </summary>
+        public static string? ResolveOperatorPath()
+        {
+            var envPath = Environment.GetEnvironmentVariable(PLONKSetup.ParamsPathEnvironmentVariable);
+            if (string.IsNullOrWhiteSpace(envPath) || !File.Exists(envPath))
+                return null;
+            if (VerifyFileHash(envPath))
+            {
+                LogUtility.Log($"PLONK params: using VFX_PLONK_PARAMS_PATH = {envPath} (hash verified)", "PLONKParamsDownloader");
+                return envPath;
+            }
+            var why = $"PLONK params: the file at VFX_PLONK_PARAMS_PATH ({envPath}) does not match the pinned SHA-256 ({ExpectedSha256}) and is ignored; the published file is used instead.";
+            ErrorLogUtility.LogError(why, "PLONKParamsDownloader");
+            Console.WriteLine(why);
+            return null;
         }
 
         /// <summary>

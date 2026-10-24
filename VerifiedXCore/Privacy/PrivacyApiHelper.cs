@@ -16,6 +16,107 @@ namespace VerifiedXCore.Privacy
         /// Derives viewing-only key material (encryption private key) from the wallet's stored viewing key.
         /// Does NOT require the spending key password — suitable for scanning / note decryption.
         /// </summary>
+        /// <summary>
+        /// Whether a decrypted note is the output it came with: the output's commitment is a leaf the chain applied, and its
+        /// stored note hash (owner-bound in the epoch) or, for older leaves, its Pedersen commitment is made from the
+        /// note's amount and randomness. A sealed note's amount and asset are what its sender wrote: wallets credited them
+        /// as written, from any transaction, and a fake note showed a balance that did not exist (fifth review, round 22).
+        /// The leaf is in the pool of the note's <paramref name="asset"/>: no note hash covers the asset, and a VFX note
+        /// sealed as vBTC showed vBTC that was never sent (fifth review, round 23). Every leaf with the commitment is
+        /// looked at, so a copy of an output's commitment applied before it does not hide the honest one.
+        /// </summary>
+        internal static bool NoteMatchesOutput(PrivateShieldedOutput? o, decimal amount, byte[]? r32, ShieldedKeyMaterial keys, string? asset) =>
+            NoteMatchesOutput(o, amount, r32, keys, asset, out _);
+
+        /// <summary>
+        /// As above, with the tree position of the leaf that matched: the note's own leaf. The first leaf with the
+        /// commitment (LookupTreePositionByCommitment) could be a copy applied before it, whose position the note cannot
+        /// be spent from; the browser scans took position 0 (fifth review, round 25).
+        /// </summary>
+        internal static bool NoteMatchesOutput(PrivateShieldedOutput? o, decimal amount, byte[]? r32, ShieldedKeyMaterial keys, string? asset, out long treePosition)
+        {
+            treePosition = 0;
+            try
+            {
+                if (o == null || string.IsNullOrEmpty(o.CommitmentB64) || string.IsNullOrEmpty(asset)) return false;
+                var c = o.CommitmentB64;
+                var leaf = PrivacyDbContext.GetPrivacyDb().GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS)
+                    .Find(x => x.Commitment == c).ToList()
+                    .Where(rec => string.Equals(rec.Commitment, c, StringComparison.Ordinal) && string.Equals(rec.AssetType, asset, StringComparison.Ordinal)
+                        && NoteMatchesRecord(rec, amount, r32, keys))
+                    .OrderBy(rec => rec.TreePosition)
+                    .FirstOrDefault();
+                if (leaf == null) return false;
+                treePosition = leaf.TreePosition;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Whether a leaf's note hash (owner-bound or V1) or, for older leaves, its Pedersen commitment is made from this amount and randomness.</summary>
+        internal static bool NoteMatchesRecord(CommitmentRecord rec, decimal amount, byte[]? r32, ShieldedKeyMaterial keys)
+        {
+            try
+            {
+                if (r32 == null || r32.Length != PlonkNative.ScalarSize) return false;
+                // Only an amount the chain's 8-decimal scale holds exactly: scaling truncates, so amounts that differ below
+                // the 8th decimal all matched one leaf, each was a different note to the wallet, and each was credited.
+                if (decimal.Round(amount, 8) != amount) return false;
+                if (!PrivacyPedersenAmount.TryToScaledU64(amount, out var scaled, out _)) return false;
+                if (!string.IsNullOrEmpty(rec.NoteHash))
+                {
+                    if (PoseidonV1.IsAvailable && keys.OwnerPk32 is { Length: 32 } ownerPk
+                        && string.Equals(rec.NoteHash, Convert.ToBase64String(PoseidonV1.NoteHashV2(scaled, r32, ownerPk)), StringComparison.Ordinal))
+                        return true;
+                    var v1 = NoteHashService.Compute(scaled, r32);
+                    return v1 != null && string.Equals(rec.NoteHash, Convert.ToBase64String(v1), StringComparison.Ordinal);
+                }
+                var g1 = new byte[PlonkNative.G1CompressedSize];
+                return PlonkNative.pedersen_commit(scaled, r32, g1) == PlonkNative.Success
+                    && string.Equals(Convert.ToBase64String(g1), rec.Commitment, StringComparison.Ordinal);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// Whether a mined private transaction spends this wallet note: its own nullifier is among the transaction's. The
+        /// spent commitments and tree positions a payload lists are not proven: any private transaction could list other
+        /// people's notes and have every node's wallet mark them spent (fifth review, round 21).
+        /// </summary>
+        internal static bool SpendsWalletNote(Transaction tx, PrivateTxPayload payload, UnspentCommitment note, ShieldedKeyMaterial keys, long blockHeight)
+        {
+            var nullifier = VfxPrivateTransactionBuilder.NullifierOf(note, keys, PrivacyEpoch.ProofRulesActive(blockHeight));
+            if (string.IsNullOrEmpty(nullifier)) return false;
+            return (payload.NullsB64 != null && payload.NullsB64.Contains(nullifier, StringComparer.Ordinal))
+                || (HasFeeLeg(tx, payload) && string.Equals(payload.FeeInputNullifierB64, nullifier, StringComparison.Ordinal));
+        }
+
+        /// <summary>
+        /// Whether the ledger applies this transaction's VFX fee leg (spends its fee nullifier, appends its fee change leaf):
+        /// a vBTC unshield or private transfer carrying the whole leg. Any other transaction's fee fields are applied by
+        /// nothing, and wallets credited the fee change note they carried and marked spent the note their fee nullifier
+        /// named (fifth review, round 23).
+        /// </summary>
+        internal static bool HasFeeLeg(Transaction tx, PrivateTxPayload payload) =>
+            (tx.TransactionType == TransactionType.VBTC_V2_UNSHIELD || tx.TransactionType == TransactionType.VBTC_V2_PRIVATE_TRANSFER)
+            && (payload.Fee ?? Globals.PrivateTxFixedFee) > 0
+            && !string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64)
+            && !string.IsNullOrWhiteSpace(payload.FeeTreeMerkleRoot)
+            && payload.FeeInputSpentTreePosition.HasValue;
+
+        /// <summary>Whether a decrypted fee change note is the VFX leaf the ledger appended for this transaction's fee leg.</summary>
+        internal static bool FeeNoteMatchesLeg(Transaction tx, PrivateTxPayload payload, ShieldedPlainNote note, ShieldedKeyMaterial keys) =>
+            FeeNoteMatchesLeg(tx, payload, note, keys, out _);
+
+        internal static bool FeeNoteMatchesLeg(Transaction tx, PrivateTxPayload payload, ShieldedPlainNote note, ShieldedKeyMaterial keys, out long treePosition)
+        {
+            treePosition = 0;
+            if (!HasFeeLeg(tx, payload) || !string.Equals(note.AssetType ?? "VFX", "VFX", StringComparison.Ordinal)) return false;
+            byte[]? r32;
+            try { r32 = Convert.FromBase64String(note.RandomnessB64 ?? ""); } catch { return false; }
+            return NoteMatchesOutput(new PrivateShieldedOutput { CommitmentB64 = payload.FeeOutputCommitmentB64 ?? "" }, note.Amount, r32, keys, "VFX", out treePosition);
+        }
+
         public static bool TryGetViewingKeyMaterial(ShieldedWallet w, [NotNullWhen(true)] out ShieldedKeyMaterial? keys, out string? error)
         {
             keys = null;
@@ -39,6 +140,32 @@ namespace VerifiedXCore.Privacy
                 EncryptionPublicKey33 = pub33,
                 ZfxAddress = w.ShieldedAddress
             };
+            return true;
+        }
+
+        public const string ViewingKeySpendWarning =
+            "This key can spend the wallet's shielded funds: anyone holding it can move them through the raw transaction routes. Share it only as you would the wallet itself.";
+
+        /// <summary>
+        /// The wallet's viewing key, for export. With the current key derivation the viewing key is spend authority (the raw
+        /// routes build and prove a spend from it and the zfx address), so it is released on the same bar as a spend: the
+        /// wallet's spending key must unwrap with <paramref name="walletPassword"/>. A row without a spending key (view-only)
+        /// cannot meet that bar and does not export.
+        /// </summary>
+        public static bool TryExportSpendCapableViewingKey(ShieldedWallet w, string? walletPassword, [NotNullWhen(true)] out string? viewingKeyBase64, out string? error)
+        {
+            viewingKeyBase64 = null;
+            if (w.ViewingKey == null || w.ViewingKey.Length == 0)
+            {
+                error = "No viewing key on wallet row.";
+                return false;
+            }
+            if (!TryGetKeyMaterial(w, walletPassword, out _, out error))
+            {
+                error = "The viewing key can spend this wallet's funds, so exporting it needs the wallet password, as a spend does: " + error;
+                return false;
+            }
+            viewingKeyBase64 = Convert.ToBase64String(w.ViewingKey);
             return true;
         }
 
@@ -78,6 +205,13 @@ namespace VerifiedXCore.Privacy
             if (!result.Item1)
                 return (false, Newtonsoft.Json.JsonConvert.SerializeObject(new { Success = false, Message = result.Item2 }));
 
+            await BroadcastAdmittedPrivateTxAsync(tx);
+            return (true, Newtonsoft.Json.JsonConvert.SerializeObject(new { Success = true, Message = "Broadcast.", Hash = tx.Hash }));
+        }
+
+        /// <summary>The tail of <see cref="BroadcastVerifiedPrivateTxAsync"/>: rating, local mempool, peers. The caller has verified the transaction.</summary>
+        public static async Task BroadcastAdmittedPrivateTxAsync(Transaction tx)
+        {
             if (tx.TransactionRating == null)
             {
                 var rating = await TransactionRatingService.GetTransactionRating(tx);
@@ -86,7 +220,6 @@ namespace VerifiedXCore.Privacy
 
             await TransactionData.AddToPool(tx);
             await P2PClient.SendTXMempool(tx);
-            return (true, Newtonsoft.Json.JsonConvert.SerializeObject(new { Success = true, Message = "Broadcast.", Hash = tx.Hash }));
         }
 
         /// <summary>
@@ -94,12 +227,36 @@ namespace VerifiedXCore.Privacy
         /// Reloads the wallet fresh from DB to avoid overwriting concurrent auto-scanner changes.
         /// Persists immediately.
         /// </summary>
+        /// <summary>
+        /// A wallet's name for one note: its commitment, amount and randomness. Not the commitment alone: in the epoch no
+        /// proof covers the commitment, and an output carrying the commitment of a note on its way to this wallet, applied
+        /// first, made the real note "already known" to every scan and resync, and marking one spent marked both (fifth
+        /// review, round 32).
+        /// </summary>
+        public static string NoteIdentity(string? commitment, decimal amount, byte[]? randomness) =>
+            $"{commitment}|{amount.ToString("0.############################", System.Globalization.CultureInfo.InvariantCulture)}|{Convert.ToBase64String(randomness ?? Array.Empty<byte>())}";
+
+        /// <summary><see cref="NoteIdentity(string, decimal, byte[])"/> of a sealed note's randomness as carried (Base64).</summary>
+        public static string NoteIdentity(string? commitment, decimal amount, string? randomnessB64)
+        {
+            byte[] r = Array.Empty<byte>();
+            if (!string.IsNullOrEmpty(randomnessB64))
+            {
+                try { r = Convert.FromBase64String(randomnessB64); }
+                catch { /* as the scans take it: none */ }
+            }
+            return NoteIdentity(commitment, amount, r);
+        }
+
+        /// <summary><see cref="NoteIdentity(string, decimal, byte[])"/> of a wallet note.</summary>
+        public static string NoteIdentity(UnspentCommitment note) => NoteIdentity(note.Commitment, note.Amount, note.Randomness);
+
         public static void MarkInputsSpentLocally(string zfxAddress, IReadOnlyList<UnspentCommitment> spentInputs, string assetType)
         {
             if (string.IsNullOrEmpty(zfxAddress) || spentInputs == null || spentInputs.Count == 0)
                 return;
 
-            ShieldedWalletLock.Wait(zfxAddress);
+            var walletLock = ShieldedWalletLock.Acquire(zfxAddress);
             try
             {
                 // Reload fresh from DB to pick up any changes made by the auto-scanner
@@ -108,16 +265,17 @@ namespace VerifiedXCore.Privacy
                     return;
 
                 var spentCommitments = new HashSet<string>(
-                    spentInputs.Select(i => i.Commitment).Where(c => !string.IsNullOrEmpty(c)),
+                    spentInputs.Where(i => i != null && !string.IsNullOrEmpty(i.Commitment)).Select(NoteIdentity),
                     StringComparer.Ordinal);
 
                 foreach (var uc in fresh.UnspentCommitments ?? new List<UnspentCommitment>())
                 {
                     if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
                         continue;
-                    if (spentCommitments.Contains(uc.Commitment))
+                    if (spentCommitments.Contains(NoteIdentity(uc)))
                     {
                         uc.IsSpent = true;
+                        uc.SpendPendingSince = Globals.LastBlock?.Height ?? 0;
                         if (fresh.ShieldedBalances.ContainsKey(assetType))
                             fresh.ShieldedBalances[assetType] -= uc.Amount;
                     }
@@ -127,7 +285,72 @@ namespace VerifiedXCore.Privacy
             }
             finally
             {
-                ShieldedWalletLock.Release(zfxAddress);
+                ShieldedWalletLock.Release(walletLock);
+            }
+        }
+
+        /// <summary>Blocks after which a note this wallet marked spent, for a spend neither mined nor pending here, is restored.</summary>
+        internal const int UnminedSpendBlocks = 30;
+
+        /// <summary>
+        /// Notes a wallet marked spent for a transaction it sent are restored when that transaction was never mined: its
+        /// nullifier is not spent on chain, no transaction in this node's mempool claims it, and
+        /// <see cref="UnminedSpendBlocks"/> blocks have passed. A spend that missed its block (its Merkle root went stale
+        /// as soon as another private transaction was mined) was dropped from the mempool and its notes stayed spent until
+        /// a manual resync (fifth review, round 32). A note the chain spent is settled as spent.
+        /// </summary>
+        public static void RestoreUnminedSpends(long tipHeight)
+        {
+            List<ShieldedWallet> wallets;
+            try { wallets = ShieldedWalletService.GetAll(); }
+            catch { return; }
+            foreach (var listed in wallets ?? new List<ShieldedWallet>())
+            {
+                if (listed?.UnspentCommitments == null || !listed.UnspentCommitments.Any(n => n != null && n.IsSpent && n.SpendPendingSince != null))
+                    continue;
+                var walletLock = ShieldedWalletLock.Acquire(listed.ShieldedAddress);
+                try
+                {
+                    var w = ShieldedWalletService.FindByZfxAddress(listed.ShieldedAddress);
+                    if (w?.UnspentCommitments == null || !TryGetViewingKeyMaterial(w, out var keys, out _) || keys == null)
+                        continue;
+                    var epoch = PrivacyEpoch.ProofRulesActive(tipHeight + 1);
+                    var changed = false;
+                    foreach (var uc in w.UnspentCommitments)
+                    {
+                        if (uc == null || !uc.IsSpent || uc.SpendPendingSince is not { } since)
+                            continue;
+                        var asset = uc.AssetType ?? "";
+                        var nullifier = VfxPrivateTransactionBuilder.NullifierOf(uc, keys, epoch);
+                        if (nullifier == null)
+                            continue;
+                        if (NullifierService.IsNullifierSpentInDb(nullifier, asset))
+                        {
+                            uc.SpendPendingSince = null; // mined: spent for good
+                            changed = true;
+                            continue;
+                        }
+                        if (tipHeight - since < UnminedSpendBlocks
+                            || MempoolNullifierTracker.IsClaimedByPendingTx(MempoolNullifierTracker.MakeKey(asset, nullifier)))
+                            continue;
+                        uc.IsSpent = false;
+                        uc.SpendPendingSince = null;
+                        w.ShieldedBalances ??= new Dictionary<string, decimal>();
+                        w.ShieldedBalances[asset] = (w.ShieldedBalances.TryGetValue(asset, out var b) ? b : 0M) + uc.Amount;
+                        changed = true;
+                        LogUtility.Log($"Shielded wallet {w.ShieldedAddress}: a {uc.Amount} {asset} note marked spent at block {since} by a transaction never mined is spendable again.", "PrivacyApiHelper.RestoreUnminedSpends()");
+                    }
+                    if (changed)
+                        ShieldedWalletService.Upsert(w);
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Restoring unmined spends of {listed.ShieldedAddress}: {ex.Message}", "PrivacyApiHelper.RestoreUnminedSpends()");
+                }
+                finally
+                {
+                    ShieldedWalletLock.Release(walletLock);
+                }
             }
         }
 
@@ -140,7 +363,7 @@ namespace VerifiedXCore.Privacy
             if (string.IsNullOrEmpty(zfxAddress) || spentInputs == null || spentInputs.Count == 0)
                 return;
 
-            ShieldedWalletLock.Wait(zfxAddress);
+            var walletLock = ShieldedWalletLock.Acquire(zfxAddress);
             try
             {
                 var fresh = ShieldedWalletService.FindByZfxAddress(zfxAddress);
@@ -148,16 +371,24 @@ namespace VerifiedXCore.Privacy
                     return;
 
                 var commitmentSet = new HashSet<string>(
-                    spentInputs.Select(i => i.Commitment).Where(c => !string.IsNullOrEmpty(c)),
+                    spentInputs.Where(i => i != null && !string.IsNullOrEmpty(i.Commitment)).Select(NoteIdentity),
                     StringComparer.Ordinal);
+                TryGetViewingKeyMaterial(fresh, out var keys, out _);
+                var epoch = PrivacyEpoch.ProofRulesActive((Globals.LastBlock?.Height ?? 0) + 1);
 
                 foreach (var uc in fresh.UnspentCommitments ?? new List<UnspentCommitment>())
                 {
                     if (uc == null || !uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
                         continue;
-                    if (commitmentSet.Contains(uc.Commitment))
+                    // Not a note the chain has spent meanwhile (another request's spend of it mined while this one was
+                    // being built): restoring it showed a balance that was gone (round 26).
+                    if (keys != null && VfxPrivateTransactionBuilder.NullifierOf(uc, keys, epoch) is { } nullifier
+                        && NullifierService.IsNullifierSpentInDb(nullifier, uc.AssetType ?? assetType))
+                        continue;
+                    if (commitmentSet.Contains(NoteIdentity(uc)))
                     {
                         uc.IsSpent = false;
+                        uc.SpendPendingSince = null;
                         if (fresh.ShieldedBalances.ContainsKey(assetType))
                             fresh.ShieldedBalances[assetType] += uc.Amount;
                     }
@@ -167,7 +398,7 @@ namespace VerifiedXCore.Privacy
             }
             finally
             {
-                ShieldedWalletLock.Release(zfxAddress);
+                ShieldedWalletLock.Release(walletLock);
             }
         }
 
@@ -237,7 +468,7 @@ namespace VerifiedXCore.Privacy
             // Track incoming privacy TXs to create local TX records for the receiver
             var incomingPrivacyTxRecords = new List<(Transaction tx, string senderAddress, decimal noteAmount, long blockHeight)>();
 
-            ShieldedWalletLock.Wait(zfxAddress);
+            var walletLock = ShieldedWalletLock.Acquire(zfxAddress);
             try
             {
             // Re-fetch inside lock for freshest state
@@ -259,42 +490,25 @@ namespace VerifiedXCore.Privacy
                 foreach (var tx in block.Transactions)
                 {
                     result.TransactionsScanned++;
-                    if (tx?.Data == null || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
+                    if (tx?.Data == null || !PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType) || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
                         continue;
                     if (payload == null)
                         continue;
 
-                    // --- Mark wallet notes consumed by this tx's spent positions ---
-                    if (payload.SpentCommitmentTreePositions != null && payload.SpentCommitmentTreePositions.Count > 0)
+                    // --- Mark wallet notes consumed by this tx's nullifiers (each note's own; round 21) ---
+                    if ((payload.NullsB64 != null && payload.NullsB64.Count > 0) || !string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64))
                     {
-                        HashSet<string> spentCommitmentStrings;
-                        if (payload.SpentCommitmentB64s != null && payload.SpentCommitmentB64s.Count > 0)
+                        foreach (var uc in w.UnspentCommitments)
                         {
-                            // v1.1+ TX: commitment strings stored directly in payload
-                            spentCommitmentStrings = new HashSet<string>(payload.SpentCommitmentB64s, StringComparer.Ordinal);
-                        }
-                        else
-                        {
-                            // Legacy TX: look up by tree position (may fail for corrupted positions)
-                            spentCommitmentStrings = LookupCommitmentStringsByTreePositions(
-                                payload.SpentCommitmentTreePositions, payload.Asset);
-                        }
-
-                        if (spentCommitmentStrings.Count > 0)
-                        {
-                            foreach (var uc in w.UnspentCommitments)
-                            {
-                                if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
-                                    continue;
-                                if (spentCommitmentStrings.Contains(uc.Commitment))
-                                {
-                                    uc.IsSpent = true;
-                                    result.NotesMarkedSpent++;
-                                    var assetKey = uc.AssetType ?? "";
-                                    if (w.ShieldedBalances.ContainsKey(assetKey))
-                                        w.ShieldedBalances[assetKey] -= uc.Amount;
-                                }
-                            }
+                            if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
+                                continue;
+                            if (!SpendsWalletNote(tx, payload, uc, keys, block.Height))
+                                continue;
+                            uc.IsSpent = true;
+                            result.NotesMarkedSpent++;
+                            var assetKey = uc.AssetType ?? "";
+                            if (w.ShieldedBalances.ContainsKey(assetKey))
+                                w.ShieldedBalances[assetKey] -= uc.Amount;
                         }
                     }
 
@@ -309,12 +523,13 @@ namespace VerifiedXCore.Privacy
                         if (feeEnc != null
                             && ShieldedNoteEncryption.TryOpen(feeEnc, keys.EncryptionPrivateKey32, out var feePlain, out _)
                             && ShieldedPlainNoteCodec.TryDeserializeUtf8(feePlain, out var feeNote, out _)
-                            && feeNote != null)
+                            && feeNote != null
+                            && FeeNoteMatchesLeg(tx, payload, feeNote, keys, out var feeMatchedPos)) // the leaf the ledger appended (round 23)
                         {
                             var feeC = payload.FeeOutputCommitmentB64;
-                            if (!string.IsNullOrEmpty(feeC) && !merged.Contains(feeC))
+                            if (!string.IsNullOrEmpty(feeC) && !merged.Contains(NoteIdentity(feeC, feeNote.Amount, feeNote.RandomnessB64)))
                             {
-                                merged.Add(feeC);
+                                merged.Add(NoteIdentity(feeC, feeNote.Amount, feeNote.RandomnessB64));
                                 result.NotesFound++;
 
                                 byte[] feeR32 = Array.Empty<byte>();
@@ -324,7 +539,7 @@ namespace VerifiedXCore.Privacy
                                     catch { /* ignore */ }
                                 }
 
-                                long feeTreePos = LookupTreePositionByCommitment(feeC, feeNote.AssetType ?? "VFX");
+                                long feeTreePos = feeMatchedPos; // the matched leaf's (round 25)
 
                                 w.UnspentCommitments.Add(new UnspentCommitment
                                 {
@@ -363,10 +578,8 @@ namespace VerifiedXCore.Privacy
                             continue;
 
                         var c = o.CommitmentB64;
-                        if (string.IsNullOrEmpty(c) || merged.Contains(c))
+                        if (string.IsNullOrEmpty(c) || merged.Contains(PrivacyApiHelper.NoteIdentity(c, note.Amount, note.RandomnessB64)))
                             continue;
-                        merged.Add(c);
-                        result.NotesFound++;
 
                         byte[] r32 = Array.Empty<byte>();
                         if (!string.IsNullOrEmpty(note.RandomnessB64))
@@ -375,15 +588,17 @@ namespace VerifiedXCore.Privacy
                             catch { /* ignore */ }
                         }
 
-                        long treePos = LookupTreePositionByCommitment(c, note.AssetType ?? "");
 
+                        if (!NoteMatchesOutput(o, note.Amount, r32, keys, note.AssetType, out var matchedPos)) continue; // the note is the output it came with (round 22)
+                        merged.Add(PrivacyApiHelper.NoteIdentity(c, note.Amount, note.RandomnessB64)); // seen once it matched: a copy that does not match hid the real output (round 24)
+                        result.NotesFound++;
                         w.UnspentCommitments.Add(new UnspentCommitment
                         {
                             Commitment = c,
                             AssetType = note.AssetType ?? "",
                             Amount = note.Amount,
                             Randomness = r32,
-                            TreePosition = treePos,
+                            TreePosition = matchedPos, // the matched leaf's (round 25)
                             BlockHeight = block.Height,
                             IsSpent = false
                         });
@@ -404,7 +619,7 @@ namespace VerifiedXCore.Privacy
             }
 
             w.LastScannedBlock = Math.Max(w.LastScannedBlock, toHeight);
-            ShieldedWalletService.Upsert(w);
+            ShieldedWalletService.Upsert(w, notesAsGiven: true); // what the chain shows, even nothing (round 25)
 
             result.Success = true;
             result.LastScannedBlock = w.LastScannedBlock;
@@ -414,7 +629,7 @@ namespace VerifiedXCore.Privacy
             } // end try
             finally
             {
-                ShieldedWalletLock.Release(zfxAddress);
+                ShieldedWalletLock.Release(walletLock);
             }
 
             // Save incoming privacy TX records for the receiver (outside of wallet lock)

@@ -84,7 +84,7 @@ namespace VerifiedXCore.Services
                 var account = AccountData.GetLocalValidator();
                 if (account?.GetPrivKey != null && !string.IsNullOrEmpty(Globals.ValidatorAddress) && prevSet.Contains(Globals.ValidatorAddress))
                 {
-                    if (!CasterMembershipStore.TryMarkSigned(candidate.RecordSeq, candidate.RecordHash, CasterMembershipStore.ComputeCasterSetHash(candidate)))
+                    if (!CasterMembershipStore.TryMarkSigned(candidate.RecordSeq, candidate.RecordHash, CasterMembershipStore.ComputeCasterSetHash(candidate), candidate.EffectiveFromHeight))
                     {
                         CasterLogUtility.Log($"MEMBERSHIP: rotation aborted — already signed a DIFFERENT caster set at seq {candidate.RecordSeq} (equivocation guard).", "MEMBERSHIP");
                         return false;
@@ -342,14 +342,9 @@ namespace VerifiedXCore.Services
             if (isRemoval)
             {
                 var target = candidate!.ChangedAddress;
+                // Only this node's own evidence lifts the refusal. An answer at the member's listed address is not
+                // evidence: nothing proves the member gave it.
                 var refusal = CasterSeatService.RemovalRefusal(candidate.ChangeType, target, head!, TimeUtil.GetTime());
-                if (refusal != null && candidate.ChangeType == "Demotion")
-                {
-                    var ip = head!.Casters.FirstOrDefault(c => c.Address == target)?.PeerIP;
-                    if (!string.IsNullOrEmpty(ip)
-                        && (await CasterDiscoveryService.CheckCandidateVersionDetailed(ip.Replace("::ffff:", ""), target)).Status == CasterDiscoveryService.VersionCheckResult.Outdated)
-                        refusal = null;
-                }
                 if (refusal != null)
                 {
                     CasterLogUtility.Log($"MEMBERSHIP: REFUSED to sign {candidate.ChangeType} of {target} at seq {candidate.RecordSeq} — {refusal}. Proposer={request!.ProposerAddress}", "MEMBERSHIP");
@@ -369,6 +364,21 @@ namespace VerifiedXCore.Services
         /// Note: majority signatures are not required at signing time (they're being collected);
         /// ValidateSuccessor's signature check is enforced at append, not here.
         /// </summary>
+        /// <summary>Why a promotion's new entry is not the promoted validator as this node sees it, or null.</summary>
+        internal static string? PromotedEntryRefusal(CasterMembershipRecord candidate)
+        {
+            var entry = candidate.Casters?.FirstOrDefault(c => string.Equals(c.Address, candidate.ChangedAddress, StringComparison.Ordinal));
+            if (entry == null) return "the promoted member has no entry";
+            if (!Globals.NetworkValidators.TryGetValue(entry.Address, out var seen) || seen == null)
+                return $"this node does not know validator {entry.Address}";
+            var seenIp = (seen.IPAddress ?? "").Replace("::ffff:", "");
+            if (!string.Equals(entry.PeerIP, seenIp, StringComparison.Ordinal))
+                return $"the promoted member's PeerIP {entry.PeerIP} is not where this node sees it ({seenIp})";
+            if (!string.Equals(entry.PublicKey, seen.PublicKey ?? "", StringComparison.Ordinal))
+                return "the promoted member's PublicKey is not the one this node knows";
+            return null;
+        }
+
         public static RecordSignature? HandleSignRequest(MembershipSignRequest request)
         {
             if (request?.Candidate == null)
@@ -393,6 +403,11 @@ namespace VerifiedXCore.Services
             if (candidate.RecordSeq != head.RecordSeq + 1) return null;
             if (!string.Equals(candidate.PrevRecordHash, head.RecordHash, StringComparison.OrdinalIgnoreCase)) return null;
             if (candidate.EffectiveFromHeight <= head.EffectiveFromHeight) return null;
+            if (!CasterMembershipStore.EffectiveHeightWithinReach(candidate.EffectiveFromHeight, head.EffectiveFromHeight, Globals.LastBlock?.Height ?? 0))
+            {
+                CasterLogUtility.Log($"MEMBERSHIP: REFUSED to sign seq {candidate.RecordSeq} — effective height {candidate.EffectiveFromHeight} is beyond what a proposer near our tip builds. Proposer={request.ProposerAddress}", "MEMBERSHIP");
+                return null;
+            }
             if (candidate.Casters == null || candidate.Casters.Count < CasterMembershipStore.MinCommitteeSize) return null;
             // SEAT-HEAL: the append rejects a set above the cap, so signing one only locks our sequence (Sep 30).
             if (candidate.Casters.Count > CasterDiscoveryService.MaxCasters)
@@ -415,13 +430,46 @@ namespace VerifiedXCore.Services
             };
             if (!validChange) return null;
 
+            // The promoted member's entry as this node sees that validator: its PeerIP is where it is probed, and the
+            // member is demoted on that address's silence, so a record naming another address (proposed so, or as a
+            // lower-hash sibling) is not signed. The proposer takes it from the same view (NetworkValidators).
+            if (candidate.ChangeType == "Promotion" && PromotedEntryRefusal(candidate) is { } promotedRefusal)
+            {
+                CasterLogUtility.Log($"MEMBERSHIP: REFUSED to sign seq {candidate.RecordSeq} — {promotedRefusal}. Proposer={request.ProposerAddress}", "MEMBERSHIP");
+                return null;
+            }
+
+            // The request is unauthenticated: a promotion is signed only for a candidate this node would itself promote.
+            if (candidate.ChangeType == "Promotion")
+            {
+                var addedEntry = candidate.Casters.First(c => string.Equals(c.Address, candidate.ChangedAddress, StringComparison.Ordinal));
+                var refusal = CasterDiscoveryService.PromotionSigningRefusal(addedEntry, Globals.LastBlock?.Height ?? 0, TimeUtil.GetTime());
+                if (refusal != null)
+                {
+                    CasterLogUtility.Log($"MEMBERSHIP: REFUSED to sign Promotion of {candidate.ChangedAddress} at seq {candidate.RecordSeq} — {refusal}. Proposer={request.ProposerAddress}", "MEMBERSHIP");
+                    return null;
+                }
+            }
+
+            // Every continuing member keeps its entry exactly: a rotation adds or removes one member and changes no one
+            // else's PeerIP or PublicKey (ProposeRotationAsync copies them from the head).
+            foreach (var c in candidate.Casters)
+            {
+                var h = head.Casters.FirstOrDefault(x => string.Equals(x.Address, c.Address, StringComparison.Ordinal));
+                if (h != null && (!string.Equals(c.PeerIP, h.PeerIP, StringComparison.Ordinal) || !string.Equals(c.PublicKey, h.PublicKey, StringComparison.Ordinal)))
+                {
+                    CasterLogUtility.Log($"MEMBERSHIP: REFUSED to sign seq {candidate.RecordSeq} — it changes continuing member {c.Address}'s entry. Proposer={request.ProposerAddress}", "MEMBERSHIP");
+                    return null;
+                }
+            }
+
             // We must be a member of the PREVIOUS set to be an eligible signer.
             var account = AccountData.GetLocalValidator();
             if (account?.GetPrivKey == null || string.IsNullOrEmpty(Globals.ValidatorAddress)) return null;
             if (!headSet.Contains(Globals.ValidatorAddress)) return null;
 
             // Equivocation guard: never sign two different caster SETS at the same seq.
-            if (!CasterMembershipStore.TryMarkSigned(candidate.RecordSeq, candidate.RecordHash, CasterMembershipStore.ComputeCasterSetHash(candidate)))
+            if (!CasterMembershipStore.TryMarkSigned(candidate.RecordSeq, candidate.RecordHash, CasterMembershipStore.ComputeCasterSetHash(candidate), candidate.EffectiveFromHeight))
             {
                 CasterLogUtility.Log($"MEMBERSHIP: REFUSED double-sign at seq {candidate.RecordSeq} (different caster set). Proposer={request.ProposerAddress}", "MEMBERSHIP");
                 return null;
@@ -452,6 +500,8 @@ namespace VerifiedXCore.Services
             if (candidate.RecordSeq != head.RecordSeq + 1) return null;
             if (!string.Equals(candidate.PrevRecordHash, head.RecordHash, StringComparison.OrdinalIgnoreCase)) return null;
             if (candidate.EffectiveFromHeight <= head.EffectiveFromHeight) return null;
+            if (!CasterMembershipStore.EffectiveHeightWithinReach(candidate.EffectiveFromHeight, head.EffectiveFromHeight, Globals.LastBlock?.Height ?? 0))
+                return null;
             if (CasterMembershipStore.ComputeRecordHash(candidate) != candidate.RecordHash) return null;
 
             // Same set + stale-tip rule the append path enforces (signatures are checked at append).
@@ -467,7 +517,7 @@ namespace VerifiedXCore.Services
 
             var account = AccountData.GetLocalValidator();
             if (account?.GetPrivKey == null) return null;
-            if (!CasterMembershipStore.TryMarkSigned(candidate.RecordSeq, candidate.RecordHash, CasterMembershipStore.ComputeCasterSetHash(candidate)))
+            if (!CasterMembershipStore.TryMarkSigned(candidate.RecordSeq, candidate.RecordHash, CasterMembershipStore.ComputeCasterSetHash(candidate), candidate.EffectiveFromHeight))
             {
                 CasterLogUtility.Log($"MEMBERSHIP: REFUSED bootstrap-reset double-sign at seq {candidate.RecordSeq}. Proposer={request.ProposerAddress}", "MEMBERSHIP");
                 return null;
@@ -501,7 +551,7 @@ namespace VerifiedXCore.Services
             if (account?.GetPrivKey == null)
                 return null;
 
-            if (!CasterMembershipStore.TryMarkSigned(0, candidate.RecordHash, candidate.RecordHash /* genesis identity stays the full hash */))
+            if (!CasterMembershipStore.TryMarkSigned(0, candidate.RecordHash, candidate.RecordHash /* genesis identity stays the full hash */, candidate.EffectiveFromHeight))
             {
                 CasterLogUtility.Log($"MEMBERSHIP: REFUSED genesis double-sign (different hash at seq 0). Proposer={request.ProposerAddress}", "MEMBERSHIP");
                 return null;

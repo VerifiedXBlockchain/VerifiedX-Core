@@ -56,6 +56,31 @@ namespace VerifiedXCore.Bitcoin.Services
             return seen.Count > 0 ? (true, "") : (false, "FailedAllocations is empty.");
         }
 
+        /// <summary>
+        /// A completion's Bitcoin transactions: one txid, or (from the path-audit rules) several separated by commas, one per
+        /// vault that paid. The handler joins them so; a list was always refused, and an older exit paid by two or more
+        /// vaults could never be completed (fifth review, round 21).
+        /// </summary>
+        public static bool IsBtcTxIdList(string? txids, long height)
+        {
+            if (IsBtcTxIdShape(txids)) return true;
+            if (height < Globals.PathAuditRulesHeight || string.IsNullOrWhiteSpace(txids)) return false;
+            var parts = txids.Split(',');
+            return parts.Length <= 200 && parts.All(IsBtcTxIdShape);
+        }
+
+        /// <summary>The number of vaults an exit's recorded plan draws on (at least one).</summary>
+        public static int VaultsInPlan(string? allocationsJson, string? fallbackContract)
+        {
+            try
+            {
+                var plan = string.IsNullOrWhiteSpace(allocationsJson) ? null : Newtonsoft.Json.JsonConvert.DeserializeObject<List<Models.PoolUnlockAllocation>>(allocationsJson);
+                var vaults = plan?.Select(a => a?.SmartContractUID ?? "").Where(u => u.Length > 0).Distinct(StringComparer.Ordinal).Count() ?? 0;
+                return Math.Max(1, vaults);
+            }
+            catch { return 1; }
+        }
+
         /// <summary>64 hex chars, optional 0x.</summary>
         public static bool IsBtcTxIdShape(string? txid)
         {

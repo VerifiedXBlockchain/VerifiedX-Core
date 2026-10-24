@@ -2,6 +2,7 @@ using Newtonsoft.Json.Linq;
 using Newtonsoft.Json;
 using VerifiedXCore.Data;
 using VerifiedXCore.Models;
+using VerifiedXCore.Models.DST;
 using VerifiedXCore.Models.SmartContracts;
 using VerifiedXCore.Utilities;
 using System.Security.Principal;
@@ -152,8 +153,40 @@ namespace VerifiedXCore.Services
                             var keySign = jobj["KeySign"]?.ToObject<string?>();
                             var amountSoldFor = jobj["SoldFor"]?.ToObject<decimal?>();
 
-                            //if you have a bid or buy now this should auto start the process.
-                            _ = SmartContractService.CompleteSaleSmartContractTX(scUID, tx.FromAddress, amountSoldFor.Value, keySign);
+                            // Fund-loss audit item 5: only a sale this wallet actually bid on is completed from its balance.
+                            // A Sale_Start that got past the bid signature (the "manual" bypass, or a bid signature replayed
+                            // from another listing) names this wallet as the buyer; without a matching local bid it is ignored.
+                            // Only a fresh Sale_Start: a wallet catching up met old ones, judged them by the state of
+                            // their block and paid now, though the seller had since cancelled, emptied the vault and
+                            // started the sale again under the same bid (fifth review, round 31).
+                            if (amountSoldFor.HasValue && Math.Abs(TimeUtil.GetTime() - tx.Timestamp) > 600)
+                            {
+                                SCLogUtility.Log($"Incoming Sale_Start for {scUID} is from {tx.Timestamp}, not now; not completing the sale automatically.", "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            }
+                            else if (amountSoldFor.HasValue && Bid.HasLocalSentBid(toAddress ?? account.Address, keySign, amountSoldFor.Value, scUID)
+                                && Bid.VaultShrankSinceBid(toAddress ?? account.Address, keySign, scUID) is { } shrank)
+                            {
+                                // A watched vault whose owner balance fell since the bid (round 30): not paid for automatically.
+                                SCLogUtility.Log($"Incoming Sale_Start for {scUID}: {shrank}", "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            }
+                            else if (amountSoldFor.HasValue && Bid.HasLocalSentBid(toAddress ?? account.Address, keySign, amountSoldFor.Value, scUID)
+                                && Bid.ContentChangedSinceBid(toAddress ?? account.Address, keySign, scUID) is { } changed)
+                            {
+                                // The asset is not the one bid on (an Update() since the bid): not paid for automatically.
+                                SCLogUtility.Log($"Incoming Sale_Start for {scUID}: {changed}", "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            }
+                            else if (amountSoldFor.HasValue && Bid.HasLocalSentBid(toAddress ?? account.Address, keySign, amountSoldFor.Value, scUID))
+                            {
+                                //if you have a bid or buy now this should auto start the process.
+                                // Marked first: the bid then pays automatically once; a later Sale_Start under the same
+                                // signature (after a cancel) is left for the owner to complete by hand.
+                                Bid.MarkAutoCompleted(toAddress ?? account.Address, keySign, scUID);
+                                _ = SmartContractService.CompleteSaleSmartContractTX(scUID, tx.FromAddress, amountSoldFor.Value, keySign, expectedBuyer: toAddress ?? account.Address);
+                            }
+                            else
+                            {
+                                SCLogUtility.Log($"Incoming Sale_Start for {scUID} names {toAddress} as buyer for {amountSoldFor} with purchase key {keySign}, but this wallet placed no such bid; not completing the sale.", "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                            }
                         }
 
                         if(function == "Sale_Complete()")
@@ -1046,7 +1079,18 @@ namespace VerifiedXCore.Services
                 // rules here judges the transaction against its own effect (the vote that decided a cancellation would
                 // read "already decided" and be stamped Invalid). Post-gate the wallet record follows what was applied.
                 var cancelVoteByRules = Bitcoin.Services.VBTCCancellationVoting.RulesActive(blockHeight);
-                if (cancelVoteByRules && tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
+                // A vault the chain watches holds no cancellation vote: its cancel took effect when it was applied and
+                // opens no cancellation record, so the test below would stamp an applied cancel Invalid.
+                var cancelOnWatchedVault = tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL && Bitcoin.Attestation.BtcWithdrawals.IsWatched(tx);
+                if (cancelOnWatchedVault)
+                {
+                    var txdataWatched = TransactionData.GetAll();
+                    tx.TransactionStatus = TransactionStatus.Success;
+                    txdataWatched.InsertSafe(tx);
+                    SCLogUtility.Log($"VBTC_V2_WITHDRAWAL_CANCEL in block: {tx.Hash}, from {tx.FromAddress} (a vault the chain watches: applied at once, no vote).",
+                        "BlockTransactionValidatorService.ProcessIncomingTransactions()");
+                }
+                if (cancelVoteByRules && !cancelOnWatchedVault && tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
                 {
                     var created = VBTCWithdrawalCancellation.GetCancellation($"{VBTCWithdrawalCancellation.OnChainUidPrefix}{tx.Hash}");
                     if (created == null)
@@ -1206,6 +1250,17 @@ namespace VerifiedXCore.Services
                         tx.TransactionStatus = TransactionStatus.Invalid;
                         txdata.InsertSafe(tx);
                     }
+                }
+
+                // A fee bump for a pinned withdrawal (watched vaults). Post-consensus wallet bookkeeping only: the rule
+                // was applied in state; here the wallet's own copy of the transaction is marked mined.
+                if (tx.TransactionType == TransactionType.VBTC_V2_COIN_PIN)
+                {
+                    var txdataBump = TransactionData.GetAll();
+                    tx.TransactionStatus = TransactionStatus.Success;
+                    txdataBump.InsertSafe(tx);
+                    SCLogUtility.Log($"VBTC_V2_COIN_PIN (withdrawal fee bump or release) in block: {tx.Hash}, from {tx.FromAddress}",
+                        "BlockTransactionValidatorService.ProcessIncomingTransactions()");
                 }
 
                 if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_LOCK ||
@@ -1522,6 +1577,11 @@ namespace VerifiedXCore.Services
                             if (function == "Sale_Complete()" || function == "M_Sale_Complete()")
                             {
                                 var localFromAddress = AccountData.GetSingleAccount(tx.FromAddress);
+                                // This wallet's completion, mined: its bid is used, whatever route the completion took (sent
+                                // from this node, signed elsewhere, or relayed by another node), so a re-minted UID cannot
+                                // have it paid again.
+                                if (localFromAddress != null)
+                                    VerifiedXCore.Models.DST.Bid.MarkUsedByCompletion(tx);
 
                                 var scUID = (string?)jobj["ContractUID"];
                                 if(scUID != null)
@@ -1603,7 +1663,7 @@ namespace VerifiedXCore.Services
                             if (!string.IsNullOrWhiteSpace(name))
                             {
                                 if (!name.Contains(".rbx") && !name.Contains(".vfx"))
-                                    name = Globals.LastBlock.Height < Globals.V4Height ? name + ".rbx" : name + ".vfx";
+                                    name = blockHeight < Globals.V4Height ? name + ".rbx" : name + ".vfx";
                                 await Account.AddAdnrToAccount(tx.FromAddress, name);
                             }
                         }

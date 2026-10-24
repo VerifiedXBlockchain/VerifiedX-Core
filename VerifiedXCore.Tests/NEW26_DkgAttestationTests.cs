@@ -45,8 +45,11 @@ namespace VerifiedXCore.Tests
         private readonly string _groupKey;
         private readonly string _address;
 
+        private readonly bool _priorLibrary = Globals.FrostFFIAvailable;
+
         public NEW26_DkgAttestationTests()
         {
+            Globals.FrostFFIAvailable = true;   // the ceremonies here run on a node whose FROST library passed its check
             _tempRoot = Path.Combine(Path.GetTempPath(), $"new26_test_{Guid.NewGuid():N}") + Path.DirectorySeparatorChar;
             Directory.CreateDirectory(_tempRoot);
             _priorCustomPath = Globals.CustomPath;
@@ -72,6 +75,7 @@ namespace VerifiedXCore.Tests
 
         public void Dispose()
         {
+            Globals.FrostFFIAvailable = _priorLibrary;
             try { DbContext.CloseDB(); } catch { }
             Globals.LastBlock = _priorLastBlock;
             Globals.VbtcV2DkgAttestationHeight = _priorActivation;
@@ -349,6 +353,81 @@ namespace VerifiedXCore.Tests
             Assert.False((await Verify(CreateFor(uid2, mixed, Proof(uid2, mixed), isS3C: true))).Ok);
         }
 
+        /// <summary>Participants that hold a key: each a secret and its constant term, the group key their sum.</summary>
+        private static (string GroupKey, string Address, Dictionary<string, byte[]> Secrets, Dictionary<string, string> Terms) HeldKey(IEnumerable<string> participants)
+        {
+            var secrets = new Dictionary<string, byte[]>();
+            var terms = new Dictionary<string, string>();
+            var points = new List<NBitcoin.Secp256k1.ECPubKey>();
+            foreach (var p in participants)
+            {
+                var a = new NBitcoin.Key().ToBytes();
+                var phi = NBitcoin.Secp256k1.ECPrivKey.Create(a).CreatePubKey();
+                secrets[p] = a;
+                terms[p] = Convert.ToHexString(phi.ToBytes(true)).ToLowerInvariant();
+                points.Add(phi);
+            }
+            NBitcoin.Secp256k1.ECPubKey.TryCombine(NBitcoin.Secp256k1.Context.Instance, points, out var sum);
+            var groupKey = Convert.ToHexString(sum!.ToBytes(true)[1..]).ToLowerInvariant();
+            return (groupKey, FrostDkgAttestation.DeriveTaprootAddress(groupKey, NBitcoin.Network.Main)!, secrets, terms);
+        }
+
+        private static Dictionary<string, FrostDkgAttestation.Round1Proof> Possession((string GroupKey, string Address, Dictionary<string, byte[]> Secrets, Dictionary<string, string> Terms) held,
+            string uid, string owner) =>
+            held.Secrets.ToDictionary(kv => kv.Key, kv => new FrostDkgAttestation.Round1Proof
+            {
+                ConstantTerm = held.Terms[kv.Key],
+                PossessionSignature = Convert.ToHexString(NBitcoin.Secp256k1.ECPrivKey.Create(kv.Value)
+                    .SignBIP340(FrostDkgAttestation.PossessionMessage(uid, owner, held.GroupKey)).ToBytes()).ToLowerInvariant(),
+            });
+
+        [Fact]
+        public async Task NEW26_S3c_MustShowItsParticipantsHoldTheKey()
+        {
+            var priorRules = Globals.PathAuditRulesHeight;
+            Globals.PathAuditRulesHeight = 100;
+            try
+            {
+                var addresses = _s3c.Select(s => s.Address).ToList();
+                var t = FrostDkgAttestation.ThresholdFor(addresses.Count, 51);
+                var pkg = new string('a', 64);
+                string ProofOf(string uid, string groupKey, string address, Dictionary<string, FrostDkgAttestation.Round1Proof>? round1) =>
+                    FrostDkgAttestation.BuildProof(uid, groupKey, address, _minter.Address, t, addresses,
+                        _s3c.Select(s => new FrostDkgAttestation.Attestation
+                        {
+                            ValidatorAddress = s.Address,
+                            Signature = SignatureService.CreateSignature(FrostDkgAttestation.Message(uid, groupKey, address, _minter.Address, t, addresses, null, pkg), s.Key, s.Pub),
+                        }), pkg, round1);
+
+                // Someone else's address (a key the pool does not hold): attested by the pool, refused.
+                var uid = NewUid();
+                var (ok, message) = await Verify(Create(uid, _address, _groupKey, ProofOf(uid, _groupKey, _address, null), addresses, isS3C: true));
+                Assert.False(ok);
+                Assert.Contains("hold the key", message);
+
+                // ... and with good signatures for this vault by terms that sum to another key: refused.
+                var other = HeldKey(addresses);
+                uid = NewUid();
+                (ok, message) = await Verify(Create(uid, _address, _groupKey, ProofOf(uid, _groupKey, _address, Possession((_groupKey, other.Address, other.Secrets, other.Terms), uid, _minter.Address)), addresses, isS3C: true));
+                Assert.False(ok);
+                Assert.Contains("do not hold it", message);
+
+                // A key the pool holds, but its signatures copied from another vault's creation: refused (round 12).
+                var held = HeldKey(addresses);
+                var copiedFrom = NewUid();
+                uid = NewUid();
+                (ok, message) = await Verify(Create(uid, held.Address, held.GroupKey, ProofOf(uid, held.GroupKey, held.Address, Possession(held, copiedFrom, _minter.Address)), addresses, isS3C: true));
+                Assert.False(ok);
+                Assert.Contains("no valid possession signature", message);
+
+                // A key the pool holds, signed for this vault: accepted.
+                uid = NewUid();
+                (ok, message) = await Verify(Create(uid, held.Address, held.GroupKey, ProofOf(uid, held.GroupKey, held.Address, Possession(held, uid, _minter.Address)), addresses, isS3C: true));
+                Assert.True(ok, message);
+            }
+            finally { Globals.PathAuditRulesHeight = priorRules; }
+        }
+
         [Fact]
         public async Task NEW26_ValidatorWhoseBalanceMovedAway_NotEligible()
         {
@@ -377,6 +456,54 @@ namespace VerifiedXCore.Tests
             var nine = _public.Take(9).ToList();
             var (ok, message) = await Verify(CreateFor(uid, nine, Proof(uid, nine)));
             Assert.True(ok, message);
+        }
+
+        /// <summary>
+        /// A validator registered with a key that is not its own could be sent no share: every honest dealer refused Round 2
+        /// and was dropped and remembered as failing, while it stayed in, so every ceremony including it failed (fifth
+        /// review, round 13). It is left out before the start; a coordinator that sees nobody's key blames nobody.
+        /// </summary>
+        [Fact]
+        public async Task NEW26_AParticipantWhoseRegisteredKeyIsNotItsOwn_IsLeftOut_NotTheHonestDealers()
+        {
+            var bad = NewKey();
+            BlockchainData.GetBlocks().InsertSafe(new Block
+            {
+                Height = 40, Hash = $"h40-{Guid.NewGuid():N}",
+                Transactions = new List<Transaction>
+                {
+                    new Transaction
+                    {
+                        TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = bad.Address, ToAddress = bad.Address, Hash = "r40",
+                        Data = JsonConvert.SerializeObject(new { ValidatorAddress = bad.Address, IPAddress = "10.0.0.1", FrostPublicKey = _minter.Pub, IsS3C = false }),
+                    },
+                },
+            });
+            Globals.IsChainSynced = true;
+            VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.InvalidateCache();
+            var validators = VerifiedXCore.Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidators();
+            Assert.Contains(validators, v => v.ValidatorAddress == bad.Address);
+            Assert.Equal(_public.Count + _s3c.Count + 1, validators.Count);
+            var oneAttempt = new[] { new PreSignedLeaderAuth { SessionId = FrostDkgLeaderAuth.NewSessionId(_minter.Address) } };
+            try
+            {
+                var run = await VerifiedXCore.Bitcoin.Services.FrostMPCService.CoordinateDKGCeremony(NewUid(), _minter.Address, validators, 51, preSignedAuths: oneAttempt);
+                Assert.Equal(new[] { bad.Address }, run.Excluded.Keys.ToArray());
+                Assert.Contains("does not derive its address", run.Excluded[bad.Address]);
+
+                // A coordinator whose registry is not ready sees no key at all: nobody is dropped or remembered.
+                VerifiedXCore.Bitcoin.Services.FrostMPCService.RecentDkgFailures.TryRemove(bad.Address, out _);
+                Globals.IsChainSynced = false;
+                var unready = await VerifiedXCore.Bitcoin.Services.FrostMPCService.CoordinateDKGCeremony(NewUid(), _minter.Address, validators, 51,
+                    preSignedAuths: new[] { new PreSignedLeaderAuth { SessionId = FrostDkgLeaderAuth.NewSessionId(_minter.Address) } });
+                Assert.Empty(unready.Excluded);
+                Assert.Contains("registry not synced", unready.Error);
+                Assert.False(VerifiedXCore.Bitcoin.Services.FrostMPCService.RecentDkgFailures.ContainsKey(_public[0].Address));
+            }
+            finally
+            {
+                VerifiedXCore.Bitcoin.Services.FrostMPCService.RecentDkgFailures.TryRemove(bad.Address, out _);
+            }
         }
 
         // ── Registry, cache, decompile ─────────────────────────────────────────────────────
@@ -439,10 +566,19 @@ namespace VerifiedXCore.Tests
 
             var root = Path.GetDirectoryName(Path.GetDirectoryName(ThisFile()))!;
             var controller = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "Controllers", "VBTCController.cs"));
-            Assert.Equal(4, CountOf(controller, "FundedOnly(Services.VBTCValidatorRegistry.GetPublicValidators())"));
+            // The coordinator takes its list from the bond's eligible list: funded only, and from the bond height aged too.
+            Assert.Equal(4, CountOf(controller, "ValidatorBond.CeremonyEligible(Services.VBTCValidatorRegistry.GetPublicValidators(), "));
+            Assert.Equal(4, CountOf(controller, "Services.VBTCValidatorRegistry.GetPublicValidators()"));
             Assert.Equal(0, CountOf(controller, "= Services.VBTCValidatorRegistry.GetPublicValidators()"));
             var s3c = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "Services", "S3CService.cs"));
             Assert.Contains("VBTCValidatorRegistry.HoldsValidatorBalance(v.ValidatorAddress)", s3c);
+            Assert.Contains("ValidatorBond.IsAged(v.ValidatorAddress", s3c);
+
+            // Before the bond height that list is the funded list, unchanged.
+            Assert.True(Globals.ValidatorBondHeight > 99);
+            var eligible = VerifiedXCore.Services.ValidatorBond.CeremonyEligible(all, 100);
+            Assert.Equal(funded.Select(v => v.ValidatorAddress).OrderBy(a => a, StringComparer.Ordinal),
+                         eligible.Select(v => v.ValidatorAddress).OrderBy(a => a, StringComparer.Ordinal));
         }
 
         // ── Wallet: never run or finish a ceremony whose contract would be refused (follow-up) ──
@@ -548,10 +684,10 @@ namespace VerifiedXCore.Tests
             Assert.Equal(3, CountOf(controller, "var scUID = ceremony.EffectiveContractUID;"));   // the attested UID (the ceremony id unless rerun)
 
             var mpc = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "Services", "FrostMPCService.cs"));
-            Assert.Contains("var dkgProof = FrostDkgAttestation.BuildProof(contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, attestations);", mpc);
+            Assert.Contains("var dkgProof = FrostDkgAttestation.BuildProof(contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, attestations, keyPackageHashOfAll, round1Proofs);", mpc);
             var startup = File.ReadAllText(Path.Combine(root, "VerifiedXCore", "Bitcoin", "FROST", "FrostStartup.cs"));
             Assert.Contains("FrostDkgAttestation.SignLocal(session.SmartContractUID, session.GroupPublicKey, session.TaprootAddress,", startup);
-            Assert.Contains("session.LeaderAddress, FrostDkgAttestation.ThresholdFor(session.ParticipantAddresses?.Count ?? 0, session.RequiredThreshold),", startup);
+            Assert.Contains("session.LeaderAddress, FrostDkgAttestation.CeremonyThreshold(session.ParticipantAddresses?.Count ?? 0, session.RequiredThreshold, session.RekeyOf),", startup);
         }
 
         private static int CountOf(string text, string needle)

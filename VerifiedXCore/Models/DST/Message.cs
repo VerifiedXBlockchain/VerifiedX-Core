@@ -19,10 +19,15 @@ namespace VerifiedXCore.Models.DST
         public bool ResponseMessage { get; set; }
         public string ResponseMessageId { get; set; }
 
+        /// <summary>A punch's HMAC or a helo's cookie (DstSessionAuth). Not part of Hash.</summary>
+        public string? Auth { get; set; }
+
        
         public void Build()
         {
-            Id = RandomStringUtility.GetRandomString(8);
+            // Unguessable: a reply is matched to its request by this id alone, and an eight-character id from a
+            // non-cryptographic generator let a sender who guessed it have its datagram taken as the shop's reply.
+            Id = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
             SentTimestamp = TimeUtil.GetTime();
             IPAddress = P2PClient.MostLikelyIP();
             Port = Globals.DSTClientPort;
@@ -140,7 +145,10 @@ namespace VerifiedXCore.Models.DST
         AssetReq,
         AssetReqRec,
         AssetPunchClient,
-        Ping
+        Ping,
+        STUNSecret,
+        STUNSecretConfirm,
+        ShopCookie
     }
 
     public enum DecShopRequestOptions

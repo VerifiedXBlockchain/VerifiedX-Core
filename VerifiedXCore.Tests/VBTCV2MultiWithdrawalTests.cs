@@ -34,8 +34,26 @@ namespace VerifiedXCore.Tests
         private const long TestHeight = 1000;
         // Valid base58check VFX address (canonical sample from AddressValidationTests) — the
         // request is a self-transaction, so it must survive VerifyTX's generic to-address check.
-        private const string Requestor = "RAjtW2uDSEDW9mPVkKp2K2AAu4uJD9Zrn7";
-        private const string ReserveRequestor = "xRBXReserveMultiWithdrawTest00000001";
+        // A real key: VerifyTX checks the signature before the rules these tests judge (round 36).
+        private static readonly EllipticCurve.PrivateKey RequestorKey = new EllipticCurve.PrivateKey("secp256k1");
+        private static readonly string RequestorPub = "04" + Convert.ToHexString(RequestorKey.publicKey().toString()).ToLowerInvariant();
+        private static readonly string Requestor = AccountData.GetHumanAddress(RequestorPub);
+        private static readonly (EllipticCurve.PrivateKey Key, string Pub, string Address) ReserveRequestorKeys = NewReserveKey();
+        private static readonly EllipticCurve.PrivateKey ReserveRequestorKey = ReserveRequestorKeys.Key;
+        private static readonly string ReserveRequestorPub = ReserveRequestorKeys.Pub;
+        private static readonly string ReserveRequestor = ReserveRequestorKeys.Address;
+
+        /// <summary>A key whose reserve address has the xRBX prefix (not every key's does).</summary>
+        private static (EllipticCurve.PrivateKey, string, string) NewReserveKey()
+        {
+            while (true)
+            {
+                var key = new EllipticCurve.PrivateKey("secp256k1");
+                var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+                var address = ReserveAccount.GetHumanAddress(pub);
+                if (address.StartsWith("xRBX", StringComparison.Ordinal)) return (key, pub, address);
+            }
+        }
         private const string BtcDestination = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx";
 
         private readonly string _tempRoot;
@@ -83,19 +101,20 @@ namespace VerifiedXCore.Tests
         }
 
         private static string MultiData(decimal total, (string ScUid, decimal Amount)[] inputs,
-            string from = Requestor, int feeRate = 10)
+            string? from = null, int feeRate = 10)
             => JsonConvert.SerializeObject(new
             {
                 Function = VBTCService.MultiWithdrawalFunction,
-                RequestorAddress = from,
+                RequestorAddress = from ?? Requestor,
                 BTCAddress = BtcDestination,
                 TotalAmount = total,
                 FeeRate = feeRate,
                 Inputs = inputs.Select(i => new { SCUID = i.ScUid, Amount = i.Amount }).ToArray(),
             });
 
-        private static Transaction BuildTx(string data, string from = Requestor, long height = 0, string? to = null)
+        private static Transaction BuildTx(string data, string? from = null, long height = 0, string? to = null)
         {
+            from ??= Requestor;
             var tx = new Transaction
             {
                 Timestamp = TimeUtil.GetTime(),
@@ -109,6 +128,10 @@ namespace VerifiedXCore.Tests
                 Height = height,
             };
             tx.Build();
+            if (tx.FromAddress == Requestor)
+                tx.Signature = VerifiedXCore.Services.SignatureService.CreateSignature(tx.Hash, RequestorKey, RequestorPub);
+            else if (tx.FromAddress == ReserveRequestor)
+                tx.Signature = VerifiedXCore.Services.SignatureService.CreateSignature(tx.Hash, ReserveRequestorKey, ReserveRequestorPub);
             return tx;
         }
 
@@ -218,7 +241,7 @@ namespace VerifiedXCore.Tests
             var (ok, message) = await TransactionValidatorService.VerifyTX(tx);
 
             Assert.False(ok);
-            Assert.Contains("Reserve accounts cannot request BTC withdrawals", message);
+            Assert.True(message.Contains("Reserve accounts cannot request BTC withdrawals"), message);
         }
 
         [Fact]
@@ -307,7 +330,7 @@ namespace VerifiedXCore.Tests
         /// <summary>A fully valid multi TX (shape + gates + balances) must clear the whole multi
         /// branch — proven by failing at the unrelated final signature check.</summary>
         [Fact]
-        public async Task Multi_ValidMulti_PassesBranch_FailsOnlyAtSignature()
+        public async Task Multi_ValidMulti_Passes()
         {
             SetTip();
             SeedContract("wdok:1", "xSomeOwner", ("+", Requestor, 0.5M));
@@ -316,8 +339,7 @@ namespace VerifiedXCore.Tests
 
             var (ok, message) = await TransactionValidatorService.VerifyTX(tx);
 
-            Assert.False(ok);
-            Assert.Equal("Signature cannot be null.", message);
+            Assert.True(ok, message); // signed now: a valid multi passes (round 36: the signature is checked first)
         }
 
         // ── Outflow parsing (drives the per-contract mempool + intra-block guards) ───────────

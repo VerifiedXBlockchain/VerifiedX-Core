@@ -51,7 +51,13 @@ namespace VerifiedXCore.Controllers
                     NativeCapabilities = caps,
                     CapVerifyV1 = (caps & PlonkNative.CapVerifyV1) != 0,
                     CapParsePublicInputsV1 = (caps & PlonkNative.CapParsePublicInputsV1) != 0,
-                    CapProveV1 = (caps & PlonkNative.CapProveV1) != 0
+                    CapProveV1 = (caps & PlonkNative.CapProveV1) != 0,
+                    // Fund-loss audit item 1, stage 2: what this node can do once proofs are required.
+                    VfxPi2VerifyAvailable = PLONKSetup.IsVfxPi2VerifyAvailable,
+                    V1ProvingAvailable = PLONKSetup.IsV1ProvingAvailable,
+                    CircuitPoseidonAvailable = PoseidonV1.IsAvailable,
+                    ProofRulesHeight = Globals.PrivateTxProofRulesHeight,
+                    ProofRulesActive = PrivacyEpoch.ProofRulesActive((Globals.LastBlock?.Height ?? 0) + 1)
                 }));
             }
             catch (Exception ex)
@@ -132,7 +138,7 @@ namespace VerifiedXCore.Controllers
 
                 var fee = Globals.PrivateTxFixedFee;
                 if (!CommitmentSelectionService.TrySelectInputs(
-                        w.UnspentCommitments,
+                        (w.UnspentCommitments ?? new List<UnspentCommitment>()).Where(c => c != null && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)).ToList(), // VFX notes only (round 25)
                         req.TransparentAmount + fee,
                         out var inputs,
                         out _,
@@ -196,7 +202,7 @@ namespace VerifiedXCore.Controllers
 
                 var fee = Globals.PrivateTxFixedFee;
                 if (!CommitmentSelectionService.TrySelectInputs(
-                        w.UnspentCommitments,
+                        (w.UnspentCommitments ?? new List<UnspentCommitment>()).Where(c => c != null && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)).ToList(), // VFX notes only (round 25)
                         req.PaymentAmount + fee,
                         out var inputs,
                         out _,
@@ -408,9 +414,7 @@ namespace VerifiedXCore.Controllers
                 if (string.IsNullOrWhiteSpace(accountKey))
                     return Task.FromResult(Fail("Cannot access account private key. Is the wallet locked?"));
 
-                var keyMat = ShieldedHdDerivation.DeriveFromPrivateKey(accountKey);
-                var wallet = ShieldedWalletService.CreateFromKeyMaterial(keyMat, req.TransparentAddress, req.WalletPassword);
-                ShieldedWalletService.Upsert(wallet);
+                var keyMat = ShieldedWalletService.UpsertFromAccountKey(accountKey, req.TransparentAddress, req.WalletPassword);
 
                 return Task.FromResult(Ok(new
                 {
@@ -464,7 +468,10 @@ namespace VerifiedXCore.Controllers
 
         /// <summary>Scan blocks for notes decryptable with wallet encryption key; updates local wallet row.</summary>
         [HttpPost("ScanShielded")]
-        public Task<string> ScanShielded([FromBody] ScanShieldedRequest req)
+        public Task<string> ScanShielded([FromBody] ScanShieldedRequest req) =>
+            ShieldedWalletLock.Holding(req?.ZfxAddress, () => ScanShieldedCore(req!)); // the wallet's lock: a scan wrote over the auto-scanner's changes made meanwhile (round 25)
+
+        private Task<string> ScanShieldedCore(ScanShieldedRequest req)
         {
             try
             {
@@ -504,7 +511,7 @@ namespace VerifiedXCore.Controllers
                 foreach (var u in w.UnspentCommitments ?? new List<UnspentCommitment>())
                 {
                     if (!string.IsNullOrEmpty(u.Commitment))
-                        merged.Add(u.Commitment);
+                        merged.Add(PrivacyApiHelper.NoteIdentity(u));
                 }
 
                 // Build a set of wallet commitment strings for spent detection
@@ -524,35 +531,23 @@ namespace VerifiedXCore.Controllers
                     foreach (var tx in block.Transactions)
                     {
                         transactionsScanned++;
-                        if (tx?.Data == null || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
+                        if (tx?.Data == null || !PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType) || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
                             continue;
                         if (payload == null)
                             continue;
 
-                        // --- Mark wallet notes consumed by this tx's nullifiers ---
-                        // Use commitment-string matching: look up CommitmentRecord by tree position
-                        // to get its commitment string, then match against wallet commitment strings.
-                        if (payload.SpentCommitmentTreePositions != null && payload.SpentCommitmentTreePositions.Count > 0)
+                        // --- Mark wallet notes consumed by this tx's nullifiers (each note's own; round 22) ---
+                        foreach (var uc in w.UnspentCommitments ?? new List<UnspentCommitment>())
                         {
-                            var spentCommitmentStrings = PrivacyApiHelper.LookupCommitmentStringsByTreePositions(
-                                payload.SpentCommitmentTreePositions, payload.Asset);
-
-                            if (spentCommitmentStrings.Count > 0)
-                            {
-                                foreach (var uc in w.UnspentCommitments ?? new List<UnspentCommitment>())
-                                {
-                                    if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
-                                        continue;
-                                    if (spentCommitmentStrings.Contains(uc.Commitment))
-                                    {
-                                        uc.IsSpent = true;
-                                        notesMarkedSpent++;
-                                        var assetKey = uc.AssetType ?? "";
-                                        if (w.ShieldedBalances.ContainsKey(assetKey))
-                                            w.ShieldedBalances[assetKey] -= uc.Amount;
-                                    }
-                                }
-                            }
+                            if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
+                                continue;
+                            if (!PrivacyApiHelper.SpendsWalletNote(tx, payload, uc, keys, block.Height))
+                                continue;
+                            uc.IsSpent = true;
+                            notesMarkedSpent++;
+                            var assetKey = uc.AssetType ?? "";
+                            if (w.ShieldedBalances.ContainsKey(assetKey))
+                                w.ShieldedBalances[assetKey] -= uc.Amount;
                         }
 
                         // --- Detect new incoming notes ---
@@ -576,10 +571,8 @@ namespace VerifiedXCore.Controllers
                             if (!ShieldedPlainNoteCodec.TryDeserializeUtf8(plain, out var note, out _) || note == null)
                                 continue;
                             var c = o.CommitmentB64;
-                            if (string.IsNullOrEmpty(c) || merged.Contains(c))
+                            if (string.IsNullOrEmpty(c) || merged.Contains(PrivacyApiHelper.NoteIdentity(c, note.Amount, note.RandomnessB64)))
                                 continue;
-                            merged.Add(c);
-                            notesFound++;
                             byte[] r32 = Array.Empty<byte>();
                             if (!string.IsNullOrEmpty(note.RandomnessB64))
                             {
@@ -590,17 +583,18 @@ namespace VerifiedXCore.Controllers
                                 catch { /* ignore */ }
                             }
 
-                            // Look up the actual tree position from the global CommitmentRecord
-                            long treePos = PrivacyApiHelper.LookupTreePositionByCommitment(c, note.AssetType ?? "");
 
                             w.UnspentCommitments ??= new List<UnspentCommitment>();
+                            if (!PrivacyApiHelper.NoteMatchesOutput(o, note.Amount, r32, keys, note.AssetType, out var matchedPos)) continue; // the note is the output it came with (round 22)
+                            merged.Add(PrivacyApiHelper.NoteIdentity(c, note.Amount, note.RandomnessB64)); // seen once it matched: a copy that does not match hid the real output (round 24)
+                            notesFound++;
                             w.UnspentCommitments.Add(new UnspentCommitment
                             {
                                 Commitment = c,
                                 AssetType = note.AssetType ?? "",
                                 Amount = note.Amount,
                                 Randomness = r32,
-                                TreePosition = treePos,
+                                TreePosition = matchedPos, // the matched leaf's (round 25)
                                 BlockHeight = block.Height,
                                 IsSpent = false
                             });
@@ -670,7 +664,10 @@ namespace VerifiedXCore.Controllers
             }
         }
 
-        /// <summary>Export 32-byte viewing key (Base64) for watch-only import.</summary>
+        /// <summary>
+        /// Export the 32-byte viewing key (Base64). It is spend-capable, not watch-only (PrivacyApiHelper.TryExportSpendCapableViewingKey),
+        /// so it needs the wallet password and the response says it can spend.
+        /// </summary>
         [HttpPost("ExportViewingKey")]
         public Task<string> ExportViewingKey([FromBody] ExportViewingKeyRequest req)
         {
@@ -681,10 +678,9 @@ namespace VerifiedXCore.Controllers
                 var w = ShieldedWalletService.FindByZfxAddress(req.ZfxAddress);
                 if (w == null)
                     return Task.FromResult(Fail("Wallet not found."));
-                if (w.ViewingKey == null || w.ViewingKey.Length == 0)
-                    return Task.FromResult(Fail("No viewing key on wallet row."));
-                var vk = Convert.ToBase64String(w.ViewingKey);
-                return Task.FromResult(Ok(new { ViewingKeyBase64 = vk }));
+                if (!PrivacyApiHelper.TryExportSpendCapableViewingKey(w, req.WalletPassword, out var vk, out var err))
+                    return Task.FromResult(Fail(err ?? "Viewing key not exported."));
+                return Task.FromResult(Ok(new { ViewingKeyBase64 = vk, CanSpend = true, Warning = PrivacyApiHelper.ViewingKeySpendWarning }));
             }
             catch (Exception ex)
             {
@@ -712,6 +708,15 @@ namespace VerifiedXCore.Controllers
                 if (vk.Length != 32)
                     return Task.FromResult(Fail("Viewing key must be 32 bytes."));
 
+                // The key must be this address's own: any other produced a wallet that sees nothing and, imported over a
+                // spendable row, replaced its viewing key while the row kept its spend key.
+                if (!PrivateRawTxService.TryKeyMaterial(req.ZfxAddress, vk, out _, out var bindErr))
+                    return Task.FromResult(Fail(bindErr ?? "The viewing key does not belong to this zfx address."));
+
+                var existing = ShieldedWalletService.FindByZfxAddress(req.ZfxAddress);
+                if (existing?.SpendingKey != null && existing.SpendingKey.Length > 0)
+                    return Task.FromResult(Ok(new { Message = "This node already holds the spendable wallet for this address; nothing imported." }));
+
                 var row = new ShieldedWallet
                 {
                     ShieldedAddress = req.ZfxAddress,
@@ -729,6 +734,124 @@ namespace VerifiedXCore.Controllers
             catch (Exception ex)
             {
                 return Task.FromResult(Fail(ApiErrorText.For(ex)));
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        //  Raw shielded VFX (externally held keys: web wallet and integrators)
+        //  Build here (the node reads the pool and runs the prover), sign / submit there.
+        //  Shield: GetRawShieldTxData → sign Hash → SendRawPrivateTx { Hash, Signature }.
+        //  Unshield / transfer: GetRaw*TxData (zfx + viewing key) → SendRawPrivateTx { Hash }.
+        // ═══════════════════════════════════════════════════════════════════════════
+
+        /// <summary>Unsigned, proven T→Z shield for a FromAddress this node does not hold. Sign the Hash and submit via SendRawPrivateTx.</summary>
+        [HttpPost("GetRawShieldTxData")]
+        public Task<string> GetRawShieldTxData([FromBody] RawShieldVfxRequest req)
+        {
+            try
+            {
+                if (req == null)
+                    return Task.FromResult(Fail("Request body is required."));
+                var r = PrivateRawTxService.BuildShield(req.FromAddress, req.RecipientZfxAddress, req.ShieldAmount, req.Memo, req.TransparentFee, DbContext.DB_Privacy);
+                return Task.FromResult(r.Success ? Ok(r) : Fail(r.Message ?? "Build failed."));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
+            }
+        }
+
+        /// <summary>
+        /// Stateless scan: the VFX notes a viewing key can open (position, spent / pending / spendable, randomness). Needs no
+        /// wallet row on this node. The viewing key is spend authority: send it only to a node you trust, over TLS.
+        /// </summary>
+        [HttpPost("GetShieldedNotesRaw")]
+        public Task<string> GetShieldedNotesRaw([FromBody] RawShieldedNotesRequest req)
+        {
+            try
+            {
+                if (req == null)
+                    return Task.FromResult(Fail("Request body is required."));
+                if (!PrivateRawTxService.TryParseKey32(req.ViewingKey, out var vk, out var kErr))
+                    return Task.FromResult(Fail(kErr ?? "Invalid viewing key."));
+                var r = PrivateRawTxService.ScanNotes(req.ZfxAddress, vk, req.FromHeight, req.ToHeight, req.IncludeSpent, DbContext.DB_Privacy);
+                return Task.FromResult(r.Success ? Ok(r) : Fail(r.Message ?? "Scan failed."));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
+            }
+        }
+
+        /// <summary>Complete, proven Z→T unshield from the caller's notes (found by viewing key). No signature; submit the Hash via SendRawPrivateTx.</summary>
+        [HttpPost("GetRawUnshieldTxData")]
+        public Task<string> GetRawUnshieldTxData([FromBody] RawUnshieldVfxRequest req)
+        {
+            try
+            {
+                if (req == null)
+                    return Task.FromResult(Fail("Request body is required."));
+                if (!PrivateRawTxService.TryParseKey32(req.ViewingKey, out var vk, out var kErr))
+                    return Task.FromResult(Fail(kErr ?? "Invalid viewing key."));
+                var r = PrivateRawTxService.BuildUnshield(req.ZfxAddress, vk, req.TransparentToAddress, req.TransparentAmount, req.InputCommitments, DbContext.DB_Privacy);
+                return Task.FromResult(r.Success ? Ok(r) : Fail(r.Message ?? "Build failed."));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
+            }
+        }
+
+        /// <summary>Complete, proven Z→Z private transfer (pay another zfx address, or your own to consolidate). No signature; submit the Hash via SendRawPrivateTx.</summary>
+        [HttpPost("GetRawPrivateTransferTxData")]
+        public Task<string> GetRawPrivateTransferTxData([FromBody] RawPrivateTransferVfxRequest req)
+        {
+            try
+            {
+                if (req == null)
+                    return Task.FromResult(Fail("Request body is required."));
+                if (!PrivateRawTxService.TryParseKey32(req.ViewingKey, out var vk, out var kErr))
+                    return Task.FromResult(Fail(kErr ?? "Invalid viewing key."));
+                var r = PrivateRawTxService.BuildPrivateTransfer(req.ZfxAddress, vk, req.RecipientZfxAddress, req.PaymentAmount, req.InputCommitments, DbContext.DB_Privacy);
+                return Task.FromResult(r.Success ? Ok(r) : Fail(r.Message ?? "Build failed."));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(Fail(ApiErrorText.For(ex)));
+            }
+        }
+
+        /// <summary>Dry run: the node's full verifier on a built transaction (with the signature for a shield), nothing broadcast.</summary>
+        [HttpPost("VerifyRawPrivateTx")]
+        public async Task<string> VerifyRawPrivateTx([FromBody] RawPrivateTxSubmission body)
+        {
+            try
+            {
+                if (body == null || string.IsNullOrWhiteSpace(body.Hash))
+                    return Fail("Hash is required.");
+                var (ok, message) = await PrivateRawTxService.VerifyAsync(body.Hash, body.Signature);
+                return ok ? Ok(new { Hash = body.Hash, Message = "Transaction verifies." }) : Fail(message);
+            }
+            catch (Exception ex)
+            {
+                return Fail(ApiErrorText.For(ex));
+            }
+        }
+
+        /// <summary>Submit a built transaction: shield with { Hash, Signature }, unshield / transfer with { Hash }.</summary>
+        [HttpPost("SendRawPrivateTx")]
+        public async Task<string> SendRawPrivateTx([FromBody] RawPrivateTxSubmission body)
+        {
+            try
+            {
+                if (body == null || string.IsNullOrWhiteSpace(body.Hash))
+                    return Fail("Hash is required.");
+                var (ok, message, hash) = await PrivateRawTxService.SendAsync(body.Hash, body.Signature);
+                return ok ? Ok(new { Hash = hash, Message = message }) : Fail(message);
+            }
+            catch (Exception ex)
+            {
+                return Fail(ApiErrorText.For(ex));
             }
         }
 
@@ -1146,7 +1269,10 @@ namespace VerifiedXCore.Controllers
 
         /// <summary>Scan blocks for vBTC notes decryptable with wallet encryption key; updates local wallet row. Scoped to a specific vBTC contract UID.</summary>
         [HttpPost("ScanShieldedVBTC")]
-        public Task<string> ScanShieldedVBTC([FromBody] ScanShieldedVbtcRequest req)
+        public Task<string> ScanShieldedVBTC([FromBody] ScanShieldedVbtcRequest req) =>
+            ShieldedWalletLock.Holding(req?.ZfxAddress, () => ScanShieldedVBTCCore(req!)); // the wallet's lock: a scan wrote over the auto-scanner's changes made meanwhile (round 25)
+
+        private Task<string> ScanShieldedVBTCCore(ScanShieldedVbtcRequest req)
         {
             try
             {
@@ -1187,7 +1313,7 @@ namespace VerifiedXCore.Controllers
                 foreach (var u in w.UnspentCommitments ?? new List<UnspentCommitment>())
                 {
                     if (!string.IsNullOrEmpty(u.Commitment))
-                        merged.Add(u.Commitment);
+                        merged.Add(PrivacyApiHelper.NoteIdentity(u));
                 }
 
                 var walletCommitmentStrings = new HashSet<string>(
@@ -1207,35 +1333,25 @@ namespace VerifiedXCore.Controllers
                     foreach (var tx in block.Transactions)
                     {
                         transactionsScanned++;
-                        if (tx?.Data == null || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
+                        if (tx?.Data == null || !PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType) || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
                             continue;
                         if (payload == null)
                             continue;
 
-                        // Mark wallet notes consumed by this tx's nullifiers
-                        if (payload.SpentCommitmentTreePositions != null && payload.SpentCommitmentTreePositions.Count > 0)
+                        // Mark wallet notes consumed by this tx's nullifiers (each note's own; round 22)
+                        foreach (var uc in w.UnspentCommitments ?? new List<UnspentCommitment>())
                         {
-                            var spentCommitmentStrings = PrivacyApiHelper.LookupCommitmentStringsByTreePositions(
-                                payload.SpentCommitmentTreePositions, payload.Asset);
-
-                            if (spentCommitmentStrings.Count > 0)
-                            {
-                                foreach (var uc in w.UnspentCommitments ?? new List<UnspentCommitment>())
-                                {
-                                    if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
-                                        continue;
-                                    if (!string.Equals(uc.AssetType, asset, StringComparison.Ordinal))
-                                        continue;
-                                    if (spentCommitmentStrings.Contains(uc.Commitment))
-                                    {
-                                        uc.IsSpent = true;
-                                        notesMarkedSpent++;
-                                        var assetKey = uc.AssetType ?? "";
-                                        if (w.ShieldedBalances.ContainsKey(assetKey))
-                                            w.ShieldedBalances[assetKey] -= uc.Amount;
-                                    }
-                                }
-                            }
+                            if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment))
+                                continue;
+                            if (!string.Equals(uc.AssetType, asset, StringComparison.Ordinal))
+                                continue;
+                            if (!PrivacyApiHelper.SpendsWalletNote(tx, payload, uc, keys, block.Height))
+                                continue;
+                            uc.IsSpent = true;
+                            notesMarkedSpent++;
+                            var assetKey = uc.AssetType ?? "";
+                            if (w.ShieldedBalances.ContainsKey(assetKey))
+                                w.ShieldedBalances[assetKey] -= uc.Amount;
                         }
 
                         // Detect new incoming vBTC notes
@@ -1262,10 +1378,8 @@ namespace VerifiedXCore.Controllers
                             if (!string.Equals(note.AssetType, asset, StringComparison.Ordinal))
                                 continue;
                             var c = o.CommitmentB64;
-                            if (string.IsNullOrEmpty(c) || merged.Contains(c))
+                            if (string.IsNullOrEmpty(c) || merged.Contains(PrivacyApiHelper.NoteIdentity(c, note.Amount, note.RandomnessB64)))
                                 continue;
-                            merged.Add(c);
-                            notesFound++;
                             byte[] r32 = Array.Empty<byte>();
                             if (!string.IsNullOrEmpty(note.RandomnessB64))
                             {
@@ -1276,16 +1390,18 @@ namespace VerifiedXCore.Controllers
                                 catch { /* ignore */ }
                             }
 
-                            long treePos = PrivacyApiHelper.LookupTreePositionByCommitment(c, note.AssetType ?? "");
 
                             w.UnspentCommitments ??= new List<UnspentCommitment>();
+                            if (!PrivacyApiHelper.NoteMatchesOutput(o, note.Amount, r32, keys, note.AssetType, out var matchedPos)) continue; // the note is the output it came with (round 22)
+                            merged.Add(PrivacyApiHelper.NoteIdentity(c, note.Amount, note.RandomnessB64)); // seen once it matched: a copy that does not match hid the real output (round 24)
+                            notesFound++;
                             w.UnspentCommitments.Add(new UnspentCommitment
                             {
                                 Commitment = c,
                                 AssetType = note.AssetType ?? "",
                                 Amount = note.Amount,
                                 Randomness = r32,
-                                TreePosition = treePos,
+                                TreePosition = matchedPos, // the matched leaf's (round 25)
                                 BlockHeight = block.Height,
                                 IsSpent = false
                             });
@@ -1328,7 +1444,10 @@ namespace VerifiedXCore.Controllers
         /// <paramref name="req"/>.FromHeight to rebuild from scratch.
         /// </summary>
         [HttpPost("ResyncShieldedVBTC")]
-        public Task<string> ResyncShieldedVBTC([FromBody] ResyncShieldedVbtcRequest req)
+        public Task<string> ResyncShieldedVBTC([FromBody] ResyncShieldedVbtcRequest req) =>
+            ShieldedWalletLock.Holding(req?.ZfxAddress, () => ResyncShieldedVBTCCore(req!)); // the wallet's lock: a scan wrote over the auto-scanner's changes made meanwhile (round 25)
+
+        private Task<string> ResyncShieldedVBTCCore(ResyncShieldedVbtcRequest req)
         {
             try
             {
@@ -1351,7 +1470,7 @@ namespace VerifiedXCore.Controllers
                     w.UnspentCommitments.RemoveAll(c => string.Equals(c.AssetType, asset, StringComparison.Ordinal));
                 if (w.ShieldedBalances.ContainsKey(asset))
                     w.ShieldedBalances.Remove(asset);
-                ShieldedWalletService.Upsert(w);
+                ShieldedWalletService.Upsert(w, notesAsGiven: true); // the wipe stands even when nothing else is left (round 25)
 
                 // Now rescan using the ScanShieldedVBTC logic
                 var scanReq = new ScanShieldedVbtcRequest
@@ -1361,7 +1480,7 @@ namespace VerifiedXCore.Controllers
                     FromHeight = fromHeight,
                     ToHeight = toHeight
                 };
-                return ScanShieldedVBTC(scanReq);
+                return ScanShieldedVBTCCore(scanReq); // under the lock this resync holds
             }
             catch (Exception ex)
             {

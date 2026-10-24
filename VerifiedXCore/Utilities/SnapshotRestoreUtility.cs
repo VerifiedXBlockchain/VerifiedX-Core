@@ -18,6 +18,35 @@ namespace VerifiedXCore.Utilities
 
         /// <summary>Public accessor so block validation can hold off while a restore is in progress.</summary>
         public static bool IsRestoreRunning => _isRestoreRunning;
+        internal static void SetRestoreRunningForTests(bool running) => _isRestoreRunning = running;
+
+        private static volatile bool _stateDestroyed = false;
+
+        /// <summary>
+        /// Set when a restore failed after it had wiped the chain-derived state (and possibly deleted the blocks above its
+        /// target): the state then matches no chain, so this node must not validate or produce blocks on it until a restore
+        /// succeeds or the state is rebuilt ('rebuildstate'). Callers read a failed restore as "nothing changed"; without
+        /// this the node went on accepting blocks on top of the wiped state.
+        /// </summary>
+        public static bool StateDestroyedByFailedRestore => _stateDestroyed;
+
+        internal static void ClearStateDestroyed() => _stateDestroyed = false;
+
+        /// <summary>Recorded as the state status's failure reason, so the stop outlives a restart.</summary>
+        public const string StateDestroyedReason = "Snapshot restore failed after wiping the state";
+
+        /// <summary>
+        /// At startup: a state a restore wiped and did not finish (it failed, or the node stopped mid-restore) stays stopped;
+        /// the flag above is in memory only, the status records it. A later restore that succeeds, or a rebuild, marks the
+        /// state synced and clears it.
+        /// </summary>
+        public static void RecallStateDestroyed()
+        {
+            var status = StateTreiStatusService.GetStatus();
+            // A rebuild that never ended (the node stopped mid-replay) left partial state in the same way.
+            if (status != null && !status.IsSynced && (status.RestoreDestroyed == true || status.RebuildInProgress == true))
+                _stateDestroyed = true;
+        }
 
         /// <summary>
         /// Attempts a snapshot restore so that state matches the chain at <paramref name="targetHeight"/>.
@@ -53,6 +82,7 @@ namespace VerifiedXCore.Utilities
             }
 
             _isRestoreRunning = true;
+            await VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.WaitUntilStoppedAsync();
             var wasResyncing = Globals.IsResyncing;
             var wasStopTimers = Globals.StopAllTimers;
             if (manageFlags)
@@ -61,6 +91,9 @@ namespace VerifiedXCore.Utilities
                 Globals.StopAllTimers = true;
             }
 
+            var wiped = false;
+            var restored = false;
+            var replayedButUnverified = false;
             try
             {
                 var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -73,6 +106,8 @@ namespace VerifiedXCore.Utilities
                 StateTreiStatusService.SetFailed($"Snapshot restore in progress (slot {slot.SlotId} → {targetHeight}).");
 
                 // 1) Wipe all chain-derived state, then copy the slot back into the live collections.
+                StateTreiStatusService.SetRestoreDestroyed(true); // before the wipe: a crash from here on keeps the stop
+                wiped = true;
                 BlockRollbackUtility.WipeChainDerivedState();
                 if (!StateSnapshotService.RestoreSlotToLive(slot.SlotId))
                 {
@@ -98,6 +133,9 @@ namespace VerifiedXCore.Utilities
                 var blockStore = Block.GetBlocks();
                 blockStore.DeleteManySafe(x => x.Height > targetHeight);
                 DbContext.DB.Checkpoint();
+                // Slots and deletion records above the target came from the removed blocks. Dropped now, while the state is
+                // still marked dirty, so no exit from here on leaves them behind a synced status.
+                StateSnapshotService.InvalidateAbove(targetHeight);
 
                 // 5) Replay local blocks (slotHeight, target] through the standard commit path.
                 var walletAccounts = AccountData.GetAccounts().FindAll().ToList();
@@ -154,8 +192,8 @@ namespace VerifiedXCore.Utilities
                                 else
                                 {
                                     var maturedRows = pendingRows.Where(x => x.ConfirmTimestamp < block.Timestamp).ToList();
-                                    if (maturedRows.Count > 0)
-                                        await StateData.UpdateTreiFromReserve(maturedRows);
+                                    if (maturedRows.Count > 0 && !await StateData.UpdateTreiFromReserve(maturedRows, block))
+                                        replayFails++; // a settlement this node could not write is a replay failure (round 7)
                                 }
                             }
                         }
@@ -168,6 +206,8 @@ namespace VerifiedXCore.Utilities
                             {
                                 if (walletAddresses.Contains(tx.ToAddress) || walletAddresses.Contains(tx.FromAddress))
                                 {
+                                    // A sale completion this wallet sent uses its bid, as when it was first mined.
+                                    if (walletAddresses.Contains(tx.FromAddress)) VerifiedXCore.Models.DST.Bid.MarkUsedByCompletion(tx);
                                     var existing = walletTxs.FindOne(x => x.Hash == tx.Hash);
                                     if (existing == null)
                                     {
@@ -183,6 +223,14 @@ namespace VerifiedXCore.Utilities
                         replayFails++;
                         ErrorLogUtility.LogError($"[SnapshotRestore] Error replaying block {block.Height}: {ex.Message}", "SnapshotRestoreUtility");
                     }
+                }
+
+                // Every height from the slot to the target must have been replayed: a block missing from the store left a
+                // gap the loop above skipped, and the state then matched no chain.
+                if (replayed != targetHeight - slot.Height)
+                {
+                    replayFails++;
+                    ErrorLogUtility.LogError($"[SnapshotRestore] Replayed {replayed} block(s) for heights {slot.Height + 1}..{targetHeight}; the block store is missing some.", "SnapshotRestoreUtility");
                 }
 
                 if (replayFails > 0)
@@ -209,14 +257,30 @@ namespace VerifiedXCore.Utilities
                 BlockRollbackUtility.RefreshInMemoryTip(targetHeight);
                 await DbContext.CheckPoint();
 
-                // 8) State is verified consistent up to the target. Slots newer than the target
-                //    contain rolled-back blocks — invalidate them.
+                // A slot holds the attestation and bond tables as they were when it was taken. One taken from a state
+                // that was started at other heights than this release starts them at brings that state back, and
+                // marking it good here would erase the flag the start of the node set on it. It is not good: only a
+                // rebuild from the chain is.
+                var otherSettings = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.BuiltUnderOtherSettings(targetHeight);
+                if (otherSettings != null)
+                {
+                    ErrorLogUtility.LogError($"[SnapshotRestore] The restored state must be rebuilt from the chain: {otherSettings}.", "SnapshotRestoreUtility");
+                    StateTreiStatusService.SetFailed($"Attestation state built under other settings: {otherSettings}.");
+                    replayedButUnverified = true;
+                    StateTreiStatusService.SetRestoreDestroyed(false); // restored and replayed; flagged for a rebuild, not wiped
+                    return false;
+                }
+
+                // 8) State is verified consistent up to the target (slots above it were invalidated at step 4).
                 StateTreiStatusService.SetSynced(targetHeight);
-                StateSnapshotService.InvalidateAbove(targetHeight);
+                // The withdrawal store was wiped, restored and replayed with the rest of the state.
+                VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.StateRestoredFromSnapshot();
 
                 sw.Stop();
                 Console.WriteLine($"[SnapshotRestore] SUCCESS: restored to height {targetHeight} (replayed {replayed} block(s), {walletTxInserts} wallet TX(s)) in {sw.Elapsed.TotalSeconds:F1}s.");
                 LogUtility.Log($"[SnapshotRestore] Success: slot={slot.SlotId} target={targetHeight} replayed={replayed} in {sw.ElapsedMilliseconds} ms", "SnapshotRestoreUtility");
+                restored = true;
+                _stateDestroyed = false;
                 return true;
             }
             catch (Exception ex)
@@ -227,6 +291,16 @@ namespace VerifiedXCore.Utilities
             }
             finally
             {
+                // The attestation-settings exit restored the slot and replayed to the target (the state is flagged for a
+                // rebuild, as at startup); every other failure after the wipe leaves a wiped or half-replayed state.
+                if (wiped && !restored && !replayedButUnverified)
+                {
+                    _stateDestroyed = true;
+                    StateTreiStatusService.SetFailed($"{StateDestroyedReason} (restore to {targetHeight}); restart with 'rebuildstate'.");
+                    BlockRollbackUtility.RefreshInMemoryTip(targetHeight); // the tip the block store holds now, not the deleted one
+                    ErrorLogUtility.LogError($"[SnapshotRestore] Restore to {targetHeight} failed after the state was wiped; this node stops validating blocks. Restart it with the 'rebuildstate' argument.", "SnapshotRestoreUtility");
+                    Console.WriteLine("[SnapshotRestore] FAILED after wiping state: this node stops validating blocks. Restart it with the 'rebuildstate' argument.");
+                }
                 _isRestoreRunning = false;
                 if (manageFlags)
                 {

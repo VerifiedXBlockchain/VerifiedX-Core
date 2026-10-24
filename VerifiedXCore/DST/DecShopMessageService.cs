@@ -17,6 +17,32 @@ namespace VerifiedXCore.DST
     public class DecShopMessageService
     {
         const int PaginationAmount = 10;
+        /// <summary>Most bids one Bids reply carries (the newest).</summary>
+        public const int MaxBidsPerReply = 25;
+        /// <summary>Most bytes a reply's Data may take once written into the message: one UDP datagram, with room for the envelope.</summary>
+        public const int MaxReplyDataBytes = 60_000;
+
+        /// <summary>The bytes <paramref name="data"/> takes as the message's (escaped) Data string.</summary>
+        internal static int ReplyDataBytes(string data) => Encoding.UTF8.GetByteCount(JsonConvert.ToString(data));
+
+        /// <summary>
+        /// The live collections, in id order, that fit one reply. Clients ask once and take the reply as their list, so
+        /// a reply that outgrew one datagram reached them as nothing at all.
+        /// </summary>
+        internal static List<Collection> CollectionsForOneReply(IEnumerable<Collection> live)
+        {
+            var fitting = new List<Collection>();
+            var used = ReplyDataBytes("[]");
+            foreach (var collection in live.OrderBy(x => x.Id))
+            {
+                var cost = ReplyDataBytes(JsonConvert.SerializeObject(collection)) - 2 + (fitting.Count > 0 ? 1 : 0);
+                if (used + cost > MaxReplyDataBytes)
+                    break;
+                used += cost;
+                fitting.Add(collection);
+            }
+            return fitting;
+        }
         public static Message? ProcessMessage(Message message, string shopURL = "NA")
         {
             if (message.ComType == MessageComType.Request)
@@ -936,7 +962,8 @@ namespace VerifiedXCore.DST
                     }
                     else if(option == "Collections")
                     {
-                        var collections = Collection.GetAllCollections()?.Where(x => x.CollectionLive).ToList();
+                        var live = Collection.GetAllCollections()?.Where(x => x.CollectionLive);
+                        var collections = live == null ? null : CollectionsForOneReply(live);
                         if(collections?.Count() > 0)
                         {
                             var respMessage = new Message
@@ -1039,7 +1066,7 @@ namespace VerifiedXCore.DST
                         if (listings?.Count() > 0)
                         {
                             var pageSkip = page * PaginationAmount;
-                            var listingsPageApplied = listings.Skip(pageSkip);
+                            var listingsPageApplied = listings.OrderBy(x => x.Id).Skip(pageSkip).Take(PaginationAmount).ToList();
                             var respMessage = new Message
                             {
                                 ResponseMessage = true,
@@ -1246,7 +1273,8 @@ namespace VerifiedXCore.DST
                         var bids = Bid.GetListingBids(listingId);
                         if (bids?.Count() > 0)
                         {
-                            var bidList = bids.ToList();
+                            // The newest bids only: the full history of a busy listing outgrew one datagram.
+                            var bidList = bids.OrderByDescending(b => b.BidSendTime).Take(MaxBidsPerReply).ToList();
                             var respMessage = new Message
                             {
                                 ResponseMessage = true,
@@ -1314,13 +1342,18 @@ namespace VerifiedXCore.DST
                         };
 
 
+                        // Clients drop whatever an update leaves out, so one that outgrows a datagram is not sent cut short.
+                        var updateData = JsonConvert.SerializeObject(decShopUpdateData);
+                        if (ReplyDataBytes(updateData) > MaxReplyDataBytes)
+                            return null;
+
                         var respMessage = new Message
                         {
                             ResponseMessage = true,
                             ResponseMessageId = message.Id,
                             Type = message.Type,
                             ComType = MessageComType.Response,
-                            Data = JsonConvert.SerializeObject(decShopUpdateData)
+                            Data = updateData
                         };
 
                         return respMessage;

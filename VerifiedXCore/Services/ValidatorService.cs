@@ -243,6 +243,16 @@ namespace VerifiedXCore.Services
         {
             try
             {
+                // A validator whose FROST library has not passed its check neither registers nor reactivates: peers would
+                // pick it for ceremonies it cannot take part in (FrostLibraryGate). This runs once at startup, so it waits
+                // for the check, which runs alongside.
+                await Bitcoin.FROST.FrostLibraryGate.WaitForCheckAsync(TimeSpan.FromMinutes(2));
+                if (!Bitcoin.FROST.FrostLibraryGate.Ready)
+                {
+                    LogUtility.Log($"Cannot send vBTC V2 registration - {Bitcoin.FROST.FrostLibraryGate.Unavailable}.", "ValidatorService.SendVBTCV2RegistrationTx()");
+                    return;
+                }
+
                 // Wait for ports to be verified open before sending any registration/heartbeat TXs
                 var portWaitAttempts = 0;
                 while (!Globals.PortsOpened && portWaitAttempts < 30)
@@ -262,13 +272,13 @@ namespace VerifiedXCore.Services
                 {
                     // Wait briefly for IP to be discovered before making decisions
                     var quickIpWait = 0;
-                    while (string.IsNullOrEmpty(Globals.ReportedIP) && quickIpWait < 6)
+                    while (string.IsNullOrEmpty(P2PClient.ValidatorReportedIP()) && quickIpWait < 6)
                     {
                         quickIpWait++;
                         await Task.Delay(5000);
                     }
 
-                    var currentIp = Globals.ReportedIP;
+                    var currentIp = P2PClient.ValidatorReportedIP();
 
                     if (existingValidator.IsActive)
                     {
@@ -311,7 +321,7 @@ namespace VerifiedXCore.Services
 
                 // Wait for IP to be discovered (up to 90 seconds)
                 var ipWaitAttempts = 0;
-                while (string.IsNullOrEmpty(Globals.ReportedIP) && ipWaitAttempts < 18)
+                while (string.IsNullOrEmpty(P2PClient.ValidatorReportedIP()) && ipWaitAttempts < 18)
                 {
                     ipWaitAttempts++;
                     LogUtility.Log($"Waiting for IP discovery before vBTC V2 registration (attempt {ipWaitAttempts}/18)...",
@@ -341,7 +351,7 @@ namespace VerifiedXCore.Services
                     await Task.Delay(5000);
                 }
 
-                var ipAddress = Globals.ReportedIP;
+                var ipAddress = P2PClient.ValidatorReportedIP();
                 if (string.IsNullOrEmpty(ipAddress))
                 {
                     LogUtility.Log($"Cannot send vBTC V2 registration - IP address not reported yet",
@@ -434,6 +444,13 @@ namespace VerifiedXCore.Services
         {
             try
             {
+                // Nor while the FROST library has not passed its check: peers would pick this validator (FrostLibraryGate).
+                if (!Bitcoin.FROST.FrostLibraryGate.Ready)
+                {
+                    LogUtility.Log($"Cannot send vBTC V2 reactivation - {Bitcoin.FROST.FrostLibraryGate.Unavailable}.", "ValidatorService.SendVBTCV2ReactivationTx()");
+                    return;
+                }
+
                 // Don't send reactivation TX if ports aren't verified open
                 if (!Globals.PortsOpened)
                 {
@@ -450,7 +467,7 @@ namespace VerifiedXCore.Services
 
                 // Wait for IP to be discovered (up to 90 seconds)
                 var ipWaitAttempts = 0;
-                while (string.IsNullOrEmpty(Globals.ReportedIP) && ipWaitAttempts < 18)
+                while (string.IsNullOrEmpty(P2PClient.ValidatorReportedIP()) && ipWaitAttempts < 18)
                 {
                     ipWaitAttempts++;
                     LogUtility.Log($"Waiting for IP discovery before vBTC V2 reactivation (attempt {ipWaitAttempts}/18)...",
@@ -480,7 +497,7 @@ namespace VerifiedXCore.Services
                     await Task.Delay(5000);
                 }
 
-                var ipAddress = Globals.ReportedIP;
+                var ipAddress = P2PClient.ValidatorReportedIP();
                 if (string.IsNullOrEmpty(ipAddress))
                 {
                     LogUtility.Log($"Cannot send vBTC V2 reactivation - IP address not reported yet",
@@ -1051,6 +1068,7 @@ namespace VerifiedXCore.Services
 
                         Globals.ValidatorAddress = validator.Address;
                         Globals.ValidatorPublicKey = account.PublicKey;
+                        Globals.ValidatorExitSent = false; // validating again: announce as usual
 
                         output = "Account found and activated as a validator! Thank you for service to the network!";
 
@@ -1067,6 +1085,106 @@ namespace VerifiedXCore.Services
             }
 
             return output;
+        }
+
+        /// <summary>
+        /// Sends the validator exit transaction for an address this wallet holds: the graceful way out. On chain the
+        /// validator stops counting at once; its bonded stake unlocks ValidatorBond.ExitWaitBlocks blocks after the
+        /// exit is mined. Works whether or not this node is validating right now (a validator that has gone quiet is
+        /// still bonded and exits the same way). Returns the transaction hash, or why it was not sent.
+        /// </summary>
+        public static async Task<(bool Ok, string Message)> SendValidatorExit(string address)
+        {
+            try
+            {
+                // Before the bonds start an exit frees nothing, and an exit mined then is judged by rules that read each
+                // node's own view of who is a validator (a node still syncing has none and refused the block). None is sent.
+                var next = (Globals.LastBlock?.Height ?? 0) + 1;
+                if (!ValidatorBond.Active(next))
+                    return (false, $"The validator bond starts at block {Globals.ValidatorBondHeight}. Before it no stake is locked and no exit transaction is needed; none was sent.");
+                var account = AccountData.GetSingleAccount(address);
+                if (account == null) return (false, $"This wallet does not hold the key for {address}.");
+                // A registration or heartbeat of this validator still waiting to be mined would, mined after the exit,
+                // put the validator back in and resume the bond.
+                if (TransactionData.GetPool().Find(x => x.FromAddress == address).Any(x =>
+                        x.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER || x.TransactionType == TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT))
+                    return (false, $"A registration or heartbeat of {address} is still waiting to be mined; mined after the exit it would undo it. Send the exit once it is mined.");
+                var from = StateData.GetSpecificAccountStateTrei(address);
+                if (from == null) return (false, $"{address} has no account in chain state.");
+                var privateKey = AccountData.GetPrivateKey(account);
+                if (privateKey == null) return (false, "The wallet is locked: unlock it to sign the exit.");
+
+                // Normalize Amount/Fee/ToAddress BEFORE Build() so the hash matches what remote nodes compute.
+                var exitTx = new Transaction
+                {
+                    Timestamp = TimeUtil.GetTime(),
+                    FromAddress = address,
+                    ToAddress = address.ToAddressNormalize(),
+                    Amount = 0M.ToNormalizeDecimal(),
+                    Fee = 0M.ToNormalizeDecimal(),
+                    Nonce = from.Nonce,
+                    TransactionType = TransactionType.VBTC_V2_VALIDATOR_EXIT,
+                    Data = JsonConvert.SerializeObject(new
+                    {
+                        ValidatorAddress = address,
+                        ExitBlockHeight = Globals.LastBlock.Height,
+                        Signature = SignatureService.CreateSignature(address, privateKey, account.PublicKey)
+                    })
+                };
+                exitTx.Build();
+                exitTx.Signature = SignatureService.CreateSignature(exitTx.Hash, privateKey, account.PublicKey);
+
+                var verified = await TransactionValidatorService.VerifyTX(exitTx);
+                if (!verified.Item1) return (false, verified.Item2);
+                if (exitTx.TransactionRating == null)
+                    exitTx.TransactionRating = await TransactionRatingService.GetTransactionRating(exitTx);
+
+                await TransactionData.AddToPool(exitTx);
+                // From here this node does not announce the validator again (see Globals.ValidatorExitSent). Set once
+                // the exit is in the pool: set before, a failure there left the node silent and not exited.
+                if (address == Globals.ValidatorAddress) Globals.ValidatorExitSent = true;
+                await P2PClient.SendTXMempool(exitTx);
+                LogUtility.Log($"Validator {address} exit transaction sent: {exitTx.Hash}", "ValidatorService.SendValidatorExit()");
+                return (true, exitTx.Hash);
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Error sending the validator exit for {address}: {ex}", "ValidatorService.SendValidatorExit()");
+                return (false, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Stops validating on this node. <paramref name="sendExit"/>: also send the on-chain exit for the validating
+        /// account first, which is what frees a bonded stake (after the wait). The operator's own stop does; a stop the
+        /// node makes by itself (ports unreachable, a balance problem) does not, since an exit also ends the bond's age
+        /// and should be the operator's decision. Returns what happened to the exit, or null when none was asked for.
+        /// </summary>
+        public static async Task<string?> DoMasterNodeStop(bool sendExit)
+        {
+            string? exitNote = null;
+            if (sendExit)
+            {
+                try
+                {
+                    var validating = AccountData.GetAccounts().FindAll().Where(x => x.IsValidating).Select(x => x.Address).ToList();
+                    if (validating.Count == 0 && !string.IsNullOrEmpty(Globals.ValidatorAddress)) validating.Add(Globals.ValidatorAddress);
+                    foreach (var address in validating)
+                    {
+                        var (ok, message) = await SendValidatorExit(address);
+                        exitNote = ok
+                            ? $"Exit transaction sent for {address}: {message}. Its {ValidatorRequiredAmount()} VFX stake unlocks {ValidatorBond.ExitWaitBlocks} blocks after the exit is mined."
+                            : !ValidatorBond.Active((Globals.LastBlock?.Height ?? 0) + 1) ? message
+                            : $"The exit transaction for {address} was NOT sent: {message}. The stake stays bonded until an exit is mined (ExitValidator).";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    exitNote = $"The exit transaction was NOT sent: {ex.Message}";
+                }
+            }
+            await DoMasterNodeStop();
+            return exitNote;
         }
 
         public static async Task DoMasterNodeStop()
@@ -1246,54 +1364,19 @@ namespace VerifiedXCore.Services
 
                 if (myAccount == null)
                 {
-                    ErrorLogUtility.LogError($"Account not found for validator {validator.Address}", 
+                    ErrorLogUtility.LogError($"Account not found for validator {validator.Address}",
                         "ValidatorService.StopValidating()");
                     return;
                 }
 
-                var from = StateData.GetSpecificAccountStateTrei(validator.Address);
-                if (from == null)
-                {
-                    ErrorLogUtility.LogError($"State account not found for validator {validator.Address}", 
-                        "ValidatorService.StopValidating()");
+                // Called by the wallet when a send would leave a validating account's local balance under the validator
+                // amount. Under the bond such a send cannot take the stake (consensus refuses it) and the local balance
+                // only looks short because of sends still pending: nothing is stopped, and no exit is sent from here (an
+                // exit ends the bond's age and is the operator's decision: V1/TurnOffValidator, VBTC/ExitValidator).
+                // An account that is not bonded stops validating locally, as before.
+                var next = (Globals.LastBlock?.Height ?? 0) + 1;
+                if (ValidatorBond.Active(next) && ValidatorBond.Holds(ValidatorBond.Row(validator.Address), next))
                     return;
-                }
-
-                // Create VBTC_V2_VALIDATOR_EXIT transaction
-                // Normalize Amount/Fee/ToAddress BEFORE Build() so the hash matches
-                // what remote nodes compute after deserializing (prevents "hash not equal" errors)
-                var exitTx = new Transaction
-                {
-                    Timestamp = TimeUtil.GetTime(),
-                    FromAddress = validator.Address,
-                    ToAddress = validator.Address.ToAddressNormalize(),
-                    Amount = 0M.ToNormalizeDecimal(),
-                    Fee = 0M.ToNormalizeDecimal(),
-                    Nonce = from.Nonce,
-                    TransactionType = TransactionType.VBTC_V2_VALIDATOR_EXIT,
-                    Data = JsonConvert.SerializeObject(new
-                    {
-                        ValidatorAddress = validator.Address,
-                        ExitBlockHeight = Globals.LastBlock.Height,
-                        Signature = validator.Signature
-                    })
-                };
-
-                exitTx.Build();
-
-                // Sign the transaction
-                var privateKey = AccountData.GetPrivateKey(myAccount);
-                exitTx.Signature = SignatureService.CreateSignature(
-                    exitTx.Hash, 
-                    privateKey, 
-                    myAccount.PublicKey
-                );
-
-                // Add to mempool
-                await TransactionData.AddToPool(exitTx);
-
-                LogUtility.Log($"Validator {validator.Address} exit transaction created: {exitTx.Hash}", 
-                    "ValidatorService.StopValidating()");
 
                 // Update local state
                 myAccount.IsValidating = false;
@@ -1710,6 +1793,7 @@ namespace VerifiedXCore.Services
 
                         Globals.ValidatorAddress = validator.Address;
                         Globals.ValidatorPublicKey = account.PublicKey;
+                        Globals.ValidatorExitSent = false; // validating again: announce as usual
 
                         output = "Account found and activated as a validator! Thank you for service to the network!";
 

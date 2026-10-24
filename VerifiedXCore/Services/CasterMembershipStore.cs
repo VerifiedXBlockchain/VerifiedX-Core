@@ -20,6 +20,19 @@ namespace VerifiedXCore.Services
     {
         private const string COLLECTION_NAME = "rsrv_caster_membership";
         private const string SIGNED_MARKER_COLLECTION = "rsrv_membership_signed";
+        private const string RESET_MARKER_COLLECTION = "rsrv_membership_reset";
+
+        /// <summary>Where this node's operator last reset the membership store: the tip at the reset.</summary>
+        public class ResetMarker
+        {
+            public int Id { get; set; } = 1;
+            public long ResetAtHeight { get; set; }
+        }
+
+        private static LiteDB.ILiteCollection<ResetMarker>? ResetCollection() => DbContext.DB_Config?.GetCollection<ResetMarker>(RESET_MARKER_COLLECTION);
+
+        /// <summary>The tip at this node's last operator reset, or 0 when it never had one.</summary>
+        public static long LastOperatorResetHeight() => ResetCollection()?.FindById(1)?.ResetAtHeight ?? 0;
         public const string GenesisPrevHash = "GENESIS";
 
         private static readonly object Mut = new object();
@@ -34,15 +47,24 @@ namespace VerifiedXCore.Services
             /// (see <see cref="ComputeCasterSetHash(CasterMembershipRecord)"/>). Empty on markers
             /// written before the fix.</summary>
             public string SetHash { get; set; } = "";
-            /// <summary>ROTATION-LIVENESS (Sep 2026): unix seconds the mark was written. Lets a mark
-            /// whose rotation never landed expire (see <see cref="SignedMarkExpirySeconds"/>). 0 on
-            /// markers written before the fix — those never expire (age unknown).</summary>
+            /// <summary>Unix seconds the mark was written (diagnostic).</summary>
             public long SignedAt { get; set; }
+            /// <summary>The latest EffectiveFromHeight among the candidates signed at this seq. The mark is released
+            /// only once that height is behind the tip (<see cref="IsStaleAbortedMark(SignedSeqMarker, long, long, long, long, long)"/>).
+            /// 0 on marks written before it was recorded: those keep the old wall-clock expiry (<see cref="LegacyMarkExpirySeconds"/>).</summary>
+            public long EffectiveFromHeight { get; set; }
         }
 
-        /// <summary>A signed-seq mark for a set that was never appended is an aborted proposal, not an
-        /// equivocation risk, once it is this old and the head is still below its seq.</summary>
-        public const long SignedMarkExpirySeconds = 600;
+        /// <summary>
+        /// Blocks past a signed candidate's EffectiveFromHeight before its mark is released. A live append refuses a
+        /// candidate whose effective height has passed (<see cref="EffectiveHeightHasPassed"/>), so once every node near
+        /// the tip is past it the signed candidate can no longer land, and a different set may be signed at the seq.
+        /// The margin covers nodes whose tip trails ours.
+        /// </summary>
+        public const int SignedMarkReleaseMarginBlocks = MaxProposerTipLead;
+
+        /// <summary>The expiry of a mark written before marks recorded an effective height (a one-time migration).</summary>
+        public const long LegacyMarkExpirySeconds = 600;
 
         /// <summary>BOOTSTRAP-RESET (Sep 2026): ChangeType of a record that supersedes a stale committee
         /// with the hardcoded seed set. Signed by a seed majority instead of the previous set, and
@@ -76,6 +98,18 @@ namespace VerifiedXCore.Services
             var quantized = ((minimum + RotationHeightWindow - 1) / RotationHeightWindow) * RotationHeightWindow;
             return Math.Max(headEffectiveFromHeight + 1, quantized);
         }
+
+        /// <summary>How many blocks a proposer's tip may lead ours and still have its record's effective height signed here.</summary>
+        public const int MaxProposerTipLead = RotationHeightWindow;
+
+        /// <summary>
+        /// Whether a successor's EffectiveFromHeight is one an honest proposer near our tip builds (rotations and bootstrap
+        /// resets both take it from the tip). Only a lower bound was checked, so one signed record far in the future
+        /// blocked every later rotation: each successor must be later still. Signer-side only: what a node appends does not
+        /// depend on its tip.
+        /// </summary>
+        public static bool EffectiveHeightWithinReach(long candidateEffective, long headEffective, long tip)
+            => candidateEffective <= ComputeRotationEffectiveHeight(headEffective, tip + MaxProposerTipLead);
 
         /// <summary>Identity of a record's caster SET: sorted addresses only — independent of
         /// EffectiveFromHeight, PeerIP, PublicKey and signatures.</summary>
@@ -129,6 +163,21 @@ namespace VerifiedXCore.Services
             if (!string.Equals(candidate.PrevRecordHash, head.PrevRecordHash, StringComparison.OrdinalIgnoreCase)) return false;
             if (string.IsNullOrEmpty(candidate.RecordHash) || string.Equals(candidate.RecordHash, head.RecordHash, StringComparison.OrdinalIgnoreCase)) return false;
             if (!string.Equals(ComputeCasterSetHash(candidate), ComputeCasterSetHash(head), StringComparison.OrdinalIgnoreCase)) return false;
+            // The same change, and every entry kept: a lower-hash sibling with the same addresses replaced the head whole,
+            // so it could put in another PeerIP or PublicKey for a member. Only the promoted member's PeerIP may differ:
+            // each proposer reads it from its own view of the candidate, and honest siblings must still converge. A
+            // Demotion and a Departure of one member are one change (an outdated member stopped as it was demoted).
+            static string Kind(string? change) => change is "Demotion" or "Departure" ? "Removal" : change ?? "";
+            if (!string.Equals(Kind(candidate.ChangeType), Kind(head.ChangeType), StringComparison.Ordinal)
+                || !string.Equals(candidate.ChangedAddress, head.ChangedAddress, StringComparison.Ordinal)) return false;
+            foreach (var c in candidate.Casters ?? new List<CasterInfo>())
+            {
+                var h = head.Casters?.FirstOrDefault(x => string.Equals(x.Address, c.Address, StringComparison.Ordinal));
+                if (h == null || !string.Equals(c.PublicKey, h.PublicKey, StringComparison.Ordinal)) return false;
+                var promoted = string.Equals(candidate.ChangeType, "Promotion", StringComparison.Ordinal)
+                    && string.Equals(c.Address, candidate.ChangedAddress, StringComparison.Ordinal);
+                if (!promoted && !string.Equals(c.PeerIP, h.PeerIP, StringComparison.Ordinal)) return false;
+            }
             return string.CompareOrdinal(candidate.RecordHash.ToLowerInvariant(), head.RecordHash.ToLowerInvariant()) < 0;
         }
 
@@ -263,6 +312,9 @@ namespace VerifiedXCore.Services
                 if (col != null)
                     removed = col.DeleteAll();
                 MarkerCollection()?.DeleteAll();
+                // A genesis from before the reset stays validly signed forever: remembered here, so it cannot re-arm the
+                // era this reset was meant to end (TryAppend refuses a genesis that takes effect below it).
+                ResetCollection()?.Upsert(new ResetMarker { Id = 1, ResetAtHeight = Globals.LastBlock?.Height ?? 0 });
                 _cachedHead = null;
                 _armed = false;
                 Globals.CertEnforceHeight = long.MaxValue;
@@ -334,6 +386,7 @@ namespace VerifiedXCore.Services
         {
             reason = "";
             if (candidate == null) { reason = "null candidate"; return false; }
+            if (FieldHoldingTheSeparator(candidate) is { } field) { reason = $"{field} holds the payload separator '|'"; return false; }
 
             if (candidate.RecordSeq == 0)
             {
@@ -411,6 +464,23 @@ namespace VerifiedXCore.Services
             return true;
         }
 
+        /// <summary>
+        /// The signed payload joins a record's fields with '|' (FormatCasterMembershipV1). A field that holds '|' made two
+        /// records with different fields - a longer ChangedAddress and one member fewer, say - the same bytes, so the
+        /// signatures on one were valid on the other. No honest field holds it (addresses, IPs, hex keys and hashes, a
+        /// change name), so a record with one is refused: with none, the payload reads back as exactly one record.
+        /// </summary>
+        internal static string? FieldHoldingTheSeparator(CasterMembershipRecord r)
+        {
+            static bool Has(string? s) => s != null && s.Contains('|');
+            if (Has(r.PrevRecordHash)) return "PrevRecordHash";
+            if (Has(r.ChangeType)) return "ChangeType";
+            if (Has(r.ChangedAddress)) return "ChangedAddress";
+            foreach (var c in r.Casters ?? new List<CasterInfo>())
+                if (c == null || Has(c.Address) || Has(c.PeerIP) || Has(c.PublicKey)) return "a caster entry";
+            return null;
+        }
+
         /// <summary>Seconds since our tip's timestamp; long.MaxValue with no tip (cold start counts as stale).</summary>
         public static long TipAgeSeconds()
         {
@@ -445,6 +515,17 @@ namespace VerifiedXCore.Services
                 .Select(c => c.Address).ToHashSet(StringComparer.Ordinal);
             if (expectedSeeds.Count == 0 || !expectedSeeds.SetEquals(candidateSet))
             { reason = "bootstrap reset caster set is not the hardcoded seed list"; return false; }
+            if (candidate.Casters!.Count != candidateSet.Count)
+            { reason = "bootstrap reset lists a seed twice"; return false; }
+            // Each seed's entry as hardcoded (BootstrapResetService.ProposeAsync builds it so): the set alone let a reset
+            // rewrite a seed's PeerIP or PublicKey, and its co-signers check no entry either.
+            foreach (var seed in SeedNodeService.GetBootstrapSeedPeers().Where(p => !string.IsNullOrEmpty(p.ValidatorAddress)))
+            {
+                var entry = candidate.Casters!.First(c => string.Equals(c.Address, seed.ValidatorAddress, StringComparison.Ordinal));
+                if (!string.Equals(entry.PeerIP, (seed.PeerIP ?? "").Replace("::ffff:", ""), StringComparison.Ordinal)
+                    || !string.Equals(entry.PublicKey, seed.ValidatorPublicKey ?? "", StringComparison.Ordinal))
+                { reason = $"bootstrap reset changes seed {seed.ValidatorAddress}'s entry from the hardcoded one"; return false; }
+            }
 
             var payload = CanonicalPayload(candidate);
             var seedSigners = new HashSet<string>(StringComparer.Ordinal);
@@ -461,8 +542,20 @@ namespace VerifiedXCore.Services
             return true;
         }
 
-        /// <summary>Appends a validated successor of the local head. Returns false (with reason) otherwise.</summary>
-        public static bool TryAppend(CasterMembershipRecord candidate, out string reason)
+        /// <summary>
+        /// Whether a record's effective height is at or below <paramref name="tip"/>. A record announced live after that
+        /// is refused: it would govern blocks already produced, and it may be a signed candidate withheld until its
+        /// signers had released their marks and signed another set at the seq.
+        /// </summary>
+        public static bool EffectiveHeightHasPassed(long effectiveFromHeight, long tip) => tip >= 0 && effectiveFromHeight <= tip;
+
+        /// <summary>
+        /// Appends a validated successor of the local head. Returns false (with reason) otherwise. A live append
+        /// (announce, the proposer's own) refuses a rotation whose effective height has passed; a record fetched by
+        /// membership sync (<paramref name="fromSync"/>) is applied as the peers that hold it applied it, so a lagging
+        /// node catches up.
+        /// </summary>
+        public static bool TryAppend(CasterMembershipRecord candidate, out string reason, bool fromSync = false)
         {
             lock (Mut)
             {
@@ -503,6 +596,18 @@ namespace VerifiedXCore.Services
                     }
                     reason = $"stale seq {candidate.RecordSeq} (head {head.RecordSeq})"; return false;
                 }
+                if (candidate.RecordSeq == 0 && candidate.EffectiveFromHeight < LastOperatorResetHeight())
+                {
+                    reason = $"genesis effective at {candidate.EffectiveFromHeight} is from before this node's operator reset at {LastOperatorResetHeight()}";
+                    CasterLogUtility.Log($"MEMBERSHIP: REJECTED pre-reset GENESIS — {reason}.", "MEMBERSHIP");
+                    return false;
+                }
+                var tip = Globals.LastBlock?.Height ?? -1;
+                if (!fromSync && candidate.RecordSeq > 0 && EffectiveHeightHasPassed(candidate.EffectiveFromHeight, tip))
+                {
+                    reason = $"effective height {candidate.EffectiveFromHeight} has passed (tip {tip})";
+                    return false;
+                }
                 if (!ValidateSuccessor(head, candidate, out reason))
                     return false;
                 var col = Collection();
@@ -527,7 +632,7 @@ namespace VerifiedXCore.Services
             foreach (var r in records.OrderBy(x => x.RecordSeq))
             {
                 // Wave 6: genesis is appended like any record — validated by seed signatures.
-                if (TryAppend(r, out _))
+                if (TryAppend(r, out _, fromSync: true))
                     applied++;
             }
             return applied;
@@ -542,7 +647,7 @@ namespace VerifiedXCore.Services
         /// record, or the same set under another proposer's hash, is allowed — see
         /// <see cref="EvaluateSignedMarker"/> for the rationale and the legacy-marker migration.
         /// </summary>
-        public static bool TryMarkSigned(long seq, string recordHash, string setHash)
+        public static bool TryMarkSigned(long seq, string recordHash, string setHash, long effectiveFromHeight)
         {
             lock (Mut)
             {
@@ -552,12 +657,13 @@ namespace VerifiedXCore.Services
                 switch (EvaluateSignedMarker(existing, recordHash, setHash))
                 {
                     case SignedMarkDecision.Insert:
-                        col.Insert(seq, new SignedSeqMarker { Id = seq, RecordHash = recordHash, SetHash = setHash, SignedAt = NowUnix() });
+                        col.Insert(seq, new SignedSeqMarker { Id = seq, RecordHash = recordHash, SetHash = setHash, SignedAt = NowUnix(), EffectiveFromHeight = effectiveFromHeight });
                         return true;
                     case SignedMarkDecision.Idempotent:
                         return true;
                     case SignedMarkDecision.SameSetRefresh:
                         existing!.RecordHash = recordHash;
+                        existing.EffectiveFromHeight = Math.Max(existing.EffectiveFromHeight, effectiveFromHeight);
                         col.Update(seq, existing);
                         return true;
                     case SignedMarkDecision.LegacyUpgrade:
@@ -566,20 +672,22 @@ namespace VerifiedXCore.Services
                             "MEMBERSHIP");
                         existing.RecordHash = recordHash;
                         existing.SetHash = setHash;
+                        existing.EffectiveFromHeight = effectiveFromHeight;
                         col.Update(seq, existing);
                         return true;
                     default:
-                        // ROTATION-LIVENESS (Sep 2026): a mark for a DIFFERENT set at this seq refuses
-                        // us. But if nothing was ever appended at this seq and the mark is old, it is
-                        // an aborted proposal, not an equivocation risk — release it for the new set.
+                        // A mark for a DIFFERENT set at this seq refuses us, until nothing can append the
+                        // candidate it marks (its effective height is behind the tip): then it is an aborted
+                        // proposal, not an equivocation risk, and is released for the new set.
                         if (existing != null && IsStaleAbortedMark(existing, seq))
                         {
                             CasterLogUtility.Log(
-                                $"MEMBERSHIP: signed-seq marker at seq {seq} expired — its rotation never appended in {SignedMarkExpirySeconds}s; releasing for a new caster set.",
+                                $"MEMBERSHIP: signed-seq marker at seq {seq} released — its rotation (effective {existing.EffectiveFromHeight}) never appended and is behind the tip; releasing for a new caster set.",
                                 "MEMBERSHIP");
                             existing.RecordHash = recordHash;
                             existing.SetHash = setHash;
                             existing.SignedAt = NowUnix();
+                            existing.EffectiveFromHeight = effectiveFromHeight;
                             col.Update(seq, existing);
                             return true;
                         }
@@ -611,21 +719,44 @@ namespace VerifiedXCore.Services
 
         private static long NowUnix() => DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-        /// <summary>Pure decision: the mark's rotation never landed (head below seq) and it is past
-        /// <see cref="SignedMarkExpirySeconds"/>. Legacy marks with no timestamp never expire.</summary>
+        /// <summary>Whether a mark can be released for a different set: see the pure overload.</summary>
         internal static bool IsStaleAbortedMark(SignedSeqMarker existing, long seq)
         {
             var head = GetCurrent();
             if (head != null && head.RecordSeq >= seq) return false;
-            return IsStaleAbortedMark(existing, seq, headSeq: head?.RecordSeq ?? -1, nowUnix: NowUnix());
+            return IsStaleAbortedMark(existing, seq, headSeq: head?.RecordSeq ?? -1, tipHeight: Globals.LastBlock?.Height ?? -1, tipAgeSeconds: TipAgeSeconds(), nowUnix: NowUnix());
         }
 
-        internal static bool IsStaleAbortedMark(SignedSeqMarker existing, long seq, long headSeq, long nowUnix)
+        /// <summary>
+        /// Pure decision: the mark's rotation never landed (head below seq) and no node near the tip can append it any
+        /// more, because its effective height is <see cref="SignedMarkReleaseMarginBlocks"/> behind our tip. While the
+        /// chain is stalled (tip at least <see cref="BootstrapResetMinStallSeconds"/> old) the tip cannot pass it, so the
+        /// mark is released then too, or an aborted rotation would lock the seq against the removal or bootstrap reset
+        /// that ends the stall. A mark written before marks recorded an effective height keeps the wall-clock expiry it
+        /// was written under (one with no timestamp either never expires).
+        /// </summary>
+        internal static bool IsStaleAbortedMark(SignedSeqMarker existing, long seq, long headSeq, long tipHeight, long tipAgeSeconds, long nowUnix)
         {
             if (headSeq >= seq) return false;
-            if (existing.SignedAt <= 0) return false;
-            return nowUnix - existing.SignedAt >= SignedMarkExpirySeconds;
+            if (tipAgeSeconds >= BootstrapResetMinStallSeconds) return true;
+            if (existing.EffectiveFromHeight <= 0)
+                return existing.SignedAt > 0 && nowUnix - existing.SignedAt >= LegacyMarkExpirySeconds;
+            return tipHeight >= existing.EffectiveFromHeight + SignedMarkReleaseMarginBlocks;
         }
+
+        /// <summary>
+        /// Pure: this node has no membership record while a majority (at least two) of the peers it last asked report
+        /// one. Without a record certificate enforcement is not armed: the node takes the next block uncertified and
+        /// fork choice falls through to lowest-hash-wins. Mainnet 7,562,232 (23 October 2026): 66 of one operator's 70
+        /// validators had no record and switched to the uncertified block that way. When peers report none either (the
+        /// legacy era, or seeds restarting a chain before they mint the genesis record), this is false.
+        /// </summary>
+        internal static bool MissingWhilePeersHaveOne(long? localSeq, IReadOnlyList<long> peerHeads)
+            => localSeq == null && peerHeads.Count >= 2 && peerHeads.Count(h => h >= 0) * 2 > peerHeads.Count;
+
+        /// <summary>This node, against the record heads its last membership pull observed.</summary>
+        internal static bool MissingWhilePeersHaveOne()
+            => MissingWhilePeersHaveOne(GetCurrent()?.RecordSeq, CasterDiscoveryService.LastObservedPeerHeads);
 
         /// <summary>Test/diagnostic support: clears the in-memory head cache (persisted data untouched).</summary>
         public static void InvalidateCache()

@@ -43,7 +43,9 @@ namespace VerifiedXCore.Models
             var scs = GetSCST();
             if (scs != null)
             {
-                var sc = scs.FindOne(x => x.SmartContractUID == smartContractUID);
+                // The oldest document of a UID, as the scan before the UID index read it: through a non-unique index the
+                // first match depends on the index's random levels, which differ between nodes (fourth review, round 8).
+                var sc = scs.Find(x => x.SmartContractUID == smartContractUID).OrderBy(x => x.Id).FirstOrDefault();
                 if (sc != null)
                 {
                     return sc;
@@ -110,6 +112,16 @@ namespace VerifiedXCore.Models
         public static void UpdateSmartContract(SmartContractStateTrei scMain)
         {
             var scs = GetSCST();
+
+            // A vault the chain watches: its ledger is kept within what one document holds, and a write that fails is
+            // thrown, never dropped; a dropped ledger write left a withdrawal paid with no debit (fourth review, round 5).
+            if (scMain != null && VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(scMain.SmartContractUID))
+            {
+                VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.CompactWatched(scMain);
+                if (!scs.UpdateOrThrow(scMain))
+                    throw new InvalidOperationException($"Vault {scMain.SmartContractUID}'s state is not in the state trie; it was not written.");
+                return;
+            }
 
             scs.UpdateSafe(scMain);
         }

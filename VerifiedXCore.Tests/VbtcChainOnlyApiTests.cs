@@ -144,8 +144,8 @@ namespace VerifiedXCore.Tests
                     $"{p.SmartContractUID}{p.OwnerAddress}{p.WithdrawalRequestHash}{p.BTCTxHash}{p.FailureProof}{p.Timestamp}{p.UniqueId}", who.Key, who.Pub);
                 return (string?)JObject.Parse(await _api.CancelWithdrawalRaw(p))["Message"] ?? "";
             }
-            Assert.NotEqual("Only the contract owner can request cancellation", await Cancel(_owner));   // past the owner check
-            Assert.Equal("Only the contract owner can request cancellation", await Cancel(_holder));
+            Assert.DoesNotContain("for the contract's owner", await Cancel(_owner));   // past the owner check
+            Assert.Contains("for the contract's owner", await Cancel(_holder));        // and told which routes a requester uses
         }
 
         [Fact]

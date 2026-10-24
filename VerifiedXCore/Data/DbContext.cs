@@ -69,6 +69,8 @@ namespace VerifiedXCore.Data
         public static LiteDatabase DB_vBTC { set; get; } // stores vBTC V2 data (validators, contracts, cancellations)
         public static LiteDatabase DB_Shares { set; get; }
         public static LiteDatabase DB_Privacy { set; get; }
+        /// <summary>Bitcoin facts in consensus: attested headers, vault scripts, vault coins, signer sets. Chain-derived only; no secrets.</summary>
+        public static LiteDatabase DB_BtcAttest { set; get; }
         public static LiteDatabase DB_Snapshot { set; get; } //rotating chain-state snapshots for fast fork/crash recovery
 
 
@@ -101,6 +103,7 @@ namespace VerifiedXCore.Data
         public const string RSRV_DB_VBTC = @"rsrvvbtc.db";
         public const string RSRV_DB_SHARES = @"rsrvshares.db";
         public const string RSRV_DB_PRIVACY = @"DB_Privacy.db";
+        public const string RSRV_DB_BTC_ATTEST = @"rsrvbtcattest.db";
         public const string RSRV_DB_SNAPSHOT = @"rsrvsnapshot.db";
 
         //Database tables
@@ -141,6 +144,33 @@ namespace VerifiedXCore.Data
         public const string RSRV_TOPIC_TREI = "rsrv_topic_trei";
         public const string RSRV_VOTE = "rsrv_vote";
         public const string RSRV_TOKEN_VOTE = "rsrv_token_vote";
+
+        /// <summary>
+        /// Indexes the mempool where it lives (DB_Mempool). Its indexes were made on a collection of the same name in the main
+        /// database, which nothing uses: every look-up in the mempool read all of it, on every node, after each block once per
+        /// block transaction, on each admission and in each proposal (fifth review, round 35). Only bounded values: a
+        /// transaction's hash (checked against its content) and sender (its signer), and its type.
+        /// </summary>
+        private static void EnsureMempoolIndexes()
+        {
+            var pool = DB_Mempool.GetCollection<Transaction>(RSRV_TRANSACTION_POOL);
+            pool.EnsureIndexSafe(x => x.Hash, false);
+            pool.EnsureIndexSafe(x => x.FromAddress, false);
+            pool.EnsureIndexSafe(x => x.TransactionType, false);
+        }
+
+        /// <summary>Drops <paramref name="collection"/>'s index on <paramref name="expression"/>, if it has one (round 34).</summary>
+        private static void DropIndexOn(LiteDatabase db, string collection, string expression)
+        {
+            try
+            {
+                var names = db.GetCollection("$indexes").Find(LiteDB.Query.EQ("collection", collection))
+                    .Where(d => d["expression"].AsString == expression).Select(d => d["name"].AsString).ToList();
+                foreach (var name in names)
+                    db.GetCollection(collection).DropIndex(name);
+            }
+            catch (Exception ex) { ErrorLogUtility.LogError($"Dropping index {expression} on {collection}: {ex.Message}", "DbContext.DropIndexOn()"); }
+        }
         public const string RSRV_SETTINGS = "rsrv_settings";
         public const string RSRV_MOTHER = "rsrv_mother";
         public const string RSRV_ADJ_BENCH = "rsrv_adj_bench";
@@ -173,6 +203,7 @@ namespace VerifiedXCore.Data
 
             DB = new LiteDatabase(new ConnectionString{Filename = path + RSRV_DB_NAME,Connection = ConnectionType.Direct,ReadOnly = false}, mapper);
             DB_Mempool = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_MEMPOOL, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
+            EnsureMempoolIndexes();
             DB_Assets = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_ASSETS, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_AssetQueue = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_ASSET_QUEUE, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_WorldStateTrei = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_WSTATE_TREI, Connection = ConnectionType.Direct, ReadOnly = false });
@@ -197,27 +228,56 @@ namespace VerifiedXCore.Data
             DB_TokenizedWithdrawals = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_TOKENIZED_WITHDRAWALS, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_VBTCWithdrawalRequests = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC_WITHDRAWAL_REQUESTS, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_vBTC = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC, Connection = ConnectionType.Direct, ReadOnly = false });
+            VerifiedXCore.Bitcoin.Models.VBTCWithdrawalCancellation.EnsureIndexes(DB_vBTC);
             DB_Shares = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SHARES, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Privacy = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_PRIVACY, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
+            DB_BtcAttest = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_BTC_ATTEST, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
             DB_Snapshot = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SNAPSHOT, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
 
             PrivacyDbContext.EnsurePrivacyIndexes(DB_Privacy);
+            VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.EnsureIndexes(DB_BtcAttest);
 
             var blocks = DB.GetCollection<Block>(RSRV_BLOCKS);
             blocks.EnsureIndexSafe(x => x.Height);
 
-            var transactionPool = DbContext.DB.GetCollection<Transaction>(DbContext.RSRV_TRANSACTION_POOL);
-            transactionPool.EnsureIndexSafe(x => x.Hash, false);
-            transactionPool.EnsureIndexSafe(x => x.FromAddress, false);
-            transactionPool.EnsureIndexSafe(x => x.ToAddress, false);
+            EnsureMempoolIndexes();
 
             var rsrvTransactions = DB_Reserve.GetCollection<ReserveTransactions>(RSRV_RESERVE_TRANSACTIONS);
             rsrvTransactions.EnsureIndexSafe(x => x.Hash);
+            // Settlement reads the pending rows every block, Recover() and the pending vBTC total a sender's: both scanned
+            // every row ever written (fifth review, round 28).
+            rsrvTransactions.EnsureIndexSafe(x => x.ReserveTransactionStatus);
+            rsrvTransactions.EnsureIndexSafe(x => x.FromAddress);
+            try { rsrvTransactions.EnsureIndex(ReserveTransactions.DueIndexName, ReserveTransactions.DueIndexExpression); } // round 34
+            catch (Exception ex) { ErrorLogUtility.LogError($"Reserve due index: {ex.Message}", "DbContext.Initialize()"); }
+            // Withdrawal requests had no index: every request, settlement, owner balance and vault creation read every
+            // request row ever stored, on every node, and the table only grows (fifth review, round 33). Readers keep the
+            // order they read rows in before (by Id) wherever more than one can match.
+            var vbtcWithdrawalRequests = DB_VBTCWithdrawalRequests.GetCollection<VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest>(RSRV_VBTC_WITHDRAWAL_REQUESTS);
+            vbtcWithdrawalRequests.EnsureIndexSafe(x => x.TransactionHash);
+            vbtcWithdrawalRequests.EnsureIndexSafe(x => x.RequestorAddress);
+            // The contract UID as a request's transaction spelled it has no length before the path-audit rules: indexed
+            // only up to 200 characters (round 34; a plain index made by round 33 is dropped).
+            DropIndexOn(DB_VBTCWithdrawalRequests, RSRV_VBTC_WITHDRAWAL_REQUESTS, "$.SmartContractUID");
+            try { vbtcWithdrawalRequests.EnsureIndex(VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.ShortUidIndexName, VerifiedXCore.Bitcoin.Models.VBTCWithdrawalRequest.ShortUidIndexExpression); }
+            catch (Exception ex) { ErrorLogUtility.LogError($"Withdrawal request contract index: {ex.Message}", "DbContext.Initialize()"); }
+            // Token votes likewise: each vote cast read every vote ever cast in validation and again in apply, and a vote
+            // costs one fee (round 33). Only fields whose every value is bounded are indexed: LiteDB refuses an index key
+            // over 1,023 bytes and the write is lost, so a node with the index dropped a row a node without it kept (a
+            // topic id had no length before the path-audit rules; round 34). The voter is the signer (NEW-04) and the
+            // contract one that exists.
+            var tokenVotes = DB_Wallet.GetCollection<TokenVote>(RSRV_TOKEN_VOTE);
+            DropIndexOn(DB_Wallet, RSRV_TOKEN_VOTE, "$.TopicUID");
+            tokenVotes.EnsureIndexSafe(x => x.Address);
+            tokenVotes.EnsureIndexSafe(x => x.SmartContractUID);
 
             var transactions = DbContext.DB_Wallet.GetCollection<Transaction>(DbContext.RSRV_TRANSACTIONS);
             transactions.EnsureIndexSafe(x => x.Hash, false);
             transactions.EnsureIndexSafe(x => x.FromAddress, false);
             transactions.EnsureIndexSafe(x => x.ToAddress, false);
+            // Every block reads the wallet's pending transactions; every transaction to a local address adds a row (a
+            // validator's address is public, and a zero-amount transaction costs one fee): read whole each block (round 34).
+            transactions.EnsureIndexSafe(x => x.TransactionStatus, false);
 
             var aTrei = DbContext.DB_AccountStateTrei.GetCollection<AccountStateTrei>(DbContext.RSRV_ASTATE_TREI);
             aTrei.EnsureIndexSafe(x => x.Key, false);
@@ -225,6 +285,21 @@ namespace VerifiedXCore.Data
 
             var scTrei = DbContext.DB_SmartContractStateTrei.GetCollection<SmartContractStateTrei>(DbContext.RSRV_SCSTATE_TREI);
             scTrei.EnsureIndexSafe(x => x.LastModifiedHeight, false); //snapshot diff-copy queries
+            // Every contract lookup is by its UID: without an index each one read every contract's document, a watched
+            // vault's ledger (up to about 10 MB) among them (fourth review, round 7). Not unique: older states may hold a
+            // UID twice; lookups take the oldest (lowest Id), as the scan did.
+            scTrei.EnsureIndexSafe(x => x.SmartContractUID, false);
+            DB_SmartContractStateTrei.GetCollection<RetiredContractUid>(RetiredContractUid.CollectionName).EnsureIndexSafe(x => x.SmartContractUID, false);
+            // Not indexed by owner or token owner: an owner change writes the text a transaction names (TokenContractOwnerChange
+            // takes any string), LiteDB refuses an index key over 1,023 bytes and the write was lost on a node with the
+            // index and kept on one without it (round 33 added them, round 34 drops them where a node built them).
+            DropIndexOn(DbContext.DB_SmartContractStateTrei, RSRV_SCSTATE_TREI, "$.OwnerAddress");
+            DropIndexOn(DbContext.DB_SmartContractStateTrei, RSRV_SCSTATE_TREI, "$.TokenDetails.ContractOwner");
+            // Nor bridge locks by vault: before the path-audit rules a lock keeps the vault UID as its transaction spelled it
+            // (found through the collation), so its length is not bounded, and the index was made on every read of the
+            // store, which would then throw for good (round 33 added it; round 34). It was read only at a ledger's
+            // compaction and a vault's creation.
+            DropIndexOn(DB_VBTCWithdrawalRequests, VerifiedXCore.Bitcoin.Models.VBTCBridgeLockState.CollectionName, "$.SmartContractUID");
 
             //var peers = DbContext.DB_Peers.GetCollection<Peers>(DbContext.RSRV_PEERS);
             //peers.EnsureIndex(x => x.PeerIP, true);
@@ -345,6 +420,7 @@ namespace VerifiedXCore.Data
             DB_vBTC.Commit();
             DB_Shares.Commit();
             DB_Privacy.Commit();
+            DB_BtcAttest.Commit();
         }
 
         public static void Rollback(string location = "", string message = "")
@@ -388,6 +464,7 @@ namespace VerifiedXCore.Data
             //DB_Settings.Rollback();
             DB_Reserve.Rollback();
             DB_Privacy.Rollback();
+            DB_BtcAttest.Rollback();
         }
 
         public static void DeleteCorruptDb()
@@ -434,6 +511,7 @@ namespace VerifiedXCore.Data
             DB_vBTC.Commit();
             DB_Shares.Commit();
             DB_Privacy.Commit();
+            DB_BtcAttest.Commit();
 
             //dispose connection to DB
             CloseDB();
@@ -482,6 +560,7 @@ namespace VerifiedXCore.Data
             File.Delete(path + RSRV_DB_BITCOIN);
             File.Delete(path + RSRV_DB_TOKENIZED_WITHDRAWALS);
             File.Delete(path + RSRV_DB_VBTC_WITHDRAWAL_REQUESTS);
+            File.Delete(path + RSRV_DB_BTC_ATTEST);
             File.Delete(path + RSRV_DB_SNAPSHOT);
 
             // SECRET-BEARING FILES ARE NEVER DELETED — they hold local material that cannot be
@@ -501,6 +580,7 @@ namespace VerifiedXCore.Data
             //recreate DBs
             DB = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_NAME, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
             DB_Mempool = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_MEMPOOL, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
+            EnsureMempoolIndexes();
             DB_Assets = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_ASSETS, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_AssetQueue = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_ASSET_QUEUE, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_WorldStateTrei = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_WSTATE_TREI, Connection = ConnectionType.Direct, ReadOnly = false });
@@ -525,11 +605,14 @@ namespace VerifiedXCore.Data
             DB_TokenizedWithdrawals = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_TOKENIZED_WITHDRAWALS, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_VBTCWithdrawalRequests = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC_WITHDRAWAL_REQUESTS, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_vBTC = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_VBTC, Connection = ConnectionType.Direct, ReadOnly = false });
+            VerifiedXCore.Bitcoin.Models.VBTCWithdrawalCancellation.EnsureIndexes(DB_vBTC);
             DB_Shares = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SHARES, Connection = ConnectionType.Direct, ReadOnly = false });
             DB_Privacy = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_PRIVACY, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
+            DB_BtcAttest = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_BTC_ATTEST, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
             DB_Snapshot = new LiteDatabase(new ConnectionString { Filename = path + RSRV_DB_SNAPSHOT, Connection = ConnectionType.Direct, ReadOnly = false }, mapper);
 
             PrivacyDbContext.EnsurePrivacyIndexes(DB_Privacy);
+            VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.EnsureIndexes(DB_BtcAttest);
 
             // The preserved secret-bearing files still contain OLD-chain consensus state — clear
             // only those collections (secrets stay): vBTC V2 contracts/cancellations/validators
@@ -604,6 +687,7 @@ namespace VerifiedXCore.Data
             DB_vBTC.Dispose();
             DB_Shares.Dispose();
             DB_Privacy.Dispose();
+            DB_BtcAttest.Dispose();
             DB_Snapshot.Dispose();
         }
 
@@ -742,6 +826,11 @@ namespace VerifiedXCore.Data
             try
             {
                 DB_Privacy.Checkpoint();
+            }
+            catch { }
+            try
+            {
+                DB_BtcAttest.Checkpoint();
             }
             catch { }
         }

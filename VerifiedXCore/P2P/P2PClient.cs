@@ -88,8 +88,12 @@ namespace VerifiedXCore.P2P
         #region Get Available HubConnections for Peers
         public static async Task RemoveNode(NodeInfo node)
         {
-            if(Globals.AdjudicateAccount == null && Globals.Nodes.TryRemove(node.NodeIP, out _) && node.Connection != null)
-                await node.Connection.DisposeAsync();            
+            if (Globals.AdjudicateAccount == null && Globals.Nodes.TryRemove(node.NodeIP, out _))
+            {
+                RetireReport(node.NodeIP); // a peer that is gone no longer confirms this node's address
+                if (node.Connection != null)
+                    await node.Connection.DisposeAsync();
+            }
         }
 
         #endregion
@@ -135,6 +139,22 @@ namespace VerifiedXCore.P2P
         // NEW-20: reporters per reported address (a peer counts once), and a bound on how many addresses are tracked.
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, System.Collections.Concurrent.ConcurrentDictionary<string, byte>> _ipReporters = new();
         private const int MaxTrackedReportedIPs = 256;
+        // A peer sees one address for this node, so it holds one vote: a new report moves it. Every dial selector skips
+        // ReportedIPs, so without this one peer could fill the table with addresses this node would then never dial.
+        private static readonly Dictionary<string, string> _reporterVote = new();
+        private const int MaxTrackedReporters = 1024;
+        private static readonly object _reportedIpLock = new();
+        // Program.cs and Config.cs seed a manually configured address with this weight; peer votes never remove it.
+        private const int ManualReportWeight = 99999;
+
+        internal static void ResetReportedIPTracking()
+        {
+            lock (_reportedIpLock)
+            {
+                _ipReporters.Clear();
+                _reporterVote.Clear();
+            }
+        }
 
         /// <summary>
         /// NEW-20: records a peer's report of this node's public address. The value was any string (up to ~1.15 MB), was
@@ -148,37 +168,136 @@ namespace VerifiedXCore.P2P
             if (string.IsNullOrWhiteSpace(reported) || reported.Length > 45 || !System.Net.IPAddress.TryParse(reported.Trim(), out var parsed))
                 return;
             var ip = VerifiedXCore.Utilities.RemoteIp.Text(parsed)!;
-            var who = string.IsNullOrEmpty(reporter) ? "?" : reporter;
-            if (!_ipReporters.ContainsKey(ip) && _ipReporters.Count >= MaxTrackedReportedIPs)
-                return;
-            var set = _ipReporters.GetOrAdd(ip, _ => new System.Collections.Concurrent.ConcurrentDictionary<string, byte>());
-            if (set.Count < 64) set.TryAdd(who, 0);
-            Globals.ReportedIPs.AddOrUpdate(ip, set.Count, (_, existing) => Math.Max(existing, set.Count));
-            TryAutoUpdateReportedIP();
+            // One endpoint, one vote: the reporter's address is canonicalised so other spellings of it are the same key.
+            var who = !string.IsNullOrEmpty(reporter) && System.Net.IPAddress.TryParse(reporter.Trim(), out var reporterIp)
+                ? VerifiedXCore.Utilities.RemoteIp.Text(reporterIp)!
+                : string.IsNullOrEmpty(reporter) ? "?" : reporter;
+            lock (_reportedIpLock)
+            {
+                _reporterVote.TryGetValue(who, out var previous);
+                if (previous == ip)
+                    return;
+                if (previous == null && _reporterVote.Count >= MaxTrackedReporters)
+                    return;
+                if (_ipReporters.TryGetValue(ip, out var existingSet) ? existingSet.Count >= 64 : _ipReporters.Count >= MaxTrackedReportedIPs)
+                    return;
+                if (previous != null)
+                    WithdrawReport(previous, who);
+
+                var set = _ipReporters.GetOrAdd(ip, _ => new System.Collections.Concurrent.ConcurrentDictionary<string, byte>());
+                set.TryAdd(who, 0);
+                _reporterVote[who] = ip;
+                Globals.ReportedIPs.AddOrUpdate(ip, set.Count, (_, existing) => Math.Max(existing, set.Count));
+                TryAutoUpdateReportedIP(); // under the lock: a choice made from an older count cannot be published over a newer one
+            }
         }
 
+        /// <summary>Withdraws a peer's report of this node's address (the peer disconnected) and re-evaluates the address.</summary>
+        public static void RetireReport(string? reporter)
+        {
+            if (string.IsNullOrEmpty(reporter))
+                return;
+            var who = System.Net.IPAddress.TryParse(reporter.Trim(), out var reporterIp) ? VerifiedXCore.Utilities.RemoteIp.Text(reporterIp)! : reporter;
+            lock (_reportedIpLock)
+            {
+                if (!_reporterVote.TryGetValue(who, out var previous))
+                    return;
+                WithdrawReport(previous, who);
+                TryAutoUpdateReportedIP();
+            }
+        }
+
+        private static void WithdrawReport(string ip, string reporter)
+        {
+            _reporterVote.Remove(reporter);
+            if (!_ipReporters.TryGetValue(ip, out var set))
+                return;
+            set.TryRemove(reporter, out _);
+            var remaining = set.Count;
+            if (remaining == 0)
+                _ipReporters.TryRemove(ip, out _);
+            if (Globals.ReportedIPs.TryGetValue(ip, out var current) && current >= ManualReportWeight)
+                return;
+            if (remaining == 0)
+                Globals.ReportedIPs.TryRemove(ip, out _);
+            else
+                Globals.ReportedIPs[ip] = remaining;
+        }
+
+        /// <summary>
+        /// The addresses an outbound dial skips as this node's own: only the confirmed <see cref="Globals.ReportedIP"/>.
+        /// ReportedIPs holds every candidate peers have reported, so skipping all of them let peers keep this node from
+        /// dialing addresses of their choosing.
+        /// </summary>
+        public static IEnumerable<string> OwnAddressesToSkip() =>
+            string.IsNullOrWhiteSpace(Globals.ReportedIP) ? Array.Empty<string>() : new[] { Globals.ReportedIP };
+
+        /// <summary>
+        /// Sets <see cref="Globals.ReportedIP"/> from peers' reports unless it was configured. Re-evaluated on every report:
+        /// a candidate with more confirming peers replaces the current address (a tie keeps it), and an address whose
+        /// confirmations fall below two is dropped, so the first two peers to agree cannot fix it for the process lifetime.
+        /// </summary>
         public static void TryAutoUpdateReportedIP()
         {
-            // Don't overwrite manually configured IP
+            lock (_reportedIpLock)
+                AutoUpdateReportedIP();
+        }
+
+        private static void AutoUpdateReportedIP()
+        {
             if (Globals.ReportedIPManuallySet)
                 return;
 
-            // Already set via auto-discovery
-            if (!string.IsNullOrEmpty(Globals.ReportedIP))
-                return;
+            var current = Globals.ReportedIP;
+            var currentVotes = !string.IsNullOrEmpty(current) && Globals.ReportedIPs.TryGetValue(current, out var votes) ? votes : 0;
 
-            // Find the top non-private IP with at least 2 confirmations
-            var bestIP = Globals.ReportedIPs
+            // The top non-private IP with at least 2 confirmations
+            var best = Globals.ReportedIPs
                 .Where(kv => !IsPrivateIP(kv.Key) && kv.Value >= 2)
                 .OrderByDescending(kv => kv.Value)
-                .Select(kv => kv.Key)
                 .FirstOrDefault();
 
-            if (!string.IsNullOrEmpty(bestIP))
+            if (best.Key == null)
             {
-                Globals.ReportedIP = bestIP;
-                LogUtility.Log($"Auto-discovered IP address: {bestIP}", "P2PClient.TryAutoUpdateReportedIP()");
+                if (!string.IsNullOrEmpty(current) && currentVotes < 2)
+                {
+                    Globals.ReportedIP = "";
+                    LogUtility.Log($"Auto-discovered IP address {current} lost its confirmations; cleared.", "P2PClient.TryAutoUpdateReportedIP()");
+                }
+                return;
             }
+
+            if (best.Key == current || (currentVotes >= 2 && best.Value <= currentVotes))
+                return;
+
+            Globals.ReportedIP = best.Key;
+            LogUtility.Log($"Auto-discovered IP address: {best.Key}", "P2PClient.TryAutoUpdateReportedIP()");
+        }
+
+        /// <summary>Peer confirmations a validator's own address needs before its registration and heartbeat carry it.</summary>
+        public const int ValidatorIpConfirmations = 3;
+
+        private static int _validatorIpHintLogged;
+
+        /// <summary>
+        /// The address a validator registers and heartbeats with: the configured one (<c>ipaddress=</c>), else the
+        /// auto-discovered <see cref="Globals.ReportedIP"/> only while at least <see cref="ValidatorIpConfirmations"/> peers
+        /// confirm it, else null. Two peers the node happens to dial are enough to set ReportedIP for its other uses; they
+        /// are not enough to publish it on chain as the address FROST and caster traffic is sent to.
+        /// </summary>
+        public static string? ValidatorReportedIP()
+        {
+            var ip = Globals.ReportedIP;
+            if (string.IsNullOrEmpty(ip))
+                return null;
+            if (Globals.ReportedIPManuallySet)
+                return ip;
+            if (Globals.ReportedIPs.TryGetValue(ip, out var votes) && votes >= ValidatorIpConfirmations)
+                return ip;
+            if (System.Threading.Interlocked.Exchange(ref _validatorIpHintLogged, 1) == 0)
+                LogUtility.Log($"This validator's address {ip} has {votes} peer confirmation(s); it registers and heartbeats once {ValidatorIpConfirmations} peers confirm it. To run with fewer peers, set it with ipaddress=.",
+                    "P2PClient.ValidatorReportedIP()");
+            return null;
         }
 
         public static string MostLikelyIP()
@@ -444,17 +563,13 @@ namespace VerifiedXCore.P2P
 
             await DropDisconnectedPeers();            
 
-            // FIX: Removed Globals.ReportedIPs from skip set — ReportedIPs contains external IPs
-            // that peers report back to us (our own IP as seen by them). Including them in the
-            // skip set was incorrectly preventing connections to legitimate peers whose IP happened
-            // to match an entry in ReportedIPs.
             // CHURN-FIX: peers evicted for lagging (or under connect-failure backoff) are excluded in
             // BOTH passes below, so a node dropped by the height check is not re-dialed 10s later.
             var cooldownIPs = PeerConnectionBackoff.BlockedIPs();
 
             var SkipIPs = new HashSet<string>(Globals.Nodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
                 .Union(Globals.BannedIPs.Keys)
-                .Union(Globals.ReportedIPs.Keys)
+                .Union(OwnAddressesToSkip())
                 .Union(Globals.SkipPeers.Keys)
                 .Union(cooldownIPs));
 
@@ -511,7 +626,7 @@ namespace VerifiedXCore.P2P
 
                 var fortisOnlyIPs = new HashSet<string>(fortisList.Select(x => x))
                     .Union(Globals.BannedIPs.Keys)
-                    .Union(Globals.ReportedIPs.Keys);
+                    .Union(OwnAddressesToSkip());
 
                 Random rnd = new Random();
                 var newPeers = peerDB.Find(x => x.IsOutgoing == true).ToArray()

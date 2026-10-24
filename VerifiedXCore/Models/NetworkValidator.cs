@@ -455,6 +455,9 @@ namespace VerifiedXCore.Models
         ///   4) <c>FirstSeenAtHeight</c> is preserved if already set (to avoid
         ///      resetting the maturity-gate timer on reconnects), otherwise populated.
         /// </summary>
+        /// <summary>How long a trusted validator's IP holds against a direct connection from another IP since it was last seen.</summary>
+        public const long DirectConnectIpHoldSeconds = 600;
+
         public static void UpsertTrustedOnDirectConnect(NetworkValidator validator)
         {
             if (validator == null || string.IsNullOrEmpty(validator.Address))
@@ -521,6 +524,18 @@ namespace VerifiedXCore.Models
             if (validator.FirstSeenAt == 0)
                 validator.FirstSeenAt = currentTime;
 
+            // A direct connection proves the key, not that the validator moved: the handshake names no recipient and
+            // replays to another node within its window, so it does not re-point a validator seen recently at another
+            // IP. A validator that really moved is taken at its new IP once its old entry has gone quiet.
+            if (Globals.NetworkValidators.TryGetValue(validator.Address, out var known) && known.IsFullyTrusted
+                && !string.IsNullOrEmpty(known.IPAddress) && !string.Equals(known.IPAddress, validator.IPAddress, StringComparison.Ordinal)
+                && currentTime - known.LastSeen <= DirectConnectIpHoldSeconds)
+            {
+                LogUtility.Log($"Validator {validator.Address} connected from {validator.IPAddress}; keeping its recently seen IP {known.IPAddress}.",
+                    "NetworkValidator.UpsertTrustedOnDirectConnect");
+                validator.IPAddress = known.IPAddress;
+            }
+
             // Upsert into the trusted registry.
             Globals.NetworkValidators[validator.Address] = validator;
 
@@ -586,10 +601,11 @@ namespace VerifiedXCore.Models
                         var parts = cleanVersion.Split('.');
                         if (parts.Length > 0 && int.TryParse(parts[0], out var major))
                         {
-                            if (major < Globals.MajorVer)
+                            var requiredMajor = Globals.MinimumPeerMajorVersion(Globals.LastBlock?.Height ?? 0);
+                            if (major < requiredMajor)
                             {
                                 toRemove.Add(kvp.Key);
-                                LogUtility.Log($"LIVENESS-SWEEP: {kvp.Key} at {ip} — version '{cleanVersion}' outdated (need major >= {Globals.MajorVer}). Removing.", "NetworkValidator.RunPostSyncLivenessSweep");
+                                LogUtility.Log($"LIVENESS-SWEEP: {kvp.Key} at {ip} — version '{cleanVersion}' outdated (need major >= {requiredMajor}). Removing.", "NetworkValidator.RunPostSyncLivenessSweep");
                                 continue;
                             }
                         }
@@ -642,7 +658,7 @@ namespace VerifiedXCore.Models
                     var parts = cleanVersion.Split('.');
                     if (parts.Length > 0 && int.TryParse(parts[0], out var major))
                     {
-                        if (major < Globals.MajorVer)
+                        if (major < Globals.MinimumPeerMajorVersion(Globals.LastBlock?.Height ?? 0))
                             return false;
                     }
                 }

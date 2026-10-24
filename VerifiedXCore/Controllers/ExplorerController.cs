@@ -113,6 +113,21 @@ namespace VerifiedXCore.Controllers
             }
         }
 
+        /// <summary>
+        /// The explorer answers without the API token, so under openapi it serves chain data only: this node's own wallet
+        /// rows (its pending and sent transactions) are not shown to network callers. On a loopback-only node it keeps
+        /// showing them to the operator.
+        /// </summary>
+        private static bool WalletRowsVisible => !Globals.OpenAPI;
+
+        private static List<Transaction> WalletTransactionsFor(string address) => WalletRowsVisible
+            ? TransactionData.GetAll().Query()
+                .Where(t => t.FromAddress == address || t.ToAddress == address)
+                .OrderByDescending(t => t.Height)
+                .Limit(50)
+                .ToList()
+            : new List<Transaction>();
+
         // ── Transaction by hash ──────────────────────────────────────────────────
         [HttpGet("api/tx/{hash}")]
         public IActionResult GetTransaction(string hash)
@@ -120,7 +135,7 @@ namespace VerifiedXCore.Controllers
             try
             {
                 // Search local wallet transactions first
-                var tx = TransactionData.GetTxByHash(hash);
+                var tx = WalletRowsVisible ? TransactionData.GetTxByHash(hash) : null;
                 if (tx != null) return Ok(tx);
 
                 // Fall back: search recent blocks
@@ -163,11 +178,7 @@ namespace VerifiedXCore.Controllers
                 var nonce = state?.Nonce ?? 0;
 
                 // Get transactions involving this address from wallet DB
-                var txs = TransactionData.GetAll().Query()
-                    .Where(t => t.FromAddress == address || t.ToAddress == address)
-                    .OrderByDescending(t => t.Height)
-                    .Limit(50)
-                    .ToList();
+                var txs = WalletTransactionsFor(address);
 
                 return Ok(new
                 {
@@ -250,7 +261,7 @@ namespace VerifiedXCore.Controllers
                     return Ok(new { type = "block", data = block });
 
                 // Try transaction hash
-                var tx = TransactionData.GetTxByHash(q);
+                var tx = WalletRowsVisible ? TransactionData.GetTxByHash(q) : null;
                 if (tx != null)
                     return Ok(new { type = "tx", data = tx });
 
@@ -279,11 +290,7 @@ namespace VerifiedXCore.Controllers
             var state = aTrei.FindOne(x => x.Key == q);
             if (state != null)
             {
-                var txs = TransactionData.GetAll().Query()
-                    .Where(t => t.FromAddress == q || t.ToAddress == q)
-                    .OrderByDescending(t => t.Height)
-                    .Limit(50)
-                    .ToList();
+                var txs = WalletTransactionsFor(q);
 
                 return Ok(new
                 {
@@ -301,11 +308,7 @@ namespace VerifiedXCore.Controllers
 
             // Address might exist with 0 balance (not in state trie)
             // Still check if it has any transactions
-            var addrTxs = TransactionData.GetAll().Query()
-                .Where(t => t.FromAddress == q || t.ToAddress == q)
-                .OrderByDescending(t => t.Height)
-                .Limit(50)
-                .ToList();
+            var addrTxs = WalletTransactionsFor(q);
 
             if (addrTxs.Any())
             {
@@ -978,7 +981,7 @@ function stNm(s){
   return m[s]!==undefined?m[s]:'Unknown';
 }
 function ttype(t){
-  var n=['TX','NODE','NFT_MINT','NFT_TX','NFT_BURN','NFT_SALE','ADNR','DSTR','VOTE_TOPIC','VOTE','RESERVE','SC_MINT','SC_TX','SC_BURN','FTKN_MINT','FTKN_TX','FTKN_BURN','TKNZ_MINT','TKNZ_TX','TKNZ_BURN','TKNZ_WD_ARB','TKNZ_WD_OWNER','VBTC2_VAL_REG','VBTC2_VAL_HB','VBTC2_VAL_EXIT','VBTC2_CREATE','VBTC2_TX','VBTC2_WD_REQ','VBTC2_WD_COMP','VBTC2_WD_CANCEL','VBTC2_WD_VOTE','VFX_SHIELD','VFX_UNSHIELD','VFX_PRIV_XFER','VBTC2_SHIELD','VBTC2_UNSHIELD','VBTC2_PRIV_XFER'];
+  var n=['TX','NODE','NFT_MINT','NFT_TX','NFT_BURN','NFT_SALE','ADNR','DSTR','VOTE_TOPIC','VOTE','RESERVE','SC_MINT','SC_TX','SC_BURN','FTKN_MINT','FTKN_TX','FTKN_BURN','TKNZ_MINT','TKNZ_TX','TKNZ_BURN','TKNZ_WD_ARB','TKNZ_WD_OWNER','VBTC2_VAL_REG','VBTC2_VAL_HB','VBTC2_VAL_EXIT','VBTC2_CREATE','VBTC2_TX','VBTC2_WD_REQ','VBTC2_WD_COMP','VBTC2_WD_CANCEL','VBTC2_WD_VOTE','VFX_SHIELD','VFX_UNSHIELD','VFX_PRIV_XFER','VBTC2_SHIELD','VBTC2_UNSHIELD','VBTC2_PRIV_XFER','VBTC2_BRIDGE_LOCK','VBTC2_BRIDGE_UNLOCK','VBTC2_POOL_UNLOCK','VBTC2_EXIT_BTC','VBTC2_EXIT_BTC_COMP','VBTC2_EXIT_BTC_FAIL','VBTC2_BTC_REPORT','VBTC2_WD_FEE_BUMP','VBTC2_BTC_REWIND'];
   return n[t]!==undefined?n[t]:'TYPE_'+t;
 }
 function tCls(t){

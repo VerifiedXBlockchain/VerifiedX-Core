@@ -130,4 +130,59 @@ namespace VerifiedXCore.Models.Privacy
         public long FromHeight { get; set; }
         public long ToHeight { get; set; }
     }
+
+    // ── Raw (externally held keys) shielded VFX flows: PrivateRawTxService ─────────────────────────────────────
+
+    /// <summary>Build + prove a T→Z shield for an address this node does not hold; the caller signs the returned Hash.</summary>
+    public class RawShieldVfxRequest
+    {
+        public string FromAddress { get; set; } = "";
+        public string RecipientZfxAddress { get; set; } = "";
+        public decimal ShieldAmount { get; set; }
+        /// <summary>Optional; the node's fee calculation when omitted.</summary>
+        public decimal? TransparentFee { get; set; }
+        public string? Memo { get; set; }
+    }
+
+    /// <summary>Stateless note scan for a zfx address by its viewing key (Base64 or 64 hex chars).</summary>
+    public class RawShieldedNotesRequest
+    {
+        public string ZfxAddress { get; set; } = "";
+        public string ViewingKey { get; set; } = "";
+        /// <summary>Default: the proof-rules height once the epoch is active, else 0.</summary>
+        public long? FromHeight { get; set; }
+        /// <summary>Default: the chain tip.</summary>
+        public long? ToHeight { get; set; }
+        public bool IncludeSpent { get; set; }
+    }
+
+    /// <summary>Build + prove a Z→T unshield from notes the viewing key can open; the result needs no signature.</summary>
+    public class RawUnshieldVfxRequest
+    {
+        public string ZfxAddress { get; set; } = "";
+        public string ViewingKey { get; set; } = "";
+        public string TransparentToAddress { get; set; } = "";
+        public decimal TransparentAmount { get; set; }
+        /// <summary>Optional: spend exactly these note commitments (1–2); the node selects when omitted.</summary>
+        public List<string>? InputCommitments { get; set; }
+    }
+
+    /// <summary>Build + prove a Z→Z private transfer; the result needs no signature.</summary>
+    public class RawPrivateTransferVfxRequest
+    {
+        public string ZfxAddress { get; set; } = "";
+        public string ViewingKey { get; set; } = "";
+        public string RecipientZfxAddress { get; set; } = "";
+        public decimal PaymentAmount { get; set; }
+        public List<string>? InputCommitments { get; set; }
+    }
+
+    /// <summary>Submit (or dry-run) a transaction built by a GetRaw*TxData route.</summary>
+    public class RawPrivateTxSubmission
+    {
+        /// <summary>The Hash a GetRaw*TxData route returned.</summary>
+        public string Hash { get; set; } = "";
+        /// <summary>Shield only: the FromAddress signature over the Hash. Ignored for unshield / transfer.</summary>
+        public string? Signature { get; set; }
+    }
 }

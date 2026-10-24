@@ -121,18 +121,18 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Both honor mainnet/testnet via their GetBaseURL().
         /// </summary>
         /// <summary>
-        /// Whether the Esplora cross-check has a usable provider for the given network.
-        /// TestNet4 has none: MempoolSpace/Blockstream route all non-mainnet requests to
-        /// TESTNET3 URLs (blockstream.info has no testnet4 Esplora at all), so their answers
-        /// are wrong-chain poison for DecideEmptyVerdict — an answered-empty from the wrong
-        /// chain can upgrade a single lagging Electrum "empty" into ConfirmedEmpty on a funded
-        /// vault. Skipping keeps the check Electrum-quorum-only there (2+ servers must agree),
-        /// and per project policy we minimize third-party reliance rather than extend it.
+        /// Whether the Esplora cross-check has a usable provider for the given network. TestNet4 and
+        /// the VFX signet have none: MempoolSpace/Blockstream route all non-mainnet requests to
+        /// TESTNET3 URLs, so on those chains their answers are wrong-chain poison for DecideEmptyVerdict — an
+        /// answered-empty from the wrong chain can upgrade a single lagging Electrum "empty" into
+        /// ConfirmedEmpty on a funded vault. Skipping keeps the check Electrum-quorum-only there
+        /// (2+ servers must agree; the signet runs two), and per project policy we minimize
+        /// third-party reliance rather than extend it.
         /// Pure function so the routing rule is unit-testable.
         /// </summary>
         public static bool IsEsploraCrossCheckSupported(Network network)
         {
-            return network != Network.TestNet4;
+            return network != Network.TestNet4 && network != Network.VfxSignet;
         }
 
         private static async Task<(List<BlockchainScripthashListunspentResult> Utxos, bool Answered)> GetUTXOsFromEsplora(string address)
@@ -305,7 +305,10 @@ namespace VerifiedXCore.Bitcoin.Services
             IEnumerable<BlockchainScripthashListunspentResult> utxos, ulong amountSats,
             HashSet<string>? preferredOutpoints, bool smallestSufficientFirst)
         {
-            var sorted = SortUtxosDeterministic(utxos);
+            // Only confirmed coins fund a withdrawal (Electrum height 0 is the mempool, -1 an unconfirmed parent). A coin
+            // still in the mempool can be replaced by its sender, which voids the payout built on it - after the COMPLETE
+            // that burned the holder's vBTC was already sent.
+            var sorted = SortUtxosDeterministic(utxos.Where(u => u.Height > 0));
             bool IsPreferred(BlockchainScripthashListunspentResult u) =>
                 preferredOutpoints is { Count: > 0 } && preferredOutpoints.Contains($"{u.TxHash}:{u.TxPos}".ToLowerInvariant());
 
@@ -324,6 +327,29 @@ namespace VerifiedXCore.Bitcoin.Services
             }
 
             return preferred.Concat(rest).ToList();
+        }
+
+        /// <summary>
+        /// Why the coins selected for a withdrawal fall short of its amount. Coins other withdrawals' signed transactions
+        /// hold, and coins not yet confirmed (never selected: their sender could replace them), free up with time: such a
+        /// shortfall is marked transient, so a caller retries instead of treating the vault as unable to pay (a bridge exit
+        /// blacklisted a vault for a day while its own change from the last payout waited for one confirmation).
+        /// </summary>
+        internal static string ShortfallReason(IEnumerable<BlockchainScripthashListunspentResult> utxos,
+            IEnumerable<BlockchainScripthashListunspentResult> spendable, ulong totalInputAmount, ulong amountToSend)
+        {
+            var excludedSats = (ulong)utxos.Sum(u => (decimal)u.Value) - (ulong)spendable.Sum(u => (decimal)u.Value);
+            if (excludedSats > 0 && totalInputAmount + excludedSats >= amountToSend)
+            {
+                // Enough coins exist, but other withdrawals' signed transactions hold them. They free up
+                // when those transactions confirm (or are reclaimed) — retryable, not a vault problem.
+                return $"{PinnedCoinsShortfallMarker} Not enough free coins right now: {excludedSats * SatoshiMultiplier:F8} BTC is held by other withdrawals in flight. Required: {amountToSend * SatoshiMultiplier:F8} BTC, free: {totalInputAmount * SatoshiMultiplier:F8} BTC. Try again once they confirm. {TransientUtxoErrorMarker}";
+            }
+            // Held and unconfirmed coins together: a shortfall that both would cover frees up with time as well.
+            var unconfirmedSats = (ulong)spendable.Where(u => u.Height <= 0).Sum(u => (decimal)u.Value);
+            if (unconfirmedSats > 0 && totalInputAmount + excludedSats + unconfirmedSats >= amountToSend)
+                return $"Not enough confirmed, free coins yet: {unconfirmedSats * SatoshiMultiplier:F8} BTC is waiting for its first confirmation and {excludedSats * SatoshiMultiplier:F8} BTC is held by other withdrawals in flight. Required: {amountToSend * SatoshiMultiplier:F8} BTC, available now: {totalInputAmount * SatoshiMultiplier:F8} BTC. Try again once they confirm. {TransientUtxoErrorMarker}";
+            return $"Insufficient funds. Required: {amountToSend * SatoshiMultiplier:F8} BTC, Available: {totalInputAmount * SatoshiMultiplier:F8} BTC";
         }
 
         /// <summary>
@@ -434,8 +460,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
                     // Estimate transaction size for Taproot (smaller than legacy/segwit)
                     // Taproot: ~57.5 vBytes per input, ~43 vBytes per output + 10.5 overhead
-                    int estimatedSize = (int)(57.5 * unspentCoins.Count + 43 * 2 + 10.5); // destination + change
-                    feeEstimate = (ulong)(estimatedSize * feeRateSatsPerVByte);
+                    feeEstimate = (ulong)WithdrawalFeeSats(unspentCoins.Count, feeRateSatsPerVByte);
 
                     // Fee is deducted from withdrawal amount, so UTXOs only need to cover the amount
                     if (totalInputAmount >= amountToSend)
@@ -443,18 +468,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
 
                 if (totalInputAmount < amountToSend)
-                {
-                    var excludedSats = (ulong)utxos.Sum(u => (decimal)u.Value) - (ulong)spendable.Sum(u => (decimal)u.Value);
-                    if (excludedSats > 0 && totalInputAmount + excludedSats >= amountToSend)
-                    {
-                        // Enough coins exist, but other withdrawals' signed transactions hold them. They free up
-                        // when those transactions confirm (or are reclaimed) — retryable, not a vault problem.
-                        return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(),
-                            $"{PinnedCoinsShortfallMarker} Not enough free coins right now: {excludedSats * SatoshiMultiplier:F8} BTC is held by other withdrawals in flight. Required: {amountToSend * SatoshiMultiplier:F8} BTC, free: {totalInputAmount * SatoshiMultiplier:F8} BTC. Try again once they confirm. {TransientUtxoErrorMarker}");
-                    }
                     return (false, null, 0, new List<Coin>(), new List<BlockchainScripthashListunspentResult>(),
-                        $"Insufficient funds. Required: {amountToSend * SatoshiMultiplier:F8} BTC, Available: {totalInputAmount * SatoshiMultiplier:F8} BTC");
-                }
+                        ShortfallReason(utxos, spendable, totalInputAmount, amountToSend));
 
                 // Safety check: the payout left after the fee must be a relayable output.
                 if (feeEstimate >= amountToSend || amountToSend - feeEstimate < (ulong)VBTCService.TaprootDustSats)
@@ -544,6 +559,17 @@ namespace VerifiedXCore.Bitcoin.Services
                         "BitcoinTransactionService.SignTransactionWithFROST()");
                 }
 
+                if (string.IsNullOrEmpty(frostGroupPublicKey))
+                {
+                    // A later key of a watched vault (plan 8.8) is no contract: its public key is recorded with it, and its
+                    // holders file their shares under its own UID.
+                    var key = VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(scUID);
+                    if (key != null && key.Generation > 0)
+                    {
+                        frostGroupPublicKey = key.GroupKeyHex;
+                        ceremonyId = VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyUidOf(key);
+                    }
+                }
                 if (string.IsNullOrEmpty(frostGroupPublicKey))
                 {
                     return (false, string.Empty, string.Empty, "FROST group public key not found in contract or State Trei", null);
@@ -701,8 +727,13 @@ namespace VerifiedXCore.Bitcoin.Services
             }
         }
 
+        /// <summary>Stands in for the Electrum server's broadcast in tests: given the hex, the txid it answers, or its error.</summary>
+        internal static Func<string, Task<(string? TxHash, string? Error)>>? BroadcastHexForTests;
+
         /// <summary>
-        /// Broadcasts a signed Bitcoin transaction to the network
+        /// Broadcasts a signed Bitcoin transaction to the network. The txid returned is the signed transaction's own hash:
+        /// a server that answers with any other txid has not broadcast this transaction, and the broadcast fails with both
+        /// hashes in its error, so no caller records a payment under a txid the server chose.
         /// </summary>
         public static async Task<(bool Success, string TxHash, string ErrorMessage)> BroadcastTransaction(NBitcoin.Transaction signedTx)
         {
@@ -714,31 +745,44 @@ namespace VerifiedXCore.Bitcoin.Services
                 LogUtility.Log($"[FROST] Bitcoin transaction broadcast SUCCESS HEX: {txHex}",
                             "BitcoinTransactionService.BroadcastTransaction()");
 
-                var client = await GetElectrumClient();
-                if (client == null)
+                string? echoed, error;
+                if (BroadcastHexForTests != null)
+                    (echoed, error) = await BroadcastHexForTests(txHex);
+                else
                 {
-                    return (false, string.Empty, "No Electrum server available");
+                    var client = await GetElectrumClient();
+                    if (client == null)
+                    {
+                        return (false, string.Empty, "No Electrum server available");
+                    }
+
+                    using (client)
+                    {
+                        var broadcastResult = await client.Broadcast(txHex);
+                        (echoed, error) = (broadcastResult?.TxHash, broadcastResult?.ErrorMessage);
+                    }
                 }
 
-                using (client)
+                if (!string.IsNullOrEmpty(echoed))
                 {
-                    var broadcastResult = await client.Broadcast(txHex);
-
-                    if (!string.IsNullOrEmpty(broadcastResult?.TxHash))
+                    if (!string.Equals(echoed.Trim(), txHash, StringComparison.OrdinalIgnoreCase))
                     {
-                        LogUtility.Log($"[FROST] Bitcoin transaction broadcast SUCCESS: {broadcastResult.TxHash}",
-                            "BitcoinTransactionService.BroadcastTransaction()");
-                        return (true, broadcastResult.TxHash, string.Empty);
+                        var mismatch = $"Broadcast failed - the server answered txid {echoed} for the signed transaction {txHash}";
+                        ErrorLogUtility.LogError(mismatch, "BitcoinTransactionService.BroadcastTransaction()");
+                        return (false, string.Empty, mismatch);
                     }
-                    else
-                    {
-                        var errorDetail = !string.IsNullOrEmpty(broadcastResult?.ErrorMessage)
-                            ? $"Electrum rejected: {broadcastResult.ErrorMessage}"
-                            : "Broadcast failed - no result returned (empty response or connection issue)";
-                        ErrorLogUtility.LogError($"Bitcoin broadcast failed. TxHex length: {txHex.Length}, Error: {errorDetail}",
-                            "BitcoinTransactionService.BroadcastTransaction()");
-                        return (false, string.Empty, errorDetail);
-                    }
+                    LogUtility.Log($"[FROST] Bitcoin transaction broadcast SUCCESS: {txHash}",
+                        "BitcoinTransactionService.BroadcastTransaction()");
+                    return (true, txHash, string.Empty);
+                }
+                else
+                {
+                    var errorDetail = !string.IsNullOrEmpty(error)
+                        ? $"Electrum rejected: {error}"
+                        : "Broadcast failed - no result returned (empty response or connection issue)";
+                    ErrorLogUtility.LogError($"Bitcoin broadcast failed. TxHex length: {txHex.Length}, Error: {errorDetail}",
+                        "BitcoinTransactionService.BroadcastTransaction()");
+                    return (false, string.Empty, errorDetail);
                 }
             }
             catch (Exception ex)
@@ -797,6 +841,13 @@ namespace VerifiedXCore.Bitcoin.Services
         /// version returned 0 for every failure mode, making "Electrum is broken" indistinguishable
         /// from "tx not confirmed".
         /// </summary>
+        /// <summary>
+        /// The fee a vault withdrawal pays for <paramref name="inputCount"/> inputs at <paramref name="feeRate"/> sat/vB, as the
+        /// builder sets it (Taproot: ~57.5 vB per input, ~43 vB per output, destination and change, + 10.5). Signers bound an
+        /// unwatched vault's transaction by the same figure (FrostSigningAuthorization).
+        /// </summary>
+        public static long WithdrawalFeeSats(int inputCount, long feeRate) => (int)(57.5 * inputCount + 43 * 2 + 10.5) * feeRate;
+
         public static async Task<TxConfirmationLookup> GetTransactionConfirmationsResilient(string txHash)
         {
             var answers = new List<int>();
@@ -832,6 +883,53 @@ namespace VerifiedXCore.Bitcoin.Services
                 details.Any() ? string.Join(", ", details) : "no servers tried");
         }
 
+        /// <summary>Distinct Electrum hosts that must agree before an answer may release a pin or stop a signer.</summary>
+        public const int ConfirmationAgreementRequired = 2;
+
+        /// <summary>How one server is asked for a transaction's confirmations (Ok; &gt;= 1 in a block, 0 known and unconfirmed). Replaced in tests.</summary>
+        internal static Func<ClientSettings, string, Task<(bool Ok, int Confirms)>> QueryConfirms =
+            (server, txid) => ElectrumServerPool.AttemptAsync(server, c => c.GetConfirms(txid));
+
+        /// <summary>How many distinct hosts know a transaction, and how many have it in a block.</summary>
+        public readonly record struct TxSightings(int Known, int Confirmed, int MinConfirmations, string Detail);
+
+        /// <summary>
+        /// Every usable server is asked, one answer per host, until <paramref name="required"/> hosts have the transaction in
+        /// a block (or, with <paramref name="stopWhenKnown"/>, know it at all). For a decision that releases a pin or stops
+        /// acting: one server's word - or a path to it, as certificates are not checked - is never enough.
+        /// </summary>
+        public static async Task<TxSightings> GetTransactionConfirmationsCorroborated(string txHash, int required = ConfirmationAgreementRequired, bool stopWhenKnown = false)
+        {
+            int known = 0, confirmed = 0, minConfirmations = int.MaxValue;
+            var details = new List<string>();
+            var hosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var server in GetElectrumServerCandidates())
+            {
+                if (!hosts.Add((server.Host ?? "").Trim())) continue; // two ports of one host are one opinion
+                var (ok, answer) = await QueryConfirms(server, txHash);
+                var confirms = ok ? answer : -1;
+                details.Add($"{server.Host}:{server.Port}={(confirms >= 1 ? confirms.ToString() : confirms == 0 ? "0 (mempool)" : "no-answer")}");
+                if (confirms >= 0) known++;
+                if (confirms >= 1) { confirmed++; minConfirmations = Math.Min(minConfirmations, confirms); }
+                if (confirmed >= required || (stopWhenKnown && known >= required)) break;
+            }
+            return new TxSightings(known, confirmed, confirmed > 0 ? minConfirmations : 0, details.Count > 0 ? string.Join(", ", details) : "no servers tried");
+        }
+
+        /// <summary>
+        /// Two-host agreement in the tri-state of <see cref="TxConfirmationLookup.Confirmations"/>: &gt;= 1 only when
+        /// <see cref="ConfirmationAgreementRequired"/> distinct hosts have the transaction in a block (the fewest
+        /// confirmations among them); 0 when a host knows it and none has it in a block; null otherwise, including one host
+        /// alone saying "in a block". For steps that a false "confirmed" makes final (a withdrawal's completion).
+        /// </summary>
+        public static async Task<int?> GetAgreedConfirmations(string txHash)
+        {
+            var seen = await GetTransactionConfirmationsCorroborated(txHash);
+            if (seen.Confirmed >= ConfirmationAgreementRequired) return seen.MinConfirmations;
+            if (seen.Known > 0 && seen.Confirmed == 0) return 0;
+            return null;
+        }
+
         /// <summary>
         /// Legacy single-value confirmation check. UNKNOWN collapses to 0 here — callers that must
         /// distinguish "couldn't ask" from "unconfirmed" (pin release, pinned-tx disposition) use
@@ -858,73 +956,233 @@ namespace VerifiedXCore.Bitcoin.Services
         /// transaction. A mempool spend is not enough: it can be evicted or replaced, and the signed transaction can
         /// then still confirm. (Treating "missing from listunspent" as dead let a withholder get a second transaction
         /// signed for the same withdrawal while the first could still be broadcast: two payouts.)
+        /// Nor is an outpoint that never existed: a transaction that creates it can still be broadcast, and the signed
+        /// transaction confirm after it. A missing outpoint is spent by a confirmed transaction only when a confirmed
+        /// transaction created it.
         /// Pure: <paramref name="unspent"/> is the address's unspent set, <paramref name="mempoolSpent"/> the
-        /// outpoints its mempool transactions spend (null when that could not be read).
+        /// outpoints its mempool transactions spend (null when that could not be read), <paramref name="createdOnChain"/>
+        /// the outpoints a confirmed transaction created at the address (null when that could not be read).
         /// </summary>
-        public static OutpointSpendVerdict ClassifyOutpointSpends(IEnumerable<string> outpoints, ISet<string> unspent, ISet<string>? mempoolSpent)
+        public static OutpointSpendVerdict ClassifyOutpointSpends(IEnumerable<string> outpoints, ISet<string> unspent, ISet<string>? mempoolSpent, ISet<string>? createdOnChain)
         {
             var missing = outpoints.Where(o => !unspent.Contains(o)).ToList();
             if (missing.Count == 0)
                 return OutpointSpendVerdict.NotSpentByConfirmed;
-            if (mempoolSpent == null)
+            if (mempoolSpent == null || createdOnChain == null)
                 return OutpointSpendVerdict.Inconclusive;
-            return missing.Any(o => !mempoolSpent.Contains(o)) ? OutpointSpendVerdict.SpentByConfirmed : OutpointSpendVerdict.NotSpentByConfirmed;
+            return missing.Any(o => !mempoolSpent.Contains(o) && createdOnChain.Contains(o)) ? OutpointSpendVerdict.SpentByConfirmed : OutpointSpendVerdict.NotSpentByConfirmed;
         }
+
+        /// <summary>The same without knowing which outpoints a confirmed transaction created: a missing outpoint is then Inconclusive.</summary>
+        public static OutpointSpendVerdict ClassifyOutpointSpends(IEnumerable<string> outpoints, ISet<string> unspent, ISet<string>? mempoolSpent) =>
+            ClassifyOutpointSpends(outpoints, unspent, mempoolSpent, null);
 
         /// <summary>Most unconfirmed deposit-address transactions read to tell mempool spends from confirmed ones.</summary>
         public const int MaxUnconfirmedHistoryScan = 50;
 
+        /// <summary>Servers that must each prove an outpoint spent by a confirmed transaction before it is treated as spent.</summary>
+        public const int SpentProofsRequired = 2;
+
         /// <summary>
-        /// Reads the deposit address's unspent set and its mempool transactions to classify <paramref name="outpoints"/>
-        /// (lowercase "txid:vout"). Anything that cannot be read is Inconclusive; callers keep their pins then.
+        /// Most confirmed deposit-address transactions read, per server, looking for the one that spends an outpoint: the
+        /// newest first, and only those in or after the block that created it (nothing earlier can spend it). More than this
+        /// since the coin was made: a spend not found among them is not "not spent" but Inconclusive.
         /// </summary>
-        public static async Task<(OutpointSpendVerdict Verdict, string Detail)> GetOutpointSpendVerdict(string depositAddress, IEnumerable<string> outpoints)
+        public const int MaxConfirmedHistoryScan = 200;
+
+        /// <summary>
+        /// Most headers read below the attested checkpoint to reach a spend's block: 26 Electrum chunks, about a year, which
+        /// covers every vBTC V2 vault (the first were made in May 2026). Read only once a validly signed spender is found.
+        /// </summary>
+        public const int MaxHeadersBelowCheckpoint = 26 * 2016;
+
+        /// <summary>
+        /// The header of a Bitcoin block below the attested checkpoint, which the validators did not attest themselves: read
+        /// from the server with every header up to the checkpoint, each linked to the next by its hash and the last one the
+        /// attested checkpoint header. A server cannot change one without breaking the chain to the attested hash. Null when
+        /// the block is at or above the checkpoint, too far below it, or the chain does not hold.
+        /// </summary>
+        private static async Task<VerifiedXCore.Bitcoin.Attestation.BtcHeader?> HeaderBelowCheckpoint(Client client, long height)
+        {
+            var meta = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.GetMeta();
+            if (meta == null || height < 0 || height >= meta.CheckpointHeight || meta.CheckpointHeight - height > MaxHeadersBelowCheckpoint) return null;
+            var checkpoint = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.HeaderAt(meta.CheckpointHeight);
+            if (checkpoint == null) return null;
+
+            var chain = new List<VerifiedXCore.Bitcoin.Attestation.BtcHeader>();
+            for (var from = height; from <= meta.CheckpointHeight;)
+            {
+                var count = (int)Math.Min(2016, meta.CheckpointHeight - from + 1);
+                var read = await client.GetBlockHeadersHex((int)from, count);
+                var hex = read?.Hex;
+                if (hex == null || read!.Count != count || hex.Length != count * VerifiedXCore.Bitcoin.Attestation.BtcHeader.Size * 2) return null;
+                for (var i = 0; i < count; i++)
+                {
+                    if (!VerifiedXCore.Bitcoin.Attestation.BtcHeader.TryParse(hex.Substring(i * 160, 160), out var header) || header == null) return null;
+                    if (chain.Count > 0 && !string.Equals(header.PrevHash, chain[^1].Hash, StringComparison.OrdinalIgnoreCase)) return null;
+                    chain.Add(header);
+                }
+                from += count;
+            }
+            return string.Equals(chain[^1].Hash, checkpoint.Hash, StringComparison.OrdinalIgnoreCase) ? chain[0] : null;
+        }
+
+        /// <summary>
+        /// Classifies <paramref name="outpoints"/> (lowercase "txid:vout") of a signed transaction, asking each Electrum server
+        /// on its own. An outpoint is spent by a confirmed transaction only when <see cref="SpentProofsRequired"/> servers
+        /// each show the transaction that spends it: confirmed in the address's history, other than
+        /// <paramref name="signedTxId"/> (the transaction asked about: its own confirmation is not its death), and carrying
+        /// a valid signature over the real funding output (every transaction read is checked against its txid). A server
+        /// that leaves a coin out of its unspent set cannot alone make a signed transaction look dead. The spend's
+        /// confirmation must also be proven by a Merkle branch to the validator-attested header of its block, buried as the
+        /// attestation buries a block (<see cref="VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Depth"/> headers that count
+        /// above it, <see cref="VerifiedXCore.Bitcoin.Attestation.BtcChainRules.BuriedAt"/>), so nothing between this node and
+        /// the servers can fake it, nor a shallow reorg undo it; before the attestation's recording height no spend is
+        /// proven. Anything less is
+        /// NotSpentByConfirmed when the servers that answered all say so, else Inconclusive; callers keep their pins then.
+        /// </summary>
+        public static async Task<(OutpointSpendVerdict Verdict, string Detail)> GetOutpointSpendVerdict(string depositAddress, IEnumerable<string> outpoints, string? signedTxId = null)
         {
             try
             {
                 var ops = outpoints.Select(o => (o ?? "").Trim().ToLowerInvariant()).Where(o => o.Length > 0).Distinct().ToList();
                 if (ops.Count == 0)
                     return (OutpointSpendVerdict.NotSpentByConfirmed, "no outpoints");
+                var depositScript = BitcoinAddress.Create(depositAddress, Globals.BTCNetwork).ScriptPubKey;
+                var scriptHash = Client.GetScriptHash(BitcoinAddress.Create(depositAddress, Globals.BTCNetwork));
+                var exclude = (signedTxId ?? "").Trim().ToLowerInvariant();
 
-                var lookup = await GetTaprootUTXOs(depositAddress);
-                if (!lookup.Success)
-                    return (OutpointSpendVerdict.Inconclusive, $"utxolookup=failed ({lookup.Error})");
-                var unspent = lookup.Utxos.Select(u => $"{u.TxHash}:{u.TxPos}".ToLowerInvariant()).ToHashSet();
-                if (ops.All(unspent.Contains))
-                    return (OutpointSpendVerdict.NotSpentByConfirmed, $"utxolookup=all {ops.Count} unspent");
-
-                using var client = await GetElectrumClient();
-                if (client == null)
-                    return (OutpointSpendVerdict.Inconclusive, "no Electrum server for the address history");
-
-                // The outpoints existed, so the address has history; an empty answer is a failed read.
-                var history = await client.GetHistory(depositAddress);
-                if (history == null || history.Count == 0)
-                    return (OutpointSpendVerdict.Inconclusive, "address history unavailable");
-
-                // Electrum lists mempool transactions with height 0 (or -1 when they have unconfirmed parents).
-                var unconfirmed = history.Where(h => h.Height <= 0).Select(h => h.TxHash).Distinct().ToList();
-                if (unconfirmed.Count > MaxUnconfirmedHistoryScan)
-                    return (OutpointSpendVerdict.Inconclusive, $"{unconfirmed.Count} unconfirmed transactions on the address");
-
-                var mempoolSpent = new HashSet<string>();
-                foreach (var txid in unconfirmed)
+                int proofs = 0, notSpent = 0, inconclusive = 0;
+                var details = new List<string>();
+                foreach (var server in GetElectrumServerCandidates())
                 {
-                    var raw = await client.GetRawTx(txid);
-                    if (raw?.RawTx == null)
-                        return (OutpointSpendVerdict.Inconclusive, $"mempool tx {txid} unavailable");
-                    foreach (var input in NBitcoin.Transaction.Parse(raw.RawTx, Globals.BTCNetwork).Inputs)
-                        mempoolSpent.Add($"{input.PrevOut.Hash}:{input.PrevOut.N}".ToLowerInvariant());
+                    var (answered, verdict) = await ElectrumServerPool.AttemptAsync(server,
+                        c => ServerOutpointVerdict(c, depositAddress, depositScript, scriptHash, ops, exclude), TimeSpan.FromSeconds(60));
+                    var v = answered ? verdict : (OutpointSpendVerdict.Inconclusive, "no answer");
+                    details.Add($"{server.Host}: {v.Item1} ({v.Item2})");
+                    if (v.Item1 == OutpointSpendVerdict.SpentByConfirmed) proofs++;
+                    else if (v.Item1 == OutpointSpendVerdict.NotSpentByConfirmed) notSpent++;
+                    else inconclusive++;
+                    if (proofs >= SpentProofsRequired) break;
                 }
 
-                var verdict = ClassifyOutpointSpends(ops, unspent, mempoolSpent);
-                var missing = ops.Count(o => !unspent.Contains(o));
-                return (verdict, $"{missing}/{ops.Count} spent, {ops.Count(o => mempoolSpent.Contains(o))} of them by mempool txs");
+                var detail = string.Join("; ", details);
+                if (proofs >= SpentProofsRequired)
+                    return (OutpointSpendVerdict.SpentByConfirmed, detail);
+                if (notSpent > 0 && proofs == 0 && inconclusive == 0)
+                    return (OutpointSpendVerdict.NotSpentByConfirmed, detail);
+                return (OutpointSpendVerdict.Inconclusive, $"{proofs} of {SpentProofsRequired} servers proved a confirmed spend; {detail}");
             }
             catch (Exception ex)
             {
                 return (OutpointSpendVerdict.Inconclusive, $"check threw {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// One server's answer for <see cref="GetOutpointSpendVerdict"/>. A spend is proven only from the Bitcoin attestation's
+        /// recording height: before it the validators attest no headers, so a spend's confirmation could not be told from a
+        /// claim and nothing is declared dead (Inconclusive: evidence and pins are kept until then).
+        /// </summary>
+        private static async Task<(OutpointSpendVerdict, string)> ServerOutpointVerdict(Client client, string depositAddress, Script depositScript, string scriptHash, List<string> ops, string excludeTxId)
+        {
+            var listed = await client.GetListUnspent(scriptHash);
+            if (!client.LastCallSucceeded) return (OutpointSpendVerdict.Inconclusive, "unspent set unavailable");
+            var unspent = (listed ?? new List<ElectrumX.Results.BlockchainScripthashListunspentResult>()).Select(u => $"{u.TxHash}:{u.TxPos}".ToLowerInvariant()).ToHashSet();
+            var missing = ops.Where(o => !unspent.Contains(o)).ToList();
+            if (missing.Count == 0) return (OutpointSpendVerdict.NotSpentByConfirmed, $"all {ops.Count} unspent");
+
+            var history = await client.GetHistory(depositAddress);
+            if (history == null || history.Count == 0) return (OutpointSpendVerdict.Inconclusive, "address history unavailable");
+
+            // A transaction read from the server, checked against its txid (a server cannot substitute its contents).
+            var read = new Dictionary<string, NBitcoin.Transaction>(StringComparer.OrdinalIgnoreCase);
+            async Task<NBitcoin.Transaction?> Tx(string txid)
+            {
+                if (read.TryGetValue(txid, out var known)) return known;
+                var raw = await client.GetRawTx(txid);
+                if (raw?.RawTx == null) return null;
+                var tx = NBitcoin.Transaction.Parse(raw.RawTx, Globals.BTCNetwork);
+                if (!string.Equals(tx.GetHash().ToString(), txid, StringComparison.OrdinalIgnoreCase)) return null;
+                return read[txid] = tx;
+            }
+
+            // Electrum lists mempool transactions with height 0 (or -1 when they have unconfirmed parents).
+            var unconfirmed = history.Where(h => h.Height <= 0).Select(h => h.TxHash).Distinct().ToList();
+            if (unconfirmed.Count > MaxUnconfirmedHistoryScan) return (OutpointSpendVerdict.Inconclusive, $"{unconfirmed.Count} unconfirmed transactions on the address");
+            var mempoolSpent = new HashSet<string>();
+            foreach (var txid in unconfirmed)
+            {
+                var tx = await Tx(txid);
+                if (tx == null) return (OutpointSpendVerdict.Inconclusive, $"mempool tx {txid} unavailable");
+                foreach (var input in tx.Inputs) mempoolSpent.Add($"{input.PrevOut.Hash}:{input.PrevOut.N}".ToLowerInvariant());
+            }
+
+            // Newest first: the transaction that spends a coin is usually among the latest on the address.
+            var confirmed = history.Where(h => h.Height > 0).OrderByDescending(h => h.Height).Select(h => h.TxHash.ToLowerInvariant()).Distinct().ToList();
+            var confirmedAt = history.Where(h => h.Height > 0).GroupBy(h => h.TxHash.ToLowerInvariant()).ToDictionary(g => g.Key, g => g.First().Height);
+            var searchCut = false; // a spend was looked for while older history (since the coin was made) was left unread
+
+            foreach (var o in missing.Where(o => !mempoolSpent.Contains(o)))
+            {
+                var colon = o.LastIndexOf(':');
+                if (colon <= 0 || !uint.TryParse(o[(colon + 1)..], out var n)) continue;
+                var creatorId = o[..colon];
+                // Created by a confirmed transaction at this address (else the signed transaction can still confirm later).
+                if (!confirmed.Contains(creatorId)) continue;
+                var creator = await Tx(creatorId);
+                if (creator == null) return (OutpointSpendVerdict.Inconclusive, $"funding tx {creatorId} unavailable");
+                if (n >= creator.Outputs.Count || creator.Outputs[(int)n].ScriptPubKey != depositScript) continue;
+
+                // The confirmed transaction that spends it, validly signed over that output: in or after the coin's own block.
+                var sinceCreated = confirmed.Where(t => confirmedAt[t] >= confirmedAt[creatorId]).ToList();
+                var searchable = sinceCreated.Take(MaxConfirmedHistoryScan).ToList();
+                if (sinceCreated.Count > searchable.Count) searchCut = true;
+                foreach (var candidateId in searchable.Where(t => t != creatorId && t != excludeTxId))
+                {
+                    var spender = await Tx(candidateId);
+                    if (spender == null) return (OutpointSpendVerdict.Inconclusive, $"history tx {candidateId} unavailable");
+                    var index = spender.Inputs.FindIndex(i => $"{i.PrevOut.Hash}:{i.PrevOut.N}".ToLowerInvariant() == o);
+                    if (index < 0) continue;
+                    var spent = new TxOut[spender.Inputs.Count];
+                    for (var i = 0; i < spender.Inputs.Count; i++)
+                    {
+                        var prev = await Tx(spender.Inputs[i].PrevOut.Hash.ToString());
+                        if (prev == null || spender.Inputs[i].PrevOut.N >= prev.Outputs.Count)
+                            return (OutpointSpendVerdict.Inconclusive, $"input {i} of {candidateId} unavailable");
+                        spent[i] = prev.Outputs[(int)spender.Inputs[i].PrevOut.N];
+                    }
+                    if (spender.CreateValidator(spent).ValidateInput(index).Error != null)
+                        continue;
+                    // From the recording height the validators attest Bitcoin's headers: the spend's confirmation is then
+                    // proven against the attested header of its block, which no server (nor anything between this node and
+                    // the servers, whose certificates are not pinned) can forge. A block not attested yet: ask again later.
+                    if (!VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(Globals.LastBlock?.Height ?? 0))
+                        return (OutpointSpendVerdict.Inconclusive, "no attested Bitcoin headers before the attestation's recording height");
+                    var proof = await client.GetBlockchainTransactionGetMerkle(candidateId, confirmedAt[candidateId]);
+                    // The attested header of its block; or, for a block below the attested checkpoint (a spend from before the
+                    // attestation began), its header linked by hashes up to the attested checkpoint header.
+                    var header = proof?.Merkle == null ? null
+                        : VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.HeaderAt(proof.Height) ?? await HeaderBelowCheckpoint(client, proof.Height);
+                    if (header == null)
+                        return (OutpointSpendVerdict.Inconclusive, $"the block of {candidateId} is not attested yet");
+                    if (!string.Equals(VerifiedXCore.Bitcoin.Attestation.BtcMerkle.RootFromBranch(candidateId, proof.Pos, proof.Merkle), header.MerkleRoot, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    // Buried as the attestation buries a block (on testnet4 a minimum-difficulty header does not count): a
+                    // shallow Bitcoin reorg could still undo it and bring the signed transaction back. A block below the
+                    // attested checkpoint is buried by the checkpoint itself.
+                    var meta = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.GetMeta();
+                    var buried = meta != null && (proof.Height < meta.CheckpointHeight
+                        || VerifiedXCore.Bitcoin.Attestation.BtcChainRules.Current.BuriedAt(proof.Height, meta.TipHeight,
+                               VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Depth, h => VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.HeaderAt(h)) != null);
+                    if (!buried)
+                        return (OutpointSpendVerdict.Inconclusive, $"{candidateId} is not yet buried under {VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Depth} attested headers");
+                    return (OutpointSpendVerdict.SpentByConfirmed, $"{o} spent by confirmed {candidateId}");
+                }
+            }
+            if (searchCut)
+                return (OutpointSpendVerdict.Inconclusive, $"more than {MaxConfirmedHistoryScan} confirmed transactions since a coin was made; no spend among the newest");
+            return (OutpointSpendVerdict.NotSpentByConfirmed, $"{missing.Count}/{ops.Count} missing, no confirmed spend shown");
         }
 
         /// <summary>

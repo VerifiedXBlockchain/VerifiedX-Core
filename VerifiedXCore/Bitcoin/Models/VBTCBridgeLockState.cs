@@ -35,6 +35,8 @@ namespace VerifiedXCore.Bitcoin.Models
         public string EvmDestination { get; set; } = string.Empty;
         public string LockTxHash { get; set; } = string.Empty;
         public long LockTimestamp { get; set; }
+        /// <summary>The block that carried the lock (0 for a row written before this was recorded).</summary>
+        public long LockBlockHeight { get; set; }
 
         /// <summary>True when fully consumed (UnlockedAmount >= Amount).</summary>
         public bool IsUnlocked { get; set; }
@@ -112,6 +114,21 @@ namespace VerifiedXCore.Bitcoin.Models
         }
 
         /// <summary>
+        /// Gives back what an exit reserved on a lock when that exit is failed by rule before anything was signed for
+        /// it. The lock stays in use: nothing is wrong with it.
+        /// </summary>
+        public static bool RestoreUnlock(string lockId, decimal restoreAmount, long restoreSats)
+        {
+            var col = GetCollection();
+            var rec = col.FindOne(x => x.LockId == lockId);
+            if (rec == null || restoreAmount <= 0) return false;
+            rec.UnlockedAmount = Math.Max(0, rec.UnlockedAmount - restoreAmount);
+            rec.UnlockedAmountSats = Math.Max(0, rec.UnlockedAmountSats - restoreSats);
+            rec.IsUnlocked = false;
+            return col.Update(rec);
+        }
+
+        /// <summary>
         /// Returns the total amount of vBTC currently available in the bridge lock pool.
         /// </summary>
         public static decimal GetTotalAvailableAmount()
@@ -120,14 +137,24 @@ namespace VerifiedXCore.Bitcoin.Models
             return locks.Sum(x => x.RemainingAmount);
         }
 
-        /// <summary>Insert when a bridge lock TX is applied in <see cref="StateData"/>.</summary>
-        public static bool TryInsertFromLockTx(Transaction tx, string scUID, string lockId, decimal amount, long amountSats, string evmDestination)
+        public enum LockInsert { Inserted, AlreadyPresent, Failed }
+
+        /// <summary>Runs just before a lock row is inserted; a test throws from it to stand for a storage fault.</summary>
+        internal static Action<VBTCBridgeLockState>? InsertStepForTests;
+
+        /// <summary>
+        /// Inserts the lock row when a bridge lock TX is applied in <see cref="StateData"/>. A row already under the lock id is
+        /// a replay (<see cref="LockInsert.AlreadyPresent"/>); a storage fault is reported through
+        /// <see cref="StateData.NoteApplyStepFailed"/>, so this node stops as a failed apply, and returns
+        /// <see cref="LockInsert.Failed"/>.
+        /// </summary>
+        public static LockInsert InsertFromLockTx(Transaction tx, string scUID, string lockId, decimal amount, long amountSats, string evmDestination, long blockHeight = 0)
         {
             try
             {
                 lockId = lockId.Trim();
                 if (GetByLockId(lockId) != null)
-                    return false;
+                    return LockInsert.AlreadyPresent;
 
                 var rec = new VBTCBridgeLockState
                 {
@@ -141,16 +168,24 @@ namespace VerifiedXCore.Bitcoin.Models
                     EvmDestination = evmDestination.Trim(),
                     LockTxHash = tx.Hash,
                     LockTimestamp = tx.Timestamp,
+                    LockBlockHeight = blockHeight,
                     IsUnlocked = false
                 };
+                InsertStepForTests?.Invoke(rec);
                 GetCollection().Insert(rec);
-                return true;
+                return LockInsert.Inserted;
             }
-            catch
+            catch (Exception ex)
             {
-                return false;
+                StateData.NoteApplyStepFailed(tx.Height, ex);
+                ErrorLogUtility.LogError($"InsertFromLockTx: lock {lockId} not written: {ex.Message}", "VBTCBridgeLockState.InsertFromLockTx");
+                return LockInsert.Failed;
             }
         }
+
+        /// <summary>Insert when a bridge lock TX is applied in <see cref="StateData"/>; true only when the row was written now.</summary>
+        public static bool TryInsertFromLockTx(Transaction tx, string scUID, string lockId, decimal amount, long amountSats, string evmDestination, long blockHeight = 0) =>
+            InsertFromLockTx(tx, scUID, lockId, amount, amountSats, evmDestination, blockHeight) == LockInsert.Inserted;
 
         /// <summary>
         /// Apply a partial or full unlock to this lock record (pool-based unlock).
@@ -183,6 +218,7 @@ namespace VerifiedXCore.Bitcoin.Models
             }
             catch (Exception ex)
             {
+                StateData.NoteApplyStepFailed(StateWriteContext.StampHeight, ex); // a fault of this node's storage stops it as a failed apply
                 ErrorLogUtility.LogError($"ApplyPartialUnlock error: {ex.Message}", "VBTCBridgeLockState.ApplyPartialUnlock");
                 return false;
             }
@@ -203,8 +239,10 @@ namespace VerifiedXCore.Bitcoin.Models
                 GetCollection().Update(rec);
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                StateData.NoteApplyStepFailed(tx.Height, ex); // a fault of this node's storage stops it as a failed apply
+                ErrorLogUtility.LogError($"TryFinalizeUnlock: lock {rec.LockId} not written: {ex.Message}", "VBTCBridgeLockState.TryFinalizeUnlock");
                 return false;
             }
         }

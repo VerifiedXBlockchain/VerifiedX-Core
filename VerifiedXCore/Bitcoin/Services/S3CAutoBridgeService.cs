@@ -147,7 +147,16 @@ namespace VerifiedXCore.Bitcoin.Services
                 // Give the request a moment to be mined so the contract's Active* fields are populated.
                 await Task.Delay(TimeSpan.FromSeconds(CeremonyPollSeconds));
                 var comp = await VBTCService.CompleteWithdrawal(s.S3CContractUID, reqTxHash);
-                if (!comp.Success)
+                // A vault the chain watches answers "not mined yet" until the request is in a block. That is a matter
+                // of blocks, not a failure: the request is in the pool and will be pinned and paid when it is mined.
+                for (var waited = 0; waited < 20 && !comp.Success && Attestation.BtcVaultView.IsNotMinedYet(comp.ErrorMessage); waited++)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(CeremonyPollSeconds));
+                    comp = await VBTCService.CompleteWithdrawal(s.S3CContractUID, reqTxHash);
+                }
+                // On a vault the chain watches nothing is completed from here: the vault's signers pay the request and
+                // the answer says it is in the chain's hands. That is not a failure; the next step waits for the BTC.
+                if (!comp.Success && !Attestation.BtcVaultView.IsInTheChainsHands(comp.ErrorMessage))
                 { Set(s, S3CAutoBridgeStatus.Failed, $"Withdrawal completion failed: {comp.ErrorMessage}. Funds still in the S3C contract."); return; }
 
                 // 4. Wait for the BTC to arrive at the companion deposit address (confirmed delta).
@@ -314,8 +323,13 @@ namespace VerifiedXCore.Bitcoin.Services
         // §12.4: dedicated poll of the companion deposit address for the confirmed arrival delta.
         private static async Task<decimal> WaitForBtcArrival(string companionScUID, string requester, decimal before)
         {
+            // A companion the chain watches is credited when consensus counts the deposit: after the withdrawal's
+            // transaction is signed by the vault's signers, mined, and buried under the confirmation depth (six blocks
+            // on mainnet, about an hour on its own). The window that suited a one-confirmation Electrum balance is too
+            // short for that.
+            var window = Attestation.BtcAttestBalance.IsAttestedVault(companionScUID) ? BtcArrivalMaxSeconds * 4 : BtcArrivalMaxSeconds;
             var waited = 0;
-            while (waited < BtcArrivalMaxSeconds)
+            while (waited < window)
             {
                 var bal = await VBTCService.TryGetAvailableTransparentVbtcBalance(companionScUID, requester);
                 if (bal.success && bal.availableBalance > before)

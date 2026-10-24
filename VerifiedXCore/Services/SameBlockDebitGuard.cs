@@ -26,7 +26,7 @@ namespace VerifiedXCore.Services
     /// </summary>
     public static class SameBlockDebitGuard
     {
-        public enum LedgerKind { VbtcV2, VbtcV1, Token, Native }
+        public enum LedgerKind { VbtcV2, VbtcV1, Token, Native, ShieldedPool }
 
         /// <summary>ContractUid of the native VFX key (not a contract).</summary>
         public const string NativeUid = "VFX";
@@ -47,8 +47,13 @@ namespace VerifiedXCore.Services
         /// The ledger debits a transaction's apply writes, parsed the way StateData parses them. Unparseable data yields
         /// no debits (apply writes none either).
         /// </summary>
-        public static List<(DebitKey Key, decimal Amount)> GetDebits(Transaction tx)
+        public static List<(DebitKey Key, decimal Amount)> GetDebits(Transaction tx, long? height = null)
         {
+            // The height the transaction is judged at, never its own Height field: a sender sets that, and only block
+            // validation overwrites it. A withdrawal request carrying "Height": 1 was counted as no debit at admission and
+            // in the block builder, which then built blocks its own check refused; two such requests stopped every
+            // producer (fifth review, round 17). In block validation the field is the block's height, which is passed.
+            var judged = height ?? ((Globals.LastBlock?.Height ?? 0) + 1);
             var debits = new List<(DebitKey, decimal)>();
             if (tx == null || string.IsNullOrEmpty(tx.FromAddress))
                 return debits;
@@ -68,6 +73,22 @@ namespace VerifiedXCore.Services
                     debits.Add((new DebitKey(LedgerKind.Native, NativeUid, tx.FromAddress), native));
             }
 
+            // Fund-loss audit item 1: an unshield / private transfer debits its shielded pool's supply. The per-transaction
+            // supply floor reads committed state, so two in one block each passed against the same supply. Judged at
+            // the height the guard is given (round 17); before PrivateTxSupplyRulesHeight the pool was never judged.
+            if (Privacy.PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType))
+            {
+                var zkHeight = judged;
+                if (zkHeight >= Globals.PrivateTxSupplyRulesHeight && !string.IsNullOrEmpty(tx.Data)
+                    && PrivateTxPayloadCodec.TryDecode(tx.Data, out var zkPayload, out _))
+                {
+                    var poolDebit = Privacy.PrivateTxSupplyRules.PoolDebit(tx, zkPayload);
+                    if (poolDebit > 0M)
+                        debits.Add((new DebitKey(LedgerKind.ShieldedPool, zkPayload.Asset, Privacy.PrivacyConstants.ShieldedPoolAddress), poolDebit));
+                }
+                return debits;
+            }
+
             if (string.IsNullOrEmpty(tx.Data))
                 return debits;
 
@@ -85,10 +106,9 @@ namespace VerifiedXCore.Services
                     case TransactionType.VBTC_V2_WITHDRAWAL_REQUEST:
                     {
                         // The request debits (escrow) only from WithdrawalEscrowHeight on; earlier requests were burned
-                        // at COMPLETE, so counting them here would refuse historical blocks the apply accepts. Same height
-                        // source as the apply (tx.Height, set when the transaction is crafted into its block).
-                        var height = tx.Height > 0 ? tx.Height : (Globals.LastBlock?.Height ?? 0) + 1;
-                        if (!Bitcoin.Models.VBTCWithdrawalRequest.EscrowAppliesTo(height))
+                        // at COMPLETE, so counting them here would refuse historical blocks the apply accepts. Judged at
+                        // the height the guard is given, never the transaction's own Height field (round 17).
+                        if (!Bitcoin.Models.VBTCWithdrawalRequest.EscrowAppliesTo(judged))
                             return debits;
                         foreach (var (uid, amt) in Bitcoin.Services.VBTCService.GetVbtcV2WithdrawalOutflows(tx))
                             debits.Add((new DebitKey(LedgerKind.VbtcV2, uid, tx.FromAddress), amt));
@@ -190,6 +210,8 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static decimal? CommittedBalance(DebitKey key)
         {
+            if (key.Kind == LedgerKind.ShieldedPool)
+                return Privacy.PrivateTxSupplyRules.CommittedSupply(key.ContractUid, (Globals.LastBlock?.Height ?? 0) + 1); // ContractUid holds the asset ("VFX", "VBTC:…"); admission height
             if (key.Kind == LedgerKind.Native)
             {
                 // No account: VerifyTX allows that only for TKNZ_WD_ARB (arbiters); not judged here.
@@ -259,7 +281,7 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static DebitKey Canonical(DebitKey key, Dictionary<string, string>? cache = null)
         {
-            if (key.Kind == LedgerKind.Token || key.Kind == LedgerKind.Native)
+            if (key.Kind == LedgerKind.Token || key.Kind == LedgerKind.Native || key.Kind == LedgerKind.ShieldedPool)
                 return key;
             if (cache == null || !cache.TryGetValue(key.ContractUid, out var uid))
             {
@@ -278,10 +300,15 @@ namespace VerifiedXCore.Services
             internal HashSet<string> Senders { get; } = new(StringComparer.Ordinal);
             internal HashSet<string> Hashes { get; } = new(StringComparer.Ordinal);
             internal HashSet<string> Swept { get; } = new(StringComparer.Ordinal);
+            /// <summary>Reserves with a Register() already in this block (from PathAuditRulesHeight).</summary>
+            internal HashSet<string> Registered { get; } = new(StringComparer.Ordinal);
             private readonly Dictionary<DebitKey, decimal?> _balances = new();
 
             /// <summary>The height of the block being validated; null at admission and proposal (NEW-27).</summary>
             public long? BlockHeight { get; init; }
+
+            /// <summary>Senders whose registration or heartbeat in this block starts a validator bond: their stake is held from the block's start (ValidatorBond.StartsBond).</summary>
+            public HashSet<string> BondStarting { get; } = new(StringComparer.Ordinal);
 
             /// <summary>Consensus state (block validation).</summary>
             public State() : this(CommittedBalance) { }
@@ -292,8 +319,39 @@ namespace VerifiedXCore.Services
             internal decimal? BalanceOf(DebitKey key)
             {
                 if (!_balances.TryGetValue(key, out var b))
-                    _balances[key] = b = _balanceOf(key);
+                {
+                    // The shielded pool's supply is judged at the block's height (block validation) or at tip + 1.
+                    b = key.Kind == LedgerKind.ShieldedPool
+                        ? Privacy.PrivateTxSupplyRules.CommittedSupply(key.ContractUid, BlockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                        : AttestedOwnerBalance(key) ?? _balanceOf(key);
+                    // A bonded validator's stake is not there to be spent: its sends in one block are added up
+                    // against what is above the stake.
+                    if (key.Kind == LedgerKind.Native && b.HasValue)
+                        b -= ValidatorBond.LockedAmount(key.Holder, BlockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+                    _balances[key] = b;
+                }
+                // A bond that starts in this block holds the stake from the block's start.
+                if (key.Kind == LedgerKind.Native && b.HasValue && BondStarting.Contains(key.Holder))
+                    return b - ValidatorService.ValidatorRequiredAmount();
                 return b;
+            }
+
+            /// <summary>
+            /// The owner of a vault whose Bitcoin is attested has a balance in state like any holder, so its debits within
+            /// one block are added up in block validation too (for other vaults the owner is judged at admission and
+            /// proposal only, see <see cref="PolicyBalance"/>). Null for every other key.
+            /// </summary>
+            private decimal? AttestedOwnerBalance(DebitKey key)
+            {
+                if (key.Kind != LedgerKind.VbtcV2) return null;
+                var sc = SmartContractStateTrei.GetSmartContractState(key.ContractUid);
+                if (sc == null || key.Holder != sc.OwnerAddress || !Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(sc.SmartContractUID))
+                    return null;
+                var balance = Bitcoin.Services.VBTCService.AttestedOwnerSpendable(sc, key.Holder, BlockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+                // Reserve sends debit at unlock; their pending rows are netted as they are for a reserve holder.
+                if (key.Holder.StartsWith("xRBX"))
+                    balance -= ReserveTransactions.GetPendingVBTCTransferTotal(key.Holder, key.ContractUid);
+                return balance;
             }
         }
 
@@ -327,11 +385,32 @@ namespace VerifiedXCore.Services
             if (isSweep && state.Senders.Contains(sender))
                 return (false, $"{ReasonPrefix}: Recover() must be the only transaction from {sender} in its block.");
 
-            var debits = GetDebits(tx);
+            // A reserve registers its recovery account once: the check reads committed state, so two Register() of one
+            // reserve in a block both passed and the last applied replaced the first's recovery account. From the
+            // path-audit rules a block carries one Register() per reserve (the producer keeps the first).
+            var isRegister = IsReserveRegister(tx) && (state.BlockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.PathAuditRulesHeight;
+            if (isRegister && state.Registered.Contains(sender))
+                return (false, $"{ReasonPrefix}: {sender} registers its recovery account more than once in this block.");
+
+            // A registration or heartbeat that starts a bond: what its sender has already sent in this block must
+            // have left the stake, and what it sends after is judged against what is above the stake.
+            if (!state.BondStarting.Contains(sender) && ValidatorBond.StartsBond(tx, state.BlockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)))
+            {
+                var native = Canonical(new DebitKey(LedgerKind.Native, NativeUid, sender), state.CanonicalUids);
+                state.Spent.TryGetValue(native, out var sentAlready);
+                var whole = state.BalanceOf(native);
+                var stake = ValidatorService.ValidatorRequiredAmount();
+                if (whole.HasValue && sentAlready > whole.Value - stake)
+                    return (false, $"{ReasonPrefix}: {sender} starts a validator bond in this block and sends {sentAlready} VFX in it; {stake} VFX of its {whole.Value} must stay.");
+                state.BondStarting.Add(sender);
+            }
+
+            var debits = GetDebits(tx, state.BlockHeight);
             if (debits.Count == 0)
             {
                 state.Senders.Add(sender);
                 if (isSweep) state.Swept.Add(sender);
+                if (isRegister) state.Registered.Add(sender);
                 return (true, "");
             }
 
@@ -342,7 +421,7 @@ namespace VerifiedXCore.Services
             {
                 state.Spent.TryGetValue(key, out var spent);
                 state.Count.TryGetValue(key, out var count);
-                if (count + n < 2)
+                if (count + n < 2 && !(key.Kind == LedgerKind.Native && state.BondStarting.Contains(key.Holder)))
                     continue;
                 var balance = state.BalanceOf(key);
                 if (balance.HasValue && spent + sum > balance.Value)
@@ -358,6 +437,7 @@ namespace VerifiedXCore.Services
             }
             state.Senders.Add(sender);
             if (isSweep) state.Swept.Add(sender);
+            if (isRegister) state.Registered.Add(sender);
             return (true, "");
         }
 
@@ -395,6 +475,14 @@ namespace VerifiedXCore.Services
             }
             catch { }
             return paid;
+        }
+
+        public static bool IsReserveRegister(Transaction tx)
+        {
+            if (tx?.TransactionType != TransactionType.RESERVE || string.IsNullOrEmpty(tx.Data))
+                return false;
+            try { return JObject.Parse(tx.Data)["Function"]?.ToObject<string?>() == "Register()"; }
+            catch { return false; }
         }
 
         public static bool IsReserveRecover(Transaction tx)
@@ -437,7 +525,7 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static (bool Ok, string Reason) CheckAgainstPending(Transaction tx, IEnumerable<Transaction> pendingFromSameSender)
         {
-            var debits = GetDebits(tx);
+            var debits = GetDebits(tx); // admission: judged at the tip + 1
             if (debits.Count == 0)
                 return (true, "");
             var state = State.ForPolicy();
@@ -446,7 +534,7 @@ namespace VerifiedXCore.Services
             {
                 if (p.Hash == tx.Hash)
                     continue;
-                if (!GetDebits(p).Any(d => keys.Contains(Canonical(d.Key, state.CanonicalUids))))
+                if (!GetDebits(p, state.BlockHeight).Any(d => keys.Contains(Canonical(d.Key, state.CanonicalUids))))
                     continue;
                 // A pending transaction that itself no longer fits is left for the proposal to drop.
                 TryRegister(p, state);

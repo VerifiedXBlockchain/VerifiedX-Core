@@ -31,6 +31,8 @@ namespace VerifiedXCore.Bitcoin.FROST
     {
         public const string BtcExitPrefix = "btcexit_";
 
+        internal const string NonCanonicalReference = "WithdrawalRequestHash must be written exactly as the chain records the payment";
+
         public static (bool Ok, string Reason) Authorize(FrostSigningStartRequest request)
         {
             try
@@ -101,7 +103,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                 request.BtcTxId = derivedTxId;
 
                 // ── 2. Every input must spend the contract's own deposit address ───────────────
-                var depositAddress = ResolveDepositAddress(request.SmartContractUID);
+                // A vault the chain watches can have more than one key (plan 8.8): the session names the key it signs
+                // with by that key's UID (the vault's own UID for its first key), every input must be held under that
+                // key, and everything else below is judged for the vault the key belongs to.
+                var watchedKey = Attestation.BtcVaultKeys.KeyRow(request.SmartContractUID);
+                var vaultUid = watchedKey?.SmartContractUID ?? request.SmartContractUID;
+                var depositAddress = watchedKey?.DepositAddress ?? ResolveDepositAddress(request.SmartContractUID);
                 if (string.IsNullOrWhiteSpace(depositAddress)) return (false, "Contract deposit address could not be resolved");
 
                 Script depositScript;
@@ -118,18 +125,54 @@ namespace VerifiedXCore.Bitcoin.FROST
                 string destination;
                 long maxDestinationSats;
                 bool leaderIsOwner = false;
+                long? maxFeeSats = null; // an unwatched vault: the builder's fee for this transaction (below)
                 bool isBridgeExit = false;
+                bool leaderIsVaultSignerOfPinned = false;
+                bool pinnedRelease = false;
+                string? pinnedDestinationScriptHex = null; // a watched vault: the script state holds for the pinned payment
 
-                var wrh = request.WithdrawalRequestHash.Trim();
+                // The tracker, the durable evidence, the session and the pins all key on this string as sent, so it
+                // must be the one spelling the chain names the payment by: one payment, one key.
+                var wrh = request.WithdrawalRequestHash;
+                if (wrh != wrh.Trim()) return (false, NonCanonicalReference);
                 if (wrh.StartsWith(BtcExitPrefix, StringComparison.OrdinalIgnoreCase))
                 {
                     isBridgeExit = true;
-                    var (exit, capSats, exitReason) = ResolveBtcExitForContract(wrh, request.SmartContractUID);
+                    var (exit, capSats, exitReason) = ResolveBtcExitForContract(wrh, vaultUid);
                     if (exit == null) return (false, exitReason);
                     if (exit.IsComplete) return (false, "Bridge exit already completed");
+                    if (!string.Equals(wrh, Attestation.BtcWithdrawals.ExitSigningReference(exit.BaseBurnTxHash, vaultUid), StringComparison.Ordinal))
+                        return (false, NonCanonicalReference);
                     destination = exit.BtcDestination;
                     // Cap at THIS contract's share of the exit, never the whole exit amount.
                     maxDestinationSats = capSats;
+                    if (watchedKey == null) maxFeeSats = BitcoinTransactionService.WithdrawalFeeSats(inputCount, LegacyExitFeeRate);
+
+                    // A vault the chain watches: only the transaction consensus pinned for this vault's part of the exit
+                    // is signed, and any signer of the vault may lead (as for a withdrawal, below).
+                    if (watchedKey != null)
+                    {
+                        var (pinned, pinReason) = Attestation.BtcWithdrawals.MaySignExit(exit, vaultUid, txId);
+                        if (!pinned) return (false, pinReason);
+                        pinnedDestinationScriptHex = Attestation.BtcWithdrawals.ExitDestinationScriptOf(exit, vaultUid);
+                        leaderIsVaultSignerOfPinned = Attestation.BtcWithdrawalSigner.SignersOf(request.SmartContractUID)
+                            .Contains(request.LeaderAddress, StringComparer.Ordinal);
+                    }
+                }
+                else if (Attestation.BtcWithdrawals.IsSweepReference(wrh))
+                {
+                    // A sweep: a replaced key's coins moving to the vault's current key, fixed by rule. Any holder of the
+                    // key being signed with may lead; the transaction is the pinned one and pays only the vault.
+                    if (watchedKey == null) return (false, "A sweep is signed only for a vault the chain watches");
+                    var (pinned, pinReason) = Attestation.BtcWithdrawals.MaySignSweep(wrh, vaultUid, txId);
+                    if (!pinned) return (false, pinReason);
+                    var sweep = Attestation.BtcAttestStore.Withdrawal(wrh)!;
+                    if (!string.Equals(wrh, sweep.Ref, StringComparison.Ordinal)) return (false, NonCanonicalReference);
+                    pinnedDestinationScriptHex = sweep.DestinationScriptHex;
+                    destination = Attestation.BtcAttestStore.ScriptRow(sweep.DestinationScriptHex)?.DepositAddress ?? "";
+                    maxDestinationSats = sweep.AmountSats;
+                    leaderIsVaultSignerOfPinned = Attestation.BtcWithdrawalSigner.SignersOf(request.SmartContractUID)
+                        .Contains(request.LeaderAddress, StringComparer.Ordinal);
                 }
                 else
                 {
@@ -138,37 +181,73 @@ namespace VerifiedXCore.Bitcoin.FROST
                     // The hash alone would return an arbitrary sibling (wrong amount cap, and
                     // IsWithdrawalSignable would reject on the contract mismatch), and a
                     // cancellation filed against another vault's share would block this one.
-                    var wr = VBTCWithdrawalRequest.GetByTransactionHash(wrh, request.SmartContractUID);
-                    var pendingCancellation = VBTCWithdrawalCancellation.HasPendingCancellation(
-                        wrh, VerifiedXCore.Utilities.TimeUtil.GetTime(), request.SmartContractUID);
-                    var (signable, signableReason) = IsWithdrawalSignable(wr, request.SmartContractUID, pendingCancellation);
+                    if (WithdrawalNoLongerSignable(wrh, vaultUid) is { } notNow) return (false, notNow);
+                    var wr = VBTCWithdrawalRequest.GetByTransactionHash(wrh, vaultUid);
+                    var pendingCancellation = VBTCWithdrawalCancellation.HasPendingCancellationOrUnreadable(
+                        wrh, VerifiedXCore.Utilities.TimeUtil.GetTime(), vaultUid);
+                    var (signable, signableReason) = IsWithdrawalSignable(wr, vaultUid, pendingCancellation);
                     if (!signable) return (false, signableReason);
-                    destination = wr!.BTCDestination;
+                    if (!string.Equals(wrh, wr!.TransactionHash, StringComparison.Ordinal)) return (false, NonCanonicalReference);
+                    destination = wr.BTCDestination;
                     maxDestinationSats = (long)(wr.Amount * 100_000_000M);
                     leaderIsOwner = string.Equals(wr.RequestorAddress, request.LeaderAddress, StringComparison.Ordinal);
+                    // An unwatched vault: any transaction within the bounds was signed, so one built from the same coins
+                    // that paid the destination a few sats burned the rest as fee (#188). It pays the fee the builder sets
+                    // at the request's rate (VBTCService.CompleteWithdrawal), and takes the whole amount from the vault.
+                    if (!Attestation.BtcAttestBalance.IsAttestedVault(wr.SmartContractUID))
+                        maxFeeSats = BitcoinTransactionService.WithdrawalFeeSats(inputCount, wr.FeeRate != 0 ? wr.FeeRate : 10);
+
+                    // A vault the chain watches: consensus has fixed the one transaction that pays this withdrawal,
+                    // before anyone signed. A share is given for that transaction and for no other, so "nothing is
+                    // pinned" means "no signature exists", which is what expiry and cancellation rely on. And since
+                    // no other transaction can be signed, any signer of the vault may lead the ceremony.
+                    if (Attestation.BtcAttestBalance.IsAttestedVault(wr.SmartContractUID))
+                    {
+                        var (pinned, pinReason) = Attestation.BtcWithdrawals.MaySign(wrh, wr.SmartContractUID, txId);
+                        if (!pinned) return (false, pinReason);
+                        // The requester gave the withdrawal up: consensus fixed a transaction that returns its coins to
+                        // the vault and pays nobody.
+                        pinnedRelease = Attestation.BtcWithdrawals.IsPinnedRelease(wrh, wr.SmartContractUID, txId);
+                        pinnedDestinationScriptHex = Attestation.BtcWithdrawals.DestinationScriptOf(wrh, wr.SmartContractUID);
+                        leaderIsVaultSignerOfPinned = Attestation.BtcWithdrawalSigner.SignersOf(request.SmartContractUID)
+                            .Contains(request.LeaderAddress, StringComparer.Ordinal);
+                    }
                 }
 
+                // On a watched vault the destination is the script consensus built the pinned transaction with, so
+                // this check and the transaction cannot disagree over how an address is read.
                 Script destinationScript;
-                try { destinationScript = BitcoinAddress.Create(destination, Globals.BTCNetwork).ScriptPubKey; }
+                try
+                {
+                    destinationScript = pinnedDestinationScriptHex != null
+                        ? Script.FromHex(pinnedDestinationScriptHex)
+                        : BitcoinAddress.Create(destination, Globals.BTCNetwork).ScriptPubKey;
+                }
                 catch (Exception ex) { return (false, $"Authorized destination invalid: {ApiErrorText.For(ex)}"); }
 
                 // ── 4. Outputs: destination (bounded) or change to the vault, nothing else ─────
                 //      AND the vault's total cost (destination + miner fee) must fit the authorization.
+                // Back to the vault means to any of its keys on a watched vault: change of a payment fixed before a
+                // re-key goes to the key it was fixed under, a release after it to the current one.
+                var vaultScripts = watchedKey != null
+                    ? Attestation.BtcAttestStore.ScriptRowsForVault(vaultUid).Select(k => Script.FromHex(k.ScriptHex)).ToList()
+                    : new List<Script> { depositScript };
                 long destinationSats = 0, changeSats = 0;
                 foreach (var o in tx.Outputs)
                 {
                     if (o.ScriptPubKey == destinationScript) destinationSats += o.Value.Satoshi;
-                    else if (o.ScriptPubKey == depositScript) changeSats += o.Value.Satoshi;
+                    else if (vaultScripts.Contains(o.ScriptPubKey)) changeSats += o.Value.Satoshi;
                     else return (false, "Transaction pays an output that is neither the authorized destination nor vault change");
                 }
                 long inputSats = 0;
                 foreach (var so in spentOutputs) inputSats += so.Value.Satoshi;
 
-                var (boundsOk, boundsReason) = CheckSpendBounds(inputSats, destinationSats, changeSats, maxDestinationSats);
+                var (boundsOk, boundsReason) = CheckSpendBounds(inputSats, destinationSats, changeSats, maxDestinationSats, pinnedRelease, maxFeeSats);
                 if (!boundsOk) return (false, boundsReason);
 
                 // ── 5. Leader: the withdrawal owner for user withdrawals; a committee caster for exits ─
-                var (leaderOk, leaderReason) = IsLeaderAllowed(isBridgeExit, leaderIsOwner, IsKnownCaster(request.LeaderAddress));
+                var (leaderOk, leaderReason) = IsLeaderAllowed(isBridgeExit, leaderIsOwner || leaderIsVaultSignerOfPinned,
+                    IsCommitteeCaster(request.LeaderAddress) || (isBridgeExit && leaderIsVaultSignerOfPinned));
                 if (!leaderOk) return (false, leaderReason);
 
                 return (true, "");
@@ -179,6 +258,16 @@ namespace VerifiedXCore.Bitcoin.FROST
                 return (false, $"Authorization error: {ApiErrorText.For(ex)}");
             }
         }
+
+        /// <summary>
+        /// The transaction a withdrawal's signing record is kept under on this validator
+        /// (<see cref="Services.FrostWithdrawalSigningTracker"/>). On a vault the chain does not watch there is none:
+        /// the validator itself holds each withdrawal to one Bitcoin transaction. On a watched vault consensus fixes
+        /// which transactions may be signed, and a fee bump pins a second one on the same coins; the signer keeps one
+        /// record per pinned transaction, so the replacement can be signed and two ceremonies do not disturb each other.
+        /// </summary>
+        public static string? SigningScope(string? scUID, string? btcTxId) =>
+            !string.IsNullOrEmpty(btcTxId) && Attestation.BtcVaultKeys.KeyRow(scUID) != null ? btcTxId.Trim().ToLowerInvariant() : null;
 
         /// <summary>
         /// Who may lead a ceremony. A USER withdrawal is led only by its owner: every legitimate
@@ -192,6 +281,90 @@ namespace VerifiedXCore.Bitcoin.FROST
             if (isBridgeExit)
                 return leaderIsCommitteeCaster ? (true, "") : (false, "Bridge exit signing must be led by a committee caster");
             return leaderIsOwner ? (true, "") : (false, "Withdrawal signing must be led by the withdrawal owner");
+        }
+
+        /// <summary>Confirmations of a Bitcoin transaction (null: no Electrum server answered). Replaced in tests.</summary>
+        public static Func<string, Task<int?>> ParentConfirmations { get; set; } =
+            async txid => (await BitcoinTransactionService.GetTransactionConfirmationsResilient(txid)).Confirmations;
+
+        /// <summary>
+        /// Why this validator does not give a share now because an input of a vault the chain does not watch spends a coin
+        /// whose transaction is not confirmed on Bitcoin, or null. Such a coin can be replaced away (RBF), and the payment
+        /// with it, after the withdrawal is settled. The builder no longer picks one, but a build saved before that, or a
+        /// transaction its leader built itself, still reached the signers. A watched vault's inputs are attested coins.
+        /// No answer is a refusal; the leader asks again on its next attempt.
+        /// </summary>
+        public static async Task<string?> UnconfirmedInputToSign(string? scUID, IReadOnlyList<string>? outpoints)
+        {
+            if (string.IsNullOrEmpty(scUID) || Attestation.BtcVaultKeys.KeyRow(scUID) != null || Attestation.BtcAttestBalance.IsAttestedVault(scUID))
+                return null;
+            if (outpoints == null || outpoints.Count == 0)
+                return "the transaction names no inputs";
+            foreach (var parent in outpoints.Select(o => (o ?? "").Split(':')[0]).Distinct(StringComparer.Ordinal))
+            {
+                int? confirmations;
+                try { confirmations = await ParentConfirmations(parent); }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"Confirmation lookup for {parent} failed: {ex.Message}", "FrostSigningAuthorization.UnconfirmedInputToSign()");
+                    confirmations = null;
+                }
+                if (confirmations == null)
+                    return $"could not establish that input transaction {parent} is confirmed on Bitcoin (no Electrum server knows it, or none answered)";
+                if (confirmations < 1)
+                    return $"input transaction {parent} is not confirmed on Bitcoin yet; a withdrawal spends confirmed coins only";
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Why this validator is not to give a share now for a vault the chain does not watch, or null. What it signs is
+        /// judged from its own withdrawal store, cancellations and exits, which are only as current as its chain: after a
+        /// snapshot restore, a resync, a fork recovery (its download phase too) or while far behind, a withdrawal refunded
+        /// since reads open. So it signs only with its chain synced, not resyncing or recovering, and its tip recent. (Not "no block being downloaded": that is held every time a
+        /// peer is a block ahead, and a share refused at Round 2 fails the whole ceremony. A few blocks behind, a
+        /// cancellation being voted on is already seen, and refused.) A watched vault's shares are for transactions
+        /// consensus pinned, which spend the same coins.
+        /// </summary>
+        public static string? NotAtNetworkHeightToSign(string? scUID)
+        {
+            if (string.IsNullOrEmpty(scUID) || Attestation.BtcVaultKeys.KeyRow(scUID) != null || Attestation.BtcAttestBalance.IsAttestedVault(scUID))
+                return null;
+            return NodeNotAtNetworkHeight();
+        }
+
+        /// <summary>Why this node is not at the network's height (see <see cref="NotAtNetworkHeightToSign"/>), or null.</summary>
+        public static string? NodeNotAtNetworkHeight()
+        {
+            string? why = null;
+            var tip = Globals.LastBlock;
+            if (!Globals.IsChainSynced) why = "chain not synced";
+            else if (Globals.IsResyncing) why = "node is resyncing";
+            else if (VerifiedXCore.Utilities.ForkRecoveryUtility.IsRecoveryInProgress) why = "fork recovery in progress";
+            else if (Globals.StopAllTimers) why = "timers stopped";
+            else if (tip == null || tip.Height <= 0) why = "no tip block";
+            else if (VerifiedXCore.Utilities.TimeUtil.GetTime() - tip.Timestamp > VBTCCancellationVoteService.MAX_TIP_AGE_SECONDS)
+                why = $"tip block {tip.Height} is {VerifiedXCore.Utilities.TimeUtil.GetTime() - tip.Timestamp}s old";
+            return why == null ? null : $"This validator is not at the network's height ({why}); signing resumes when it is";
+        }
+
+        /// <summary>
+        /// Why a withdrawal (not a bridge exit or a sweep) is not to have a share given for it now, or null: the withdrawal
+        /// store is being rebuilt (a row put back reads "requested" until the rebuild brings it to how its withdrawal
+        /// ended), its cancellation was approved (it was refunded, whatever its row reads), or its row is closed. Asked
+        /// when a ceremony starts and again just before Round 2 gives the share: a signing session lives longer than a
+        /// cancellation vote waits for a ceremony to end.
+        /// </summary>
+        public static string? WithdrawalNoLongerSignable(string wrh, string vaultUid)
+        {
+            if (VBTCWithdrawalStoreRebuildService.IsRunning)
+                return "The withdrawal store is being rebuilt; signing resumes when it finishes";
+            if (VBTCWithdrawalCancellation.GetCancellationsFor(wrh, vaultUid).Any(c => c.IsProcessed && c.IsApproved))
+                return "Withdrawal request was cancelled and refunded";
+            var row = VBTCWithdrawalRequest.GetByTransactionHash(wrh, vaultUid);
+            if (row != null && (row.IsCompleted || row.Status == VBTCWithdrawalStatus.Completed || row.Status == VBTCWithdrawalStatus.Cancelled))
+                return IsWithdrawalSignable(row, vaultUid).Reason;
+            return null;
         }
 
         /// <summary>
@@ -229,11 +402,17 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// </summary>
         public const long DUST_TOLERANCE_SATS = 546;
 
-        public static (bool Ok, string Reason) CheckSpendBounds(long inputSats, long destinationSats, long changeSats, long maxSats)
+        /// <param name="releaseToVault">The transaction is a release fixed by consensus for a watched vault: it pays
+        /// nobody and returns everything but its fee to the vault. The fee is still held within the authorized amount.</param>
+        /// <summary>The fee rate an unwatched vault's bridge exit is built at (BurnExitConsensusService: delegatedFeeRate).</summary>
+        public const long LegacyExitFeeRate = 10;
+
+        public static (bool Ok, string Reason) CheckSpendBounds(long inputSats, long destinationSats, long changeSats, long maxSats, bool releaseToVault = false, long? maxFeeSats = null)
         {
             if (maxSats <= 0) return (false, "No authorized amount");
             if (inputSats <= 0) return (false, "Transaction has no input value");
-            if (destinationSats <= 0) return (false, "Transaction does not pay the authorized destination");
+            if (releaseToVault && destinationSats != 0) return (false, "A release pays nobody; this transaction pays the destination");
+            if (!releaseToVault && destinationSats <= 0) return (false, "Transaction does not pay the authorized destination");
             if (changeSats < 0) return (false, "Negative change");
 
             var fee = inputSats - destinationSats - changeSats;
@@ -244,6 +423,16 @@ namespace VerifiedXCore.Bitcoin.FROST
             if (vaultCost > maxSats + DUST_TOLERANCE_SATS)
                 return (false, $"Transaction spends {vaultCost} sats from the vault (destination {destinationSats} + fee {fee}) but only {maxSats} sats are authorized");
 
+            // An unwatched vault's transaction as its builder makes it: the fee its rate sets (change below dust falls to
+            // the fee), and the whole amount out of the vault, so the fee comes out of the payout and nothing else.
+            if (maxFeeSats is long feeCap)
+            {
+                if (fee > feeCap + DUST_TOLERANCE_SATS)
+                    return (false, $"Transaction pays {fee} sats fee; the withdrawal's fee rate allows {feeCap}");
+                if (vaultCost < maxSats)
+                    return (false, $"Transaction takes {vaultCost} sats from the vault for a {maxSats}-sat payment; the payout is short");
+            }
+
             return (true, "");
         }
 
@@ -251,7 +440,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// Verifies a round message carries the session leader's replayed start signature.
         /// Reads X-Frost-Leader / X-Frost-Timestamp / X-Frost-Signature headers.
         /// </summary>
-        public static bool VerifyLeaderHeaders(Microsoft.AspNetCore.Http.HttpContext context, SigningSession session, out string reason)
+        public static bool VerifyLeaderHeaders(Microsoft.AspNetCore.Http.HttpContext context, SigningSession session, out string reason, string? round2Body = null)
         {
             reason = "";
             var leader = context.Request.Headers["X-Frost-Leader"].ToString();
@@ -266,6 +455,16 @@ namespace VerifiedXCore.Bitcoin.FROST
 
             var msg = $"{session.SessionId}.{leader}.{ts}";
             if (!VerifiedXCore.Services.SignatureService.VerifySignature(leader, msg, sig)) { reason = "Invalid leader signature"; return false; }
+            if (!string.IsNullOrEmpty(session.StartContentSignature))
+            {
+                // A watched vault's session: from any address, but Round 2 carries the leader's signature over its own body
+                // (the nonce set it commits this signer's share to). Reading shares changes nothing.
+                if (round2Body == null) return true;
+                var bodySig = context.Request.Headers[FrostDkgLeaderAuth.SigningContentHeader].ToString();
+                if (string.IsNullOrEmpty(bodySig) || !VerifiedXCore.Services.SignatureService.VerifySignature(leader, FrostDkgLeaderAuth.SigningRound2Message(session.SessionId, round2Body), bodySig))
+                { reason = "This session's Round 2 is signed by its leader"; return false; }
+                return true;
+            }
             if (!SameLeaderEndpoint(session.LeaderRemoteIp, NormalizeRemoteIp(context.Connection.RemoteIpAddress)))
             { reason = "Round message did not come from the endpoint that started the session"; return false; }
             return true;
@@ -292,6 +491,11 @@ namespace VerifiedXCore.Bitcoin.FROST
         {
             try
             {
+                // A later key of a watched vault (plan 8.8) is no contract: its address is recorded with it.
+                var key = Attestation.BtcVaultKeys.KeyRow(scUID);
+                if (key != null && key.Generation > 0 && string.Equals(key.KeyUID, scUID, StringComparison.Ordinal))
+                    return key.DepositAddress;
+
                 var local = VBTCContractV2.GetContract(scUID);
                 if (local != null && !string.IsNullOrWhiteSpace(local.DepositAddress))
                     return local.DepositAddress;
@@ -317,6 +521,20 @@ namespace VerifiedXCore.Bitcoin.FROST
         {
             var outpoints = tx.Inputs.Select(x => $"{x.PrevOut.Hash}:{x.PrevOut.N}".ToLowerInvariant()).ToList();
             return (tx.GetHash().ToString().ToLowerInvariant(), outpoints);
+        }
+
+        /// <summary>
+        /// Why a bridge exit's share is no longer given: the reference names no exit on this contract any more, or the
+        /// exit was completed or failed after its ceremony started (sign/start judged it while it was open). Null while
+        /// the exit is still open.
+        /// </summary>
+        public static string? BridgeExitNoLongerSignable(string reference, string scUID)
+        {
+            var (exit, _, reason) = ResolveBtcExitForContract(reference, scUID);
+            if (exit == null) return reason;
+            if (exit.IsFailedRecord) return "Bridge exit has failed";
+            if (exit.IsComplete) return "Bridge exit already completed";
+            return null;
         }
 
         /// <summary>
@@ -369,14 +587,39 @@ namespace VerifiedXCore.Bitcoin.FROST
                 catch { return 0; }
                 if (allocs == null) return 0;
 
+                // A part is signed only for what applying this exit drew from its lock: the single-lock shape drew nothing,
+                // and a part whose lock was gone or already freed (an alias unlock in the same block, below the path-audit
+                // rules) was skipped at apply but kept in the plan, so the vault paid Bitcoin with no lock drawn behind it. A
+                // row from before this record: an exit on vaults the chain watches drew every part; any other is not signed.
+                List<PoolUnlockAllocation>? drawnParts;
+                if (exit.DrawnAllocationsJson == null)
+                {
+                    if (!Attestation.BtcWithdrawals.IsWatchedExit(exit)) return 0;
+                    drawnParts = allocs.Where(x => x != null).ToList();
+                }
+                else
+                {
+                    try { drawnParts = JsonConvert.DeserializeObject<List<PoolUnlockAllocation>>(exit.DrawnAllocationsJson); }
+                    catch { return 0; }
+                    if (drawnParts == null) return 0;
+                }
+                var undrawn = drawnParts.Where(x => x != null).ToList();
+
                 decimal sum = 0M;
+                var drawn = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var a in allocs)
                 {
                     if (a == null || a.UnlockAmount <= 0M) continue;
-                    var allocContract = a.SmartContractUID;
-                    if (string.IsNullOrEmpty(allocContract) && !string.IsNullOrEmpty(a.LockId))
-                        allocContract = VBTCBridgeLockState.GetByLockId(a.LockId)?.SmartContractUID ?? "";
-                    if (string.Equals(allocContract, scUID, StringComparison.Ordinal))
+                    // Each part is a lock as its own record names it, and its vault is the lock's. A lock named by an
+                    // alias ("L1 ", "l1": the lookup trims and ignores case) or named twice drew nothing the second time
+                    // when the exit was applied, so the exit asks for more than its locks gave up: it is not signed.
+                    var held = VBTCBridgeLockState.GetByLockId(a.LockId ?? "");
+                    if (held == null || !string.Equals(a.LockId, held.LockId, StringComparison.Ordinal) || !drawn.Add(held.LockId))
+                        return 0;
+                    var live = undrawn.FindIndex(d => string.Equals(d.LockId, a.LockId, StringComparison.Ordinal) && d.UnlockAmount == a.UnlockAmount);
+                    if (live < 0) return 0; // asks for more than its locks gave up: not signed
+                    undrawn.RemoveAt(live);
+                    if (string.Equals(held.SmartContractUID, scUID, StringComparison.Ordinal))
                         sum += a.UnlockAmount;
                 }
                 var sats = (long)(sum * 100_000_000M);
@@ -392,14 +635,35 @@ namespace VerifiedXCore.Bitcoin.FROST
         }
 
 
-        private static bool IsKnownCaster(string address)
+        /// <summary>
+        /// Whether a bridge exit's leader is a caster of the committee in the signed membership record for the next block:
+        /// the committee whose votes the exit carries and that elects its handler. The node's own list of casters
+        /// (<see cref="IsKnownCaster"/>) also holds every caster it has heard of, so a caster that had left the committee
+        /// could still lead an exit's signing, and pin or withhold it (#274, C-184).
+        /// </summary>
+        internal static bool IsCommitteeCaster(string? address) =>
+            !string.IsNullOrEmpty(address)
+            && BridgeCasterConsensus.GetCommitteeForHeight((Globals.LastBlock?.Height ?? 0) + 1).Contains(address);
+
+        internal static bool IsKnownCaster(string address)
         {
             if (Globals.BootstrapCasterAddresses.Contains(address)) return true;
             if (Globals.BlockCasters.Any(p => string.Equals(p.ValidatorAddress, address, StringComparison.Ordinal))) return true;
-            lock (Globals.KnownCasters)
+            lock (Globals.KnownCastersLock) // the lock the list is rebuilt under (round 25)
             {
                 return Globals.KnownCasters.Any(c => string.Equals(c.Address, address, StringComparison.Ordinal));
             }
         }
+
+        /// <summary>
+        /// Whether a signing ceremony on a key the chain watches is led by neither a holder of that key nor a caster: a
+        /// withdrawal's requester, whose transaction the holders sign without it. An older vault's withdrawal has its owner
+        /// as its only leader, and is not counted here: in the requester's share four addresses could keep every older
+        /// vault's owner out until those vaults freeze (fifth review, round 25).
+        /// </summary>
+        internal static bool LedByRequester(string? leaderAddress, string? keyUid) =>
+            !string.IsNullOrEmpty(leaderAddress) && keyUid != null && Attestation.BtcVaultKeys.KeyRow(keyUid) != null
+            && !(keyUid != null && Attestation.BtcWithdrawalSigner.SignersOf(keyUid).Contains(leaderAddress, StringComparer.Ordinal))
+            && !IsKnownCaster(leaderAddress);
     }
 }

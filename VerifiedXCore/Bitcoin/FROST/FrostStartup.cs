@@ -19,6 +19,9 @@ namespace VerifiedXCore.Bitcoin.FROST
     {
         public IConfiguration Configuration { get; }
 
+        /// <summary>The DKG routes no coordinator uses (POST round1, share, round3) change no session (fourth review, round 4).</summary>
+        internal static readonly bool DkgSideRoutesClosed = true;
+
         public FrostStartup(IConfiguration configuration)
         {
             Configuration = configuration;
@@ -136,6 +139,181 @@ namespace VerifiedXCore.Bitcoin.FROST
                 });
 
                 /// <summary>
+                /// POST /frost/btcreport/signature - one validator hands another its signature over a Bitcoin report hash
+                /// (docs/PLAN-vBTC-Bitcoin-Attestation.md, 3.4). The signature is kept only when it is valid and its signer
+                /// is in the stored signer set of the epoch it names, so the route needs no other authentication. The answer
+                /// carries the signatures this node holds for the same report.
+                /// </summary>
+                endpoints.MapPost("/frost/btcreport/signature", async context =>
+                {
+                    try
+                    {
+                        if (context.Request.ContentLength > 4096)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+                            return;
+                        }
+                        var buffer = new char[4097];
+                        int read;
+                        using (var reader = new StreamReader(context.Request.Body))
+                            read = await reader.ReadBlockAsync(buffer, 0, buffer.Length);
+                        if (read > 4096)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+                            return;
+                        }
+                        var message = JsonConvert.DeserializeObject<VerifiedXCore.Bitcoin.Attestation.BtcReportSignatureMessage>(new string(buffer, 0, read));
+                        context.Response.StatusCode = StatusCodes.Status200OK;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(VerifiedXCore.Bitcoin.Attestation.BtcReportService.HandleSignature(message)));
+                    }
+                    catch
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "The request is not a report signature." }));
+                    }
+                });
+
+                /// <summary>
+                /// POST /frost/btcreport/headers - the Bitcoin headers this validator follows, after the newest hash of
+                /// the request's locator it holds. Validators ask each other so that one cut off from Bitcoin still
+                /// learns of the heaviest chain; the asker checks every header itself, so the route needs no
+                /// authentication and nothing it serves has to be believed.
+                /// </summary>
+                endpoints.MapPost("/frost/btcreport/headers", async context =>
+                {
+                    try
+                    {
+                        if (context.Request.ContentLength > 8192)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+                            return;
+                        }
+                        var buffer = new char[8193];
+                        int read;
+                        using (var reader = new StreamReader(context.Request.Body))
+                            read = await reader.ReadBlockAsync(buffer, 0, buffer.Length);
+                        if (read > 8192)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+                            return;
+                        }
+                        var request = JsonConvert.DeserializeObject<VerifiedXCore.Bitcoin.Attestation.Net.BtcHeadersRequest>(new string(buffer, 0, read));
+                        context.Response.StatusCode = StatusCodes.Status200OK;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(VerifiedXCore.Bitcoin.Attestation.BtcReportService.HandleHeaders(request)));
+                    }
+                    catch
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "The request is not a header request." }));
+                    }
+                });
+
+                /// <summary>
+                /// GET /frost/btcreport/status - what this validator's Bitcoin reporting is doing: its Bitcoin tip and
+                /// peers, the tip the chain has attested, the reports it is offering to sign with their signature counts,
+                /// and what it is waiting for. Operators compare the Bitcoin tip between validators. Loopback only.
+                /// </summary>
+                endpoints.MapGet("/frost/btcreport/status", async context =>
+                {
+                    if (!IsLoopbackRequest(context))
+                    {
+                        await WriteForbiddenAsync(context);
+                        return;
+                    }
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        ValidatorAddress = Globals.ValidatorAddress,
+                        ObserveHeight = Globals.BitcoinAttestationObserveHeight,
+                        RecordHeight = Globals.BitcoinAttestationRecordHeight,
+                        EnforceHeight = Globals.BitcoinAttestationHeight,
+                        Depth = VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Depth,
+                        Status = VerifiedXCore.Bitcoin.Attestation.BtcReportService.Status,
+                    }, Formatting.Indented));
+                });
+
+                /// <summary>
+                /// GET /frost/keystore - this validator's FROST key records and a one-line verdict (Ok / Verdict): after an
+                /// upgrade nothing should be ambiguous and nothing should be waiting to be bound. A share whose ceremony never
+                /// produced a contract stays under its session id and is normal. Each row shows the UID the share is filed
+                /// under and which contracts on chain carry its group key. Loopback only; no key material.
+                /// </summary>
+                endpoints.MapGet("/frost/keystore", async context =>
+                {
+                    if (!IsLoopbackRequest(context))
+                    {
+                        await WriteForbiddenAsync(context);
+                        return;
+                    }
+                    var report = FrostKeyShareBinding.Report(Globals.ValidatorAddress);
+                    var response = JsonConvert.SerializeObject(new
+                    {
+                        Success = true,
+                        report.Ok,
+                        report.Verdict,
+                        report.ValidatorAddress,
+                        report.ChainSynced,
+                        report.BindingHasRun,
+                        report.ChainStateError,
+                        report.Records,
+                        report.UnderSessionId,
+                        report.Ambiguous,
+                        report.PendingBind,
+                        report.NoVault,
+                        report.KeyCopied,
+                        report.Keys,
+                    }, Formatting.Indented);
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    await context.Response.WriteAsync(response);
+                });
+
+                /// <summary>
+                /// POST /frost/keystore/migrate - run the session-id share binding now (it runs by itself once the node is
+                /// synced): every share still under a session id is filed under the one vault that carries its group key.
+                /// Refused while the node is not synced, because the answer is read from chain state. Loopback only.
+                /// </summary>
+                endpoints.MapPost("/frost/keystore/migrate", async context =>
+                {
+                    if (!IsLoopbackRequest(context)) { await WriteForbiddenAsync(context); return; }
+                    if (!Globals.IsChainSynced)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status409Conflict;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Chain not synced; the binding is decided from current chain state." }));
+                        return;
+                    }
+                    var result = FrostKeyShareBinding.BindSessionShares();
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = result.Failed == 0, Result = result }, Formatting.Indented));
+                });
+
+                /// <summary>
+                /// POST /frost/keystore/bind/{id}/{scUID}?confirm=true - an operator's decision for a share left under its
+                /// session id because more than one contract carries its key: file record {id} under {scUID}. Only onto a
+                /// contract on chain that carries the record's group key; a share already under a contract is never moved.
+                /// Binding to the wrong contract hands this validator's share to it. Loopback only; never called automatically.
+                /// </summary>
+                endpoints.MapPost("/frost/keystore/bind/{id}/{scUID}", async context =>
+                {
+                    if (!IsLoopbackRequest(context)) { await WriteForbiddenAsync(context); return; }
+                    if (!long.TryParse(context.Request.RouteValues["id"]?.ToString(), out var id))
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "id must be a key record id (see GET /frost/keystore)" }));
+                        return;
+                    }
+                    if (context.Request.Query["confirm"] != "true")
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Add ?confirm=true. Binding to the wrong contract hands this validator's key share to it." }));
+                        return;
+                    }
+                    var (ok, message) = FrostKeyShareBinding.BindByOperator(id, context.Request.RouteValues["scUID"] as string);
+                    context.Response.StatusCode = ok ? StatusCodes.Status200OK : StatusCodes.Status409Conflict;
+                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = ok, Message = message }));
+                });
+
+                /// <summary>
                 /// POST /frost/pins/reconcile/{scUID} - Run the on-chain pin release check NOW instead
                 /// of waiting for the 5-minute reconciler. Intrinsically safe: it can only release a
                 /// pin when Bitcoin itself provides the evidence (pinned tx confirmed, or its inputs
@@ -233,6 +411,33 @@ namespace VerifiedXCore.Bitcoin.FROST
                     await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = epoch != null, Epoch = epoch, Previous = previous }, Formatting.Indented));
                 });
 
+                // An operator's release of signing records written before exact spellings (see NeedsOperatorRelease): after
+                // confirming that no transaction signed for the withdrawal then can still pay.
+                endpoints.MapPost("/frost/evidence/release/{scUID}", async context =>
+                {
+                    if (!IsLoopbackRequest(context))
+                    {
+                        await WriteForbiddenAsync(context);
+                        return;
+                    }
+                    var scUID = context.Request.RouteValues["scUID"]?.ToString();
+                    var withdrawal = context.Request.Query["withdrawal"].ToString();
+                    if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawal) || context.Request.Query["confirm"] != "true")
+                    {
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                        {
+                            Success = false,
+                            Message = "Releases this validator's signing records for one withdrawal written before exact spellings. Confirm first that no transaction signed for it then can still pay; then give ?withdrawal=<reference>&confirm=true."
+                        }));
+                        return;
+                    }
+                    var released = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ReleaseByOperator(scUID, withdrawal);
+                    LogUtility.Log($"[FROST Dedup] WARNING: operator released {released} signing record(s) for withdrawal {withdrawal} on {scUID} via localhost endpoint.", "FrostStartup./frost/evidence/release");
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = true, Released = released }));
+                });
+
                 endpoints.MapPost("/frost/pins/clear/{scUID}", async context =>
                 {
                     if (!IsLoopbackRequest(context))
@@ -298,7 +503,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                         MinedRows = rows.Count(x => !string.IsNullOrEmpty(x.TransactionHash)),
                         LocalOnlyRows = rows.Count(x => string.IsNullOrEmpty(x.TransactionHash)),
                         ByStatus = rows.GroupBy(x => x.Status.ToString()).ToDictionary(g => g.Key, g => g.Count()),
-                        RebuildRunning = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning,
+                        RebuildRunning = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.InProgress,
+                        RebuildUnfinished = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsUnfinished,
                         RebuildMeta = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.GetMeta(),
                         LastRebuildResult = VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.LastResult
                     }, Formatting.Indented);
@@ -332,7 +538,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                         return;
                     }
 
-                    if (VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning)
+                    if (VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.InProgress)
                     {
                         context.Response.StatusCode = StatusCodes.Status409Conflict;
                         await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "A rebuild is already running." }));
@@ -423,6 +629,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                 {
                     try
                     {
+                        // A node whose FROST library has not passed its check cannot take part (FrostLibraryGate).
+                        if (!FrostLibraryGate.Ready)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = FrostLibraryGate.Unavailable }));
+                            return;
+                        }
+
                         // FIND-0013 Fix: Opportunistic cleanup to prevent unbounded session growth
                         FrostSessionStorage.CleanupOldSessions();
 
@@ -453,8 +667,17 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 }));
                                 return;
                             }
+                            // The contract id is kept with the session for an hour, long after it stops counting toward the
+                            // caps: unbounded, a few starts could hold gigabytes here (#208, D27). A contract's or a re-key's
+                            // id is under 60 characters.
+                            if (request.SmartContractUID != null && request.SmartContractUID.Length > FrostSessionStorage.MAX_SESSION_ID_LENGTH)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Invalid SmartContractUID (max {FrostSessionStorage.MAX_SESSION_ID_LENGTH} characters)" }));
+                                return;
+                            }
 
-                            if (request.ParticipantAddresses == null || request.ParticipantAddresses.Count == 0 
+                            if (request.ParticipantAddresses == null || request.ParticipantAddresses.Count == 0
                                 || request.ParticipantAddresses.Count > FrostSessionStorage.MAX_PARTICIPANTS)
                             {
                                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
@@ -463,6 +686,16 @@ namespace VerifiedXCore.Bitcoin.FROST
                                     Success = false,
                                     Message = $"ParticipantAddresses must be 1-{FrostSessionStorage.MAX_PARTICIPANTS}"
                                 }));
+                                return;
+                            }
+                            // Each participant once and no empty entry: the start's hash reads the list as a set, so a copy
+                            // listing someone twice had the leader's hash and signature, and opened a session with one more
+                            // signer than the ceremony, which then failed here and was blamed on this validator (fourth review, round 5).
+                            if (request.ParticipantAddresses.Any(string.IsNullOrEmpty)
+                                || request.ParticipantAddresses.Distinct(StringComparer.Ordinal).Count() != request.ParticipantAddresses.Count)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "ParticipantAddresses lists each participant once" }));
                                 return;
                             }
 
@@ -478,14 +711,17 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // FIND-0013 Fix: Enforce maximum concurrent session cap
-                            if (FrostSessionStorage.DKGSessions.Count >= FrostSessionStorage.MAX_DKG_SESSIONS)
+                            // Room and age, before anything else is looked at (who leads is judged once its signature is checked).
+                            var dkgNow = TimeUtil.GetTime();
+                            var dkgSource = VerifiedXCore.Utilities.RemoteIp.Group(context.Connection.RemoteIpAddress);
+                            var dkgRoomRefusal = FrostSessionStorage.DkgStartRefusal(FrostSessionStorage.DKGSessions.Values, dkgNow, request.SessionId, request.Timestamp, null, null, request.RekeyOf);
+                            if (dkgRoomRefusal != null)
                             {
                                 context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                                 {
                                     Success = false,
-                                    Message = "Maximum concurrent DKG sessions reached. Try again later."
+                                    Message = dkgRoomRefusal
                                 }));
                                 return;
                             }
@@ -505,6 +741,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                             }
 
                             // Verify all participants are registered active validators
+                            var participantKeys = new Dictionary<string, string>(StringComparer.Ordinal);
                             foreach (var participantAddr in request.ParticipantAddresses)
                             {
                                 var participantValidator = Services.VBTCValidatorRegistry.GetValidator(participantAddr);
@@ -518,6 +755,61 @@ namespace VerifiedXCore.Bitcoin.FROST
                                     }));
                                     return;
                                 }
+                                // Its key, taken now and kept for the ceremony (round 14).
+                                if (FrostShareCrypto.IsOwnKey(participantValidator.FrostPublicKey, participantAddr))
+                                    participantKeys[participantAddr] = participantValidator.FrostPublicKey;
+                            }
+
+                            // The leader's signature over the whole start (fourth review, round 4): required for a re-key, whose
+                            // leader is a validator with its key on its node; a web wallet's pre-signed start has none.
+                            var startBodyHash = FrostDkgLeaderAuth.StartBodyHash(request);
+                            var leaderSignedStart = !string.IsNullOrEmpty(request.BodySignature)
+                                && SignatureService.VerifySignature(request.LeaderAddress, FrostDkgLeaderAuth.StartMessage(startBodyHash), request.BodySignature);
+                            if (!leaderSignedStart && (!string.IsNullOrEmpty(request.BodySignature) || !string.IsNullOrEmpty(request.RekeyOf)))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "A re-key's start is signed in full by its leader (and a signature given must be valid)." }));
+                                return;
+                            }
+                            // A session id and a re-key's UID are the leader's own: another validator's signed start under them,
+                            // reaching this node first, had the leader's own start refused (fourth review, round 7).
+                            var boundRefusal = FrostDkgLeaderAuth.SessionIdRefusal(request.SessionId, request.LeaderAddress, rekey: !string.IsNullOrEmpty(request.RekeyOf), bodySigned: leaderSignedStart)
+                                ?? (string.IsNullOrEmpty(request.RekeyOf) ? null : VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyUidLeaderRefusal(request.SmartContractUID, request.LeaderAddress));
+                            if (boundRefusal != null)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = boundRefusal }));
+                                return;
+                            }
+                            // A UID the chain fixed for a due key's successor is used only by that vault's re-key, signed in full
+                            // by its leader: a copy stripped of both was taken as an unsigned creation under the re-key's
+                            // session id, and the leader's own start was then refused (fourth review, round 6).
+                            var dueVaultOfUid = VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.DueKeyClaiming(request.SmartContractUID);
+                            if (dueVaultOfUid != null && (!string.Equals(request.RekeyOf, dueVaultOfUid, StringComparison.Ordinal) || !leaderSignedStart))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"This UID is the one fixed for vault {dueVaultOfUid}'s next key: only that vault's re-key, signed by its leader, runs under it." }));
+                                return;
+                            }
+                            // The leader's signed start replaces a session a copy with other content opened first, if nothing
+                            // has been done in it yet.
+                            if (leaderSignedStart) FrostSessionStorage.MakeWayForSignedStart(request.SessionId, startBodyHash);
+
+                            // The same start sent again (by anyone who received it) is answered as accepted: refusing it made
+                            // the leader's own copy fail when another copy arrived first.
+                            if (FrostSessionStorage.DKGSessions.TryGetValue(request.SessionId, out var alreadyOpen) && alreadyOpen.StartBodyHash == startBodyHash
+                                && !alreadyOpen.IsAborted)
+                            {
+                                // A copy without the leader's full signature may have opened it: the signed one makes it the
+                                // leader's (its Round 2 set and shares then come from the leader only).
+                                if (leaderSignedStart) alreadyOpen.LeaderSigned = true;
+                                context.Response.StatusCode = StatusCodes.Status200OK;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = true, Message = "DKG ceremony already started with this start", SessionId = request.SessionId,
+                                    SmartContractUID = request.SmartContractUID, ParticipantCount = request.ParticipantAddresses.Count, Threshold = request.RequiredThreshold, CommitmentGenerated = true
+                                }, Formatting.Indented));
+                                return;
                             }
 
                             // FIND-0013 Fix: Cryptographic signature verification using existing SignatureService
@@ -564,18 +856,33 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // Per-leader session cap: one address cannot exhaust the DKG session pool.
-                            var leaderOpenSessions = FrostSessionStorage.CountDkgSessionsForLeader(request.LeaderAddress);
-                            if (!FrostSessionStorage.LeaderMayOpenDkgSession(leaderOpenSessions))
+                            // The leader is known now: a start it already used, its own places, and its network's. A re-key's
+                            // leader is an active vBTC validator (re-keys have places of their own, which nobody else may take).
+                            var dkgLeaderRefusal = (string.IsNullOrEmpty(request.RekeyOf) ? null : FrostSessionStorage.RekeyLeaderRefusal(request.LeaderAddress))
+                                ?? FrostSessionStorage.DkgStartRefusal(FrostSessionStorage.DKGSessions.Values, dkgNow, request.SessionId, request.Timestamp, request.LeaderAddress, dkgSource, request.RekeyOf);
+                            if (dkgLeaderRefusal != null)
                             {
-                                LogUtility.Log($"[FROST] DKG start refused for leader {request.LeaderAddress}: {leaderOpenSessions} sessions already open (cap {FrostSessionStorage.MAX_DKG_SESSIONS_PER_LEADER}).", "FrostStartup.DKGStart");
+                                LogUtility.Log($"[FROST] DKG start refused for leader {request.LeaderAddress} from {dkgSource}: {dkgLeaderRefusal}", "FrostStartup.DKGStart");
                                 context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                                 {
                                     Success = false,
-                                    Message = $"Too many open DKG sessions for this leader (cap {FrostSessionStorage.MAX_DKG_SESSIONS_PER_LEADER}). Finish or abandon them first."
+                                    Message = dkgLeaderRefusal
                                 }));
                                 return;
+                            }
+
+                            // A re-key's ceremony (plan 8.8) is joined only for a vault whose key the chain says is due, and
+                            // only at the share every re-key uses: a leader chooses neither the vault nor the threshold.
+                            if (!string.IsNullOrEmpty(request.RekeyOf))
+                            {
+                                var rekeyRefusal = VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.RekeyCeremonyRefusal(request.RekeyOf, request.RequiredThreshold);
+                                if (rekeyRefusal != null)
+                                {
+                                    context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = rekeyRefusal }));
+                                    return;
+                                }
                             }
 
                             // FIND-024 Fix: Determine this validator's participant index (1-based)
@@ -596,7 +903,7 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                             ushort myParticipantId = (ushort)(participantIndex + 1); // FROST uses 1-based IDs
                             ushort maxSigners = (ushort)request.ParticipantAddresses.Count;
-                            ushort minSigners = (ushort)Math.Ceiling(maxSigners * (request.RequiredThreshold / 100.0));
+                            ushort minSigners = (ushort)FrostDkgAttestation.CeremonyThreshold(maxSigners, request.RequiredThreshold, request.RekeyOf);
 
                             // FIND-024 Fix: Call FROST native library for DKG Round 1
                             var (commitment, secretPackage, errorCode) = FrostNative.DKGRound1Generate(
@@ -623,8 +930,15 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 ParticipantAddresses = request.ParticipantAddresses,
                                 RequiredThreshold = request.RequiredThreshold,
                                 StartTimestamp = TimeUtil.GetTime(),
+                                LastProgressTimestamp = TimeUtil.GetTime(),
+                                SourceIp = dkgSource,
+                                RekeyOf = string.IsNullOrEmpty(request.RekeyOf) ? null : request.RekeyOf,
+                                LeaderSigned = leaderSignedStart,
+                                StartRemoteIp = FrostSigningAuthorization.NormalizeRemoteIp(context.Connection.RemoteIpAddress),
+                                StartBodyHash = startBodyHash,
                                 MyParticipantIndex = myParticipantId,
-                                Round1SecretPackage = secretPackage
+                                Round1SecretPackage = secretPackage,
+                                ParticipantKeys = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(participantKeys, StringComparer.Ordinal),
                             };
 
                             // Auto-store this validator's commitment
@@ -648,8 +962,32 @@ namespace VerifiedXCore.Bitcoin.FROST
                             if (superseded > 0)
                                 LogUtility.Log($"[FROST] DKG start for {request.SmartContractUID}: leader {request.LeaderAddress} restarted; superseded {superseded} stale session(s).", "FrostStartup.DKGStart");
 
-                            if (!FrostSessionStorage.DKGSessions.TryAdd(request.SessionId, session))
+                            if (!FrostSessionStorage.NoteDkgStart(request.SessionId, dkgNow) || !FrostSessionStorage.DKGSessions.TryAdd(request.SessionId, session))
                             {
+                                // A copy with other content, unsigned, that got here a moment earlier: the signed start takes its place.
+                                if (leaderSignedStart && FrostSessionStorage.MakeWayForSignedStart(request.SessionId, startBodyHash)
+                                    && FrostSessionStorage.NoteDkgStart(request.SessionId, dkgNow) && FrostSessionStorage.DKGSessions.TryAdd(request.SessionId, session))
+                                {
+                                    context.Response.StatusCode = StatusCodes.Status200OK;
+                                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                    {
+                                        Success = true, Message = "DKG ceremony started with FROST Round 1 commitment generated", SessionId = request.SessionId,
+                                        SmartContractUID = request.SmartContractUID, ParticipantCount = request.ParticipantAddresses.Count, Threshold = request.RequiredThreshold, CommitmentGenerated = true
+                                    }, Formatting.Indented));
+                                    return;
+                                }
+                                // The same start, a copy of which got here a moment earlier: answered as accepted.
+                                if (FrostSessionStorage.DKGSessions.TryGetValue(request.SessionId, out var raced) && raced.StartBodyHash == startBodyHash && !raced.IsAborted)
+                                {
+                                    if (leaderSignedStart) raced.LeaderSigned = true;
+                                    context.Response.StatusCode = StatusCodes.Status200OK;
+                                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                    {
+                                        Success = true, Message = "DKG ceremony already started with this start", SessionId = request.SessionId,
+                                        SmartContractUID = request.SmartContractUID, ParticipantCount = request.ParticipantAddresses.Count, Threshold = request.RequiredThreshold, CommitmentGenerated = true
+                                    }, Formatting.Indented));
+                                    return;
+                                }
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                                 {
@@ -692,6 +1030,23 @@ namespace VerifiedXCore.Bitcoin.FROST
                 /// </summary>
                 endpoints.MapPost("/frost/dkg/round1", async context =>
                 {
+                    // A node whose FROST library has not passed its check cannot take part (FrostLibraryGate).
+                    if (!FrostLibraryGate.Ready)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = FrostLibraryGate.Unavailable }));
+                        return;
+                    }
+
+                    // Not used by any coordinator, and an open door: anyone could put a commitment, share or verification
+                    // into a validator's session ahead of the leader's, and the validator was then dropped as failing while
+                    // its sender was never named (fourth review, round 4). It changes no session.
+                    if (DkgSideRoutesClosed)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status410Gone;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Not used: commitments are taken from the leader's Round 2 set." }));
+                        return;
+                    }
                     try
                     {
                         using (var reader = new StreamReader(context.Request.Body))
@@ -881,6 +1236,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                 /// </summary>
                 endpoints.MapPost("/frost/dkg/round2/{sessionId}", async context =>
                 {
+                    // A node whose FROST library has not passed its check cannot take part (FrostLibraryGate).
+                    if (!FrostLibraryGate.Ready)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = FrostLibraryGate.Unavailable }));
+                        return;
+                    }
+
                     try
                     {
                         var sessionId = context.Request.RouteValues["sessionId"] as string;
@@ -892,17 +1255,72 @@ namespace VerifiedXCore.Bitcoin.FROST
                             return;
                         }
 
-                        if (!FrostSessionStorage.DKGSessions.TryGetValue(sessionId, out var session))
+                        if (!FrostSessionStorage.DKGSessions.TryGetValue(sessionId, out var session) || session.IsAborted)
                         {
                             context.Response.StatusCode = StatusCodes.Status404NotFound;
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Session not found" }));
                             return;
                         }
 
+                        // Round 2 is made once. Its shares are answered again to a coordinator that asks again; nothing
+                        // posted a second time is stored or counts as the ceremony going on.
+                        if (!string.IsNullOrEmpty(session.Round2Secret) && !string.IsNullOrEmpty(session.GeneratedSharesJson))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status200OK;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                            {
+                                Success = true,
+                                Message = "Round 2 shares were generated before",
+                                SessionId = sessionId,
+                                SharesGenerated = true,
+                                GeneratedShares = session.GeneratedSharesJson
+                            }, Formatting.Indented));
+                            return;
+                        }
+
                         using (var reader = new StreamReader(context.Request.Body))
                         {
                             var body = await reader.ReadToEndAsync();
-                            
+                            if (session.LeaderSigned && !SignatureService.VerifySignature(session.LeaderAddress,
+                                    FrostDkgLeaderAuth.ContentMessage("ROUND2", sessionId, body), context.Request.Headers[FrostDkgLeaderAuth.ContentSignatureHeader].ToString()))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This session's Round 2 set is signed by its leader." }));
+                                return;
+                            }
+                            if (!FromStartEndpoint(session, context))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This session's Round 2 set comes from the endpoint that started it." }));
+                                return;
+                            }
+
+                            // One Round 2 per session: two requests at once (the leader's signed request replayed by a
+                            // participant) each sealed with their own one-time keys, the last one stored, and the leader
+                            // relayed the other's ciphertext; a reveal then failed to open it and the dealer was dropped
+                            // (fifth review, round 13). Held to the end of this request; asked again, the stored answer.
+                            using var round2Hold = await HoldGate(session.Gate, TimeSpan.FromSeconds(30));
+                            if (round2Hold == null)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Busy with this session; ask again." }));
+                                return;
+                            }
+                            if (!string.IsNullOrEmpty(session.Round2Secret) && !string.IsNullOrEmpty(session.GeneratedSharesJson))
+                            {
+                                round2Hold.Dispose(); // not held while a requester reads slowly (round 14)
+                                context.Response.StatusCode = StatusCodes.Status200OK;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                {
+                                    Success = true,
+                                    Message = "Round 2 shares were generated before",
+                                    SessionId = sessionId,
+                                    SharesGenerated = true,
+                                    GeneratedShares = session.GeneratedSharesJson
+                                }, Formatting.Indented));
+                                return;
+                            }
+
                             // FIND-024 Fix: Parse all Round 1 commitments and call FROST native Round 2
                             if (string.IsNullOrEmpty(session.Round1SecretPackage))
                             {
@@ -927,15 +1345,6 @@ namespace VerifiedXCore.Bitcoin.FROST
                             else
                             {
                                 LogUtility.Log($"[FROST DEBUG] Round2 addressCommitments is null or empty. Body length={body?.Length ?? 0}, body(first 300)='{body?.Substring(0, Math.Min(300, body?.Length ?? 0))}'", "FrostStartup.DKGRound2");
-                            }
-
-                            // Store all commitments in the session for later use by TryFinalizeDKG (Round 3)
-                            if (addressCommitments != null)
-                            {
-                                foreach (var kvp in addressCommitments)
-                                {
-                                    session.Round1Commitments.TryAdd(kvp.Key, kvp.Value);
-                                }
                             }
 
                             // Build BTreeMap using computed FROST Identifiers from participant list ordering
@@ -969,6 +1378,18 @@ namespace VerifiedXCore.Bitcoin.FROST
                             var remappedCommitments = btreeMap.ToString(Newtonsoft.Json.Formatting.None);
                             LogUtility.Log($"[FROST] Round 2 BTreeMap built with {btreeMap.Count} entries for session {sessionId}", "FrostStartup.DKGRound2");
 
+                            // Every dealer's commitment has exactly as many coefficients as the key's threshold: a higher-degree
+                            // polynomial would make a key that needs more signers than attested (fourth review, round 6).
+                            var expectedCoefficients = FrostDkgAttestation.CeremonyThreshold(session.ParticipantAddresses.Count, session.RequiredThreshold, session.RekeyOf);
+                            var wrongDegree = (addressCommitments ?? new Dictionary<string, string>())
+                                .Where(kvp => !FrostDkgBlame.CommitmentHasCoefficients(kvp.Value, expectedCoefficients)).Select(kvp => kvp.Key).ToList();
+                            if (wrongDegree.Count > 0)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Round 1 commitments with other than {expectedCoefficients} coefficients: {string.Join(", ", wrongDegree)}" }));
+                                return;
+                            }
+
                             // Pre-validate: FROST part2() requires exactly (maxSigners - 1) other participants' commitments.
                             // If the count doesn't match, the FFI will return opaque error -4. Catch it early with a clear message.
                             var expectedCommitmentCount = session.ParticipantAddresses.Count - 1; // maxSigners minus self
@@ -999,7 +1420,10 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // NEW-19: seal every package (it carries the recipient's secret share in plaintext) to the
                             // recipient's registered validator key; the coordinator only ever relays ciphertext.
                             var idToAddress = BuildAddressToIdentifierMap(session.ParticipantAddresses).ToDictionary(kv => kv.Value, kv => kv.Key);
-                            var sealedShares = FrostShareCrypto.SealAll(sharesJson, sessionId, idToAddress, FrostShareCrypto.VerifiedPublicKey, out var sealError);
+                            var sealEphemerals = new Dictionary<string, string>(StringComparer.Ordinal);
+                            // To the keys taken at the start (round 14); a session from before them reads the registry.
+                            var sealedShares = FrostShareCrypto.SealAll(sharesJson, sessionId, idToAddress,
+                                a => session.ParticipantKeys.TryGetValue(a, out var k) ? k : FrostShareCrypto.VerifiedPublicKey(a), out var sealError, sealEphemerals);
                             if (sealedShares == null)
                             {
                                 ErrorLogUtility.LogError($"FROST DKG Round 2: shares not released for session {sessionId}: {sealError}", "FrostStartup.DKGRound2");
@@ -1008,9 +1432,16 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // Store Round 2 state
+                            // Store Round 2 state, and the participants' commitments it was made from (TryFinalizeDKG, Round 3).
+                            // Only participants' commitments, and only now that they made a Round 2.
+                            foreach (var kvp in addressCommitments!)
+                                if (session.ParticipantAddresses.Contains(kvp.Key))
+                                    session.Round1Commitments.TryAdd(kvp.Key, kvp.Value);
                             session.Round2Secret = round2Secret;
                             session.GeneratedSharesJson = sealedShares;
+                            foreach (var (identifier, ephemeral) in sealEphemerals) session.SealEphemerals[identifier] = ephemeral;
+                            FrostSessionStorage.MarkDkgStage(session, FrostSessionStorage.DkgStage.Round2);
+                            round2Hold.Dispose(); // stored: the answer is written without the lock (round 14)
 
                             LogUtility.Log($"[FROST] DKG Round 2 shares generated via native library for session {sessionId}", "FrostStartup.DKGRound2");
 
@@ -1038,6 +1469,23 @@ namespace VerifiedXCore.Bitcoin.FROST
                 /// </summary>
                 endpoints.MapPost("/frost/dkg/share", async context =>
                 {
+                    // A node whose FROST library has not passed its check cannot take part (FrostLibraryGate).
+                    if (!FrostLibraryGate.Ready)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = FrostLibraryGate.Unavailable }));
+                        return;
+                    }
+
+                    // Not used by any coordinator, and an open door: anyone could put a commitment, share or verification
+                    // into a validator's session ahead of the leader's, and the validator was then dropped as failing while
+                    // its sender was never named (fourth review, round 4). It changes no session.
+                    if (DkgSideRoutesClosed)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status410Gone;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Not used: shares are taken from the leader's share batch." }));
+                        return;
+                    }
                     try
                     {
                         using (var reader = new StreamReader(context.Request.Body))
@@ -1135,6 +1583,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // FIND-024 Fix: Auto-trigger DKG finalization if all required shares received
                             var receivedCount = session.ReceivedSharesJson.Count;
                             var totalOtherParticipants = session.ParticipantAddresses.Count - 1;
+                            if (receivedCount >= totalOtherParticipants) FrostSessionStorage.MarkDkgStage(session, FrostSessionStorage.DkgStage.SharesIn);
                             var dkgAutoFinalized = false;
 
                             if (receivedCount >= totalOtherParticipants && !session.IsCompleted 
@@ -1176,6 +1625,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                 /// </summary>
                 endpoints.MapPost("/frost/dkg/shares/{sessionId}", async context =>
                 {
+                    // A node whose FROST library has not passed its check cannot take part (FrostLibraryGate).
+                    if (!FrostLibraryGate.Ready)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = FrostLibraryGate.Unavailable }));
+                        return;
+                    }
+
                     try
                     {
                         var sessionId = context.Request.RouteValues["sessionId"] as string;
@@ -1194,9 +1651,70 @@ namespace VerifiedXCore.Bitcoin.FROST
                             return;
                         }
 
+                        // The body is read before the session's lock is taken: a sender trickling its body held the lock, and
+                        // the leader's batch to this validator timed out (fourth review, round 12).
+                        string body;
+                        using (var bodyReader = new StreamReader(context.Request.Body)) body = await bodyReader.ReadToEndAsync();
+                        // The leader's signature is checked before the lock, and the lock is waited for a bounded time:
+                        // unsigned bodies queued behind it were hashed one by one while the leader's batch waited (round 13).
+                        if (session.LeaderSigned && !SignatureService.VerifySignature(session.LeaderAddress,
+                                FrostDkgLeaderAuth.ContentMessage("SHARES", sessionId, body), context.Request.Headers[FrostDkgLeaderAuth.ContentSignatureHeader].ToString()))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This session's shares are sent by its leader, signed." }));
+                            return;
+                        }
+                        if (!FromStartEndpoint(session, context))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This session's shares come from the endpoint that started it." }));
+                            return;
+                        }
+                        // A batch for another validator is refused before the lock: it reads only the body (round 16).
+                        try
+                        {
+                            var addressed = Newtonsoft.Json.Linq.JObject.Parse(body);
+                            var addressedTo = addressed["Recipient"]?.ToString();
+                            var myBatchId = !string.IsNullOrEmpty(Globals.ValidatorAddress) && BuildAddressToIdentifierMap(session.ParticipantAddresses).TryGetValue(Globals.ValidatorAddress, out var mine) ? mine : null;
+                            if ((!string.IsNullOrEmpty(addressedTo) && addressedTo != Globals.ValidatorAddress)
+                                || (myBatchId != null && addressed["AllGeneratedShares"] is Newtonsoft.Json.Linq.JObject batchShares && !BatchCarriesShareFor(batchShares, myBatchId)))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This share batch is not addressed to this validator." }));
+                                return;
+                            }
+                        }
+                        catch (Newtonsoft.Json.JsonException) { } // judged under the lock as before
+                        // One batch at a time per session, and none while it gives its attestation (round 11).
+                        if (!await session.Gate.WaitAsync(TimeSpan.FromSeconds(30)))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Busy with this session; ask again." }));
+                            return;
+                        }
+                        try
+                        {
                         using (var reader = new StreamReader(context.Request.Body))
                         {
-                            var body = await reader.ReadToEndAsync();
+                            // (read before the lock)
+                            // Shares are taken only once this validator has made its Round 2 (it then holds every dealer's
+                            // commitment, and each share is checked against its dealer's before it is kept): one sent earlier
+                            // was kept unchecked and the real one dropped (fourth review, round 4).
+                            if (string.IsNullOrEmpty(session.Round2Secret))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Shares are taken after this validator's Round 2." }));
+                                return;
+                            }
+                            // A finished session takes no more shares, and one that reported takes none either: reports (which
+                            // a dealer answers with a share's sealing key) come only from a session that will never attest a
+                            // key (fourth review, round 10).
+                            if (session.IsCompleted || session.Reported)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This validator's shares for this session are settled." }));
+                                return;
+                            }
                             var json = Newtonsoft.Json.Linq.JObject.Parse(body);
 
                             // Verify the leader signature
@@ -1248,6 +1766,24 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 myFrostIdentifier = myId;
                             }
 
+                            // A batch made for another validator is refused, and so is one carrying no share for this one:
+                            // a participant replaying its own batch here had this validator report every dealer (to the
+                            // replayer) and refuse the leader's real batch, and it was dropped (fifth review, round 15).
+                            // Neither reports anybody.
+                            var batchRecipient = json["Recipient"]?.ToString();
+                            if (!string.IsNullOrEmpty(batchRecipient) && batchRecipient != myAddress)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This share batch is addressed to another validator." }));
+                                return;
+                            }
+                            if (!string.IsNullOrEmpty(myFrostIdentifier) && !BatchCarriesShareFor(allSharesToken, myFrostIdentifier))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "No share in this batch is addressed to this validator." }));
+                                return;
+                            }
+
                             if (string.IsNullOrEmpty(myFrostIdentifier))
                             {
                                 LogUtility.Log($"[FROST] WARNING: Could not determine own FROST Identifier for share extraction. MyAddress={myAddress}", "FrostStartup.DKGSharesBatch");
@@ -1272,7 +1808,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 }
 
                                 // Bound data size
-                                if (senderSharesStr.Length > FrostSessionStorage.MAX_COMMITMENT_DATA_LENGTH * 10)
+                                if (senderSharesStr.Length > FrostDkgBlame.MaxDealerEntryLength)
                                 {
                                     if (session.ParticipantAddresses.Contains(senderAddr)) accusations[senderAddr] = FrostDkgBlame.AccusationUnopenable;
                                     LogUtility.Log($"[FROST] Share data from {senderAddr} exceeds size limit, skipping", "FrostStartup.DKGSharesBatch");
@@ -1297,10 +1833,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                                             shareForMe = opened;
                                     }
 
+                                    // Only the signing share, in the library's own form, is kept (round 12).
+                                    if (!string.IsNullOrEmpty(shareForMe)) shareForMe = FrostDkgBlame.CanonicalShare(shareForMe) ?? "";
                                     if (!string.IsNullOrEmpty(shareForMe))
                                     {
-                                        if (session.Round1Commitments.TryGetValue(senderAddr, out var senderCommitment)
-                                            && !FrostDkgBlame.ShareMatchesCommitment(shareForMe, senderCommitment, myFrostIdentifier!))
+                                        if (!session.Round1Commitments.TryGetValue(senderAddr, out var senderCommitment)
+                                            || !FrostDkgBlame.ShareMatchesCommitment(shareForMe, senderCommitment, myFrostIdentifier!))
                                         {
                                             accusations[senderAddr] = FrostDkgBlame.AccusationInvalidShare;
                                             LogUtility.Log($"[FROST] Share from {senderAddr} does not match its Round 1 commitment.", "FrostStartup.DKGSharesBatch");
@@ -1323,8 +1861,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 }
                             }
 
+                            // A report is made once and for good: this session will not finish, and gives no attestation (round 10).
+                            if (accusations.Count > 0) session.Reported = true;
+
                             var receivedCount = session.ReceivedSharesJson.Count;
                             var totalOtherParticipants = session.ParticipantAddresses.Count - 1;
+                            if (accusations.Count == 0 && receivedCount >= totalOtherParticipants) FrostSessionStorage.MarkDkgStage(session, FrostSessionStorage.DkgStage.SharesIn);
 
                             LogUtility.Log($"[FROST] Batch share distribution: extracted {sharesExtracted} new shares, total received: {receivedCount}/{totalOtherParticipants}", 
                                 "FrostStartup.DKGSharesBatch");
@@ -1348,9 +1890,13 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 RequiredShares = totalOtherParticipants,
                                 DKGFinalized = dkgFinalized,
                                 TaprootAddress = session.TaprootAddress ?? "",
-                                Accusations = accusations
+                                Accusations = accusations,
+                                // Each report signed, so the dealer reveals that share's key for it and for nothing else (round 9).
+                                AccusationSignatures = accusations.Keys.ToDictionary(accused => accused, accused => SignedReport(myAddress, session, accused))
                             }, Formatting.Indented));
                         }
+                        }
+                        finally { session.Gate.Release(); }
                     }
                     catch (Exception ex)
                     {
@@ -1365,6 +1911,23 @@ namespace VerifiedXCore.Bitcoin.FROST
                 /// </summary>
                 endpoints.MapPost("/frost/dkg/round3", async context =>
                 {
+                    // A node whose FROST library has not passed its check cannot take part (FrostLibraryGate).
+                    if (!FrostLibraryGate.Ready)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = FrostLibraryGate.Unavailable }));
+                        return;
+                    }
+
+                    // Not used by any coordinator, and an open door: anyone could put a commitment, share or verification
+                    // into a validator's session ahead of the leader's, and the validator was then dropped as failing while
+                    // its sender was never named (fourth review, round 4). It changes no session.
+                    if (DkgSideRoutesClosed)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status410Gone;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Not used: a ceremony finishes from its shares." }));
+                        return;
+                    }
                     try
                     {
                         using (var reader = new StreamReader(context.Request.Body))
@@ -1619,6 +2182,113 @@ namespace VerifiedXCore.Bitcoin.FROST
                 });
 
                 /// <summary>
+                /// POST /frost/dkg/abort - the ceremony's leader gives up a failed attempt: the session holds no place here
+                /// from now on and its secrets are dropped (a later attempt runs under a new session and contract UID).
+                /// Signed by the leader over "ABORT.{sessionId}.{leader}.{timestamp}", so no participant can end another's
+                /// ceremony; a finished ceremony is not touched.
+                /// </summary>
+                endpoints.MapPost("/frost/dkg/abort", async context =>
+                {
+                    try
+                    {
+                        using var reader = new StreamReader(context.Request.Body);
+                        var request = JsonConvert.DeserializeObject<FrostDKGAbortRequest>(await reader.ReadToEndAsync());
+                        if (request == null || string.IsNullOrEmpty(request.SessionId) || string.IsNullOrEmpty(request.LeaderAddress) || string.IsNullOrEmpty(request.LeaderSignature))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "SessionId, LeaderAddress and LeaderSignature are required" }));
+                            return;
+                        }
+                        if (!FrostSessionStorage.DKGSessions.TryGetValue(request.SessionId, out var session)
+                            || !string.Equals(session.LeaderAddress, request.LeaderAddress, StringComparison.Ordinal))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status404NotFound;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "No session of this leader" }));
+                            return;
+                        }
+                        if (Math.Abs(TimeUtil.GetTime() - request.Timestamp) > FrostSessionStorage.DKG_START_MAX_AGE_SECONDS
+                            || !SignatureService.VerifySignature(request.LeaderAddress, FrostDKGAbortRequest.Message(request.SessionId, request.LeaderAddress, request.Timestamp), request.LeaderSignature))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid or old leader signature" }));
+                            return;
+                        }
+                        var aborted = FrostSessionStorage.AbortDkg(session);
+                        if (aborted) LogUtility.Log($"[FROST] DKG session {request.SessionId} given up by its leader {request.LeaderAddress}.", "FrostStartup.DKGAbort");
+                        context.Response.StatusCode = StatusCodes.Status200OK;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = true, Aborted = aborted }));
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"DKG abort error: {ex.Message}", "FrostStartup.DKGAbort");
+                        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Error: {VerifiedXCore.ApiErrorText.Generic(ex)}" }));
+                    }
+                });
+
+                /// <summary>
+                /// POST /frost/dkg/reveal/{sessionId} - the one-time key this validator sealed its share for one recipient
+                /// with, against that recipient's signed report that the share was bad. The coordinator opens the share
+                /// it relayed and checks it against this validator's commitment, which settles the report (fourth review,
+                /// round 9). Only for the reporting recipient's own share: it holds that share already.
+                /// </summary>
+                endpoints.MapPost("/frost/dkg/reveal/{sessionId}", async context =>
+                {
+                    try
+                    {
+                        var sessionId = context.Request.RouteValues["sessionId"] as string;
+                        string body;
+                        using (var reader = new StreamReader(context.Request.Body))
+                        {
+                            var buffer = new char[4097];
+                            var read = await reader.ReadBlockAsync(buffer, 0, buffer.Length);
+                            if (read > 4096)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+                                return;
+                            }
+                            body = new string(buffer, 0, read);
+                        }
+                        var request = Newtonsoft.Json.Linq.JObject.Parse(body);
+                        var accuser = request["Accuser"]?.Type == Newtonsoft.Json.Linq.JTokenType.String ? (string)request["Accuser"]! : null;
+                        var signature = request["Signature"]?.Type == Newtonsoft.Json.Linq.JTokenType.String ? (string)request["Signature"]! : null;
+                        var myAddress = Globals.ValidatorAddress;
+                        if (string.IsNullOrEmpty(sessionId) || string.IsNullOrEmpty(accuser) || string.IsNullOrEmpty(signature) || string.IsNullOrEmpty(myAddress)
+                            || !FrostSessionStorage.DKGSessions.TryGetValue(sessionId, out var session)
+                            || session.ParticipantAddresses == null || !session.ParticipantAddresses.Contains(accuser) || accuser == myAddress)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status404NotFound;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "No such share" }));
+                            return;
+                        }
+                        session.Round1Commitments.TryGetValue(accuser, out var accuserCommitment);
+                        session.Round1Commitments.TryGetValue(myAddress, out var myCommitment);
+                        if (string.IsNullOrEmpty(accuserCommitment) || string.IsNullOrEmpty(myCommitment)
+                            || !SignatureService.VerifySignature(accuser, FrostDkgBlame.AccusationMessage(sessionId, session.StartBodyHash, accuser, myAddress, accuserCommitment, myCommitment), signature))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Not a signed report of this share's recipient" }));
+                            return;
+                        }
+                        if (!BuildAddressToIdentifierMap(session.ParticipantAddresses).TryGetValue(accuser, out var identifier)
+                            || !session.SealEphemerals.TryGetValue(identifier, out var ephemeral))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status404NotFound;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "No such share" }));
+                            return;
+                        }
+                        context.Response.StatusCode = StatusCodes.Status200OK;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = true, EphemeralKey = ephemeral }));
+                    }
+                    catch (Exception ex)
+                    {
+                        ErrorLogUtility.LogError($"DKG reveal error: {ex.Message}", "FrostStartup.DKGReveal");
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Unreadable request" }));
+                    }
+                });
+
+                /// <summary>
                 /// GET /frost/dkg/result/{sessionId} - Get DKG ceremony result
                 /// </summary>
                 endpoints.MapGet("/frost/dkg/result/{sessionId}", async context =>
@@ -1650,6 +2320,22 @@ namespace VerifiedXCore.Bitcoin.FROST
                             return;
                         }
 
+                        if (!await session.Gate.WaitAsync(TimeSpan.FromSeconds(30))) // not while a share batch is being taken (round 11); bounded (round 12)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Busy taking a share batch; ask again." }));
+                            return;
+                        }
+                        try
+                        {
+                        // A session that reported a share attests nothing (round 10).
+                        if (session.Reported)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status409Conflict;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This validator reported a share in this session; it attests no key from it.", SessionId = sessionId, IsCompleted = false }));
+                            return;
+                        }
+
                         // Check if ceremony is completed
                         if (!session.IsCompleted)
                         {
@@ -1667,9 +2353,15 @@ namespace VerifiedXCore.Bitcoin.FROST
                         // NEW-26: this validator's attestation that the key is one it holds a share of, for this contract.
                         // NEW-26 (follow-up): the attestation also binds the owner (the authenticated leader), the signing
                         // threshold and the participant list of this validator's own session.
+                        // It also binds the public key package this validator finished with: a leader that gave participants
+                        // different commitments leaves them with different packages, and no proof (fourth review, round 3).
+                        // Only where consensus asks for it (a re-key, a creation from the rules' height): before, a validator
+                        // signing it while others did not failed honest creations during a rolling upgrade (round 4).
+                        var keyPackageHash = !string.IsNullOrEmpty(session.RekeyOf) || (Globals.LastBlock?.Height ?? -1) + 1 >= Globals.PathAuditRulesHeight
+                            ? FrostDkgAttestation.KeyPackageHash(session.FinalPubkeyPackage) : null;
                         var attestation = FrostDkgAttestation.SignLocal(session.SmartContractUID, session.GroupPublicKey, session.TaprootAddress,
-                            session.LeaderAddress, FrostDkgAttestation.ThresholdFor(session.ParticipantAddresses?.Count ?? 0, session.RequiredThreshold),
-                            session.ParticipantAddresses);
+                            session.LeaderAddress, FrostDkgAttestation.CeremonyThreshold(session.ParticipantAddresses?.Count ?? 0, session.RequiredThreshold, session.RekeyOf),
+                            session.ParticipantAddresses, session.RekeyOf, keyPackageHash);
 
                         // Return final result
                         context.Response.StatusCode = StatusCodes.Status200OK;
@@ -1683,8 +2375,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                             TaprootAddress = session.TaprootAddress,
                             DKGProof = session.DKGProof,
                             Attestation = attestation,
+                            PublicKeyPackageHash = keyPackageHash,
+                            // A creation's proof that this validator holds its part of the key, signed for this vault (round 12).
+                            Possession = string.IsNullOrEmpty(session.RekeyOf)
+                                ? FrostDkgAttestation.SignPossession(session.Round1SecretPackage, session.SmartContractUID, session.LeaderAddress, session.GroupPublicKey ?? "") : null,
                             IsCompleted = session.IsCompleted
                         }, Formatting.Indented));
+                        }
+                        finally { session.Gate.Release(); }
                     }
                     catch (Exception ex)
                     {
@@ -1709,6 +2407,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                 {
                     try
                     {
+                        // A node whose FROST library has not passed its check cannot take part (FrostLibraryGate).
+                        if (!FrostLibraryGate.Ready)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = FrostLibraryGate.Unavailable }));
+                            return;
+                        }
+
                         // FIND-0013 Fix: Opportunistic cleanup
                         FrostSessionStorage.CleanupOldSessions();
 
@@ -1740,6 +2446,17 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // A signing start is authorized by the same "{session}.{leader}.{timestamp}" signature a key
+                            // ceremony's start and share batch carry: every participant of a leader's ceremony could start
+                            // signing under that leader's name (fifth review, round 16). Key ceremonies' ids carry the
+                            // leader's tag; signing ids never do.
+                            if (FrostDkgLeaderAuth.IsTagged(request.SessionId))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "A key ceremony's session id is not a signing session's." }));
+                                return;
+                            }
+
                             if (request.SignerAddresses == null || request.SignerAddresses.Count == 0 
                                 || request.SignerAddresses.Count > FrostSessionStorage.MAX_PARTICIPANTS)
                             {
@@ -1764,15 +2481,39 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // FIND-0013 Fix: Enforce maximum concurrent session cap
-                            if (FrostSessionStorage.SigningSessions.Count >= FrostSessionStorage.MAX_SIGNING_SESSIONS)
+                            // FIND-0013 Fix: Enforce maximum concurrent session cap (in all, per leader, per input)
+                            FrostSessionStorage.DropFinishedForRoom(); // finished sessions make way (round 35)
+                            var noRoom = FrostSessionStorage.SigningStartRefusal(FrostSessionStorage.SigningSessions.Values.ToList(), null, null); // the total; the leader's own room once it is known to be the leader
+                            if (noRoom != null)
                             {
                                 context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                                 {
                                     Success = false,
-                                    Message = "Maximum concurrent signing sessions reached. Try again later."
+                                    Message = noRoom
                                 }));
+                                return;
+                            }
+
+                            // The leader is who it says, and the start is recent, before any work is done for it: Authorize
+                            // decompiles the vault's contract and the prior-transaction check asks Electrum, and anybody could
+                            // make every validator do both with a start nobody signed (#274, C-224).
+                            if (string.IsNullOrEmpty(request.LeaderAddress) || string.IsNullOrEmpty(request.LeaderSignature))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "LeaderAddress and leader signature required" }));
+                                return;
+                            }
+                            if (Math.Abs(TimeUtil.GetTime() - request.Timestamp) > FrostSessionStorage.SIGNING_START_MAX_AGE_SECONDS)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "The signing start's timestamp is too far from this validator's clock." }));
+                                return;
+                            }
+                            if (!SignatureService.VerifySignature(request.LeaderAddress, $"{request.SessionId}.{request.LeaderAddress}.{request.Timestamp}", request.LeaderSignature))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Invalid leader signature" }));
                                 return;
                             }
 
@@ -1796,6 +2537,13 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 }));
                                 return;
                             }
+                            if (FrostSigningAuthorization.NotAtNetworkHeightToSign(request.SmartContractUID) is { } notReady)
+                            {
+                                LogUtility.Log($"[FROST] sign/start refused for {request.SmartContractUID} / {request.WithdrawalRequestHash}: {notReady}", "FrostStartup.SignStart");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = notReady }));
+                                return;
+                            }
 
                             // Durable double-payout guard: if THIS validator already signed a different
                             // transaction for this withdrawal, allow a new one only if the old one was
@@ -1815,11 +2563,13 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // withdrawal input, and that no other withdrawal's signed tx is outstanding
                             // for the contract unless this tx conflicts with it. This is the network-level
                             // defense against double-spend — even if the coordinator's code is modified.
+                            ISet<string>? reclaimablePinsForStart = null; // fund-loss audit item 7: reused by the atomic record below
                             if (!string.IsNullOrEmpty(request.WithdrawalRequestHash))
                             {
                                 var (blocked, reason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
                                     .CheckWithdrawalSigning(request.SmartContractUID, request.WithdrawalRequestHash,
-                                        request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints);
+                                        request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints,
+                                        transactionScope: FrostSigningAuthorization.SigningScope(request.SmartContractUID, request.BtcTxId));
 
                                 // If blocked by a contract outpoint pin, check on-chain whether the pinned
                                 // tx(s) have since confirmed (or can no longer confirm) — released pins drop
@@ -1840,9 +2590,11 @@ namespace VerifiedXCore.Bitcoin.FROST
                                         await TryReleaseContractPinIfObservedOnChain(request.SmartContractUID);
                                     }
 
+                                    reclaimablePinsForStart = reclaimable;
                                     (blocked, reason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
                                         .CheckWithdrawalSigning(request.SmartContractUID, request.WithdrawalRequestHash,
-                                            request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints, reclaimable);
+                                            request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints, reclaimable,
+                                            FrostSigningAuthorization.SigningScope(request.SmartContractUID, request.BtcTxId));
                                 }
 
                                 if (blocked)
@@ -1899,6 +2651,30 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
+                            // A session id is opened once: an open one is not touched, and one this validator opened before
+                            // (since finished, aborted or cleaned up) is not opened again under a signature still in date
+                            // (fifth review, round 17).
+                            // Matched on what was signed, not on the signature's spelling: one signature verifies under
+                            // several encodings, and a copy re-encoded by a forwarder made the leader's own start a stranger
+                            // (round 19).
+                            if (FrostSessionStorage.SigningSessions.TryGetValue(request.SessionId, out var openSession)
+                                && !string.IsNullOrEmpty(openSession.StartMessage)
+                                && !string.IsNullOrEmpty(request.ContentSignature)
+                                && string.Equals(openSession.StartMessage, FrostDkgLeaderAuth.SigningStartMessage(request), StringComparison.Ordinal)
+                                && SignatureService.VerifySignature(openSession.LeaderAddress, openSession.StartMessage, request.ContentSignature))
+                            {
+                                // The leader's own start, arriving after a copy of it opened the session: the same session (round 18).
+                                context.Response.StatusCode = StatusCodes.Status200OK;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = true, Message = "Signing ceremony already started", SessionId = request.SessionId, MessageHash = openSession.MessageHash, NonceGenerated = true }));
+                                return;
+                            }
+                            if (FrostSessionStorage.SigningSessions.ContainsKey(request.SessionId) || FrostSessionStorage.SigningStartSeen(request.SessionId))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Signing session already exists" }));
+                                return;
+                            }
+
                             var leaderMessage = $"{request.SessionId}.{request.LeaderAddress}.{request.Timestamp}";
                             var leaderSigValid = SignatureService.VerifySignature(request.LeaderAddress, leaderMessage, request.LeaderSignature);
                             if (!leaderSigValid)
@@ -1910,6 +2686,64 @@ namespace VerifiedXCore.Bitcoin.FROST
                                     Success = false,
                                     Message = "Invalid leader signature"
                                 }));
+                                return;
+                            }
+
+                            // A vault the chain watches is signed only for a start its leader signed in full: the plain
+                            // signature names no content, and any signer holding one of the leader's could open a session
+                            // under it with content of its own and take the leader's places (fifth review, round 17).
+                            // Such signings are led by validators, which sign their starts on their own nodes.
+                            if (VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(request.SmartContractUID) != null
+                                && (string.IsNullOrEmpty(request.ContentSignature)
+                                    || !SignatureService.VerifySignature(request.LeaderAddress, FrostDkgLeaderAuth.SigningStartMessage(request), request.ContentSignature)))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "A signing start for this vault is signed in full by its leader." }));
+                                return;
+                            }
+
+                            // An older start of the leader's does not take the place of a newer one open here for the same
+                            // input: a copy of an attempt this validator missed, sent while the leader's retry was under way,
+                            // was recorded as the leader's session and the retry's Round 2 refused (round 19).
+                            // And the newest start verified here for the input is remembered, so starts the leader gave up are
+                            // refused even once the newer session has gone, and the older sessions it gave up free their
+                            // places (round 20).
+                            if (VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(request.SmartContractUID) != null)
+                            {
+                                if (!FrostSessionStorage.TakeStartOrder(request.LeaderAddress, request.SmartContractUID, request.WithdrawalRequestHash, request.InputIndex, request.Timestamp))
+                                {
+                                    context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "A newer start of this leader holds this input here." }));
+                                    return;
+                                }
+                                FrostSessionStorage.DropSupersededSigningSessions(request.LeaderAddress, request.SmartContractUID, request.WithdrawalRequestHash, request.InputIndex, request.Timestamp);
+                            }
+
+                            // The leader is who it says: its room here, and a start that is not an old one sent again.
+                            if (Math.Abs(TimeUtil.GetTime() - request.Timestamp) > FrostSessionStorage.SIGNING_START_MAX_AGE_SECONDS)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "The signing start's timestamp is too far from this validator's clock." }));
+                                return;
+                            }
+                            var ledByRequester = FrostSigningAuthorization.LedByRequester(request.LeaderAddress, request.SmartContractUID);
+                            FrostSessionStorage.DropFinishedForRoom();
+                            var noRoomForLeader = FrostSessionStorage.SigningStartRefusal(FrostSessionStorage.SigningSessions.Values.ToList(), request.LeaderAddress, request.MessageHash, ledByRequester);
+                            if (noRoomForLeader != null)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = noRoomForLeader }));
+                                return;
+                            }
+
+                            // Every input of a vault the chain does not watch spends a confirmed coin. Asked only for a start
+                            // whose leader signed it, recently, with room here, so no caller (nor an old start sent again) makes
+                            // this validator query Electrum. Nothing is recorded before this point for such a vault.
+                            if (await FrostSigningAuthorization.UnconfirmedInputToSign(request.SmartContractUID, request.TxInputOutpoints) is { } unconfirmedInput)
+                            {
+                                LogUtility.Log($"[FROST] sign/start refused for {request.SmartContractUID} / {request.WithdrawalRequestHash}: {unconfirmedInput}", "FrostStartup.SignStart");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = unconfirmedInput }));
                                 return;
                             }
 
@@ -1945,10 +2779,20 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 if (keyStore != null && !string.IsNullOrEmpty(keyStore.KeyPackage)
                                     && !string.Equals(keyStore.SmartContractUID, request.SmartContractUID, StringComparison.Ordinal))
                                 {
-                                    LogUtility.Log($"[FROST] Key found via vault group key for SC={request.SmartContractUID} (was stored as {keyStore.SmartContractUID}). Auto-updating.",
-                                        "FrostStartup.SignStart");
-                                    if (FrostValidatorKeyStore.UpdateSmartContractUID(keyStore.Id, request.SmartContractUID))
-                                        keyStore.SmartContractUID = request.SmartContractUID;
+                                    // Fund-loss audit item 4: a record filed under ANOTHER on-chain contract is that
+                                    // contract's share; a body copying its group key must not borrow (and relabel) it.
+                                    if (!FrostDkgGuard.MayAdoptKeyRecord(keyStore.SmartContractUID, request.SmartContractUID, keyStore.GroupPublicKey, out var adoptReason))
+                                    {
+                                        ErrorLogUtility.LogError($"FROST sign/start REFUSED for SC={request.SmartContractUID}: {adoptReason}", "FrostStartup.SignStart");
+                                        keyStore = null;
+                                    }
+                                    else
+                                    {
+                                        LogUtility.Log($"[FROST] Key found via vault group key for SC={request.SmartContractUID} (was stored as {keyStore.SmartContractUID}). Auto-updating.",
+                                            "FrostStartup.SignStart");
+                                        if (FrostValidatorKeyStore.UpdateSmartContractUID(keyStore.Id, request.SmartContractUID))
+                                            keyStore.SmartContractUID = request.SmartContractUID;
+                                    }
                                 }
                             }
 
@@ -1963,6 +2807,11 @@ namespace VerifiedXCore.Bitcoin.FROST
                                     {
                                         ErrorLogUtility.LogError($"FROST sign/start: CeremonyId fallback key for SC={request.SmartContractUID} has group key {keyStore.GroupPublicKey} but the vault key is {expectedGroupKey}; refusing to relabel or use it.",
                                             "FrostStartup.SignStart");
+                                        keyStore = null;
+                                    }
+                                    else if (!FrostDkgGuard.MayAdoptKeyRecord(keyStore.SmartContractUID, request.SmartContractUID, keyStore.GroupPublicKey, out var adoptReason))
+                                    {
+                                        ErrorLogUtility.LogError($"FROST sign/start REFUSED for SC={request.SmartContractUID}: {adoptReason}", "FrostStartup.SignStart");
                                         keyStore = null;
                                     }
                                     else
@@ -1983,7 +2832,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 {
                                     keyStore = FrostValidatorKeyStore.GetKeyPackageByGroupPublicKey(vbtcContract.FrostGroupPublicKey, myAddr);
                                     if (keyStore != null && !string.IsNullOrEmpty(keyStore.KeyPackage)
-                                        && FrostDkgGuard.KeyPackageMatchesContract(keyStore.GroupPublicKey, expectedGroupKey))
+                                        && FrostDkgGuard.KeyPackageMatchesContract(keyStore.GroupPublicKey, expectedGroupKey)
+                                        && FrostDkgGuard.MayAdoptKeyRecord(keyStore.SmartContractUID, request.SmartContractUID, keyStore.GroupPublicKey, out _)) // fund-loss audit item 4
                                     {
                                         // Auto-fix: update the key store record to use the real SCUID
                                         LogUtility.Log($"[FROST] Key found via GroupPublicKey fallback for SC={request.SmartContractUID} (was stored as {keyStore.SmartContractUID}). Auto-updating.",
@@ -2059,9 +2909,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 MessageHash = request.MessageHash,
                                 SmartContractUID = request.SmartContractUID,
                                 LeaderAddress = request.LeaderAddress,
+                                LedByRequester = ledByRequester,
                                 LeaderStartTimestamp = request.Timestamp,
                                 LeaderStartSignature = request.LeaderSignature,
                                 LeaderRemoteIp = FrostSigningAuthorization.NormalizeRemoteIp(context.Connection.RemoteIpAddress),
+                                StartContentSignature = VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(request.SmartContractUID) != null ? request.ContentSignature : null,
+                                StartMessage = VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(request.SmartContractUID) != null ? FrostDkgLeaderAuth.SigningStartMessage(request) : null,
                                 WithdrawalRequestHash = request.WithdrawalRequestHash,  // FIND-028
                                 SignerAddresses = request.SignerAddresses,
                                 RequiredThreshold = request.RequiredThreshold,
@@ -2079,12 +2932,9 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                             if (!FrostSessionStorage.SigningSessions.TryAdd(request.SessionId, signingSession))
                             {
-                                // FIND-028: Record failed if we can't create session (conflict)
-                                if (!string.IsNullOrEmpty(request.WithdrawalRequestHash))
-                                {
-                                    VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                                        .RecordSigningFailed(request.SmartContractUID, request.WithdrawalRequestHash, request.SessionId, request.InputIndex);
-                                }
+                                // The session is someone else's (the leader's own, a copy of its start sent again): nothing of
+                                // it is touched. Recording a failure here under its id dropped the leader's open session from
+                                // the tracker, and its Round 2 was refused (fifth review, round 17).
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new
                                 {
@@ -2094,12 +2944,32 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 return;
                             }
 
-                            // FIND-028: Record signing started for withdrawal dedup
+                            FrostSessionStorage.NoteSigningStart(request.SessionId);
+
+                            // FIND-028: Record signing started for withdrawal dedup.
+                            // Fund-loss audit item 7: check and record under one lock. The check at the top of this
+                            // handler is a fast refusal; between it and here another start for the same input (a
+                            // different sighash) could pass the same check, and both ceremonies then ran. The record
+                            // is now the decision: the loser's session is dropped here and refused.
                             if (!string.IsNullOrEmpty(request.WithdrawalRequestHash))
                             {
-                                VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                                    .RecordSigningStarted(request.SmartContractUID, request.WithdrawalRequestHash, request.SessionId,
-                                        request.InputIndex, request.MessageHash, request.AllInputSighashes);
+                                var (beginBlocked, beginReason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
+                                    .TryBeginSigning(request.SmartContractUID, request.WithdrawalRequestHash, request.SessionId,
+                                        request.InputIndex, request.MessageHash, request.AllInputSighashes, request.TxInputOutpoints, reclaimablePinsForStart,
+                                        FrostSigningAuthorization.SigningScope(request.SmartContractUID, request.BtcTxId), request.LeaderAddress, request.BtcTxId);
+                                if (beginBlocked)
+                                {
+                                    FrostSessionStorage.SigningSessions.TryRemove(request.SessionId, out _);
+                                    LogUtility.Log($"[FROST Dedup] BLOCKED signing start (at record) for withdrawal {request.WithdrawalRequestHash} input {request.InputIndex}: {beginReason}",
+                                        "FrostStartup.SignStart");
+                                    context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new
+                                    {
+                                        Success = false,
+                                        Message = $"FIND-028: {beginReason}"
+                                    }));
+                                    return;
+                                }
                             }
 
                             LogUtility.Log($"[FROST] Signing ceremony started with real nonce generation. Session: {request.SessionId}", "FrostStartup.SignStart");
@@ -2177,6 +3047,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                 /// </summary>
                 endpoints.MapPost("/frost/sign/round2/{sessionId}", async context =>
                 {
+                    // A node whose FROST library has not passed its check cannot take part (FrostLibraryGate).
+                    if (!FrostLibraryGate.Ready)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                        await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = FrostLibraryGate.Unavailable }));
+                        return;
+                    }
+
                     try
                     {
                         var sessionId = context.Request.RouteValues["sessionId"] as string;
@@ -2196,16 +3074,18 @@ namespace VerifiedXCore.Bitcoin.FROST
 
                         // Only the session leader (proven by replaying the start signature) may
                         // trigger share generation — this is the step that commits our key share.
-                        if (!FrostSigningAuthorization.VerifyLeaderHeaders(context, session, out var r2AuthReason))
+                        // The body is read first: a watched vault's leader signs it (round 18).
+                        string round2Body;
+                        using (var round2Reader = new StreamReader(context.Request.Body)) round2Body = await round2Reader.ReadToEndAsync();
+                        if (!FrostSigningAuthorization.VerifyLeaderHeaders(context, session, out var r2AuthReason, round2Body))
                         {
                             context.Response.StatusCode = StatusCodes.Status403Forbidden;
                             await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = $"Leader auth failed: {r2AuthReason}" }));
                             return;
                         }
 
-                        using (var reader = new StreamReader(context.Request.Body))
                         {
-                            var body = await reader.ReadToEndAsync();
+                            var body = round2Body; // read before the leader check (round 18)
                             
                             var myAddr = Globals.ValidatorAddress ?? "";
 
@@ -2238,12 +3118,43 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // withdrawal whose escrow validators - possibly this one - are voting to refund.
                             if (!string.IsNullOrEmpty(session.WithdrawalRequestHash)
                                 && !session.WithdrawalRequestHash.StartsWith(FrostSigningAuthorization.BtcExitPrefix, StringComparison.OrdinalIgnoreCase)
-                                && VerifiedXCore.Bitcoin.Models.VBTCWithdrawalCancellation.HasPendingCancellation(
+                                && !VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.IsSweepReference(session.WithdrawalRequestHash)
+                                && VerifiedXCore.Bitcoin.Models.VBTCWithdrawalCancellation.HasPendingCancellationOrUnreadable(
                                     session.WithdrawalRequestHash, TimeUtil.GetTime(), session.SmartContractUID))
                             {
                                 LogUtility.Log($"[FROST] Sign Round 2 REFUSED for session {sessionId}: a cancellation of withdrawal {session.WithdrawalRequestHash} is being voted on.", "FrostStartup.SignRound2");
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "A cancellation of this withdrawal is being voted on; refusing to sign" }));
+                                return;
+                            }
+
+                            // ... nor once it ended after the ceremony started: a cancellation approved (a session outlives
+                            // the time a cancellation vote waits for its ceremony), its row closed, or the store being rebuilt.
+                            if (!string.IsNullOrEmpty(session.WithdrawalRequestHash)
+                                && !session.WithdrawalRequestHash.StartsWith(FrostSigningAuthorization.BtcExitPrefix, StringComparison.OrdinalIgnoreCase)
+                                && !VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.IsSweepReference(session.WithdrawalRequestHash)
+                                && FrostSigningAuthorization.WithdrawalNoLongerSignable(session.WithdrawalRequestHash, session.SmartContractUID ?? "") is { } ended)
+                            {
+                                LogUtility.Log($"[FROST] Sign Round 2 REFUSED for session {sessionId}: withdrawal {session.WithdrawalRequestHash}: {ended}", "FrostStartup.SignRound2");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = ended }));
+                                return;
+                            }
+                            // ... nor a bridge exit that was completed or failed after the ceremony started (sign/start checks it).
+                            if (!string.IsNullOrEmpty(session.WithdrawalRequestHash)
+                                && session.WithdrawalRequestHash.StartsWith(FrostSigningAuthorization.BtcExitPrefix, StringComparison.OrdinalIgnoreCase)
+                                && FrostSigningAuthorization.BridgeExitNoLongerSignable(session.WithdrawalRequestHash, session.SmartContractUID ?? "") is { } exitEnded)
+                            {
+                                LogUtility.Log($"[FROST] Sign Round 2 REFUSED for session {sessionId}: bridge exit {session.WithdrawalRequestHash}: {exitEnded}", "FrostStartup.SignRound2");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = exitEnded }));
+                                return;
+                            }
+                            if (FrostSigningAuthorization.NotAtNetworkHeightToSign(session.SmartContractUID) is { } notReadyForShare)
+                            {
+                                LogUtility.Log($"[FROST] Sign Round 2 REFUSED for session {sessionId}: {notReadyForShare}", "FrostStartup.SignRound2");
+                                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = notReadyForShare }));
                                 return;
                             }
 
@@ -2308,6 +3219,23 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 LogUtility.Log($"[FROST] WARNING: Sign Round 2 could not remap nonces - using raw body. SignerAddresses count: {session.SignerAddresses?.Count ?? 0}", "FrostStartup.SignRound2");
                             }
 
+                            // Fund-loss audit item 7: the share is produced here, so the tracker's decision is re-checked
+                            // here - this session must be the ceremony this validator accepted for the withdrawal input,
+                            // signing the sighash it announced.
+                            if (!string.IsNullOrEmpty(session.WithdrawalRequestHash)
+                                && !session.WithdrawalRequestHash.StartsWith(FrostSigningAuthorization.BtcExitPrefix, StringComparison.OrdinalIgnoreCase))
+                            {
+                                var (holds, holdReason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
+                                    .ConfirmSessionHoldsInput(session.SmartContractUID, session.WithdrawalRequestHash, session.InputIndex, sessionId, session.MessageHash,
+                                        FrostSigningAuthorization.SigningScope(session.SmartContractUID, session.BtcTxId));
+                                if (!holds)
+                                {
+                                    ErrorLogUtility.LogError($"FROST Sign Round 2 REFUSED for session {sessionId}: {holdReason}", "FrostStartup.SignRound2");
+                                    context.Response.StatusCode = StatusCodes.Status409Conflict;
+                                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = holdReason }));
+                                    return;
+                                }
+                            }
                             // Consume the secret nonce atomically: it is wiped here and can never be used again,
                             // even if share generation below fails (fail closed; the coordinator starts a new session).
                             if (!session.TryConsumeNonceSecret(out var nonceSecretOnce) || string.IsNullOrEmpty(nonceSecretOnce))
@@ -2342,7 +3270,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                             {
                                 VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
                                     .RecordSigningCompleted(session.SmartContractUID, session.WithdrawalRequestHash, sessionId,
-                                        session.InputIndex, session.MessageHash, session.TxInputOutpoints, session.BtcTxId);
+                                        session.InputIndex, session.MessageHash, session.TxInputOutpoints, session.BtcTxId,
+                                        FrostSigningAuthorization.SigningScope(session.SmartContractUID, session.BtcTxId));
                             }
 
                             LogUtility.Log($"[FROST] Signing Round 2 signature share generated via native library for session {sessionId}", "FrostStartup.SignRound2");
@@ -2551,8 +3480,19 @@ namespace VerifiedXCore.Bitcoin.FROST
                             }
 
                             // The start signature is known to every signer; only the endpoint that started
-                            // the session may abort it (a peer signer could otherwise kill every ceremony).
-                            if (!FrostSigningAuthorization.SameLeaderEndpoint(session.LeaderRemoteIp, FrostSigningAuthorization.NormalizeRemoteIp(context.Connection.RemoteIpAddress)))
+                            // the session may abort it (a peer signer could otherwise kill every ceremony). A watched
+                            // vault's session is aborted by its leader's own signature instead, from any address (round 18).
+                            if (!string.IsNullOrEmpty(session.StartContentSignature))
+                            {
+                                if (string.IsNullOrEmpty(request.ContentSignature)
+                                    || !SignatureService.VerifySignature(session.LeaderAddress, FrostDkgLeaderAuth.SigningAbortMessage(request.SessionId), request.ContentSignature))
+                                {
+                                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                    await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This session is aborted by its leader's signature" }));
+                                    return;
+                                }
+                            }
+                            else if (!FrostSigningAuthorization.SameLeaderEndpoint(session.LeaderRemoteIp, FrostSigningAuthorization.NormalizeRemoteIp(context.Connection.RemoteIpAddress)))
                             {
                                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Abort must come from the endpoint that started the session" }));
@@ -2567,7 +3507,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                             if (!shareGenerated && !string.IsNullOrEmpty(session.WithdrawalRequestHash))
                             {
                                 VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                                    .RecordSigningFailed(session.SmartContractUID, session.WithdrawalRequestHash, request.SessionId, session.InputIndex);
+                                    .RecordSigningFailed(session.SmartContractUID, session.WithdrawalRequestHash, request.SessionId, session.InputIndex,
+                                        FrostSigningAuthorization.SigningScope(session.SmartContractUID, session.BtcTxId));
                             }
 
                             LogUtility.Log($"[FROST] Signing session {request.SessionId} aborted by leader {request.LeaderAddress}. ShareGenerated: {shareGenerated}",
@@ -2666,6 +3607,13 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This node is not in the contract's DKG snapshot; refusing to store backup." }));
                                 return;
                             }
+                            // And only for an owner that holds a share of that contract's key (#274, C-162).
+                            if (storeSnapshot.Count > 0 && !storeSnapshot.Contains(ownerAddress))
+                            {
+                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "The owner is not in the contract's DKG snapshot; refusing to store backup." }));
+                                return;
+                            }
 
                             // Verify signature: message = "{OwnerAddress}.{SmartContractUID}.{Timestamp}"
                             // Signature must cover the blob (see FrostKeyBackupService.BuildStoreSignMessage).
@@ -2689,7 +3637,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 PlaintextHash = plaintextHash ?? "",
                                 Version = version,
                                 GroupPublicKey = request["GroupPublicKey"]?.ToString() ?? "",
-                                StoredTimestamp = now
+                                StoredTimestamp = now,
+                                // An id that names no contract on chain (nor a later key of a watched vault): counted per owner (#274, C-162).
+                                Unbound = string.IsNullOrEmpty(FrostDkgGuard.ResolveOnChainGroupPublicKey(smartContractUID)),
                             };
 
                             if (!FrostPeerKeyBackup.SaveBackup(backup))
@@ -2698,6 +3648,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Refusing to overwrite an existing backup for a different group key" }));
                                 return;
                             }
+                            if (backup.Unbound)
+                                FrostPeerKeyBackup.TrimUnbound(ownerAddress, uid => !string.IsNullOrEmpty(FrostDkgGuard.ResolveOnChainGroupPublicKey(uid)));
 
                             // Compute hash of stored blob for verification by sender
                             var storedHash = Convert.ToHexString(
@@ -2883,43 +3835,94 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// mempool spend can be evicted or replaced, after which the first tx can still confirm, and a
         /// second signed tx for the same withdrawal would then pay it twice.
         /// </summary>
+        /// <summary>
+        /// A key ceremony its leader did not sign in full (a web wallet's vault creation: the wallet signs only the start)
+        /// takes its Round 2 set and share batches from the endpoint its start came from, as a signing session does. Those
+        /// bodies were authenticated by nothing but the start's own signature, which every participant holds: one could fix
+        /// another's Round 2 set, or send it a garbage batch that made it report and refuse the leader's real one.
+        /// </summary>
+        internal static bool FromStartEndpoint(DKGSession session, HttpContext context) =>
+            session.LeaderSigned || FrostSigningAuthorization.SameLeaderEndpoint(session.StartRemoteIp, FrostSigningAuthorization.NormalizeRemoteIp(context.Connection.RemoteIpAddress));
+
         internal static async Task<(bool Ok, string Reason)> CheckPriorSignedTransactionAsync(string scUID, string withdrawalRequestHash, string? requestedTxId)
         {
             try
             {
-                var evidence = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.Get(scUID, withdrawalRequestHash);
-                if (evidence == null || string.IsNullOrEmpty(evidence.BtcTxId)) return (true, "");
-                if (string.Equals(evidence.BtcTxId, (requestedTxId ?? "").Trim(), StringComparison.OrdinalIgnoreCase)) return (true, "");
+                // A vault the chain watches: which transactions may be signed for a withdrawal is fixed in state
+                // (FrostSigningAuthorization has just checked this one against it). They all spend the same coins, so
+                // at most one confirms; a replacement at a higher fee is one of them and must be signable.
+                if (VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(scUID) != null)
+                    return (true, "");
 
-                var lookup = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.GetTransactionConfirmationsResilient(evidence.BtcTxId);
-                var verdict = ClassifyPriorTx(lookup.Confirmations);
-                if (verdict == PriorTxVerdict.Confirmed)
-                    return (false, $"A transaction ({evidence.BtcTxId}) already signed for this withdrawal has confirmed on Bitcoin; refusing to sign another");
-                if (verdict == PriorTxVerdict.InMempool)
-                    return (false, $"Previously signed transaction {evidence.BtcTxId} for this withdrawal is in the Bitcoin mempool (unconfirmed); refusing to sign another while it can still confirm");
-                // Unknown to every Electrum server: it may have been conflicted away. Prove it below: one
-                // of its inputs must be spent by a CONFIRMED transaction.
+                // Every record for this payment, under whatever spelling of its reference it was signed under (several
+                // can share one stored reference). A new transaction is signed only once every other one can never confirm.
+                var allRecords = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(scUID, withdrawalRequestHash);
+                var records = allRecords.Where(e => !string.IsNullOrEmpty(e.BtcTxId)).ToList();
+                bool IsRequested(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence e) =>
+                    string.Equals(e.BtcTxId, (requestedTxId ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
+                var dead = new List<(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence Record, string Detail)>();
+                // A record from before exact spellings, not released, may be the only trace of two transactions (one signed
+                // under another spelling was recorded over): no share is given for this payment at all, not even for the
+                // transaction it names (its missing inputs would complete it while the other can still pay).
+                var exactSince = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ExactSpellingSince();
+                if (allRecords.FirstOrDefault(e => e.NeedsOperatorRelease(exactSince)) is { } unreleased)
+                    return (false, $"This validator signed {(string.IsNullOrEmpty(unreleased.BtcTxId) ? "a transaction" : $"transaction {unreleased.BtcTxId}")} for this withdrawal before exact spellings; a transaction signed then under another spelling may have been recorded over it. " +
+                        "An operator confirms none can pay and releases it (POST /frost/evidence/release/{scUID}?withdrawal=...&confirm=true on this node).");
+                foreach (var evidence in records.Where(e => !IsRequested(e)))
+                {
+                    var (ok, reason, detail) = await CheckPriorSignedRecordAsync(scUID, evidence);
+                    if (!ok) return (false, reason);
+                    dead.Add((evidence, detail));
+                }
 
-                var depositAddress = FrostSigningAuthorization.ResolveDepositAddressForContract(scUID);
-                if (string.IsNullOrEmpty(depositAddress))
-                    return (false, "Contract deposit address could not be resolved to check the previously signed transaction");
-
-                var (spendVerdict, spendDetail) = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.GetOutpointSpendVerdict(depositAddress, evidence.Outpoints);
-                if (spendVerdict == VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.OutpointSpendVerdict.Inconclusive)
-                    return (false, $"Could not establish whether previously signed transaction {evidence.BtcTxId} can still confirm ({spendDetail}); refusing to sign another");
-                if (spendVerdict != VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed)
-                    return (false, $"Previously signed transaction {evidence.BtcTxId} for this withdrawal can still confirm ({spendDetail}); refusing to sign a second one");
-
-                // Conflicted away: a confirmed transaction spent one of its inputs, so it can never confirm.
-                VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.Delete(scUID, withdrawalRequestHash);
-                VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.ForgetDeadTransaction(scUID, withdrawalRequestHash,
-                    $"signed tx {evidence.BtcTxId} can never confirm ({spendDetail})");
-                LogUtility.Log($"[FROST Dedup] Previously signed tx {evidence.BtcTxId} for {withdrawalRequestHash} was conflicted away on-chain; allowing a new transaction.", "FrostStartup.SignStart");
+                // Conflicted away: retire each dead transaction's own record, and what this node holds in memory for it.
+                var requestedIsHeld = records.Any(IsRequested);
+                foreach (var (evidence, detail) in dead)
+                {
+                    VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.DeleteRecord(evidence.Id);
+                    foreach (var spelling in new[] { withdrawalRequestHash, evidence.WithdrawalRequestHash }.Distinct(StringComparer.Ordinal))
+                        VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.ForgetDeadTransaction(scUID, spelling, evidence.BtcTxId,
+                            keepSigningRecord: requestedIsHeld, $"signed tx {evidence.BtcTxId} can never confirm ({detail})");
+                    LogUtility.Log($"[FROST Dedup] Previously signed tx {evidence.BtcTxId} for {withdrawalRequestHash} was conflicted away on-chain; allowing a new transaction.", "FrostStartup.SignStart");
+                }
                 return (true, "");
             }
             catch (Exception ex)
             {
                 return (false, $"Error checking previously signed transaction: {ApiErrorText.For(ex)}");
+            }
+        }
+
+        /// <summary>One recorded signed transaction for the payment: refused while it can pay; Ok (with why) once proven dead.</summary>
+        private static async Task<(bool Ok, string Reason, string DeadDetail)> CheckPriorSignedRecordAsync(string scUID, VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence evidence)
+        {
+            try
+            {
+                var lookup = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.GetTransactionConfirmationsResilient(evidence.BtcTxId);
+                var verdict = ClassifyPriorTx(lookup.Confirmations);
+                if (verdict == PriorTxVerdict.Confirmed)
+                    return (false, $"A transaction ({evidence.BtcTxId}) already signed for this withdrawal has confirmed on Bitcoin; refusing to sign another", "");
+                if (verdict == PriorTxVerdict.InMempool)
+                    return (false, $"Previously signed transaction {evidence.BtcTxId} for this withdrawal is in the Bitcoin mempool (unconfirmed); refusing to sign another while it can still confirm", "");
+                // Unknown to every Electrum server: it may have been conflicted away. Prove it below: one
+                // of its inputs must be spent by a CONFIRMED transaction.
+
+                var depositAddress = FrostSigningAuthorization.ResolveDepositAddressForContract(scUID);
+                if (string.IsNullOrEmpty(depositAddress))
+                    return (false, "Contract deposit address could not be resolved to check the previously signed transaction", "");
+
+                var (spendVerdict, spendDetail) = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.GetOutpointSpendVerdict(depositAddress, evidence.Outpoints, evidence.BtcTxId);
+                if (spendVerdict == VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.OutpointSpendVerdict.Inconclusive)
+                    return (false, $"Could not establish whether previously signed transaction {evidence.BtcTxId} can still confirm ({spendDetail}); refusing to sign another", "");
+                if (spendVerdict != VerifiedXCore.Bitcoin.Services.BitcoinTransactionService.OutpointSpendVerdict.SpentByConfirmed)
+                    return (false, $"Previously signed transaction {evidence.BtcTxId} for this withdrawal can still confirm ({spendDetail}); refusing to sign a second one", "");
+
+                // Conflicted away: a confirmed transaction spent one of its inputs, so it can never confirm.
+                return (true, "", spendDetail);
+            }
+            catch (Exception ex)
+            {
+                return (false, $"Error checking previously signed transaction: {ApiErrorText.For(ex)}", "");
             }
         }
 
@@ -2988,38 +3991,15 @@ namespace VerifiedXCore.Bitcoin.FROST
         {
             string txCheckDetail;
 
-            // 1) Pinned tx confirmed? Multi-server lookup — the old single-server check meant one
-            // wedged Electrum connection held the pin forever after the tx had long confirmed.
-            if (!string.IsNullOrEmpty(pin.BtcTxId))
-            {
-                var lookup = await VerifiedXCore.Bitcoin.Services.BitcoinTransactionService
-                    .GetTransactionConfirmationsResilient(pin.BtcTxId);
-                if (lookup.Confirmations >= 1)
-                {
-                    VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                        .ClearContractPin(scUID, pin.WithdrawalRequestHash, $"pinned tx confirmed with {lookup.Confirmations} confirmation(s)");
-
-                    // Any other pinned tx spending one of these coins now conflicts with a confirmed tx.
-                    foreach (var loser in VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.GetOverlappingPins(scUID, pin.WithdrawalRequestHash, pin.Outpoints))
-                        VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker
-                            .ClearContractPin(scUID, loser.WithdrawalRequestHash, $"conflicts with confirmed tx {pin.BtcTxId} (withdrawal {pin.WithdrawalRequestHash})");
-                    return;
-                }
-
-                if (lookup.Confirmations == 0)
-                {
-                    // Known but unconfirmed: the tx is alive in a mempool. Keep it.
-                    var aliveOutcome = $"kept: txlookup=unconfirmed/in-mempool ({lookup.ServersTried} server(s): {lookup.Detail})";
-                    VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.NotePinReleaseCheck(scUID, pin.WithdrawalRequestHash, aliveOutcome);
-                    LogUtility.Log($"[FROST Dedup] Pin release check for {scUID} (tx {pin.BtcTxId}) — {aliveOutcome}", "FrostStartup.TryReleaseContractPinIfObservedOnChain");
-                    return;
-                }
-                txCheckDetail = $"txlookup=UNKNOWN ({lookup.ServersTried} server(s): {lookup.Detail})";
-            }
-            else
-            {
-                txCheckDetail = "txlookup=skipped (no BtcTxId on pin)";
-            }
+            // 1) The pinned tx's own confirmation is not asked of Electrum: its hosts are not authenticated (certificates
+            // are not checked), so a path to them could speak for any of them and free the pin, and its rivals', while the
+            // pinned tx was unconfirmed. Step 2 releases it instead: the pinned tx is itself the confirmed spender of its
+            // inputs, proven by Merkle branches to attested, buried headers, and so are its rivals. Before the validators
+            // attest Bitcoin's headers step 2 proves nothing and the pin stays: under withdrawal concurrency a pin holds
+            // only its own coins, which its confirmed tx has spent, so nothing else waits on it.
+            txCheckDetail = string.IsNullOrEmpty(pin.BtcTxId)
+                ? "txlookup=skipped (no BtcTxId on pin)"
+                : "txlookup=not asked (released only on a proven confirmed spend)";
 
             // 2) One of the pinned inputs spent by a confirmed tx?
             string utxoCheckDetail;
@@ -3153,10 +4133,25 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// persists the key package, and marks the session as completed.
         /// Returns true if finalization succeeded.
         /// </summary>
+        /// <summary>This validator's signature on its report about a dealer's share; null when it cannot sign (the report then drops nobody).</summary>
+        private static string? SignedReport(string? myAddress, DKGSession session, string accused)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(myAddress)) return null;
+                session.Round1Commitments.TryGetValue(myAddress, out var mine);
+                session.Round1Commitments.TryGetValue(accused, out var theirs);
+                var signature = SignatureService.AddressSignature(myAddress, FrostDkgBlame.AccusationMessage(session.SessionId, session.StartBodyHash, myAddress, accused, mine, theirs));
+                return string.IsNullOrEmpty(signature) || signature == "ERROR" ? null : signature;
+            }
+            catch { return null; }
+        }
+
         private static bool TryFinalizeDKG(DKGSession session)
         {
             try
             {
+                if (session.Reported) return false; // a session that reported a share never finishes (round 10)
                 if (session.IsCompleted) return true;
                 if (string.IsNullOrEmpty(session.Round2Secret))
                 {
@@ -3284,6 +4279,31 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// This ensures DKG and signing ceremonies use consistent identifiers even when
         /// the validator list grows, shrinks, or the dictionary iteration order changes.
         /// </summary>
+        /// <summary>Whether any sender's entry in a share batch holds a share under <paramref name="identifier"/>.</summary>
+        internal static bool BatchCarriesShareFor(Newtonsoft.Json.Linq.JObject batch, string identifier)
+        {
+            foreach (var entry in batch.Properties())
+            {
+                try
+                {
+                    if (Newtonsoft.Json.Linq.JObject.Parse(entry.Value?.ToString() ?? "")[identifier] != null) return true;
+                }
+                catch { }
+            }
+            return false;
+        }
+
+        /// <summary>The gate, taken within <paramref name="wait"/> and released when the result is disposed; null when not taken.</summary>
+        internal static async Task<IDisposable?> HoldGate(SemaphoreSlim gate, TimeSpan wait) =>
+            await gate.WaitAsync(wait) ? new GateRelease(gate) : null;
+
+        private sealed class GateRelease : IDisposable
+        {
+            private SemaphoreSlim? _gate;
+            public GateRelease(SemaphoreSlim gate) { _gate = gate; }
+            public void Dispose() => Interlocked.Exchange(ref _gate, null)?.Release();
+        }
+
         internal static Dictionary<string, string> BuildAddressToIdentifierMap(List<string> participantAddresses)
         {
             var sorted = participantAddresses.OrderBy(a => a, StringComparer.Ordinal).ToList();

@@ -240,6 +240,28 @@ namespace VerifiedXCore.Tests
 
         // ---------- Save dedup: mined record converges onto the raw pre-registration row ----------
 
+        /// <summary>
+        /// A raw caller's note spelled the contract UID its own way (found through the collation); the mined request takes
+        /// the note over with the chain's spelling, so completion finds it by exact UID (round 35).
+        /// </summary>
+        [Fact]
+        public void ARawNote_TakesTheMinedRequestsContractSpelling()
+        {
+            Assert.True(VBTCWithdrawalRequest.Save(new VBTCWithdrawalRequest
+            {
+                RequestorAddress = Requester, SmartContractUID = ScA.ToUpperInvariant(), OriginalUniqueId = "spelled", TransactionHash = "",
+                Amount = 0.01M, Status = VBTCWithdrawalStatus.Requested, RequestBlockHeight = 900,
+            }));
+            Assert.True(VBTCWithdrawalRequest.Save(new VBTCWithdrawalRequest
+            {
+                RequestorAddress = Requester, SmartContractUID = ScA, OriginalUniqueId = "spelled", TransactionHash = "mined-spelled",
+                Amount = 0.01M, Status = VBTCWithdrawalStatus.Requested, RequestBlockHeight = 950,
+            }, update: true));
+            var row = VBTCWithdrawalRequest.GetByTransactionHash("mined-spelled", ScA);
+            Assert.NotNull(row);
+            Assert.Equal(ScA, row!.SmartContractUID);
+        }
+
         [Fact]
         public void Save_MinedRecordUpdatesRawPreRegistrationRow_NoDuplicate()
         {

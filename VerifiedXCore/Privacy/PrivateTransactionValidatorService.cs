@@ -16,21 +16,29 @@ namespace VerifiedXCore.Privacy
             bool twSkipVerify,
             Dictionary<string, long>? processedNonces,
             bool skipPlonkProofVerification = false,
-            long? blockHeight = null)
+            long? blockHeight = null,
+            long? blockTimestamp = null)
         {
             _ = twSkipVerify;
 
             if (txRequest.Data != null && txRequest.Data.Length > Globals.MaxPrivateTxDataSize)
                 return (false, $"Private transaction Data exceeds MaxPrivateTxDataSize ({Globals.MaxPrivateTxDataSize}).");
 
-            if (!blockDownloads)
+            var blockTime = LedgerIntegrityRules.BlockTime(blockHeight, blockTimestamp);
+            if (blockTime != null)
+            {
+                if (LedgerIntegrityRules.TimestampOutsideItsBlock(txRequest, blockTime.Value))
+                    return (false, LedgerIntegrityRules.TimestampOutsideItsBlockMessage);
+            }
+            else if (!blockDownloads)
             {
                 var stale = await TransactionData.IsTxTimestampStale(txRequest, allowHistorical: false);
                 if (stale)
                     return (false, "The timestamp of this transaction is too old or too far in the future.");
             }
 
-            if (!await TransactionValidatorService.VerifyTXSize(txRequest))
+            var admission = blockHeight == null && !blockVerify && !blockDownloads; // measured as a block will carry it
+            if (!await TransactionValidatorService.VerifyTXSize(admission ? TransactionValidatorService.AsCarriedInABlock(txRequest) : txRequest))
                 return (false, "This transactions is too large. Max size allowed is 30 kb.");
 
             var txExist = Globals.MemBlocks.ContainsKey(txRequest.Hash);
@@ -54,19 +62,49 @@ namespace VerifiedXCore.Privacy
             if (!payload!.TryValidateStructure(out var structErr))
                 return (false, structErr ?? "Invalid private payload structure.");
 
+            // Fund-loss audit item 1 (stage 2): the shape proofs require (nothing in the reset block; note hashes on every
+            // output; two notes spent; the dummy note at most once). Block validation judges at the block's height.
+            var proofRulesHeight = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
+            // A downloaded block skips the root and proof checks only before the proof-rules epoch, as history the validators
+            // of its time judged. In the epoch it is judged as a live block: a caster's catch-up block (tip + 1) and the
+            // download loop both pass blockDownloads, and one caster could have a proof-less, made-up-root unshield committed.
+            var skipHistoricalPrivacyChecks = blockDownloads && !PrivacyEpoch.ProofRulesActive(proofRulesHeight);
+            var proofShapeError = PrivateTxProofRules.Check(txRequest, payload, proofRulesHeight);
+            if (proofShapeError != null)
+                return (false, proofShapeError);
+            // From ShieldSpendsNothingHeight in a block, and at admission at every height.
+            if ((proofRulesHeight >= Globals.ShieldSpendsNothingHeight || (blockHeight == null && !blockVerify && !blockDownloads))
+                && PrivateTxProofRules.ShieldSpendsNothing(txRequest, payload) is { } shieldSpends)
+                return (false, shieldSpends);
+            if (proofRulesHeight >= Globals.PathAuditRulesHeight && EncodingRefusal(txRequest, payload) is { } encoding)
+                return (false, encoding);
+            // At most two notes spent and two made. Before the proof rules nothing bounded them but the Data cap: a
+            // transfer from the pool (no proof, no sender, its fee paid by the pool) carried about 100 made-up outputs,
+            // fifty a block put about 5,000 leaves a block into the pool at no cost, and every node's work per private
+            // transaction grows with the pool (fifth review, round 33). Admission at every height (wallets make at most
+            // two of each); blocks from the path-audit height.
+            if ((blockHeight == null || proofRulesHeight >= Globals.PathAuditRulesHeight)
+                && (payload.Outs.Count > MaxNotesPerSide || payload.NullsB64.Count > MaxNotesPerSide))
+                return (false, TooManyNotesReason);
+
             if (payload.NullsB64.Count > 0)
             {
                 foreach (var n in payload.NullsB64)
                 {
                     if (string.IsNullOrWhiteSpace(n))
                         return (false, "Nullifier entry is empty.");
-                    if (NullifierService.IsNullifierSpentInDb(n, payload.Asset))
+                    // In the epoch the public dummy's nullifier is spent by every single-note spend and never recorded; one
+                    // recorded before the epoch (any pre-epoch transaction could carry it) refused every such spend from the
+                    // epoch on (fifth review, round 32).
+                    if (PrivacyEpoch.ProofRulesActive(proofRulesHeight) && PrivacyEpoch.IsDummyNullifier(n))
+                        continue;
+                    if (NullifierService.IsNullifierSpentInDb(n, payload.Asset, height: proofRulesHeight))
                         return (false, "Nullifier already spent on-chain.");
                 }
             }
 
             if (!string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64)
-                && NullifierService.IsNullifierSpentInDb(payload.FeeInputNullifierB64, "VFX"))
+                && NullifierService.IsNullifierSpentInDb(payload.FeeInputNullifierB64, "VFX", height: proofRulesHeight))
                 return (false, "VFX fee nullifier already spent on-chain.");
 
             if (!string.IsNullOrWhiteSpace(payload.Kind) && !ExpectedKindMatches(txRequest.TransactionType, payload.Kind))
@@ -83,10 +121,21 @@ namespace VerifiedXCore.Privacy
                 var zk = ValidateZkPrivate(txRequest, payload!);
                 if (!zk.ok)
                     return zk;
-                var merkle = ValidatePayloadMerkleRootRecency(payload!, blockDownloads);
+                // Fund-loss audit item 1 (stage 1): supply floor, required nullifier/root, outer fields bound to the
+                // payload. Block validation judges at the block's own height; admission at the height it would mine into.
+                var judgedAt = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
+                // Scanned history, on every path that judges it (download, height sync, peer catch-up): live blocks are
+                // always above the scanned height, so 8.x producers' blocks are never judged by it (rounds 18-20).
+                if (judgedAt <= PrivateTxSupplyRules.UnshieldBindingScannedThrough
+                    && PrivateTxSupplyRules.OuterFieldsError(txRequest, payload!) is { } historicalOuter)
+                    return (false, historicalOuter);
+                var supplyRules = PrivateTxSupplyRules.Check(txRequest, payload!, judgedAt);
+                if (!supplyRules.ok)
+                    return supplyRules;
+                var merkle = ValidatePayloadMerkleRootRecency(payload!, skipHistoricalPrivacyChecks);
                 if (!merkle.ok)
                     return merkle;
-                var feeMerkle = ValidateVfxFeeTreeMerkleRootRecency(payload!, blockDownloads);
+                var feeMerkle = ValidateVfxFeeTreeMerkleRootRecency(payload!, skipHistoricalPrivacyChecks);
                 if (!feeMerkle.ok)
                     return feeMerkle;
             }
@@ -98,14 +147,21 @@ namespace VerifiedXCore.Privacy
             if (!ValidateVbtcPayloadFields(txRequest.TransactionType, payload, out var vbtcErr))
                 return (false, vbtcErr ?? "Invalid vBTC private payload.");
 
+            // Before the proof-rules height blocks do not judge proofs (round 32), but an 8.x node with its parameters loaded
+            // still does and refuses a bad one: this node does not admit a proof it would not judge, so it never proposes a
+            // block those nodes refuse. Wallets attach none before the height.
+            if (blockHeight == null && !PrivacyEpoch.ProofRulesActive(proofRulesHeight)
+                && (!string.IsNullOrWhiteSpace(payload.ProofB64) || !string.IsNullOrWhiteSpace(payload.FeeProofB64)))
+                return (false, PreEpochProofAdmissionReason);
+
             if (!skipPlonkProofVerification)
             {
-                var plonk = PlonkProofVerifier.TryValidatePrivateProofs(txRequest, payload!, blockDownloads);
+                var plonk = PlonkProofVerifier.TryValidatePrivateProofs(txRequest, payload!, skipHistoricalPrivacyChecks, proofRulesHeight);
                 if (!plonk.ok)
                     return (false, plonk.message);
             }
 
-            if (!VerifyPrivateHash(txRequest))
+            if (!VerifyPrivateHash(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)))
                 return (false, "This transactions hash is not equal to the private hash.");
 
             if (PrivateTransactionTypes.IsTransparentShield(txRequest.TransactionType))
@@ -123,7 +179,7 @@ namespace VerifiedXCore.Privacy
 
             if (!blockDownloads && !blockVerify && payload.NullsB64.Count > 0)
             {
-                if (!MempoolNullifierTracker.TryRegisterForMempool(txRequest.Hash, payload.Asset, payload.NullsB64, out var mErr))
+                if (!MempoolNullifierTracker.TryRegisterForMempool(txRequest.Hash, payload.Asset, payload.NullsB64, out var mErr, proofRulesHeight))
                     return (false, mErr ?? "Mempool nullifier conflict.");
             }
 
@@ -131,12 +187,19 @@ namespace VerifiedXCore.Privacy
                 && (txRequest.TransactionType == TransactionType.VBTC_V2_UNSHIELD || txRequest.TransactionType == TransactionType.VBTC_V2_PRIVATE_TRANSFER)
                 && !string.IsNullOrWhiteSpace(payload.FeeInputNullifierB64))
             {
-                if (!MempoolNullifierTracker.TryRegisterForMempool(txRequest.Hash, "VFX", new[] { payload.FeeInputNullifierB64 }, out var feeMempoolErr))
+                if (!MempoolNullifierTracker.TryRegisterForMempool(txRequest.Hash, "VFX", new[] { payload.FeeInputNullifierB64 }, out var feeMempoolErr, proofRulesHeight))
                     return (false, feeMempoolErr ?? "Mempool VFX fee nullifier conflict.");
             }
 
             return (true, "Transaction has been verified.");
         }
+
+        /// <summary>Notes a private transaction may spend, and make (consensus: not the wallets' configurable limits).</summary>
+        internal const int MaxNotesPerSide = 2;
+
+        internal const string TooManyNotesReason = "A private transaction spends at most two notes and makes at most two.";
+
+        internal const string PreEpochProofAdmissionReason = "Before the proof-rules height a private transaction carries no proof.";
 
         private static bool ValidateVbtcPayloadFields(TransactionType t, PrivateTxPayload payload, out string? err)
         {
@@ -287,6 +350,9 @@ namespace VerifiedXCore.Privacy
 
             if (txRequest.TransactionType == TransactionType.VBTC_V2_SHIELD)
             {
+                var frozenVault = VerifiedXCore.Bitcoin.Attestation.BtcLegacyFreeze.Refusal(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+                if (frozenVault != null)
+                    return (false, frozenVault);
                 if (txRequest.Amount != 0.0M)
                     return (false, "VBTC shield must carry token amount in Data payload; transparent Amount must be 0.");
                 if (Globals.LastBlock.Height > Globals.TXHeightRule1
@@ -299,8 +365,11 @@ namespace VerifiedXCore.Privacy
                 // Mined shields from a vault owner are not re-checked: the owner's balance includes the Bitcoin
                 // deposit, and Electrum is never asked during block validation (the producer checked it). Non-owner
                 // balances are ledger-only and are still checked.
+                // A vault whose Bitcoin is attested is the exception to that: its owner's balance is in state.
+                var shieldVault = SmartContractStateTrei.GetSmartContractState(payload.VbtcContractUid ?? "");
                 var ownerInBlock = blockContext
-                    && SmartContractStateTrei.GetSmartContractState(payload.VbtcContractUid ?? "")?.OwnerAddress == txRequest.FromAddress;
+                    && shieldVault?.OwnerAddress == txRequest.FromAddress
+                    && !VerifiedXCore.Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(shieldVault?.SmartContractUID);
 
                 if (!ownerInBlock
                     && !string.IsNullOrWhiteSpace(payload.VbtcContractUid)
@@ -351,7 +420,7 @@ namespace VerifiedXCore.Privacy
             return (true, "");
         }
 
-        private static (bool ok, string message) ValidateZkPrivate(Transaction txRequest, PrivateTxPayload payload)
+        internal static (bool ok, string message) ValidateZkPrivate(Transaction txRequest, PrivateTxPayload payload)
         {
             if (txRequest.Fee != 0)
                 return (false, "Private ZK transactions must have Fee 0 (fee is burned inside the proof in later phases).");
@@ -409,7 +478,45 @@ namespace VerifiedXCore.Privacy
             return (true, "");
         }
 
-        private static bool VerifyPrivateHash(Transaction txRequest)
+        /// <summary>
+        /// From the path-audit rules: every nullifier, root, commitment and note hash in its one Base64 spelling, a
+        /// transaction's nullifiers distinct (the public dummy apart), and amounts in whole satoshis. Spent nullifiers are
+        /// compared as text while proofs read their bytes: a nullifier spelled again (a space inside, the last character's
+        /// unused bits) spent one note twice, in one transaction or in later ones; a fraction of a satoshi was credited but
+        /// not proven (fifth review, round 19).
+        /// </summary>
+        internal static string? EncodingRefusal(Transaction tx, PrivateTxPayload payload)
+        {
+            // A VFX private transaction names the VFX pool exactly. The proof does not cover the asset and the privacy
+            // store ignores case, while every duplicate guard compares the text: "vfx", "Vfx"... spent one note once per
+            // spelling in a block; and one naming a vBTC pool was judged against that pool's supply and paid in VFX
+            // (fifth review, round 20).
+            if ((tx.TransactionType == TransactionType.VFX_SHIELD || tx.TransactionType == TransactionType.VFX_UNSHIELD
+                    || tx.TransactionType == TransactionType.VFX_PRIVATE_TRANSFER)
+                && !string.Equals(payload.Asset, "VFX", StringComparison.Ordinal))
+                return "A VFX private transaction's asset is \"VFX\".";
+            static bool Canonical(string? s)
+            {
+                if (string.IsNullOrEmpty(s)) return true;
+                try { return Convert.ToBase64String(Convert.FromBase64String(s)) == s; } catch { return false; }
+            }
+            var fields = new List<string?>(payload.NullsB64 ?? new List<string>())
+            {
+                payload.FeeInputNullifierB64, payload.MerkleRootB64, payload.FeeTreeMerkleRoot, payload.FeeOutputNoteHashB64,
+            };
+            foreach (var o in payload.Outs ?? new List<PrivateShieldedOutput>()) { fields.Add(o.CommitmentB64); fields.Add(o.NoteHashB64); }
+            if (fields.Any(f => !Canonical(f)))
+                return "A private transaction's nullifiers, roots, commitments and note hashes are each in their one Base64 spelling.";
+            var spent = (payload.NullsB64 ?? new List<string>()).Where(n => !PrivacyEpoch.IsDummyNullifier(n)).ToList();
+            if (spent.Count != spent.Distinct(StringComparer.Ordinal).Count())
+                return "A private transaction spends each note once.";
+            foreach (var amount in new decimal?[] { tx.Amount, payload.TransparentAmount, payload.VbtcTransparentAmount, payload.Fee })
+                if (amount is { } a && a != Math.Round(a, 8))
+                    return "A private transaction's amounts are whole satoshis (8 decimal places).";
+            return null;
+        }
+
+        internal static bool VerifyPrivateHash(Transaction txRequest, long height)
         {
             var probe = new Transaction
             {
@@ -423,7 +530,7 @@ namespace VerifiedXCore.Privacy
                 Data = txRequest.Data,
                 UnlockTime = txRequest.UnlockTime
             };
-            probe.BuildPrivate();
+            probe.BuildPrivate(height); // a shield's fee is in its hash from ShieldFeeSignedHeight (round 18)
             return probe.Hash == txRequest.Hash;
         }
     }

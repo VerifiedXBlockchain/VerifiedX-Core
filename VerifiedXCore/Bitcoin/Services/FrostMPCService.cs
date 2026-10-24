@@ -19,10 +19,13 @@ namespace VerifiedXCore.Bitcoin.Services
     /// </summary>
     public class FrostMPCService
     {
-        private static readonly HttpClient _httpClient = new HttpClient
+        private static HttpClient _httpClient = new HttpClient
         {
             Timeout = TimeSpan.FromSeconds(30)
         };
+
+        /// <summary>Tests only: the client the signing ceremony's requests go through.</summary>
+        internal static HttpClient SigningHttpForTests { get => _httpClient; set => _httpClient = value; }
 
         /// <summary>
         /// Dedicated long-timeout HttpClient for DKG Round 2 share generation.
@@ -31,7 +34,10 @@ namespace VerifiedXCore.Bitcoin.Services
         /// </summary>
         private static readonly HttpClient _ceremonyHttpClient = new HttpClient
         {
-            Timeout = TimeSpan.FromSeconds(90)
+            Timeout = TimeSpan.FromSeconds(90),
+            // An honest Round 2 output is a few hundred bytes per participant; a larger answer fails its sender, not its
+            // recipients (fifth review, round 13).
+            MaxResponseContentBufferSize = 64L * 1024 * 1024,
         };
 
         #region Validator Reachability
@@ -201,7 +207,11 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             public FrostDKGResult? Result;
             public readonly Dictionary<string, string> Failed = new(StringComparer.Ordinal);
+            /// <summary>Of <see cref="Failed"/>: the validators that said they had no room (HTTP 429). Left out of this ceremony, not remembered as failing.</summary>
+            public readonly HashSet<string> Busy = new(StringComparer.Ordinal);
             public string? Error;
+            /// <summary>The hash of the start every participant opened its session with (reports are signed over it).</summary>
+            public string? StartBodyHash;
         }
 
         /// <summary>Test seam: runs one attempt (contract UID, session, participants, auth) in place of the validator network.</summary>
@@ -249,9 +259,12 @@ namespace VerifiedXCore.Bitcoin.Services
             int threshold,
             Action<int, int>? progressCallback = null,
             IReadOnlyList<PreSignedLeaderAuth>? preSignedAuths = null,
-            Func<int, string?>? participantShortfall = null)
+            Func<int, string?>? participantShortfall = null,
+            string? rekeyOf = null,
+            Func<string>? newContractUid = null)
         {
             var run = new FrostDkgRun();
+            if (!FrostLibraryGate.Ready) { run.Error = FrostLibraryGate.Unavailable; return run; }
             var leaderAddress = ownerAddress;
             var attempts = preSignedAuths is { Count: > 0 } ? Math.Min(MaxDkgAttempts, preSignedAuths.Count) : MaxDkgAttempts;
             var participants = validators.GroupBy(v => v.ValidatorAddress, StringComparer.Ordinal).Select(g => g.First()).ToList();
@@ -294,14 +307,14 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 run.Attempts = attempt;
                 var auth = preSignedAuths is { Count: > 0 } ? preSignedAuths[attempt - 1] : null;
-                var contractUid = attempt == 1 ? ceremonyId : FrostDkgAttestation.NewContractUid();
-                var sessionId = !string.IsNullOrEmpty(auth?.SessionId) ? auth!.SessionId : Guid.NewGuid().ToString();
+                var contractUid = attempt == 1 ? ceremonyId : (newContractUid?.Invoke() ?? FrostDkgAttestation.NewContractUid());
+                var sessionId = !string.IsNullOrEmpty(auth?.SessionId) ? auth!.SessionId : FrostDkgLeaderAuth.NewSessionId(leaderAddress);
                 LogUtility.Log($"[FROST MPC] DKG attempt {attempt}/{attempts}. Ceremony: {ceremonyId}, Contract: {contractUid}, Session: {sessionId}, " +
                     $"Validators: {participants.Count}, Threshold: {threshold}%, PreSigned: {auth != null}", "FrostMPCService.CoordinateDKGCeremony");
 
                 var outcome = AttemptRunnerForTests != null
                     ? await AttemptRunnerForTests(contractUid, sessionId, participants, auth)
-                    : await RunDkgAttempt(contractUid, sessionId, leaderAddress, participants, threshold, progressCallback, auth);
+                    : await RunDkgAttempt(contractUid, sessionId, leaderAddress, participants, threshold, progressCallback, auth, rekeyOf);
                 if (outcome.Result != null)
                 {
                     run.Result = outcome.Result;
@@ -318,7 +331,10 @@ namespace VerifiedXCore.Bitcoin.Services
                 foreach (var (address, reason) in outcome.Failed)
                 {
                     run.Excluded.TryAdd(address, reason);
-                    RecentDkgFailures[address] = (TimeUtil.GetTime() + DkgFailureMemorySeconds, reason);
+                    // A validator with no room for another ceremony did nothing wrong (and anybody can fill its room for a
+                    // while): it sits out this ceremony and is asked again by the next.
+                    if (!outcome.Busy.Contains(address))
+                        RecentDkgFailures[address] = (TimeUtil.GetTime() + DkgFailureMemorySeconds, reason);
                     LogUtility.Log($"[FROST MPC] DKG attempt {attempt}: dropping {address} — {reason}", "FrostMPCService.CoordinateDKGCeremony");
                 }
                 if (outcome.Failed.Count == 0)
@@ -329,6 +345,57 @@ namespace VerifiedXCore.Bitcoin.Services
             return run;
         }
 
+        /// <summary>
+        /// Why a dealer's Round 2 output is not one sealed package for each of <paramref name="recipientIds"/>, each within
+        /// the size a recipient opens (as relayed to it); null when it is.
+        /// </summary>
+        /// <summary>The longest sealed share the coordinator relays (an honest one is about 300 characters).</summary>
+        public const int MaxSealedShareLength = 4_096;
+
+        internal static string? Round2OutputRefusal(string shares, IReadOnlyCollection<string> recipientIds)
+        {
+            JObject map;
+            try { map = JObject.Parse(shares); }
+            catch { return "gave a Round 2 output that is not a map of sealed shares"; }
+            var names = map.Properties().Select(p => p.Name).ToList();
+            if (names.Count != recipientIds.Count || !recipientIds.All(id => map.Property(id, StringComparison.Ordinal) != null))
+                return "gave a Round 2 output that is not one share for each other participant";
+            foreach (var p in map.Properties())
+            {
+                if (p.Value.Type != JTokenType.String || !((string)p.Value!).StartsWith(FrostShareCrypto.Prefix, StringComparison.Ordinal))
+                    return "gave a Round 2 share that is not sealed";
+                if (new JObject { [p.Name] = p.Value }.ToString(Formatting.None).Length > FrostDkgBlame.MaxDealerEntryLength)
+                    return "gave a Round 2 share over the size a recipient opens";
+                // An honest sealed share is a few hundred characters, always: one near the recipients' limit, copied into
+                // every other recipient's batch, could time their deliveries out (round 14). Only the coordinator is this
+                // strict; it only ever drops the dealer.
+                if (((string)p.Value!).Length > MaxSealedShareLength)
+                    return "gave a Round 2 share far over a sealed share's size";
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// A request answered "busy" (503: the session's lock was held past the validator's wait) is asked again twice
+        /// before the answer counts against the validator: requests anyone can send can hold that lock a while (fifth
+        /// review, round 16).
+        /// </summary>
+        private static async Task<HttpResponseMessage> SendRetryingBusy(HttpClient client, Func<HttpRequestMessage> make, int tries = 3)
+        {
+            for (var i = 1; ; i++)
+            {
+                using var request = make();
+                var response = await client.SendAsync(request);
+                if (response.StatusCode != System.Net.HttpStatusCode.ServiceUnavailable || i >= tries) return response;
+                response.Dispose();
+                await Task.Delay(TimeSpan.FromSeconds(2));
+            }
+        }
+
+        /// <summary>The participants no share can be sealed to: no registered key, or one that does not derive the address.</summary>
+        internal static List<string> UnsealableParticipants(IEnumerable<VBTCValidator> validators, Func<string, string?> verifiedKeyOf) =>
+            validators.Select(v => v.ValidatorAddress).Where(a => string.IsNullOrEmpty(verifiedKeyOf(a))).Distinct(StringComparer.Ordinal).ToList();
+
         /// <summary>One ceremony over exactly these participants; on failure, the participants that caused it.</summary>
         private static async Task<DkgAttempt> RunDkgAttempt(
             string contractUid,
@@ -337,16 +404,39 @@ namespace VerifiedXCore.Bitcoin.Services
             List<VBTCValidator> validators,
             int threshold,
             Action<int, int>? progressCallback,
-            PreSignedLeaderAuth? preSignedAuth)
+            PreSignedLeaderAuth? preSignedAuth,
+            string? rekeyOf = null)
         {
             var attempt = new DkgAttempt();
             try
             {
+                // A participant whose registered key does not derive its address can be sent no share: every honest
+                // dealer refused Round 2 over it and was dropped, while it stayed in (fifth review, round 13). It is left
+                // out before the start. When nobody's key can be used, this node's registry is not ready: nobody is blamed.
+                // Each participant's key, taken once: disputes are settled with these, not the registry at settlement time
+                // (a participant that left the registry in between had its honest dealer ruled bad; round 14).
+                var keys = validators.Select(v => v.ValidatorAddress).Distinct(StringComparer.Ordinal)
+                    .Select(a => (Address: a, Key: FrostShareCrypto.VerifiedPublicKey(a))).Where(x => x.Key != null)
+                    .ToDictionary(x => x.Address, x => x.Key!, StringComparer.Ordinal);
+                var unsealable = UnsealableParticipants(validators, a => keys.TryGetValue(a, out var k) ? k : null);
+                if (unsealable.Count == validators.Count && validators.Count > 0)
+                {
+                    attempt.Error = "This node cannot see the validators' registered keys yet (registry not synced).";
+                    return attempt;
+                }
+                if (unsealable.Count > 0)
+                {
+                    foreach (var address in unsealable) attempt.Failed[address] = "its registered key does not derive its address (no share can be sealed to it)";
+                    attempt.Error = $"{unsealable.Count} of {validators.Count} validators have no usable registered key.";
+                    return attempt;
+                }
+
                 // Start: FROST DKG needs every participant from here on.
-                await BroadcastDKGStart(sessionId, contractUid, leaderAddress, validators, threshold, preSignedAuth, attempt.Failed);
+                await BroadcastDKGStart(sessionId, contractUid, leaderAddress, validators, threshold, preSignedAuth, attempt.Failed, rekeyOf, attempt.Busy, attempt);
                 if (attempt.Failed.Count > 0)
                 {
                     attempt.Error = $"{attempt.Failed.Count} of {validators.Count} validators did not join the key ceremony.";
+                    await AbortDkgAttempt(sessionId, leaderAddress, validators.Where(v => !attempt.Failed.ContainsKey(v.ValidatorAddress)), preSignedAuth);
                     return attempt;
                 }
                 progressCallback?.Invoke(0, 10);
@@ -359,7 +449,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     attempt.Failed[v.ValidatorAddress] = "did not provide a Round 1 commitment";
                 if (attempt.Failed.Count == 0)
                 {
-                    var minSigners = FrostDkgAttestation.ThresholdFor(validators.Count, threshold);
+                    var minSigners = FrostDkgAttestation.CeremonyThreshold(validators.Count, threshold, rekeyOf);
                     var invalid = FrostDkgBlame.InvalidRound1Packages(commitments, validators.Select(v => v.ValidatorAddress).ToList(), minSigners);
                     if (invalid == null)
                         LogUtility.Log("[FROST MPC] Round 1 commitment check unavailable (native library); continuing without it.", "FrostMPCService.RunDkgAttempt");
@@ -370,23 +460,27 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (attempt.Failed.Count > 0)
                 {
                     attempt.Error = $"Round 1 failed for {attempt.Failed.Count} of {validators.Count} validators.";
+                    await AbortDkgAttempt(sessionId, leaderAddress, validators, preSignedAuth);
                     return attempt;
                 }
                 progressCallback?.Invoke(1, 40);
 
                 // Round 2: shares generated by each validator and delivered to each recipient.
                 progressCallback?.Invoke(2, 50);
-                await CoordinateShareDistribution(sessionId, validators, commitments, leaderAddress, preSignedAuth, attempt.Failed);
+                await CoordinateShareDistribution(sessionId, validators, commitments, leaderAddress, preSignedAuth, attempt.Failed, attempt.StartBodyHash, keys);
                 if (attempt.Failed.Count > 0)
                 {
                     attempt.Error = $"Round 2 failed for {attempt.Failed.Count} of {validators.Count} validators.";
+                    await AbortDkgAttempt(sessionId, leaderAddress, validators, preSignedAuth);
                     return attempt;
                 }
                 progressCallback?.Invoke(2, 65);
 
                 // Results: every participant must have finished with the same key and attested it.
                 progressCallback?.Invoke(3, 85);
-                attempt.Result = await AggregateDKGResult(sessionId, contractUid, validators, threshold, leaderAddress, attempt.Failed);
+                attempt.Result = await AggregateDKGResult(sessionId, contractUid, validators, threshold, leaderAddress, attempt.Failed, rekeyOf);
+                if (attempt.Result == null)
+                    await AbortDkgAttempt(sessionId, leaderAddress, validators, preSignedAuth);
                 if (attempt.Result == null)
                     attempt.Error = attempt.Failed.Count > 0
                         ? $"{attempt.Failed.Count} of {validators.Count} validators did not finish the key ceremony with a valid attestation."
@@ -404,6 +498,33 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// Gives up a failed attempt's sessions on its participants, so they hold no place there while later attempts
+        /// run (each under a new session). Only a leader whose key is on this node signs one; a web wallet's attempt
+        /// (pre-signed) is left to give its places back on its own, two minutes after it last went on. Best effort.
+        /// </summary>
+        private static async Task AbortDkgAttempt(string sessionId, string leaderAddress, IEnumerable<VBTCValidator> validators, PreSignedLeaderAuth? preSignedAuth)
+        {
+            if (preSignedAuth != null) return;
+            try
+            {
+                var timestamp = TimeUtil.GetTime();
+                var signature = VerifiedXCore.Services.SignatureService.AddressSignature(leaderAddress, FrostDKGAbortRequest.Message(sessionId, leaderAddress, timestamp));
+                if (string.IsNullOrEmpty(signature) || signature == "F") return;
+                var request = new FrostDKGAbortRequest { SessionId = sessionId, LeaderAddress = leaderAddress, Timestamp = timestamp, LeaderSignature = signature };
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                await Task.WhenAll(validators.Where(v => InputValidationHelper.ValidateValidatorIPAddress(v.IPAddress, out _)).Select(async v =>
+                {
+                    try { await _httpClient.PostAsJsonAsync($"http://{v.IPAddress}:{Globals.FrostValidatorPort}/frost/dkg/abort", request, cts.Token); }
+                    catch { }
+                }));
+            }
+            catch (Exception ex)
+            {
+                LogUtility.Log($"[FROST MPC] Could not give up DKG session {sessionId}: {ex.Message}", "FrostMPCService.AbortDkgAttempt");
+            }
+        }
+
+        /// <summary>
         /// Broadcast the DKG start to every participant; each one that does not accept it is added to
         /// <paramref name="failed"/> (FROST DKG needs all of them).
         /// </summary>
@@ -414,7 +535,10 @@ namespace VerifiedXCore.Bitcoin.Services
             List<VBTCValidator> validators,
             int threshold,
             PreSignedLeaderAuth? preSignedAuth,
-            Dictionary<string, string> failed)
+            Dictionary<string, string> failed,
+            string? rekeyOf = null,
+            HashSet<string>? busy = null,
+            DkgAttempt? attempt = null)
         {
             // Sign with leader's key using deterministic message format
             // Any VFX wallet owner can be the leader — not just validators
@@ -445,10 +569,17 @@ namespace VerifiedXCore.Bitcoin.Services
                 Timestamp = timestamp,
                 LeaderSignature = leaderSignature,
                 ParticipantAddresses = validators.Select(v => v.ValidatorAddress).ToList(),
-                RequiredThreshold = threshold
+                RequiredThreshold = threshold,
+                RekeyOf = rekeyOf,
             };
+            // A leader whose key is here signs the whole start; its Round 2 set and share batch are then signed too, and
+            // validators take that session's content from it only (a web wallet's pre-signed start cannot).
+            if (preSignedAuth == null)
+                startRequest.BodySignature = VerifiedXCore.Services.SignatureService.AddressSignature(leaderAddress, FrostDkgLeaderAuth.StartMessage(FrostDkgLeaderAuth.StartBodyHash(startRequest)));
+            if (attempt != null) attempt.StartBodyHash = FrostDkgLeaderAuth.StartBodyHash(startRequest);
 
             var failures = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
+            var noRoom = new System.Collections.Concurrent.ConcurrentDictionary<string, bool>();
             var tasks = validators.Select(async validator =>
             {
                 try
@@ -470,6 +601,7 @@ namespace VerifiedXCore.Bitcoin.Services
                         LogUtility.Log($"[FROST MPC] DKG Start REJECTED by {validator.ValidatorAddress}: HTTP {(int)response.StatusCode} — {errorBody}",
                             "FrostMPCService.BroadcastDKGStart");
                         failures[validator.ValidatorAddress] = $"refused the DKG start (HTTP {(int)response.StatusCode})";
+                        if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests) noRoom[validator.ValidatorAddress] = true;
                     }
                 }
                 catch (Exception ex)
@@ -482,6 +614,7 @@ namespace VerifiedXCore.Bitcoin.Services
             await Task.WhenAll(tasks);
 
             foreach (var (address, reason) in failures) failed[address] = reason;
+            if (busy != null) foreach (var address in noRoom.Keys) busy.Add(address);
             LogUtility.Log($"[FROST MPC] DKG Start broadcast: {validators.Count - failures.Count}/{validators.Count} joined",
                 "FrostMPCService.BroadcastDKGStart");
         }
@@ -545,8 +678,8 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>
         /// Round 2: each validator generates its shares from all Round 1 commitments, and each recipient is sent the shares
         /// addressed to it. Validators that produce no shares or do not accept theirs are added to <paramref name="failed"/>;
-        /// recipients' reports of a share that would not open or did not match its sender's commitment are resolved by
-        /// FrostDkgBlame.ResolveAccusations (validators from this build report them; older ones just do not finish).
+        /// recipients' signed reports of a share that would not open or did not match its sender's commitment are settled by
+        /// the share itself (FrostDkgBlame.DisputedShareIsGood; older validators' unsigned reports drop nobody).
         /// </summary>
         private static async Task CoordinateShareDistribution(
             string sessionId,
@@ -554,7 +687,9 @@ namespace VerifiedXCore.Bitcoin.Services
             Dictionary<string, string> commitments,
             string leaderAddress,
             PreSignedLeaderAuth? preSignedAuth,
-            Dictionary<string, string> failed)
+            Dictionary<string, string> failed,
+            string? startBodyHash = null,
+            IReadOnlyDictionary<string, string>? participantKeys = null)
         {
             LogUtility.Log($"[FROST MPC] Coordinating share distribution for {validators.Count} validators (parallel)...",
                 "FrostMPCService.CoordinateShareDistribution");
@@ -562,6 +697,9 @@ namespace VerifiedXCore.Bitcoin.Services
             // Step 1: Send all Round 1 commitments to each validator in parallel and collect their generated Round 2 shares.
             // Uses _ceremonyHttpClient (90s timeout) because FROST crypto with many participants is computationally heavy.
             var commitmentPayload = JsonConvert.SerializeObject(commitments);
+            var leaderSigns = preSignedAuth == null;
+            var round2Signature = leaderSigns
+                ? VerifiedXCore.Services.SignatureService.AddressSignature(leaderAddress, FrostDkgLeaderAuth.ContentMessage("ROUND2", sessionId, commitmentPayload)) : null;
             var allGeneratedShares = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.Ordinal);
             var generationFailures = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.Ordinal);
 
@@ -570,8 +708,9 @@ namespace VerifiedXCore.Bitcoin.Services
                 try
                 {
                     var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/dkg/round2/{sessionId}";
-                    var content = new StringContent(commitmentPayload, Encoding.UTF8, "application/json");
-                    var response = await _ceremonyHttpClient.PostAsync(url, content);
+                    using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(commitmentPayload, Encoding.UTF8, "application/json") };
+                    if (round2Signature != null) request.Headers.TryAddWithoutValidation(FrostDkgLeaderAuth.ContentSignatureHeader, round2Signature);
+                    var response = await _ceremonyHttpClient.SendAsync(request);
                     var responseBody = await response.Content.ReadAsStringAsync();
                     if (!response.IsSuccessStatusCode)
                     {
@@ -599,6 +738,17 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
             });
             await Task.WhenAll(round2Tasks);
+
+            // Each dealer's output in the form every recipient takes: one sealed package per other participant, each
+            // within the recipient's size limit. One that is not failed every recipient's batch with no report, and the
+            // recipients were dropped instead of the dealer (fifth review, round 13).
+            var participantIds = FrostStartup.BuildAddressToIdentifierMap(validators.Select(v => v.ValidatorAddress).ToList());
+            foreach (var (dealer, shares) in allGeneratedShares)
+            {
+                var others = participantIds.Where(kv => kv.Key != dealer).Select(kv => kv.Value).ToList();
+                var refusal = Round2OutputRefusal(shares, others);
+                if (refusal != null) generationFailures[dealer] = refusal;
+            }
 
             if (!generationFailures.IsEmpty)
             {
@@ -635,7 +785,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
             var participantSet = validators.Select(v => v.ValidatorAddress).ToHashSet(StringComparer.Ordinal);
             var deliveryFailures = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.Ordinal);
-            var accusations = new System.Collections.Concurrent.ConcurrentBag<(string Accuser, string Accused)>();
+            var accusations = new System.Collections.Concurrent.ConcurrentBag<(string Accuser, string Accused, string? Signature)>();
             var distributeTasks = validators.Select(async validator =>
             {
                 try
@@ -646,10 +796,19 @@ namespace VerifiedXCore.Bitcoin.Services
                         LeaderAddress = leaderAddress,
                         Timestamp = timestamp,
                         LeaderSignature = leaderSignature,
+                        // Named in the signed body: a participant replayed its own batch to others, who reported every
+                        // dealer and refused the leader's real batch (fifth review, round 15).
+                        Recipient = validator.ValidatorAddress,
                         AllGeneratedShares = sharesByRecipient[validator.ValidatorAddress]
                     });
-                    var content = new StringContent(redistributePayload, Encoding.UTF8, "application/json");
-                    var response = await _ceremonyHttpClient.PostAsync(url, content);
+                    var sharesSignature = leaderSigns
+                        ? VerifiedXCore.Services.SignatureService.AddressSignature(leaderAddress, FrostDkgLeaderAuth.ContentMessage("SHARES", sessionId, redistributePayload)) : null;
+                    var response = await SendRetryingBusy(_ceremonyHttpClient, () =>
+                    {
+                        var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(redistributePayload, Encoding.UTF8, "application/json") };
+                        if (sharesSignature != null) request.Headers.TryAddWithoutValidation(FrostDkgLeaderAuth.ContentSignatureHeader, sharesSignature);
+                        return request;
+                    });
                     if (!response.IsSuccessStatusCode)
                     {
                         deliveryFailures[validator.ValidatorAddress] = $"did not accept its Round 2 shares (HTTP {(int)response.StatusCode})";
@@ -658,11 +817,13 @@ namespace VerifiedXCore.Bitcoin.Services
                     try
                     {
                         var json = JObject.Parse(await response.Content.ReadAsStringAsync());
+                        var signatures = json["AccusationSignatures"] as JObject;
                         if (json["Accusations"] is JObject reported)
                             foreach (var p in reported.Properties())
                                 if (participantSet.Contains(p.Name))
                                 {
-                                    accusations.Add((validator.ValidatorAddress, p.Name));
+                                    var signature = signatures?[p.Name]?.Type == JTokenType.String ? (string?)signatures[p.Name] : null;
+                                    accusations.Add((validator.ValidatorAddress, p.Name, signature));
                                     LogUtility.Log($"[FROST MPC] {validator.ValidatorAddress} reports the share from {p.Name}: {p.Value}",
                                         "FrostMPCService.CoordinateShareDistribution");
                                 }
@@ -682,8 +843,50 @@ namespace VerifiedXCore.Bitcoin.Services
                 (accusations.IsEmpty ? "" : $", {accusations.Count} share report(s)"), "FrostMPCService.CoordinateShareDistribution");
 
             foreach (var (address, reason) in deliveryFailures) failed[address] = reason;
-            foreach (var address in FrostDkgBlame.ResolveAccusations(accusations))
-                failed.TryAdd(address, "Round 2 share dispute (a share that would not open or did not match its commitment)");
+
+            // Each signed report is settled by the share itself (FrostDkgBlame.DisputedShareIsGood): its dealer reveals the
+            // key it sealed it with, and whoever was wrong is dropped. A report without a valid signature drops nobody
+            // (its sender then simply does not finish). Weighing reports by count let two colluding validators name one
+            // honest validator and have only it dropped, attempt after attempt (fourth review, round 9).
+            var idByAddress = FrostStartup.BuildAddressToIdentifierMap(validators.Select(v => v.ValidatorAddress).ToList());
+            var byAddress = validators.ToDictionary(v => v.ValidatorAddress, StringComparer.Ordinal);
+            var disputes = accusations
+                .Where(a => !string.IsNullOrEmpty(a.Signature) && a.Accuser != a.Accused
+                    && VerifiedXCore.Services.SignatureService.VerifySignature(a.Accuser, FrostDkgBlame.AccusationMessage(sessionId, startBodyHash, a.Accuser, a.Accused,
+                        commitments.TryGetValue(a.Accuser, out var accuserCommitment) ? accuserCommitment : null,
+                        commitments.TryGetValue(a.Accused, out var accusedCommitment) ? accusedCommitment : null), a.Signature!))
+                .GroupBy(a => (a.Accuser, a.Accused)).Select(g => g.First()).ToList();
+            foreach (var unsigned in accusations.Where(a => !disputes.Any(d => d.Accuser == a.Accuser && d.Accused == a.Accused)))
+                LogUtility.Log($"[FROST MPC] Report by {unsigned.Accuser} against {unsigned.Accused} carries no valid signature; nobody is dropped for it.", "FrostMPCService.CoordinateShareDistribution");
+            var verdicts = await Task.WhenAll(disputes.Select(async d =>
+            {
+                var good = false;
+                try
+                {
+                    string? sealedShare = null;
+                    if (sharesByRecipient.TryGetValue(d.Accuser, out var batch) && batch.TryGetValue(d.Accused, out var dealerMap) && idByAddress.TryGetValue(d.Accuser, out var accuserId)
+                        && dealerMap.Length <= FrostDkgBlame.MaxDealerEntryLength) // a recipient refuses a longer entry unopened: the dealer's doing (round 12)
+                    {
+                        try { sealedShare = JObject.Parse(dealerMap)[accuserId]?.ToString(); } catch { }
+                        var url = $"http://{byAddress[d.Accused].IPAddress}:{Globals.FrostValidatorPort}/frost/dkg/reveal/{sessionId}";
+                        var content = new StringContent(JsonConvert.SerializeObject(new { Accuser = d.Accuser, Signature = d.Signature }), Encoding.UTF8, "application/json");
+                        var response = await _ceremonyHttpClient.PostAsync(url, content);
+                        var ephemeral = response.IsSuccessStatusCode ? JObject.Parse(await response.Content.ReadAsStringAsync())["EphemeralKey"]?.ToString() : null;
+                        commitments.TryGetValue(d.Accused, out var dealerCommitment);
+                        good = FrostDkgBlame.DisputedShareIsGood(sealedShare, ephemeral, (participantKeys != null && participantKeys.TryGetValue(d.Accuser, out var accuserKey) ? accuserKey : FrostShareCrypto.VerifiedPublicKey(d.Accuser)), sessionId, accuserId, dealerCommitment);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogUtility.Log($"[FROST MPC] Settling the report by {d.Accuser} against {d.Accused}: {ex.Message}", "FrostMPCService.CoordinateShareDistribution");
+                }
+                return (d.Accuser, d.Accused, Good: good);
+            }));
+            foreach (var (accuser, accused, good) in verdicts)
+            {
+                if (good) failed.TryAdd(accuser, $"reported a good share from {accused} as bad (shown by the share)");
+                else failed.TryAdd(accused, $"sent {accuser} a share that would not open or did not match its commitment (shown by the share)");
+            }
         }
 
         /// <summary>
@@ -735,17 +938,19 @@ namespace VerifiedXCore.Bitcoin.Services
             List<VBTCValidator> validators,
             int threshold,
             string leaderAddress,
-            Dictionary<string, string> failed)
+            Dictionary<string, string> failed,
+            string? rekeyOf = null)
         {
             LogUtility.Log($"[FROST MPC] Collecting DKG results from {validators.Count} validators...", "FrostMPCService.AggregateDKGResult");
 
-            var results = new System.Collections.Concurrent.ConcurrentDictionary<string, (string Gpk, string Address, FrostDkgAttestation.Attestation? Attestation)>(StringComparer.Ordinal);
+            var results = new System.Collections.Concurrent.ConcurrentDictionary<string, (string Gpk, string Address, FrostDkgAttestation.Attestation? Attestation, string? KeyPackageHash)>(StringComparer.Ordinal);
+            var possession = new System.Collections.Concurrent.ConcurrentDictionary<string, FrostDkgAttestation.Round1Proof>(StringComparer.Ordinal);
             var resultTasks = validators.Select(async validator =>
             {
                 try
                 {
                     var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/dkg/result/{sessionId}";
-                    var response = await _httpClient.GetAsync(url);
+                    var response = await SendRetryingBusy(_httpClient, () => new HttpRequestMessage(HttpMethod.Get, url));
                     if (!response.IsSuccessStatusCode)
                         return;
                     var json = JObject.Parse(await response.Content.ReadAsStringAsync());
@@ -755,8 +960,15 @@ namespace VerifiedXCore.Bitcoin.Services
                     var addr = json["TaprootAddress"]?.Value<string>();
                     FrostDkgAttestation.Attestation? attestation = null;
                     try { attestation = json["Attestation"]?.Type == JTokenType.Object ? json["Attestation"]!.ToObject<FrostDkgAttestation.Attestation>() : null; } catch { }
+                    var keyPackageHash = json["PublicKeyPackageHash"]?.Type == JTokenType.String ? json["PublicKeyPackageHash"]!.Value<string>() : null;
                     if (!string.IsNullOrEmpty(gpk) && !string.IsNullOrEmpty(addr))
-                        results[validator.ValidatorAddress] = (gpk, addr, attestation);
+                        results[validator.ValidatorAddress] = (gpk, addr, attestation, keyPackageHash);
+                    try
+                    {
+                        if (json["Possession"]?.Type == JTokenType.Object && json["Possession"]!.ToObject<FrostDkgAttestation.Round1Proof>() is { } held)
+                            possession[validator.ValidatorAddress] = held;
+                    }
+                    catch { }
                 }
                 catch (Exception ex)
                 {
@@ -771,12 +983,18 @@ namespace VerifiedXCore.Bitcoin.Services
             if (results.IsEmpty)
                 return null;
 
-            // The key the majority finished with; a participant reporting another key is dropped.
-            var majority = results.GroupBy(r => (r.Value.Gpk, r.Value.Address)).OrderByDescending(g => g.Count()).First();
+            // The key the majority finished with, and the public key package: a participant reporting another key, or
+            // another package (it was given other commitments than the rest), is dropped. Every attestation signs the
+            // package's hash, so a proof only stands if all participants finished with the same one.
+            var majority = results.GroupBy(r => (r.Value.Gpk, r.Value.Address, r.Value.KeyPackageHash)).OrderByDescending(g => g.Count())
+                .ThenBy(g => g.Key.KeyPackageHash ?? "", StringComparer.Ordinal).First();
             var groupPublicKey = majority.Key.Gpk;
             var taprootAddress = majority.Key.Address;
+            var keyPackageHashOfAll = majority.Key.KeyPackageHash;
             foreach (var r in results.Where(r => r.Value.Gpk != groupPublicKey || r.Value.Address != taprootAddress))
                 failed[r.Key] = "reported a different group key";
+            foreach (var r in results.Where(r => !failed.ContainsKey(r.Key) && r.Value.KeyPackageHash != keyPackageHashOfAll))
+                failed[r.Key] = "finished with a different public key package (it was given other commitments)";
 
             // NEW-26: the address must be the group key's Taproot address (consensus derives it the same way).
             try
@@ -797,13 +1015,13 @@ namespace VerifiedXCore.Bitcoin.Services
             // NEW-26 (follow-up): participants, threshold and owner are the ceremony's own (the validators sign them from
             // their sessions); consensus requires one valid attestation from every participant, by that participant.
             var participants = FrostDkgAttestation.Canonical(validators.Select(v => v.ValidatorAddress));
-            var signingThreshold = FrostDkgAttestation.ThresholdFor(participants.Count, threshold);
+            var signingThreshold = FrostDkgAttestation.CeremonyThreshold(participants.Count, threshold, rekeyOf);
             var attestations = new List<FrostDkgAttestation.Attestation>();
             foreach (var r in results.Where(r => !failed.ContainsKey(r.Key)))
             {
                 var a = r.Value.Attestation;
                 if (a != null && a.ValidatorAddress == r.Key
-                    && FrostDkgAttestation.Verify(a, contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants))
+                    && FrostDkgAttestation.Verify(a, contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, rekeyOf, keyPackageHashOfAll))
                     attestations.Add(a);
                 else
                     failed[r.Key] = "did not return a valid attestation";
@@ -813,7 +1031,11 @@ namespace VerifiedXCore.Bitcoin.Services
             if (failed.Count > 0)
                 return null;
 
-            var dkgProof = FrostDkgAttestation.BuildProof(contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, attestations);
+            // A creation's proof carries each participant's Round 1 constant term signed for this vault: that its
+            // participants hold the key (consensus asks it of an S3C vault; rounds 11-12). A re-key's proof needs none.
+            var round1Proofs = rekeyOf == null && participants.All(p => possession.ContainsKey(p))
+                ? participants.ToDictionary(p => p, p => possession[p], StringComparer.Ordinal) : null;
+            var dkgProof = FrostDkgAttestation.BuildProof(contractUid, groupPublicKey, taprootAddress, leaderAddress, signingThreshold, participants, attestations, keyPackageHashOfAll, round1Proofs);
             LogUtility.Log($"[FROST MPC] DKG aggregation complete. GroupPubKey: {groupPublicKey.Substring(0, 16)}..., Address: {taprootAddress}",
                 "FrostMPCService.AggregateDKGResult");
 
@@ -856,6 +1078,9 @@ namespace VerifiedXCore.Bitcoin.Services
             int inputIndex = 0,
             FrostSigningTxContext? txContext = null)
         {
+            if (!FrostLibraryGate.Ready)
+                return new FrostCeremonyOutcome { FailureCode = FrostCeremonyFailureCode.LibraryUnavailable, Detail = FrostLibraryGate.Unavailable, InputIndex = inputIndex };
+
             // Reuse the pre-signed session ID if provided (web wallet flow), otherwise generate a new one.
             // The pre-signed signatures embed this session ID in the message, so it MUST match.
             var sessionId = !string.IsNullOrEmpty(preSignedAuth?.SessionId) ? preSignedAuth.SessionId : Guid.NewGuid().ToString();
@@ -918,6 +1143,21 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 // Phase 3: Signing Round 2 - Signature shares
                 var round2Shares = await CollectSigningRound2Shares(sessionId, validators, round1Nonces, leaderAddress, startTimestamp, startSignature);
+
+                // Every share is made over the whole commitment set, so a holder that committed in Round 1 and gave no
+                // share makes the set impossible to aggregate, attempt after attempt. Named, a new session leaves it out.
+                var withheld = round2Shares == null ? new List<string>()
+                    : round1Nonces.Keys.Where(a => !round2Shares.ContainsKey(a)).OrderBy(a => a, StringComparer.Ordinal).ToList();
+                if (withheld.Count > 0)
+                {
+                    LogUtility.Log($"[FROST MPC] sid={sessionId} input={inputIndex} wrh={Shorten(withdrawalRequestHash)} phase=r2 withheld=[{string.Join(",", withheld)}] code={FrostCeremonyFailureCode.Round2SharesWithheld}", "FrostMPCService.CoordinateSigningCeremony");
+                    AbortCeremony();
+                    var withheldOutcome = FrostCeremonyOutcome.Fail(FrostCeremonyFailureCode.Round2SharesWithheld, sessionId,
+                        $"{withheld.Count} holder(s) committed in Round 1 and gave no share: {string.Join(", ", withheld)}",
+                        round2Shares!.Count, round1Nonces.Count, validators.Count, null, inputIndex);
+                    withheldOutcome.Withholders = withheld;
+                    return withheldOutcome;
+                }
                 if (round2Shares == null || round2Shares.Count < requiredCount)
                 {
                     var got = round2Shares?.Count ?? 0;
@@ -931,7 +1171,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 // FIND-026 Fix: Pass scUID and ordered signer addresses for correct pubkey package lookup
                 // and FROST Identifier remapping
                 var signerAddresses = validators.Select(v => v.ValidatorAddress).ToList();
-                var (signingResult, aggCode, aggDetail) = await AggregateSignature(sessionId, messageHash, scUID, signerAddresses, validators, threshold, round2Shares, ceremonyId);
+                var (signingResult, aggCode, aggDetail) = await AggregateSignature(sessionId, messageHash, scUID, signerAddresses, validators, threshold, round2Shares, round1Nonces, ceremonyId);
                 if (signingResult != null)
                 {
                     LogUtility.Log($"[FROST MPC] sid={sessionId} input={inputIndex} wrh={Shorten(withdrawalRequestHash)} phase=agg — ceremony completed successfully", "FrostMPCService.CoordinateSigningCeremony");
@@ -969,7 +1209,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     SessionId = sessionId,
                     LeaderAddress = leaderAddress,
                     Timestamp = timestamp,
-                    LeaderSignature = leaderSignature
+                    LeaderSignature = leaderSignature,
+                    ContentSignature = LocalLeaderSignature(leaderAddress, FrostDkgLeaderAuth.SigningAbortMessage(sessionId)),
                 };
 
                 var tasks = validators.Select(async validator =>
@@ -998,6 +1239,17 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Round messages prove leadership by replaying the session's start signature
         /// (validators check it against the session they created at sign/start).
         /// </summary>
+        /// <summary>The leader's signature over a message when its key is on this node (a validator leading); null otherwise.</summary>
+        private static string? LocalLeaderSignature(string leaderAddress, string message)
+        {
+            try
+            {
+                var signature = VerifiedXCore.Services.SignatureService.AddressSignature(leaderAddress, message);
+                return string.IsNullOrEmpty(signature) || signature == "F" || signature == "ERROR" ? null : signature;
+            }
+            catch { return null; }
+        }
+
         private static void AddLeaderAuthHeaders(HttpRequestMessage req, string leaderAddress, long startTimestamp, string startSignature)
         {
             req.Headers.TryAddWithoutValidation("X-Frost-Leader", leaderAddress);
@@ -1073,6 +1325,9 @@ namespace VerifiedXCore.Bitcoin.Services
                     UnsignedTxHex = txContext?.UnsignedTxHex,
                     Prevouts = txContext?.Prevouts
                 };
+                // The whole start, signed on the leader's node (required for a vault the chain watches; round 17).
+                if (preSignedAuth == null || string.IsNullOrEmpty(preSignedAuth.StartSignature))
+                    startRequest.ContentSignature = VerifiedXCore.Services.SignatureService.AddressSignature(leaderAddress, FrostDkgLeaderAuth.SigningStartMessage(startRequest));
 
                 var tasks = validators.Select(async validator =>
                 {
@@ -1151,19 +1406,16 @@ namespace VerifiedXCore.Bitcoin.Services
                             var responseBody = await response.Content.ReadAsStringAsync();
                             var json = JObject.Parse(responseBody);
                             
-                            if (json["Success"]?.Value<bool>() == true 
+                            if (json["Success"]?.Value<bool>() == true
                                 && json["SessionId"]?.Value<string>() == sessionId
                                 && json["Nonces"] is JObject noncesObj)
                             {
-                                foreach (var kvp in noncesObj)
-                                {
-                                    var addr = kvp.Key;
-                                    var data = kvp.Value?.Value<string>();
-                                    if (!string.IsNullOrEmpty(data))
-                                    {
-                                        nonces.TryAdd(addr, data);
-                                    }
-                                }
+                                // Each validator answers for its own commitment only: one that sent another holder's
+                                // entry could put a commitment that holder never made into the set, so that holder
+                                // refuses Round 2 and is taken for one that withheld its share.
+                                var data = noncesObj[validator.ValidatorAddress]?.Value<string>();
+                                if (!string.IsNullOrEmpty(data))
+                                    nonces.TryAdd(validator.ValidatorAddress, data);
                             }
                         }
                     }
@@ -1206,6 +1458,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 // Broadcast aggregated nonces to all validators, extract signature shares
                 // directly from POST responses (the endpoint returns the share inline)
                 var noncePayload = JsonConvert.SerializeObject(nonces);
+                var round2BodySignature = LocalLeaderSignature(leaderAddress, FrostDkgLeaderAuth.SigningRound2Message(sessionId, noncePayload));
                 var postSuccessCount = 0;
                 var postTasks = validators.Select(async validator =>
                 {
@@ -1215,6 +1468,8 @@ namespace VerifiedXCore.Bitcoin.Services
                         var content = new StringContent(noncePayload, Encoding.UTF8, "application/json");
                         using var round2Req = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
                         AddLeaderAuthHeaders(round2Req, leaderAddress, startTimestamp, startSignature);
+                        // A watched vault's session takes Round 2 on the leader's signature over the nonce set (round 18).
+                        if (round2BodySignature != null) round2Req.Headers.TryAddWithoutValidation(FrostDkgLeaderAuth.SigningContentHeader, round2BodySignature);
                         var response = await _httpClient.SendAsync(round2Req);
                         
                         if (response.IsSuccessStatusCode)
@@ -1316,15 +1571,10 @@ namespace VerifiedXCore.Bitcoin.Services
                                 {
                                     lock (shares)
                                     {
-                                        foreach (var kvp in sharesObj)
-                                        {
-                                            var addr = kvp.Key;
-                                            var data = kvp.Value?.Value<string>();
-                                            if (!string.IsNullOrEmpty(data) && !shares.ContainsKey(addr))
-                                            {
-                                                shares[addr] = data;
-                                            }
-                                        }
+                                        // Its own share only, as for the commitments.
+                                        var data = sharesObj[validator.ValidatorAddress]?.Value<string>();
+                                        if (!string.IsNullOrEmpty(data) && !shares.ContainsKey(validator.ValidatorAddress))
+                                            shares[validator.ValidatorAddress] = data;
                                     }
                                 }
                             }
@@ -1375,37 +1625,16 @@ namespace VerifiedXCore.Bitcoin.Services
             List<VBTCValidator> validators,
             int threshold,
             Dictionary<string, string> shares,
+            Dictionary<string, string> sentNonces,
             string? ceremonyId = null)
         {
             try
             {
                 LogUtility.Log($"[FROST MPC] Aggregating {shares.Count} signature shares via FROST native library for contract {scUID}...", "FrostMPCService.AggregateSignature");
 
-                // Collect nonce commitments from validators in parallel (needed for aggregation)
-                var nonces = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
-                var nonceCollectTasks = validators.Select(async validator =>
-                {
-                    try
-                    {
-                        var url = $"http://{validator.IPAddress}:{Globals.FrostValidatorPort}/frost/sign/round1/{sessionId}";
-                        var response = await _httpClient.GetAsync(url);
-                        if (response.IsSuccessStatusCode)
-                        {
-                            var responseBody = await response.Content.ReadAsStringAsync();
-                            var json = JObject.Parse(responseBody);
-                            if (json["Success"]?.Value<bool>() == true && json["Nonces"] is JObject noncesObj)
-                            {
-                                foreach (var kvp in noncesObj)
-                                {
-                                    nonces.TryAdd(kvp.Key, kvp.Value?.Value<string>() ?? "");
-                                }
-                            }
-                        }
-                    }
-                    catch { /* Already logged during collection phase */ }
-                });
-
-                await Task.WhenAll(nonceCollectTasks);
+                // The commitments exactly as Round 2 sent them, the set every share was made over. They were fetched again
+                // here, and a holder that answered differently the second time made the aggregate fail.
+                var nonces = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(sentNonces);
 
                 // 3-tier key lookup for pubkey package:
                 // 1. Try SCUID first (works after SignStart auto-updated the record)
@@ -1759,7 +1988,11 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
                 if (scStateTreiRec == null || string.IsNullOrEmpty(scStateTreiRec.ContractData))
-                    return null;
+                {
+                    // A later key of a watched vault (plan 8.8): its holders, as the re-key recorded them.
+                    var key = VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(scUID);
+                    return key != null && key.Generation > 0 ? VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.Holders(key) : null;
+                }
 
                 var scMain = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
                 var tknz = scMain?.Features?

@@ -40,6 +40,41 @@ namespace VerifiedXCore.Tests
             Data = JsonConvert.SerializeObject(new { Function = "VBTCBridgeUnlock()", ExitBurnTxHash = burn, LockId = lockId }),
         };
 
+        /// <summary>
+        /// Apply reads allocations with a typed reader that matches "lockId" as LockId: the guard, reading the exact key,
+        /// let two exits draw one lock in one block (fifth review, round 16). From the path-audit rules it reads as apply.
+        /// </summary>
+        [Fact]
+        public void ALockNamedUnderAnotherSpellingOfTheKey_IsStillOneLock()
+        {
+            Transaction Spelled(string burn, string key, string lockId) => new Transaction
+            {
+                TransactionType = TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC,
+                Data = "{\"Function\":\"VBTCBridgeExitToBTC()\",\"BaseBurnTxHash\":\"" + burn + "\",\"Allocations\":[{\"" + key + "\":\"" + lockId + "\",\"UnlockAmount\":0.1}]}",
+            };
+            var st = new BridgeIntraBlockGuard.State();
+            var h = VerifiedXCore.Globals.PathAuditRulesHeight;
+            Assert.True(BridgeIntraBlockGuard.TryRegister(Spelled("0x01", "LockId", "L1"), st, h).Ok);
+            Assert.False(BridgeIntraBlockGuard.TryRegister(Spelled("0x02", "lockId", "L1"), st, h).Ok);
+            Assert.False(BridgeIntraBlockGuard.TryRegister(Spelled("0x03", "lockid", "L1"), st, h).Ok);
+        }
+
+        /// <summary>An older exit paid by several vaults completes with their txids joined by commas (round 21).</summary>
+        [Fact]
+        public void ACompletionNamesOneTxidOrAList_FromThePathAuditRules()
+        {
+            var a = new string('a', 64); var b = new string('b', 64);
+            var h = VerifiedXCore.Globals.PathAuditRulesHeight;
+            Assert.True(BridgeTxRules.IsBtcTxIdList(a, h - 1));
+            Assert.False(BridgeTxRules.IsBtcTxIdList(a + "," + b, h - 1));
+            Assert.True(BridgeTxRules.IsBtcTxIdList(a + "," + b, h));
+            Assert.False(BridgeTxRules.IsBtcTxIdList(a + ",xyz", h));
+            Assert.False(BridgeTxRules.IsBtcTxIdList(a + ",", h));
+            // ... at most one per vault the exit draws on (round 22).
+            Assert.Equal(2, BridgeTxRules.VaultsInPlan("[{\"LockId\":\"L1\",\"SmartContractUID\":\"A\",\"UnlockAmount\":0.1},{\"LockId\":\"L2\",\"SmartContractUID\":\"B\",\"UnlockAmount\":0.1},{\"LockId\":\"L3\",\"SmartContractUID\":\"A\",\"UnlockAmount\":0.1}]", null));
+            Assert.Equal(1, BridgeTxRules.VaultsInPlan(null, "A"));
+        }
+
         [Fact]
         public void SameBurnTwiceInBlock_SecondRejected()
         {

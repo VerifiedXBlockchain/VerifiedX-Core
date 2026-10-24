@@ -126,6 +126,55 @@ namespace VerifiedXCore.Tests
             Assert.False(IsCanonicalSibling(head: lower, candidate: lower));  // same record is not a sibling
         }
 
+        /// <summary>
+        /// C-012: a lower-hash sibling with the same addresses replaced the head whole, so it could carry another PeerIP or
+        /// PublicKey for any member. A sibling now keeps every entry, except the promoted member's PeerIP (each proposer
+        /// reads it from its own view of the candidate, and honest siblings must still converge).
+        /// </summary>
+        [Fact]
+        public void CanonicalSibling_KeepsEveryMembersEntry_ButThePromotedMembersPeerIp()
+        {
+            bool Adoptable(params (string, string, string)[] other)
+            {
+                // Whichever has the lower hash is offered to the other as its sibling.
+                var x = Rec(3, 110, "prev", ("xA", "1.1.1.1", "KA"), ("xB", "2.2.2.2", "KB"));
+                var y = Rec(3, 120, "prev", other);
+                var lower = string.CompareOrdinal(x.RecordHash, y.RecordHash) < 0 ? x : y;
+                return IsCanonicalSibling(ReferenceEquals(lower, x) ? y : x, lower);
+            }
+            Assert.False(Adoptable(("xA", "9.9.9.9", "KA"), ("xB", "2.2.2.2", "KB")));   // a continuing member's PeerIP
+            Assert.False(Adoptable(("xA", "1.1.1.1", "KX"), ("xB", "2.2.2.2", "KB")));   // a continuing member's PublicKey
+            Assert.False(Adoptable(("xA", "1.1.1.1", "KA"), ("xB", "2.2.2.2", "KX")));   // the promoted member's PublicKey
+            Assert.True(Adoptable(("xA", "1.1.1.1", "KA"), ("xB", "8.8.8.8", "KB")));    // the promoted member's PeerIP only
+            Assert.True(Adoptable(("xA", "1.1.1.1", "KA"), ("xB", "2.2.2.2", "KB")));    // the same entries
+        }
+
+        /// <summary>
+        /// A Demotion and a Departure of the same member at the same seq (the version audit demotes it as its operator
+        /// stops it) can both be signed: they are one change, and the lower hash must still win on every node.
+        /// </summary>
+        [Fact]
+        public void CanonicalSibling_ADemotionAndADepartureOfOneMember_Converge()
+        {
+            CasterMembershipRecord Removal(string change, long eff)
+            {
+                var r = new CasterMembershipRecord
+                {
+                    RecordSeq = 3, EffectiveFromHeight = eff, PrevRecordHash = "prev", ChangeType = change, ChangedAddress = "xC",
+                    Casters = new List<CasterInfo> { new() { Address = "xA", PeerIP = "1.1.1.1", PublicKey = "KA" }, new() { Address = "xB", PeerIP = "2.2.2.2", PublicKey = "KB" } },
+                    Signatures = new List<RecordSignature>(),
+                };
+                r.RecordHash = ComputeRecordHash(r);
+                return r;
+            }
+            var demotion = Removal("Demotion", 110);
+            var departure = Removal("Departure", 110);
+            var lower = string.CompareOrdinal(demotion.RecordHash, departure.RecordHash) < 0 ? demotion : departure;
+            var higher = ReferenceEquals(lower, demotion) ? departure : demotion;
+            Assert.True(IsCanonicalSibling(head: higher, candidate: lower));
+            Assert.False(IsCanonicalSibling(head: lower, candidate: higher));
+        }
+
         [Fact]
         public void CanonicalSibling_RejectsDifferentSetPrevOrSeq()
         {

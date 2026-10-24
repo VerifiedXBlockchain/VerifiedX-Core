@@ -52,6 +52,7 @@ namespace VerifiedXCore.Tests
             DbContext.DB_Reserve = _main;
             DbContext.DB_TokenizedWithdrawals = _main;
             DbContext.DB_VBTCWithdrawalRequests = _main;
+            DbContext.DB_BtcAttest = _main;
 
             // Wiped via GetCollectionNames loops in production files of their own:
             DbContext.DB_SmartContractStateTrei = _scdec;
@@ -84,6 +85,7 @@ namespace VerifiedXCore.Tests
             DbContext.DB_Reserve = null;
             DbContext.DB_TokenizedWithdrawals = null;
             DbContext.DB_VBTCWithdrawalRequests = null;
+            DbContext.DB_BtcAttest = null;
             DbContext.DB_SmartContractStateTrei = null;
             DbContext.DB_DecShopStateTrei = null;
             DbContext.DB_vBTC = null;

@@ -1,4 +1,4 @@
-﻿using NBitcoin.Protocol;
+using NBitcoin.Protocol;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using VerifiedXCore.Arbiter;
@@ -128,6 +128,15 @@ namespace VerifiedXCore.Services
                 if (scState == null)
                     return (false, $"vBTC V2 contract not found in state trei: {input.SCUID}");
 
+                // Fund-loss audit item 6: one row per input shares the request's UniqueId; none may reuse a mined key.
+                if ((blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.WithdrawalUniqueIdRulesHeight)
+                {
+                    var wdUniqueId = jobj["UniqueId"]?.ToObject<string?>() ?? txRequest.Hash;
+                    var reuseError = VBTCWithdrawalRequest.UniqueIdReuseError(requesterAddress, wdUniqueId, input.SCUID, txRequest.Hash);
+                    if (reuseError != null)
+                        return (false, reuseError);
+                }
+
                 // VX-01: same contract-type rule as the single shape.
                 if (!Bitcoin.Services.VBTCService.IsVbtcV2Contract(scState))
                     return (false, $"Contract {input.SCUID} is not a vBTC V2 contract.");
@@ -166,7 +175,7 @@ namespace VerifiedXCore.Services
                     ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scState, requesterAddress, gateHeight);
 
                     deposit = await VbtcOwnerDeposit.CheckAsync(() => Bitcoin.Services.VBTCService.ResolveDepositAddress(scState, null),
-                        input.Amount - ledgerBalance, blockDownloads, blockVerify);
+                        input.Amount - ledgerBalance, blockDownloads, blockVerify, scState.SmartContractUID, blockHeight ?? Globals.LastBlock?.Height ?? 0); // fund-loss audit item 8
                     if (deposit.Status == OwnerDepositStatus.Unverifiable)
                         return (false, $"{VbtcOwnerDeposit.UnverifiableReason} (contract {input.SCUID})");
 
@@ -177,7 +186,7 @@ namespace VerifiedXCore.Services
                 {
                     // Owner branch at block verification trusts the crafter's ElectrumX check —
                     // same rule as the single shape.
-                    if (!(isRequesterOwner && blockVerify))
+                    if (!(isRequesterOwner && VbtcOwnerDeposit.LeftToTheProducer(deposit, blockVerify)))
                         return (false, $"Insufficient vBTC balance for withdrawal input {input.SCUID}. Available: {totalBalance}, Requested: {input.Amount}");
                 }
             }
@@ -191,7 +200,7 @@ namespace VerifiedXCore.Services
         /// to the seller (current owner) and - only when the contract has a royalty feature - to its royalty payee; the
         /// data's Royalty flag must match the contract, and together they cover the price (existing 1 VFX tolerance).
         /// </summary>
-        internal static string? SalePaymentError(Transaction txRequest, bool? royaltyFlag, SmartContractStateTrei sc, SmartContractMain scMain)
+        internal static string? SalePaymentError(Transaction txRequest, bool? royaltyFlag, SmartContractStateTrei sc, SmartContractMain scMain, long? height = null)
         {
             var royaltyFeat = scMain.Features?.FirstOrDefault(x => x.FeatureName == FeatureName.Royalty);
             var contractRoyalty = royaltyFeat != null;
@@ -209,6 +218,12 @@ namespace VerifiedXCore.Services
                 return "Sale payments are missing.";
 
             var royaltyPayTo = contractRoyalty ? ((RoyaltyFeature)royaltyFeat!.FeatureFeatures).RoyaltyPayToAddress : null;
+            // The royalty is credited to the account this text names, looked up through the collation: an alias of a
+            // real address (a character one platform's tables ignore) was that account on some nodes and a new one on
+            // others. From the path-audit rules it is a VFX address (round 27).
+            if (contractRoyalty && (height ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.PathAuditRulesHeight
+                && (string.IsNullOrEmpty(royaltyPayTo) || !AddressValidateUtility.ValidateRBXAddress(royaltyPayTo)))
+                return "The contract's royalty address is not a VFX address.";
             foreach (var (p, toPayee) in paid)
             {
                 if (p.FromAddress != sc.NextOwner)
@@ -228,10 +243,15 @@ namespace VerifiedXCore.Services
             return null;
         }
 
-        public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false, bool twSkipVerify = false, Dictionary<string, long> processedNonces = null, bool skipPrivatePlonkProofVerification = false, long? blockHeight = null)
+        public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false, bool twSkipVerify = false, Dictionary<string, long> processedNonces = null, bool skipPrivatePlonkProofVerification = false, long? blockHeight = null, long? blockTimestamp = null)
         {
             bool txResult = false;
             bool runReserveCheck = true;
+            // The time this transaction's rules are judged at: its block's timestamp in block validation from
+            // Globals.PathAuditRulesHeight, the node's clock (null) otherwise. See LedgerIntegrityRules.BlockTime.
+            var blockTime = LedgerIntegrityRules.BlockTime(blockHeight, blockTimestamp);
+            // And contract code read while this transaction is judged is read as of its block (ContractClock).
+            using var contractClock = blockHeight != null ? ContractClock.ForBlock(blockTime, blockHeight.Value) : null;
 
             // NEW-27: a whitelisted transaction skips validation only in block validation and only with the content its
             // hash commits to (the carried Hash alone used to skip every check).
@@ -244,9 +264,21 @@ namespace VerifiedXCore.Services
                 return (false, preimageError);
 
             // NEW-10: contract UIDs are exact (creation format; references equal the stored record's UID).
-            var contractUidError = LedgerIntegrityRules.ContractUids(txRequest);
+            var contractUidError = LedgerIntegrityRules.ContractUids(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
             if (contractUidError != null)
                 return (false, contractUidError);
+
+            // Fund-loss audit item 1 (freeze): nothing is sent from a frozen address at/after AddressFreezeHeight.
+            var frozenError = LedgerIntegrityRules.FrozenSender(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (frozenError != null)
+                return (false, frozenError);
+
+            // Fund-loss audit item 10: a reserve cannot send or burn fungible tokens. FTKN_TX is whitelisted for
+            // reserves and gets a Pending row, but the token apply moves the balance at once and neither CallBack()
+            // nor Recover() restores token accounts - no 24h window, no recovery. Refused from the height.
+            var reserveTokenError = LedgerIntegrityRules.ReserveTokenTransfer(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (reserveTokenError != null)
+                return (false, reserveTokenError);
 
 
             // Height-gated vBTC privacy disable (inert until VbtcPrivacyDisableHeight is set).
@@ -257,8 +289,81 @@ namespace VerifiedXCore.Services
                 && vbtcPrivacyGateHeight >= Globals.VbtcPrivacyDisableHeight)
                 return (false, "vBTC privacy transactions are temporarily disabled.");
 
+            // A bonded validator's stake cannot be sent (ValidatorBond; from Globals.ValidatorBondHeight). Before the
+            // branches below, so that a shield, which also takes VFX from its sender, is held to it as well.
+            var bondRefusal = ValidatorBond.SpendRefusal(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (bondRefusal != null)
+                return (false, bondRefusal);
+
+            // A vault that is changing hands keeps its owner's balance; vBTC goes only to an address that can hold it.
+            var vaultInTransitError = LedgerIntegrityRules.OwnerKeepsAVaultWholeWhileItChangesHands(txRequest)
+                ?? LedgerIntegrityRules.VbtcRecipientCanHoldIt(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // A watched vault holds at most so many holders with a balance, so its ledger stays within one document.
+                ?? VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.HolderLimitRefusal(txRequest)
+                // ... and its document does not grow by a sale's key without bound (round 9).
+                ?? VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.SaleRefusal(txRequest)
+                // Addresses and looked-up identifiers in plain ASCII (round 26); before the private branch, whose
+                // addresses resolve names too.
+                ?? LedgerIntegrityRules.IdentifiersArePlainAscii(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // VFX goes to an address somebody can sign for (round 27).
+                ?? LedgerIntegrityRules.VfxRecipientCanHoldIt(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // What a token transaction adds to a document read whole later is bounded (round 33).
+                ?? LedgerIntegrityRules.TokenDocumentLimits(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // Nothing is addressed to a name: the applies credit the ToAddress as written.
+                ?? LedgerIntegrityRules.RecipientIsNotAName(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // The recipient is this network's (at admission at every height).
+                ?? LedgerIntegrityRules.RecipientIsThisNetworks(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1), admission: blockHeight == null && !blockVerify && !blockDownloads)
+                // The fee reads one way in the hash: amount digits cannot move into it.
+                ?? LedgerIntegrityRules.FeeBelowOneVfx(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // A reserve moves VFX only in a TX, which CallBack() and Recover() can return.
+                ?? LedgerIntegrityRules.ReserveMovesVfxOnlyByTransfer(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                // A contract call is in the shape its apply reads.
+                ?? LedgerIntegrityRules.ContractCallIsArrayForm(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (vaultInTransitError != null)
+                return (false, vaultInTransitError);
+
             if (PrivateTransactionTypes.IsPrivateTransaction(txRequest.TransactionType))
-                return await PrivateTransactionValidatorService.VerifyPrivateTX(txRequest, blockDownloads, blockVerify, twSkipVerify, processedNonces, skipPrivatePlonkProofVerification, blockHeight);
+                return await PrivateTransactionValidatorService.VerifyPrivateTX(txRequest, blockDownloads, blockVerify, twSkipVerify, processedNonces, skipPrivatePlonkProofVerification, blockHeight, blockTimestamp);
+
+            // Bitcoin attestation: sender-less transactions with their own rules, judged from chain state alone. Block
+            // validation passes the block's height; admission the height the transaction would be mined at.
+            if (VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(txRequest.TransactionType))
+                return await VerifiedXCore.Bitcoin.Attestation.BtcAttestTxValidator.Verify(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1), blockDownloads, admission: blockHeight == null, blockTimestamp: blockTimestamp);
+
+            // From the enforcement height: vaults created before the recording height are frozen, and the transactions
+            // only the earlier way of working needs are refused for every vault.
+            var legacyFreezeRefusal = VerifiedXCore.Bitcoin.Attestation.BtcLegacyFreeze.Refusal(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (legacyFreezeRefusal != null)
+                return (false, legacyFreezeRefusal);
+
+            // Withdrawals on a vault the chain watches: no completion transaction, no vote, cancellation only before
+            // the Bitcoin transaction is fixed, and a destination that is a Bitcoin address.
+            // The fee raise (type 44) is new with the attestation: not accepted before the recording height, as the other
+            // new types are not. Its refusal below runs only from that height, and before it a 9.x node took a type 44
+            // that 8.x nodes, still peers until then, refuse: one transaction's fee to split them (fourth review, round 5).
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_COIN_PIN
+                && !VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)))
+                return (false, "A withdrawal's fee is raised only from the Bitcoin attestation's recording height.");
+
+            // Only from the recording height (no vault is watched before it): both read the transaction's data first and
+            // refuse what they cannot read, which older builds did not do for historical blocks (fourth review, round 4).
+            var watchedWithdrawalRefusal = VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                ? VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.Refusal(txRequest) ?? VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.ExitRefusal(txRequest)
+                : null;
+            if (watchedWithdrawalRefusal != null)
+                return (false, watchedWithdrawalRefusal);
+            // While this node's withdrawal store is being rebuilt, a row put back reads "requested" until the rebuild brings
+            // it to how its withdrawal ended, so a completion, cancel or vote judged against it now could be judged otherwise
+            // by every other node. From the path-audit rules none is taken meanwhile, refused as a missing row is (reported,
+            // not read as state corruption).
+            if ((txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE || txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL
+                    || txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE)
+                && (blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.PathAuditRulesHeight
+                && Bitcoin.Services.VBTCWithdrawalStoreRebuildService.IsRunning)
+                return (txResult, WithdrawalStoreRebuildingReason);
+            // A cancellation on such a vault has passed its whole rule just above; the vote-based rules below are not its.
+            var watchedCancel = txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL
+                && VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.IsWatched(txRequest);
 
             var accStTrei = StateData.GetAccountStateTrei();
             var from = StateData.GetSpecificAccountStateTrei(txRequest.FromAddress);
@@ -280,7 +385,10 @@ namespace VerifiedXCore.Services
             // Only enforced after TXHeightRule4 activation to avoid rejecting historical blocks
             if (Globals.LastBlock.Height > Globals.TXHeightRule4)
             {
-                if (txRequest.FromAddress != "Coinbase_BlkRwd" && txRequest.FromAddress != "Coinbase_TrxFees")
+                // The Bitcoin attestation's transactions have no sender and no nonce (their authority is their
+                // signatures): two in one block (a report and a re-key) would otherwise both need nonce 0 of one name.
+                if (txRequest.FromAddress != "Coinbase_BlkRwd" && txRequest.FromAddress != "Coinbase_TrxFees"
+                    && !VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(txRequest.TransactionType))
                 {
                     long expectedNonce;
                     
@@ -310,6 +418,13 @@ namespace VerifiedXCore.Services
 
             if(txRequest.TransactionType == TransactionType.TKNZ_WD_ARB && txRequest.Amount > 0.00M)
                 return (txResult, "This transaction type cannot have a send amount.");
+
+            // A fee is never negative. The fee-exempt types below skip the "more than zero" rule, and nothing else bounded
+            // the fee from below: apply takes Amount + Fee from the sender, so a negative fee credited it (fifth review,
+            // round 36). Refused at admission at every height; in blocks from the path-audit height (a mainnet hotfix sets
+            // its own).
+            if (txRequest.Fee < 0M && (blockHeight == null || blockHeight.Value >= Globals.PathAuditRulesHeight))
+                return (txResult, NegativeFeeReason);
 
             // FIND-004 FIX: Exempt vBTC V2 validator transactions from fee requirements (they must be free)
             if (txRequest.Fee <= 0 
@@ -358,20 +473,9 @@ namespace VerifiedXCore.Services
 
             //if (txRequest.ToAddress != "Adnr_Base" && txRequest.ToAddress != "DecShop_Base" && txRequest.ToAddress != "Topic_Base" && txRequest.ToAddress != "Vote_Base")
 
-            if (txRequest.ToAddress != "Adnr_Base" && 
-                txRequest.ToAddress != "DecShop_Base" && 
-                txRequest.ToAddress != "Topic_Base" && 
-                txRequest.ToAddress != "Vote_Base" && 
-                txRequest.ToAddress != "Reserve_Base" &&
-                txRequest.ToAddress != "Token_Base" && 
-                txRequest.ToAddress != "TW_Base")
-            {
-                if (!AddressValidateUtility.ValidateAddress(txRequest.ToAddress))
-                    return (txResult, "To Address failed to validate");
-
-                if(txRequest.ToAddress.Length < 32)
-                    return (txResult, "Address length is too short.");
-            }
+            var recipientError = RecipientError(txRequest);
+            if (recipientError != null)
+                return (txResult, recipientError);
 
             if (Globals.LastBlock.Height > Globals.TXHeightRule1) //March 31th, 2023 at 03:44 UTC
             {
@@ -383,7 +487,12 @@ namespace VerifiedXCore.Services
 
             // HAL-068 Fix: Timestamp validation using explicit blockDownloads parameter instead of semaphore state
             // Skip validation during block sync, enforce for new transactions
-            if (!blockDownloads)
+            if (blockTime != null)
+            {
+                if (LedgerIntegrityRules.TimestampOutsideItsBlock(txRequest, blockTime.Value))
+                    return (txResult, LedgerIntegrityRules.TimestampOutsideItsBlockMessage);
+            }
+            else if (!blockDownloads)
             {
                 var isTxStale = await TransactionData.IsTxTimestampStale(txRequest, allowHistorical: false);
                 if (isTxStale)
@@ -408,88 +517,32 @@ namespace VerifiedXCore.Services
             // vBTC V2 vault transactions may be larger from VbtcVaultTxSizeHeight (see LedgerIntegrityRules.MaxTxSizeBytes);
             // block validation passes the block's height, admission the height the tx would mine into.
             var maxTxSize = LedgerIntegrityRules.MaxTxSizeBytes(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1));
-            if (!VerifyTXSize(txRequest, maxTxSize))
+            var admission = blockHeight == null && !blockVerify && !blockDownloads;
+            if (!VerifyTXSize(admission ? AsCarriedInABlock(txRequest) : txRequest, maxTxSize))
             {
                 return (txResult, $"This transactions is too large. Max size allowed is {maxTxSize / 1024} kb.");
             }
 
             //Hash Check
-            var newTxn = new Transaction()
-            {
-                Timestamp = txRequest.Timestamp,
-                FromAddress = txRequest.FromAddress,
-                ToAddress = txRequest.ToAddress,
-                Amount = txRequest.Amount,
-                Fee = txRequest.Fee,
-                Nonce = txRequest.Nonce,
-                TransactionType = txRequest.TransactionType,
-                Data = txRequest.Data,
-                UnlockTime = txRequest.UnlockTime,
-            };
+            if (!StandardHashMatches(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)))
+                return (txResult, "This transactions hash is not equal to the original hash.");
 
-            newTxn.Build();
+            // The signature before any rule that parses or runs carried contract code: every transaction that reaches this
+            // point must pass the same check at the end of VerifyTX, so only the order of refusals changes, and a
+            // transaction nobody signed never reaches the parser or the interpreter (fifth review, round 36).
+            var earlySignatureError = SignatureError(txRequest);
+            if (earlySignatureError != null)
+                return (txResult, earlySignatureError);
 
-            if (!newTxn.Hash.Equals(txRequest.Hash))
-            {
-                var amountCheck = txRequest.Amount % 1 == 0;
-                var amountFormat = 0M;
-                if (amountCheck)
-                {
-                    var amountStr = txRequest.Amount.ToString("0.0");
-                    amountFormat = decimal.Parse(amountStr);
-                }
-
-                var newTxnMod = new Transaction()
-                {
-                    Timestamp = txRequest.Timestamp,
-                    FromAddress = txRequest.FromAddress,
-                    ToAddress = txRequest.ToAddress,
-                    Amount = amountFormat,
-                    Fee = txRequest.Fee,
-                    Nonce = txRequest.Nonce,
-                    TransactionType = txRequest.TransactionType,
-                    Data = txRequest.Data,
-                    UnlockTime = txRequest.UnlockTime,
-                };
-
-                newTxnMod.Build();
-
-                // NEW-22: the "Amount 0" re-hash below matched a transaction SIGNED with Amount "0" whatever Amount it now
-                // carries (the non-integer case above also re-hashed with 0): a relay or producer could raise the amount
-                // of any such transaction without breaking its signature. It applies only to a zero amount.
-                if (!newTxnMod.Hash.Equals(txRequest.Hash) && txRequest.Amount != 0M)
-                {
-                    return (txResult, "This transactions hash is not equal to the original hash.");
-                }
-
-                if (!newTxnMod.Hash.Equals(txRequest.Hash))
-                {
-                    var newTxnModZero = new Transaction()
-                    {
-                        Timestamp = txRequest.Timestamp,
-                        FromAddress = txRequest.FromAddress,
-                        ToAddress = txRequest.ToAddress,
-                        Amount = 0,
-                        Fee = txRequest.Fee,
-                        Nonce = txRequest.Nonce,
-                        TransactionType = txRequest.TransactionType,
-                        Data = txRequest.Data,
-                        UnlockTime = txRequest.UnlockTime,
-                    };
-
-                    newTxnModZero.Build();
-
-                    if (!newTxnModZero.Hash.Equals(txRequest.Hash))
-                    {
-                        return (txResult, "This transactions hash is not equal to the original hash.");
-                    }
-                }
-
-            }
+            // The rules below read the contract call the dispatcher runs, or the transaction is refused.
+            var contractCallError = LedgerIntegrityRules.ContractCallIsReadable(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
+                ?? LedgerIntegrityRules.VbtcDataKeysAreDistinct(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (contractCallError != null)
+                return (txResult, contractCallError);
 
             // NEW-29: a carried contract body must be deterministic and terminate - checked on its syntax tree, before any
             // rule below runs the code.
-            var contractBodyError = LedgerIntegrityRules.ContractBodyAllowed(txRequest);
+            var contractBodyError = LedgerIntegrityRules.ContractBodyAllowed(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
             if (contractBodyError != null)
                 return (txResult, contractBodyError);
 
@@ -497,6 +550,26 @@ namespace VerifiedXCore.Services
             var vaultCodeError = LedgerIntegrityRules.VaultCodeUnchanged(txRequest);
             if (vaultCodeError != null)
                 return (txResult, vaultCodeError);
+
+            // A vBTC V2 vault is never burned: its ledger lives on the record Burn() deletes.
+            var vaultBurnError = LedgerIntegrityRules.VaultNotBurned(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (vaultBurnError != null)
+                return (txResult, vaultBurnError);
+
+            // Fund-loss audit item 4: the inverse - a contract that is not a vault cannot be rewritten into one.
+            var vaultRewriteError = LedgerIntegrityRules.VaultNotCreatedByRewrite(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (vaultRewriteError != null)
+                return (txResult, vaultRewriteError);
+
+            // Fund-loss audit item 9: a contract's Royalty feature never changes after creation.
+            var royaltyRewriteError = LedgerIntegrityRules.RoyaltyUnchangedByRewrite(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (royaltyRewriteError != null)
+                return (txResult, royaltyRewriteError);
+
+            // A sold NFT's body is rewritten by its minter only when it was made to evolve.
+            var evolutionError = LedgerIntegrityRules.EvolutionNeedsAnEvolvingContract(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            if (evolutionError != null)
+                return (txResult, evolutionError);
 
             // NEW-28: legacy V1 vBTC is retired and frozen (height-gated; block height at verify, tip + 1 at admission).
             var v1FrozenError = LedgerIntegrityRules.VbtcV1Frozen(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1));
@@ -512,6 +585,16 @@ namespace VerifiedXCore.Services
                 var creationSignatureError = SignatureError(txRequest);
                 if (creationSignatureError != null)
                     return (txResult, creationSignatureError);
+
+                // Nothing is created under the UID of a vault the chain watches or ever watched.
+                var watchedUidError = LedgerIntegrityRules.CreatedUidWasNeverWatched(txRequest);
+                if (watchedUidError != null)
+                    return (txResult, watchedUidError);
+
+                // Nor under the UID of a contract burned from the path-audit rules.
+                var burnedUidError = LedgerIntegrityRules.CreatedUidWasNeverBurned(txRequest, blockHeight ?? (Globals.LastBlock.Height + 1));
+                if (burnedUidError != null)
+                    return (txResult, burnedUidError);
 
                 // NEW-26: a vBTC V2 deposit address must be the validators' FROST key (height-gated; block height at
                 // verify, tip + 1 at admission). Runs after the signature check (it decompiles the body too).
@@ -611,9 +694,23 @@ namespace VerifiedXCore.Services
                                             // credited an attacker-chosen supply of an EXISTING token), and the
                                             // supply / decimals must be within documented bounds.
                                             var deployBody = SmartContractDeployBinding.ReadPayload(txData).Data;
-                                            var deployBindingError = SmartContractDeployBinding.Validate(deployBody, scUID, txRequest.FromAddress, isTokenDeploy: true, out _);
+                                            var deployBindingError = SmartContractDeployBinding.Validate(deployBody, scUID, txRequest.FromAddress, isTokenDeploy: true, out var deployed);
                                             if (deployBindingError != null)
                                                 return (txResult, deployBindingError);
+
+                                            // From the path-audit height: the name and ticker are copied into every holder's account
+                                            // document, and the deployer is credited a token account it must have room for (round 33).
+                                            if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.PathAuditRulesHeight)
+                                            {
+                                                var deployedToken = deployed?.Features?.Where(f => f != null && f.FeatureName == FeatureName.Token)
+                                                    .Select(f => f.FeatureFeatures).OfType<TokenFeature>().FirstOrDefault();
+                                                if (deployedToken != null
+                                                    && ((deployedToken.TokenName?.Length ?? 0) > LedgerIntegrityRules.MaxTokenNameLength
+                                                        || (deployedToken.TokenTicker?.Length ?? 0) > LedgerIntegrityRules.MaxTokenTickerLength))
+                                                    return (txResult, $"A token's name is at most {LedgerIntegrityRules.MaxTokenNameLength} characters and its ticker {LedgerIntegrityRules.MaxTokenTickerLength}.");
+                                                if (deployedToken?.TokenSupply > 0 && LedgerIntegrityRules.TokenAccountRoom(txRequest.FromAddress, scUID) is { } noRoom)
+                                                    return (txResult, noRoom);
+                                            }
 
                                             break;
                                         }
@@ -648,6 +745,10 @@ namespace VerifiedXCore.Services
 
                                             if (amount.Value < 1.0M)
                                                 return (txResult, "You must mint at least 1 token.");
+
+                                            var holderBalance = StateData.GetSpecificAccountStateTrei(fromAddress)?.TokenAccounts?.FirstOrDefault(x => x.SmartContractUID == scUID)?.Balance ?? 0M;
+                                            if (LedgerIntegrityRules.TokenMintRefusal(scStateTreiRec.TokenDetails, amount.Value, holderBalance, blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) is { } mintRefusal)
+                                                return (txResult, mintRefusal);
 
                                             if (txRequest.ToAddress != "Token_Base")
                                                 return (txResult, "To Address must be 'Token_Base'.");
@@ -710,6 +811,9 @@ namespace VerifiedXCore.Services
                                             if (scStateTreiRec.NextOwner != null)
                                                 return (txResult, "You are attempting to transfer a Smart contract that has a new owner assigned to it.");
 
+                                            if (TokenOwnerChangeRefusal(txRequest, toAddress, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) is { } ownerChange)
+                                                return (txResult, ownerChange);
+
                                             break;
                                         }
 
@@ -756,7 +860,7 @@ namespace VerifiedXCore.Services
                                             // NEW-04: the apply debits the FromAddress named in the data, so it must be the signer
                                             // (anyone could move any holder's tokens), the credit goes to the transaction's
                                             // ToAddress, and a negative amount (which minted) is refused.
-                                            var tokenTransferError = LedgerIntegrityRules.TokenTransfer(txRequest.FromAddress, txRequest.ToAddress, fromAddress, toAddress, amount)
+                                            var tokenTransferError = LedgerIntegrityRules.TokenTransfer(txRequest.FromAddress, txRequest.ToAddress, fromAddress, toAddress, amount, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                                                 ?? LedgerIntegrityRules.TokenTransferResolvesToSender(fromAddress, toAddress);
                                             if (tokenTransferError != null)
                                                 return (txResult, tokenTransferError);
@@ -958,6 +1062,14 @@ namespace VerifiedXCore.Services
                                             if(voteExist)
                                                 return (txResult, "Token Holder has already voted.");
 
+                                            // A block carries one vote per holder and topic (LedgerIntegrityRules.RegisterNftStepInBlock):
+                                            // at admission a second one waiting in the pool is refused.
+                                            if (blockHeight == null && !blockDownloads && !blockVerify
+                                                && (Globals.LastBlock?.Height ?? 0) + 1 >= Globals.VoteTopicRulesHeight
+                                                && LedgerIntegrityRules.TokenVoteKey(txRequest) is { } voteKey
+                                                && TransactionData.GetPool().Find(x => x.FromAddress == txRequest.FromAddress && x.Hash != txRequest.Hash).Any(p => LedgerIntegrityRules.TokenVoteKey(p) == voteKey))
+                                                return (txResult, $"{LedgerIntegrityRules.TokenVotedTwiceInBlock}: this holder's vote on this topic is already pending.");
+
                                             break;
                                         }
                                     case "Update()":
@@ -1052,6 +1164,10 @@ namespace VerifiedXCore.Services
                                                     return (txResult, "You are attempting to evolve a Smart contract you don't own.");
                                                 }
                                             }
+                                            else if ((blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.SaleCompleteContractRulesHeight)
+                                            {
+                                                return (txResult, "SC does not exist."); // fund-loss audit item 2: no missing else
+                                            }
                                             //Run the Trillium REPL To ensure new state is valid again.
                                             break;
                                         }
@@ -1074,6 +1190,10 @@ namespace VerifiedXCore.Services
                                                 {
                                                     return (txResult, "You are attempting to devolve a Smart contract you don't own.");
                                                 }
+                                            }
+                                            else if ((blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.SaleCompleteContractRulesHeight)
+                                            {
+                                                return (txResult, "SC does not exist."); // fund-loss audit item 2: no missing else
                                             }
                                             //Run the Trillium REPL To ensure new state is valid again.
                                             break;
@@ -1461,6 +1581,11 @@ namespace VerifiedXCore.Services
                                             if (txRequest.FromAddress != fromAddress)
                                                 return (txResult, "From address in data must match transaction FromAddress.");
 
+                                            // The apply credits tx.ToAddress; from VbtcEnvelopeRulesHeight Data names the same
+                                            // recipient, as the typed transfer requires, so every reader agrees who was paid.
+                                            if ((blockHeight ?? (Globals.LastBlock.Height + 1)) >= Globals.VbtcEnvelopeRulesHeight && txRequest.ToAddress != toAddress)
+                                                return (txResult, "To address in data must match transaction ToAddress.");
+
                                             // Reserve moves must use the typed VBTC_V2_TRANSFER path where the
                                             // reserve lifecycle (unlock time, deferred apply, callback) is enforced —
                                             // this envelope path would move the ledger immediately.
@@ -1508,7 +1633,7 @@ namespace VerifiedXCore.Services
 
                                                     // Owner: deposit address balance (Electrum, never for mined blocks) plus ledger.
                                                     var deposit = await VbtcOwnerDeposit.CheckAsync(() => Bitcoin.Services.VBTCService.ResolveDepositAddress(scStateTreiRec, null),
-                                                        amount.Value - ledgerBalance, blockDownloads, blockVerify);
+                                                        amount.Value - ledgerBalance, blockDownloads, blockVerify, scStateTreiRec.SmartContractUID, blockHeight ?? Globals.LastBlock?.Height ?? 0); // fund-loss audit item 8
                                                     if (deposit.Status == OwnerDepositStatus.Unverifiable)
                                                         return (txResult, VbtcOwnerDeposit.UnverifiableReason);
                                                     decimal depositBalance = deposit.DepositBalance;
@@ -1523,7 +1648,7 @@ namespace VerifiedXCore.Services
                                                         // rejecting blocks whose crafter verified the deposit live, and turning any
                                                         // local withdrawal-store divergence into block rejections.
                                                         var legacyBypassHeight = blockHeight ?? Globals.LastBlock?.Height ?? 0;
-                                                        if (blockVerify && legacyBypassHeight >= Globals.VbtcLegacyTransferBypassFixHeight)
+                                                        if (VbtcOwnerDeposit.LeftToTheProducer(deposit, blockVerify) && legacyBypassHeight >= Globals.VbtcLegacyTransferBypassFixHeight)
                                                         {
                                                             // Trust the block crafter's ElectrumX verification
                                                         }
@@ -1724,7 +1849,11 @@ namespace VerifiedXCore.Services
                                     
                                     var signatureVerify = Bid.VerifyBidSignature(keySign, amountSoldFor.Value, toAddress, bidSignature);
 
-                                    if (bidSignature == "manual")
+                                    // Fund-loss audit item 5: "manual" is set above for M_Sale_Start() only, but the string was
+                                    // tested, so a plain Sale_Start() carrying it skipped the bid signature. From the height the
+                                    // bypass is honoured only for M_Sale_Start().
+                                    var saleStartRulesActive = (blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.SaleStartBidRulesHeight;
+                                    if (bidSignature == "manual" && (function == "M_Sale_Start()" || !saleStartRulesActive))
                                         signatureVerify = true;
 
                                     if(!signatureVerify)
@@ -1786,7 +1915,24 @@ namespace VerifiedXCore.Services
 
                             if (scUID != null && transactions != null && keySign != null)
                             {
+                                // Fund-loss audit item 2: the payments' positivity rule (NEW-17) ran only inside the
+                                // "record exists" branch below, and that branch had no else - a completion naming a
+                                // contract never minted skipped every check while its apply still moved the inner
+                                // payments. Both are judged first, at the block's height (admission: tip + 1).
+                                var saleRulesHeight = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
+                                if (saleRulesHeight >= Globals.SaleCompleteContractRulesHeight)
+                                {
+                                    var saleAmountError = LedgerIntegrityRules.SaleAmounts(txRequest);
+                                    if (saleAmountError != null)
+                                        return (txResult, saleAmountError);
+                                }
+                                // The balance check below sums every entry; none may be negative.
+                                var saleEntriesError = LedgerIntegrityRules.SaleEntriesNonNegative(txRequest, blockHeight);
+                                if (saleEntriesError != null)
+                                    return (txResult, saleEntriesError);
                                 var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
+                                if (scStateTreiRec == null && saleRulesHeight >= Globals.SaleCompleteContractRulesHeight)
+                                    return (txResult, "SC does not exist.");
                                 if (scStateTreiRec != null)
                                 {
                                     var scMain = SmartContractMain.GenerateSmartContractInMemory(scStateTreiRec.ContractData);
@@ -1817,7 +1963,7 @@ namespace VerifiedXCore.Services
 
                                     // NEW-17: every payment the apply makes is bound here, on every branch (the royalty-less
                                     // featured branch had no checks; the others were one-sided bounds).
-                                    var salePaymentError = SalePaymentError(txRequest, royalty, scStateTreiRec, scMain);
+                                    var salePaymentError = SalePaymentError(txRequest, royalty, scStateTreiRec, scMain, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
                                     if (salePaymentError != null)
                                         return (txResult, salePaymentError);
 
@@ -1974,6 +2120,8 @@ namespace VerifiedXCore.Services
                                     return (txResult, "A reserve account may not create an ADNR.");
 
                                 var name = (string)jobj["Name"];
+                                if (LedgerIntegrityRules.AdnrNameError(name, blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) is { } nameGrammar)
+                                    return (txResult, nameGrammar);
 
                                 var adnrList = Adnr.GetAdnr();
                                 if (adnrList != null)
@@ -1983,6 +2131,14 @@ namespace VerifiedXCore.Services
                                         var nameRBX = name.ToLower() + ".vfx";
                                         var nameCheck = adnrList.FindOne(x => x.Name == name || x.Name == nameRBX);
                                         if (nameCheck != null)
+                                        {
+                                            return (txResult, "Name has already been taken.");
+                                        }
+                                        // A name registered before V4Height is stored "label.rbx", and "label.vfx" was free to
+                                        // take: one label then had two owners. From the height the legacy spelling holds the label.
+                                        var legacyName = name.ToLower() + ".rbx";
+                                        if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.LegacyNameReservedHeight
+                                            && adnrList.FindOne(x => x.Name == legacyName) != null)
                                         {
                                             return (txResult, "Name has already been taken.");
                                         }
@@ -2091,15 +2247,34 @@ namespace VerifiedXCore.Services
                                     //Rules:
                                     //1. Must be a valid signature from the BTC address
                                     //2. Message must be a timestamp no older than 30 minutes. 
-                                    var signatureValid = Bitcoin.Services.SignatureService.VerifySignature(message, signature);
-                                    if (!signatureValid)
-                                        return (txResult, "Invalid BTC Signature");
-                                    var messageParse = long.TryParse(message, out var messageTimestamp);
+                                    //From BtcNameSignerOwnsAddressHeight the signer is BTCAddress's own key and the message names this sender and name.
+                                    long messageTimestamp;
+                                    if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.BtcNameSignerOwnsAddressHeight)
+                                    {
+                                        //The apply stores Name + ".btc", so a Name carrying the suffix would store a name the signer never signed.
+                                        if (name.Contains(".btc", StringComparison.OrdinalIgnoreCase))
+                                            return (txResult, "Name may not contain network suffix '.btc'!");
+                                        var boundError = Bitcoin.Services.BtcNameSignatures.Check(message, signature, btcAddress, txRequest.FromAddress, name + ".btc", Globals.BTCNetwork, out messageTimestamp);
+                                        if (boundError != null)
+                                            return (txResult, boundError);
+                                    }
+                                    else
+                                    {
+                                        var signatureValid = Bitcoin.Services.SignatureService.VerifySignature(message, signature);
+                                        if (!signatureValid)
+                                            return (txResult, "Invalid BTC Signature");
+                                        var messageParse = long.TryParse(message, out messageTimestamp);
 
-                                    if (!messageParse)
-                                        return (txResult, "Improper Message Format. Message must be a timestamp.");
+                                        if (!messageParse)
+                                            return (txResult, "Improper Message Format. Message must be a timestamp.");
+                                    }
 
-                                    if (!blockDownloads)
+                                    if (blockTime != null)
+                                    {
+                                        if (messageTimestamp < LedgerIntegrityRules.NowForAgeRules(blockTime) - 30 * 60)
+                                            return (txResult, "Signature message is too old. Please resubmit a new tx.");
+                                    }
+                                    else if (!blockDownloads)
                                     {
                                         if (messageTimestamp < TimeUtil.GetTime(0, -30))
                                             return (txResult, "Signature message is too old. Please resubmit a new tx.");
@@ -2132,6 +2307,36 @@ namespace VerifiedXCore.Services
                                     if (toAddressCheck != null)
                                     {
                                         return (txResult, "Address is already associated with an active DNR");
+                                    }
+
+                                    //From BtcNameSignerOwnsAddressHeight the receiving Bitcoin key accepts the name for the new owner.
+                                    if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.BtcNameSignerOwnsAddressHeight)
+                                    {
+                                        var acceptMessage = (string?)jobj["BTCToMessage"];
+                                        var acceptSignature = (string?)jobj["BTCToSignature"];
+                                        if (acceptMessage == null || acceptSignature == null)
+                                            return (txResult, "The receiving BTC address must sign the transfer.");
+
+                                        //The name moved is the one the receiver signed, among the sender's records at the address (the apply picks it the same way).
+                                        var signedRecord = StateData.SignedBtcNameRecord(adnrList, BTCFromAddress, txRequest.FromAddress, acceptMessage);
+                                        if (signedRecord == null)
+                                            return (txResult, "The receiving BTC address's signature names a name the sender does not hold at that address.");
+
+                                        var acceptError = Bitcoin.Services.BtcNameSignatures.Check(acceptMessage, acceptSignature, BTCToAddress, txRequest.ToAddress, signedRecord.Name, Globals.BTCNetwork, out var acceptTimestamp);
+                                        if (acceptError != null)
+                                            return (txResult, acceptError);
+
+                                        var maxAge = Bitcoin.Services.BtcNameSignatures.TransferAcceptanceMaxAgeSeconds;
+                                        if (blockTime != null)
+                                        {
+                                            if (acceptTimestamp < LedgerIntegrityRules.NowForAgeRules(blockTime) - maxAge)
+                                                return (txResult, "The receiving BTC address's signature is too old. Please sign again.");
+                                        }
+                                        else if (!blockDownloads)
+                                        {
+                                            if (acceptTimestamp < TimeUtil.GetTime() - maxAge)
+                                                return (txResult, "The receiving BTC address's signature is too old. Please sign again.");
+                                        }
                                     }
                                 }
 
@@ -2194,6 +2399,17 @@ namespace VerifiedXCore.Services
                             {
                                 var function = (string)jobj["Function"];
                                 TopicTrei topic = jobj["Topic"].ToObject<TopicTrei>();//review this to ensure deserialization works.
+                                // From the height a topic's end of voting names its instant: a date with no offset is read in
+                                // each node's own time zone when it is stored, so nodes would hold different instants. Checked
+                                // for every function, since the apply stores the topic whatever the function. Refused at admission at every height.
+                                if (topic != null && topic.VotingEndDate.Kind == DateTimeKind.Unspecified
+                                    && (blockHeight == null || blockHeight.Value >= Globals.PathAuditRulesHeight))
+                                    return (txResult, VotingEndDateNeedsOffsetReason);
+                                // The apply stores the topic whatever the function, and every rule below is a TopicAdd()'s: one
+                                // carrying another function mined a topic with any owner, counts and end date. From the height,
+                                // and at admission at every height.
+                                if (function != "TopicAdd()" && (blockHeight == null || blockHeight.Value >= Globals.VoteTopicRulesHeight))
+                                    return (txResult, VoteTopicIsTopicAddReason);
                                 if (function == "TopicAdd()")
                                 {
                                     if (topic == null)
@@ -2211,7 +2427,13 @@ namespace VerifiedXCore.Services
                                         var isTopicSigValid = SignatureService.VerifySignature(txRequest.FromAddress, topic.TopicUID, topicSig);
                                         if(isTopicSigValid)
                                         {
-                                            if(!blockDownloads)
+                                            if ((blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.TopicAddDeterministicHeight)
+                                            {
+                                                var topicRefusal = TopicAddRefusal(txRequest, topic, blockTime, admission: blockHeight == null);
+                                                if (topicRefusal != null)
+                                                    return (txResult, topicRefusal);
+                                            }
+                                            else if(!blockDownloads)
                                             {
                                                 //checks if topic height is within realm of mem blocks
                                                 if (!Globals.MemBlocks.Values.Where(x => x == topic.BlockHeight).Any())
@@ -2340,8 +2562,20 @@ namespace VerifiedXCore.Services
                                     if(topic == null)
                                         return (txResult, "Topic does not exist.");
 
-                                    var currentTime = DateTime.UtcNow;
-                                    if(currentTime > topic.VotingEndDate)
+                                    // A topic made before the height with an end date written without an offset is stored at a
+                                    // different instant on each node, so a vote on it is refused from the height. Judged from the
+                                    // topic's own transaction in its block, which every node holds alike.
+                                    if ((blockHeight == null || blockHeight.Value >= Globals.PathAuditRulesHeight)
+                                        && topic.BlockHeight < Globals.PathAuditRulesHeight && TopicEndDateWrittenWithoutOffset(topic))
+                                        return (txResult, TopicEndDateWithoutOffsetReason);
+
+                                    // From the height the end of voting is read as the moment it is (a stored date comes
+                                    // back in the node's local time; compared as it stood, the answer followed the
+                                    // node's time zone), against the block's timestamp in a block.
+                                    var votingEnded = (blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.PathAuditRulesHeight
+                                        ? DateTimeOffset.FromUnixTimeSeconds(LedgerIntegrityRules.NowForAgeRules(blockTime)).UtcDateTime > topic.VotingEndDate.ToUniversalTime()
+                                        : DateTime.UtcNow > topic.VotingEndDate;
+                                    if (votingEnded)
                                         return (txResult, "Voting for this topic has ended.");
 
                                     //from address must equal vote address
@@ -2460,6 +2694,8 @@ namespace VerifiedXCore.Services
 
                                     if (function == "DecShopCreate()")
                                     {
+                                        if (DecShopOwnerRefusal(txRequest, decshop, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) is { } shopOwner)
+                                            return (txResult, shopOwner);
                                         if (txRequest.Amount < Globals.DecShopRequiredRBX)
                                             return (txResult, $"There must be at least {Globals.DecShopRequiredRBX} VFX to create a Auction House.");
 
@@ -2479,6 +2715,15 @@ namespace VerifiedXCore.Services
                                             //86400 seconds in a day
                                             var currentTime = TimeUtil.GetTime();
                                             var lastUpdateTime = currentTime - treiRec.UpdateTimestamp;
+                                            // From the height: the last update's time is its block's (the stored one
+                                            // is the clock of the node at the moment it applied the update, a different
+                                            // number on every node), and in a block "now" is the block's timestamp.
+                                            if ((blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.PathAuditRulesHeight)
+                                            {
+                                                var lastUpdateBlock = BlockchainData.GetBlockByHeight(treiRec.LatestBlockHeight);
+                                                if (lastUpdateBlock != null)
+                                                    lastUpdateTime = LedgerIntegrityRules.NowForWaitRules(blockTime) - lastUpdateBlock.Timestamp;
+                                            }
 
                                             if (lastUpdateTime < 43200)
                                             {
@@ -2509,6 +2754,9 @@ namespace VerifiedXCore.Services
                 if(txRequest.TransactionType == TransactionType.RESERVE)
                 {
                     var txData = txRequest.Data;
+                    // Fund-loss audit item 3: from this height a RESERVE transaction that throws while being read is
+                    // refused (the empty catch below let it through), and Recover() must carry its recovery signature.
+                    var reserveRulesActive = (blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.ReserveRecoverRulesHeight;
                     if (txData != null)
                     {
                         try
@@ -2534,6 +2782,12 @@ namespace VerifiedXCore.Services
 
                                         string reserveAddress = txRequest.FromAddress;
                                         string recoveryAddress = jobj["RecoveryAddress"].ToObject<string>();
+                                        // Not the reserve itself: Recover() reads the reserve and its recovery account as two
+                                        // copies and wrote the reserve's emptied copy last, destroying its balance (fifth
+                                        // review, round 30). From the path-audit rules.
+                                        if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.PathAuditRulesHeight
+                                            && string.Equals(recoveryAddress, reserveAddress, StringComparison.OrdinalIgnoreCase))
+                                            return (txResult, "A reserve account's recovery address is another address.");
                                         if(!string.IsNullOrEmpty(reserveAddress) && !string.IsNullOrEmpty(recoveryAddress))
                                         {
                                             var stateRec = StateData.GetSpecificAccountStateTrei(reserveAddress);
@@ -2562,15 +2816,39 @@ namespace VerifiedXCore.Services
                                         string hash = jobj["Hash"].ToObject<string>();
                                         if(!string.IsNullOrEmpty(hash))
                                         {
+                                            // The hash is a transaction's, in hex. The block path below looked a row up by the
+                                            // text, then searched the chain with the spaces taken out and saved a new pending
+                                            // row under the text as given: a call-back naming a reserve transaction's hash with
+                                            // a space in it refunded it a second time (fifth review, round 27). No transaction
+                                            // in mainnet or testnet history has such a call-back.
+                                            if (!hash.All(Uri.IsHexDigit))
+                                                return (txResult, "A call-back names a transaction hash in hex.");
                                             var currentTime = TimeUtil.GetTime();
 
                                             var rTx = ReserveTransactions.GetTransactions(hash);
+                                            // A row of a RESERVE transaction (Register, CallBack, Recover) is never written by the
+                                            // apply; only the block-path search below wrote one, on the nodes that validated some
+                                            // block, kept even when that block was refused. From the path-audit rules (no search) a
+                                            // call-back found by such a row on some nodes was refused by the others (fifth review,
+                                            // round 29): it counts as no row.
+                                            if (rTx != null && rTx.TransactionType == TransactionType.RESERVE
+                                                && (blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.PathAuditRulesHeight)
+                                                rTx = null;
                                             if(rTx == null)
                                             {
                                                 if(!blockVerify)
                                                     return (txResult, "Could not find a reserve transaction with that hash.");
+                                                // From the path-audit rules a block's call-back needs the row as admission does: the
+                                                // chain search below read every block of the chain before the signature was checked,
+                                                // once per such call-back, on every validating node (fifth review, round 28). Every
+                                                // delayed transaction leaves a row when it is applied.
+                                                if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.PathAuditRulesHeight)
+                                                    return (txResult, "Could not find a reserve transaction with that hash.");
 
                                                 var txSearchResult = await TransactionData.GetNetworkTXByHash(hash, 0, false, true);
+
+                                                if (txSearchResult != null && !string.Equals(txSearchResult.Hash, hash, StringComparison.Ordinal))
+                                                    txSearchResult = null; // found only under another spelling
 
                                                 if(txSearchResult != null)
                                                 {
@@ -2597,7 +2875,10 @@ namespace VerifiedXCore.Services
                                                         UnlockTime = txSearchResult.UnlockTime
                                                     };
 
-                                                    ReserveTransactions.SaveReserveTx(rTx);
+                                                    // A RESERVE transaction is not a delayed payment: its row moves nothing, and kept on
+                                                    // some nodes only it made call-backs judged differently (round 29). Not saved.
+                                                    if (txSearchResult.TransactionType != TransactionType.RESERVE)
+                                                        ReserveTransactions.SaveReserveTx(rTx);
                                                 }
                                             }
 
@@ -2610,7 +2891,18 @@ namespace VerifiedXCore.Services
                                             if (rTx.FromAddress != txRequest.FromAddress)
                                                 return (txResult, "From address does not match the reserve tx from address. Cannot call back.");
 
-                                            if (Globals.BlocksDownloadSlim.CurrentCount != 0 && Globals.BlocksDownloadV2Slim.CurrentCount != 0)
+                                            // In a block (from the height) the row is finalized by the first block
+                                            // timed after its unlock time, on every node alike, and the block's own
+                                            // timestamp must be before the unlock time (with the margin): after a halt
+                                            // across the unlock time, the first block would otherwise still carry a
+                                            // call-back of a payment whose time had passed. The clock is read only at
+                                            // admission, so that a call-back past its time is not sent.
+                                            if (blockTime != null)
+                                            {
+                                                if (rTx.ConfirmTimestamp <= LedgerIntegrityRules.NowForAgeRules(blockTime))
+                                                    return (txResult, "This TX had passed by its block's time and can no longer be called back.");
+                                            }
+                                            else if (Globals.BlocksDownloadSlim.CurrentCount != 0 && Globals.BlocksDownloadV2Slim.CurrentCount != 0)
                                             {
                                                 if (rTx.ConfirmTimestamp <= currentTime)
                                                     return (txResult, "This TX has already passed and can no longer be called back.");
@@ -2621,6 +2913,17 @@ namespace VerifiedXCore.Services
                                     if (function == "Recover()")
                                     {
                                         runReserveCheck = false;
+                                        if (reserveRulesActive)
+                                        {
+                                            // Item 3: every recovery check below sits under "both strings non-empty"; with an
+                                            // empty RecoverySigScript nothing ran, and a missing SignatureTime threw into the
+                                            // catch at the end of this block, which swallowed it.
+                                            var sigTimeToken = jobj["SignatureTime"];
+                                            if (string.IsNullOrEmpty(jobj["RecoveryAddress"]?.ToObject<string?>())
+                                                || string.IsNullOrEmpty(jobj["RecoverySigScript"]?.ToObject<string?>())
+                                                || sigTimeToken == null || sigTimeToken.Type == JTokenType.Null)
+                                                return (txResult, "Recover() requires RecoveryAddress, RecoverySigScript and SignatureTime.");
+                                        }
                                         string recoveryAddress = jobj["RecoveryAddress"].ToObject<string>();
                                         string recoverySigScript = jobj["RecoverySigScript"].ToObject<string>();
                                         long sigTime = jobj["SignatureTime"].ToObject<long>();
@@ -2629,7 +2932,12 @@ namespace VerifiedXCore.Services
                                         {
                                             var currentTime = TimeUtil.GetTime(-600);
 
-                                            if (Globals.BlocksDownloadSlim.CurrentCount != 0 && Globals.BlocksDownloadV2Slim.CurrentCount != 0)
+                                            if (blockTime != null)
+                                            {
+                                                if (LedgerIntegrityRules.NowForAgeRules(blockTime) - 600 > sigTime)
+                                                    return (txResult, "Recover request has expired.");
+                                            }
+                                            else if (Globals.BlocksDownloadSlim.CurrentCount != 0 && Globals.BlocksDownloadV2Slim.CurrentCount != 0)
                                             {
                                                 if (currentTime > sigTime)
                                                 return (txResult, "Recover request has expired.");
@@ -2657,7 +2965,13 @@ namespace VerifiedXCore.Services
                                 }
                             }
                         }
-                        catch { }
+                        catch
+                        {
+                            // Item 3: a RESERVE transaction this block could not read is refused from the height (it was
+                            // swallowed, so a Recover() with no SignatureTime passed with every recovery check skipped).
+                            if (reserveRulesActive)
+                                return (txResult, "Reserve transaction not formatted properly.");
+                        }
                     }
 
                 }
@@ -2834,7 +3148,7 @@ namespace VerifiedXCore.Services
                                     ledgerBalanceMulti = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateMulti, txRequest.FromAddress, blockHeight ?? Globals.LastBlock?.Height ?? 0);
 
                                     var depositMulti = await VbtcOwnerDeposit.CheckAsync(() => Bitcoin.Services.VBTCService.ResolveDepositAddress(scStateMulti, null),
-                                        input.Amount - ledgerBalanceMulti, blockDownloads, blockVerify);
+                                        input.Amount - ledgerBalanceMulti, blockDownloads, blockVerify, scStateMulti.SmartContractUID, blockHeight ?? Globals.LastBlock?.Height ?? 0); // fund-loss audit item 8
                                     if (depositMulti.Status == OwnerDepositStatus.Unverifiable)
                                         return (txResult, $"{VbtcOwnerDeposit.UnverifiableReason} (contract {input.SCUID})");
                                     decimal depositBalanceMulti = depositMulti.DepositBalance;
@@ -2843,7 +3157,7 @@ namespace VerifiedXCore.Services
                                     {
                                         // At block verification, trust the crafter's ElectrumX check —
                                         // same owner-branch rule as the single shape.
-                                        if (!blockVerify)
+                                        if (!VbtcOwnerDeposit.LeftToTheProducer(depositMulti, blockVerify))
                                             return (txResult, $"Insufficient vBTC balance (owner) for transfer input {input.SCUID}. Available: {depositBalanceMulti + ledgerBalanceMulti}, Requested: {input.Amount}");
                                     }
                                 }
@@ -2976,7 +3290,7 @@ namespace VerifiedXCore.Services
 
                                     // Owner: deposit address balance (Electrum, never for mined blocks) plus ledger.
                                     var deposit = await VbtcOwnerDeposit.CheckAsync(() => Bitcoin.Services.VBTCService.ResolveDepositAddress(scStateTreiRec, null),
-                                        amount.Value - ledgerBalance + pendingReserveOut, blockDownloads, blockVerify);
+                                        amount.Value - ledgerBalance + pendingReserveOut, blockDownloads, blockVerify, scStateTreiRec.SmartContractUID, blockHeight ?? Globals.LastBlock?.Height ?? 0); // fund-loss audit item 8
                                     if (deposit.Status == OwnerDepositStatus.Unverifiable)
                                         return (txResult, VbtcOwnerDeposit.UnverifiableReason);
                                     decimal depositBalance = deposit.DepositBalance;
@@ -2986,7 +3300,8 @@ namespace VerifiedXCore.Services
                                     {
                                         // During block verification, skip deposit balance check for owner.
                                         // The block crafter already verified via ElectrumX during mempool admission.
-                                        if (blockVerify)
+                                        // (Not for a vault whose Bitcoin is attested: that is checked here.)
+                                        if (VbtcOwnerDeposit.LeftToTheProducer(deposit, blockVerify))
                                         {
                                             // Trust the block crafter's ElectrumX verification
                                         }
@@ -3054,6 +3369,15 @@ namespace VerifiedXCore.Services
                         if (txRequest.ToAddress != validatorAddress)
                             return (txResult, "To address must match validator address (self-transaction).");
                         
+                        // The key shares are sealed to: it must be the validator's own. One that is not had every honest
+                        // dealer of each ceremony refuse Round 2 and be dropped (fifth review, round 13).
+                        if ((blockHeight ?? (Globals.LastBlock.Height + 1)) >= Globals.PathAuditRulesHeight
+                            && !FrostKeyIsOwn(jobj["FrostPublicKey"], validatorAddress, required: true))
+                            return (txResult, "FrostPublicKey must be the validator's own public key.");
+
+                        if (RegisteredBaseAddressRefusal(jobj, blockHeight, txRequest.Signature) is { } baseRefusal)
+                            return (txResult, baseRefusal);
+
                         if (txRequest.Fee != 0M)
                             return (txResult, "Validator registration must be a free transaction (Fee = 0).");
                         
@@ -3063,7 +3387,13 @@ namespace VerifiedXCore.Services
                         // Anti-spam check: Ensure validator doesn't already have an active record.
                         // Exception: if the existing record's RegisterTransactionHash matches this TX hash,
                         // it means this TX was already processed into a block but not yet cleaned from mempool.
-                        var existingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(validatorAddress);
+                        // From the rules' height, the set as of the block before this one (the tip-based lookup answered
+                        // "nobody" on a node catching up). Before it, the lookup earlier builds made, exactly: the set as
+                        // of the block before is stricter on a replay than they were, and must not refuse a block they took.
+                        var registrySetHeight = Bitcoin.Services.VBTCValidatorRegistry.SetHeightFor(blockHeight);
+                        var existingValidator = registrySetHeight + 1 >= Globals.PathAuditRulesHeight
+                            ? Bitcoin.Services.VBTCValidatorRegistry.GetValidatorAt(validatorAddress, registrySetHeight)
+                            : Bitcoin.Services.VBTCValidatorRegistry.GetValidator(validatorAddress);
                         if (existingValidator != null && existingValidator.IsActive
                             && existingValidator.RegisterTransactionHash != txRequest.Hash)
                             return (txResult, "Validator already has an active registration. Cannot register again.");
@@ -3111,10 +3441,28 @@ namespace VerifiedXCore.Services
                         if (txRequest.Amount != 0M)
                             return (txResult, "Validator exit cannot have an amount.");
                         
-                        // Ensure validator actually has an active registration
-                        var existingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(validatorAddress);
-                        if (existingValidator == null || !existingValidator.IsActive)
-                            return (txResult, "Validator does not have an active registration. Cannot exit.");
+                        var exitHeight = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
+                        if (ValidatorBond.TransactionRulesActive(exitHeight))
+                        {
+                            // Under the bond an exit is what unlocks a stake, so it must be open to every bonded
+                            // validator, also one that went quiet long ago and is no longer listed as active; and it
+                            // is judged from chain state, not from this node's scan of recent blocks.
+                            var bond = ValidatorBond.Row(validatorAddress);
+                            if (bond == null) return (txResult, "This address has no validator bond. Nothing to exit.");
+                            if (bond.ExitHeight != 0) return (txResult, $"This validator exited at block {bond.ExitHeight}; its stake unlocks at block {ValidatorBond.UnlockHeight(bond)}.");
+                        }
+                        else
+                        {
+                            // Ensure validator actually has an active registration. Read from the committed blocks up
+                            // to the one before this transaction's block, which is what a node at the tip always read.
+                            // The lookup used here before answers "nobody" on a node that is still catching up, so
+                            // such a node refused a block carrying an exit that the rest of the network had accepted
+                            // and could not pass that height (second path audit, 14 October 2026).
+                            var existingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetActiveValidatorsAt(exitHeight - 1)
+                                .FirstOrDefault(x => x.ValidatorAddress == validatorAddress);
+                            if (existingValidator == null || !existingValidator.IsActive)
+                                return (txResult, "Validator does not have an active registration. Cannot exit.");
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -3159,6 +3507,13 @@ namespace VerifiedXCore.Services
 
                         if (txRequest.ToAddress != validatorAddress)
                             return (txResult, "To address must match validator address (self-transaction).");
+
+                        if ((blockHeight ?? (Globals.LastBlock.Height + 1)) >= Globals.PathAuditRulesHeight
+                            && !FrostKeyIsOwn(jobj["FrostPublicKey"], validatorAddress, required: false))
+                            return (txResult, "FrostPublicKey must be the validator's own public key.");
+
+                        if (RegisteredBaseAddressRefusal(jobj, blockHeight, txRequest.Signature) is { } baseRefusal)
+                            return (txResult, baseRefusal);
 
                         if (txRequest.Fee != 0M)
                             return (txResult, "Validator heartbeat must be a free transaction (Fee = 0).");
@@ -3260,6 +3615,16 @@ namespace VerifiedXCore.Services
                             if (!Bitcoin.Services.VBTCService.IsVbtcV2Contract(scState))
                                 return (txResult, $"Contract {scUID} is not a vBTC V2 contract.");
 
+                            // Fund-loss audit item 6: a (requester, UniqueId, contract) key under which a request was
+                            // already mined cannot be reused (the row store matched on it and reopened the old row).
+                            if ((blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.WithdrawalUniqueIdRulesHeight)
+                            {
+                                var wdUniqueId = jobj["UniqueId"]?.ToObject<string?>() ?? txRequest.Hash; // the apply's fallback
+                                var reuseError = VBTCWithdrawalRequest.UniqueIdReuseError(requesterAddress, wdUniqueId, scUID, txRequest.Hash);
+                                if (reuseError != null)
+                                    return (txResult, reuseError);
+                            }
+
                             // S3C §0: per-CONTRACT active-withdrawal gate (was per-user) — rejects if
                             // the contract already has a mined active request (anti-grief expiry inside).
                             // includeLocalOnlyRows: false — consensus must not read rows that exist on
@@ -3349,7 +3714,7 @@ namespace VerifiedXCore.Services
                                     // Deposit address balance: Electrum is never asked during block validation (the
                                     // owner-shortfall check below is bypassed under blockVerify regardless).
                                     deposit = await VbtcOwnerDeposit.CheckAsync(() => Bitcoin.Services.VBTCService.ResolveDepositAddress(scState, null),
-                                        amount.Value - ledgerBalance, blockDownloads, blockVerify);
+                                        amount.Value - ledgerBalance, blockDownloads, blockVerify, scState.SmartContractUID, blockHeight ?? Globals.LastBlock?.Height ?? 0); // fund-loss audit item 8
                                     if (deposit.Status == OwnerDepositStatus.Unverifiable)
                                         return (txResult, VbtcOwnerDeposit.UnverifiableReason);
                                     totalBalance = deposit.DepositBalance + ledgerBalance;
@@ -3362,7 +3727,7 @@ namespace VerifiedXCore.Services
                                     // Deposit balance is external Bitcoin chain state — if ElectrumX is temporarily
                                     // unavailable during block validation, we trust the crafter's prior verification.
                                     // This matches the v1 TransferCoin() pattern where owner balance is not checked.
-                                    if (isRequesterOwner && blockVerify)
+                                    if (isRequesterOwner && VbtcOwnerDeposit.LeftToTheProducer(deposit, blockVerify))
                                     {
                                         // Trust the block crafter's ElectrumX verification
                                     }
@@ -3420,13 +3785,33 @@ namespace VerifiedXCore.Services
                         // Contract-scoped: a multi-contract request mints one row per contract
                         // under this hash, and this COMPLETE finalizes its own contract's row.
                         var withdrawalRequest = VBTCWithdrawalRequest.GetByTransactionHash(withdrawalRequestHash, scUID);
+
+                        // From Globals.PathAuditRulesHeight a completion names a request that exists on its own contract.
+                        // Every node writes the request table from the mined requests, in order, so a healthy node holds
+                        // every row: no row means the completion names a request that does not exist on this contract, or
+                        // this node's table is damaged. Either way this node cannot judge it as the network does, and it
+                        // refuses rather than guess (a guess accepted what nodes holding the row refused).
+                        var completeHeight = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
+                        if (withdrawalRequest == null && completeHeight >= Globals.PathAuditRulesHeight)
+                        {
+                            if (blockVerify || blockDownloads)
+                                ReportWithdrawalStoreGap(withdrawalRequestHash, scUID, txRequest);
+                            return (txResult, NoWithdrawalRequestReason(withdrawalRequestHash, scUID));
+                        }
+
                         if (withdrawalRequest != null)
                         {
                             // Full validation path (local node has the request record)
                             // FIND-002 + FIND-028 FIX: Allow the original requester OR an active vBTC validator
                             if (withdrawalRequest.RequestorAddress != txRequest.FromAddress)
                             {
-                                var completingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(txRequest.FromAddress);
+                                // From the path-audit rules only the requester completes: apply (StateData.CompleteVBTCV2Withdrawal)
+                                // and the store rebuild (ReplayComplete) have only ever honoured the requester's completion, so a
+                                // validator's was mined and then changed nothing.
+                                if (completeHeight >= Globals.PathAuditRulesHeight)
+                                    return (txResult, $"Only the original requester ({withdrawalRequest.RequestorAddress}) can complete this withdrawal. Received from: {txRequest.FromAddress}");
+
+                                var completingValidator = Bitcoin.Services.VBTCValidatorRegistry.GetValidatorAt(txRequest.FromAddress, Bitcoin.Services.VBTCValidatorRegistry.SetHeightFor(blockHeight));
                                 if (completingValidator == null || !completingValidator.IsActive)
                                     return (txResult, $"Only the original requester ({withdrawalRequest.RequestorAddress}) or an active vBTC validator can complete this withdrawal. Received from: {txRequest.FromAddress}");
                             }
@@ -3446,6 +3831,18 @@ namespace VerifiedXCore.Services
                         // Validate Bitcoin transaction hash format (64 hex chars)
                         if (btcTxHash.Length != 64 || !System.Text.RegularExpressions.Regex.IsMatch(btcTxHash, "^[0-9a-fA-F]{64}$"))
                             return (txResult, $"Invalid Bitcoin transaction hash format: {btcTxHash}");
+
+                        // Fund-loss audit item 8 (re-audit): validator-local checks at ADMISSION only (third review: block
+                        // acceptance must not depend on this node's local rows, or a fresh / mid-rebuild node refuses blocks
+                        // its peers accept). One Bitcoin transaction pays one withdrawal; a bridge exit's transaction pays
+                        // none; and when this node signed the withdrawal (its durable signing record - fourth review: every
+                        // signer, not only the node that ran the ceremony), the COMPLETE must name the transaction it signed.
+                        if (!blockVerify && !blockDownloads)
+                        {
+                            var refusal = Bitcoin.Services.CompletedWithdrawalConfirmation.AdmissionRefusal(scUID, withdrawalRequestHash, btcTxHash, withdrawalRequest?.LastSignedBtcTxId);
+                            if (refusal != null)
+                                return (txResult, refusal);
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -3465,7 +3862,7 @@ namespace VerifiedXCore.Services
             // for validation, apply and the store rebuild). Below it the legacy checks that follow apply unchanged.
             var cancelVoteHeight = blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
             var cancelVoteRulesActive = Bitcoin.Services.VBTCCancellationVoting.RulesActive(cancelVoteHeight);
-            if (cancelVoteRulesActive && (txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL
+            if (cancelVoteRulesActive && !watchedCancel && (txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL
                                           || txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE))
             {
                 try
@@ -3475,6 +3872,13 @@ namespace VerifiedXCore.Services
                         : Bitcoin.Services.VBTCCancellationVoting.ValidateVote(txRequest, cancelVoteHeight);
                     if (rulesError != null)
                         return (txResult, rulesError);
+
+                    // From the path-audit height a vote's withdrawal row must be here: an approving vote cancels it and
+                    // refunds its escrow, which a node lacking the row (a damaged table) would not do. As for a
+                    // completion, such a node refuses rather than guess.
+                    if (txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE
+                        && VoteWithdrawalRowMissing(txRequest, cancelVoteHeight, blockVerify || blockDownloads) is { } missingRow)
+                        return (txResult, missingRow);
                 }
                 catch (Exception ex)
                 {
@@ -3483,7 +3887,7 @@ namespace VerifiedXCore.Services
                 }
             }
 
-            if (!cancelVoteRulesActive && txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
+            if (!cancelVoteRulesActive && !watchedCancel && txRequest.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL)
             {
                 if (!string.IsNullOrWhiteSpace(txRequest.Data))
                 {
@@ -3547,8 +3951,9 @@ namespace VerifiedXCore.Services
 
                         // S3C §7.4: voter must be active AND in the contract's DKG snapshot (or the
                         // public set for legacy no-snapshot contracts) — same resolution as StateData.
-                        var voterSet = Bitcoin.Services.VBTCService.ResolveCancellationVoterSet(cancellation.SmartContractUID);
-                        var validator = Bitcoin.Services.VBTCValidatorRegistry.GetValidator(txRequest.FromAddress);
+                        var voterSetHeight = Bitcoin.Services.VBTCValidatorRegistry.SetHeightFor(blockHeight);
+                        var voterSet = Bitcoin.Services.VBTCService.ResolveCancellationVoterSet(cancellation.SmartContractUID, voterSetHeight);
+                        var validator = Bitcoin.Services.VBTCValidatorRegistry.GetValidatorAt(txRequest.FromAddress, voterSetHeight);
                         if (validator == null || !validator.IsActive || !voterSet.Contains(txRequest.FromAddress))
                             return (txResult, "Only validators in this contract's DKG snapshot can vote on its cancellation.");
 
@@ -3590,6 +3995,21 @@ namespace VerifiedXCore.Services
 
                     if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(lockId))
                         return (txResult, "ContractUID and LockId are required for bridge lock.");
+                    // The lock is stored under its id trimmed: one of spaces only was debited and stored where no look-up
+                    // finds it, and one with spaces around it is not the id it is found by (fifth review, round 17).
+                    if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.PathAuditRulesHeight
+                        && (string.IsNullOrWhiteSpace(lockId) || lockId != lockId.Trim()))
+                        return (txResult, "A bridge LockId is not blank and has no spaces around it.");
+                    // ... and at most 64 characters: every plan names its locks in one transaction under the size cap, and
+                    // long ids filled it so every burn reaching them was refused (fifth review, round 27).
+                    // ... of letters, digits, '-' and '_': a quote or backslash takes four bytes where a plan's size is
+                    // measured, and long ids of them pushed plans over the cap (round 29).
+                    if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.PathAuditRulesHeight
+                        && !lockId.All(c => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_'))
+                        return (txResult, "A bridge LockId is made of letters, digits, '-' and '_'.");
+                    if ((blockHeight ?? (Globals.LastBlock?.Height ?? 0) + 1) >= Globals.PathAuditRulesHeight
+                        && lockId.Length > VerifiedXCore.Bitcoin.Services.BridgePoolUnlockService.MaxLockIdLength)
+                        return (txResult, $"A bridge LockId is at most {VerifiedXCore.Bitcoin.Services.BridgePoolUnlockService.MaxLockIdLength} characters.");
 
                     // Reserve-held vBTC is locked: bridge locks from a reserve address are denied.
                     if (txRequest.FromAddress.StartsWith("xRBX"))
@@ -3600,6 +4020,11 @@ namespace VerifiedXCore.Services
                     // client gate and recreate the third-party stuck-funds danger (§6.2).
                     if (Bitcoin.Services.VBTCService.ResolveContractIsS3C(scUID))
                         return (txResult, "vBTC.b bridge is not available for S3C contracts.");
+
+                    // A watched vault whose key cannot sign any more pays nobody: its vBTC does not go into the pool
+                    // that bridge exits are paid from (plan 8.8).
+                    if (Bitcoin.Attestation.BtcVaultKeys.CannotSignRefusal(SmartContractStateTrei.GetSmartContractState(scUID)?.SmartContractUID ?? scUID) is { } cannotSign)
+                        return (txResult, cannotSign);
 
                     if (txRequest.FromAddress != txRequest.ToAddress)
                         return (txResult, "Bridge lock must be a self-transaction (from == to).");
@@ -3626,6 +4051,13 @@ namespace VerifiedXCore.Services
 
                     if (string.IsNullOrEmpty(evmDestination) || !evmDestination.StartsWith("0x") || evmDestination.Length != 42)
                         return (txResult, "Invalid EvmDestination for bridge lock.");
+
+                    // Validators never sign a Base mint for a destination that begins with an admin message tag, so a lock to
+                    // one would debit vBTC that is never minted. Refused at admission at every height; in blocks from the
+                    // path-audit height.
+                    if ((blockHeight == null || blockHeight.Value >= Globals.PathAuditRulesHeight)
+                        && VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.DestinationStartsWithAdminTag(evmDestination))
+                        return (txResult, BridgeLockDestinationIsAdminTagReason);
 
                     if (VBTCBridgeLockState.GetByLockId(lockId) != null)
                         return (txResult, "Bridge LockId already exists on-chain.");
@@ -3673,10 +4105,16 @@ namespace VerifiedXCore.Services
                     if (expectedSats != amountSats.Value)
                         return (txResult, "AmountSats does not match Amount for bridge unlock.");
 
-                    if (!IsValidEvmTxHash32(exitBurnTxHash))
+                    if (!IsValidBurnId(exitBurnTxHash, blockHeight ?? (Globals.LastBlock.Height + 1)))
                         return (txResult, "ExitBurnTxHash must be a 32-byte hex string (optionally 0x-prefixed).");
 
                     var unlockGateHeight = blockHeight ?? (Globals.LastBlock.Height + 1);
+                    // From the path-audit height a lock is named by its own id exactly, as an exit names it: the lookup trims
+                    // and ignores case, and the block's guard compares ids as written, so an unlock under an alias ("L1 ")
+                    // and an exit under the real id drew the same lock in one block.
+                    if (unlockGateHeight >= Globals.PathAuditRulesHeight && VBTCBridgeLockState.GetByLockId(lockId) is { } named
+                        && !string.Equals(lockId, named.LockId, StringComparison.Ordinal))
+                        return (txResult, $"Bridge unlock must name the lock by its own id ({named.LockId}).");
                     var unlockStrict = unlockGateHeight >= Globals.BridgeBurnBindingHeight;
                     if (unlockStrict)
                     {
@@ -3767,7 +4205,7 @@ namespace VerifiedXCore.Services
                     if (string.IsNullOrEmpty(vfxDestAddr))
                         return (txResult, "VfxDestinationAddress is required for bridge pool unlock.");
 
-                    if (!IsValidEvmTxHash32(exitBurnTxHash))
+                    if (!IsValidBurnId(exitBurnTxHash, blockHeight ?? (Globals.LastBlock.Height + 1)))
                         return (txResult, "ExitBurnTxHash must be a 32-byte hex string (optionally 0x-prefixed).");
 
                     if (txRequest.FromAddress != txRequest.ToAddress)
@@ -3806,7 +4244,7 @@ namespace VerifiedXCore.Services
                         if (VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(poolBurnHash))
                             return (txResult, "Exit burn transaction has already been consumed.");
 
-                        var (allocOk, allocReason) = ValidateBridgeAllocations(allocations, totalAmount.Value);
+                        var (allocOk, allocReason) = ValidateBridgeAllocations(allocations, totalAmount.Value, poolGateHeight);
                         if (!allocOk)
                             return (txResult, $"Bridge pool unlock allocations invalid: {allocReason}");
 
@@ -3878,7 +4316,7 @@ namespace VerifiedXCore.Services
                     if (txRequest.FromAddress != txRequest.ToAddress)
                         return (txResult, "Bridge exit to BTC must be a self-transaction (from == to).");
 
-                    if (!IsValidEvmTxHash32(baseBurnTxHash))
+                    if (!IsValidBurnId(baseBurnTxHash, blockHeight ?? (Globals.LastBlock.Height + 1)))
                         return (txResult, "BaseBurnTxHash must be a valid 32-byte hex transaction hash.");
 
                     // Duplicate burn: post-gate use the normalized, cross-path check (consumed registry,
@@ -3923,7 +4361,7 @@ namespace VerifiedXCore.Services
                         var exitAllocs = jobj["Allocations"];
                         if (exitAllocs != null && exitAllocs.Type == JTokenType.Array && exitAllocs.HasValues)
                         {
-                            var (allocOk, allocReason) = ValidateBridgeAllocations(exitAllocs, exitTotal);
+                            var (allocOk, allocReason) = ValidateBridgeAllocations(exitAllocs, exitTotal, exitGateHeight);
                             if (!allocOk)
                                 return (txResult, $"Bridge exit to BTC allocations invalid: {allocReason}");
                         }
@@ -4005,6 +4443,13 @@ namespace VerifiedXCore.Services
                     if (st == null || st.IsComplete)
                         return (txResult, "No pending bridge exit to BTC for this burn hash.");
 
+                    // An exit is closed by the caster that made it, the one that leads its Bitcoin signing: any committee
+                    // caster could fail an exit another had paid, and the burn was exited again and paid twice (fifth
+                    // review, round 20).
+                    if ((blockHeight ?? (Globals.LastBlock.Height + 1)) >= Globals.PathAuditRulesHeight
+                        && !string.Equals(txRequest.FromAddress, st.OwnerAddress, StringComparison.Ordinal))
+                        return (txResult, "A bridge exit is completed or failed only by the caster that made it.");
+
                     // Post-gate hardening: only the handler caster may close an exit, a COMPLETE must
                     // name a real-looking Bitcoin txid, and a FAIL may only restore allocations the exit
                     // actually reserved (BlacklistLock has no undo).
@@ -4016,8 +4461,14 @@ namespace VerifiedXCore.Services
 
                         if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE)
                         {
-                            if (!BridgeTxRules.IsBtcTxIdShape(jobj["BtcTxHash"]?.ToObject<string>()))
-                                return (txResult, "BtcTxHash must be a 32-byte hex transaction id.");
+                            if (!BridgeTxRules.IsBtcTxIdList(jobj["BtcTxHash"]?.ToObject<string>(), closeGateHeight))
+                                return (txResult, "BtcTxHash must be a 32-byte hex transaction id (or, from the path-audit rules, a comma-separated list of them).");
+                            // At most one per vault the exit draws on: the txids a completion names are taken as the exit's
+                            // payments elsewhere, and a list of other users' withdrawals' txids froze their owners' add-backs
+                            // (fifth review, round 22).
+                            if (closeGateHeight >= Globals.PathAuditRulesHeight
+                                && (jobj["BtcTxHash"]?.ToObject<string>() ?? "").Split(',').Length > BridgeTxRules.VaultsInPlan(st.AllocationsJson, st.SmartContractUID))
+                                return (txResult, "A completion names at most one Bitcoin transaction per vault the exit draws on.");
                         }
                         else
                         {
@@ -4054,7 +4505,13 @@ namespace VerifiedXCore.Services
                 if(txRequest.UnlockTime == null)
                     return (txResult, "There must be an unlock time for this transaction");
 
-                if (Globals.BlocksDownloadSlim.CurrentCount != 0 && Globals.BlocksDownloadV2Slim.CurrentCount != 0)
+                if (blockTime != null)
+                {
+                    // 24 hours less the three the rule has always allowed, from the block's timestamp.
+                    if (txRequest.UnlockTime.Value < LedgerIntegrityRules.NowForAgeRules(blockTime) + 21 * 3600)
+                        return (txResult, "Unlock time does not meet 24 hour requirement.");
+                }
+                else if (Globals.BlocksDownloadSlim.CurrentCount != 0 && Globals.BlocksDownloadV2Slim.CurrentCount != 0)
                 {
                     var validUnlockTime = TimeUtil.GetReserveTime(-3);
 
@@ -4074,8 +4531,273 @@ namespace VerifiedXCore.Services
 
         }
 
+        internal const string NegativeFeeReason = "A transaction's fee cannot be negative.";
+
+        internal const string NoWithdrawalRequestPrefix = "No withdrawal request ";
+        internal const string WithdrawalStoreRebuildingReason = NoWithdrawalRequestPrefix + "is judged while this node's withdrawal store is being rebuilt.";
+        internal static string NoWithdrawalRequestReason(string? requestHash, string? scUID) =>
+            $"{NoWithdrawalRequestPrefix}{requestHash} exists on contract {scUID}.";
+
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> ReportedWithdrawalStoreGaps = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// From the path-audit height: the refusal for a cancellation vote whose withdrawal row this node's table lacks (a
+        /// damaged store; an approving vote would cancel the row and refund its escrow, which this node could not do), or
+        /// null. In a block it is reported loudly.
+        /// </summary>
+        internal static string? VoteWithdrawalRowMissing(Transaction vote, long height, bool inBlock)
+        {
+            if (height < Globals.PathAuditRulesHeight) return null;
+            var voted = VBTCWithdrawalCancellation.GetCancellation(JObject.Parse(vote.Data)["CancellationUID"]?.ToObject<string?>() ?? "");
+            if (voted == null || VBTCWithdrawalRequest.GetByTransactionHash(voted.WithdrawalRequestHash, voted.SmartContractUID) != null) return null;
+            if (inBlock) ReportWithdrawalStoreGap(voted.WithdrawalRequestHash, voted.SmartContractUID, vote);
+            return NoWithdrawalRequestReason(voted.WithdrawalRequestHash, voted.SmartContractUID);
+        }
+
+        /// <summary>
+        /// A block names a withdrawal request this node's table does not hold. A healthy table holds every mined request,
+        /// so either the block is invalid or this node's withdrawal store is damaged; this node refuses the block either
+        /// way. Said loudly (console and error log, once per request): if peers accept the block, this node has stopped
+        /// following the chain and needs its state rebuilt from the blocks: restart with "rebuildstate". A snapshot of the same
+        /// store would not heal it, so this refusal does not count toward the automatic snapshot restore.
+        /// </summary>
+        private static void ReportWithdrawalStoreGap(string? requestHash, string? scUID, Transaction tx)
+        {
+            if (ReportedWithdrawalStoreGaps.Count >= 1_000) ReportedWithdrawalStoreGaps.Clear();   // logging only: bounded
+            if (!ReportedWithdrawalStoreGaps.TryAdd($"{requestHash}|{scUID}", 0)) return;
+            var text = $"WITHDRAWAL STORE: block transaction {tx.Hash} ({tx.TransactionType}) names withdrawal request {requestHash} on contract {scUID}, " +
+                       "which this node's withdrawal table does not hold. The block is refused. If other nodes accept it, this node's withdrawal store is " +
+                       "damaged and it has stopped following the chain: restart it with \"rebuildstate\" (full state rebuild from the blocks).";
+            ErrorLogUtility.LogError(text, "TransactionValidatorService.ReportWithdrawalStoreGap()");
+            ConsoleWriterService.OutputMarked($"[red]{Spectre.Console.Markup.Escape(text)}[/]");
+        }
+
+        internal const string RegisteredBaseAddressReason = "A validator's BaseAddress must be the one its own key derives.";
+
+        /// <summary>
+        /// A validator registration or heartbeat that names a BaseAddress names the one its own key (FrostPublicKey, checked
+        /// to be the validator's own) derives: the vBTCb validator set knows validators by it, and a chosen address could
+        /// be shaped into another contract message. Refused at admission at every height; in blocks from the path-audit
+        /// height. Null when it passes.
+        /// </summary>
+        internal const string DecShopOwnerReason = "A new shop is owned by the address that sends its creation.";
+        internal const string TokenOwnerChangeReason = "A token contract's new owner in the data is the transaction's recipient.";
+
+        /// <summary>
+        /// From DataOwnerBoundHeight a DecShopCreate()'s Data.OwnerAddress is its sender: the owner is stored from the data,
+        /// which the sender's signature covers but no rule tied to the sender, so a shop could be created in another's name.
+        /// </summary>
+        internal static string? DecShopOwnerRefusal(Transaction tx, DecShop decshop, long height) =>
+            height >= Globals.DataOwnerBoundHeight && decshop.OwnerAddress != tx.FromAddress ? DecShopOwnerReason : null;
+
+        /// <summary>
+        /// From DataOwnerBoundHeight a TokenContractOwnerChange()'s new owner in the data is the transaction's ToAddress: one
+        /// apply path stores the data's owner and the other the recipient, so the two had to be the same address.
+        /// </summary>
+        internal static string? TokenOwnerChangeRefusal(Transaction tx, string? dataToAddress, long height) =>
+            height >= Globals.DataOwnerBoundHeight && dataToAddress != tx.ToAddress ? TokenOwnerChangeReason : null;
+
+        internal static string? RegisteredBaseAddressRefusal(JObject data, long? blockHeight, string? signature)
+        {
+            var named = data["BaseAddress"]?.ToObject<string>();
+            if (string.IsNullOrEmpty(named) || (blockHeight != null && blockHeight.Value < Globals.PathAuditRulesHeight)) return null;
+            var key = data["FrostPublicKey"]?.ToObject<string>();
+            // A heartbeat may leave its key out (the registry keeps the one it has): the key is then the one that signed
+            // this transaction, which the signature check has already tied to the validator's address. Every such
+            // heartbeat naming a BaseAddress was refused.
+            if (string.IsNullOrEmpty(key)) key = SignerPublicKey(signature);
+            string? derived = null;
+            try { derived = string.IsNullOrEmpty(key) ? null : Bitcoin.Services.ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(key); } catch { }
+            return string.Equals(named.Trim(), derived, StringComparison.OrdinalIgnoreCase) ? null : RegisteredBaseAddressReason;
+        }
+        /// <summary>The public key a signature script carries ("04" + 128 hex), read as SignatureService.VerifySignature reads it; null if unreadable.</summary>
+        private static string? SignerPublicKey(string? sigScript)
+        {
+            try
+            {
+                var parts = (sigScript ?? "").Split('.', 2);
+                if (parts.Length < 2) return null;
+                var hex = HexByteUtility.ByteToHex(Base58Utility.Base58Decode(parts[1]));
+                if (hex.Length / 2 == 63) hex = "00" + hex;   // the same patch as VerifySignature
+                var pk = VerifiedXCore.EllipticCurve.PublicKey.fromString(HexByteUtility.HexToByte(hex));
+                return "04" + Convert.ToHexString(pk.toString()).ToLowerInvariant();
+            }
+            catch { return null; }
+        }
+        internal const string BridgeLockDestinationIsAdminTagReason = "A bridge lock's EvmDestination cannot begin with a Base admin message tag.";
+        internal const string VotingEndDateNeedsOffsetReason = "A topic's voting end date must carry a UTC offset.";
+
+        internal const string TopicOwnerHasActiveTopicReason = "Only one active topic per address is allowed.";
+        internal const string TopicAdjVoteInMissingReason = "Topic description was missing the Adj Vote in Requirements.";
+
+        /// <summary>
+        /// A signed TopicAdd()'s rules from TopicAddDeterministicHeight: each reads only the transaction, the state and the
+        /// block's timestamp, so live apply, a rebuild and a replay reach the same verdict (they run in block downloads too).
+        /// Under a Validator topic the sender keeps the validator balance after paying; the sender holds no other topic whose
+        /// voting is still open at the block's time; an AdjVoteIn topic meets its specs and the 2,800-character limit. Whether
+        /// the sender is in this node's adjudicator pool is node-local, so it is judged at admission only. Who has crafted a
+        /// block lately and the node's recent-block window are node-local too, and are not rules from the height.
+        /// </summary>
+        internal static string? TopicAddRefusal(Transaction tx, TopicTrei topic, long? blockTime, bool admission)
+        {
+            if (topic.VoterType == TopicVoterType.Validator)
+            {
+                var stAcct = StateData.GetSpecificAccountStateTrei(tx.FromAddress);
+                if (stAcct == null)
+                    return "Could not locate account in state trei.";
+                if (stAcct.Balance - (tx.Amount + tx.Fee) < ValidatorService.ValidatorRequiredAmount())
+                    return $"Balance is under {ValidatorService.ValidatorRequiredAmount()}. Topic will not be allowed.";
+            }
+            if (topic.VoterType == TopicVoterType.Adjudicator && admission && !Globals.AdjNodes.Values.Any(x => x.Address == tx.FromAddress))
+                return $"The from addesss ({tx.FromAddress}) is not in the adjudicator pool.";
+
+            var now = DateTimeOffset.FromUnixTimeSeconds(LedgerIntegrityRules.NowForAgeRules(blockTime)).UtcDateTime;
+            var owned = TopicTrei.GetSpecificTopicByAddress(tx.FromAddress);
+            if (owned != null && owned.Any(t => t.VotingEndDate.ToUniversalTime() >= now))
+                return TopicOwnerHasActiveTopicReason;
+
+            if (topic.VoteTopicCategory == VoteTopicCategories.AdjVoteIn)
+            {
+                AdjVoteInReqs? adjVoteReq;
+                try { adjVoteReq = JsonConvert.DeserializeObject<AdjVoteInReqs>(topic.TopicDescription ?? ""); }
+                catch (JsonException) { adjVoteReq = null; }
+                if (adjVoteReq == null)
+                    return TopicAdjVoteInMissingReason;
+                if (!VoteValidatorService.ValidateAdjVoteIn(adjVoteReq))
+                    return "You did not meet the required specs or information was not completed. This topic has been cancelled.";
+                if ((topic.TopicDescription?.Length ?? 0) + (topic.TopicName?.Length ?? 0) > 2800)
+                    return "Topic is larger than the 2800 limit.";
+            }
+            return null;
+        }
+
+        internal const string VoteTopicIsTopicAddReason = "A voting topic transaction creates a topic: its Function is TopicAdd().";
+        internal const string TopicEndDateWithoutOffsetReason = "This topic's voting end date was written without a UTC offset; it cannot be voted on.";
+
+        /// <summary>
+        /// Whether the transaction that created <paramref name="topic"/> (in the block at its height) wrote the end of voting
+        /// without an offset, or cannot be found. Read from block data, never from the stored date.
+        /// </summary>
+        internal static bool TopicEndDateWrittenWithoutOffset(TopicTrei topic)
+        {
+            try
+            {
+                var block = BlockchainData.GetBlockByHeight(topic.BlockHeight);
+                foreach (var t in block?.Transactions ?? new List<Transaction>())
+                {
+                    if (t.TransactionType != TransactionType.VOTE_TOPIC || string.IsNullOrEmpty(t.Data)) continue;
+                    var written = JObject.Parse(t.Data)["Topic"]?.ToObject<TopicTrei>();
+                    if (written != null && written.TopicUID == topic.TopicUID)
+                        return written.VotingEndDate.Kind == DateTimeKind.Unspecified;
+                }
+            }
+            catch { }
+            return true;
+        }
+
+        /// <summary>
+        /// Whether a standard (non-private) transaction's carried Hash is the hash of its content. Accepts the legacy
+        /// spellings VerifyTX always has: a whole-number Amount hashed as "N.0", and a zero Amount hashed as "0".
+        /// </summary>
+        internal static bool StandardHashMatches(Transaction txRequest) => StandardHashMatches(txRequest, long.MaxValue);
+
+        /// <summary>As <see cref="StandardHashMatches(Transaction)"/>, judged for <paramref name="height"/>.</summary>
+        internal static bool StandardHashMatches(Transaction txRequest, long height)
+        {
+            var newTxn = new Transaction()
+            {
+                Timestamp = txRequest.Timestamp,
+                FromAddress = txRequest.FromAddress,
+                ToAddress = txRequest.ToAddress,
+                Amount = txRequest.Amount,
+                Fee = txRequest.Fee,
+                Nonce = txRequest.Nonce,
+                TransactionType = txRequest.TransactionType,
+                Data = txRequest.Data,
+                UnlockTime = txRequest.UnlockTime,
+            };
+
+            newTxn.Build();
+
+            if (newTxn.Hash.Equals(txRequest.Hash))
+                return true;
+
+            var amountCheck = txRequest.Amount % 1 == 0;
+            // A non-whole amount has no other spelling. Re-hashed below as 0, it matched a signature over "0", so a relay
+            // could put any fraction on such a transaction; from FractionalAmountRehashHeight it gets no re-hash.
+            if (!amountCheck && height >= Globals.FractionalAmountRehashHeight)
+                return false;
+            var amountFormat = 0M;
+            if (amountCheck)
+            {
+                var amountStr = txRequest.Amount.ToString("0.0");
+                amountFormat = decimal.Parse(amountStr);
+            }
+
+            var newTxnMod = new Transaction()
+            {
+                Timestamp = txRequest.Timestamp,
+                FromAddress = txRequest.FromAddress,
+                ToAddress = txRequest.ToAddress,
+                Amount = amountFormat,
+                Fee = txRequest.Fee,
+                Nonce = txRequest.Nonce,
+                TransactionType = txRequest.TransactionType,
+                Data = txRequest.Data,
+                UnlockTime = txRequest.UnlockTime,
+            };
+
+            newTxnMod.Build();
+
+            if (newTxnMod.Hash.Equals(txRequest.Hash))
+                return true;
+
+            // NEW-22: the "Amount 0" re-hash below matched a transaction SIGNED with Amount "0" whatever Amount it now
+            // carries (the non-integer case above also re-hashed with 0): a relay or producer could raise the amount
+            // of any such transaction without breaking its signature. It applies only to a zero amount.
+            if (txRequest.Amount != 0M)
+                return false;
+
+            var newTxnModZero = new Transaction()
+            {
+                Timestamp = txRequest.Timestamp,
+                FromAddress = txRequest.FromAddress,
+                ToAddress = txRequest.ToAddress,
+                Amount = 0,
+                Fee = txRequest.Fee,
+                Nonce = txRequest.Nonce,
+                TransactionType = txRequest.TransactionType,
+                Data = txRequest.Data,
+                UnlockTime = txRequest.UnlockTime,
+            };
+
+            newTxnModZero.Build();
+
+            return newTxnModZero.Hash.Equals(txRequest.Hash);
+        }
+
+        /// <summary>The recipient rule: one of the base sentinels, or a whole address. Null when it passes.</summary>
+        internal static string? RecipientError(Transaction txRequest)
+        {
+            if (txRequest.ToAddress != "Adnr_Base" &&
+                txRequest.ToAddress != "DecShop_Base" &&
+                txRequest.ToAddress != "Topic_Base" &&
+                txRequest.ToAddress != "Vote_Base" &&
+                txRequest.ToAddress != "Reserve_Base" &&
+                txRequest.ToAddress != "Token_Base" &&
+                txRequest.ToAddress != "TW_Base")
+            {
+                if (!AddressValidateUtility.ValidateAddress(txRequest.ToAddress))
+                    return "To Address failed to validate";
+
+                if (txRequest.ToAddress.Length < 32)
+                    return "Address length is too short.";
+            }
+            return null;
+        }
+
         /// <summary>The transaction signature check (over the carried Hash); null when it passes.</summary>
-        private static string? SignatureError(Transaction txRequest)
+        internal static string? SignatureError(Transaction txRequest)
         {
             if (string.IsNullOrEmpty(txRequest.Signature))
                 return "Signature cannot be null.";
@@ -4116,8 +4838,14 @@ namespace VerifiedXCore.Services
         /// not unlocked/blacklisted, positive amounts within each lock's remaining balance, and a
         /// sum equal to the declared total.
         /// </summary>
-        private static (bool Ok, string Reason) ValidateBridgeAllocations(JToken? allocationsToken, decimal totalAmount)
+        private static (bool Ok, string Reason) ValidateBridgeAllocations(JToken? allocationsToken, decimal totalAmount, long height = 0)
         {
+            // From the path-audit height a lock is named by its own id exactly and asked for no more than it holds. A lock's
+            // look-up trims its id and ignores case, while the duplicate check (here and across a block) compared ids
+            // exactly: "L1" and "l1 " drew on one lock twice, the second draw failed at apply and the part was paid in full
+            // anyway, and an expired exit restored both (fourth review, round 11).
+            var exact = height >= Globals.PathAuditRulesHeight;
+            if (exact && Bitcoin.Attestation.BtcWithdrawals.AllocationFieldsRefusal(allocationsToken) is { } fields) return (false, fields);
             List<PoolUnlockAllocation>? allocations;
             try { allocations = allocationsToken?.ToObject<List<PoolUnlockAllocation>>(); }
             catch (Exception ex) { return (false, $"unparseable allocations: {ApiErrorText.For(ex)}"); }
@@ -4130,18 +4858,52 @@ namespace VerifiedXCore.Services
                 if (a == null || string.IsNullOrWhiteSpace(a.LockId)) return (false, "allocation missing LockId");
                 if (!seen.Add(a.LockId)) return (false, $"duplicate lock {a.LockId}");
                 if (a.UnlockAmount <= 0M) return (false, $"non-positive amount for lock {a.LockId}");
+                // Whole satoshis from the path-audit rules: a fraction let an exit draw just under a satoshi more than
+                // the votes' amount, and parts truncated apart paid less than the locks gave up (fifth review, round 15).
+                if (exact && Bitcoin.Services.VBTCService.GetVbtcAmountError(a.UnlockAmount, "a bridge allocation") is { } fraction)
+                    return (false, fraction);
                 var rec = VBTCBridgeLockState.GetByLockId(a.LockId);
                 if (rec == null) return (false, $"unknown lock {a.LockId}");
                 if (rec.IsUnlocked) return (false, $"lock {a.LockId} already fully unlocked");
                 if (rec.IsBlacklisted) return (false, $"lock {a.LockId} is blacklisted");
                 if (!string.IsNullOrEmpty(a.SmartContractUID) && !string.Equals(a.SmartContractUID, rec.SmartContractUID, StringComparison.Ordinal))
                     return (false, $"lock {a.LockId} contract mismatch");
-                if (a.UnlockAmount > rec.RemainingAmount + 0.00000001M)
+                if (exact && !string.Equals(a.LockId, rec.LockId, StringComparison.Ordinal))
+                    return (false, $"lock {a.LockId} is not named by its own id {rec.LockId}");
+                if (a.UnlockAmount > rec.RemainingAmount + (exact ? 0M : 0.00000001M))
                     return (false, $"lock {a.LockId} has {rec.RemainingAmount} remaining, allocation asks {a.UnlockAmount}");
                 sum += a.UnlockAmount;
             }
-            if (Math.Abs(sum - totalAmount) > 0.00000001M) return (false, $"allocation sum {sum} != total {totalAmount}");
+            if (Math.Abs(sum - totalAmount) > (exact ? 0M : 0.00000001M)) return (false, $"allocation sum {sum} != total {totalAmount}"); // exact from the path-audit rules (round 14)
+            if (exact && Bitcoin.Services.VBTCService.GetVbtcAmountError(totalAmount, "a bridge total") is { } totalFraction) return (false, totalFraction);
             return (true, "");
+        }
+
+        /// <summary>
+        /// A validator's FrostPublicKey, read as the registry reads it, is its own account key (derives its address). A
+        /// heartbeat may leave it out (the registry then keeps the one it has); a registration may not.
+        /// </summary>
+        internal static bool FrostKeyIsOwn(JToken? token, string address, bool required)
+        {
+            string? key;
+            try { key = token?.ToObject<string?>(); } catch { return false; }
+            if (string.IsNullOrEmpty(key)) return !required;
+            return Bitcoin.FROST.FrostShareCrypto.IsOwnKey(key, address); // one spelling (round 14)
+        }
+
+        /// <summary>
+        /// A bridge burn's id as a transaction names it: its Base transaction's hash, and from the path-audit rules also
+        /// "{hash}:{position}" for one of several burns in that transaction (BaseBridgeService.BurnId; #277). The position is
+        /// written plainly (digits, no leading zero), so a burn has one spelling of it.
+        /// </summary>
+        private static bool IsValidBurnId(string? id, long height)
+        {
+            if (IsValidEvmTxHash32(id)) return true;
+            if (id == null || height < Globals.PathAuditRulesHeight) return false;
+            var colon = id.IndexOf(':');
+            if (colon < 0 || !IsValidEvmTxHash32(id[..colon])) return false;
+            var position = id[(colon + 1)..];
+            return position.Length is > 0 and <= 3 && position.All(c => c >= '0' && c <= '9') && (position == "0" || position[0] != '0');
         }
 
         private static bool IsValidEvmTxHash32(string? h)
@@ -4191,7 +4953,7 @@ namespace VerifiedXCore.Services
                 ledgerBalance = Bitcoin.Services.VBTCService.GetOwnerLedgerBalance(scStateTreiRec, fromAddress, currentHeight);
 
                 var deposit = await VbtcOwnerDeposit.CheckAsync(() => Bitcoin.Services.VBTCService.ResolveDepositAddress(scStateTreiRec, null),
-                    amount - ledgerBalance, blockDownloads, blockVerify);
+                    amount - ledgerBalance, blockDownloads, blockVerify, scStateTreiRec.SmartContractUID, Globals.LastBlock?.Height ?? 0); // fund-loss audit item 8
                 if (deposit.Status == OwnerDepositStatus.Unverifiable)
                     return (false, VbtcOwnerDeposit.UnverifiableReason);
                 decimal depositBalance = deposit.DepositBalance;
@@ -4199,7 +4961,7 @@ namespace VerifiedXCore.Services
                 decimal ownerBalance = depositBalance + ledgerBalance;
                 if (ownerBalance < amount && deposit.Status != OwnerDepositStatus.Trusted)
                 {
-                    if (!blockVerify)
+                    if (!VbtcOwnerDeposit.LeftToTheProducer(deposit, blockVerify))
                         return (false, $"Insufficient vBTC balance (owner) for bridge lock. Available: {ownerBalance} (deposit: {depositBalance}, ledger: {ledgerBalance}), Requested: {amount}");
                 }
             }
@@ -4214,6 +4976,21 @@ namespace VerifiedXCore.Services
 
             return (true, "");
         }
+
+        /// <summary>
+        /// The transaction as a block carries it, with the fields no hash covers at their widest: its Height, its stored Id
+        /// (each node's own), and its rating and status. The size cap counts them, and at admission they are empty or short:
+        /// a transaction admitted just under the cap was over it in the producer's block, which then failed its own check,
+        /// and every producer stopped. Admission measures this copy, so what it admits fits in any block.
+        /// </summary>
+        internal static Transaction AsCarriedInABlock(Transaction tx) => new Transaction
+        {
+            Id = new LiteDB.ObjectId(int.MinValue, int.MinValue, short.MinValue, int.MinValue),
+            Hash = tx.Hash, ToAddress = tx.ToAddress, FromAddress = tx.FromAddress, Amount = tx.Amount, Nonce = tx.Nonce, Fee = tx.Fee,
+            Timestamp = tx.Timestamp, Data = tx.Data, UnlockTime = tx.UnlockTime, Signature = tx.Signature,
+            Height = long.MaxValue, TransactionType = tx.TransactionType,
+            TransactionRating = Enum.GetValues<TransactionRating>().Max(), TransactionStatus = Enum.GetValues<TransactionStatus>().Max(),
+        };
 
         public static Task<bool> VerifyTXSize(Transaction txRequest) =>
             Task.FromResult(VerifyTXSize(txRequest, LedgerIntegrityRules.DefaultMaxTxSizeBytes));

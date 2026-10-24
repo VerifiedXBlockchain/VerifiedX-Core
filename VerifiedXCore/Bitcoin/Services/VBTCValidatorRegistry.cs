@@ -72,11 +72,11 @@ namespace VerifiedXCore.Bitcoin.Services
             // One cached scan per (height, block hash at that height): admission checks many transactions against the same
             // tip, and a rollback that replaces the block changes the key.
             var tipHash = BlockchainData.GetBlockByHeight(height)?.Hash;
-            if (string.IsNullOrEmpty(tipHash)) return ScanBlocks(height); // no committed block to key on: never cached
+            if (string.IsNullOrEmpty(tipHash)) return ScanBlocks(height, consensus: true); // no committed block to key on: never cached
             var cached = _atHeightCache; // a reference: read and replaced atomically
             if (cached != null && cached.Height == height && cached.Hash == tipHash)
                 return cached.Validators.Select(Copy).ToList();
-            var scanned = ScanBlocks(height);
+            var scanned = ScanBlocks(height, consensus: true);
             _atHeightCache = new AtHeight(height, tipHash, scanned.Select(Copy).ToList());
             return scanned;
         }
@@ -99,6 +99,20 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// One validator from the active set as of <paramref name="height"/> (committed blocks only, as
+        /// <see cref="GetActiveValidatorsAt"/>): the lookup for consensus. <see cref="GetValidator"/> answers "nobody" on a
+        /// node that is still catching up, swallows database errors, and reads the node's tip rather than the block judged.
+        /// </summary>
+        public static VBTCValidator? GetValidatorAt(string? address, long height)
+        {
+            if (string.IsNullOrEmpty(address)) return null;
+            return GetActiveValidatorsAt(height).FirstOrDefault(v => v.ValidatorAddress == address);
+        }
+
+        /// <summary>The height whose active set judges a transaction: the block before its block, or before the next block at admission.</summary>
+        public static long SetHeightFor(long? blockHeight) => (blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) - 1;
+
+        /// <summary>
         /// S3C (§3.2): the exclusion point for ALL public ceremony/selection sites — the active
         /// set minus S3C validators. GetActiveValidators() stays inclusive for auth/consensus.
         /// With no S3C validators on-chain this returns the identical set as today.
@@ -116,14 +130,13 @@ namespace VerifiedXCore.Bitcoin.Services
         public static bool HoldsValidatorBalance(string? address)
         {
             if (string.IsNullOrEmpty(address)) return false;
-            try
-            {
-                var account = StateData.GetSpecificAccountStateTrei(address);
-                // Exact key: LiteDB lookups ignore case, so a case variant would read another address's balance.
-                return account != null && string.Equals(account.Key, address, StringComparison.Ordinal)
-                    && account.Balance >= VerifiedXCore.Services.ValidatorService.ValidatorRequiredAmount();
-            }
-            catch { return false; }
+            // No catch: this answer decides who is in a signer set and whose bond is funded. A database error read as
+            // "does not hold it" gave this node other sets than the network's without a word; thrown, it fails the
+            // block step or the transaction that asked, and the node is flagged.
+            var account = StateData.GetSpecificAccountStateTrei(address);
+            // Exact key: LiteDB lookups ignore case, so a case variant would read another address's balance.
+            return account != null && string.Equals(account.Key, address, StringComparison.Ordinal)
+                && account.Balance >= VerifiedXCore.Services.ValidatorService.ValidatorRequiredAmount();
         }
 
         /// <summary>NEW-26 (follow-up): the validators that hold the validator balance now (see HoldsValidatorBalance).</summary>
@@ -155,20 +168,75 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Scans the last SCAN_WINDOW blocks for validator lifecycle transactions
         /// and builds a map of active validators.
         /// </summary>
-        private static List<VBTCValidator> ScanBlocks(long currentHeight)
+        /// <param name="consensus">
+        /// The scan decides consensus state (a signer set, the bonds, a ceremony's participants): a block that cannot
+        /// be read is then an error to its caller, not an empty answer. A node that read "no validators" where its
+        /// peers read forty held other state than they did and nothing said so.
+        /// </param>
+        /// <summary>A block's validator transactions, with the hashes that place it in the chain.</summary>
+        private sealed record BlockSummary(string? Hash, string? PrevHash, List<Transaction> Transactions);
+
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, BlockSummary> _summaries = new();
+        [ThreadStatic] private static long _blocksReadOnThisThread;
+
+        /// <summary>Blocks this thread read from the store to scan (tests).</summary>
+        internal static long BlocksReadOnThisThread => _blocksReadOnThisThread;
+
+        private static bool IsValidatorTx(Transaction tx) =>
+            tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER
+            || tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT
+            || tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_EXIT;
+
+        /// <summary>
+        /// The window's blocks, oldest first, as their validator transactions. Every scan read every block of the window
+        /// whole (up to 1,000; tens of seconds when they are full, and full blocks cost a few VFX), and a scan ran for each
+        /// new height asked (fifth review, round 33). A block's summary is kept and reused while the block above it names
+        /// its hash as its previous one; the top block, and any whose hash does not follow, is read from the store.
+        /// </summary>
+        private static List<BlockSummary?> WindowOf(long scanFrom, long currentHeight)
+        {
+            var window = new List<BlockSummary?>();
+            string? expected = null;
+            for (long h = currentHeight; h >= scanFrom; h--)
+            {
+                BlockSummary? summary;
+                if (expected != null && _summaries.TryGetValue(h, out var known) && known.Hash == expected)
+                    summary = known;
+                else
+                {
+                    var block = BlockchainData.GetBlockByHeight(h);
+                    _blocksReadOnThisThread++;
+                    summary = block == null ? null : new BlockSummary(block.Hash, block.PrevHash,
+                        block.Transactions?.Where(IsValidatorTx).ToList() ?? new List<Transaction>());
+                    if (summary != null && !string.IsNullOrEmpty(summary.Hash))
+                        _summaries[h] = summary;
+                    else
+                        _summaries.TryRemove(h, out _);
+                }
+                window.Add(summary);
+                expected = string.IsNullOrEmpty(summary?.PrevHash) ? null : summary!.PrevHash;
+            }
+            foreach (var old in _summaries.Keys.Where(k => k < scanFrom - SCAN_WINDOW || k > currentHeight + SCAN_WINDOW).ToList())
+                _summaries.TryRemove(old, out _);
+            window.Reverse();
+            return window;
+        }
+
+        private static List<VBTCValidator> ScanBlocks(long currentHeight, bool consensus = false)
         {
             var scanFrom = Math.Max(0, currentHeight - SCAN_WINDOW);
             var validatorMap = new Dictionary<string, VBTCValidator>();
 
             try
             {
+                var window = WindowOf(scanFrom, currentHeight);
                 for (long h = scanFrom; h <= currentHeight; h++)
                 {
-                    var block = BlockchainData.GetBlockByHeight(h);
-                    if (block?.Transactions == null || !block.Transactions.Any())
+                    var summary = window[(int)(h - scanFrom)];
+                    if (summary == null || summary.Transactions.Count == 0)
                         continue;
 
-                    foreach (var tx in block.Transactions)
+                    foreach (var tx in summary.Transactions)
                     {
                         if (tx.TransactionType == TransactionType.VBTC_V2_VALIDATOR_REGISTER)
                             ProcessRegister(tx, h, validatorMap);
@@ -183,6 +251,7 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 ErrorLogUtility.LogError($"Error scanning blocks for validator state: {ex}",
                     "VBTCValidatorRegistry.ScanBlocks()");
+                if (consensus) throw;
             }
 
             // Return only validators that are active (registered/heartbeated and not exited)

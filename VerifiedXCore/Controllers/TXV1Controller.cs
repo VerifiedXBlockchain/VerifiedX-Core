@@ -961,6 +961,7 @@ namespace VerifiedXCore.Controllers
 
                     var twSkipVerify = transaction.TransactionType == TransactionType.TKNZ_WD_OWNER ? true : false;
                     var result = !twSkipVerify ? await TransactionValidatorService.VerifyTX(transaction) : await TransactionValidatorService.VerifyTX(transaction, false, false, true);
+                    VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // a dry run claims nothing (round 27)
                     if (result.Item1 == true)
                     {
 
@@ -1010,19 +1011,43 @@ namespace VerifiedXCore.Controllers
                     var result = !twSkipVerify ? await TransactionValidatorService.VerifyTX(transaction) : await TransactionValidatorService.VerifyTX(transaction, false, false, true);
                     if (result.Item1 == true)
                     {
-                        if (transaction.TransactionRating == null)
+                        // The node rates the transaction itself; a rating supplied by the caller is ignored.
+                        transaction.TransactionRating = await TransactionRatingService.GetTransactionRating(transaction);
+                        if (transaction.TransactionRating == TransactionRating.F)
                         {
-                            var rating = await TransactionRatingService.GetTransactionRating(transaction);
-                            transaction.TransactionRating = rating;
+                            VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // refused: claims nothing
+                            return JsonConvert.SerializeObject(new { Result = "Fail", Message = "Transaction was rated F and cannot be added to the mempool." });
                         }
 
-                        await TransactionData.AddToPool(transaction);
+                        // What every peer checks on receipt: with this sender's transactions already waiting it must not overspend.
+                        var waitingOverspend = TransactionData.PendingOverspendReason(transaction);
+                        if (waitingOverspend != null)
+                        {
+                            VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // refused: claims nothing (round 27)
+                            return JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Not broadcast: together with this address's transactions still waiting to be mined it would overspend ({waitingOverspend}). Submit it again once they are mined." });
+                        }
+
+                        if (TransactionData.IsPoolConflict(transaction))
+                        {
+                            VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // refused: claims nothing
+                            return JsonConvert.SerializeObject(new { Result = "Fail", Message = "Transaction conflicts with one already in the mempool." });
+                        }
+
+                        // Checked and inserted in one locked step, as on the peer paths.
+                        if (!MempoolEvictionUtility.TryAdmitAndInsert(transaction, TransactionData.GetPool(), out var admissionReason))
+                        {
+                            VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // refused: claims nothing
+                            return JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Transaction was not admitted to the mempool: {admissionReason}" });
+                        }
+
+                        VerifiedXCore.Models.DST.Bid.MarkUsedByCompletion(transaction);   // a sale completion sent raw uses this wallet's bid, as one built here does
                         await P2PClient.SendTXMempool(transaction);//send out to mempool
 
                         output = JsonConvert.SerializeObject(new { Result = "Success", Message = $"Transaction has been broadcasted.", Hash = transaction.Hash });
                     }
                     else
                     {
+                        VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // refused: claims nothing (round 28)
                         output = JsonConvert.SerializeObject(new { Result = "Fail", Message = $"Transaction was not verified." });
                     }
                 }

@@ -58,6 +58,11 @@ namespace VerifiedXCore.Bitcoin.Services
         Trusted,
         /// <summary>No server answered; the transaction must not be accepted or proposed on an unverified deposit.</summary>
         Unverifiable,
+        /// <summary>
+        /// DepositBalance is the vault's Bitcoin as the chain has attested it (a vault created from the recording
+        /// height on). The same figure on every node and in every mode, block validation included.
+        /// </summary>
+        Attested,
     }
 
     public readonly record struct OwnerDepositCheck(OwnerDepositStatus Status, decimal DepositBalance);
@@ -80,13 +85,30 @@ namespace VerifiedXCore.Bitcoin.Services
 
         public static bool IsUnverifiable(string? reason) => reason != null && reason.StartsWith(UnverifiableReason, StringComparison.Ordinal);
 
+        /// <summary>
+        /// Whether an owner's shortfall found during block validation is left to the block's producer. That was the
+        /// rule for every vault, because the deposit was an Electrum answer and block validation cannot ask Electrum.
+        /// For a vault whose Bitcoin is attested there is nothing to leave to anyone: the shortfall is a fact of state
+        /// and the transaction is refused in the block as it is at admission.
+        /// </summary>
+        public static bool LeftToTheProducer(OwnerDepositCheck deposit, bool blockVerify) =>
+            blockVerify && deposit.Status != OwnerDepositStatus.Attested;
+
         /// <param name="resolveDepositAddress">The vault's Bitcoin deposit address; called only when a query is needed
         /// (it may decompile the contract).</param>
         /// <param name="neededFromDeposit">What the deposit must cover once the owner ledger is counted (amount minus ledger).</param>
         /// <param name="blockDownloads">Block sync: Electrum is not asked.</param>
         /// <param name="blockVerify">Block validation: Electrum is not asked.</param>
-        public static async Task<OwnerDepositCheck> CheckAsync(Func<string?> resolveDepositAddress, decimal neededFromDeposit, bool blockDownloads, bool blockVerify)
+        /// <param name="scUID">The contract, so that Completed withdrawals whose Bitcoin transaction has not confirmed are
+        /// taken out of the deposit (fund-loss audit item 8); null skips that step.</param>
+        /// <param name="currentHeight">The height the owner ledger was computed at (which Completed rows it counted).</param>
+        public static async Task<OwnerDepositCheck> CheckAsync(Func<string?> resolveDepositAddress, decimal neededFromDeposit, bool blockDownloads, bool blockVerify,
+            string? scUID = null, long currentHeight = 0)
         {
+            // A vault the chain watches: its deposit is in state. No mode, no Electrum, no exception for blocks.
+            if (Attestation.BtcAttestBalance.IsAttestedVault(scUID))
+                return new OwnerDepositCheck(OwnerDepositStatus.Attested, Attestation.BtcAttestBalance.DepositBtc(scUID!));
+
             if (blockDownloads || blockVerify)
                 return new OwnerDepositCheck(OwnerDepositStatus.NotQueried, 0M);
 
@@ -102,20 +124,33 @@ namespace VerifiedXCore.Bitcoin.Services
             if (string.IsNullOrEmpty(depositAddress))
                 return new OwnerDepositCheck(OwnerDepositStatus.Checked, 0M);
 
+            // Fund-loss audit item 8: the owner ledger added back every Completed withdrawal, but one whose Bitcoin
+            // transaction has not confirmed - or (re-audit) whose named transaction is not the withdrawal's - is still in
+            // the confirmed deposit, so the deposit must cover it too.
+            decimal unconfirmedCompleted = 0M;
+            if (!string.IsNullOrEmpty(scUID))
+            {
+                var unconfirmed = await CompletedWithdrawalConfirmation.NotYetCountedAmountAsync(scUID, currentHeight);
+                if (unconfirmed == null)
+                    return NoAnswer(mode);
+                unconfirmedCompleted = unconfirmed.Value;
+            }
+            var needed = neededFromDeposit + unconfirmedCompleted;
+
             var first = await DepositBalanceLookup.GetConfirmedBalanceAsync(depositAddress);
             if (!first.Answered)
                 return NoAnswer(mode);
 
-            if (first.ConfirmedBtc >= neededFromDeposit)
-                return new OwnerDepositCheck(OwnerDepositStatus.Checked, first.ConfirmedBtc);
+            if (first.ConfirmedBtc >= needed)
+                return new OwnerDepositCheck(OwnerDepositStatus.Checked, first.ConfirmedBtc - unconfirmedCompleted);
 
             // A shortfall counts only once a second server agrees: a lagging server under-reports. The higher answer
             // wins. With no other server configured, the one answer stands.
             var second = await DepositBalanceLookup.GetConfirmedBalanceAsync(depositAddress, bypassCache: true, excludeServer: first.Server);
             if (second.Answered)
-                return new OwnerDepositCheck(OwnerDepositStatus.Checked, Math.Max(first.ConfirmedBtc, second.ConfirmedBtc));
+                return new OwnerDepositCheck(OwnerDepositStatus.Checked, Math.Max(first.ConfirmedBtc, second.ConfirmedBtc) - unconfirmedCompleted);
             if (second.NoOtherServer)
-                return new OwnerDepositCheck(OwnerDepositStatus.Checked, first.ConfirmedBtc);
+                return new OwnerDepositCheck(OwnerDepositStatus.Checked, first.ConfirmedBtc - unconfirmedCompleted);
             return NoAnswer(mode);
         }
 

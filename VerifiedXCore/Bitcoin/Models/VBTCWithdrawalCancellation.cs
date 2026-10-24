@@ -72,6 +72,42 @@ namespace VerifiedXCore.Bitcoin.Models
             c?.CancellationUID?.StartsWith(OnChainUidPrefix, StringComparison.Ordinal) == true;
 
         #region Database Methods
+        /// <summary>
+        /// Index on the cancelled request's hash, kept only up to 200 characters (others indexed as null): it is taken from
+        /// the cancel's data and found through the collation, so its length is not bounded before the path-audit rules,
+        /// and LiteDB loses a write whose key is over 1,023 bytes (round 34). The store had no index: every cancel and
+        /// every vote read every cancellation ever recorded, about two fees a row (fifth review, round 35).
+        /// </summary>
+        internal const string ShortRequestHashIndexExpression = "IIF(LENGTH($.WithdrawalRequestHash) <= 200, $.WithdrawalRequestHash, null)";
+        internal const string ShortRequestHashIndexName = "WithdrawalRequestHashShort";
+
+        /// <summary>The cancellations of <paramref name="withdrawalRequestHash"/> as the database compares it, in the scan's order.</summary>
+        public static List<VBTCWithdrawalCancellation> RowsForRequest(ILiteCollection<VBTCWithdrawalCancellation> col, string? withdrawalRequestHash)
+        {
+            if (withdrawalRequestHash == null) return new List<VBTCWithdrawalCancellation>();
+            var collation = DbContext.DB_vBTC.Collation;
+            var candidates = withdrawalRequestHash.Length <= 200
+                ? col.Find(Query.EQ(ShortRequestHashIndexExpression, withdrawalRequestHash)).Concat(col.Find(Query.EQ(ShortRequestHashIndexExpression, BsonValue.Null)))
+                : col.FindAll();
+            return candidates
+                .Where(x => x.WithdrawalRequestHash != null && collation.Compare(x.WithdrawalRequestHash, withdrawalRequestHash) == 0)
+                .GroupBy(x => x.Id).Select(g => g.First())
+                .OrderBy(x => x.Id)
+                .ToList();
+        }
+
+        /// <summary>Indexes the store (at start; round 35): the cancellation UID ("CANCEL_" and a transaction hash) and the request hash, bounded.</summary>
+        internal static void EnsureIndexes(LiteDatabase db)
+        {
+            try
+            {
+                var col = db.GetCollection<VBTCWithdrawalCancellation>(DbContext.RSRV_VBTC_V2_CANCELLATIONS);
+                col.EnsureIndex(x => x.CancellationUID, false);
+                col.EnsureIndex(ShortRequestHashIndexName, ShortRequestHashIndexExpression);
+            }
+            catch (Exception ex) { ErrorLogUtility.LogError($"Cancellation indexes: {ex.Message}", "VBTCWithdrawalCancellation.EnsureIndexes()"); }
+        }
+
         public static ILiteCollection<VBTCWithdrawalCancellation> GetDb()
         {
             var db = DbContext.DB_vBTC.GetCollection<VBTCWithdrawalCancellation>(DbContext.RSRV_VBTC_V2_CANCELLATIONS);
@@ -119,27 +155,37 @@ namespace VerifiedXCore.Bitcoin.Models
         /// the whole-request behavior (unchanged for single-contract withdrawals, whose only
         /// cancellation row is that contract's).
         /// </summary>
-        public static bool HasPendingCancellation(string withdrawalRequestHash, long nowSeconds, string? scUID)
+        public static bool HasPendingCancellation(string withdrawalRequestHash, long nowSeconds, string? scUID) =>
+            PendingCancellation(withdrawalRequestHash, nowSeconds, scUID, whenUnreadable: false);
+
+        /// <summary>
+        /// For a signer: as <see cref="HasPendingCancellation(string, long, string?)"/>, but a store that cannot be read
+        /// answers "pending", so no share is given for a withdrawal whose cancellation could not be ruled out.
+        /// </summary>
+        public static bool HasPendingCancellationOrUnreadable(string withdrawalRequestHash, long nowSeconds, string? scUID) =>
+            PendingCancellation(withdrawalRequestHash, nowSeconds, scUID, whenUnreadable: true);
+
+        private static bool PendingCancellation(string withdrawalRequestHash, long nowSeconds, string? scUID, bool whenUnreadable)
         {
             if (string.IsNullOrWhiteSpace(withdrawalRequestHash)) return false;
             try
             {
                 var db = GetDb();
-                if (db == null) return false;
+                if (db == null) return whenUnreadable;
                 var cutoff = nowSeconds - PENDING_CANCELLATION_MAX_AGE_SECONDS;
                 var height = Globals.LastBlock?.Height ?? 0;
                 // On-chain records only: a node-local leftover must not block signing on one validator.
                 // A record stamped with its mined height is pending for exactly its vote window (block height, the
                 // same clock the votes are judged by - a stalled chain must not reopen signing while an approval
                 // can still land). Older records keep the wall-clock bound.
-                return db.Find(x => x.WithdrawalRequestHash == withdrawalRequestHash)
+                return RowsForRequest(db, withdrawalRequestHash)
                          .Where(x => string.IsNullOrEmpty(scUID) || x.SmartContractUID == scUID)
                          .Where(IsOnChainRecord)
                          .Any(x => x.RequestBlockHeight > 0
                              ? IsVoteWindowOpen(x, Math.Max(height, x.RequestBlockHeight))
                              : !x.IsProcessed && x.RequestTime >= cutoff);
             }
-            catch { return false; }
+            catch { return whenUnreadable; }
         }
 
         /// <summary>
@@ -152,7 +198,7 @@ namespace VerifiedXCore.Bitcoin.Models
             if (string.IsNullOrWhiteSpace(withdrawalRequestHash)) return null;
             var db = GetDb();
             if (db == null) return null;
-            return db.Find(x => x.WithdrawalRequestHash == withdrawalRequestHash)
+            return RowsForRequest(db, withdrawalRequestHash)
                 .Where(IsOnChainRecord)
                 .Where(x => string.IsNullOrEmpty(scUID) || x.SmartContractUID == scUID)
                 .Where(x => IsVoteWindowOpen(x, height))
@@ -165,7 +211,7 @@ namespace VerifiedXCore.Bitcoin.Models
         {
             var db = GetDb();
             if (db == null || string.IsNullOrWhiteSpace(withdrawalRequestHash)) return new List<VBTCWithdrawalCancellation>();
-            return db.Find(x => x.WithdrawalRequestHash == withdrawalRequestHash)
+            return RowsForRequest(db, withdrawalRequestHash)
                 .Where(IsOnChainRecord)
                 .Where(x => string.IsNullOrEmpty(scUID) || x.SmartContractUID == scUID)
                 .OrderByDescending(x => x.RequestBlockHeight).ThenByDescending(x => x.RequestTime)
@@ -190,7 +236,7 @@ namespace VerifiedXCore.Bitcoin.Models
             // On-chain records only. This backs the consensus duplicate-cancel rule (VerifyTX, StateData): a
             // node-local leftover here made that node refuse the real cancel — at block validation too — while
             // every other node accepted it.
-            return cancellations.Find(x => x.WithdrawalRequestHash == withdrawalRequestHash)
+            return RowsForRequest(cancellations, withdrawalRequestHash)
                 .Where(IsOnChainRecord)
                 .FirstOrDefault(x => string.IsNullOrEmpty(scUID) || x.SmartContractUID == scUID);
         }
@@ -259,6 +305,7 @@ namespace VerifiedXCore.Bitcoin.Models
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError(ex.ToString(), "VBTCWithdrawalCancellation.SaveCancellation()");
+                Extensions.DbExtensions.NoteFailure(DbContext.RSRV_VBTC_V2_CANCELLATIONS);
             }
         }
 
@@ -274,56 +321,120 @@ namespace VerifiedXCore.Bitcoin.Models
 
                 if (cancellation != null && !cancellation.IsProcessed)
                 {
-                    if (!string.IsNullOrEmpty(voteTxHash))
-                    {
-                        cancellation.VoteTxHashes ??= new Dictionary<string, string>();
-                        cancellation.VoteTxHashes[validatorAddress] = voteTxHash;
-                    }
-
-                    if (cancellation.ValidatorVotes == null)
-                    {
-                        cancellation.ValidatorVotes = new Dictionary<string, bool>();
-                    }
-
-                    // Add or update vote
-                    if (cancellation.ValidatorVotes.ContainsKey(validatorAddress))
-                    {
-                        // If vote changed, update counts
-                        bool previousVote = cancellation.ValidatorVotes[validatorAddress];
-                        if (previousVote != approve)
-                        {
-                            if (previousVote)
-                            {
-                                cancellation.ApproveCount--;
-                                cancellation.RejectCount++;
-                            }
-                            else
-                            {
-                                cancellation.RejectCount--;
-                                cancellation.ApproveCount++;
-                            }
-                        }
-                        cancellation.ValidatorVotes[validatorAddress] = approve;
-                    }
-                    else
-                    {
-                        cancellation.ValidatorVotes.Add(validatorAddress, approve);
-                        if (approve)
-                        {
-                            cancellation.ApproveCount++;
-                        }
-                        else
-                        {
-                            cancellation.RejectCount++;
-                        }
-                    }
-
-                    cancellations.UpdateSafe(cancellation);
+                    CountVote(cancellation, validatorAddress, approve, voteTxHash);
+                    Write(cancellations, cancellation);
                 }
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError(ex.ToString(), "VBTCWithdrawalCancellation.AddVote()");
+                Extensions.DbExtensions.NoteFailure(DbContext.RSRV_VBTC_V2_CANCELLATIONS);
+            }
+        }
+
+        /// <summary>The decision a counted vote makes: approved or rejected, with what is recorded of it.</summary>
+        public sealed record VoteDecision(bool Approved, long DecidedAtHeight, string? DecidedByTxHash, string? SignedBtcTxId, string? ReportedBy);
+
+        /// <summary>
+        /// Counts a vote and records the decision it makes in one write of the cancellation. Written apart, a vote whose
+        /// decision was then lost stayed counted: a replay refused it as a second vote by that validator and the
+        /// cancellation stayed undecided where the network decided it. <paramref name="decide"/> is given the record
+        /// with the vote counted and returns the decision, or null when there is none yet. Returns the record as
+        /// written, or null when the cancellation is missing or decided, or the write failed (counted as a lost write).
+        /// </summary>
+        public static VBTCWithdrawalCancellation? AddVoteAndDecide(string cancellationUID, string validatorAddress, bool approve, string? voteTxHash,
+            Func<VBTCWithdrawalCancellation, VoteDecision?> decide)
+        {
+            try
+            {
+                var cancellations = GetDb();
+                var cancellation = cancellations.FindOne(x => x.CancellationUID == cancellationUID);
+                if (cancellation == null || cancellation.IsProcessed) return null;
+                CountVote(cancellation, validatorAddress, approve, voteTxHash);
+                if (decide(cancellation) is { } decision)
+                    RecordDecision(cancellation, decision.Approved, decision.DecidedAtHeight, decision.DecidedByTxHash, decision.SignedBtcTxId, decision.ReportedBy);
+                return Write(cancellations, cancellation) ? cancellation : null;
+            }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError(ex.ToString(), "VBTCWithdrawalCancellation.AddVoteAndDecide()");
+                Extensions.DbExtensions.NoteFailure(DbContext.RSRV_VBTC_V2_CANCELLATIONS);
+                return null;
+            }
+        }
+
+        /// <summary>A vote or decision written to the store; a failure is counted as a lost write by the storage wrapper.</summary>
+        private static bool Write(ILiteCollection<VBTCWithdrawalCancellation> cancellations, VBTCWithdrawalCancellation cancellation)
+        {
+            if (FailWriteForTests?.Invoke() == true)
+            {
+                Extensions.DbExtensions.NoteFailure(DbContext.RSRV_VBTC_V2_CANCELLATIONS);
+                return false;
+            }
+            return cancellations.UpdateSafe(cancellation);
+        }
+
+        internal static Func<bool>? FailWriteForTests;
+
+        private static void CountVote(VBTCWithdrawalCancellation cancellation, string validatorAddress, bool approve, string? voteTxHash)
+        {
+            if (!string.IsNullOrEmpty(voteTxHash))
+            {
+                cancellation.VoteTxHashes ??= new Dictionary<string, string>();
+                cancellation.VoteTxHashes[validatorAddress] = voteTxHash;
+            }
+
+            if (cancellation.ValidatorVotes == null)
+            {
+                cancellation.ValidatorVotes = new Dictionary<string, bool>();
+            }
+
+            // Add or update vote
+            if (cancellation.ValidatorVotes.ContainsKey(validatorAddress))
+            {
+                // If vote changed, update counts
+                bool previousVote = cancellation.ValidatorVotes[validatorAddress];
+                if (previousVote != approve)
+                {
+                    if (previousVote)
+                    {
+                        cancellation.ApproveCount--;
+                        cancellation.RejectCount++;
+                    }
+                    else
+                    {
+                        cancellation.RejectCount--;
+                        cancellation.ApproveCount++;
+                    }
+                }
+                cancellation.ValidatorVotes[validatorAddress] = approve;
+            }
+            else
+            {
+                cancellation.ValidatorVotes.Add(validatorAddress, approve);
+                if (approve)
+                {
+                    cancellation.ApproveCount++;
+                }
+                else
+                {
+                    cancellation.RejectCount++;
+                }
+            }
+        }
+
+        private static void RecordDecision(VBTCWithdrawalCancellation cancellation, bool approved, long decidedAtHeight, string? decidedByTxHash, string? signedBtcTxId, string? reportedBy)
+        {
+            cancellation.IsProcessed = true;
+            cancellation.IsApproved = approved;
+            if (decidedAtHeight > 0)
+                cancellation.DecidedAtHeight = decidedAtHeight;
+            if (!string.IsNullOrEmpty(decidedByTxHash))
+                cancellation.DecidedByTxHash = decidedByTxHash;
+            if (!string.IsNullOrEmpty(signedBtcTxId))
+            {
+                cancellation.SignedBtcTxId = signedBtcTxId;
+                cancellation.SignedTxReportedBy = reportedBy;
             }
         }
 
@@ -339,23 +450,14 @@ namespace VerifiedXCore.Bitcoin.Models
 
                 if (cancellation != null)
                 {
-                    cancellation.IsProcessed = true;
-                    cancellation.IsApproved = approved;
-                    if (decidedAtHeight > 0)
-                        cancellation.DecidedAtHeight = decidedAtHeight;
-                    if (!string.IsNullOrEmpty(decidedByTxHash))
-                        cancellation.DecidedByTxHash = decidedByTxHash;
-                    if (!string.IsNullOrEmpty(signedBtcTxId))
-                    {
-                        cancellation.SignedBtcTxId = signedBtcTxId;
-                        cancellation.SignedTxReportedBy = reportedBy;
-                    }
-                    cancellations.UpdateSafe(cancellation);
+                    RecordDecision(cancellation, approved, decidedAtHeight, decidedByTxHash, signedBtcTxId, reportedBy);
+                    Write(cancellations, cancellation);
                 }
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError(ex.ToString(), "VBTCWithdrawalCancellation.MarkAsProcessed()");
+                Extensions.DbExtensions.NoteFailure(DbContext.RSRV_VBTC_V2_CANCELLATIONS);
             }
         }
 
@@ -369,6 +471,7 @@ namespace VerifiedXCore.Bitcoin.Models
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError(ex.ToString(), "VBTCWithdrawalCancellation.DeleteCancellation()");
+                Extensions.DbExtensions.NoteFailure(DbContext.RSRV_VBTC_V2_CANCELLATIONS);
             }
         }
 

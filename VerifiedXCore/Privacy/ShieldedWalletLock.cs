@@ -11,23 +11,46 @@ namespace VerifiedXCore.Privacy
     {
         private static readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new(StringComparer.Ordinal);
 
-        /// <summary>Returns (or creates) the per-address semaphore.</summary>
+        /// <summary>
+        /// Returns (or creates) the semaphore of the wallet row the address names. A row is found by either spelling of
+        /// its address (v1 or v2) and the auto-scanner locks the stored one: a caller locking the other spelling took
+        /// another semaphore and wrote over the scanner's changes (round 25).
+        /// </summary>
         public static SemaphoreSlim For(string zfxAddress) =>
-            _locks.GetOrAdd(zfxAddress, _ => new SemaphoreSlim(1, 1));
+            _locks.GetOrAdd(KeyOf(zfxAddress), _ => new SemaphoreSlim(1, 1));
 
-        /// <summary>Acquire the lock synchronously (auto-scanner path).</summary>
-        public static void Wait(string zfxAddress) =>
-            For(zfxAddress).Wait();
-
-        /// <summary>Release the lock.</summary>
-        public static void Release(string zfxAddress)
+        private static string KeyOf(string zfxAddress)
         {
-            if (_locks.TryGetValue(zfxAddress, out var sem))
-                try { sem.Release(); } catch (SemaphoreFullException) { }
+            try { return ShieldedWalletService.FindByZfxAddress(zfxAddress)?.ShieldedAddress ?? zfxAddress; }
+            catch { return zfxAddress; }
         }
 
-        /// <summary>Acquire the lock asynchronously.</summary>
-        public static Task WaitAsync(string zfxAddress, CancellationToken ct = default) =>
-            For(zfxAddress).WaitAsync(ct);
+        /// <summary>Runs <paramref name="body"/> holding the lock of the wallet row the address names.</summary>
+        public static T Holding<T>(string? zfxAddress, Func<T> body)
+        {
+            if (string.IsNullOrWhiteSpace(zfxAddress)) return body();
+            var sem = For(zfxAddress);
+            sem.Wait();
+            try { return body(); }
+            finally { try { sem.Release(); } catch (SemaphoreFullException) { } }
+        }
+
+        /// <summary>
+        /// Takes the lock of the wallet row the address names and returns the semaphore taken: the caller releases that
+        /// one. Resolving the address again at release could name another row (one created meanwhile under the other
+        /// spelling), leaving this lock held for good and the auto scanner waiting on it (round 26).
+        /// </summary>
+        public static SemaphoreSlim Acquire(string zfxAddress)
+        {
+            var sem = For(zfxAddress);
+            sem.Wait();
+            return sem;
+        }
+
+        /// <summary>Releases a semaphore <see cref="Acquire"/> returned.</summary>
+        public static void Release(SemaphoreSlim held)
+        {
+            try { held.Release(); } catch (SemaphoreFullException) { }
+        }
     }
 }

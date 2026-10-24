@@ -95,6 +95,14 @@ namespace VerifiedXCore.Services
                             continue;
                         }
 
+                        // This node sent its validator's exit. The registry now shows it inactive, which the checks below
+                        // would "heal" with a heartbeat: that would undo the exit and resume the bond on its stake.
+                        if (Globals.ValidatorExitSent)
+                        {
+                            await Task.Delay(TimeSpan.FromMinutes(1));
+                            continue;
+                        }
+
                         // STALL-RESOLVE: no on-chain heartbeats while stranded. They cannot be mined
                         // on a dead branch and, if the node peers with the live network, a heartbeat
                         // built against forked state must not be broadcast as if we were healthy.
@@ -178,6 +186,9 @@ namespace VerifiedXCore.Services
             {
                 if (string.IsNullOrEmpty(Globals.ValidatorAddress))
                     return false;
+                // A validator that cannot take part in a ceremony does not announce itself (FrostLibraryGate).
+                if (!Bitcoin.FROST.FrostLibraryGate.Ready)
+                    return false;
 
                 // Guard: Check if there's already a pending heartbeat TX in the mempool
                 var mempool = TransactionData.GetPool();
@@ -203,7 +214,7 @@ namespace VerifiedXCore.Services
                 var sTreiAcct = StateData.GetSpecificAccountStateTrei(validator.Address);
                 if (sTreiAcct == null) return false;
 
-                var ipAddress = Globals.ReportedIP;
+                var ipAddress = P2PClient.ValidatorReportedIP();
                 if (string.IsNullOrEmpty(ipAddress))
                 {
                     LogUtility.Log("Cannot send heartbeat TX - IP address not reported yet",

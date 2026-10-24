@@ -13,7 +13,7 @@ Frost/
 ├── linux/
 │   └── libfrost_ffi.so        # Linux x64 native library (future)
 └── mac/
-    └── libfrost_ffi.dylib     # macOS x64 native library (future)
+    └── libfrost_ffi.dylib     # macOS universal library (x86_64 + arm64)
 ```
 
 ## Build Configuration
@@ -127,7 +127,7 @@ If you encounter a `DllNotFoundException`:
 ## Version Information
 
 - **FROST Implementation**: ZCash Foundation frost-secp256k1-tr
-- **FFI Version**: 0.1.0 (placeholder mode)
+- **FFI Version**: 0.2.0-frost-real, pinned as `FrostFFICheckUtility.PinnedLibraryVersion`. The startup check fails for any other version, so a release that ships new binaries updates that constant with them.
 - **Target Framework**: .NET 6.0
 - **Supported Platforms**: Windows x64 (Linux/macOS coming soon)
 

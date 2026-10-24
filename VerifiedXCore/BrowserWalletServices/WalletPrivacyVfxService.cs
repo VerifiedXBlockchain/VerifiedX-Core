@@ -24,7 +24,8 @@ namespace VerifiedXCore.BrowserWalletServices
 
                 return new
                 {
-                    zfxAddress = w.ShieldedAddress,
+                    zfxAddress = ShieldedWalletService.CurrentAddress(w), // v2 (carries the owner key): the address to receive at from stage 3
+                    legacyZfxAddress = w.ShieldedAddress,
                     transparentSourceAddress = w.TransparentSourceAddress ?? "",
                     vfxShieldedBalance = vfxBal,
                     unspentNotes = (w.UnspentCommitments ?? new List<UnspentCommitment>())
@@ -45,9 +46,7 @@ namespace VerifiedXCore.BrowserWalletServices
             if (string.IsNullOrWhiteSpace(accountKey))
                 return new { success = false, message = "Cannot access account private key. Is the wallet locked?" };
 
-            var keyMat = ShieldedHdDerivation.DeriveFromPrivateKey(accountKey);
-            var wallet = ShieldedWalletService.CreateFromKeyMaterial(keyMat, address, password);
-            ShieldedWalletService.Upsert(wallet);
+            var keyMat = ShieldedWalletService.UpsertFromAccountKey(accountKey, address, password);
 
             return new { success = true, zfxAddress = keyMat.ZfxAddress, transparentSourceAddress = address };
         }
@@ -131,7 +130,7 @@ namespace VerifiedXCore.BrowserWalletServices
 
             var fee = Globals.PrivateTxFixedFee;
             if (!CommitmentSelectionService.TrySelectInputs(
-                    w.UnspentCommitments ?? (IReadOnlyList<UnspentCommitment>)Array.Empty<UnspentCommitment>(),
+                    (w.UnspentCommitments ?? new List<UnspentCommitment>()).Where(c => c != null && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)).ToList(), // VFX notes only (round 25)
                     amount + fee,
                     out var inputs,
                     out _,
@@ -175,7 +174,7 @@ namespace VerifiedXCore.BrowserWalletServices
 
             var fee = Globals.PrivateTxFixedFee;
             if (!CommitmentSelectionService.TrySelectInputs(
-                    w.UnspentCommitments ?? (IReadOnlyList<UnspentCommitment>)Array.Empty<UnspentCommitment>(),
+                    (w.UnspentCommitments ?? new List<UnspentCommitment>()).Where(c => c != null && string.Equals(c.AssetType, "VFX", StringComparison.Ordinal)).ToList(), // VFX notes only (round 25)
                     amount + fee,
                     out var inputs,
                     out _,
@@ -206,7 +205,10 @@ namespace VerifiedXCore.BrowserWalletServices
             return new { success = broadcastOk, hash = tx!.Hash, type = "VFX_PRIVATE_TRANSFER", amount, fromZfxAddress, toZfxAddress, detail = json };
         }
 
-        public static object ScanShieldedVFX(string zfxAddress, string? password, long? fromBlock, long? toBlock)
+        public static object ScanShieldedVFX(string zfxAddress, string? password, long? fromBlock, long? toBlock) =>
+            ShieldedWalletLock.Holding(zfxAddress, () => ScanShieldedVFXCore(zfxAddress, password, fromBlock, toBlock)); // the wallet's lock: a scan wrote over the auto-scanner's changes made meanwhile (round 25)
+
+        private static object ScanShieldedVFXCore(string zfxAddress, string? password, long? fromBlock, long? toBlock)
         {
             if (string.IsNullOrWhiteSpace(zfxAddress) || !zfxAddress.StartsWith("zfx_"))
                 return new { success = false, message = "Invalid zfx_ address." };
@@ -226,7 +228,7 @@ namespace VerifiedXCore.BrowserWalletServices
             foreach (var u in w.UnspentCommitments ?? new List<UnspentCommitment>())
             {
                 if (!string.IsNullOrEmpty(u.Commitment))
-                    merged.Add(u.Commitment);
+                    merged.Add(PrivacyApiHelper.NoteIdentity(u));
             }
 
             for (long h = scanFrom; h <= scanTo; h++)
@@ -237,9 +239,22 @@ namespace VerifiedXCore.BrowserWalletServices
                 foreach (var tx in block.Transactions)
                 {
                     txsScanned++;
-                    if (tx?.Data == null || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
+                    if (tx?.Data == null || !PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType) || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
                         continue;
-                    if (payload?.Outs == null)
+                    if (payload == null)
+                        continue;
+                    // Notes this transaction spends, each by its own nullifier, as the node scans mark them: the browser
+                    // scans only added notes, so one received and spent within the range showed as unspent for good (round 26).
+                    foreach (var uc in w.UnspentCommitments ?? new List<UnspentCommitment>())
+                    {
+                        if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment)) continue;
+                        if (!PrivacyApiHelper.SpendsWalletNote(tx, payload, uc, keys, block.Height)) continue;
+                        uc.IsSpent = true;
+                        var spentAsset = uc.AssetType ?? "";
+                        if (w.ShieldedBalances.ContainsKey(spentAsset))
+                            w.ShieldedBalances[spentAsset] -= uc.Amount;
+                    }
+                    if (payload.Outs == null)
                         continue;
                     foreach (var o in payload.Outs)
                     {
@@ -253,10 +268,8 @@ namespace VerifiedXCore.BrowserWalletServices
                         if (!ShieldedPlainNoteCodec.TryDeserializeUtf8(plain, out var note, out _) || note == null)
                             continue;
                         var c = o.CommitmentB64;
-                        if (string.IsNullOrEmpty(c) || merged.Contains(c))
+                        if (string.IsNullOrEmpty(c) || merged.Contains(PrivacyApiHelper.NoteIdentity(c, note.Amount, note.RandomnessB64)))
                             continue;
-                        merged.Add(c);
-                        newNotes++;
                         byte[] r32 = Array.Empty<byte>();
                         if (!string.IsNullOrEmpty(note.RandomnessB64))
                         {
@@ -264,13 +277,16 @@ namespace VerifiedXCore.BrowserWalletServices
                             catch { /* ignore */ }
                         }
                         w.UnspentCommitments ??= new List<UnspentCommitment>();
+                        if (!PrivacyApiHelper.NoteMatchesOutput(o, note.Amount, r32, keys, note.AssetType, out var matchedPos)) continue; // the note is the output it came with (round 22)
+                        merged.Add(PrivacyApiHelper.NoteIdentity(c, note.Amount, note.RandomnessB64)); // seen once it matched: a copy that does not match hid the real output (round 24)
+                        newNotes++;
                         w.UnspentCommitments.Add(new UnspentCommitment
                         {
                             Commitment = c,
                             AssetType = note.AssetType ?? "",
                             Amount = note.Amount,
                             Randomness = r32,
-                            TreePosition = 0,
+                            TreePosition = matchedPos, // the matched leaf's, not 0 (round 25)
                             BlockHeight = block.Height,
                             IsSpent = false
                         });
@@ -328,21 +344,29 @@ namespace VerifiedXCore.BrowserWalletServices
                 proofProvingImplemented = PLONKSetup.IsProofProvingImplemented,
                 enforcePlonkProofsForZk = Globals.EnforcePlonkProofsForZk,
                 nativeCapabilities = caps,
-                paramsBytesMirrored = Globals.PLONKParamsFileSize
+                paramsBytesMirrored = Globals.PLONKParamsFileSize,
+                // Fund-loss audit item 1, stage 2: what this node can do once proofs are required.
+                vfxPi2VerifyAvailable = PLONKSetup.IsVfxPi2VerifyAvailable,
+                v1ProvingAvailable = PLONKSetup.IsV1ProvingAvailable,
+                circuitPoseidonAvailable = PoseidonV1.IsAvailable,
+                proofRulesHeight = Globals.PrivateTxProofRulesHeight,
+                proofRulesActive = PrivacyEpoch.ProofRulesActive((Globals.LastBlock?.Height ?? 0) + 1)
             };
         }
 
         public static object GetShieldedPoolState()
         {
-            var pool = ShieldedPoolService.GetOrCreateState("VFX");
+            // Read only, as the vBTC route (#208 D16): GetOrCreateState inserted an empty pool row into the consensus privacy
+            // store from a route a locked wallet may call (#296). No row reads as an empty pool.
+            var pool = ShieldedPoolService.GetState("VFX");
             return new
             {
                 success = true,
-                assetType = pool.AssetType,
-                totalCommitments = pool.TotalCommitments,
-                totalShieldedSupply = pool.TotalShieldedSupply,
-                currentMerkleRoot = pool.CurrentMerkleRoot,
-                lastUpdateHeight = pool.LastUpdateHeight
+                assetType = pool?.AssetType ?? "VFX",
+                totalCommitments = pool?.TotalCommitments ?? 0L,
+                totalShieldedSupply = pool?.TotalShieldedSupply ?? 0M,
+                currentMerkleRoot = pool?.CurrentMerkleRoot,
+                lastUpdateHeight = pool?.LastUpdateHeight ?? 0L
             };
         }
     }

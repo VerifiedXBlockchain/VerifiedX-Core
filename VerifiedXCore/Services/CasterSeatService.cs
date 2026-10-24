@@ -49,6 +49,11 @@ namespace VerifiedXCore.Services
         private static readonly ConcurrentDictionary<string, Absence> _absent = new(StringComparer.Ordinal);
         private static readonly ConcurrentDictionary<string, long> _maintenanceUntil = new(StringComparer.Ordinal);
         private static readonly ConcurrentDictionary<string, long> _departures = new(StringComparer.Ordinal);
+        /// <summary>Member → height of the last departure notice of its honored here.</summary>
+        private static readonly ConcurrentDictionary<string, long> _departureNoticeHeights = new(StringComparer.Ordinal);
+        private static readonly object _departureNoticeLock = new();
+        /// <summary>"demoted|demoter" → height of the last demotion notice honored here.</summary>
+        private static readonly ConcurrentDictionary<string, long> _demotionNoticeHeights = new(StringComparer.Ordinal);
         private static readonly ConcurrentDictionary<string, long> _outdated = new(StringComparer.Ordinal);
         /// <summary>Member → (record seq, unix) of a removal we signed / a resume we approved. Mutual exclusion (C.3d).</summary>
         private static readonly ConcurrentDictionary<string, (long Seq, long At)> _removalSigned = new(StringComparer.Ordinal);
@@ -164,7 +169,7 @@ namespace VerifiedXCore.Services
 
         internal static void ResetForTests()
         {
-            _absent.Clear(); _maintenanceUntil.Clear(); _departures.Clear(); _outdated.Clear();
+            _absent.Clear(); _maintenanceUntil.Clear(); _departures.Clear(); _outdated.Clear(); _departureNoticeHeights.Clear(); _demotionNoticeHeights.Clear();
             _removalSigned.Clear(); _resumeApproved.Clear();
             ResumeConfirmed = false; HeldByRecord = false; MaintenanceAnnounced = false;
             _lastRemovalAttempt = 0; _lastPromotionAttempt = 0; _lastResumeAttempt = 0;
@@ -237,7 +242,56 @@ namespace VerifiedXCore.Services
         // ── Signer rules ────────────────────────────────────────────────────────────────────────────
 
         public static void NoteDeparture(string address) => _departures[address] = TimeUtil.GetTime();
+
+        /// <summary>
+        /// Whether a caster's verified demotion notice may remove <paramref name="demoted"/> from our live list, or why not.
+        /// The notice is one caster's signature over a height, so a copy could be replayed at any time: it counts only near
+        /// our tip and once per demoter. In the record era a removal is a majority-signed record, which the demoter
+        /// appends before it sends the notice: the notice counts only once our own record no longer lists the member.
+        /// </summary>
+        public static string? DemotionNoticeRefusal(string demoted, string demoter, long noticeHeight, long tip, bool recordEra, CasterMembershipRecord? head)
+        {
+            if (noticeHeight > tip + 2 || tip - noticeHeight > DepartureNoticeMaxAgeBlocks)
+                return $"notice height {noticeHeight} is not within {DepartureNoticeMaxAgeBlocks} blocks of our tip {tip}";
+            if (recordEra && (head == null || head.Casters.Any(c => string.Equals(c.Address, demoted, StringComparison.Ordinal))))
+                return "our membership record still lists the member";
+            lock (_departureNoticeLock)
+            {
+                var key = demoted + "|" + demoter;
+                if (_demotionNoticeHeights.TryGetValue(key, out var honored) && noticeHeight <= honored)
+                    return $"a notice at height {honored} was already honored";
+                _demotionNoticeHeights[key] = noticeHeight;
+            }
+            return null;
+        }
+
+        /// <summary>How far behind our tip a departure notice's height may be. Blocks are 12 s apart.</summary>
+        public const long DepartureNoticeMaxAgeBlocks = 10;
+
+        /// <summary>
+        /// Takes a member's verified departure notice as departure evidence, or says why not. The notice is signed over
+        /// its height alone, so a copy could be replayed at any time: it counts only near our tip, and once per member
+        /// (a notice at or below the height of one already honored is a copy).
+        /// </summary>
+        public static string? NoteDepartureNotice(string address, long noticeHeight, long tip)
+        {
+            if (noticeHeight > tip + 2 || tip - noticeHeight > DepartureNoticeMaxAgeBlocks)
+                return $"notice height {noticeHeight} is not within {DepartureNoticeMaxAgeBlocks} blocks of our tip {tip}";
+            lock (_departureNoticeLock)
+            {
+                if (_departureNoticeHeights.TryGetValue(address, out var honored) && noticeHeight <= honored)
+                    return $"a notice at height {honored} was already honored";
+                _departureNoticeHeights[address] = noticeHeight;
+            }
+            NoteDeparture(address);
+            return null;
+        }
         public static void NoteOutdated(string address) => _outdated[address] = TimeUtil.GetTime();
+
+        /// <summary>This node's own evidence for removing a member: past its absence grace by our timer, or seen outdated by us.</summary>
+        internal static bool HasOwnRemovalEvidence(string address, long nowUnix) =>
+            PastGrace(address, nowUnix, TimerToleranceSeconds)
+            || (_outdated.TryGetValue(address, out var seen) && nowUnix - seen <= MaintenanceGraceSeconds);
 
         /// <summary>
         /// Why this node will not sign removing <paramref name="address"/>, or null. A removal needs this node's own
@@ -268,6 +322,9 @@ namespace VerifiedXCore.Services
 
         // ── Resume (approver side) ──────────────────────────────────────────────────────────────────
 
+        /// <summary>How long after signing a member's removal this node refuses to approve its resume.</summary>
+        internal const long RemovalSignedHoldSeconds = 600;
+
         internal static string ResumeRequestMessage(CasterResumeRequest r) => $"RESUME|{r.Address}|{r.RecordSeq}|{r.RecordHash}|{r.Timestamp}";
         internal static string ResumeApprovalMessage(string address, long seq, string hash, long requestTimestamp) => $"RESUME-OK|{address}|{seq}|{hash}|{requestTimestamp}";
         internal static string MaintenanceMessage(string address, long ts) => $"MAINT|{address}|{ts}";
@@ -287,7 +344,7 @@ namespace VerifiedXCore.Services
             if (!head.Casters.Any(c => c.Address == req.Address)) return "not in the record";
             if (string.IsNullOrEmpty(self) || !head.Casters.Any(c => c.Address == self)) return "we are not a member";
             if (PastGrace(req.Address, nowUnix)) return $"absent {AbsentSeconds(req.Address, nowUnix)}s, past the {GraceFor(req.Address)}s grace period";
-            if (_removalSigned.TryGetValue(req.Address, out var r) && r.Seq == head.RecordSeq + 1 && nowUnix - r.At < CasterMembershipStore.SignedMarkExpirySeconds)
+            if (_removalSigned.TryGetValue(req.Address, out var r) && r.Seq == head.RecordSeq + 1 && nowUnix - r.At < RemovalSignedHoldSeconds)
                 return "we signed its removal";
             return null;
         }
@@ -348,15 +405,16 @@ namespace VerifiedXCore.Services
         /// live list and its absence timer is cleared.</summary>
         public static bool HandleResumedNotice(CasterResumedNotice notice)
         {
-            var req = notice?.Request;
             var head = CasterMembershipStore.GetCurrent();
-            if (req == null || head == null) return false;
-            if (!string.Equals(head.RecordHash, req.RecordHash, StringComparison.OrdinalIgnoreCase)) return false;
-            if (!SignatureService.VerifySignature(req.Address, ResumeRequestMessage(req), req.Signature)) return false;
-            var member = head.Casters.FirstOrDefault(c => c.Address == req.Address);
-            if (member == null) return false;
-            var approvers = ValidApprovers(req, head, notice!.Approvals ?? new(), SignatureService.VerifySignature);
-            if (approvers.Count < ResumeNeed(head.Casters.Count)) return false;
+            var refusal = ResumedNoticeRefusal(notice, head, TimeUtil.GetTime(), SignatureService.VerifySignature);
+            if (refusal != null)
+            {
+                CasterLogUtility.Log($"SEAT: ignored resumed notice for {notice?.Request?.Address} — {refusal}.", "SEAT");
+                return false;
+            }
+            var req = notice.Request!;
+            var member = head!.Casters.First(c => c.Address == req.Address);
+            var approvers = ValidApprovers(req, head, notice.Approvals ?? new(), SignatureService.VerifySignature);
 
             _absent.TryRemove(req.Address, out _);
             CasterDiscoveryService.AddBlockCasterIfRoomAndUnique(new Peers
@@ -371,6 +429,24 @@ namespace VerifiedXCore.Services
             Globals.SyncKnownCastersFromBlockCasters();
             CasterLogUtility.Log($"SEAT: {req.Address} resumed with {approvers.Count} approvals — back in the live list.", "SEAT");
             return true;
+        }
+
+        /// <summary>
+        /// Pure: why a resumed notice is ignored, or null. It must be recent: the notice stays validly signed for as long
+        /// as the record is unchanged, so without the age check anyone holding one could replay it to clear a dead
+        /// member's absence timer every few minutes and keep its seat from being removed.
+        /// </summary>
+        internal static string? ResumedNoticeRefusal(CasterResumedNotice? notice, CasterMembershipRecord? head, long nowUnix, Func<string, string, string, bool> verify)
+        {
+            var req = notice?.Request;
+            if (req == null || head == null) return "no request or no record";
+            if (Math.Abs(nowUnix - req.Timestamp) > RequestSkewSeconds) return "stale notice";
+            if (!string.Equals(head.RecordHash, req.RecordHash, StringComparison.OrdinalIgnoreCase)) return "different record";
+            if (string.IsNullOrEmpty(req.Address) || !verify(req.Address, ResumeRequestMessage(req), req.Signature)) return "bad signature";
+            if (!head.Casters.Any(c => c.Address == req.Address)) return "not in the record";
+            var approvers = ValidApprovers(req, head, notice!.Approvals ?? new(), verify);
+            var need = ResumeNeed(head.Casters.Count);
+            return approvers.Count < need ? $"{approvers.Count}/{need} approvals" : null;
         }
 
         // ── Resume (requester side) ─────────────────────────────────────────────────────────────────
@@ -560,12 +636,27 @@ namespace VerifiedXCore.Services
                 catch { return false; }
             }))).Count(x => x);
 
+            // The longer hold is real only when enough members know about it: the ones that missed the notice still use
+            // the normal grace period, and must be too few to sign a removal by themselves.
+            var need = MaintenanceAcksNeeded(head.Casters.Count);
+            if (acks < need)
+            {
+                CasterLogUtility.Log($"SEAT: maintenance NOT in effect — {acks}/{others.Count} members acknowledged, need {need}.", "SEAT");
+                return $"Maintenance NOT in effect: only {acks} of {others.Count} committee members acknowledged (need {need}). " +
+                       $"Peers still use the normal {GraceSeconds / 60}-minute grace period and this node's exit behaves as usual. " +
+                       "Run /maintenance again once the other casters are reachable.";
+            }
+
             MaintenanceAnnounced = true;
             try { File.WriteAllText(MaintenanceMarkerPath(), ts.ToString()); } catch { }
-            CasterLogUtility.Log($"SEAT: maintenance announced to {acks}/{others.Count} members.", "SEAT");
-            return $"Maintenance announced to {acks} of {others.Count} committee members. Your seat is held for {MaintenanceGraceSeconds / 60} minutes; " +
+            CasterLogUtility.Log($"SEAT: maintenance announced to {acks}/{others.Count} members (need {need}).", "SEAT");
+            return $"Maintenance acknowledged by {acks} of {others.Count} committee members. Your seat is held for {MaintenanceGraceSeconds / 60} minutes; " +
                    "stop the node normally now (the exit will not give up the seat). On restart it must pass the resume checks.";
         }
+
+        /// <summary>Pure: acknowledgements that make the longer hold dependable — enough that the members who missed the
+        /// notice cannot form a removal majority, and enough to approve the resume after the normal grace period.</summary>
+        internal static int MaintenanceAcksNeeded(int committeeSize) => ResumeNeed(committeeSize);
 
         public static bool HandleMaintenanceNotice(CasterMaintenanceNotice notice)
         {

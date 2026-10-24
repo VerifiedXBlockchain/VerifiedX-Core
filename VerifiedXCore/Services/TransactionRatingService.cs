@@ -8,6 +8,8 @@ namespace VerifiedXCore.Services
 {
     public class TransactionRatingService
     {
+        // The per-sender counts below are of the sender's OTHER pooled transactions (x.Hash != tx.Hash): two peers delivering
+        // one genuine transaction at once rated it against its own pooled copy, and the second handler deleted it.
         public static async Task<TransactionRating> GetTransactionRating(Transaction tx, bool dstShopTx = false)
         {
             TransactionRating rating = TransactionRating.F;//start at F in the event something is received we don't expected
@@ -82,12 +84,15 @@ namespace VerifiedXCore.Services
                     tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST ||
                     tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_COMPLETE ||
                     tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_CANCEL ||
+                    tx.TransactionType == TransactionType.VBTC_V2_COIN_PIN ||
                     tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_VOTE ||
                     tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_LOCK ||
                     tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_UNLOCK ||
                     tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC ||
                     tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE ||
-                    tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK)
+                    tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK ||
+                    tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL || // was never named: rated F, dropped by every peer
+                    VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(tx.TransactionType))
                 {
                     rating = TransactionRating.A;
                 }
@@ -105,18 +110,17 @@ namespace VerifiedXCore.Services
         private static async Task<TransactionRating> NFTRating(Transaction tx)
         {
             TransactionRating rating = TransactionRating.A;
-            var mempool = TransactionData.GetMempool();
             var pool = TransactionData.GetPool();
 
-            if (mempool != null)
+            if (pool != null)
             {
-                if (mempool.Count() > 25)
+                if (pool.Count() > 25)
                 {
-                    var txs = mempool.FindAll(x => x.FromAddress == tx.FromAddress &&
+                    var txs = pool.Find(x => x.Hash != tx.Hash && x.FromAddress == tx.FromAddress &&
                     (x.TransactionType == TransactionType.NFT_MINT ||
                         x.TransactionType == TransactionType.NFT_SALE ||
                         x.TransactionType == TransactionType.NFT_BURN ||
-                        x.TransactionType == TransactionType.NFT_TX));
+                        x.TransactionType == TransactionType.NFT_TX)).ToList();
                     if (txs.Count() > 25)
                     {
                         rating = TransactionRating.F; // Fail. Too many tx's being broadcasted from that address. 
@@ -145,17 +149,16 @@ namespace VerifiedXCore.Services
         private static async Task<TransactionRating> SCRating(Transaction tx)
         {
             TransactionRating rating = TransactionRating.A;
-            var mempool = TransactionData.GetMempool();
             var pool = TransactionData.GetPool();
 
-            if (mempool != null)
+            if (pool != null)
             {
-                if (mempool.Count() > 25)
+                if (pool.Count() > 25)
                 {
-                    var txs = mempool.FindAll(x => x.FromAddress == tx.FromAddress &&
+                    var txs = pool.Find(x => x.Hash != tx.Hash && x.FromAddress == tx.FromAddress &&
                     (x.TransactionType == TransactionType.SC_MINT ||
                         x.TransactionType == TransactionType.SC_BURN ||
-                        x.TransactionType == TransactionType.SC_TX));
+                        x.TransactionType == TransactionType.SC_TX)).ToList();
                     if (txs.Count() > 25)
                     {
                         rating = TransactionRating.F; // Fail. Too many tx's being broadcasted from that address. 
@@ -183,17 +186,16 @@ namespace VerifiedXCore.Services
         private static async Task<TransactionRating> TKNZRating(Transaction tx)
         {
             TransactionRating rating = TransactionRating.A;
-            var mempool = TransactionData.GetMempool();
             var pool = TransactionData.GetPool();
 
-            if (mempool != null)
+            if (pool != null)
             {
-                if (mempool.Count() > 25)
+                if (pool.Count() > 25)
                 {
-                    var txs = mempool.FindAll(x => x.FromAddress == tx.FromAddress &&
+                    var txs = pool.Find(x => x.Hash != tx.Hash && x.FromAddress == tx.FromAddress &&
                     (x.TransactionType == TransactionType.TKNZ_MINT ||
                         x.TransactionType == TransactionType.TKNZ_BURN ||
-                        x.TransactionType == TransactionType.TKNZ_TX));
+                        x.TransactionType == TransactionType.TKNZ_TX)).ToList();
                     if (txs.Count() > 25)
                     {
                         rating = TransactionRating.F; // Fail. Too many tx's being broadcasted from that address. 
@@ -222,17 +224,16 @@ namespace VerifiedXCore.Services
         private static async Task<TransactionRating> FTKNRating(Transaction tx)
         {
             TransactionRating rating = TransactionRating.A;
-            var mempool = TransactionData.GetMempool();
             var pool = TransactionData.GetPool();
 
-            if (mempool != null)
+            if (pool != null)
             {
-                if (mempool.Count() > 25)
+                if (pool.Count() > 25)
                 {
-                    var txs = mempool.FindAll(x => x.FromAddress == tx.FromAddress &&
+                    var txs = pool.Find(x => x.Hash != tx.Hash && x.FromAddress == tx.FromAddress &&
                     (x.TransactionType == TransactionType.FTKN_MINT ||
                         x.TransactionType == TransactionType.FTKN_BURN ||
-                        x.TransactionType == TransactionType.FTKN_TX));
+                        x.TransactionType == TransactionType.FTKN_TX)).ToList();
                     if (txs.Count() > 25)
                     {
                         rating = TransactionRating.F; // Fail. Too many tx's being broadcasted from that address. 
@@ -261,13 +262,12 @@ namespace VerifiedXCore.Services
         private static async Task<TransactionRating> DecShopRating(Transaction tx)
         {
             TransactionRating rating = TransactionRating.A;
-            var mempool = TransactionData.GetMempool();
             var pool = TransactionData.GetPool();
-            if (mempool != null)
+            if (pool != null)
             {
-                if (mempool.Count() > 0)
+                if (pool.Count() > 0)
                 {
-                    var txs = mempool.FindAll(x => x.FromAddress == tx.FromAddress && x.TransactionType == TransactionType.DSTR);
+                    var txs = pool.Find(x => x.Hash != tx.Hash && x.FromAddress == tx.FromAddress && x.TransactionType == TransactionType.DSTR).ToList();
                     if (txs.Count() > 0)
                     {
                         rating = TransactionRating.F; // Fail. you can only have 1 dec shop mempool item per address 
@@ -289,7 +289,6 @@ namespace VerifiedXCore.Services
         private static async Task<TransactionRating> ReserveRating(Transaction tx)
         {
             TransactionRating rating = TransactionRating.A;
-            var mempool = TransactionData.GetMempool();
             var pool = TransactionData.GetPool();
             var txData = tx.Data;
             string? hash = null;
@@ -322,11 +321,11 @@ namespace VerifiedXCore.Services
                 }
             }
 
-            if (mempool != null)
+            if (pool != null)
             {
-                if (mempool.Count() > 0)
+                if (pool.Count() > 0)
                 {
-                    var txs = mempool.FindAll(x => x.FromAddress == tx.FromAddress && x.TransactionType == TransactionType.RESERVE);
+                    var txs = pool.Find(x => x.Hash != tx.Hash && x.FromAddress == tx.FromAddress && x.TransactionType == TransactionType.RESERVE).ToList();
                     if (txs.Count() > 0)
                     {
                         var dupFoundOrFail = false;
@@ -396,13 +395,12 @@ namespace VerifiedXCore.Services
         private static async Task<TransactionRating> ADNRRating(Transaction tx)
         {
             TransactionRating rating = TransactionRating.A;
-            var mempool = TransactionData.GetMempool();
             var pool = TransactionData.GetPool();
-            if (mempool != null)
+            if (pool != null)
             {
-                if (mempool.Count() > 0)
+                if (pool.Count() > 0)
                 {
-                    var txs = mempool.FindAll(x => x.FromAddress == tx.FromAddress && x.TransactionType == TransactionType.ADNR);
+                    var txs = pool.Find(x => x.Hash != tx.Hash && x.FromAddress == tx.FromAddress && x.TransactionType == TransactionType.ADNR).ToList();
                     if (txs.Count() > 0)
                     {
                         rating = TransactionRating.F; // Fail. you can only have 1 ADNR per address 
@@ -424,16 +422,15 @@ namespace VerifiedXCore.Services
         private static async Task<TransactionRating> VoteRating(Transaction tx)
         {
             TransactionRating rating = TransactionRating.A;
-            var mempool = TransactionData.GetMempool();
             var pool = TransactionData.GetPool();
 
-            if (mempool != null)
+            if (pool != null)
             {
-                if (mempool.Count() >= 2)
+                if (pool.Count() >= 2)
                 {
-                    var txs = mempool.FindAll(x => x.FromAddress == tx.FromAddress &&
+                    var txs = pool.Find(x => x.Hash != tx.Hash && x.FromAddress == tx.FromAddress &&
                     (x.TransactionType == TransactionType.VOTE ||
-                        x.TransactionType == TransactionType.VOTE_TOPIC));
+                        x.TransactionType == TransactionType.VOTE_TOPIC)).ToList();
 
                     if (txs.Count() > 1)
                     {
@@ -463,16 +460,15 @@ namespace VerifiedXCore.Services
         private static async Task<TransactionRating> VoteTopicRating(Transaction tx)
         {
             TransactionRating rating = TransactionRating.A;
-            var mempool = TransactionData.GetMempool();
             var pool = TransactionData.GetPool();
 
-            if (mempool != null)
+            if (pool != null)
             {
-                if (mempool.Count() >= 2)
+                if (pool.Count() >= 2)
                 {
-                    var txs = mempool.FindAll(x => x.FromAddress == tx.FromAddress &&
+                    var txs = pool.Find(x => x.Hash != tx.Hash && x.FromAddress == tx.FromAddress &&
                     (x.TransactionType == TransactionType.VOTE ||
-                        x.TransactionType == TransactionType.VOTE_TOPIC));
+                        x.TransactionType == TransactionType.VOTE_TOPIC)).ToList();
 
                     if (txs.Count() > 1)
                     {
@@ -501,7 +497,6 @@ namespace VerifiedXCore.Services
         private static async Task<TransactionRating> TXRating(Transaction tx)
         {
             TransactionRating rating = TransactionRating.A;
-            var mempool = TransactionData.GetMempool();
             var pool = TransactionData.GetPool();
 
             if (tx.Amount >= 0.1M)
@@ -522,11 +517,13 @@ namespace VerifiedXCore.Services
             {
                 rating = TransactionRating.D; //low priority tx
             }
-            if (mempool != null)
+            // The pool's count and this sender's rows come from the indexes: loading the whole pool here made every
+            // admission cost grow with the pool, refused ones included.
+            if (pool != null)
             {
-                if (mempool.Count() > 50)
+                if (pool.Count() > 50)
                 {
-                    var txs = mempool.FindAll(x => x.FromAddress == tx.FromAddress && x.TransactionType == TransactionType.TX);
+                    var txs = pool.Find(x => x.Hash != tx.Hash && x.FromAddress == tx.FromAddress && x.TransactionType == TransactionType.TX).ToList();
                     if (txs.Count() > 50)
                     {
                         rating = TransactionRating.F; // Fail. Too many tx's being broadcasted from that address. 

@@ -55,6 +55,9 @@ namespace VerifiedXCore.BrowserWalletServices
                 decimal totalBalance = ledgerBalance;
                 string depositAddress = "";
 
+                // A vault the chain watches: the owner's deposit is the vault's Bitcoin as the chain records it, on
+                // any node, with or without a local record. Other vaults: the balance this wallet last saw.
+                var kind = Bitcoin.Attestation.BtcVaultView.KindOf(scState.SmartContractUID);
                 if (isOwner)
                 {
                     var contract = VBTCContractV2.GetContract(scState.SmartContractUID);
@@ -62,6 +65,12 @@ namespace VerifiedXCore.BrowserWalletServices
                     {
                         depositAddress = contract.DepositAddress ?? "";
                         totalBalance = contract.Balance + ledgerBalance;
+                    }
+                    if (kind.Attested)
+                    {
+                        totalBalance = Bitcoin.Attestation.BtcAttestBalance.DepositBtc(scState.SmartContractUID) + ledgerBalance;
+                        // The newest key's address, ahead of the local record's (written at creation; round 16).
+                        depositAddress = Bitcoin.Attestation.BtcAttestStore.ScriptRowForVault(scState.SmartContractUID)?.DepositAddress ?? depositAddress;
                     }
                 }
 
@@ -102,6 +111,15 @@ namespace VerifiedXCore.BrowserWalletServices
                         activeWithdrawalDest = active?.BTCDestination ?? "",
                         escrowedWithdrawalAmount = escrowedAmount,
                         expiredEscrowAmount = expiredEscrowAmount,
+                        // Bitcoin attestation: a watched vault needs no "Complete" (its signers pay withdrawals), can
+                        // have several withdrawals open, and lists this address's open ones; a legacy vault carries
+                        // the freeze notice.
+                        attested = kind.Attested,
+                        legacy = kind.Legacy,
+                        freezeHeight = kind.FreezeHeight,
+                        frozen = kind.Frozen,
+                        vaultNote = kind.Note,
+                        openWithdrawals = OpenWithdrawalsOf(scState.SmartContractUID, address),
                         proofBlockHeight = contract?.ProofBlockHeight ?? 0,
                         totalValidators = contract?.TotalRegisteredValidators ?? 0,
                         requiredThreshold = contract?.RequiredThreshold ?? 0,
@@ -123,9 +141,73 @@ namespace VerifiedXCore.BrowserWalletServices
             return (result.Item1, result.Item2);
         }
 
+        /// <summary>This address's open withdrawals on a watched vault, as the wallet page lists them (empty for any other vault).</summary>
+        private static List<object> OpenWithdrawalsOf(string scUID, string address)
+        {
+            if (!Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(scUID)) return new List<object>();
+            return Bitcoin.Attestation.BtcAttestStore.WithdrawalsOf(scUID, Bitcoin.Attestation.VaultWithdrawalState.Waiting)
+                .Concat(Bitcoin.Attestation.BtcAttestStore.WithdrawalsOf(scUID, Bitcoin.Attestation.VaultWithdrawalState.Pinned))
+                .Where(w => !w.IsBridgeExit && w.Requester == address)
+                .OrderBy(w => w.RequestVfxHeight).ThenBy(w => w.Ref, StringComparer.Ordinal)
+                .Select(w =>
+                {
+                    var newest = w.Pins.LastOrDefault(p => !p.Dead);
+                    var pinned = w.State == Bitcoin.Attestation.VaultWithdrawalState.Pinned;
+                    return (object)new
+                    {
+                        requestHash = w.RequestHash,
+                        requester = w.Requester,
+                        state = !pinned ? "waiting for coins" : newest?.IsRelease == true ? "being given up, awaiting Bitcoin" : "awaiting Bitcoin",
+                        amount = w.AmountSats / Bitcoin.Attestation.BtcAttestBalance.SatsPerBtc,
+                        feeRate = newest?.FeeRate > 0 ? newest.FeeRate : w.FeeRate,
+                        bitcoinTxid = newest?.Txid,
+                        waitingFor = pinned ? null : w.WaitingReason,
+                        canCancel = !pinned,
+                        canRaiseFee = pinned && Bitcoin.Attestation.BtcWithdrawals.HasRoomForPayment(w) && !w.Pins.Any(p => !p.Dead && p.IsRelease),
+                        canRelease = pinned && Bitcoin.Attestation.BtcWithdrawals.HasRoomForRelease(w),
+                        releasing = pinned && w.Pins.Any(p => !p.Dead && p.IsRelease),
+                    };
+                }).ToList();
+        }
+
+        /// <summary>Raise the Bitcoin fee of a pinned withdrawal (watched vaults), signed by the requester's account on this node.</summary>
+        public static async Task<(bool success, string message)> BumpWithdrawalFee(string scUID, string requestorAddress, string requestHash, long feeRate)
+        {
+            var (ok, result) = await Bitcoin.Services.VBTCService.BumpWithdrawalFee(scUID, requestorAddress, requestHash, feeRate);
+            return ok
+                ? (true, $"Fee raised to {feeRate} sat/vB. The replacement Bitcoin transaction is fixed when this is mined ({result}); the extra fee comes out of the amount paid.")
+                : (false, result);
+        }
+
+        /// <summary>Give up a pinned withdrawal (watched vaults), signed by the requester's account on this node.</summary>
+        public static async Task<(bool success, string message)> ReleaseWithdrawal(string scUID, string requestorAddress, string requestHash, long feeRate)
+        {
+            var (ok, result) = await Bitcoin.Services.VBTCService.ReleaseWithdrawal(scUID, requestorAddress, requestHash, feeRate);
+            return ok
+                ? (true, $"Release sent ({result}). When it is mined a Bitcoin transaction returning the withdrawal's coins to the vault is fixed at {feeRate} sat/vB; the vBTC comes back, less that transaction's fee, once Bitcoin has confirmed it.")
+                : (false, result);
+        }
+
+        /// <summary>Where a withdrawal from a watched vault stands (null for any other vault or an unknown request).</summary>
+        public static object? GetWithdrawalPin(string scUID, string requestHash) =>
+            Bitcoin.Attestation.BtcVaultView.Withdrawal(scUID, requestHash);
+
         public static async Task<(bool success, string message, string? vfxTxHash, string? btcTxHash)> CompleteWithdrawal(
             string scUID, string requestHash)
         {
+            // A vault the chain watches: nothing is completed by hand. The wallet is told where the withdrawal
+            // stands; "being paid" is not an error.
+            if (Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(scUID))
+            {
+                var stands = Bitcoin.Attestation.BtcVaultView.Completion(scUID, requestHash);
+                var beingPaid = Bitcoin.Attestation.BtcVaultView.IsInTheChainsHands(stands.Message);
+                var text = stands.Message
+                    .Replace(Bitcoin.Services.VBTCService.AwaitingConfirmationMarker, "")
+                    .Replace(Bitcoin.Attestation.BtcVaultView.WaitingForPinMarker, "").Trim();
+                return (stands.Success || beingPaid, text,
+                    string.IsNullOrEmpty(stands.VfxTxHash) ? null : stands.VfxTxHash, string.IsNullOrEmpty(stands.BtcTxHash) ? null : stands.BtcTxHash);
+            }
+
             var result = await Bitcoin.Services.VBTCService.CompleteWithdrawal(scUID, requestHash);
             if (result.Success)
                 return (true, "Withdrawal completed!", result.VFXTxHash, result.BTCTxHash);
@@ -153,7 +235,9 @@ namespace VerifiedXCore.BrowserWalletServices
                 status = Bitcoin.Services.VBTCChainView.WithdrawalStatus(scUID).ToString(),
                 amount = active?.Amount ?? 0M,
                 destination = active?.BTCDestination ?? "",
-                requestHash = active?.TransactionHash ?? ""
+                requestHash = active?.TransactionHash ?? "",
+                attested = Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(scUID),
+                withdrawal = active == null ? null : Bitcoin.Attestation.BtcVaultView.Withdrawal(scUID, active.TransactionHash)
             };
         }
 

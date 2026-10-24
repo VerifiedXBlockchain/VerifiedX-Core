@@ -20,7 +20,10 @@ namespace VerifiedXCore
         /// <summary>Size in bytes of the loaded PLONK params file (diagnostic only — native FFI holds the actual data).</summary>
         public static long PLONKParamsFileSize { get; set; }
 
-        /// <summary>When true, ZK-authorized private txs must carry a non-empty <c>proof_b64</c> (mempool / block validation).</summary>
+        /// <summary>
+        /// Reported by the privacy status routes only. It once made this node require a proof before the proof-rules
+        /// height, which a node's own setting must not decide (round 32); from that height every node requires one.
+        /// </summary>
         public static bool EnforcePlonkProofsForZk { get; set; }
 
         /// <summary>vBTC privacy TXs (shield/unshield/private transfer) are rejected at consensus once

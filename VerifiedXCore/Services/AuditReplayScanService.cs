@@ -45,11 +45,11 @@ namespace VerifiedXCore.Services
             var hits = new List<Hit>();
             void Add(string rule, string reason) => hits.Add(new Hit(height, tx.Hash ?? "", tx.TransactionType, rule, reason));
             if (HistoricalTransactionExceptions.IsAccepted(tx, height)) return hits; // historical mainnet list: accepted as mined
-            var bodyError = LedgerIntegrityRules.ContractBodyAllowed(tx); // NEW-29
-            if (bodyError != null) Add("NEW-29 contract body", bodyError);
-
             try
             {
+                var bodyError = LedgerIntegrityRules.ContractBodyAllowed(tx); // NEW-29
+                if (bodyError != null) Add("NEW-29 contract body", bodyError);
+
                 switch (tx.TransactionType)
                 {
                     case TransactionType.VBTC_V2_WITHDRAWAL_REQUEST:
@@ -76,7 +76,11 @@ namespace VerifiedXCore.Services
                 if (saleError != null)
                     Add("NEW-17 sale amounts", saleError);
 
-                if (LedgerIntegrityRules.VaultCodeUnchanged(tx) is string vaultCodeError) // NEW-26 (follow-up)
+                // A call the reader cannot read (a non-text MD5List, say) reads as no call to VaultCodeUnchanged while the
+                // dispatcher still runs it, so it is a violation, judged as the readability rule judges a block today.
+                if (LedgerIntegrityRules.ContractCallIsReadable(tx, Math.Max(height, Globals.PathAuditRulesHeight)) is string unreadable)
+                    Add("contract call unreadable", unreadable);
+                else if (LedgerIntegrityRules.VaultCodeUnchanged(tx) is string vaultCodeError) // NEW-26 (follow-up)
                     Add("NEW-26 vault code changed", vaultCodeError);
 
                 var coinbaseError = LedgerIntegrityRules.CoinbaseShape(tx); // NEW-16
@@ -85,7 +89,7 @@ namespace VerifiedXCore.Services
                 if (((LedgerIntegrityRules.IsCoinbase(tx) && height == Globals.SpecialBlockHeight) || height == 0) && LedgerIntegrityRules.ContentMatchesHash(tx) is string contentError) // NEW-25 (correction: genesis and the special block)
                     Add("NEW-25 coinbase/genesis content vs hash", contentError);
 
-                var uidError = LedgerIntegrityRules.ContractUids(tx); // NEW-10
+                var uidError = LedgerIntegrityRules.ContractUids(tx, height); // NEW-10
                 if (uidError != null)
                     Add("NEW-10 contract UID", uidError);
             }
@@ -289,7 +293,8 @@ namespace VerifiedXCore.Services
         {
             void Add(string? a, decimal v) { if (!string.IsNullOrEmpty(a)) { bal.TryGetValue(a, out var b); bal[a] = b + v; } }
             var coinbase = tx.FromAddress == "Coinbase_TrxFees" || tx.FromAddress == "Coinbase_BlkRwd";
-            if (height > 0 && !coinbase && !VerifiedXCore.Privacy.PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType))
+            if (height > 0 && !coinbase && !VerifiedXCore.Privacy.PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType)
+                && !VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(tx.TransactionType)) // sender-less: no account
                 Add(tx.FromAddress, -(tx.Amount + tx.Fee + SameBlockDebitGuard.SaleCompletionPayments(tx)));
             if (tx.ToAddress != null && BaseAddresses.Contains(tx.ToAddress))
                 return;
@@ -339,7 +344,7 @@ namespace VerifiedXCore.Services
                             if (!sweepOk)
                                 hits.Add(new Hit(block.Height, tx.Hash ?? "", tx.TransactionType, "NEW-07/24 block rule (Recover() alone, no repeated transaction)", sweepReason));
                         }
-                        foreach (var (rawKey, amount) in SameBlockDebitGuard.GetDebits(tx))
+                        foreach (var (rawKey, amount) in SameBlockDebitGuard.GetDebits(tx, block.Height))
                         {
                             var key = SameBlockDebitGuard.Canonical(rawKey, canonicalUids);
                             debitsInBlock.TryGetValue(key, out var d);

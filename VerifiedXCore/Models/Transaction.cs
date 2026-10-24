@@ -65,15 +65,25 @@ namespace VerifiedXCore.Models
             return HashingService.GenerateHash(HashingService.GenerateHash(GetHashPreimage()));
         }
 
-        /// <summary>Hash for privacy transaction types; see privacy implementation plan.</summary>
-        public string BuildPrivate()
+        /// <summary>
+        /// Hash for privacy transaction types; see privacy implementation plan. <paramref name="height"/> is the block the
+        /// transaction is judged for (the next block when building one).
+        /// </summary>
+        public string BuildPrivate(long? height = null)
         {
-            var data = GetPrivateHashInput();
+            var data = GetPrivateHashInput(height ?? ((Globals.LastBlock?.Height ?? 0) + 1));
             Hash = HashingService.GenerateHash(HashingService.GenerateHash(data));
             return Hash;
         }
 
-        private string GetPrivateHashInput()
+        /// <summary>
+        /// From this height a shield's hash, which its sender signs, covers its Fee: it did not, the fee is debited and
+        /// burned, and any relay, producer or block server could raise it and burn the shielder's whole balance (fifth
+        /// review, round 18). A release of this fix on its own sets its own height.
+        /// </summary>
+        public static long ShieldFeeSignedHeight => Globals.PathAuditRulesHeight;
+
+        private string GetPrivateHashInput(long height)
         {
             var sb = new StringBuilder();
             sb.Append(Timestamp);
@@ -84,6 +94,8 @@ namespace VerifiedXCore.Models
                 sb.Append(FromAddress);
                 sb.Append(Amount);
                 sb.Append(Nonce);
+                if (height >= ShieldFeeSignedHeight)
+                    sb.Append("|fee:").Append((Fee / 1.000000000000000000000000000000000m).ToString(System.Globalization.CultureInfo.InvariantCulture));
             }
             return sb.ToString();
         }
@@ -149,6 +161,14 @@ namespace VerifiedXCore.Models
         VBTC_V2_BRIDGE_EXIT_TO_BTC = 40, // Base burnForBTCExit → record BTC withdrawal intent on VFX
         VBTC_V2_BRIDGE_EXIT_TO_BTC_COMPLETE = 41, // After BTC broadcast / completion
         VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL = 42, // FROST failed for some locks → blacklist + reverse + retry
+
+        // Bitcoin facts in consensus (docs/PLAN-vBTC-Bitcoin-Attestation.md). 43 and 45 are sender-less: From and To
+        // are "BTC_Attestation", no amount, no fee; the authority is the validator signatures inside Data. 44 is an
+        // ordinary transaction signed by the withdrawal's requester.
+        VBTC_V2_BTC_REPORT = 43, // Bitcoin headers plus the transactions of one Bitcoin block that touch a vault
+        VBTC_V2_COIN_PIN = 44, // A requester pins its withdrawal again at a higher Bitcoin fee rate (fee bump; watched vaults)
+        VBTC_V2_BTC_REORG = 45, // Rewind: Bitcoin reorganised below reported events; they are taken back and the headers replaced
+        VBTC_V2_VAULT_REKEY = 46, // Sender-less: a vault's key is replaced by one the validators of the day made (plan 8.8)
     }
 
     public enum ReserveTransactionType

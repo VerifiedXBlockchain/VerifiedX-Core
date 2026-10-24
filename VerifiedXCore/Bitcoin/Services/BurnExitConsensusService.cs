@@ -46,6 +46,8 @@ namespace VerifiedXCore.Bitcoin.Services
             public string HandlerCasterAddress { get; set; } = "";
             public List<CasterConsensusVote> ConsensusVotes { get; set; } = new();
             public string CompletionVfxTxHash { get; set; } = "";
+            /// <summary>The VFX height a pool unlock's transaction was broadcast at (0 before).</summary>
+            public long CompletionBroadcastAtBlock { get; set; }
             public string BtcTxHash { get; set; } = "";
             /// <summary>Serialized BtcExitWithdrawalRecord list for stuck exit COMPLETE retry.</summary>
             public string BtcWithdrawalsJson { get; set; } = "";
@@ -100,12 +102,20 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// The committee an exit's casters elect, verify and count against: that of the next block, the block whose
+        /// validation checks the exit's votes and the height its signers check the leader at
+        /// (FrostSigningAuthorization.IsCommitteeCaster). Read at the tip, a rotation taking effect at the next block made
+        /// the elected handler one the signers refused, and a one-vault exit failed (#292).
+        /// </summary>
+        internal static HashSet<string> ExitCommittee() => BridgeCasterConsensus.GetCommitteeForHeight((Globals.LastBlock?.Height ?? 0) + 1);
+
+        /// <summary>
         /// Adaptive majority of the COMMITTEE for the current height — the same set and threshold
         /// consensus validation applies to the votes, so a handler never ships a vote set its own
         /// admission would reject.
         /// </summary>
         public static int RequiredCasterSignatures =>
-            BridgeCasterConsensus.RequiredVotesFor(BridgeCasterConsensus.GetCommitteeForHeight(Globals.LastBlock?.Height ?? 0));
+            BridgeCasterConsensus.RequiredVotesFor(ExitCommittee());
 
         /// <summary>
         /// Background loop: catch-up sync on startup, then monitor pending burns and drive consensus.
@@ -185,12 +195,61 @@ namespace VerifiedXCore.Bitcoin.Services
                     }
                 }
                 LogUtility.Log($"[BurnExitConsensus] Catch-up sync complete. Marked {syncedCount} burns as processed.", "BurnExitConsensusService");
+                var reloaded = ReloadUnfinishedWatchedExits(currentHeight);
+                if (reloaded > 0)
+                    LogUtility.Log($"[BurnExitConsensus] Took up {reloaded} exit(s) on watched vaults the chain holds open or has failed.", "BurnExitConsensusService");
             }
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"[BurnExitConsensus] Catch-up sync error: {ex.Message}", "BurnExitConsensusService");
             }
             await Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// The exits on watched vaults the chain holds open or has failed, taken up again after a restart. Following an
+        /// open exit, and making a failed one again, rested on this caster's memory: the catch-up above marks every
+        /// bridge transaction of its last 500 blocks complete and reads nothing older, so once the committee had
+        /// restarted (a rolling upgrade) an exit failed by rule afterwards was never made again and its burn stayed
+        /// unpaid (fifth review, round 23). Each is looked at again by the stuck-exit check: followed while the chain
+        /// holds it open, made again once failed.
+        /// </summary>
+        internal static int ReloadUnfinishedWatchedExits(long currentHeight)
+        {
+            var reloaded = 0;
+            List<VBTCBridgeBtcExitState> exits;
+            try { exits = VBTCBridgeBtcExitState.GetCollection().FindAll().ToList(); }
+            catch { return 0; }
+            foreach (var exit in exits)
+            {
+                if ((exit.IsComplete && !exit.IsFailedRecord) || string.IsNullOrEmpty(exit.BaseBurnTxHash) || !Attestation.BtcWithdrawals.IsWatchedExit(exit)) continue; // a failed exit is closed too
+                _processedBurns[exit.BaseBurnTxHash] = new ProcessedBurnRecord
+                {
+                    BaseBurnTxHash = exit.BaseBurnTxHash,
+                    ExitType = BurnExitType.BtcExit,
+                    BtcDestination = exit.BtcDestination,
+                    Amount = exit.Amount,
+                    Status = BurnExitStatus.VfxTxCreated,
+                    CompletionVfxTxHash = exit.IsFailedRecord ? "" : exit.ExitTxHash,
+                    AllocationsJson = exit.AllocationsJson ?? "",
+                    DetectedAtBlock = currentHeight,
+                };
+                reloaded++;
+            }
+            return reloaded;
+        }
+
+        internal static ProcessedBurnRecord? ProcessedBurnForTests(string baseBurnTxHash) =>
+            _processedBurns.TryGetValue(baseBurnTxHash, out var r) ? r : null;
+
+        /// <summary>
+        /// Whether the chain has redeemed this burn or holds an exit for it. After a restart the watcher reads back over
+        /// a stretch of Base (round 23); burns already paid there are passed over, not voted on again.
+        /// </summary>
+        private static bool ChainHasTheBurn(string baseBurnTxHash)
+        {
+            try { return VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(baseBurnTxHash); }
+            catch { return false; }
         }
 
         /// <summary>Process pending burns that haven't entered consensus yet.</summary>
@@ -229,6 +288,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 LogUtility.Log($"[BurnExitConsensus] Skipping already-tracked burn: {baseBurnTxHash}", "BurnExitConsensusService");
                 return;
             }
+            if (ChainHasTheBurn(baseBurnTxHash))
+                return;
 
             var record = new ProcessedBurnRecord
             {
@@ -281,12 +342,16 @@ namespace VerifiedXCore.Bitcoin.Services
             var (alertOk, alertReason) = BridgeCasterConsensus.VerifyBurnAlert(
                 alert.BaseBurnTxHash, BurnTypeString(alert.ExitType), (long)(alert.Amount * 100_000_000M), alertDest,
                 alert.SenderCasterAddress, alert.Timestamp, alert.Signature,
-                BridgeCasterConsensus.GetCommitteeForHeight(Globals.LastBlock?.Height ?? 0), TimeUtil.GetTime());
+                ExitCommittee(), TimeUtil.GetTime());
             if (!alertOk)
             {
                 LogUtility.Log($"[BurnExitConsensus] REJECTED BurnAlert for {alert.BaseBurnTxHash} from {alert.SenderCasterAddress}: {alertReason}", "BurnExitConsensusService");
                 return;
             }
+            // Looked up once the alert is a committee caster's: before, any unsigned alert on the open route cost two full
+            // collection reads (round 25).
+            if (ChainHasTheBurn(alert.BaseBurnTxHash))
+                return;
 
             _processedBurns.TryAdd(alert.BaseBurnTxHash, new ProcessedBurnRecord
             {
@@ -341,8 +406,8 @@ namespace VerifiedXCore.Bitcoin.Services
             }
 
             // Step 1: Generate deterministic proposal hash and sign the proposal
-            var proposalHash = BridgeCasterConsensus.ComputeProposalHash(Globals.ValidatorAddress, baseBurnTxHash);
             var proposalTimestamp = TimeUtil.GetTime();
+            var proposalHash = BridgeCasterConsensus.ComputeProposalHash(Globals.ValidatorAddress, baseBurnTxHash, proposalTimestamp);
 
             var myProposal = new BurnExitProposal
             {
@@ -362,8 +427,10 @@ namespace VerifiedXCore.Bitcoin.Services
             // Step 3: Wait for other proposals
             await Task.Delay(PROPOSAL_WAIT_MS);
 
-            // Step 4: Determine lowest hash winner
-            var allProposals = proposalDict.Values.ToList();
+            // Step 4: Determine lowest hash winner, among this round's proposals: one left from an earlier round would hold
+            // that round's draw (round 23).
+            var electedAt = TimeUtil.GetTime();
+            var allProposals = proposalDict.Values.Where(p => Math.Abs(electedAt - p.Timestamp) <= BridgeCasterConsensus.PROPOSAL_MAX_SKEW_SECONDS).ToList();
             if (!allProposals.Any())
             {
                 record.Status = BurnExitStatus.Failed;
@@ -372,7 +439,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
 
             // Only committee casters can be elected handler (intake already filters; defend here too).
-            var electionCommittee = BridgeCasterConsensus.GetCommitteeForHeight(Globals.LastBlock?.Height ?? 0);
+            var electionCommittee = ExitCommittee();
             var winnerAddress = BridgeCasterConsensus.SelectHandler(allProposals.Select(p => (p.ProposerCasterAddress, p.ProposerHash)), electionCommittee);
             if (winnerAddress == null)
             {
@@ -412,9 +479,7 @@ namespace VerifiedXCore.Bitcoin.Services
             // Step 6: Wait for confirmations
             await Task.Delay(CONFIRMATION_WAIT_MS);
 
-            var confirmations = confirmDict.Values
-                .Where(c => c.AgreedHandlerAddress == winner.ProposerCasterAddress)
-                .ToList();
+            var confirmations = ConfirmationsOfThisRound(confirmDict.Values, winner.ProposerCasterAddress, proposalTimestamp);
 
             if (confirmations.Count < RequiredCasterSignatures)
             {
@@ -444,6 +509,31 @@ namespace VerifiedXCore.Bitcoin.Services
             _confirmations.TryRemove(baseBurnTxHash, out _);
         }
 
+        /// <summary>
+        /// A caster's confirmation is held until a newer one of its own arrives. The first was kept for good: once the
+        /// election drew again in each window (round 23), a round's confirmations naming its winner, replayed to casters
+        /// that had cleared them, blocked every later winner, and a winner who did nothing kept the burn unpaid (fifth
+        /// review, round 24). Both carry the caster's signature over the handler, so a newer one cannot be forged.
+        /// </summary>
+        internal static bool KeepNewestConfirmation(ConcurrentDictionary<string, BurnExitConfirmation> held, BurnExitConfirmation confirmation) =>
+            KeepNewest(held, confirmation.ConfirmingCasterAddress, confirmation, c => c.Timestamp);
+
+        /// <summary>Holds <paramref name="item"/> under <paramref name="key"/> unless a newer or equally new one is held.</summary>
+        internal static bool KeepNewest<T>(ConcurrentDictionary<string, T> held, string key, T item, Func<T, long> timestamp) where T : class
+        {
+            while (true)
+            {
+                if (held.TryAdd(key, item)) return true;
+                if (!held.TryGetValue(key, out var current)) continue;
+                if (timestamp(item) <= timestamp(current)) return false;
+                if (held.TryUpdate(key, item, current)) return true;
+            }
+        }
+
+        /// <summary>The confirmations for this round's winner made in this round (from its proposal on, within the proposal skew).</summary>
+        internal static List<BurnExitConfirmation> ConfirmationsOfThisRound(IEnumerable<BurnExitConfirmation> held, string winner, long roundStartedAt) =>
+            held.Where(c => c.AgreedHandlerAddress == winner && c.Timestamp >= roundStartedAt - BridgeCasterConsensus.PROPOSAL_MAX_SKEW_SECONDS).ToList();
+
         /// <summary>Handle proposal from another caster.</summary>
         public static void HandleBurnExitProposal(BurnExitProposal proposal)
         {
@@ -459,7 +549,7 @@ namespace VerifiedXCore.Bitcoin.Services
             // SECURITY: only a committee caster's fresh, signed proposal with the deterministic hash counts.
             var (propOk, propReason) = BridgeCasterConsensus.VerifyProposal(
                 proposal.BaseBurnTxHash, proposal.ProposerCasterAddress, proposal.ProposerHash, proposal.Timestamp, proposal.Signature,
-                BridgeCasterConsensus.GetCommitteeForHeight(Globals.LastBlock?.Height ?? 0), TimeUtil.GetTime());
+                ExitCommittee(), TimeUtil.GetTime());
             if (!propOk)
             {
                 LogUtility.Log($"[BurnExitConsensus] REJECTED proposal for {proposal.BaseBurnTxHash} from {proposal.ProposerCasterAddress}: {propReason}", "BurnExitConsensusService");
@@ -467,7 +557,10 @@ namespace VerifiedXCore.Bitcoin.Services
             }
 
             var dict = _proposals.GetOrAdd(proposal.BaseBurnTxHash, _ => new ConcurrentDictionary<string, BurnExitProposal>());
-            dict[proposal.ProposerCasterAddress] = proposal;
+            // The newest of a proposer's proposals is held: a peer's older one replayed across a window boundary gave
+            // receivers different hashes for one proposer and split the election (round 25).
+            if (!KeepNewest(dict, proposal.ProposerCasterAddress, proposal, p => p.Timestamp))
+                return;
             LogUtility.Log($"[BurnExitConsensus] Proposal from {proposal.ProposerCasterAddress} for {proposal.BaseBurnTxHash}", "BurnExitConsensusService");
         }
 
@@ -487,7 +580,7 @@ namespace VerifiedXCore.Bitcoin.Services
             var (confOk, confReason) = BridgeCasterConsensus.VerifyConfirmation(
                 confirmation.ConfirmingCasterAddress, confirmation.BaseBurnTxHash, BurnTypeString(localRecord.ExitType),
                 (long)(localRecord.Amount * 100_000_000M), localDest, confirmation.Timestamp, confirmation.Signature,
-                BridgeCasterConsensus.GetCommitteeForHeight(Globals.LastBlock?.Height ?? 0));
+                ExitCommittee());
             if (!confOk)
             {
                 LogUtility.Log($"[BurnExitConsensus] REJECTED confirmation for {confirmation.BaseBurnTxHash} from {confirmation.ConfirmingCasterAddress}: {confReason}", "BurnExitConsensusService");
@@ -507,9 +600,9 @@ namespace VerifiedXCore.Bitcoin.Services
             }
 
             var dict = _confirmations.GetOrAdd(confirmation.BaseBurnTxHash, _ => new ConcurrentDictionary<string, BurnExitConfirmation>());
-            if (!dict.TryAdd(confirmation.ConfirmingCasterAddress, confirmation))
+            if (!KeepNewestConfirmation(dict, confirmation))
             {
-                LogUtility.Log($"[BurnExitConsensus] Ignoring duplicate confirmation for {confirmation.BaseBurnTxHash} from {confirmation.ConfirmingCasterAddress} (first one kept)", "BurnExitConsensusService");
+                LogUtility.Log($"[BurnExitConsensus] Ignoring confirmation for {confirmation.BaseBurnTxHash} from {confirmation.ConfirmingCasterAddress}: not newer than the one held", "BurnExitConsensusService");
                 return;
             }
             LogUtility.Log($"[BurnExitConsensus] Confirmation from {confirmation.ConfirmingCasterAddress} for {confirmation.BaseBurnTxHash}", "BurnExitConsensusService");
@@ -543,7 +636,7 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             var vfxDestinationAddress = record.VfxDestinationAddress;
             LogUtility.Log($"[BurnExitConsensus] VfxPoolUnlock: vfxDest={vfxDestinationAddress}, amount={record.Amount}, burn={record.BaseBurnTxHash}", "BurnExitConsensusService.ExecuteVfxPoolUnlock()");
-            var allocations = BridgePoolUnlockService.ComputeAllocationPlan(record.Amount);
+            var allocations = BridgePoolUnlockService.ComputeUnlockAllocationPlan(record.Amount, VBTCService.NextBlockHeight, vfxDestinationAddress);
 
             if (allocations == null || allocations.Count == 0)
             {
@@ -567,6 +660,7 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 record.Status = BurnExitStatus.Complete;
                 record.CompletionVfxTxHash = result.TxHashOrError;
+                record.CompletionBroadcastAtBlock = Globals.LastBlock?.Height ?? 0;
                 LogUtility.Log($"[BurnExitConsensus] VFX pool unlock TX: {result.TxHashOrError} for burn {record.BaseBurnTxHash}",
                     "BurnExitConsensusService.ExecuteVfxPoolUnlock()");
             }
@@ -591,6 +685,51 @@ namespace VerifiedXCore.Bitcoin.Services
         ///   (6) Broadcast VFX EXIT_TO_BTC_COMPLETE with BTC tx hashes.
         /// On retry (stuck exit), if EXIT_TO_BTC was already confirmed, skips straight to step (5).
         /// </summary>
+        private static bool IsOnWatchedVaults(string? allocationsJson)
+        {
+            try
+            {
+                var allocations = string.IsNullOrEmpty(allocationsJson) ? null : JsonConvert.DeserializeObject<List<PoolUnlockAllocation>>(allocationsJson);
+                return allocations is { Count: > 0 } && Attestation.BtcWithdrawals.ExitIsOnWatchedVaults(allocations, out _) == true;
+            }
+            catch { return false; }
+        }
+
+        private static List<string> AllocatedVaults(string? allocationsJson)
+        {
+            try
+            {
+                return (string.IsNullOrEmpty(allocationsJson) ? null : JsonConvert.DeserializeObject<List<PoolUnlockAllocation>>(allocationsJson))?
+                    .Select(a => a.SmartContractUID).Where(v => !string.IsNullOrEmpty(v)).Distinct(StringComparer.Ordinal).ToList() ?? new List<string>();
+            }
+            catch { return new List<string>(); }
+        }
+
+        /// <summary>The chain's record of this burn's exit when it is one that consensus pays (it draws on watched vaults); null otherwise.</summary>
+        private static VBTCBridgeBtcExitState? WatchedExitOnChain(string baseBurnTxHash)
+        {
+            var exit = VBTCBridgeBtcExitState.GetByBurnHash(baseBurnTxHash);
+            return Attestation.BtcWithdrawals.IsWatchedExit(exit) ? exit : null;
+        }
+
+        /// <summary>
+        /// Brings this caster's record in line with the chain's for an exit consensus pays: complete when Bitcoin has
+        /// paid it, otherwise still open (and looked at again later). Nothing is signed or sent from here.
+        /// </summary>
+        private static void FollowWatchedExit(ProcessedBurnRecord record, VBTCBridgeBtcExitState onChain)
+        {
+            record.CompletionVfxTxHash = onChain.ExitTxHash;
+            record.AllocationsJson = onChain.AllocationsJson ?? record.AllocationsJson;
+            if (onChain.IsComplete)
+            {
+                record.BtcTxHash = onChain.BtcTxHash ?? "";
+                record.Status = BurnExitStatus.Complete;
+                return;
+            }
+            record.Status = BurnExitStatus.VfxTxCreated;
+            record.DetectedAtBlock = Globals.LastBlock?.Height ?? record.DetectedAtBlock;
+        }
+
         private static async Task ExecuteBtcExit(ProcessedBurnRecord record)
         {
             var ownerAddress = Globals.ValidatorAddress;
@@ -636,12 +775,35 @@ namespace VerifiedXCore.Bitcoin.Services
             bool exitToBtcAlreadyConfirmed = !string.IsNullOrEmpty(record.CompletionVfxTxHash);
             List<PoolUnlockAllocation> allSuccessfulAllocations;
 
+            // An exit on vaults the chain watches is out of this caster's hands once its exit transaction is mined:
+            // consensus pins its Bitcoin transactions, the vaults' signers sign them, and Bitcoin completes it. If it
+            // could not be pinned, consensus fails it and restores its locks; only then is it made again here.
+            var watchedOnChain = WatchedExitOnChain(record.BaseBurnTxHash);
+            if (watchedOnChain != null && !watchedOnChain.IsFailedRecord)
+            {
+                FollowWatchedExit(record, watchedOnChain);
+                return;
+            }
+            var vaultsThatCouldNotPay = new HashSet<string>(StringComparer.Ordinal);
+            if (watchedOnChain != null)
+            {
+                foreach (var vault in AllocatedVaults(watchedOnChain.AllocationsJson))
+                    vaultsThatCouldNotPay.Add(vault);
+                record.CompletionVfxTxHash = "";
+                exitToBtcAlreadyConfirmed = false;
+                LogUtility.Log($"[BurnExitConsensus] The exit for burn {record.BaseBurnTxHash} was failed by the chain ({watchedOnChain.BtcTxHash}); its locks are restored. Making it again.",
+                    "BurnExitConsensusService.ExecuteBtcExit()");
+            }
+
             if (!exitToBtcAlreadyConfirmed)
             {
                 // ----------------------------------------------------------------
                 // Step 2: Compute FIFO allocation plan (full amount, one pass)
                 // ----------------------------------------------------------------
-                var allocations = BridgePoolUnlockService.ComputeAllocationPlan(record.Amount, excludedContracts);
+                // First without the vaults whose coins could not pay the last attempt; with them if there is no other way.
+                var allocations = (vaultsThatCouldNotPay.Count == 0 ? null : BridgePoolUnlockService.ComputeExitAllocationPlan(
+                        record.Amount, new HashSet<string>(excludedContracts.Concat(vaultsThatCouldNotPay)), VBTCService.NextBlockHeight, record.BtcDestination))
+                    ?? BridgePoolUnlockService.ComputeExitAllocationPlan(record.Amount, excludedContracts, VBTCService.NextBlockHeight, record.BtcDestination);
                 if (allocations == null || allocations.Count == 0)
                 {
                     record.Status = BurnExitStatus.Failed;
@@ -703,11 +865,29 @@ namespace VerifiedXCore.Bitcoin.Services
                     return;
                 }
 
+                if (IsOnWatchedVaults(record.AllocationsJson))
+                {
+                    // Stays in this status; CheckForStuckExits follows the chain's record until it is paid or failed.
+                    record.DetectedAtBlock = Globals.LastBlock?.Height ?? record.DetectedAtBlock;
+                    LogUtility.Log($"[BurnExitConsensus] VFX EXIT_TO_BTC confirmed for burn {record.BaseBurnTxHash}. Its Bitcoin transactions are fixed by consensus; the vaults' signers sign them and Bitcoin completes the exit.",
+                        "BurnExitConsensusService.ExecuteBtcExit()");
+                    return;
+                }
+
                 LogUtility.Log($"[BurnExitConsensus] VFX EXIT_TO_BTC confirmed in block. Proceeding to FROST signing for burn {record.BaseBurnTxHash}.",
                     "BurnExitConsensusService.ExecuteBtcExit()");
             }
             else
             {
+                if (IsOnWatchedVaults(record.AllocationsJson))
+                {
+                    // Sent, but the chain holds no exit for this burn (handled above otherwise): there is nothing to
+                    // fail and no failure transaction would be accepted. Start over.
+                    record.CompletionVfxTxHash = "";
+                    record.Status = BurnExitStatus.Pending;
+                    return;
+                }
+
                 // Retry path: EXIT_TO_BTC was confirmed but FROST failed previously.
                 // Broadcast a FAIL TX to restore locks, then restart the full flow.
                 LogUtility.Log($"[BurnExitConsensus] EXIT_TO_BTC already confirmed ({record.CompletionVfxTxHash}) but FROST not done. Broadcasting FAIL TX to restore locks before retry.",
@@ -826,7 +1006,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     {
                         record.Status = BurnExitStatus.FrostInProgress;
 
-                        var syntheticHash = $"btcexit_{record.BaseBurnTxHash[..Math.Min(16, record.BaseBurnTxHash.Length)]}_{scUID[..Math.Min(8, scUID.Length)]}";
+                        var syntheticHash = Attestation.BtcWithdrawals.ExitSigningReference(record.BaseBurnTxHash, scUID); // the signers' canonical spelling
 
                         var frostResult = await VBTCService.CompleteWithdrawal(
                             scUID, syntheticHash,
@@ -983,6 +1163,10 @@ namespace VerifiedXCore.Bitcoin.Services
                         {
                             LogUtility.Log($"[BurnExitConsensus] Partial FAIL TX broadcast: {partialFailResult.TxHashOrError}. Failed locks will be restored/blacklisted on-chain.",
                                 "BurnExitConsensusService.ExecuteBtcExit()");
+                            // The completion waits for the failure to be mined: mined first, it closed the exit and the
+                            // failure was refused, leaving the failed parts' locks drawn for good (fifth review, round 22).
+                            if (!await WaitForVfxTxConfirmation(partialFailResult.TxHashOrError, 300_000))
+                                LogUtility.Log("[BurnExitConsensus] Partial FAIL TX not confirmed in time; completing anyway.", "BurnExitConsensusService.ExecuteBtcExit()");
                         }
                         else
                         {
@@ -1069,6 +1253,40 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// A pool unlock was marked complete once broadcast. If its transaction is then refused (the destination's vault
+        /// filled up meanwhile, or its locks were drawn by another unlock first) the burn sat unused for good. One whose
+        /// burn the chain has not consumed some blocks after the broadcast is made again, from a new plan (fourth review,
+        /// round 7). The burn hash is single-use in consensus, so a late first transaction and a second cannot both credit.
+        /// </summary>
+        /// <summary>
+        /// Whether a pool unlock's record is to be made again: null when it is not one waiting to be seen mined (another
+        /// kind, not complete, broadcast too recently), false when its burn was consumed, true when it was not.
+        /// </summary>
+        internal static bool? UnlockToRemake(ProcessedBurnRecord r, long currentBlock, Func<string, bool>? burnUsed = null)
+        {
+            if (r.ExitType != BurnExitType.VfxPoolUnlock || r.Status != BurnExitStatus.Complete || r.CompletionBroadcastAtBlock <= 0
+                || currentBlock - r.CompletionBroadcastAtBlock <= STUCK_EXIT_BLOCK_THRESHOLD)
+                return null;
+            return burnUsed == null ? true : !burnUsed(r.BaseBurnTxHash);
+        }
+
+        internal static async Task RetryUnminedPoolUnlocks(long currentBlock)
+        {
+            foreach (var record in _processedBurns.Values.Where(r => UnlockToRemake(r, currentBlock) != null).ToList())
+            {
+                if (UnlockToRemake(record, currentBlock, VBTCBridgeConsumedBurn.IsBurnUsedAnywhere) == false) { record.CompletionBroadcastAtBlock = 0; continue; } // mined
+                LogUtility.Log($"[BurnExitConsensus] Pool unlock {record.CompletionVfxTxHash} for burn {record.BaseBurnTxHash} was not mined in {STUCK_EXIT_BLOCK_THRESHOLD} blocks; made again.", "BurnExitConsensusService.RetryUnminedPoolUnlocks()");
+                record.CompletionBroadcastAtBlock = 0;
+                record.Status = BurnExitStatus.Pending;
+                record.DetectedAtBlock = currentBlock;
+                record.HandlerCasterAddress = "";
+                record.ConsensusVotes.Clear();
+                record.CompletionVfxTxHash = "";
+                await RunConsensusRound(record.BaseBurnTxHash);
+            }
+        }
+
+        /// <summary>
         /// Detects exits stuck in any intermediate state for too long.
         /// For BTC exits where BTC was already sent, only retries the COMPLETE broadcast.
         /// For all other cases, resets to Pending for re-consensus.
@@ -1076,6 +1294,7 @@ namespace VerifiedXCore.Bitcoin.Services
         private static async Task CheckForStuckExits()
         {
             var currentBlock = Globals.LastBlock?.Height ?? 0;
+            await RetryUnminedPoolUnlocks(currentBlock);
             var stuckExits = _processedBurns.Values
                 .Where(r => (r.Status == BurnExitStatus.InConsensus ||
                              r.Status == BurnExitStatus.ConsensusReached ||
@@ -1086,6 +1305,14 @@ namespace VerifiedXCore.Bitcoin.Services
 
             foreach (var stuck in stuckExits)
             {
+                // An exit consensus pays is not stuck while the chain holds it open: it is waiting for Bitcoin.
+                var watchedOnChain = stuck.ExitType == BurnExitType.BtcExit ? WatchedExitOnChain(stuck.BaseBurnTxHash) : null;
+                if (watchedOnChain != null && !watchedOnChain.IsFailedRecord)
+                {
+                    FollowWatchedExit(stuck, watchedOnChain);
+                    continue;
+                }
+
                 // If BTC was already sent (BtcTxHash populated), do NOT restart the full flow.
                 // Only retry the EXIT_TO_BTC_COMPLETE broadcast to avoid double-sending BTC.
                 if (stuck.ExitType == BurnExitType.BtcExit && !string.IsNullOrEmpty(stuck.BtcTxHash))
@@ -1204,9 +1431,9 @@ namespace VerifiedXCore.Bitcoin.Services
             else record.BtcDestination = evidence.Destination ?? "";
         }
 
-        private static async Task<(bool Ok, bool Transient, string Reason, BaseBridgeService.BurnEventInfo? Evidence)> VerifyBurnEvidenceAsync(ProcessedBurnRecord record)
+        internal static async Task<(bool Ok, bool Transient, string Reason, BaseBridgeService.BurnEventInfo? Evidence)> VerifyBurnEvidenceAsync(ProcessedBurnRecord record)
         {
-            if (!BaseBridgeService.IsEnabled)
+            if (!BaseBridgeService.IsEnabled && BaseBridgeService.BurnEventsForTests == null)
                 return (false, true, "Base bridge RPC/contract not configured on this caster; cannot verify the burn", null);
 
             var expectedSats = (long)(record.Amount * 100_000_000M);
@@ -1219,6 +1446,25 @@ namespace VerifiedXCore.Bitcoin.Services
                 // are answers: the alert pointed at something that is not a burn of this type.
                 var transient = reason.StartsWith("Could not read", StringComparison.OrdinalIgnoreCase)
                                 || reason.IndexOf("receipt not found", StringComparison.OrdinalIgnoreCase) >= 0;
+                // A positioned id met before the path-audit rules (a caster a block behind the one that named it) is
+                // asked again once they are reached, not failed and pruned (#291).
+                if (string.Equals(reason, BaseBridgeService.PositionBeforeRules, StringComparison.Ordinal))
+                    return (false, true, $"burn evidence not yet: {reason}", null);
+                // The type comes from Base too, like the amount and destination: a committee caster's alert naming the
+                // other type had every caster that took it fail the burn and skip it for good (fifth review, round 21).
+                if (!transient)
+                {
+                    var (otherOk, otherInfo, otherReason) = await BaseBridgeService.TryGetBurnEventAsync(record.BaseBurnTxHash, vfxExit: record.ExitType != BurnExitType.VfxPoolUnlock);
+                    if (otherOk && otherInfo != null)
+                    {
+                        record.ExitType = record.ExitType == BurnExitType.VfxPoolUnlock ? BurnExitType.BtcExit : BurnExitType.VfxPoolUnlock;
+                        return (false, false, "burn evidence: the burn is of the other type; the record takes Base's", otherInfo);
+                    }
+                    // The other type's look-up could not be answered: asked again later, not failed (round 22).
+                    if (otherReason.StartsWith("Could not read", StringComparison.OrdinalIgnoreCase)
+                        || otherReason.IndexOf("receipt not found", StringComparison.OrdinalIgnoreCase) >= 0)
+                        transient = true;
+                }
                 return (false, transient, $"burn evidence unavailable: {reason}", null);
             }
 

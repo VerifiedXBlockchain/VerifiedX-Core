@@ -737,9 +737,9 @@ namespace VerifiedXCore.Nodes
                                 var rating = await TransactionRatingService.GetTransactionRating(transaction);
                                 transaction.TransactionRating = rating;
 
-                                if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
+                                if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
+                                    && MempoolEvictionUtility.TryAdmitAndInsert(transaction, mempool))
                                 {
-                                    mempool.InsertSafe(transaction);
                                     
                                     // Broadcast guard: Only broadcast if we haven't broadcast this TX recently
                                     var now = TimeUtil.GetTime();
@@ -775,6 +775,10 @@ namespace VerifiedXCore.Nodes
                                     }
 
                                 }
+                                else
+                                {
+                                    VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // verified but not pooled: claims nothing (round 32)
+                                }
                             }
 
                         }
@@ -807,9 +811,13 @@ namespace VerifiedXCore.Nodes
                             var rating = await TransactionRatingService.GetTransactionRating(transaction);
                             transaction.TransactionRating = rating;
 
-                            if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
+                            if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
+                                    && MempoolEvictionUtility.TryAdmitAndInsert(transaction, mempool))
                             {
-                                mempool.InsertSafe(transaction);
+                            }
+                            else
+                            {
+                                VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // verified but not pooled: claims nothing (round 32)
                             }
                         }
                     }
@@ -1055,7 +1063,7 @@ namespace VerifiedXCore.Nodes
             var SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
             .Union(Globals.BannedIPs.Keys)
             .Union(Globals.SkipValPeers.Keys)
-            .Union(Globals.ReportedIPs.Keys));
+            .Union(P2PClient.OwnAddressesToSkip()));
 
             if (!skipConnectedNodes)
             {
@@ -1084,7 +1092,7 @@ namespace VerifiedXCore.Nodes
                 SkipIPs = new HashSet<string>(Globals.ValidatorNodes.Values.Select(x => x.NodeIP.Replace(":" + Globals.Port, ""))
                 .Union(Globals.BannedIPs.Keys)
                 .Union(Globals.SkipValPeers.Keys)
-                .Union(Globals.ReportedIPs.Keys));
+                .Union(P2PClient.OwnAddressesToSkip()));
 
                 peerList = peerDB.Find(x => x.IsValidator).ToArray()
                 .Where(x => !SkipIPs.Contains(x.PeerIP))

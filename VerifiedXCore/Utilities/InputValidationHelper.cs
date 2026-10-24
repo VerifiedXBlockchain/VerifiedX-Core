@@ -342,10 +342,13 @@ namespace VerifiedXCore.Utilities
                     return (false, "Block is null");
                 }
 
-                // Check if block size exceeds configured maximum
-                if (block.Size > Globals.MaxBlockSizeBytes)
+                // The size is also measured here, as the gossip path measures it (BlockStaging.LocalSize): the carried Size
+                // field is whatever the sender wrote, so a block carrying a small Size passed at any length.
+                // A block without its transaction list cannot be serialized; it is refused by validation and keeps the carried figure here.
+                var size = block.Transactions == null ? block.Size : Math.Max(block.Size, VerifiedXCore.Services.BlockStaging.LocalSize(block));
+                if (size > Globals.MaxBlockSizeBytes)
                 {
-                    var errorMsg = $"Block size {block.Size} bytes exceeds maximum allowed {Globals.MaxBlockSizeBytes} bytes";
+                    var errorMsg = $"Block size {size} bytes exceeds maximum allowed {Globals.MaxBlockSizeBytes} bytes";
                     ErrorLogUtility.LogError($"HAL-19 Security: {errorMsg} from {sourceIP}", "InputValidationHelper.ValidateBlockSize()");
                     return (false, errorMsg);
                 }

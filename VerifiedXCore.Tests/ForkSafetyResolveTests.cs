@@ -39,6 +39,41 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ARestart_DoesNotForgetWhatWasSigned()
+        {
+            var store = AttestationGuard.ResetForTests();
+            Assert.True(AttestationGuard.TryClaim(7_414_815, Agreed));
+
+            AttestationGuard.ForgetMemoryForTests();                        // the process restarts; the database does not
+            Assert.False(AttestationGuard.TryClaim(7_414_815, Stale));      // still refused
+            Assert.True(AttestationGuard.TryClaim(7_414_815, Agreed));
+            Assert.Equal(Agreed, AttestationGuard.SignedAt(7_414_815));
+
+            // A caster that cannot read or record what it signed does not sign.
+            AttestationGuard.ForgetMemoryForTests();
+            store.Available = false;
+            Assert.False(AttestationGuard.TryClaim(7_414_816, Agreed));
+            Assert.Null(AttestationGuard.SignedAt(7_414_815));
+            store.Available = true;
+            Assert.True(AttestationGuard.TryClaim(7_414_816, Agreed));
+
+            // The operator reset is the only thing that releases a height.
+            Assert.Equal(2, AttestationGuard.ClearForOperatorReset());
+            Assert.True(AttestationGuard.TryClaim(7_414_815, Stale));
+        }
+
+        [Fact]
+        public void OldClaims_ArePruned_FromMemoryAndTheStore()
+        {
+            var store = AttestationGuard.ResetForTests();
+            for (var h = 1; h <= 401; h++)
+                Assert.True(AttestationGuard.TryClaim(h, Agreed));
+            Assert.Null(AttestationGuard.SignedAt(1));                      // more than 200 heights back: dropped
+            Assert.Equal(Agreed, AttestationGuard.SignedAt(300));
+            Assert.DoesNotContain(store.Load()!, r => r.Id < 201);
+        }
+
+        [Fact]
         public void ACommittedTipOtherThanTheSignedBlock_IsAWrongBlock()
         {
             Assert.Null(BlockcasterNode.SignedElsewhere(7_414_815, Stale));                // nothing signed there

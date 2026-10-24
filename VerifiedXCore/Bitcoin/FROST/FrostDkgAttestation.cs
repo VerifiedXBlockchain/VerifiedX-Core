@@ -39,6 +39,20 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// <summary>FROST minimum: a threshold key needs at least three participants.</summary>
         public const int MinParticipants = 3;
 
+        /// <summary>
+        /// A vault's new key (a re-key, plan 8.8) is made at this share of its holders, whoever leads the ceremony and
+        /// whatever the old key used: chosen by the leader, a key every holder had to sign with could be withheld by
+        /// any one of them, and would fall due again at once.
+        /// </summary>
+        public const int RekeyThresholdPercent = 67;
+
+        /// <summary>
+        /// The share of eligible validators a re-key's ceremony must include. Lower than a creation's: a re-key is
+        /// needed exactly when validators are leaving, and one that cannot be made in time loses the vault's Bitcoin.
+        /// Still two thirds of every eligible stake, each attesting.
+        /// </summary>
+        public const double RekeyParticipationShare = 0.67;
+
         public class Attestation
         {
             public string ValidatorAddress { get; set; } = "";
@@ -55,24 +69,163 @@ namespace VerifiedXCore.Bitcoin.FROST
             public int Threshold { get; set; }
             public List<string> Participants { get; set; } = new();
             public List<Attestation> Attestations { get; set; } = new();
+            /// <summary>
+            /// SHA-256 of the public key package every participant finished with (the group key and every holder's
+            /// verifying share, derived from all the commitments it was given), lowercase hex. Every attestation signs it,
+            /// so a proof stands only if all participants were given the same commitments (see <see cref="KeyPackageHash"/>).
+            /// </summary>
+            [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+            public string? PublicKeyPackageHash { get; set; }
+
+            /// <summary>
+            /// Each participant's Round 1 constant term and its proof of knowledge, by address (a creation's proof). The
+            /// terms sum to the group key, and each proof shows its dealer knows its term's secret: together, that the
+            /// participants hold the key (<see cref="KeyPossessionRefusal"/>).
+            /// </summary>
+            [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+            public Dictionary<string, Round1Proof>? Round1Proofs { get; set; }
         }
+
+        /// <summary>
+        /// A dealer's Round 1 constant term (33-byte compressed point, hex) and its BIP340 signature, made with the term's
+        /// secret, over <see cref="PossessionMessage"/> of this vault.
+        /// </summary>
+        public class Round1Proof
+        {
+            public string ConstantTerm { get; set; } = "";
+            public string PossessionSignature { get; set; } = "";
+        }
+
+        // ── Possession of the key ─────────────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// What each dealer signs with its constant term's secret: this vault (UID), its owner and its group key. Bound to
+        /// the vault, so a signature made for one creation proves nothing for another (round 12: FROST's own proofs of
+        /// knowledge name only a participant's position, and anyone could copy a pending creation's into theirs).
+        /// </summary>
+        public static byte[] PossessionMessage(string contractUid, string owner, string groupPublicKey) =>
+            System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes($"VFX-VAULT-KEY-POSSESSION|{contractUid}|{owner}|{groupPublicKey}"));
+
+        /// <summary>
+        /// A participant's possession proof from its own Round 1 secret (the native library's secret package: its first
+        /// coefficient is the constant term's secret): the term and a BIP340 signature over this vault's possession
+        /// message. Null when the package does not read.
+        /// </summary>
+        public static Round1Proof? SignPossession(string? round1SecretPackage, string contractUid, string owner, string groupPublicKey)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(round1SecretPackage)) return null;
+                var json = Newtonsoft.Json.Linq.JObject.Parse(round1SecretPackage);
+                var secret = Convert.FromHexString((string)json["coefficients"]![0]!);
+                if (!NBitcoin.Secp256k1.ECPrivKey.TryCreate(secret, out var key) || key == null) return null;
+                var term = key.CreatePubKey().ToBytes(true);
+                var signature = key.SignBIP340(PossessionMessage(contractUid, owner, groupPublicKey));
+                return new Round1Proof { ConstantTerm = Convert.ToHexString(term).ToLowerInvariant(), PossessionSignature = Convert.ToHexString(signature.ToBytes()).ToLowerInvariant() };
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// Why a creation's proof does not show that its participants hold the key it names, for this vault; null when it
+        /// does. Every participant gives its Round 1 constant term with a BIP340 signature made with the term's secret over
+        /// this vault's possession message, and the terms sum to the group key. An S3C vault needs only a few of its own
+        /// validators' attestations, and the deposit address is the group key itself: three self-declared S3C validators
+        /// could name any Taproot address (a pending vault's, a re-key's, anyone's) and have its Bitcoin credited to their
+        /// vault (fourth review, round 11), and FROST's own proofs of knowledge, bound only to a participant's position,
+        /// could be copied from a pending creation (round 12). Nobody can sign for this vault with a key they do not hold.
+        /// </summary>
+        public static string? KeyPossessionRefusal(Proof proof, IReadOnlyList<string> canonicalParticipants, string groupKeyHex, string contractUid, string owner)
+        {
+            if (proof.Round1Proofs == null || proof.Round1Proofs.Count != canonicalParticipants.Count)
+                return "The key ceremony proof carries no proof that its participants hold the key (each participant's Round 1 constant term, signed for this vault).";
+            var message = PossessionMessage(contractUid, owner, groupKeyHex);
+            var terms = new List<NBitcoin.Secp256k1.ECPubKey>();
+            foreach (var participant in canonicalParticipants)
+            {
+                if (!proof.Round1Proofs.TryGetValue(participant, out var round1) || round1 == null || !PossessionSignatureHolds(round1, message, out var term))
+                    return $"The key ceremony proof has no valid possession signature from participant {participant}.";
+                terms.Add(term!);
+            }
+            if (!NBitcoin.Secp256k1.ECPubKey.TryCombine(NBitcoin.Secp256k1.Context.Instance, terms, out var sum) || sum == null)
+                return "The participants' constant terms do not sum to a key.";
+            var groupKey = Convert.FromHexString(groupKeyHex);
+            var groupX = groupKey.Length == 33 ? groupKey.AsSpan(1).ToArray() : groupKey;
+            // The library's group key is the sum taken as a Taproot internal key and tweaked (BIP341, no script tree);
+            // knowing the sum's secret is knowing the tweaked key's, whose tweak is public. Either form is accepted.
+            var internalX = sum.ToBytes(true).AsSpan(1).ToArray();
+            var tweakedX = new TaprootInternalPubKey(internalX).GetTaprootFullPubKey().ToBytes();
+            return internalX.AsSpan().SequenceEqual(groupX) || tweakedX.AsSpan().SequenceEqual(groupX)
+                ? null : "The participants' constant terms do not sum to the vault's group key: they do not hold it.";
+        }
+
+        private static bool PossessionSignatureHolds(Round1Proof round1, byte[] message, out NBitcoin.Secp256k1.ECPubKey? term)
+        {
+            term = null;
+            try
+            {
+                var termBytes = Convert.FromHexString(round1.ConstantTerm ?? "");
+                var signatureBytes = Convert.FromHexString(round1.PossessionSignature ?? "");
+                if (termBytes.Length != 33 || signatureBytes.Length != 64) return false;
+                if (!NBitcoin.Secp256k1.ECPubKey.TryCreate(termBytes, NBitcoin.Secp256k1.Context.Instance, out _, out var point) || point == null) return false;
+                if (!NBitcoin.Secp256k1.SecpSchnorrSignature.TryCreate(signatureBytes, out var signature) || signature == null) return false;
+                if (!point.ToXOnlyPubKey().SigVerifyBIP340(signature, message)) return false;
+                term = point;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// The hash a participant signs of the public key package it finished a ceremony with. The ceremony's leader relays
+        /// every Round 1 commitment and nobody compared what they were given: a leader could give some participants other
+        /// commitments (and matching shares) than the rest, every check passed, every participant derived and attested the
+        /// same group key, and no group of holders could ever sign with it; through a re-key, one validator froze a
+        /// vault's Bitcoin for good (fourth review, round 3). Each holder's verifying share is derived from every
+        /// commitment it saw, so participants given different commitments finish with different packages.
+        /// </summary>
+        public static string? KeyPackageHash(string? publicKeyPackage) =>
+            string.IsNullOrEmpty(publicKeyPackage) ? null
+                : Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(publicKeyPackage))).ToLowerInvariant();
+
+        private static bool IsKeyPackageHash(string? hash) =>
+            hash != null && hash.Length == 64 && hash.All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
 
         /// <summary>Participants in the one canonical order every signer and verifier uses.</summary>
         public static List<string> Canonical(IEnumerable<string>? participants) =>
             (participants ?? Enumerable.Empty<string>()).Where(a => !string.IsNullOrEmpty(a)).Distinct(StringComparer.Ordinal).OrderBy(a => a, StringComparer.Ordinal).ToList();
 
         /// <summary>The message every participant signs.</summary>
-        public static string Message(string contractUid, string groupPublicKey, string taprootAddress, string owner, int threshold, IEnumerable<string> participants) =>
-            $"VFX_DKG_ATTEST_V2|{contractUid}|{groupPublicKey}|{taprootAddress}|{owner}|{threshold}|{string.Join(",", Canonical(participants))}";
+        /// <param name="rekeyOf">
+        /// For a re-key's ceremony, the vault it makes a new key for. Part of what each participant signs, so a
+        /// creation's proof is never a re-key's and a re-key's names its vault.
+        /// </param>
+        /// <param name="keyPackageHash">The <see cref="KeyPackageHash"/> of the package this participant finished with.</param>
+        public static string Message(string contractUid, string groupPublicKey, string taprootAddress, string owner, int threshold, IEnumerable<string> participants, string? rekeyOf = null, string? keyPackageHash = null) =>
+            $"VFX_DKG_ATTEST_V2|{contractUid}|{groupPublicKey}|{taprootAddress}|{owner}|{threshold}|{string.Join(",", Canonical(participants))}"
+            + (string.IsNullOrEmpty(rekeyOf) ? "" : $"|REKEY|{rekeyOf}")
+            + (string.IsNullOrEmpty(keyPackageHash) ? "" : $"|PKP|{keyPackageHash}");
 
         /// <summary>The FROST signing threshold the validators use for n participants at a threshold percentage.</summary>
         public static int ThresholdFor(int participants, int thresholdPercent) => (int)Math.Ceiling(participants * (thresholdPercent / 100.0));
+
+        /// <summary>
+        /// How many of a new key's <paramref name="participants"/> sign together after a re-key: 67%, but never every one of
+        /// them (and never fewer than a majority). At three participants 67% is all three: such a key has no holder to
+        /// spare, is due for replacement at once, and was re-keyed and swept again and again (fourth review).
+        /// </summary>
+        public static int RekeyThreshold(int participants) =>
+            Math.Max(Required(participants), Math.Min(ThresholdFor(participants, RekeyThresholdPercent), participants - 1));
+
+        /// <summary>A ceremony's signing threshold: a re-key's by <see cref="RekeyThreshold"/>, a creation's by its percentage.</summary>
+        public static int CeremonyThreshold(int participants, int thresholdPercent, string? rekeyOf) =>
+            string.IsNullOrEmpty(rekeyOf) ? ThresholdFor(participants, thresholdPercent) : RekeyThreshold(participants);
 
         /// <summary>A new vBTC V2 contract UID. The DKG runs under this id so the attestations name the contract.</summary>
         public static string NewContractUid() => Guid.NewGuid().ToString("N") + ":" + VerifiedXCore.Utilities.TimeUtil.GetTime().ToString();
 
         /// <summary>The Bitcoin network consensus uses: fixed by the chain, not by configuration.</summary>
-        public static Network ConsensusNetwork => Globals.IsTestNet ? Network.TestNet4 : Network.Main;
+        public static Network ConsensusNetwork => Globals.IsTestNet ? Network.VfxSignet : Network.Main;
 
         /// <summary>
         /// Taproot address of a FROST group key (32-byte x-only or 33-byte compressed hex). The FROST signer signs with the
@@ -94,7 +247,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         }
 
         public static string BuildProof(string contractUid, string groupPublicKey, string taprootAddress, string owner, int threshold,
-            IEnumerable<string> participants, IEnumerable<Attestation> attestations) =>
+            IEnumerable<string> participants, IEnumerable<Attestation> attestations, string? keyPackageHash = null, Dictionary<string, Round1Proof>? round1Proofs = null) =>
             Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new Proof
             {
                 ProofType = ProofType,
@@ -105,6 +258,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                 Threshold = threshold,
                 Participants = Canonical(participants),
                 Attestations = attestations.ToList(),
+                PublicKeyPackageHash = string.IsNullOrEmpty(keyPackageHash) ? null : keyPackageHash,
+                Round1Proofs = round1Proofs,
             })));
 
         public static Proof? ParseProof(string? base64)
@@ -117,15 +272,15 @@ namespace VerifiedXCore.Bitcoin.FROST
             catch { return null; }
         }
 
-        public static bool Verify(Attestation? a, string contractUid, string groupPublicKey, string taprootAddress, string owner, int threshold, IEnumerable<string> participants) =>
+        public static bool Verify(Attestation? a, string contractUid, string groupPublicKey, string taprootAddress, string owner, int threshold, IEnumerable<string> participants, string? rekeyOf = null, string? keyPackageHash = null) =>
             a != null && !string.IsNullOrEmpty(a.ValidatorAddress) && !string.IsNullOrEmpty(a.Signature)
-            && SignatureService.VerifySignature(a.ValidatorAddress, Message(contractUid, groupPublicKey, taprootAddress, owner, threshold, participants), a.Signature);
+            && SignatureService.VerifySignature(a.ValidatorAddress, Message(contractUid, groupPublicKey, taprootAddress, owner, threshold, participants, rekeyOf, keyPackageHash), a.Signature);
 
         /// <summary>A majority (51%) of n, and never fewer than two.</summary>
         public static int Required(int n) => Math.Max(2, (int)Math.Ceiling(n * 0.51));
 
         /// <summary>Participants a public ceremony needs out of <paramref name="eligible"/> validators: at least 90%, and at least three.</summary>
-        public static int RequiredParticipants(int eligible) => Math.Max(MinParticipants, (int)Math.Ceiling(eligible * PublicParticipationShare));
+        public static int RequiredParticipants(int eligible, double share = PublicParticipationShare) => Math.Max(MinParticipants, (int)Math.Ceiling(eligible * share));
 
         /// <summary>
         /// This validator's attestation for a ceremony it completed, or null. It signs only when it is a participant, its key
@@ -133,7 +288,7 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// list), and the address is the group key's Taproot address. Owner, threshold and participants come from its own
         /// session: the leader is authenticated at the ceremony start.
         /// </summary>
-        public static Attestation? SignLocal(string? contractUid, string? groupPublicKey, string? taprootAddress, string? owner, int threshold, List<string>? participants)
+        public static Attestation? SignLocal(string? contractUid, string? groupPublicKey, string? taprootAddress, string? owner, int threshold, List<string>? participants, string? rekeyOf = null, string? keyPackageHash = null)
         {
             try
             {
@@ -152,7 +307,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     var recorded = Canonical(JsonConvert.DeserializeObject<List<string>>(stored.ParticipantOrderJson));
                     if (!recorded.SequenceEqual(list, StringComparer.Ordinal)) return null;
                 }
-                var signature = SignatureService.ValidatorSignature(Message(contractUid, groupPublicKey, taprootAddress, owner, threshold, list));
+                var signature = SignatureService.ValidatorSignature(Message(contractUid, groupPublicKey, taprootAddress, owner, threshold, list, rekeyOf, keyPackageHash));
                 return string.IsNullOrEmpty(signature) || signature == "ERROR" || signature == "F" ? null
                     : new Attestation { ValidatorAddress = me, Signature = signature };
             }
@@ -164,20 +319,23 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// <summary>Whether a contract created now (at the next block) must carry validator attestations.</summary>
         public static bool RequiredForNextBlock => (Globals.LastBlock?.Height ?? -1) + 1 >= Globals.VbtcV2DkgAttestationHeight;
 
-        /// <summary>The validators consensus counts for the next block: active at the tip and holding the validator balance.</summary>
+        /// <summary>
+        /// The validators consensus counts for a key ceremony judged in the next block: active at the tip, holding the
+        /// validator balance and, from the bond height, with a stake locked for two days (ValidatorBond.CeremonyEligible).
+        /// </summary>
         public static List<VBTCValidator> EligibleAtTip() =>
-            Services.VBTCValidatorRegistry.FundedOnly(Services.VBTCValidatorRegistry.GetActiveValidatorsAt(Globals.LastBlock?.Height ?? -1));
+            VerifiedXCore.Services.ValidatorBond.CeremonyEligible(Services.VBTCValidatorRegistry.GetActiveValidatorsAt(Globals.LastBlock?.Height ?? -1), (Globals.LastBlock?.Height ?? -1) + 1);
 
         /// <summary>
         /// Before a ceremony: null when enough validators are reachable for the contract to be accepted, else the reason. A
         /// public ceremony needs at least 90% of the funded active public validators; an S3C ceremony its whole pool. A
         /// ceremony with fewer could complete and produce a real key whose contract is refused.
         /// </summary>
-        public static string? PreCeremonyShortfall(int reachable, bool isS3C, int s3cPoolSize)
+        public static string? PreCeremonyShortfall(int reachable, bool isS3C, int s3cPoolSize, double share = PublicParticipationShare)
         {
             if (!RequiredForNextBlock) return null;
             var basis = isS3C ? s3cPoolSize : EligibleAtTip().Count(v => v.IsActive && !v.IsS3C);
-            var need = isS3C ? Math.Max(MinParticipants, s3cPoolSize) : RequiredParticipants(basis);
+            var need = isS3C ? Math.Max(MinParticipants, s3cPoolSize) : RequiredParticipants(basis, share);
             return reachable >= need ? null
                 : $"Only {reachable} validator(s) are reachable; a vBTC V2 contract needs a key ceremony with at least {need} of the {basis} eligible validators, so its creation would be refused. Try again when more validators are online.";
         }
@@ -186,15 +344,17 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// After a ceremony, before its deposit address is recorded or shown: null when the contract it produced would pass
         /// the consensus check at the tip (same rule, same validator set), else the reason.
         /// </summary>
-        public static string? CeremonyResultError(string contractUid, string? groupPublicKey, string? taprootAddress, string? dkgProof, List<string>? participants, bool isS3C, string owner)
+        public static string? CeremonyResultError(string contractUid, string? groupPublicKey, string? taprootAddress, string? dkgProof, List<string>? participants, bool isS3C, string owner, string? rekeyOf = null)
         {
-            if (!RequiredForNextBlock) return null;
+            if (!RequiredForNextBlock && rekeyOf == null) return null;
             var feature = new TokenizationV2Feature
             {
                 DepositAddress = taprootAddress ?? "", FrostGroupPublicKey = groupPublicKey ?? "", DKGProof = dkgProof ?? "",
                 ValidatorAddressesSnapshot = participants ?? new List<string>(), IsS3C = isS3C,
             };
-            return Validate(feature, contractUid, owner, EligibleAtTip);
+            return Validate(feature, contractUid, owner, EligibleAtTip, rekeyOf,
+                requireKeyPackageHash: rekeyOf != null || (Globals.LastBlock?.Height ?? -1) + 1 >= Globals.PathAuditRulesHeight,
+                requireKeyPossession: isS3C && rekeyOf == null && (Globals.LastBlock?.Height ?? -1) + 1 >= Globals.PathAuditRulesHeight);
         }
 
         /// <summary>
@@ -203,7 +363,15 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// derived from committed state up to height - 1 (deterministic on every node); it is read only after the cheap
         /// checks pass.
         /// </summary>
-        public static string? Validate(TokenizationV2Feature? feature, string contractUid, string owner, Func<List<VBTCValidator>> activeAtPreviousBlock)
+        /// <param name="rekeyOf">For a re-key (plan 8.8): the vault the new key is for. The attestations must name it, the
+        /// threshold is <see cref="RekeyThresholdPercent"/> of the participants exactly, and the ceremony includes at
+        /// least <see cref="RekeyParticipationShare"/> of the eligible validators.</param>
+        /// <param name="requireKeyPackageHash">
+        /// The proof must carry the hash of the public key package every participant attested (<see cref="KeyPackageHash"/>):
+        /// always for a re-key, from Globals.PathAuditRulesHeight for a creation.
+        /// </param>
+        public static string? Validate(TokenizationV2Feature? feature, string contractUid, string owner, Func<List<VBTCValidator>> activeAtPreviousBlock, string? rekeyOf = null, bool requireKeyPackageHash = false,
+            bool requireKeyPossession = false)
         {
             if (feature == null) return "vBTC V2 contract has no TokenizationV2 data.";
             var groupKey = feature.FrostGroupPublicKey ?? "";
@@ -218,6 +386,8 @@ namespace VerifiedXCore.Bitcoin.FROST
             var proof = ParseProof(feature.DKGProof);
             if (proof == null || proof.ProofType != ProofType)
                 return "vBTC V2 contract DKG proof is not a validator attestation proof.";
+            if (requireKeyPackageHash && !IsKeyPackageHash(proof.PublicKeyPackageHash))
+                return "vBTC V2 contract DKG proof does not name the public key package its participants finished with.";
             if (!string.Equals(proof.ContractUID, contractUid, StringComparison.Ordinal)
                 || !string.Equals(proof.GroupPublicKey, groupKey, StringComparison.Ordinal)
                 || !string.Equals(proof.TaprootAddress, address, StringComparison.Ordinal))
@@ -237,6 +407,8 @@ namespace VerifiedXCore.Bitcoin.FROST
             var n = canonical.Count;
             if (proof.Threshold < Required(n) || proof.Threshold > n)
                 return $"vBTC V2 contract signing threshold {proof.Threshold} is not a majority of its {n} participants.";
+            if (rekeyOf != null && proof.Threshold != RekeyThreshold(n))
+                return $"A vault's new key signs with {RekeyThreshold(n)} of its {n} holders ({RekeyThresholdPercent}%, never all); this one names {proof.Threshold}.";
 
             // Every participant: an active validator of the contract's class that holds the validator balance.
             var eligible = new HashSet<string>(activeAtPreviousBlock().Where(v => v != null && v.IsActive && v.IsS3C == feature.IsS3C && !string.IsNullOrEmpty(v.ValidatorAddress))
@@ -246,8 +418,9 @@ namespace VerifiedXCore.Bitcoin.FROST
                 return $"vBTC V2 contract key ceremony participant {notEligible} is not an eligible validator.";
 
             // Participation: a public ceremony includes nearly every eligible validator; an S3C ceremony is its own pool.
-            if (!feature.IsS3C && n < RequiredParticipants(eligible.Count))
-                return $"vBTC V2 contract key ceremony had {n} participants; at least {RequiredParticipants(eligible.Count)} of the {eligible.Count} eligible validators are required.";
+            var share = rekeyOf != null ? RekeyParticipationShare : PublicParticipationShare;
+            if (!feature.IsS3C && n < RequiredParticipants(eligible.Count, share))
+                return $"vBTC V2 contract key ceremony had {n} participants; at least {RequiredParticipants(eligible.Count, share)} of the {eligible.Count} eligible validators are required.";
 
             // Exactly one valid attestation from every participant.
             if (proof.Attestations == null || proof.Attestations.Count != n)
@@ -258,10 +431,10 @@ namespace VerifiedXCore.Bitcoin.FROST
                     return "vBTC V2 contract DKG proof carries a duplicate or unnamed attestation.";
             foreach (var p in canonical)
             {
-                if (!byAddress.TryGetValue(p, out var a) || !Verify(a, contractUid, groupKey, address, owner, proof.Threshold, canonical))
+                if (!byAddress.TryGetValue(p, out var a) || !Verify(a, contractUid, groupKey, address, owner, proof.Threshold, canonical, rekeyOf, proof.PublicKeyPackageHash))
                     return $"vBTC V2 contract DKG proof has no valid attestation from participant {p}.";
             }
-            return null;
+            return requireKeyPossession ? KeyPossessionRefusal(proof, canonical, groupKey, contractUid, owner) : null;
         }
     }
 }

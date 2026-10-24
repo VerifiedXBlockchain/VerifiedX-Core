@@ -22,6 +22,14 @@ namespace VerifiedXCore.BrowserWalletServices
         public string RequestHash { get; set; } = "";
     }
 
+    public class VBTCWDBump
+    {
+        public string ScUID { get; set; } = "";
+        public string OwnerAddress { get; set; } = "";
+        public string RequestHash { get; set; } = "";
+        public string FeeRate { get; set; } = "";
+    }
+
     public class VBTCWDCancel
     {
         public string ScUID { get; set; } = "";

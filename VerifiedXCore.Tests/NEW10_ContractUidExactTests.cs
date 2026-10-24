@@ -148,6 +148,50 @@ namespace VerifiedXCore.Tests
             Assert.Equal(allowed, error == null);
         }
 
+        /// <summary>
+        /// Contract state is indexed by UID (round 7) and LiteDB refuses an index key over 1,023 bytes: a UID that long would
+        /// be stored on some nodes and not on others. A created UID is at most 64 hex digits, ':' and 20 digits, at every
+        /// height, for a mint, a token and a vault alike, so none comes near it (fourth review, round 11).
+        /// </summary>
+        [Theory]
+        [InlineData("SC_MINT", "Mint()")]
+        [InlineData("NFT_MINT", "Mint()")]
+        [InlineData("FTKN_MINT", "TokenDeploy()")]
+        public void NEW10_ACreatedUid_IsNeverLongEnoughToMissTheIndex(string type, string function)
+        {
+            foreach (var uid in new[] { new string('a', 32) + ":" + new string('0', 1_100), new string('a', 65) + ":1790500011", new string('a', 32) + ":" + new string('1', 21) })
+            {
+                var tx = new Transaction
+                {
+                    FromAddress = _owner.Address, TransactionType = Enum.Parse<TransactionType>(type),
+                    Data = JsonConvert.SerializeObject(new[] { new { Function = function, ContractUID = uid, Data = "x" } }),
+                };
+                Assert.NotNull(LedgerIntegrityRules.ContractUids(tx));
+            }
+        }
+
+        /// <summary>
+        /// Whether the collation finds a stored contract for a UID with characters beyond ASCII (case pairs, characters it
+        /// ignores) follows each machine's ICU or NLS tables, so the exactness refusal differed by platform (round 26).
+        /// From the path-audit rules such a UID is refused outright.
+        /// </summary>
+        [Fact]
+        public void ANamedUidBeyondAscii_IsRefusedOnEveryPlatformAlike()
+        {
+            foreach (var odd in new[] { V2.Insert(3, "­"), V2 + "Ꟁ", "İ" + V2 })
+            {
+                var tx = new Transaction { FromAddress = _holder.Address, TransactionType = TransactionType.TX, Data = "{\"ContractUID\":\"" + odd + "\"}" };
+                Assert.Contains("plain ASCII", LedgerIntegrityRules.ContractUids(tx, Globals.PathAuditRulesHeight));
+                Assert.DoesNotContain("plain ASCII", LedgerIntegrityRules.ContractUids(tx, Globals.PathAuditRulesHeight - 1) ?? "");
+            }
+            var exact = new Transaction { FromAddress = _holder.Address, TransactionType = TransactionType.TX, Data = "{\"ContractUID\":\"" + V2 + "\"}" };
+            Assert.Null(LedgerIntegrityRules.ContractUids(exact, Globals.PathAuditRulesHeight));
+            // Round 27: the format's "$" let a created UID end in a line break; refused from the path-audit rules.
+            var created = new Transaction { FromAddress = _owner.Address, TransactionType = TransactionType.NFT_MINT,
+                Data = JsonConvert.SerializeObject(new[] { new { Function = "Mint()", ContractUID = "abc:123\n", Data = "x" } }) };
+            Assert.NotNull(LedgerIntegrityRules.ContractUids(created, Globals.PathAuditRulesHeight));
+        }
+
         [Theory]
         [InlineData("scuid")]
         [InlineData("Scuid")]

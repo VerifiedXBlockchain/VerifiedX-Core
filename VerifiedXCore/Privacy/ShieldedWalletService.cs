@@ -8,8 +8,12 @@ namespace VerifiedXCore.Privacy
     /// </summary>
     public static class ShieldedWalletService
     {
-        /// <summary>Insert or replace by <see cref="ShieldedWallet.ShieldedAddress"/>.</summary>
-        public static void Upsert(ShieldedWallet wallet, LiteDatabase? db = null)
+        /// <summary>
+        /// Insert or replace by <see cref="ShieldedWallet.ShieldedAddress"/>. With <paramref name="notesAsGiven"/> (a resync)
+        /// the notes and balances are saved as given even when empty: an empty rebuild took the stored ones back, so a
+        /// resync that found no note matching the chain kept the forged ones it was run to clear (fifth review, round 25).
+        /// </summary>
+        public static void Upsert(ShieldedWallet wallet, LiteDatabase? db = null, bool notesAsGiven = false)
         {
             var target = db ?? PrivacyDbContext.GetPrivacyDb();
             var col = target.GetCollection<ShieldedWallet>(PrivacyDbContext.PRIV_WALLETS);
@@ -23,11 +27,11 @@ namespace VerifiedXCore.Privacy
                 if (wallet.LastScannedBlock == 0 && existing.LastScannedBlock > 0)
                     wallet.LastScannedBlock = existing.LastScannedBlock;
 
-                if ((wallet.UnspentCommitments == null || wallet.UnspentCommitments.Count == 0)
+                if (!notesAsGiven && (wallet.UnspentCommitments == null || wallet.UnspentCommitments.Count == 0)
                     && existing.UnspentCommitments != null && existing.UnspentCommitments.Count > 0)
                     wallet.UnspentCommitments = existing.UnspentCommitments;
 
-                if ((wallet.ShieldedBalances == null || wallet.ShieldedBalances.Count == 0)
+                if (!notesAsGiven && (wallet.ShieldedBalances == null || wallet.ShieldedBalances.Count == 0)
                     && existing.ShieldedBalances != null && existing.ShieldedBalances.Count > 0)
                     wallet.ShieldedBalances = existing.ShieldedBalances;
 
@@ -53,8 +57,49 @@ namespace VerifiedXCore.Privacy
         public static ShieldedWallet? FindByZfxAddress(string zfxAddress, LiteDatabase? db = null)
         {
             var target = db ?? PrivacyDbContext.GetPrivacyDb();
-            return target.GetCollection<ShieldedWallet>(PrivacyDbContext.PRIV_WALLETS)
-                .FindOne(x => x.ShieldedAddress == zfxAddress);
+            var col = target.GetCollection<ShieldedWallet>(PrivacyDbContext.PRIV_WALLETS);
+            var exact = col.FindOne(x => x.ShieldedAddress == zfxAddress);
+            if (exact != null)
+                return exact;
+            // Stage 3: the same keys have a v1 and a v2 address string; a row stored under one is found by the other.
+            if (!ShieldedAddressCodec.TryDecodeEncryptionKey(zfxAddress, out var enc, out _))
+                return null;
+            foreach (var w in col.FindAll())
+            {
+                if (ShieldedAddressCodec.TryDecodeEncryptionKey(w.ShieldedAddress, out var e2, out _) && e2.AsSpan().SequenceEqual(enc))
+                    return w;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// The address this wallet row should be paid at now: the v2 encoding (encryption key + owner key) of its keys,
+        /// whatever string the row was created with. Falls back to the stored string when the keys cannot be read.
+        /// </summary>
+        public static string CurrentAddress(ShieldedWallet w)
+        {
+            try
+            {
+                if (w?.ViewingKey == null || w.ViewingKey.Length != 32) return w?.ShieldedAddress ?? "";
+                if (!ShieldedAddressCodec.TryDecodeEncryptionKey(w.ShieldedAddress, out var enc, out _)) return w.ShieldedAddress;
+                return ShieldedAddressCodec.Encode(enc, ShieldedKeyMaterial.OwnerPkFromViewingKey(w.ViewingKey));
+            }
+            catch { return w?.ShieldedAddress ?? ""; }
+        }
+
+        /// <summary>
+        /// Creates (or refreshes) the wallet row for a transparent account's key, and a row for each identity earlier
+        /// builds could have derived from the key (<see cref="ShieldedHdDerivation.DeriveLegacyIdentities"/>), so notes
+        /// paid to them are still scanned and spendable. An existing row keeps its notes and scan state. Returns the
+        /// key's identity.
+        /// </summary>
+        public static ShieldedKeyMaterial UpsertFromAccountKey(string accountKeyHex, string transparentSourceAddress, string? password, LiteDatabase? db = null)
+        {
+            var material = ShieldedHdDerivation.DeriveFromPrivateKey(accountKeyHex);
+            Upsert(CreateFromKeyMaterial(material, transparentSourceAddress, password), db);
+            foreach (var legacy in ShieldedHdDerivation.DeriveLegacyIdentities(accountKeyHex))
+                Upsert(CreateFromKeyMaterial(legacy, transparentSourceAddress, password), db);
+            return material;
         }
 
         /// <summary>Builds a wallet row from HD material; optionally wraps spending+encryption secrets with <paramref name="password"/>.</summary>

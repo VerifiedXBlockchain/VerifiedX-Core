@@ -250,7 +250,10 @@ namespace VerifiedXCore.BrowserWalletServices
             return new { success = broadcastOk, hash = tx!.Hash, type = "VBTC_PRIVATE_TRANSFER", amount, fromZfxAddress, toZfxAddress, scUID, detail = json };
         }
 
-        public static object ScanShieldedVBTC(string zfxAddress, string scUID, string? password, long? fromBlock, long? toBlock)
+        public static object ScanShieldedVBTC(string zfxAddress, string scUID, string? password, long? fromBlock, long? toBlock) =>
+            ShieldedWalletLock.Holding(zfxAddress, () => ScanShieldedVBTCCore(zfxAddress, scUID, password, fromBlock, toBlock)); // the wallet's lock: a scan wrote over the auto-scanner's changes made meanwhile (round 25)
+
+        private static object ScanShieldedVBTCCore(string zfxAddress, string scUID, string? password, long? fromBlock, long? toBlock)
         {
             if (string.IsNullOrWhiteSpace(zfxAddress) || !zfxAddress.StartsWith("zfx_"))
                 return new { success = false, message = "Invalid zfx_ address." };
@@ -273,7 +276,7 @@ namespace VerifiedXCore.BrowserWalletServices
             foreach (var u in w.UnspentCommitments ?? new List<UnspentCommitment>())
             {
                 if (!string.IsNullOrEmpty(u.Commitment))
-                    merged.Add(u.Commitment);
+                    merged.Add(PrivacyApiHelper.NoteIdentity(u));
             }
 
             for (long h = scanFrom; h <= scanTo; h++)
@@ -284,9 +287,22 @@ namespace VerifiedXCore.BrowserWalletServices
                 foreach (var tx in block.Transactions)
                 {
                     txsScanned++;
-                    if (tx?.Data == null || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
+                    if (tx?.Data == null || !PrivateTransactionTypes.IsPrivateTransaction(tx.TransactionType) || !PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out _))
                         continue;
-                    if (payload?.Outs == null)
+                    if (payload == null)
+                        continue;
+                    // Notes this transaction spends, each by its own nullifier, as the node scans mark them: the browser
+                    // scans only added notes, so one received and spent within the range showed as unspent for good (round 26).
+                    foreach (var uc in w.UnspentCommitments ?? new List<UnspentCommitment>())
+                    {
+                        if (uc == null || uc.IsSpent || string.IsNullOrEmpty(uc.Commitment)) continue;
+                        if (!PrivacyApiHelper.SpendsWalletNote(tx, payload, uc, keys, block.Height)) continue;
+                        uc.IsSpent = true;
+                        var spentAsset = uc.AssetType ?? "";
+                        if (w.ShieldedBalances.ContainsKey(spentAsset))
+                            w.ShieldedBalances[spentAsset] -= uc.Amount;
+                    }
+                    if (payload.Outs == null)
                         continue;
                     foreach (var o in payload.Outs)
                     {
@@ -303,10 +319,8 @@ namespace VerifiedXCore.BrowserWalletServices
                         if (!string.Equals(note.AssetType, asset, StringComparison.Ordinal))
                             continue;
                         var c = o.CommitmentB64;
-                        if (string.IsNullOrEmpty(c) || merged.Contains(c))
+                        if (string.IsNullOrEmpty(c) || merged.Contains(PrivacyApiHelper.NoteIdentity(c, note.Amount, note.RandomnessB64)))
                             continue;
-                        merged.Add(c);
-                        newNotes++;
                         byte[] r32 = Array.Empty<byte>();
                         if (!string.IsNullOrEmpty(note.RandomnessB64))
                         {
@@ -314,13 +328,16 @@ namespace VerifiedXCore.BrowserWalletServices
                             catch { /* ignore */ }
                         }
                         w.UnspentCommitments ??= new List<UnspentCommitment>();
+                        if (!PrivacyApiHelper.NoteMatchesOutput(o, note.Amount, r32, keys, note.AssetType, out var matchedPos)) continue; // the note is the output it came with (round 22)
+                        merged.Add(PrivacyApiHelper.NoteIdentity(c, note.Amount, note.RandomnessB64)); // seen once it matched: a copy that does not match hid the real output (round 24)
+                        newNotes++;
                         w.UnspentCommitments.Add(new UnspentCommitment
                         {
                             Commitment = c,
                             AssetType = note.AssetType ?? "",
                             Amount = note.Amount,
                             Randomness = r32,
-                            TreePosition = 0,
+                            TreePosition = matchedPos, // the matched leaf's, not 0 (round 25)
                             BlockHeight = block.Height,
                             IsSpent = false
                         });
@@ -360,16 +377,18 @@ namespace VerifiedXCore.BrowserWalletServices
                 return new { success = false, message = "scUID (vBTC contract UID) is required." };
 
             var asset = VbtcPrivacyAsset.FormatAssetKey(scUID);
-            var pool = ShieldedPoolService.GetOrCreateState(asset);
+            // Read only: GetOrCreateState inserted a pool row into the consensus privacy store for any id a caller named,
+            // from a route a locked wallet may call (#208, D16). No row reads as an empty pool, as PrivacyV1 answers it.
+            var pool = ShieldedPoolService.GetState(asset);
             return new
             {
                 success = true,
                 scUID,
-                assetType = pool.AssetType,
-                totalCommitments = pool.TotalCommitments,
-                totalShieldedSupply = pool.TotalShieldedSupply,
-                currentMerkleRoot = pool.CurrentMerkleRoot,
-                lastUpdateHeight = pool.LastUpdateHeight
+                assetType = pool?.AssetType ?? asset,
+                totalCommitments = pool?.TotalCommitments ?? 0L,
+                totalShieldedSupply = pool?.TotalShieldedSupply ?? 0M,
+                currentMerkleRoot = pool?.CurrentMerkleRoot,
+                lastUpdateHeight = pool?.LastUpdateHeight ?? 0L
             };
         }
     }

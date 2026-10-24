@@ -71,8 +71,12 @@ namespace VerifiedXCore.Tests
             Assert.Equal(n1, n2);
         }
 
+        /// <summary>
+        /// An appended leaf writes the commitment and, with the pool state, the root; not the tree's node rows, which
+        /// nothing reads and which made every leaf cost the whole tree (round 32).
+        /// </summary>
         [Fact]
-        public void ShieldedMerkleStore_PersistsNodesAndPoolState()
+        public void ShieldedMerkleStore_PersistsPoolState_NotNodeRows()
         {
             var store = new ShieldedMerkleStore("VFX", _db);
             var r = new byte[32];
@@ -85,7 +89,8 @@ namespace VerifiedXCore.Tests
             store.UpdatePoolStateRoot(1, 100m, 1);
 
             var nodes = _db.GetCollection<MerkleTreeNodeRecord>(PrivacyDbContext.PRIV_MERKLE_NODES);
-            Assert.True(nodes.Count() >= 1);
+            Assert.Equal(0, nodes.Count());
+            Assert.Equal(1, _db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS).Count());
             var pool = _db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE);
             var st = pool.FindOne(x => x.AssetType == "VFX");
             Assert.NotNull(st);
@@ -104,6 +109,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void PlonkNative_Verify_IsStub()
         {
+            if ((PlonkNative.plonk_capabilities() & PlonkNative.CapV1Circuits) != 0) return; // another test loaded the real v1 params into the process-global native state
             int code = PlonkNative.plonk_verify(0, Array.Empty<byte>(), 0, Array.Empty<byte>(), 0);
             Assert.Equal(PlonkNative.ErrNotImplemented, code);
         }
@@ -111,6 +117,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void PLONKSetup_IsProofVerificationNotImplemented()
         {
+            if ((PlonkNative.plonk_capabilities() & PlonkNative.CapV1Circuits) != 0) return; // another test loaded the real v1 params into the process-global native state
             PLONKSetup.RefreshVerificationCapability();
             Assert.False(PLONKSetup.IsProofVerificationImplemented);
             Assert.False(PLONKSetup.IsProofProvingImplemented);
@@ -163,6 +170,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void PlonkProofVerifier_VerifyRaw_InvalidPublicInputs_IsNativeError()
         {
+            if ((PlonkNative.plonk_capabilities() & PlonkNative.CapV1Circuits) != 0) return; // another test loaded the real v1 params into the process-global native state
             var r = PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Transfer, new byte[] { 1 }, new byte[] { 2 });
             Assert.Equal(PlonkVerifyResult.NativeError, r);
         }
@@ -170,6 +178,7 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void PlonkProofVerifier_VerifyRaw_ValidPi_CryptoStillStub()
         {
+            if ((PlonkNative.plonk_capabilities() & PlonkNative.CapV1Circuits) != 0) return; // another test loaded the real v1 params into the process-global native state
             var payload = new PrivateTxPayload
             {
                 Asset = "VFX",
@@ -208,8 +217,12 @@ namespace VerifiedXCore.Tests
             Assert.True(pi.Length > 32);
         }
 
+        /// <summary>
+        /// A node's own setting does not change a verdict: before the proof-rules height a proofless private transfer
+        /// passes on every node, the flag set or not (round 32). From the height every node requires the proof.
+        /// </summary>
         [Fact]
-        public void PlonkProofVerifier_EnforcePlonkProofsForZk_RequiresProof()
+        public void PlonkProofVerifier_EnforcePlonkProofsForZk_DoesNotChangeAVerdict()
         {
             var prev = Globals.EnforcePlonkProofsForZk;
             try
@@ -217,8 +230,8 @@ namespace VerifiedXCore.Tests
                 Globals.EnforcePlonkProofsForZk = true;
                 var payload = new PrivateTxPayload { Asset = "VFX", Fee = Globals.PrivateTxFixedFee };
                 var tx = new Transaction { TransactionType = TransactionType.VFX_PRIVATE_TRANSFER };
-                var r = PlonkProofVerifier.TryValidatePrivateProofs(tx, payload, blockDownloads: false);
-                Assert.False(r.ok);
+                var r = PlonkProofVerifier.TryValidatePrivateProofs(tx, payload, blockDownloads: false, height: Globals.PrivateTxProofRulesHeight - 1);
+                Assert.True(r.ok, r.message);
             }
             finally
             {
@@ -490,6 +503,77 @@ namespace VerifiedXCore.Tests
             var b64 = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(inner));
             Assert.True(PrivateTxPayloadCodec.TryDecode(b64, out var p2, out _), "b64");
             Assert.Equal("VFX", p2!.Asset);
+        }
+
+        /// <summary>
+        /// The rebuild replayed a block's private transactions sorted by sender while application takes the block's order:
+        /// outputs took other tree positions, the rebuilt root differed from every live node's, and the rebuilt node
+        /// refused every later private spend (fifth review, round 21).
+        /// </summary>
+        [Fact]
+        public async Task PrivacyDbRebuild_ReplaysABlockInItsOwnOrder()
+        {
+            Transaction Shield(string from, byte seed)
+            {
+                var r = new byte[32];
+                Array.Fill(r, seed);
+                var g = new byte[PlonkNative.G1CompressedSize];
+                Assert.Equal(PlonkNative.Success, PlonkNative.pedersen_commit(seed, r, g));
+                var tx = new Transaction
+                {
+                    Timestamp = 99, FromAddress = from, ToAddress = PrivacyConstants.ShieldedPoolAddress, Amount = 1.0m, Fee = 0.000003m, Nonce = 0,
+                    TransactionType = TransactionType.VFX_SHIELD, Signature = "sig",
+                    Data = JsonConvert.SerializeObject(new PrivateTxPayload { Asset = "VFX", Kind = "t2z", Outs = { new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(g) } } }),
+                };
+                tx.BuildPrivate();
+                return tx;
+            }
+            var later = Shield("VFX_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ", 3);   // first in the block, last by sender
+            var earlier = Shield("VFX_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 4);
+            var (ok, msg) = await PrivacyDbRebuildService.TryReplayPrivateBlocksAsync(new[] { new Block { Height = 2, Transactions = new List<Transaction> { later, earlier } } }, _db);
+            Assert.True(ok, msg);
+            var commitments = _db.GetCollection<CommitmentRecord>(PrivacyDbContext.PRIV_COMMITMENTS);
+            string Out(Transaction t) => PrivateTxPayloadCodec.TryDecode(t.Data, out var p, out _) ? p!.Outs[0].CommitmentB64 : "";
+            var laterOut = Out(later);
+            var earlierOut = Out(earlier);
+            var first = commitments.FindOne(c => c.Commitment == laterOut);
+            var second = commitments.FindOne(c => c.Commitment == earlierOut);
+            Assert.True(first.TreePosition < second.TreePosition);
+        }
+
+        /// <summary>
+        /// History can hold a VFX shield whose asset is spelled "vfx" (before the rules fixed it): the rebuild rooted it as
+        /// its own legacy pool over the VFX pool's leaves (the store ignores case) and overwrote the VFX root (round 22).
+        /// </summary>
+        [Fact]
+        public async Task PrivacyDbRebuild_RootsEachPoolOnce_WhateverItsSpellingInHistory()
+        {
+            Transaction Shield(string asset, byte seed)
+            {
+                var r = new byte[32];
+                Array.Fill(r, seed);
+                var g = new byte[PlonkNative.G1CompressedSize];
+                Assert.Equal(PlonkNative.Success, PlonkNative.pedersen_commit(seed, r, g));
+                var tx = new Transaction
+                {
+                    Timestamp = 99, FromAddress = "VFX_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", ToAddress = PrivacyConstants.ShieldedPoolAddress, Amount = 1.0m, Fee = 0.000003m, Nonce = 0,
+                    TransactionType = TransactionType.VFX_SHIELD, Signature = "sig",
+                    Data = JsonConvert.SerializeObject(new PrivateTxPayload { Asset = asset, Kind = "t2z", Outs = { new PrivateShieldedOutput { Index = 0, CommitmentB64 = Convert.ToBase64String(g) } } }),
+                };
+                tx.BuildPrivate();
+                return tx;
+            }
+            var blocks = new[] { new Block { Height = 2, Transactions = new List<Transaction> { Shield("VFX", 5) } } };
+            Assert.True((await PrivacyDbRebuildService.TryReplayPrivateBlocksAsync(blocks, _db)).Success);
+            var root = _db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE).FindOne(x => x.AssetType == "VFX")!.CurrentMerkleRoot;
+            var withVariant = new[] { blocks[0], new Block { Height = 3, Transactions = new List<Transaction> { Shield("vfx", 6) } } };
+            Assert.True((await PrivacyDbRebuildService.TryReplayPrivateBlocksAsync(withVariant, _db)).Success);
+            var rows = _db.GetCollection<ShieldedPoolState>(PrivacyDbContext.PRIV_POOL_STATE).FindAll().Where(x => string.Equals(x.AssetType, "VFX", StringComparison.OrdinalIgnoreCase)).ToList();
+            Assert.Single(rows);
+            Assert.NotEqual(root, rows[0].CurrentMerkleRoot);                                // rooted once, over both leaves, in its own shape
+            var single = new ShieldedMerkleStore("VFX", _db, false);
+            single.LoadLeavesFromCommitments();
+            Assert.Equal(2, single.LeafDigests.Count);
         }
 
         [Fact]

@@ -1,0 +1,471 @@
+using VerifiedXCore.Bitcoin.FROST.Models;
+using VerifiedXCore.Bitcoin.Services;
+using VerifiedXCore.Models;
+using VerifiedXCore.Utilities;
+
+namespace VerifiedXCore.Bitcoin.FROST
+{
+    /// <summary>
+    /// Fund-loss audit item 4 (fourth review). Before NEW-26 a DKG ran under a session id, and each validator's key share
+    /// stayed filed under that id until the vault's first signing found it by group key and relabelled it. Finding by
+    /// group key alone is the hole: a contract body that copies a vault's group key asks first and is handed the share.
+    /// The earlier fixes closed it for shares already filed under a contract; a share still under its session id was
+    /// adopted by whichever body asked.
+    ///
+    /// One rule now decides who a session-id share belongs to: the ONE vault on chain that carries its group key. If two
+    /// contracts carry the key, the share is used for neither (a copied key cannot be told from the original by anything
+    /// in chain state, so this fails closed and an operator decides). The rule is applied in two places:
+    /// <list type="bullet">
+    /// <item>once the node is synced, every session-id share whose key has exactly one vault is bound to it
+    /// (<see cref="BindSessionShares"/>), so it is filed under the contract before anyone asks for it;</item>
+    /// <item>at signing, for a share that arrives later (a peer-backup restore): the same rule
+    /// (<see cref="FrostDkgGuard.MayAdoptKeyRecord"/>).</item>
+    /// </list>
+    /// A share filed under a contract is never relabelled, by either path.
+    /// </summary>
+    public static class FrostKeyShareBinding
+    {
+        /// <summary>Every vBTC V2 contract on chain with the FROST group key its body carries. Replaceable for tests.</summary>
+        internal static Func<List<(string ScUid, string GroupKey)>> OnChainVaultKeys = () =>
+            VBTCChainView.AllVaults().Select(v => (v.SmartContractUID, v.Feature.FrostGroupPublicKey ?? string.Empty)).ToList();
+
+        /// <summary>
+        /// One spelling per key: trimmed, lower case, no 0x, and the 32-byte x-only form of a 33-byte compressed key. Two
+        /// bodies that spell the same key differently still collide.
+        /// </summary>
+        public static string NormalizeKey(string? key)
+        {
+            var k = (key ?? string.Empty).Trim().ToLowerInvariant();
+            if (k.StartsWith("0x", StringComparison.Ordinal)) k = k.Substring(2);
+            if (k.Length == 66 && (k.StartsWith("02", StringComparison.Ordinal) || k.StartsWith("03", StringComparison.Ordinal))) k = k.Substring(2);
+            return k;
+        }
+
+        /// <summary>The contracts on chain whose body carries <paramref name="groupKey"/>.</summary>
+        public static List<string> VaultsCarrying(string? groupKey)
+        {
+            var wanted = NormalizeKey(groupKey);
+            if (wanted.Length == 0) return new List<string>();
+            return OnChainVaultKeys()
+                .Where(v => NormalizeKey(v.GroupKey) == wanted)
+                .Select(v => v.ScUid)
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(u => u, StringComparer.Ordinal)
+                .ToList();
+        }
+
+        /// <summary>
+        /// Whether <paramref name="scUid"/> is the only contract on chain carrying <paramref name="groupKey"/>. Fails closed
+        /// when chain state cannot be read.
+        /// </summary>
+        public static bool IsSoleVault(string? groupKey, string scUid, out string reason)
+        {
+            reason = "";
+            List<string> vaults;
+            try { vaults = VaultsCarrying(groupKey); }
+            catch (Exception ex)
+            {
+                reason = $"the vaults carrying group key {groupKey} could not be read from chain state ({ex.Message})";
+                return false;
+            }
+            if (vaults.Count == 1 && string.Equals(vaults[0], scUid, StringComparison.Ordinal))
+                return true;
+            reason = vaults.Count == 0
+                ? $"no contract on chain carries group key {groupKey}"
+                : vaults.Count == 1
+                    ? $"group key {groupKey} belongs to contract {vaults[0]}, not {scUid}"
+                    : $"{vaults.Count} contracts on chain carry group key {groupKey} ({string.Join(", ", vaults)}); a key share filed under a session id is used for none of them until an operator binds it (POST /frost/keystore/bind)";
+            return false;
+        }
+
+        public sealed class BindResult
+        {
+            public int Records { get; set; }
+            /// <summary>Session-id shares bound to their vault by this run.</summary>
+            public int Bound { get; set; }
+            /// <summary>Already filed under a contract (on chain, or a NEW-26 ceremony's contract UID).</summary>
+            public int FiledUnderContract { get; set; }
+            /// <summary>Session-id shares whose key no contract carries (a ceremony whose contract was never created).</summary>
+            public int NoVault { get; set; }
+            /// <summary>Session-id shares whose key more than one contract carries: left alone, used for none.</summary>
+            public int Ambiguous { get; set; }
+            public int Failed { get; set; }
+            public List<string> Notes { get; } = new();
+        }
+
+        /// <summary>
+        /// Binds every key share still filed under a session id to the one vault that carries its group key. Idempotent.
+        /// Call only when chain state is current (see <see cref="RunOnceWhenSyncedAsync"/>): the answer to "which
+        /// contracts carry this key" is read from it.
+        /// </summary>
+        public static BindResult BindSessionShares()
+        {
+            var result = new BindResult();
+            List<(string ScUid, string GroupKey)> vaults;
+            try { vaults = OnChainVaultKeys(); }
+            catch (Exception ex)
+            {
+                result.Failed++;
+                result.Notes.Add($"chain state could not be read: {ex.Message}");
+                return result;
+            }
+            var onChain = new HashSet<string>(vaults.Select(v => v.ScUid), StringComparer.Ordinal);
+            var byKey = vaults
+                .Where(v => NormalizeKey(v.GroupKey).Length > 0)
+                .GroupBy(v => NormalizeKey(v.GroupKey), StringComparer.Ordinal)
+                .ToDictionary(g => g.Key, g => g.Select(v => v.ScUid).Distinct(StringComparer.Ordinal).OrderBy(u => u, StringComparer.Ordinal).ToList(), StringComparer.Ordinal);
+
+            foreach (var record in FrostValidatorKeyStore.GetAllKeyPackages())
+            {
+                result.Records++;
+                var filedUnder = record.SmartContractUID ?? string.Empty;
+                if (onChain.Contains(filedUnder) || FrostDkgGuard.IsContractUid(filedUnder))
+                {
+                    result.FiledUnderContract++;
+                    continue;
+                }
+                var key = NormalizeKey(record.GroupPublicKey);
+                if (key.Length == 0 || !byKey.TryGetValue(key, out var carrying) || carrying.Count == 0)
+                {
+                    result.NoVault++;
+                    continue;
+                }
+                if (carrying.Count > 1)
+                {
+                    result.Ambiguous++;
+                    var note = $"key share {record.Id} (filed under session id {filedUnder}, group key {record.GroupPublicKey}) is NOT bound: {carrying.Count} contracts carry that key ({string.Join(", ", carrying)}). One of them copied it. The share is used for none until an operator binds it (POST /frost/keystore/bind).";
+                    result.Notes.Add(note);
+                    ErrorLogUtility.LogError("[FROST KeyStore] " + note, "FrostKeyShareBinding.BindSessionShares()");
+                    continue;
+                }
+                var vault = carrying[0];
+                if (FrostValidatorKeyStore.UpdateSmartContractUID(record.Id, vault, boundToTheVaultsKey: true))
+                {
+                    result.Bound++;
+                    result.Notes.Add($"key share {record.Id} bound to {vault} (was filed under session id {filedUnder})");
+                }
+                else
+                {
+                    result.Failed++;
+                    result.Notes.Add($"key share {record.Id} could not be bound to {vault} (see the error log)");
+                }
+            }
+
+            LogUtility.Log($"[FROST KeyStore] Session-id key shares: {result.Records} record(s), {result.Bound} bound now, {result.FiledUnderContract} already under a contract, {result.NoVault} with no vault, {result.Ambiguous} ambiguous, {result.Failed} failed.",
+                "FrostKeyShareBinding.BindSessionShares()");
+            Volatile.Write(ref _bindingHasRun, 1);
+            return result;
+        }
+
+        /// <summary>A contract on chain that carries a key share's group key, with what tells the vault from a copy.</summary>
+        public sealed class Carrier
+        {
+            public string SmartContractUID { get; set; } = "";
+            /// <summary>Its body holds an attested key-ceremony proof made for this contract's own UID.</summary>
+            public bool Attested { get; set; }
+            /// <summary>The order the contract was created in among those on chain (its state record's id, lowest first).</summary>
+            public long CreationOrder { get; set; }
+            /// <summary>The block that created it, when the chain records it (a vault from the recording height on); else null.</summary>
+            public long? CreatedAtHeight { get; set; }
+            public override string ToString() =>
+                $"{SmartContractUID} (attested: {(Attested ? "yes" : "no")}, created {(CreatedAtHeight is long h ? $"at block {h}" : "before recording")}, creation order {CreationOrder})";
+        }
+
+        /// <summary>The contracts carrying <paramref name="groupKey"/>, oldest first (<see cref="OrderByCreation"/>).</summary>
+        public static List<Carrier> CarriersOf(string? groupKey, List<(string ScUid, string GroupKey)> vaultKeys)
+        {
+            var wanted = NormalizeKey(groupKey);
+            if (wanted.Length == 0) return new List<Carrier>();
+            return OrderByCreation(vaultKeys
+                .Where(v => NormalizeKey(v.GroupKey) == wanted)
+                .Select(v => v.ScUid)
+                .Distinct(StringComparer.Ordinal)
+                .Select(uid => new Carrier
+                {
+                    SmartContractUID = uid,
+                    Attested = AttestedFor(uid),
+                    CreationOrder = SmartContractStateTrei.GetSmartContractState(uid)?.Id ?? long.MaxValue,
+                    CreatedAtHeight = CreatedAtHeight(uid),
+                }));
+        }
+
+        /// <summary>
+        /// Oldest first. When the chain recorded the block that created every carrier (vaults from the recording height
+        /// on), that height decides. Otherwise the state record's id does: the record is inserted when the creating block
+        /// is applied, blocks are applied in chain order on every node and in every state rebuild, and a snapshot restore
+        /// copies the records with their ids, so the order is the chain's on every node. The UID breaks a tie.
+        /// </summary>
+        public static List<Carrier> OrderByCreation(IEnumerable<Carrier> carriers)
+        {
+            var list = carriers.ToList();
+            var byHeight = list.Count > 0 && list.All(c => c.CreatedAtHeight.HasValue);
+            return list
+                .OrderBy(c => byHeight ? c.CreatedAtHeight!.Value : c.CreationOrder)
+                .ThenBy(c => c.CreationOrder)
+                .ThenBy(c => c.SmartContractUID, StringComparer.Ordinal)
+                .ToList();
+        }
+
+        private static long? CreatedAtHeight(string scUid)
+        {
+            try { return VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.ScriptRowsForVault(scUid).FirstOrDefault()?.CreatedAtVfxHeight; }
+            catch { return null; } // not recorded: the state record's order decides (OrderByCreation)
+        }
+
+        /// <summary>
+        /// Whether a contract's body holds a key-ceremony proof that checks out now: made for this contract's UID and creator,
+        /// its deposit address the group key's, and attested by each participant, every one a validator active at the
+        /// block the proof names (<see cref="FrostDkgAttestation.Validate"/>, the rule a creation is judged by). The proof
+        /// is re-checked rather than trusted: a contract created before the chain checked proofs could carry any text.
+        /// </summary>
+        private static bool AttestedFor(string scUid)
+        {
+            try
+            {
+                if (!FrostDkgGuard.ContractHasAttestedDkgProof(scUid)) return false;
+                var vault = VBTCChainView.GetVault(scUid);
+                if (vault == null) return false;
+                var proofHeight = vault.Feature.ProofBlockHeight;
+                if (proofHeight <= 0 || proofHeight > (Globals.LastBlock?.Height ?? 0)) return false;
+                return FrostDkgAttestation.Validate(vault.Feature, scUid, vault.State.MinterAddress, () => VBTCValidatorRegistry.GetActiveValidatorsAt(proofHeight)) == null;
+            }
+            catch { return false; } // not shown to be attested: the bind falls back to the first created
+        }
+
+        /// <summary>
+        /// The one carrier an operator may bind a session-id share to: the attested one, or, when none is attested (vaults
+        /// from before attestation), the one created first. A copy of a key is made after the vault it copies. Null, with
+        /// the reason, when no carrier qualifies (more than one is attested).
+        /// </summary>
+        public static Carrier? BindableCarrier(List<Carrier> carriers, out string reason)
+        {
+            reason = "";
+            var attested = carriers.Where(c => c.Attested).ToList();
+            if (attested.Count == 1) return attested[0];
+            if (attested.Count > 1)
+            {
+                reason = $"{attested.Count} contracts carrying the key are attested ({string.Join(", ", attested.Select(c => c.SmartContractUID))}); none is bound";
+                return null;
+            }
+            if (carriers.Count == 0) { reason = "no contract on chain carries the key"; return null; }
+            return carriers[0];
+        }
+
+        /// <summary>
+        /// An operator's decision for a share <see cref="BindSessionShares"/> left alone: file record
+        /// <paramref name="recordId"/> under <paramref name="scUid"/>. Only a share still under a session id, and only onto
+        /// a contract on chain that carries the share's group key, and only the carrier <see cref="BindableCarrier"/> names.
+        /// </summary>
+        public static (bool Ok, string Message) BindByOperator(long recordId, string? scUid)
+        {
+            if (string.IsNullOrWhiteSpace(scUid)) return (false, "scUID required");
+            var record = FrostValidatorKeyStore.GetAllKeyPackages().FirstOrDefault(r => r.Id == recordId);
+            if (record == null) return (false, $"no key record with id {recordId}");
+            if (string.Equals(record.SmartContractUID, scUid, StringComparison.Ordinal)) return (true, "already filed under that contract");
+            List<(string ScUid, string GroupKey)> vaults;
+            try { vaults = OnChainVaultKeys(); }
+            catch (Exception ex) { return (false, $"chain state could not be read: {ex.Message}"); }
+            if (vaults.Any(v => v.ScUid == record.SmartContractUID) || FrostDkgGuard.IsContractUid(record.SmartContractUID))
+                return (false, $"record {recordId} is filed under contract {record.SmartContractUID}; a share filed under a contract is never relabelled");
+            var target = vaults.FirstOrDefault(v => v.ScUid == scUid);
+            if (target.ScUid == null) return (false, $"contract {scUid} is not a vBTC V2 contract on chain");
+            if (NormalizeKey(target.GroupKey).Length == 0 || NormalizeKey(target.GroupKey) != NormalizeKey(record.GroupPublicKey))
+                return (false, $"contract {scUid} carries group key {target.GroupKey}; the record's is {record.GroupPublicKey}");
+            // A copy of the key cannot be bound: only the attested carrier, or, when none is attested, the first created.
+            var carriers = CarriersOf(record.GroupPublicKey, vaults);
+            var bindable = BindableCarrier(carriers, out var notBindable);
+            if (bindable == null)
+                return (false, $"key share {recordId} is bound to no contract: {notBindable}");
+            if (!string.Equals(bindable.SmartContractUID, scUid, StringComparison.Ordinal))
+                return (false, $"contract {scUid} is not the vault for key share {recordId}: {(bindable.Attested ? $"{bindable.SmartContractUID} is the attested carrier" : $"none is attested and {bindable.SmartContractUID} was created first")}. Carriers: {string.Join("; ", carriers)}");
+            if (!FrostValidatorKeyStore.UpdateSmartContractUID(record.Id, scUid, boundToTheVaultsKey: true))
+                return (false, "the record could not be relabelled (see the error log)");
+            LogUtility.Log($"[FROST KeyStore] Operator bound key share {recordId} to {scUid} (was filed under {record.SmartContractUID}).", "FrostKeyShareBinding.BindByOperator()");
+            return (true, $"key share {recordId} bound to {scUid}");
+        }
+
+        private static int _ran;
+
+        /// <summary>
+        /// Waits until the node is at the network's height, then runs <see cref="BindSessionShares"/> once for the process.
+        /// Not at raw startup: a node still catching up has not seen every contract, and "the one vault that carries this
+        /// key" must be answered from current state.
+        /// </summary>
+        public static async Task<BindResult?> RunOnceWhenSyncedAsync(CancellationToken cancellationToken = default, int pollMilliseconds = 30_000)
+        {
+            try
+            {
+                while (!Globals.IsChainSynced)
+                    await Task.Delay(pollMilliseconds, cancellationToken).ConfigureAwait(false);
+                if (Interlocked.Exchange(ref _ran, 1) == 1)
+                    return null;
+                var result = BindSessionShares();
+                LogVerdict();
+                return result;
+            }
+            catch (OperationCanceledException) { return null; }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"Session-id key share binding failed: {ex}", "FrostKeyShareBinding.RunOnceWhenSyncedAsync()");
+                return null;
+            }
+        }
+
+        internal static void ResetForTests() { Interlocked.Exchange(ref _ran, 0); Volatile.Write(ref _bindingHasRun, 0); }
+
+        // ── What an operator checks after an upgrade ──────────────────────────────────────────────────────────
+
+        private static int _bindingHasRun;
+
+        public const string StateUnderContract = "contract";
+        /// <summary>Filed under its contract; another contract on chain carries the same key (it gets nothing from this record).</summary>
+        public const string StateUnderContractKeyCopied = "contract-key-copied";
+        /// <summary>Under a session id with exactly one vault for its key: the binding run files it there.</summary>
+        public const string StateSessionPendingBind = "session-pending-bind";
+        /// <summary>Under a session id and no contract carries its key (its ceremony's contract was never created). Normal; stays as it is.</summary>
+        public const string StateSessionNoVault = "session-no-vault";
+        /// <summary>Under a session id and more than one contract carries its key: used for none until an operator binds it.</summary>
+        public const string StateSessionAmbiguous = "session-ambiguous";
+
+        public sealed class ShareRow
+        {
+            public long Id { get; set; }
+            public string FiledUnder { get; set; } = "";
+            public bool IsContractUid { get; set; }
+            public bool ContractOnChain { get; set; }
+            public bool UnderSessionId { get; set; }
+            public bool AttestedVault { get; set; }
+            public string GroupPublicKey { get; set; } = "";
+            public List<string> ContractsCarryingKey { get; set; } = new();
+            /// <summary>Each contract carrying the key, with whether it is attested and when it was created.</summary>
+            public List<Carrier> Carriers { get; set; } = new();
+            /// <summary>For an ambiguous share: the carrier the bind accepts, if any.</summary>
+            public string? BindTo { get; set; }
+            public string State { get; set; } = "";
+            public string Status { get; set; } = "";
+            public bool HasKeyPackage { get; set; }
+            public long CreatedTimestamp { get; set; }
+        }
+
+        public sealed class ShareReport
+        {
+            public string? ValidatorAddress { get; set; }
+            public bool ChainSynced { get; set; }
+            /// <summary>Whether the binding has completed in this process (it runs by itself once the node is synced).</summary>
+            public bool BindingHasRun { get; set; }
+            public string? ChainStateError { get; set; }
+            public int Records { get; set; }
+            public int UnderSessionId { get; set; }
+            public int Ambiguous { get; set; }
+            public int PendingBind { get; set; }
+            public int NoVault { get; set; }
+            public int KeyCopied { get; set; }
+            /// <summary>True when nothing needs an operator: no share is ambiguous and none is waiting to be bound.</summary>
+            public bool Ok { get; set; }
+            /// <summary>One line: OK, WAIT (not synced / binding not run yet) or ACTION NEEDED, and why.</summary>
+            public string Verdict { get; set; } = "";
+            public List<ShareRow> Keys { get; set; } = new();
+        }
+
+        /// <summary>
+        /// This validator's key records and the one-line answer an operator needs after an upgrade (fifth review): is any
+        /// share ambiguous, or still waiting to be bound? A share whose ceremony never produced a contract stays under its
+        /// session id for good and is not a problem, so "nothing under a session id" is not the test; "nothing ambiguous and
+        /// nothing pending" is. No key material. <paramref name="validatorAddress"/> limits the rows to that validator.
+        /// </summary>
+        public static ShareReport Report(string? validatorAddress = null)
+        {
+            var report = new ShareReport { ValidatorAddress = validatorAddress, ChainSynced = Globals.IsChainSynced, BindingHasRun = Volatile.Read(ref _bindingHasRun) == 1 };
+            var vaultKeys = new List<(string ScUid, string GroupKey)>();
+            try { vaultKeys = OnChainVaultKeys(); }
+            catch (Exception ex) { report.ChainStateError = ex.Message; }
+
+            foreach (var k in FrostValidatorKeyStore.GetAllKeyPackages())
+            {
+                if (!string.IsNullOrEmpty(validatorAddress) && !string.Equals(k.ValidatorAddress, validatorAddress, StringComparison.Ordinal))
+                    continue;
+                var filedUnder = k.SmartContractUID ?? string.Empty;
+                var isContractUid = FrostDkgGuard.IsContractUid(filedUnder);
+                SmartContractStateTrei? onChain = null;
+                try { onChain = string.IsNullOrEmpty(filedUnder) ? null : SmartContractStateTrei.GetSmartContractState(filedUnder); } catch { }
+                var key = NormalizeKey(k.GroupPublicKey);
+                var carrying = key.Length == 0
+                    ? new List<string>()
+                    : vaultKeys.Where(v => NormalizeKey(v.GroupKey) == key).Select(v => v.ScUid).Distinct(StringComparer.Ordinal).OrderBy(u => u, StringComparer.Ordinal).ToList();
+                var carriers = carrying.Count > 0 ? CarriersOf(k.GroupPublicKey, vaultKeys) : new List<Carrier>();
+                string? bindTo = null;
+                var underSession = !isContractUid && onChain == null;
+
+                string state, status;
+                if (!underSession)
+                {
+                    var others = carrying.Where(c => !string.Equals(c, filedUnder, StringComparison.Ordinal)).ToList();
+                    state = others.Count > 0 ? StateUnderContractKeyCopied : StateUnderContract;
+                    status = others.Count > 0
+                        ? $"filed under its contract; {string.Join(", ", others)} carries the same key and gets nothing from this record"
+                        : "filed under its contract";
+                }
+                else if (carrying.Count == 1) { state = StateSessionPendingBind; status = "under a session id; will be filed under " + carrying[0]; }
+                else if (carrying.Count == 0) { state = StateSessionNoVault; status = "under a session id; no contract carries its key (its ceremony's contract was never created); nothing to do"; }
+                else
+                {
+                    state = StateSessionAmbiguous;
+                    var bindable = BindableCarrier(carriers, out var notBindable);
+                    bindTo = bindable?.SmartContractUID;
+                    status = $"under a session id; AMBIGUOUS: {string.Join("; ", carriers)} all carry its key; used for none until bound. "
+                        + (bindable != null
+                            ? $"The bind accepts only {bindable.SmartContractUID} ({(bindable.Attested ? "the attested carrier" : "none is attested; created first")}): POST /frost/keystore/bind/{k.Id}/{bindable.SmartContractUID}?confirm=true"
+                            : $"No carrier can be bound: {notBindable}.");
+                }
+
+                report.Keys.Add(new ShareRow
+                {
+                    Id = k.Id, FiledUnder = filedUnder, IsContractUid = isContractUid, ContractOnChain = onChain != null, UnderSessionId = underSession,
+                    AttestedVault = onChain != null && AttestedFor(filedUnder),
+                    GroupPublicKey = k.GroupPublicKey ?? string.Empty, ContractsCarryingKey = carrying, Carriers = carriers, BindTo = bindTo, State = state, Status = status,
+                    HasKeyPackage = !string.IsNullOrEmpty(k.KeyPackage), CreatedTimestamp = k.CreatedTimestamp,
+                });
+            }
+
+            report.Records = report.Keys.Count;
+            report.UnderSessionId = report.Keys.Count(r => r.UnderSessionId);
+            report.Ambiguous = report.Keys.Count(r => r.State == StateSessionAmbiguous);
+            report.PendingBind = report.Keys.Count(r => r.State == StateSessionPendingBind);
+            report.NoVault = report.Keys.Count(r => r.State == StateSessionNoVault);
+            report.KeyCopied = report.Keys.Count(r => r.State == StateUnderContractKeyCopied);
+            report.Ok = report.ChainStateError == null && report.Ambiguous == 0 && report.PendingBind == 0;
+
+            if (report.ChainStateError != null)
+                report.Verdict = $"UNKNOWN: chain state could not be read ({report.ChainStateError}).";
+            else if (report.Ambiguous > 0)
+                report.Verdict = $"ACTION NEEDED: {report.Ambiguous} key share(s) are ambiguous (more than one contract carries their key). This validator signs for none of those contracts until each share is bound: POST /frost/keystore/bind/{{id}}/{{scUID}}?confirm=true. "
+                    + string.Join(" ", report.Keys.Where(r => r.State == StateSessionAmbiguous).Select(r =>
+                        $"Share {r.Id}: {string.Join("; ", r.Carriers)}; " + (r.BindTo != null ? $"bind to {r.BindTo}." : "no carrier can be bound.")));
+            else if (report.PendingBind > 0 && (!report.ChainSynced || !report.BindingHasRun))
+                report.Verdict = $"WAIT: {report.PendingBind} key share(s) are still under a session id. The binding runs by itself once the node is synced; check again then.";
+            else if (report.PendingBind > 0)
+                report.Verdict = $"ACTION NEEDED: {report.PendingBind} key share(s) are still under a session id although one vault carries their key. Run POST /frost/keystore/migrate and read its notes.";
+            else
+                report.Verdict = "OK: every key share that has a vault is filed under it; nothing is ambiguous."
+                    + (report.NoVault > 0 ? $" {report.NoVault} share(s) remain under a session id because no contract carries their key, which is normal." : "")
+                    + (report.KeyCopied > 0 ? $" Note: {report.KeyCopied} share(s) have their key copied by another contract; that contract gets nothing." : "");
+            return report;
+        }
+
+        private static void LogVerdict()
+        {
+            try
+            {
+                var report = Report();
+                if (report.Ok)
+                    LogUtility.Log("[FROST KeyStore] " + report.Verdict, "FrostKeyShareBinding");
+                else
+                {
+                    ErrorLogUtility.LogError("[FROST KeyStore] " + report.Verdict, "FrostKeyShareBinding");
+                    Console.WriteLine("[FROST KeyStore] " + report.Verdict + " See GET /frost/keystore on this machine.");
+                }
+            }
+            catch { }
+        }
+    }
+}

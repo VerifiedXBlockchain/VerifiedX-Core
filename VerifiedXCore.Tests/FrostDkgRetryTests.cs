@@ -3,7 +3,10 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Hosting;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using VerifiedXCore.Utilities;
 using VerifiedXCore.Bitcoin.FROST;
 using VerifiedXCore.Bitcoin.FROST.Models;
 using VerifiedXCore.Bitcoin.Models;
@@ -23,20 +26,74 @@ namespace VerifiedXCore.Tests
     [Collection("FrostDkgRetry")]
     public class FrostDkgRetryTests : IDisposable
     {
-        public FrostDkgRetryTests() => FrostMPCService.RecentDkgFailures.Clear();
+        private readonly bool _priorLibrary = Globals.FrostFFIAvailable;
+
+        public FrostDkgRetryTests()
+        {
+            FrostMPCService.RecentDkgFailures.Clear();
+            Globals.FrostFFIAvailable = true;   // the ceremonies here run on a node whose FROST library passed its check
+        }
 
         public void Dispose()
         {
+            Globals.FrostFFIAvailable = _priorLibrary;
             FrostMPCService.AttemptRunnerForTests = null;
             FrostMPCService.RecentDkgFailures.Clear();
         }
 
         private static string Id(int i) => i.ToString("x").PadLeft(64, '0');
 
+        /// <summary>Each dealer's Round 2 secret from the last RealDkg (what it finishes Round 3 with).</summary>
+        private readonly Dictionary<int, string> _round2Secrets = new();
+
+        /// <summary>
+        /// Every participant of an honest ceremony finishes with the same public key package, byte for byte, so the hash
+        /// each signs into its attestation (FrostDkgAttestation.KeyPackageHash) is the same for all; a participant given
+        /// another dealer's commitments finishes with another package (fourth review, round 3).
+        /// </summary>
+        [Fact]
+        public void HonestParticipants_FinishWithTheSamePublicKeyPackage_AndOneGivenOtherCommitmentsDoesNot()
+        {
+            const int n = 3, min = 2;
+            var (commitments, sharesByDealer) = RealDkg(n, min);
+            string Finish(int me, string[] seen, Dictionary<int, JObject> shares)
+            {
+                // Each participant's own Round 2 secret: run Round 2 again for it from the commitments it saw.
+                var others = new JObject();
+                for (int j = 1; j <= n; j++) if (j != me) others[Id(j)] = JToken.Parse(seen[j]);
+                var received = new JObject();
+                for (int j = 1; j <= n; j++) if (j != me) received[Id(j)] = shares[j][Id(me)];
+                var (gpk, keyPackage, pubkeyPackage, err) = FrostNative.DKGRound3Finalize(_round2Secrets[me], others.ToString(Newtonsoft.Json.Formatting.None), received.ToString(Newtonsoft.Json.Formatting.None));
+                Assert.Equal(FrostNative.SUCCESS, err);
+                Assert.False(string.IsNullOrEmpty(pubkeyPackage));
+                return pubkeyPackage;
+            }
+            var packages = Enumerable.Range(1, n).Select(i => Finish(i, commitments, sharesByDealer)).ToList();
+            Assert.Single(packages.Distinct());
+            Assert.Single(packages.Select(FrostDkgAttestation.KeyPackageHash).Distinct());
+
+            // Participant 1 is given another commitment for dealer 2 (and a share that matches it): it does not finish
+            // with the package the others finished with.
+            var (other2, other2Secret, e1) = FrostNative.DKGRound1Generate(2, n, min);
+            Assert.Equal(FrostNative.SUCCESS, e1);
+            var for2 = new JObject { [Id(1)] = JToken.Parse(commitments[1]), [Id(3)] = JToken.Parse(commitments[3]) };
+            var (other2Shares, _, e2) = FrostNative.DKGRound2GenerateShares(other2Secret, for2.ToString(Newtonsoft.Json.Formatting.None));
+            Assert.Equal(FrostNative.SUCCESS, e2);
+            var seenBy1 = (string[])commitments.Clone();
+            seenBy1[2] = other2;
+            var sharesSeenBy1 = new Dictionary<int, JObject>(sharesByDealer) { [2] = JObject.Parse(other2Shares) };
+            var seen = new JObject();
+            for (int j = 2; j <= n; j++) seen[Id(j)] = JToken.Parse(seenBy1[j]);
+            var received = new JObject();
+            for (int j = 2; j <= n; j++) received[Id(j)] = sharesSeenBy1[j][Id(1)];
+            var (_, _, misled, err) = FrostNative.DKGRound3Finalize(_round2Secrets[1], seen.ToString(Newtonsoft.Json.Formatting.None), received.ToString(Newtonsoft.Json.Formatting.None));
+            Assert.True(err != FrostNative.SUCCESS || misled != packages[1], "a participant given other commitments finished with the same package");
+        }
+
         // ── Round 2 share check (recipient side) ─────────────────────────────────────────────────────────────────
 
         /// <summary>A real n-participant Round 1 and the plaintext Round 2 shares each dealer produces.</summary>
-        private static (string[] Commitments, Dictionary<int, JObject> SharesByDealer) RealDkg(int n, int min)
+        private (string[] Commitments, Dictionary<int, JObject> SharesByDealer) RealDkg(int n, int min)
         {
             var commitments = new string[n + 1];
             var secrets = new string[n + 1];
@@ -51,9 +108,10 @@ namespace VerifiedXCore.Tests
             {
                 var others = new JObject();
                 for (int j = 1; j <= n; j++) if (j != dealer) others[Id(j)] = JToken.Parse(commitments[j]);
-                var (sh, _, err) = FrostNative.DKGRound2GenerateShares(secrets[dealer], others.ToString(Newtonsoft.Json.Formatting.None));
+                var (sh, round2Secret, err) = FrostNative.DKGRound2GenerateShares(secrets[dealer], others.ToString(Newtonsoft.Json.Formatting.None));
                 Assert.Equal(FrostNative.SUCCESS, err);
                 shares[dealer] = JObject.Parse(sh);
+                _round2Secrets[dealer] = round2Secret;
             }
             return (commitments, shares);
         }
@@ -134,34 +192,194 @@ namespace VerifiedXCore.Tests
 
         // ── Resolving recipients' reports ────────────────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Reports were weighed by count, so two colluding validators could name one honest dealer and have only it
+        /// dropped, attempt after attempt. A report is now settled by the share: the dealer reveals the one-time key it
+        /// sealed the share with, the relayed ciphertext opens, and the share is checked against the dealer's commitment
+        /// (fourth review, round 9). Real library, real sealing.
+        /// </summary>
         [Fact]
-        public void ADealerReportedByManyRecipients_IsTheOneDropped()
+        public void AReportedShare_IsShownGoodOrBad_ByTheKeyItWasSealedWith()
         {
-            var reports = new[] { "A", "B", "C", "E" }.Select(r => (r, "D"));
-            Assert.Equal(new[] { "D" }, FrostDkgBlame.ResolveAccusations(reports));
+            var (commitments, shares) = RealDkg(4, 3);
+            using var recipientKey = new NBitcoin.Key();
+            var recipientPub = Convert.ToHexString(recipientKey.PubKey.ToBytes()).ToLowerInvariant();
+            const string sid = "session";
+
+            // An honest dealer's share, reported as bad: the revealed key opens it and it matches (the report was false).
+            var good = FrostShareCrypto.Seal(shares[1][Id(2)]!.ToString(), recipientPub, sid, Id(2), out var goodKey);
+            Assert.True(FrostDkgBlame.DisputedShareIsGood(good, goodKey, recipientPub, sid, Id(2), commitments[1]));
+
+            // A dealer that sealed another recipient's share, or a tampered one: shown bad.
+            var wrongPoint = FrostShareCrypto.Seal(shares[1][Id(3)]!.ToString(), recipientPub, sid, Id(2), out var wrongPointKey);
+            Assert.False(FrostDkgBlame.DisputedShareIsGood(wrongPoint, wrongPointKey, recipientPub, sid, Id(2), commitments[1]));
+            var tampered = (JObject)shares[1][Id(2)]!.DeepClone();
+            var hex = (string)tampered["signing_share"]!;
+            tampered["signing_share"] = (hex[0] == '0' ? "1" : "0") + hex.Substring(1);
+            var bad = FrostShareCrypto.Seal(tampered.ToString(), recipientPub, sid, Id(2), out var badKey);
+            Assert.False(FrostDkgBlame.DisputedShareIsGood(bad, badKey, recipientPub, sid, Id(2), commitments[1]));
+
+            // A dealer that gives no key, or a key that is not the share's: shown bad (the dealer is dropped).
+            Assert.False(FrostDkgBlame.DisputedShareIsGood(good, null, recipientPub, sid, Id(2), commitments[1]));
+            Assert.False(FrostDkgBlame.DisputedShareIsGood(good, wrongPointKey, recipientPub, sid, Id(2), commitments[1]));
+            // Sealed for another session or identifier: it does not open as this one.
+            Assert.False(FrostDkgBlame.DisputedShareIsGood(good, goodKey, recipientPub, "other", Id(2), commitments[1]));
+
+            // The recipient opens the same ciphertext with its own key, as it always did.
+            Assert.True(FrostShareCrypto.TryOpen(good, recipientKey.ToBytes(), sid, Id(2), out var opened));
+            Assert.Equal(shares[1][Id(2)]!.ToString(), opened);
         }
 
+        /// <summary>
+        /// An S3C vault's deposit address is its group key, and only a few of its own validators attest it: three
+        /// self-declared S3C validators could name any Taproot address as their vault's (round 11). Its proof carries each
+        /// participant's Round 1 constant term with a BIP340 signature, made with the term's secret, over this vault's UID,
+        /// owner and group key; the terms sum to the group key. FROST's own proofs of knowledge, bound only to a
+        /// participant's position, could be copied from a pending creation into another (round 12): a possession
+        /// signature names its vault. Checked with the library's own secrets and finished key.
+        /// </summary>
         [Fact]
-        public void ARecipientReportingManyDealers_IsTheOneDropped()
+        public void APossessionProof_HoldsForItsVaultAndTheLibrarysKey_AndForNoOther()
         {
-            // E.g. a node whose own key is unavailable: it cannot open anyone's share.
-            var reports = new[] { "A", "B", "C", "D" }.Select(d => ("R", d));
-            Assert.Equal(new[] { "R" }, FrostDkgBlame.ResolveAccusations(reports));
+            var participants = new List<string> { "xA", "xB", "xC" };
+            var ids = FrostStartup.BuildAddressToIdentifierMap(participants);
+            var packages = new Dictionary<string, string>();
+            var secrets = new Dictionary<string, string>();
+            foreach (var p in participants)
+            {
+                var (c, s, e) = FrostNative.DKGRound1Generate((ushort)Convert.ToInt32(ids[p], 16), 3, 2);
+                Assert.Equal(FrostNative.SUCCESS, e);
+                (packages[p], secrets[p]) = (c, s);
+            }
+            // The library's finished group key.
+            var round2 = new Dictionary<string, JObject>();
+            var round2Secrets = new Dictionary<string, string>();
+            foreach (var p in participants)
+            {
+                var others = new JObject();
+                foreach (var o in participants.Where(o => o != p)) others[ids[o]] = JToken.Parse(packages[o]);
+                var (sh, secret2, err) = FrostNative.DKGRound2GenerateShares(secrets[p], others.ToString(Newtonsoft.Json.Formatting.None));
+                Assert.Equal(FrostNative.SUCCESS, err);
+                (round2[p], round2Secrets[p]) = (JObject.Parse(sh), secret2);
+            }
+            var me = participants[0];
+            var r1 = new JObject(); var r2 = new JObject();
+            foreach (var o in participants.Where(o => o != me)) { r1[ids[o]] = JToken.Parse(packages[o]); r2[ids[o]] = round2[o][ids[me]]; }
+            var (groupKey, _, _, finishErr) = FrostNative.DKGRound3Finalize(round2Secrets[me], r1.ToString(Newtonsoft.Json.Formatting.None), r2.ToString(Newtonsoft.Json.Formatting.None));
+            Assert.Equal(FrostNative.SUCCESS, finishErr);
+
+            // Each participant signs for its own vault, from its own Round 1 secret.
+            const string uid = "vault-uid", owner = "xOwner";
+            var proof = new FrostDkgAttestation.Proof
+            {
+                Round1Proofs = participants.ToDictionary(p => p, p => FrostDkgAttestation.SignPossession(secrets[p], uid, owner, groupKey)!),
+            };
+            Assert.All(participants, p => Assert.Equal((string)JObject.Parse(packages[p])["commitment"]![0]!, proof.Round1Proofs[p].ConstantTerm));
+            var canonical = FrostDkgAttestation.Canonical(participants);
+            Assert.Null(FrostDkgAttestation.KeyPossessionRefusal(proof, canonical, groupKey, uid, owner));
+            // Copied into another vault (another UID or owner): refused.
+            Assert.NotNull(FrostDkgAttestation.KeyPossessionRefusal(proof, canonical, groupKey, "another-uid", owner));
+            Assert.NotNull(FrostDkgAttestation.KeyPossessionRefusal(proof, canonical, groupKey, uid, "xSomeoneElse"));
+            // Someone else's key: refused.
+            var stranger = Convert.ToHexString(new NBitcoin.Key().PubKey.TaprootInternalKey.ToBytes()).ToLowerInvariant();
+            Assert.NotNull(FrostDkgAttestation.KeyPossessionRefusal(proof, canonical, stranger, uid, owner));
+            // A term moved to sum to the stranger's key carries no signature that holds: refused.
+            var forged = new FrostDkgAttestation.Proof { Round1Proofs = new Dictionary<string, FrostDkgAttestation.Round1Proof>(proof.Round1Proofs) };
+            forged.Round1Proofs[me] = new FrostDkgAttestation.Round1Proof { ConstantTerm = "02" + stranger, PossessionSignature = forged.Round1Proofs[me].PossessionSignature };
+            Assert.NotNull(FrostDkgAttestation.KeyPossessionRefusal(forged, canonical, stranger, uid, owner));
+            Assert.NotNull(FrostDkgAttestation.KeyPossessionRefusal(new FrostDkgAttestation.Proof(), canonical, groupKey, uid, owner));
         }
 
+        /// <summary>
+        /// A recipient refused a padded or extended share package and the coordinator, opening the same share, ruled it
+        /// good: the honest recipient was dropped (round 12). Both now take the share in one form, rebuilt from its signing
+        /// share alone; the library's own packages are already in that form.
+        /// </summary>
         [Fact]
-        public void AOneToOneReport_DropsBothSides()
+        public void AShare_IsTakenInOneForm_OnBothSidesOfADispute()
         {
-            // Unprovable either way: an accuser can only remove an honest dealer by losing itself.
-            Assert.Equal(new[] { "H", "L" }, FrostDkgBlame.ResolveAccusations(new[] { ("L", "H") }).OrderBy(x => x));
+            var (commitments, shares) = RealDkg(3, 2);
+            var real = shares[1][Id(2)]!.ToString(Newtonsoft.Json.Formatting.None);
+            Assert.True(JToken.DeepEquals(JObject.Parse(real), JObject.Parse(FrostDkgBlame.CanonicalShare(real)!)));
+            var padded = (JObject)shares[1][Id(2)]!.DeepClone();
+            padded["padding"] = new string('x', 1_000);
+            Assert.Equal(FrostDkgBlame.CanonicalShare(real), FrostDkgBlame.CanonicalShare(padded.ToString()));
+            Assert.Null(FrostDkgBlame.CanonicalShare("{\"signing_share\":\"zz\"}"));
+            using var recipientKey = new NBitcoin.Key();
+            var recipientPub = Convert.ToHexString(recipientKey.PubKey.ToBytes()).ToLowerInvariant();
+            var sealedPadded = FrostShareCrypto.Seal(padded.ToString(), recipientPub, "s", Id(2), out var key);
+            Assert.True(FrostDkgBlame.DisputedShareIsGood(sealedPadded, key, recipientPub, "s", Id(2), commitments[1]));
         }
 
+        /// <summary>
+        /// The dealer reveals a share's key only against its recipient's signed report about that share: the share is
+        /// the reporting recipient's own, which it holds already. Nobody else (a coordinator collecting shares) gets one.
+        /// </summary>
         [Fact]
-        public void MixedReports_DropTheCulpritAndOnlyThePairedLiar()
+        public async Task TheRevealRoute_AnswersOnlyTheRecipientsSignedReport()
         {
-            var reports = new[] { "A", "B", "C" }.Select(r => (r, "D")).Append(("L", "H"));
-            Assert.Equal(new[] { "D", "H", "L" }, FrostDkgBlame.ResolveAccusations(reports).OrderBy(x => x));
-            Assert.Empty(FrostDkgBlame.ResolveAccusations(Array.Empty<(string, string)>()));
+            var dealer = new EllipticCurve.PrivateKey("secp256k1");
+            var dealerPub = "04" + Convert.ToHexString(dealer.publicKey().toString()).ToLowerInvariant();
+            var dealerAddress = VerifiedXCore.Data.AccountData.GetHumanAddress(dealerPub);
+            var recipient = new EllipticCurve.PrivateKey("secp256k1");
+            var recipientPub = "04" + Convert.ToHexString(recipient.publicKey().toString()).ToLowerInvariant();
+            var recipientAddress = VerifiedXCore.Data.AccountData.GetHumanAddress(recipientPub);
+            var other = new EllipticCurve.PrivateKey("secp256k1");
+            var otherPub = "04" + Convert.ToHexString(other.publicKey().toString()).ToLowerInvariant();
+            var otherAddress = VerifiedXCore.Data.AccountData.GetHumanAddress(otherPub);
+            var participants = new List<string> { dealerAddress, recipientAddress, otherAddress };
+            var ids = FrostStartup.BuildAddressToIdentifierMap(participants);
+            var session = new DKGSession { SessionId = Guid.NewGuid().ToString(), SmartContractUID = "sc", LeaderAddress = otherAddress, ParticipantAddresses = participants,
+                StartTimestamp = TimeUtil.GetTime(), LastProgressTimestamp = TimeUtil.GetTime(), StartBodyHash = "start-hash" };
+            session.Round1Commitments[dealerAddress] = "{\"commitment\":[\"dealer\"]}";
+            session.Round1Commitments[recipientAddress] = "{\"commitment\":[\"recipient\"]}";
+            session.Round1Commitments[otherAddress] = "{\"commitment\":[\"other\"]}";
+            string Report(string accuser, string accused, string? start = null, string? accuserCommitment = null) =>
+                FrostDkgBlame.AccusationMessage(session.SessionId, start ?? session.StartBodyHash, accuser, accused,
+                    accuserCommitment ?? session.Round1Commitments[accuser], session.Round1Commitments[accused]);
+            session.SealEphemerals[ids[recipientAddress]] = "ab".PadLeft(64, '0');
+            session.SealEphemerals[ids[otherAddress]] = "cd".PadLeft(64, '0');
+            Assert.True(FrostSessionStorage.DKGSessions.TryAdd(session.SessionId, session));
+            var priorValidator = Globals.ValidatorAddress;
+            Globals.ValidatorAddress = dealerAddress;
+            try
+            {
+                using var server = new Microsoft.AspNetCore.TestHost.TestServer(new Microsoft.AspNetCore.Hosting.WebHostBuilder().UseStartup<FrostStartup>());
+                var client = server.CreateClient();
+                async Task<(System.Net.HttpStatusCode Code, string Body)> Reveal(string accuser, string signature)
+                {
+                    var response = await client.PostAsync($"/frost/dkg/reveal/{session.SessionId}",
+                        new System.Net.Http.StringContent(JsonConvert.SerializeObject(new { Accuser = accuser, Signature = signature }), System.Text.Encoding.UTF8, "application/json"));
+                    return (response.StatusCode, await response.Content.ReadAsStringAsync());
+                }
+                string Sign(EllipticCurve.PrivateKey key, string pub, string message) => VerifiedXCore.Services.SignatureService.CreateSignature(message, key, pub);
+
+                // The recipient's own signed report: its share's key.
+                var (code, body) = await Reveal(recipientAddress, Sign(recipient, recipientPub, Report(recipientAddress, dealerAddress)));
+                Assert.Equal(System.Net.HttpStatusCode.OK, code);
+                Assert.Equal("ab".PadLeft(64, '0'), (string)JObject.Parse(body)["EphemeralKey"]!);
+                // Somebody else's signature on that recipient's behalf, or a report about another dealer: nothing.
+                (code, _) = await Reveal(recipientAddress, Sign(other, otherPub, Report(recipientAddress, dealerAddress)));
+                Assert.Equal(System.Net.HttpStatusCode.Forbidden, code);
+                (code, _) = await Reveal(recipientAddress, Sign(recipient, recipientPub, Report(recipientAddress, otherAddress)));
+                Assert.Equal(System.Net.HttpStatusCode.Forbidden, code);
+                // A report made in another session under this id (another start) holds for none other (round 11).
+                (code, _) = await Reveal(recipientAddress, Sign(recipient, recipientPub, Report(recipientAddress, dealerAddress, start: "another-start")));
+                Assert.Equal(System.Net.HttpStatusCode.Forbidden, code);
+                // ... nor for another session of the same id and start (a replaced or restarted one): its Round 1 differs (round 11).
+                (code, _) = await Reveal(recipientAddress, Sign(recipient, recipientPub, Report(recipientAddress, dealerAddress, accuserCommitment: "{\"commitment\":[\"earlier\"]}")));
+                Assert.Equal(System.Net.HttpStatusCode.Forbidden, code);
+                // Not a participant, or the dealer itself: nothing.
+                (code, _) = await Reveal("xStranger", "sig");
+                Assert.Equal(System.Net.HttpStatusCode.NotFound, code);
+                (code, _) = await Reveal(dealerAddress, Sign(dealer, dealerPub, Report(dealerAddress, dealerAddress)));
+                Assert.Equal(System.Net.HttpStatusCode.NotFound, code);
+            }
+            finally
+            {
+                Globals.ValidatorAddress = priorValidator;
+                FrostSessionStorage.DKGSessions.TryRemove(session.SessionId, out _);
+            }
         }
 
         // ── The coordinator's attempt loop ───────────────────────────────────────────────────────────────────────
@@ -203,6 +421,38 @@ namespace VerifiedXCore.Tests
             Assert.Matches(new Regex("^[0-9a-f]{32}:[0-9]+$"), run.ContractUID!);    // NEW-10 contract UID format
             Assert.Equal(saboteurs.OrderBy(a => a), run.Excluded.Keys.OrderBy(a => a));
             Assert.DoesNotContain(run.Result!.ParticipantAddresses, saboteurs.Contains);
+        }
+
+        /// <summary>
+        /// A validator that answers a start with "no room" (HTTP 429) did nothing wrong: its room can be filled by anybody
+        /// for a while. It sits out this ceremony and is not remembered as failing, so the next ceremony asks it again
+        /// (third pass, 14 October 2026: the coordinator remembered it for six hours).
+        /// </summary>
+        [Fact]
+        public async Task AValidatorWithNoRoom_SitsOutThisCeremony_ButIsNotRememberedAsFailing()
+        {
+            var validators = Validators(20);
+            var busy = validators[0].ValidatorAddress;
+            var broken = validators[1].ValidatorAddress;
+            FrostMPCService.AttemptRunnerForTests = (uid, session, participants, auth) =>
+            {
+                var attempt = new FrostMPCService.DkgAttempt();
+                if (participants.Any(p => p.ValidatorAddress == busy))
+                {
+                    attempt.Failed[busy] = "refused the DKG start (HTTP 429)";
+                    attempt.Busy.Add(busy);
+                    attempt.Failed[broken] = "refused the DKG start (HTTP 500)";
+                    attempt.Error = "2 of 20 validators did not join the key ceremony.";
+                }
+                else attempt.Result = ResultFor(uid, participants);
+                return Task.FromResult(attempt);
+            };
+
+            var run = await FrostMPCService.CoordinateDKGCeremony("c", "ROwner", validators, 51);
+            Assert.NotNull(run.Result);
+            Assert.DoesNotContain(busy, run.Result!.ParticipantAddresses);
+            Assert.False(FrostMPCService.RecentDkgFailures.ContainsKey(busy));
+            Assert.True(FrostMPCService.RecentDkgFailures.ContainsKey(broken));
         }
 
         [Fact]

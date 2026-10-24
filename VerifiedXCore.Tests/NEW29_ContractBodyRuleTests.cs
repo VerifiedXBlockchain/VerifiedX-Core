@@ -90,6 +90,27 @@ namespace VerifiedXCore.Tests
             Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint, false, true, false, null, false, 1001));
         }
 
+        /// <summary>
+        /// A transaction nobody signed is refused before any rule parses or runs the code it carries (round 36): the
+        /// signature is checked first, so only its owner's own transactions reach the parser.
+        /// </summary>
+        [Theory]
+        [InlineData("Mint()", TransactionType.NFT_MINT)]
+        [InlineData("Transfer()", TransactionType.NFT_TX)]
+        [InlineData("Update()", TransactionType.NFT_MINT)]
+        [InlineData("Evolve()", TransactionType.NFT_TX)]
+        [InlineData("Devolve()", TransactionType.NFT_TX)]
+        [InlineData("ChangeEvolveStateSpecific()", TransactionType.NFT_TX)]
+        public async Task AnUnsignedTransaction_IsRefusedBeforeItsBodyIsParsed(string function, TransactionType type)
+        {
+            var unsigned = Tx(function, With(DoWhile), type);
+            unsigned.Signature = null;
+            Assert.Equal((false, "Signature cannot be null."), await TransactionValidatorService.VerifyTX(unsigned));
+            var forged = Tx(function, With(DoWhile), type);
+            forged.Signature = Tx(function, With(CallsRand), type).Signature;
+            Assert.Equal((false, "Signature Failed to verify."), await TransactionValidatorService.VerifyTX(forged));
+        }
+
         [Theory]
         [InlineData("Transfer()", TransactionType.NFT_TX)]
         [InlineData("Update()", TransactionType.NFT_MINT)]
@@ -109,6 +130,20 @@ namespace VerifiedXCore.Tests
             var src = NEW29_ContractCodeTests.Source(Plain()).Replace("let Name = \"Plain\"", "let Name = \"Plain\nwhat we do for rand(1) input()\"");
             Assert.Contains("what we do", src);
             Assert.Null(LedgerIntegrityRules.ContractBodyAllowed(Tx("Mint()", NEW29_ContractCodeTests.Body(src))));
+        }
+
+        [Fact]
+        public void ABodyTheParserCannotRead_IsRefused_NotThrown()
+        {
+            var prior = LedgerIntegrityRules.ParseContractBody;
+            try
+            {
+                LedgerIntegrityRules.ParseContractBody = _ => throw new InvalidOperationException("parser fault");
+                Assert.Equal("Contract code cannot be read.", LedgerIntegrityRules.ContractBodyAllowed(Tx("Mint()", Plain())));
+            }
+            finally { LedgerIntegrityRules.ParseContractBody = prior; }
+
+            Assert.Null(LedgerIntegrityRules.ContractBodyAllowed(Tx("Mint()", Plain()))); // the real parser reads it
         }
 
         [Fact]

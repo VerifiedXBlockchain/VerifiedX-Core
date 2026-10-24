@@ -225,9 +225,12 @@ namespace VerifiedXCore.Models.SmartContracts
                         textFromByte = scText;
                     }
 
+                    if (textFromByte != null && textFromByte.TrimStart().StartsWith("#", StringComparison.Ordinal))
+                        throw new InvalidOperationException("A contract body cannot be a console command.");
+
                     var repl = new TrilliumRepl();
                     repl.Run("#reset");
-                    repl.Run(textFromByte);
+                    repl.Run(VerifiedXCore.Services.ContractClock.Prepare(textFromByte)); // in a block: the block's time, not this node's clock
 
                     var scUID = repl.Run(@"GetNFTId()").Value.ToString();
                     var features = repl.Run(@"GetNFTFeatures()").Value.ToString();
@@ -364,7 +367,7 @@ namespace VerifiedXCore.Models.SmartContracts
 
                                         if (isDynamic == true)
                                         {
-                                            var blockHeight = Globals.LastBlock.Height.ToString();
+                                            var blockHeight = VerifiedXCore.Services.ContractClock.TipHeight().ToString(); // in a block: the block before it, not this node's tip
                                             var evolveState = (int)repl.Run(@"DynamicEvolve(1, " + blockHeight + ")").Value;
 
                                             var evolveFeature = evolveFeatureList.Where(x => x.EvolutionState == evolveState).FirstOrDefault();
@@ -482,7 +485,7 @@ namespace VerifiedXCore.Models.SmartContracts
 
                                     if (isDynamic == true)
                                     {
-                                        var blockHeight = Globals.LastBlock.Height.ToString();
+                                        var blockHeight = VerifiedXCore.Services.ContractClock.TipHeight().ToString(); // in a block: the block before it, not this node's tip
                                         var evolveState = (int)repl.Run(@"DynamicEvolve(1, " + blockHeight + ")").Value;
 
                                         var evolveFeature = evolveFeatureList.Where(x => x.EvolutionState == evolveState).FirstOrDefault();
@@ -527,15 +530,23 @@ namespace VerifiedXCore.Models.SmartContracts
             }
         }
 
+        /// <summary>Tests only: runs as a contract is decompiled (a fault of the decompiler or of this node).</summary>
+        internal static Action<string>? DecompileForTests;
+
         public static SmartContractMain GenerateSmartContractInMemory(string scText)
         {
+            DecompileForTests?.Invoke(scText);
             var byteArrayFromBase64 = scText.FromBase64ToByteArray();
             var decompressedByteArray = SmartContractUtility.Decompress(byteArrayFromBase64);
             var textFromByte = Encoding.Unicode.GetString(decompressedByteArray);
+            // The runner treats a one-line text that starts with '#' as a console command, and one of those reads and
+            // runs a file from this node's own disk (#load). A contract body is code, never a command.
+            if (textFromByte.TrimStart().StartsWith("#", StringComparison.Ordinal))
+                throw new InvalidOperationException("A contract body cannot be a console command.");
 
             var repl = new TrilliumRepl();
             repl.Run("#reset");
-            repl.Run(textFromByte);
+            repl.Run(VerifiedXCore.Services.ContractClock.Prepare(textFromByte)); // in a block: the block's time, not this node's clock
 
             var scUID = repl.Run(@"GetNFTId()").Value.ToString();
             var features = repl.Run(@"GetNFTFeatures()").Value.ToString();
@@ -731,7 +742,7 @@ namespace VerifiedXCore.Models.SmartContracts
 
                                 if (isDynamic == true)
                                 {
-                                    var blockHeight = Globals.LastBlock.Height.ToString();
+                                    var blockHeight = VerifiedXCore.Services.ContractClock.TipHeight().ToString(); // in a block: the block before it, not this node's tip
                                     var evolveStateDynamic = (int)repl.Run(@"DynamicEvolve(1, " + blockHeight + ")").Value;
 
                                     var evolveFeature = evolveFeatureList.Where(x => x.EvolutionState == evolveStateDynamic).FirstOrDefault();
@@ -914,7 +925,7 @@ namespace VerifiedXCore.Models.SmartContracts
 
                             if (isDynamic == true)
                             {
-                                var blockHeight = Globals.LastBlock.Height.ToString();
+                                var blockHeight = VerifiedXCore.Services.ContractClock.TipHeight().ToString(); // in a block: the block before it, not this node's tip
                                 var evolveStateDynamic = (int)repl.Run(@"DynamicEvolve(1, " + blockHeight + ")").Value;
 
                                 var evolveFeature = evolveFeatureList.Where(x => x.EvolutionState == evolveStateDynamic).FirstOrDefault();

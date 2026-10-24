@@ -34,8 +34,26 @@ namespace VerifiedXCore.Tests
     public class VBTCV2MultiTransferTests : IDisposable
     {
         private const long ActivationHeight = 1000;
-        private const string Sender = "RSenderMultiVbtcTest0000000000000001";
-        private const string ReserveSender = "xRBXReserveMultiVbtcTest000000000001";
+        // A real key: VerifyTX checks the signature before the rules these tests judge (round 36).
+        private static readonly EllipticCurve.PrivateKey SenderKey = new EllipticCurve.PrivateKey("secp256k1");
+        private static readonly string SenderPub = "04" + Convert.ToHexString(SenderKey.publicKey().toString()).ToLowerInvariant();
+        private static readonly string Sender = AccountData.GetHumanAddress(SenderPub);
+        private static readonly (EllipticCurve.PrivateKey Key, string Pub, string Address) ReserveSenderKeys = NewReserveKey();
+        private static readonly EllipticCurve.PrivateKey ReserveSenderKey = ReserveSenderKeys.Key;
+        private static readonly string ReserveSenderPub = ReserveSenderKeys.Pub;
+        private static readonly string ReserveSender = ReserveSenderKeys.Address;
+
+        /// <summary>A key whose reserve address has the xRBX prefix (not every key's does).</summary>
+        private static (EllipticCurve.PrivateKey, string, string) NewReserveKey()
+        {
+            while (true)
+            {
+                var key = new EllipticCurve.PrivateKey("secp256k1");
+                var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+                var address = ReserveAccount.GetHumanAddress(pub);
+                if (address.StartsWith("xRBX", StringComparison.Ordinal)) return (key, pub, address);
+            }
+        }
         // Valid base58check VFX address (canonical sample from AddressValidationTests) — the
         // recipient must survive VerifyTX's generic to-address validation.
         private const string Recipient = "RAjtW2uDSEDW9mPVkKp2K2AAu4uJD9Zrn7";
@@ -87,18 +105,19 @@ namespace VerifiedXCore.Tests
             });
         }
 
-        private static string MultiData(decimal total, (string ScUid, decimal Amount)[] inputs, string from = Sender, string to = Recipient)
+        private static string MultiData(decimal total, (string ScUid, decimal Amount)[] inputs, string? from = null, string to = Recipient)
             => JsonConvert.SerializeObject(new
             {
                 Function = VBTCService.MultiTransferFunction,
-                FromAddress = from,
+                FromAddress = from ?? Sender,
                 ToAddress = to,
                 TotalAmount = total,
                 Inputs = inputs.Select(i => new { SCUID = i.ScUid, Amount = i.Amount }).ToArray(),
             });
 
-        private static Transaction BuildTx(string data, string from = Sender, string to = Recipient)
+        private static Transaction BuildTx(string data, string? from = null, string to = Recipient)
         {
+            from ??= Sender;
             var tx = new Transaction
             {
                 Timestamp = TimeUtil.GetTime(),
@@ -111,6 +130,10 @@ namespace VerifiedXCore.Tests
                 Data = data,
             };
             tx.Build();
+            if (tx.FromAddress == Sender)
+                tx.Signature = VerifiedXCore.Services.SignatureService.CreateSignature(tx.Hash, SenderKey, SenderPub);
+            else if (tx.FromAddress == ReserveSender)
+                tx.Signature = VerifiedXCore.Services.SignatureService.CreateSignature(tx.Hash, ReserveSenderKey, ReserveSenderPub);
             return tx;
         }
 
@@ -315,7 +338,7 @@ namespace VerifiedXCore.Tests
         /// <summary>A fully valid multi TX (shape + balances) must clear the whole multi branch —
         /// proven by failing at the unrelated final signature check instead of any vBTC error.</summary>
         [Fact]
-        public async Task PostGate_ValidMulti_PassesBranch_FailsOnlyAtSignature()
+        public async Task PostGate_ValidMulti_Passes()
         {
             ActivateGate();
             SeedContract("multiok:1", "xSomeOwner", ("+", Sender, 0.5M));
@@ -324,8 +347,7 @@ namespace VerifiedXCore.Tests
 
             var (ok, message) = await TransactionValidatorService.VerifyTX(tx);
 
-            Assert.False(ok);
-            Assert.Equal("Signature cannot be null.", message);
+            Assert.True(ok, message); // signed now: a valid multi passes (round 36: the signature is checked first)
         }
 
         // ── Outflow parsing (shared by all overspend guards) ─────────────────────────────────

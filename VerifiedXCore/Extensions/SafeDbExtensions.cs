@@ -7,6 +7,53 @@ namespace VerifiedXCore.Extensions
 {
     public static class DbExtensions
     {
+        /// <summary>
+        /// Counts the failures these wrappers swallow (logged, a default returned) in the named collections, within the
+        /// work that opened it (it flows with that work's awaits and tasks, not to other threads). A caller whose writes
+        /// must all land (a block's apply, the withdrawal-store rebuild) opens one and checks Count when done.
+        /// </summary>
+        public sealed class FailureScope : IDisposable
+        {
+            private static readonly AsyncLocal<FailureScope?> CurrentScope = new();
+            private readonly FailureScope? _outer;
+            private readonly HashSet<string> _collections;
+            private readonly Func<Exception, bool>? _counts;
+            private int _count;
+
+            public FailureScope(params string[] collections) : this(null, collections) { }
+
+            /// <summary>
+            /// A scope that counts a swallowed exception only when <paramref name="counts"/> accepts it (a fault of this
+            /// node's storage, say); a failure noted without its exception (<see cref="NoteFailure(string?)"/>) always counts.
+            /// </summary>
+            public FailureScope(Func<Exception, bool>? counts, params string[] collections)
+            {
+                _collections = new HashSet<string>(collections, StringComparer.Ordinal);
+                _counts = counts;
+                _outer = CurrentScope.Value;
+                CurrentScope.Value = this;
+            }
+
+            public int Count => Volatile.Read(ref _count);
+
+            public void Dispose() => CurrentScope.Value = _outer;
+
+            internal static void Note(string? collection, Exception? ex = null)
+            {
+                if (collection == null) return;
+                for (var scope = CurrentScope.Value; scope != null; scope = scope._outer)
+                    if (scope._collections.Contains(collection) && (ex == null || scope._counts == null || scope._counts(ex)))
+                        Interlocked.Increment(ref scope._count);
+            }
+        }
+
+        /// <summary>Reports a failure swallowed elsewhere (a catch around this collection's writes) to the open scopes.</summary>
+        public static void NoteFailure(string? collection) => FailureScope.Note(collection);
+
+        private static void NoteFailure<T>(ILiteCollection<T>? col, Exception ex)
+        {
+            try { FailureScope.Note(col?.Name, ex); } catch { }
+        }
         private static ConcurrentDictionary<string, SemaphoreSlim> DbSemaphores = new ConcurrentDictionary<string, SemaphoreSlim>();        
 
         private static SemaphoreSlim GetSlim<T>(this ILiteCollection<T> col)
@@ -34,7 +81,8 @@ namespace VerifiedXCore.Extensions
             }
             catch (Exception ex)
             {
-                ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "SafeDBExtensions.Command()-1");                
+                ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "SafeDBExtensions.Command()-1");
+                NoteFailure(col, ex);                
             }
 
             try { slim.Release(); } catch { }            
@@ -53,6 +101,7 @@ namespace VerifiedXCore.Extensions
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "SafeDBExtensions.Command()-2");
+                NoteFailure(col, ex);
             }
 
             try { slim.Release(); } catch { }            
@@ -72,7 +121,8 @@ namespace VerifiedXCore.Extensions
             }
             catch (Exception ex)
             {
-                ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "SafeDBExtensions.CommandAsync()-1");                
+                ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "SafeDBExtensions.CommandAsync()-1");
+                NoteFailure(col, ex);                
             }
 
             try { slim?.Release(); } catch { }            
@@ -91,6 +141,7 @@ namespace VerifiedXCore.Extensions
             catch (Exception ex)
             {
                 ErrorLogUtility.LogError($"Unknown Error: {ex.ToString()}", "SafeDBExtensions.CommandAsync()-2");
+                NoteFailure(col, ex);
             }
 
             try { slim?.Release(); } catch { }            
@@ -127,6 +178,18 @@ namespace VerifiedXCore.Extensions
         public static bool UpdateSafe<T>(this ILiteCollection<T> col, T entity)
         {
             return Command(col, () => col.Update(entity));
+        }
+
+        /// <summary>
+        /// As <see cref="UpdateSafe{T}(ILiteCollection{T}, T)"/> (the collection's lock held), but a failure is thrown, not
+        /// logged and dropped: for consensus writes whose loss would leave state other than the chain says.
+        /// </summary>
+        public static bool UpdateOrThrow<T>(this ILiteCollection<T> col, T entity)
+        {
+            var slim = col.GetSlim();
+            slim.Wait();
+            try { return col.Update(entity); }
+            finally { try { slim.Release(); } catch { } }
         }
 
         //

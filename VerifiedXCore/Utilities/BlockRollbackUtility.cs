@@ -15,6 +15,9 @@ namespace VerifiedXCore.Utilities
         /// <summary>Public accessor so other services can check if a full state rebuild is in progress.</summary>
         public static bool IsResetTreisRunning => _isResetTreisRunning;
 
+        /// <summary>The last WipeChainDerivedState wiped the vBTC withdrawal store (its replay then rebuilt it from the chain).</summary>
+        public static bool WithdrawalStoreWiped { get; private set; }
+
         /// <summary>
         /// Full chain rescan rollback — deletes blocks above newHeight, nukes all state,
         /// and replays the entire blockchain from genesis.
@@ -46,6 +49,14 @@ namespace VerifiedXCore.Utilities
                 var restored = await SnapshotRestoreUtility.TryRestoreAsync(newHeight, manageFlags: false);
                 if (restored)
                     return true;
+
+                if (SnapshotRestoreUtility.StateDestroyedByFailedRestore)
+                {
+                    ErrorLogUtility.LogError(
+                        $"[RollbackBlocks] The snapshot restore to {newHeight} failed after wiping the state. This node stops validating blocks; restart it with the 'rebuildstate' argument.",
+                        "BlockRollbackUtility.RollbackBlocks");
+                    return false;
+                }
 
                 ErrorLogUtility.LogError(
                     $"[RollbackBlocks] No usable snapshot covers rollback target {newHeight} (tip {height}). " +
@@ -117,19 +128,11 @@ namespace VerifiedXCore.Utilities
                 // Step 2: Check if all transactions can be incrementally reversed.
                 // Only simple TX types are safe to undo. Complex types (smart contracts,
                 // reserves, token operations, etc.) require a full state rebuild.
-                foreach (var block in blocksToRemove)
+                var whyNot = WhyNotIncremental(blocksToRemove, targetHeight);
+                if (whyNot != null)
                 {
-                    foreach (var tx in block.Transactions)
-                    {
-                        if (!CanIncrementallyReverse(tx))
-                        {
-                            LogUtility.Log(
-                                $"[RollbackFast] Block {block.Height} contains non-reversible tx type {tx.TransactionType} " +
-                                $"(hash={tx.Hash?[..Math.Min(12, tx.Hash?.Length ?? 0)]}). Falling back to full rollback.",
-                                "BlockRollback");
-                            return await RollbackBlocks(numBlocksRollback, manageIsResyncing: false);
-                        }
-                    }
+                    LogUtility.Log($"[RollbackFast] {whyNot} Falling back to full rollback.", "BlockRollback");
+                    return await RollbackBlocks(numBlocksRollback, manageIsResyncing: false);
                 }
 
                 // Step 3: Reverse state changes for each block (newest first)
@@ -208,6 +211,10 @@ namespace VerifiedXCore.Utilities
                 blockStore.DeleteManySafe(x => x.Height > targetHeight);
                 DbContext.DB.Checkpoint();
                 DbContext.DB_AccountStateTrei.Checkpoint();
+
+                // Snapshot slots above the target hold state from the removed blocks; keep them out of any restore.
+                try { StateSnapshotService.InvalidateAbove(targetHeight); }
+                catch (Exception ex) { ErrorLogUtility.LogError($"[RollbackBlocksFast] Could not invalidate snapshot slots above {targetHeight}: {ex.Message}", "BlockRollbackUtility.RollbackBlocksFast"); }
 
                 // Step 5 + 6: Update Globals.LastBlock to the new tip and clear stale in-memory
                 // queues (shared with SnapshotRestoreUtility).
@@ -312,7 +319,61 @@ namespace VerifiedXCore.Utilities
                 if (Globals.MemBlocks.TryRemove(txHash, out _))
                     removed++;
             }
+            Services.TxHashGuard.ForgetAbove(targetHeight);
             return removed;
+        }
+
+        /// <summary>
+        /// Why the blocks above <paramref name="targetHeight"/> cannot be undone one transaction at a time; null when
+        /// they can. Two reasons: a transaction whose effects are more than a balance move, or state that Bitcoin
+        /// attestation wrote in one of those blocks. That layer writes at the start of a block whatever the block
+        /// carries (an unpinned withdrawal or bridge exit past its window is closed and refunded; a signer set is
+        /// stored). Undoing only the block's transactions would leave those writes in place, and a different block at
+        /// the same height could then be judged against a state it never produced.
+        /// </summary>
+        internal static string? WhyNotIncremental(IEnumerable<Block> blocksToRemove, long targetHeight)
+        {
+            foreach (var block in blocksToRemove)
+                foreach (var tx in block.Transactions)
+                    if (!CanIncrementallyReverse(tx))
+                        return $"Block {block.Height} contains non-reversible tx type {tx.TransactionType} (hash={tx.Hash?[..Math.Min(12, tx.Hash?.Length ?? 0)]}).";
+
+            bool attestationChanged;
+            try { attestationChanged = VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.ChangedAbove(targetHeight); }
+            catch { attestationChanged = true; }
+            if (attestationChanged)
+                return $"Bitcoin attestation state was written above block {targetHeight}.";
+
+            // The forged-VFX burn is not undone by reversing the removed blocks' transactions, and re-applying the block
+            // that carried it burns again; a snapshot restore brings back the balances and the burn marker together.
+            if (Globals.ForgedVfxBurns.Count > 0)
+            {
+                try
+                {
+                    var burnedAt = WorldTrei.GetWorldTrei().FindOne(x => true)?.ForgedVfxBurnAppliedHeight ?? 0;
+                    if (burnedAt > targetHeight)
+                        return $"The forged-VFX burn was applied above block {targetHeight}.";
+                }
+                catch { return "The forged-VFX burn marker could not be read."; }
+            }
+
+            // Delayed reserve payments settle after each block whose time passed their unlock time; a removed block may
+            // have settled some, which undoing its transactions does not reverse (fifth review, round 29).
+            try
+            {
+                var removedTimes = blocksToRemove.Select(b => b.Timestamp).ToList();
+                var targetTime = BlockchainData.GetBlockByHeight(targetHeight)?.Timestamp;
+                if (removedTimes.Count > 0)
+                {
+                    var latest = removedTimes.Max();
+                    var from = targetTime ?? removedTimes.Min() - 3_600; // the target's time, or an hour before the earliest removed block
+                    var rows = ReserveTransactions.GetReserveTransactionsDb();
+                    if (rows != null && rows.Exists(x => x.ConfirmTimestamp >= from && x.ConfirmTimestamp < latest))
+                        return $"A delayed reserve payment fell due above block {targetHeight}.";
+                }
+            }
+            catch { return "Reserve settlements above the target could not be checked."; }
+            return null;
         }
 
         /// <summary>
@@ -468,6 +529,7 @@ namespace VerifiedXCore.Utilities
             // signing keys, peer key backups, local bridge mint tracking, and the Base exit-scan
             // cursor, none of which can be rebuilt from the chain. The previous wipe-all loop
             // destroyed validator signing material on every rebuild.
+            var withdrawalStoreWipeFailed = false;
             try
             {
                 if (DbContext.DB_vBTC != null)
@@ -479,6 +541,7 @@ namespace VerifiedXCore.Utilities
             }
             catch (Exception ex)
             {
+                withdrawalStoreWipeFailed = true;   // the cancellations are part of the withdrawal store
                 Console.WriteLine($"[WipeChainDerivedState] Warning: Could not wipe DB_vBTC consensus collections: {ex.Message}");
             }
 
@@ -494,6 +557,7 @@ namespace VerifiedXCore.Utilities
             }
 
             // vBTC withdrawal requests + bridge lock/exit consensus state (all written from StateData)
+            WithdrawalStoreWiped = false;
             try
             {
                 if (DbContext.DB_VBTCWithdrawalRequests != null)
@@ -504,11 +568,24 @@ namespace VerifiedXCore.Utilities
                     // Consumed Base burns are chain-derived too. Left in place, a full replay would find
                     // every post-gate pool unlock "already consumed" and credit nothing (state divergence).
                     DbContext.DB_VBTCWithdrawalRequests.GetCollection(VBTCBridgeConsumedBurn.CollectionName).DeleteAll();
+                    WithdrawalStoreWiped = !withdrawalStoreWipeFailed;
                 }
             }
             catch (Exception ex)
             {
+                withdrawalStoreWipeFailed = true;
                 Console.WriteLine($"[WipeChainDerivedState] Warning: Could not wipe DB_VBTCWithdrawalRequests: {ex.Message}");
+            }
+
+            // Bitcoin facts in consensus (attested headers, vault scripts and coins, signer sets): rebuilt by the replay
+            // from the report, pin and vault-creation transactions.
+            try
+            {
+                VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.WipeAll();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WipeChainDerivedState] Warning: Could not wipe DB_BtcAttest: {ex.Message}");
             }
 
             // NOTE: DB_Shares (arbiter secret shares) is deliberately NOT wiped — it is local
@@ -545,7 +622,17 @@ namespace VerifiedXCore.Utilities
             try { DbContext.DB_vBTC?.Checkpoint(); } catch { }
             try { DbContext.DB_TokenizedWithdrawals?.Checkpoint(); } catch { }
             try { DbContext.DB_VBTCWithdrawalRequests?.Checkpoint(); } catch { }
+            try { DbContext.DB_BtcAttest?.Checkpoint(); } catch { }
             try { DbContext.DB_Privacy?.Checkpoint(); } catch { }
+
+            // Withdrawal rows or cancellations left from before (a fork's, say) would be read with the replayed ones: a
+            // cancellation left behind kept the replayed chain's own from being recorded, and the withdrawal open here
+            // while its peers refunded it. The state rebuild or restore that asked for the wipe fails instead.
+            if (withdrawalStoreWipeFailed)
+            {
+                VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.MarkNeedsStateRebuild();
+                throw new System.IO.IOException("The vBTC withdrawal store could not be wiped; the state is not rebuilt on it.");
+            }
         }
 
         /// <summary>
@@ -558,6 +645,9 @@ namespace VerifiedXCore.Utilities
         /// 
         /// Does NOT wipe user data (wallet, HD wallet, peers, config, keystore, beacon, DST).
         /// </summary>
+        /// <summary>Test seam: runs right after ResetTreis wipes chain-derived state, the point a crash mid-replay leaves on disk.</summary>
+        internal static Action? StateWipedForTests;
+
         public static async Task<bool> ResetTreis()
         {
             // RE-ENTRANCY GUARD: If ResetTreis is already running, reject the new request.
@@ -570,6 +660,7 @@ namespace VerifiedXCore.Utilities
             }
 
             _isResetTreisRunning = true;
+            await VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.WaitUntilStoppedAsync();
             // CRITICAL FIX: Set IsResyncing to block ALL block validation during the entire
             // state rebuild. Without this, ResetTreis wipes the state trie (Step 1) but
             // ValidateBlock keeps running on incoming P2P blocks, sees empty state → 
@@ -604,7 +695,17 @@ namespace VerifiedXCore.Utilities
                     Console.WriteLine($"[ResetTreis] Warning: Could not wipe Mempool: {ex.Message}");
                 }
 
+                // Every snapshot slot holds the state this rebuild replaces. Replay stamps rows with their
+                // original block heights, so a diff cycle would never copy them into those slots; mark them
+                // Invalid so the next cycles full-copy the rebuilt state and a restore cannot bring the old back.
+                // Durably marked before anything is destroyed: a crash during the replay leaves a status that stops this
+                // node until a rebuild completes, never the old IsSynced=true over partly rebuilt state.
+                StateTreiStatusService.SetRebuildStarted();
+
+                StateSnapshotService.InvalidateAbove(-1);
+
                 WipeChainDerivedState();
+                StateWipedForTests?.Invoke();
 
                 DbContext.DB.Checkpoint();
                 try { DbContext.DB_Mempool.Checkpoint(); } catch { }
@@ -638,6 +739,8 @@ namespace VerifiedXCore.Utilities
                 // at a time from disk, keeping memory usage flat regardless of chain length.
                 int processedCount = 0;
                 int failCount = 0;
+                int localFaultCount = 0; // the failures caused by this node's own storage, not by the chain
+                StateData.BlockStartFailedAtHeight = -1;
                 var rebuildStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
                 // Reserve rows were wiped in Step 2 and are recreated Pending during replay.
@@ -647,9 +750,21 @@ namespace VerifiedXCore.Utilities
                 // rebuilt vBTC ledger diverges. Flag keeps the per-block DB query off the hot path
                 // until reserve activity actually appears in the chain.
                 bool reservePendingPossible = false;
+                long previousHeight = -1;
+                // A rebuild that would lift a failed restore's stop must cover every height: a block missing from the
+                // store leaves state that matches no chain. (Other rebuilds keep their own rule.)
+                var liftsRestoreStop = SnapshotRestoreUtility.StateDestroyedByFailedRestore || StateTreiStatusService.GetStatus()?.RestoreDestroyed == true;
 
                 foreach (var block in blockCollection.Find(LiteDB.Query.All("Height", LiteDB.Query.Ascending)))
                 {
+                    if (liftsRestoreStop && block.Height != previousHeight + 1) // from genesis (height 0), then every height
+                    {
+                        failCount++;
+                        localFaultCount++;
+                        ErrorLogUtility.LogError($"[ResetTreis] The block store has no block between heights {Math.Max(previousHeight, -1) + 1} and {block.Height - 1}; the failed restore's stop holds.", "BlockRollbackUtility.ResetTreis");
+                    }
+                    previousHeight = block.Height;
+
                     try
                     {
                         // UpdateTreis is the comprehensive state commit path — it handles ALL TX types:
@@ -657,6 +772,15 @@ namespace VerifiedXCore.Utilities
                         // privacy/shielded TXs, bridge locks/unlocks, etc.
                         await StateData.UpdateTreis(block);
                         processedCount++;
+                        if (StateData.LastApplyHadNodeLocalFault)
+                            localFaultCount++;
+                        // A block-start step that failed (see StateData.BlockStartFailedAtHeight): the rebuilt state is
+                        // not the network's, and the replay is not a success.
+                        if (StateData.BlockStartFailedAtHeight == block.Height)
+                        {
+                            failCount++;
+                            ErrorLogUtility.LogError($"[ResetTreis] The block-start step of block {block.Height} failed during the replay.", "BlockRollbackUtility.ResetTreis");
+                        }
 
                         if (!reservePendingPossible && block.Transactions != null &&
                             block.Transactions.Any(t => t.FromAddress != null && t.FromAddress.StartsWith("xRBX") && t.TransactionType != TransactionType.RESERVE))
@@ -677,8 +801,11 @@ namespace VerifiedXCore.Utilities
                                 else
                                 {
                                     var maturedRows = pendingRows.Where(x => x.ConfirmTimestamp < block.Timestamp).ToList();
-                                    if (maturedRows.Count > 0)
-                                        await StateData.UpdateTreiFromReserve(maturedRows);
+                                    if (maturedRows.Count > 0 && !await StateData.UpdateTreiFromReserve(maturedRows, block))
+                                    {
+                                        failCount++; // a settlement this node could not write is a replay failure (round 7)
+                                        localFaultCount++; // it reports false only for a fault of this node's storage
+                                    }
                                 }
                             }
                         }
@@ -703,8 +830,16 @@ namespace VerifiedXCore.Utilities
                     catch (Exception ex)
                     {
                         failCount++;
+                        if (StateData.IsNodeLocalFault(ex))
+                            localFaultCount++;
                         ErrorLogUtility.LogError($"[ResetTreis] Error replaying block {block.Height}: {ex.Message}", "BlockRollbackUtility.ResetTreis");
                     }
+                }
+
+                if (liftsRestoreStop && previousHeight < 0)
+                {
+                    failCount++;
+                    ErrorLogUtility.LogError("[ResetTreis] The block store is empty; the failed restore's stop holds.", "BlockRollbackUtility.ResetTreis");
                 }
 
                 rebuildStopwatch.Stop();
@@ -763,6 +898,8 @@ namespace VerifiedXCore.Utilities
                             bool isRelevant = walletAddresses.Contains(tx.ToAddress) || walletAddresses.Contains(tx.FromAddress);
                             if (isRelevant)
                             {
+                                // A sale completion this wallet sent uses its bid, as when it was first mined.
+                                if (walletAddresses.Contains(tx.FromAddress)) VerifiedXCore.Models.DST.Bid.MarkUsedByCompletion(tx);
                                 var existing = txData.FindOne(x => x.Hash == tx.Hash);
                                 if (existing == null)
                                 {
@@ -809,12 +946,15 @@ namespace VerifiedXCore.Utilities
                 if (failCount == 0)
                 {
                     StateTreiStatusService.SetSynced(Globals.LastBlock.Height);
+                    SnapshotRestoreUtility.ClearStateDestroyed();
+                    VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.StoreRewrittenFromChain();
                     Console.WriteLine($"[ResetTreis] Step 5: StateTreiStatus set to SYNCED at height {Globals.LastBlock.Height}.");
                 }
                 else
                 {
-                    StateTreiStatusService.SetFailed($"ResetTreis completed with {failCount} block replay failures.");
-                    Console.WriteLine($"[ResetTreis] Step 5: StateTreiStatus set to FAILED ({failCount} replay errors).");
+                    StateTreiStatusService.EndRebuildWithFailures($"ResetTreis completed with {failCount} block replay failures ({localFaultCount} from this node's storage).", localFaultCount > 0);
+                    Console.WriteLine($"[ResetTreis] Step 5: StateTreiStatus set to FAILED ({failCount} replay errors)." +
+                        (localFaultCount > 0 ? " This node's storage failed during the replay: resync the node, then run rebuildstate." : ""));
                 }
 
                 return failCount == 0;

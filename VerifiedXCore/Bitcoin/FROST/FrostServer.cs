@@ -22,6 +22,12 @@ namespace VerifiedXCore.Bitcoin.FROST
                     {
                         webBuilder.UseKestrel(options =>
                         {
+                            // Every route reads its body before it can tell who sent it: with Kestrel's defaults (30 MB a
+                            // body, no connection limit) a few hundred trickled bodies held gigabytes of a validator's
+                            // memory (fifth review, round 17). The largest honest body, a Round 2 commitment set at the
+                            // 200-participant cap, is about 2 MB (6.4 MB at the commitment size limit).
+                            options.Limits.MaxRequestBodySize = 8 * 1024 * 1024;
+                            options.Limits.MaxConcurrentConnections = 256;
                             options.ListenAnyIP(Globals.FrostValidatorPort + 1, listenOption => { listenOption.UseHttps(GetSelfSignedCertificate()); });
                             options.ListenAnyIP(Globals.FrostValidatorPort);
                         })
@@ -29,8 +35,11 @@ namespace VerifiedXCore.Bitcoin.FROST
                         .ConfigureLogging(loggingBuilder => loggingBuilder.ClearProviders());
                     });
 
+                    // Signing records from here on are under exact spellings only (older ones may hide an overwritten one):
+                    // stamped before the server takes a request.
+                    VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.EnsureExactSpellingSince();
                     _ = builder.RunConsoleAsync();
-                    
+
                     // Pins live in memory; rebuild them from the durable signed evidence so a restart cannot
                     // let a new withdrawal spend the coins of a signed transaction that is still out there.
                     try { FrostStartup.RestorePinsFromEvidence(); }
@@ -97,8 +106,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                     return;
 
                 Console.WriteLine("[FROST Backup] Auto-recovery: No local FROST key packages found but this is an active validator. Attempting peer recovery...");
-                var recoveredCount = await VerifiedXCore.Bitcoin.Services.FrostKeyBackupService.RecoverKeysFromPeers(
-                    Globals.ValidatorAddress, activeValidators);
+                var recoveredCount = (await VerifiedXCore.Bitcoin.Services.FrostKeyBackupService.RecoverKeysFromPeersWithRetry(
+                    Globals.ValidatorAddress, activeValidators)).Restored;
 
                 if (recoveredCount > 0)
                     Console.WriteLine($"[FROST Backup] Auto-recovery: Successfully recovered {recoveredCount} FROST key package(s) from peers!");

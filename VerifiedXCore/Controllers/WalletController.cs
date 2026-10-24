@@ -46,7 +46,7 @@ namespace VerifiedXCore.Controllers
                 if (string.IsNullOrWhiteSpace(req.From) || string.IsNullOrWhiteSpace(req.To) || string.IsNullOrWhiteSpace(req.Amount))
                     return BadRequest(new { success = false, message = "From, To, and Amount are required." });
 
-                if (!decimal.TryParse(req.Amount, System.Globalization.NumberStyles.Any,
+                if (!decimal.TryParse(req.Amount, AmountStyle,
                     System.Globalization.CultureInfo.InvariantCulture, out decimal amount) || amount <= 0)
                     return BadRequest(new { success = false, message = "Invalid amount." });
 
@@ -108,7 +108,7 @@ namespace VerifiedXCore.Controllers
                     string.IsNullOrWhiteSpace(req.BTCAddress) || string.IsNullOrWhiteSpace(req.Amount))
                     return BadRequest(new { success = false, message = "scUID, ownerAddress, btcAddress, and amount are required." });
 
-                if (!decimal.TryParse(req.Amount, System.Globalization.NumberStyles.Any,
+                if (!decimal.TryParse(req.Amount, AmountStyle,
                     System.Globalization.CultureInfo.InvariantCulture, out decimal amount) || amount <= 0)
                     return BadRequest(new { success = false, message = "Invalid amount." });
 
@@ -117,7 +117,8 @@ namespace VerifiedXCore.Controllers
                     feeRate = fr;
 
                 var (success, message) = await WalletVbtcService.RequestWithdrawal(req.ScUID, req.OwnerAddress, req.BTCAddress, amount, feeRate);
-                return Ok(new { success, message });
+                // attested: the vault's signers pay the request; the wallet does not complete it.
+                return Ok(new { success, message, attested = Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(req.ScUID) });
             }
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
@@ -133,7 +134,8 @@ namespace VerifiedXCore.Controllers
                 var result = await WalletVbtcService.CompleteWithdrawal(req.ScUID, req.RequestHash);
 
                 if (result.success)
-                    return Ok(new { success = true, message = "Withdrawal completed!", vfxTxHash = result.vfxTxHash, btcTxHash = result.btcTxHash });
+                    return Ok(new { success = true, message = result.message, vfxTxHash = result.vfxTxHash, btcTxHash = result.btcTxHash,
+                        attested = Bitcoin.Attestation.BtcAttestBalance.IsAttestedVault(req.ScUID) });
                 else
                     return Ok(new { success = false, message = result.message });
             }
@@ -155,6 +157,52 @@ namespace VerifiedXCore.Controllers
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
+        /// <summary>Raise the Bitcoin fee of a pinned withdrawal on a vault the chain watches.</summary>
+        [HttpPost("api/vbtc/withdraw/bumpfee")]
+        public async Task<IActionResult> VBTCWithdrawBumpFee([FromBody] VBTCWDBump req)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.ScUID) || string.IsNullOrWhiteSpace(req.OwnerAddress) || string.IsNullOrWhiteSpace(req.RequestHash))
+                    return BadRequest(new { success = false, message = "scUID, ownerAddress, and requestHash are required." });
+                if (!long.TryParse(req.FeeRate, out var feeRate) || feeRate <= 0)
+                    return BadRequest(new { success = false, message = "Invalid fee rate." });
+
+                var (success, message) = await WalletVbtcService.BumpWithdrawalFee(req.ScUID, req.OwnerAddress, req.RequestHash, feeRate);
+                return Ok(new { success, message });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
+        }
+
+        /// <summary>Give up a pinned withdrawal on a vault the chain watches: its coins go back to the vault and the vBTC is refunded, less the Bitcoin fee.</summary>
+        [HttpPost("api/vbtc/withdraw/release")]
+        public async Task<IActionResult> VBTCWithdrawRelease([FromBody] VBTCWDBump req)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.ScUID) || string.IsNullOrWhiteSpace(req.OwnerAddress) || string.IsNullOrWhiteSpace(req.RequestHash))
+                    return BadRequest(new { success = false, message = "scUID, ownerAddress, and requestHash are required." });
+                if (!long.TryParse(req.FeeRate, out var feeRate) || feeRate <= 0)
+                    return BadRequest(new { success = false, message = "Invalid fee rate." });
+
+                var (success, message) = await WalletVbtcService.ReleaseWithdrawal(req.ScUID, req.OwnerAddress, req.RequestHash, feeRate);
+                return Ok(new { success, message });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
+        }
+
+        /// <summary>Where a withdrawal from a vault the chain watches stands, with its Bitcoin transaction(s).</summary>
+        [HttpGet("api/vbtc/withdraw/pin/{scUID}/{requestHash}")]
+        public IActionResult VBTCWithdrawPin(string scUID, string requestHash)
+        {
+            try
+            {
+                var withdrawal = WalletVbtcService.GetWithdrawalPin(scUID, requestHash);
+                return Ok(new { success = withdrawal != null, withdrawal, message = withdrawal == null ? "No such withdrawal on a vault the chain watches." : null });
+            }
+            catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
+        }
+
         [HttpGet("api/vbtc/withdraw/status/{scUID}")]
         public IActionResult VBTCWithdrawStatus(string scUID)
         {
@@ -171,7 +219,7 @@ namespace VerifiedXCore.Controllers
                     string.IsNullOrWhiteSpace(req.ToAddress) || string.IsNullOrWhiteSpace(req.Amount))
                     return BadRequest(new { success = false, message = "scUID, fromAddress, toAddress, and amount are required." });
 
-                if (!decimal.TryParse(req.Amount, System.Globalization.NumberStyles.Any,
+                if (!decimal.TryParse(req.Amount, AmountStyle,
                     System.Globalization.CultureInfo.InvariantCulture, out decimal amount) || amount <= 0)
                     return BadRequest(new { success = false, message = "Invalid amount." });
 
@@ -208,7 +256,7 @@ namespace VerifiedXCore.Controllers
                     string.IsNullOrWhiteSpace(req.Amount) || string.IsNullOrWhiteSpace(req.EvmDestination))
                     return BadRequest(new { success = false, message = "scUID, ownerAddress, amount, and evmDestination are required." });
 
-                if (!decimal.TryParse(req.Amount, System.Globalization.NumberStyles.Any,
+                if (!decimal.TryParse(req.Amount, AmountStyle,
                     System.Globalization.CultureInfo.InvariantCulture, out decimal amount) || amount <= 0)
                     return BadRequest(new { success = false, message = "Invalid amount." });
 
@@ -312,8 +360,15 @@ namespace VerifiedXCore.Controllers
             catch (Exception ex) { return StatusCode(500, new { success = false, message = ApiErrorText.For(ex) }); }
         }
 
-        private static bool TryParseAmount(string? text, out decimal amount) =>
-            decimal.TryParse(text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out amount) && amount > 0;
+        /// <summary>
+        /// An amount as a person types it: digits and one decimal point. NumberStyles.Any took a comma as a thousands
+        /// separator, so "0,5" was sent as 5 (fifth review, round 19).
+        /// </summary>
+        internal const System.Globalization.NumberStyles AmountStyle =
+            System.Globalization.NumberStyles.AllowDecimalPoint | System.Globalization.NumberStyles.AllowLeadingWhite | System.Globalization.NumberStyles.AllowTrailingWhite;
+
+        internal static bool TryParseAmount(string? text, out decimal amount) =>
+            decimal.TryParse(text, AmountStyle, System.Globalization.CultureInfo.InvariantCulture, out amount) && amount > 0;
 
         // VX-03: the shield / unshield / transfer / scan / resync routes below were GET (CSRF-able by
         // any page, passwords in the query string). They sign or mutate, so they are POST with a body.
@@ -411,7 +466,7 @@ namespace VerifiedXCore.Controllers
                     string.IsNullOrWhiteSpace(req.ScUID) || string.IsNullOrWhiteSpace(req.Amount))
                     return BadRequest(new { success = false, message = "fromAddress, zfxAddress, scUID, and amount are required." });
 
-                if (!decimal.TryParse(req.Amount, System.Globalization.NumberStyles.Any,
+                if (!decimal.TryParse(req.Amount, AmountStyle,
                     System.Globalization.CultureInfo.InvariantCulture, out decimal amount) || amount <= 0)
                     return BadRequest(new { success = false, message = "Invalid amount." });
 
@@ -429,7 +484,7 @@ namespace VerifiedXCore.Controllers
                     string.IsNullOrWhiteSpace(req.ScUID) || string.IsNullOrWhiteSpace(req.Amount))
                     return BadRequest(new { success = false, message = "zfxAddress, toAddress, scUID, and amount are required." });
 
-                if (!decimal.TryParse(req.Amount, System.Globalization.NumberStyles.Any,
+                if (!decimal.TryParse(req.Amount, AmountStyle,
                     System.Globalization.CultureInfo.InvariantCulture, out decimal amount) || amount <= 0)
                     return BadRequest(new { success = false, message = "Invalid amount." });
 
@@ -447,7 +502,7 @@ namespace VerifiedXCore.Controllers
                     string.IsNullOrWhiteSpace(req.ScUID) || string.IsNullOrWhiteSpace(req.Amount))
                     return BadRequest(new { success = false, message = "fromZfxAddress, toZfxAddress, scUID, and amount are required." });
 
-                if (!decimal.TryParse(req.Amount, System.Globalization.NumberStyles.Any,
+                if (!decimal.TryParse(req.Amount, AmountStyle,
                     System.Globalization.CultureInfo.InvariantCulture, out decimal amount) || amount <= 0)
                     return BadRequest(new { success = false, message = "Invalid amount." });
 

@@ -14,6 +14,110 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public string LeaderSignature { get; set; }
         public List<string> ParticipantAddresses { get; set; }
         public int RequiredThreshold { get; set; }
+        /// <summary>A re-key's ceremony (plan 8.8): the vault the new key is for. Null for a vault's creation.</summary>
+        public string? RekeyOf { get; set; }
+        /// <summary>
+        /// The leader's signature over the whole start (<see cref="FrostDkgLeaderAuth.StartMessage"/>). Given by a leader
+        /// whose key is on the coordinating node (always for a re-key); the session's Round 2 set and share batch must
+        /// then be signed by the leader too. A web wallet's pre-signed start has none.
+        /// </summary>
+        public string? BodySignature { get; set; }
+    }
+
+    /// <summary>
+    /// What a key ceremony's leader signs when its key is on the coordinating node (fourth review, round 4). The start's
+    /// own signature covers only its session id and time, and the Round 2 set and the share batch were not bound to the
+    /// leader at all: a participant could send other validators a start with other content, or a Round 2 set or shares
+    /// of its choosing before the leader's arrived, have them dropped from the ceremony as failing, and never be blamed.
+    /// With these, a leader-signed ceremony takes its content from its leader only.
+    /// </summary>
+    public static class FrostDkgLeaderAuth
+    {
+        /// <summary>The header carrying the leader's signature over a request's body.</summary>
+        public const string ContentSignatureHeader = "X-Leader-Content-Signature";
+
+        private static string Sha256Hex(string text) =>
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
+
+        /// <summary>The hash of everything a start says.</summary>
+        public static string StartBodyHash(FrostDKGStartRequest r) =>
+            Sha256Hex($"{r.SessionId}|{r.SmartContractUID}|{r.LeaderAddress}|{r.Timestamp}|{r.RequiredThreshold}|{r.RekeyOf}|"
+                + string.Join(",", (r.ParticipantAddresses ?? new List<string>()).Where(a => !string.IsNullOrEmpty(a)).Distinct(StringComparer.Ordinal).OrderBy(a => a, StringComparer.Ordinal)));
+
+        public static string StartMessage(string startBodyHash) => $"DKG-START|{startBodyHash}";
+
+        /// <summary>The tag a leader's session ids begin with: the first 16 hex digits of a hash of its address.</summary>
+        public static string LeaderTag(string? leaderAddress) => Sha256Hex("VFX-DKG-SESSION|" + (leaderAddress ?? "")).Substring(0, 16);
+
+        /// <summary>
+        /// A new session id for a ceremony this leader runs: its tag, a colon, a GUID. A session id was only a name: another
+        /// validator could open one under the leader's id at a participant first, with its own signed start, and the
+        /// leader's start was refused there, attempt after attempt (fourth review, round 7). A participant takes a tagged
+        /// id only from the leader it names (<see cref="SessionIdRefusal"/>).
+        /// </summary>
+        public static string NewSessionId(string leaderAddress) => $"{LeaderTag(leaderAddress)}:{Guid.NewGuid()}";
+
+        /// <summary>
+        /// Everything a signing start says, as its leader signs it. The transaction's id and outpoints are not in it: the
+        /// signer derives them from the unsigned transaction, which is.
+        /// </summary>
+        public static string SigningStartMessage(FrostSigningStartRequest r) =>
+            "SIGN-START|" + Sha256Hex(string.Join("|", new[]
+            {
+                r.SessionId, r.SmartContractUID, r.CeremonyId, r.LeaderAddress, r.Timestamp.ToString(), r.MessageHash, r.WithdrawalRequestHash,
+                r.InputIndex.ToString(), r.InputCount.ToString(), r.UnsignedTxHex, r.RequiredThreshold.ToString(),
+                string.Join(",", r.AllInputSighashes ?? new List<string>()),
+                string.Join(",", r.SignerAddresses ?? new List<string>()),
+                string.Join(",", (r.Prevouts ?? new()).Select(p => $"{p.TxId}:{p.Vout}:{p.ValueSats}:{p.ScriptPubKeyHex}")),
+            }.Select(x => x ?? "")));
+
+        /// <summary>A watched vault's signing Round 2, as its leader signs it: the session and the nonce set it sends.</summary>
+        public static string SigningRound2Message(string sessionId, string body) => $"SIGN-ROUND2|{sessionId}|{Sha256Hex(body ?? "")}";
+
+        /// <summary>A watched vault's signing abort, as its leader signs it.</summary>
+        public static string SigningAbortMessage(string sessionId) => $"SIGN-ABORT|{sessionId}";
+
+        /// <summary>The header a leader's own signature over a round message travels in.</summary>
+        public const string SigningContentHeader = "X-Frost-Content-Signature";
+
+        /// <summary>Whether a session id has a leader's tag (16 hex digits and a colon): only key ceremonies' ids do.</summary>
+        public static bool IsTagged(string? sessionId) =>
+            sessionId != null && sessionId.Length > 17 && sessionId[16] == ':' && sessionId.Take(16).All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
+
+        /// <summary>
+        /// Why a start's session id is refused: a tagged id names another leader, or comes without the leader's signature
+        /// over the whole start (every tagged id is made on the leader's own node, which always signs: an unsigned copy
+        /// under it, carried to a finished ceremony before the leader's start arrived, held the id; fourth review,
+        /// round 8), or a re-key's id is not tagged with its leader. Untagged ids (a web wallet's pre-signed creations,
+        /// older coordinators) are taken for creations.
+        /// </summary>
+        public static string? SessionIdRefusal(string? sessionId, string? leaderAddress, bool rekey, bool bodySigned)
+        {
+            var id = sessionId ?? "";
+            var tagged = IsTagged(id);
+            if (tagged && !string.Equals(id.Substring(0, 16), LeaderTag(leaderAddress), StringComparison.Ordinal))
+                return "This session id belongs to another leader.";
+            if (tagged && !bodySigned)
+                return "A leader-tagged session is started only with its leader's signature over the whole start.";
+            if (rekey && !tagged)
+                return "A re-key's session id is tagged with its leader.";
+            return null;
+        }
+
+        /// <summary>What the leader signs for a request body of one step ("ROUND2", "SHARES") of a session.</summary>
+        public static string ContentMessage(string step, string sessionId, string body) => $"DKG-{step}|{sessionId}|{Sha256Hex(body ?? "")}";
+    }
+
+    /// <summary>A key ceremony's leader gives up a failed attempt (<c>POST /frost/dkg/abort</c>).</summary>
+    public class FrostDKGAbortRequest
+    {
+        public string SessionId { get; set; } = "";
+        public string LeaderAddress { get; set; } = "";
+        public long Timestamp { get; set; }
+        public string LeaderSignature { get; set; } = "";
+
+        /// <summary>What the leader signs: distinct from a start's "{sessionId}.{leader}.{timestamp}", so a start's signature does not abort.</summary>
+        public static string Message(string sessionId, string leaderAddress, long timestamp) => $"ABORT.{sessionId}.{leaderAddress}.{timestamp}";
     }
 
     /// <summary>
@@ -87,6 +191,8 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
         public string LeaderAddress { get; set; }
         public long Timestamp { get; set; }
         public string LeaderSignature { get; set; }
+        /// <summary>The leader's signature over the whole start (<see cref="FrostDkgLeaderAuth.SigningStartMessage"/>); required for a vault the chain watches (round 17).</summary>
+        public string? ContentSignature { get; set; }
         public List<string> SignerAddresses { get; set; }
         public int RequiredThreshold { get; set; }
         /// <summary>
@@ -145,6 +251,8 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
     /// </summary>
     public class FrostSigningAbortRequest
     {
+        /// <summary>The leader's signature over <see cref="FrostDkgLeaderAuth.SigningAbortMessage"/> (a watched vault's session; round 18).</summary>
+        public string? ContentSignature { get; set; }
         public string SessionId { get; set; } = "";
         public string LeaderAddress { get; set; } = "";
         /// <summary>The timestamp from the ORIGINAL start message.</summary>

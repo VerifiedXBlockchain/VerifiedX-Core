@@ -118,27 +118,7 @@ namespace VerifiedXCore
             //Globals.IsTestNet = true;
 
 
-            //Globals.IsCustomTestNet = true;
-            Globals.V4Height = Globals.IsTestNet ? 1 : 3_074_181;//change for mainnet.
-            Globals.V2ValHeight = Globals.IsTestNet ? 0 : 3_074_180;//change for mainnet.
-            Globals.SpecialBlockHeight = Globals.IsTestNet ? 2000 : 3_074_185;//change for mainnet.
-            Globals.GenesisValidator = Globals.IsTestNet ? "xMpa8DxDLdC9SQPcAFBc2vqwyPsoFtrWyC" : "RBdwbhyqwJCTnoNe1n7vTXPJqi5HKc6NTH";
-            Globals.TXHeightRule5 = Globals.IsTestNet ? 746313 : Globals.TXHeightRule5;
-            Globals.VbtcPrivacyDisableHeight = Globals.IsTestNet ? 1 /* TODO set testnet disable height */ : 7_281_000L;
-            Globals.V2WithdrawalExpiryFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-            Globals.V2WithdrawalOwnerAddBackFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-            Globals.VbtcLegacyTransferBypassFixHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-            Globals.V2TransferMultiHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-            Globals.BridgeBurnBindingHeight = Globals.IsTestNet ? 1 : 7_281_000L;
-            Globals.BridgeIntraBlockGuardHeight = Globals.IsTestNet ? 1 : 7_296_200L;
-            Globals.WithdrawalEscrowHeight = Globals.IsTestNet ? 1 : 7_296_200L;
-            // TODO set both: testnet must be ABOVE its tip at deploy (block 1,017,408 holds a request the fee floor refuses).
-            Globals.VbtcWithdrawalConcurrencyHeight = Globals.IsTestNet ? 1_018_000 : Globals.VbtcWithdrawalConcurrencyHeight;
-            // Must be above the tip when every node runs this build (see Globals.VbtcCancellationVoteRulesHeight).
-            Globals.VbtcCancellationVoteRulesHeight = Globals.IsTestNet ? 1_019_000 : Globals.VbtcCancellationVoteRulesHeight;
-            Globals.VbtcV2DkgAttestationHeight = Globals.IsTestNet ? 1_002_979 : Globals.VbtcV2DkgAttestationHeight;
-            Globals.VbtcV1RetirementHeight = Globals.IsTestNet ? 1_002_979 : Globals.VbtcV1RetirementHeight;
-            Globals.VbtcVaultTxSizeHeight = Globals.IsTestNet ? 1 : Globals.VbtcVaultTxSizeHeight;
+            Globals.ApplyNetworkHeights(); // every per-network activation height, in one place (the Warden calls it too)
 
             //Perform network time sync
             _ = NetworkTimeService.Run();
@@ -265,10 +245,8 @@ namespace VerifiedXCore
                     {
                         skipStateSync = true;
                     }
-                    if (argC.Contains("encpass"))
+                    if (StartArgs.TryGetValue(x, "encpass", out var encPassword))
                     {
-                        var encPassSplit = argC.Split(new char[] { '=' });
-                        var encPassword = encPassSplit[1];
                         Globals.EncryptPassword = encPassword.ToSecureString();
                     }
                     if(argC.Contains("openapi"))
@@ -283,10 +261,8 @@ namespace VerifiedXCore
                     {
                         await Task.Delay(5000);//give previous session time to close.
                     }
-                    if(argC.Contains("apitoken"))
+                    if (StartArgs.TryGetValue(x, "apitoken", out var apiToken))
                     {
-                        var apiTokens = argC.Split(new char[] { '=' });
-                        var apiToken = apiTokens[1];
                         Globals.APIToken = apiToken.ToSecureString();
                     }
                     if(argC.Contains("blockseedcalls"))
@@ -369,6 +345,13 @@ namespace VerifiedXCore
             Config.Config.EstablishConfigFile();
             Config.Config.EstablishABLFile();
             var config = Config.Config.ReadConfigFile();
+            var configMismatch = Config.Config.TestnetConfigMismatch(config);
+            if (configMismatch != null)
+            {
+                Console.WriteLine(configMismatch);
+                ErrorLogUtility.LogError(configMismatch, "Config.TestnetConfigMismatch()");
+                Environment.Exit(1);
+            }
             Config.Config.ProcessConfig(config);
             if (argList.Any(x => string.Equals(x?.Trim(), "casterlog", StringComparison.OrdinalIgnoreCase)))
                 Globals.CasterLogEnabled = true;
@@ -402,22 +385,30 @@ namespace VerifiedXCore
 
             _ = Bitcoin.Services.VBTCService.BackfillLocalVBTCContracts(); //creates missing local vBTC V2 records for contracts local accounts own or hold balances on
 
-            // PLONK params: auto-download if not present, then load into native FFI (background — non-blocking)
-            _ = Task.Run(async () =>
+            // Fund-loss audit item 1: the shielded pool supply is consensus state from PrivateTxSupplyRulesHeight, so the
+            // privacy store is rebuilt from the chain once per database folder (synchronous, before networking).
+            await PrivacyDbRebuildService.EnsureRebuiltOnceAtStartupAsync();
+
+            // PLONK params: the cached file or a download, hash-verified, loaded into the native library; retried until it
+            // succeeds. In the background, except when the proof rules are active or within about a day of the stored tip:
+            // then the node waits for them, because one that takes blocks before it can verify refuses the first block
+            // that carries a private transaction. (The stored tip, read from the block store: Globals.LastBlock is not
+            // loaded yet at this point.)
+            var plonkLoad = Task.Run(() => PLONKSetup.EnsureLoadedAsync());
+            if (PrivacyEpoch.MustLoadParamsBeforeStart(BlockchainData.GetHeight()))
             {
-                try
+                Console.WriteLine("PLONK parameters: the proof rules are active or near; loading them before start (about a minute; longer on the first run, which downloads ~400 MB)...");
+                await Task.WhenAny(plonkLoad, Task.Delay(TimeSpan.FromMinutes(45)));
+                if (!plonkLoad.IsCompleted || !plonkLoad.Result)
                 {
-                    var plonkParamsPath = await PLONKParamsDownloader.EnsureParamsAvailableAsync();
-                    if (!string.IsNullOrEmpty(plonkParamsPath))
-                        PLONKSetup.TryLoadParamsFile(plonkParamsPath);
-                    PLONKSetup.RefreshVerificationCapability();
-                    LogUtility.Log("PLONK params loaded successfully in background.", "Program.Main()");
+                    Console.WriteLine("PLONK parameters are NOT loaded. Continuing; private transactions are refused until they load (retrying in the background).");
+                    ErrorLogUtility.LogError("PLONK parameters were not loaded before start although the proof rules are active or near.", "Program.Main()");
                 }
-                catch (Exception ex)
-                {
-                    ErrorLogUtility.LogError($"Background PLONK load failed: {ex}", "Program.Main()");
-                }
-            });
+            }
+
+            // Fund-loss audit item 4: once the node is at the network's height, every FROST key share still filed under a
+            // pre-NEW-26 session id is filed under the one vault that carries its group key (background; waits for sync).
+            _ = Bitcoin.FROST.FrostKeyShareBinding.RunOnceWhenSyncedAsync();
 
             // FROST FFI: Verify native library presence and full functionality (background — non-blocking)
             _ = Task.Run(() =>
@@ -428,6 +419,7 @@ namespace VerifiedXCore
                     Globals.FrostFFIAvailable = frostResult.AllChecksPassed;
                     Globals.FrostFFIVersion = frostResult.LibraryVersion;
                     Globals.FrostFFICheckSummary = frostResult.Summary;
+                    Bitcoin.FROST.FrostLibraryGate.CheckFinished();
                     LogUtility.Log(frostResult.Summary, "FrostFFICheck");
                     if (frostResult.AllChecksPassed)
                     {
@@ -437,14 +429,17 @@ namespace VerifiedXCore
                     {
                         Console.WriteLine("[FROST FFI] Health check FAILED — see logs for details");
                         ErrorLogUtility.LogError($"FROST FFI check failed: {string.Join("; ", frostResult.Errors)}", "FrostFFICheck");
+                        Bitcoin.FROST.FrostLibraryGate.ReportCheckFailed(string.Join("; ", frostResult.Errors));
                     }
                 }
                 catch (Exception ex)
                 {
                     Globals.FrostFFIAvailable = false;
                     Globals.FrostFFICheckSummary = $"FROST FFI check error: {ex.Message}";
+                    Bitcoin.FROST.FrostLibraryGate.CheckFinished();
                     ErrorLogUtility.LogError($"FROST FFI check error: {ex}", "FrostFFICheck");
                     Console.WriteLine($"[FROST FFI] Health check ERROR: {ex.Message}");
+                    Bitcoin.FROST.FrostLibraryGate.ReportCheckFailed(ex.Message);
                 }
             });
 
@@ -474,6 +469,7 @@ namespace VerifiedXCore
                     else if (rebuildStateRequested)
                     {
                         Console.WriteLine($"[REVERT] No snapshot covers height {revertToHeight.Value} — rebuildstate passed, running full revert + genesis replay...");
+                        StateTreiStatusService.SetRebuildStarted(); // before the blocks go: a crash from here on leaves the node stopped
 
                         var revertBlocks = Block.GetBlocks();
                         var deletedBlocks = revertBlocks.DeleteManySafe(x => x.Height > revertToHeight.Value);
@@ -489,8 +485,16 @@ namespace VerifiedXCore
                     }
                     else
                     {
-                        Console.WriteLine($"[REVERT] REFUSED: no snapshot slot covers height {revertToHeight.Value} and rebuildstate was not passed.");
-                        Console.WriteLine($"[REVERT] Nothing was deleted. To force a full revert + genesis state replay (can take an hour or more),");
+                        if (SnapshotRestoreUtility.StateDestroyedByFailedRestore)
+                        {
+                            Console.WriteLine($"[REVERT] The snapshot restore to {revertToHeight.Value} failed after wiping the state. This node will not validate blocks.");
+                            Console.WriteLine($"[REVERT] To rebuild it and complete the revert,");
+                        }
+                        else
+                        {
+                            Console.WriteLine($"[REVERT] REFUSED: no snapshot slot covers height {revertToHeight.Value} and rebuildstate was not passed.");
+                            Console.WriteLine($"[REVERT] Nothing was deleted. To force a full revert + genesis state replay (can take an hour or more),");
+                        }
                         Console.WriteLine($"[REVERT] restart with BOTH arguments: revertblock={revertToHeight.Value} rebuildstate");
                     }
                 }
@@ -743,6 +747,13 @@ namespace VerifiedXCore
 
             // V2 Bridge: Caster consensus for burn exits
             _ = Task.Run(() => Bitcoin.Services.BurnExitConsensusService.ConsensusLoop(CancellationToken.None));
+
+            // Bitcoin attestation: validators follow Bitcoin and sign reports. Idle before the observation height
+            // and on a node that is not a validator.
+            _ = Task.Run(() => Bitcoin.Attestation.BtcReportService.RunLoop(CancellationToken.None));
+            // ... and sign the Bitcoin transaction consensus has pinned for a withdrawal from a vault they hold shares of.
+            _ = Task.Run(() => Bitcoin.Attestation.BtcWithdrawalSigner.RunLoop(CancellationToken.None));
+            _ = Task.Run(() => Bitcoin.Attestation.BtcVaultKeyService.RunLoop(CancellationToken.None)); // replaces vault keys that are due (plan 8.8)
 
             //API Port URL
             string url = !Globals.TestURL ? "http://*:" + Globals.APIPort : "https://*:" + Globals.APIPortSSL;

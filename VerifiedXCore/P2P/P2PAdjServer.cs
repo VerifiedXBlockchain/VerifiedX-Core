@@ -112,7 +112,8 @@ namespace VerifiedXCore.P2P
                 }
 
                 // HAL-040 Fix: Only add to signature map AFTER successful verification
-                if (!Globals.Signatures.TryAdd(signature, now))
+                // Keyed on the canonical signature: a re-encoded copy (whitespace, high-s) is the same handshake.
+                if (!ConsensusRequestAuth.TryConsume(signature, now))
                 {
                     await EndOnConnect(peerIP, "40", startTime, conQueue, "Reused signature.", "Reused signature.");
                     return;
@@ -284,9 +285,9 @@ namespace VerifiedXCore.P2P
                                                 var rating = await TransactionRatingService.GetTransactionRating(transaction);
                                                 transaction.TransactionRating = rating;
 
-                                                if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
+                                                if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
+                                    && MempoolEvictionUtility.TryAdmitAndInsert(transaction, mempool))
                                                 {
-                                                    mempool.InsertSafe(transaction);
                                                     var txOutput = "";
                                                     txOutput = JsonConvert.SerializeObject(transaction);
                                                     //await SendAdjMessageAll("tx", txOutput);//sends messages to all in fortis pool
@@ -299,6 +300,7 @@ namespace VerifiedXCore.P2P
                                                 }
                                                 else
                                                 {
+                                                    VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // verified but not pooled: claims nothing (round 32)
                                                     Globals.BroadcastedTrxDict.TryRemove(transaction.Hash, out _);
                                                     Globals.ConsensusBroadcastedTrxDict.TryRemove(transaction.Hash, out _);
                                                 }
@@ -356,9 +358,9 @@ namespace VerifiedXCore.P2P
                                             var rating = await TransactionRatingService.GetTransactionRating(transaction);
                                             transaction.TransactionRating = rating;
 
-                                            if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
+                                            if (dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
+                                    && MempoolEvictionUtility.TryAdmitAndInsert(transaction, mempool))
                                             {
-                                                mempool.InsertSafe(transaction);
                                                 var txOutput = "";
                                                 txOutput = JsonConvert.SerializeObject(transaction);
                                                 //await SendAdjMessageAll("tx", txOutput);//sends messages to all in fortis pool
@@ -371,6 +373,7 @@ namespace VerifiedXCore.P2P
                                             }
                                             else
                                             {
+                                                VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(transaction.Hash); // verified but not pooled: claims nothing (round 32)
                                                 Globals.BroadcastedTrxDict.TryRemove(transaction.Hash, out _);
                                                 Globals.ConsensusBroadcastedTrxDict.TryRemove(transaction.Hash, out _);
                                             }

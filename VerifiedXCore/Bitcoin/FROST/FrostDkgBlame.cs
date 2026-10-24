@@ -24,10 +24,48 @@ namespace VerifiedXCore.Bitcoin.FROST
         private static readonly BigInteger Order = BigInteger.Parse("0FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", System.Globalization.NumberStyles.HexNumber);
 
         /// <summary>
+        /// Whether a Round 1 package's commitment has exactly <paramref name="coefficients"/> coefficients, the key's
+        /// threshold: a dealer's polynomial of higher degree makes a key that needs more signers than were attested
+        /// (fourth review, round 6).
+        /// </summary>
+        public static bool CommitmentHasCoefficients(string? round1PackageJson, int coefficients)
+        {
+            try { return JObject.Parse(round1PackageJson ?? "")["commitment"] is JArray c && c.Count == coefficients; }
+            catch { return false; }
+        }
+
+        /// <summary>
         /// Feldman check of one Round 2 share: signing_share·G == Σ_k x^k·C_k, where C_k are the sender's Round 1
         /// commitment coefficients and x is the recipient's identifier (the same check FROST part3 makes, which the native
         /// library reports without naming the sender). False when the share or commitment cannot be read.
         /// </summary>
+        /// <summary>The longest dealer entry (its map for one recipient, as relayed) a recipient opens: the same on both sides of a dispute.</summary>
+        public static int MaxDealerEntryLength => VerifiedXCore.Bitcoin.FROST.Models.FrostSessionStorage.MAX_COMMITMENT_DATA_LENGTH * 10;
+
+        /// <summary>
+        /// A Round 2 package as the library makes it, rebuilt from its signing share alone (64 hex digits) with the fixed
+        /// header; null when it has none. A recipient keeps only this, so nothing a dealer adds reaches the native
+        /// finalize, and a dispute is judged on the same thing the recipient took (fourth review, round 12: a padded or
+        /// extended package was refused by the recipient and ruled good by the coordinator, and the honest recipient was
+        /// dropped).
+        /// </summary>
+        public static string? CanonicalShare(string? round2PackageJson)
+        {
+            try
+            {
+                var share = JObject.Parse(round2PackageJson ?? "")["signing_share"];
+                if (share?.Type != JTokenType.String) return null;
+                var hex = ((string)share!).ToLowerInvariant();
+                if (hex.Length != 64 || !hex.All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return null;
+                return new JObject
+                {
+                    ["header"] = new JObject { ["version"] = 0, ["ciphersuite"] = "FROST-secp256k1-SHA256-TR-v1" },
+                    ["signing_share"] = hex,
+                }.ToString(Newtonsoft.Json.Formatting.None);
+            }
+            catch { return null; }
+        }
+
         public static bool ShareMatchesCommitment(string round2PackageJson, string round1PackageJson, string recipientIdentifierHex)
         {
             try
@@ -93,6 +131,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                     try
                     {
                         if (!idByAddress.ContainsKey(address)) { invalid.Add(address); continue; }
+                        // Exactly the threshold's number of coefficients (a higher degree needs more signers than attested).
+                        if (minSigners >= 2 && !CommitmentHasCoefficients(package, minSigners)) { invalid.Add(address); continue; }
                         parsed[address] = JToken.Parse(package);
                     }
                     catch { invalid.Add(address); }
@@ -144,35 +184,39 @@ namespace VerifiedXCore.Bitcoin.FROST
         private static string ParticipantIdentifier(int index) => index.ToString("x").PadLeft(64, '0');
 
         /// <summary>
-        /// Who to exclude, given recipients' reports that a sender's share would not open or did not match its commitment.
-        /// A report cannot be proven to a third party (the share is sealed to the recipient), so the rule bounds the damage
-        /// instead: repeatedly drop whoever is involved in the most open reports - a sender accused by many recipients, or
-        /// a recipient accusing many senders (e.g. one that cannot open any share because its own key is unavailable).
-        /// When the remaining reports are one-to-one, both sides are dropped: an honest participant can then only be
-        /// removed together with a participant that lied, so an attacker loses one node for every honest one it removes.
+        /// What a recipient signs to report a dealer's share (the dealer reveals that share's key only against it). It names
+        /// the start the session was opened with, so a report made in one session under an id holds for no other session
+        /// opened later under the same id (fourth review, round 11).
         /// </summary>
-        public static HashSet<string> ResolveAccusations(IEnumerable<(string Accuser, string Accused)> accusations)
+        public static string AccusationMessage(string sessionId, string? startBodyHash, string accuser, string accused,
+            string? accuserCommitment, string? accusedCommitment) =>
+            $"DKG-ACCUSE|{sessionId}|{startBodyHash}|{accuser}|{accused}|{CommitmentHash(accuserCommitment)}|{CommitmentHash(accusedCommitment)}";
+
+        /// <summary>
+        /// The hash of a Round 1 commitment, as a report names it. Round 1 is made afresh for every session a validator
+        /// opens, so a report names the very session it was made in: one made in a session that was then replaced under
+        /// the same id and start (a signed copy of the same start, a restart) holds for no other (fourth review, round 11).
+        /// </summary>
+        public static string CommitmentHash(string? commitment) =>
+            string.IsNullOrEmpty(commitment) ? "-" : Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(commitment))).ToLowerInvariant();
+
+        /// <summary>
+        /// A recipient's report that a dealer's share would not open or did not match its commitment, settled by the share
+        /// itself: the dealer reveals the one-time key it sealed that share with, which opens the ciphertext the
+        /// coordinator relayed, and the share is checked against the dealer's Round 1 commitment. True when the share
+        /// opens and matches (the report was false: the recipient is dropped); false otherwise, or when the dealer gives no
+        /// key that opens it (the dealer is dropped). Reports were weighed by count before, which let two colluding
+        /// validators name the same honest one and have only it dropped, attempt after attempt (fourth review, round 9).
+        /// The revealed share is the reporting recipient's own, which it holds already; an honest recipient reports only a
+        /// share that is bad.
+        /// </summary>
+        public static bool DisputedShareIsGood(string? sealedPackage, string? ephemeralPrivateHex, string? recipientPublicKeyHex, string sessionId,
+            string recipientIdentifier, string? dealerCommitment)
         {
-            var open = accusations.Where(a => a.Accuser != a.Accused).Distinct().ToList();
-            var excluded = new HashSet<string>(StringComparer.Ordinal);
-            while (open.Count > 0)
-            {
-                var degree = open.SelectMany(a => new[] { a.Accuser, a.Accused })
-                    .GroupBy(n => n, StringComparer.Ordinal)
-                    .Select(g => (Node: g.Key, Count: g.Count()))
-                    .OrderByDescending(n => n.Count).ThenBy(n => n.Node, StringComparer.Ordinal)
-                    .ToList();
-                if (degree[0].Count > 1)
-                {
-                    excluded.Add(degree[0].Node);
-                }
-                else
-                {
-                    foreach (var a in open) { excluded.Add(a.Accuser); excluded.Add(a.Accused); }
-                }
-                open = open.Where(a => !excluded.Contains(a.Accuser) && !excluded.Contains(a.Accused)).ToList();
-            }
-            return excluded;
+            if (string.IsNullOrEmpty(recipientPublicKeyHex) || string.IsNullOrEmpty(dealerCommitment)) return false;
+            return FrostShareCrypto.OpenWithEphemeral(sealedPackage, ephemeralPrivateHex, recipientPublicKeyHex, sessionId, recipientIdentifier, out var package)
+                && CanonicalShare(package) is { } canonical
+                && ShareMatchesCommitment(canonical, dealerCommitment, recipientIdentifier);
         }
     }
 }

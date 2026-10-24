@@ -1,0 +1,515 @@
+using System;
+using System.IO;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Threading.Tasks;
+using VerifiedXCore;
+using VerifiedXCore.Data;
+using VerifiedXCore.EllipticCurve;
+using VerifiedXCore.Models;
+using VerifiedXCore.Models.Privacy;
+using VerifiedXCore.Privacy;
+using VerifiedXCore.Services;
+using VerifiedXCore.Utilities;
+using Xunit;
+
+namespace VerifiedXCore.Tests
+{
+    /// <summary>
+    /// Fund-loss audit item 1, stage 1 (Globals.PrivateTxSupplyRulesHeight): a VFX unshield may not take more than the
+    /// shielded pool holds, must spend at least one note against a Merkle root, and its outer recipient/amount must equal
+    /// the payload's. The audit's forged unshield (no proof, no nullifier, no root, any amount) is refused at the gate
+    /// and - for replay - still accepted below it. Two unshields in one block are judged against one supply.
+    /// </summary>
+    [Collection("DbContextSequential")]
+    public class FundLoss01_PrivateTxSupplyRulesTests : IDisposable
+    {
+        private const long Gate = 1000;
+        private readonly string _tempRoot;
+        private readonly string? _priorCustomPath;
+        private readonly Block _priorLastBlock;
+        private readonly long _priorGate;
+        private readonly string _root;
+        private readonly System.Collections.Generic.Dictionary<string, decimal> _priorCorrections;
+
+        public FundLoss01_PrivateTxSupplyRulesTests()
+        {
+            _tempRoot = Path.Combine(Path.GetTempPath(), $"fl01_{Guid.NewGuid():N}") + Path.DirectorySeparatorChar;
+            Directory.CreateDirectory(_tempRoot);
+            _priorCustomPath = Globals.CustomPath;
+            Globals.CustomPath = _tempRoot;
+            _priorLastBlock = Globals.LastBlock;
+            _priorGate = Globals.PrivateTxSupplyRulesHeight;
+            Globals.PrivateTxSupplyRulesHeight = Gate;
+            // The mainnet counter correction is not part of these fixtures (one test sets it explicitly).
+            _priorCorrections = new(Globals.ShieldedSupplyCorrections, StringComparer.Ordinal);
+            Globals.ShieldedSupplyCorrections.Clear();
+            DbContext.Initialize();
+
+            _root = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+            var pool = ShieldedPoolService.GetOrCreateState("VFX");
+            pool.TotalShieldedSupply = 0.5M;
+            pool.CurrentMerkleRoot = _root;
+            PrivacyDbContext.PoolState().Update(pool);
+        }
+
+        public void Dispose()
+        {
+            try { DbContext.CloseDB(); } catch { }
+            Globals.LastBlock = _priorLastBlock;
+            Globals.PrivateTxSupplyRulesHeight = _priorGate;
+            Globals.ShieldedSupplyCorrections.Clear();
+            foreach (var (k, v) in _priorCorrections) Globals.ShieldedSupplyCorrections[k] = v;
+            Globals.CustomPath = _priorCustomPath;
+            try { Directory.Delete(_tempRoot, recursive: true); } catch { }
+        }
+
+        private static string NewAddress()
+        {
+            var key = new PrivateKey("secp256k1");
+            var pub = "04" + Convert.ToHexString(key.publicKey().toString()).ToLowerInvariant();
+            return AccountData.GetHumanAddress(pub);
+        }
+
+        private static string RandomScalar() => Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+
+        /// <summary>An unshield shaped the way the honest builder shapes it (nullifier, position, root, bound outer fields).</summary>
+        private Transaction Unshield(string to, decimal amount, bool withNullifier = true, bool withRoot = true,
+            string? payloadTo = null, decimal? payloadAmount = null)
+        {
+            var payload = new PrivateTxPayload
+            {
+                Version = 1,
+                Kind = "unshield",
+                SubType = "Unshield",
+                Asset = "VFX",
+                NullsB64 = withNullifier ? new() { RandomScalar() } : new(),
+                SpentCommitmentTreePositions = withNullifier ? new() { 0L } : new(),
+                MerkleRootB64 = withRoot ? _root : null,
+                TransparentOutput = payloadTo ?? to,
+                TransparentAmount = payloadAmount ?? amount,
+                Fee = Globals.PrivateTxFixedFee,
+            };
+            var tx = new Transaction
+            {
+                FromAddress = PrivacyConstants.ShieldedPoolAddress,
+                ToAddress = to,
+                Amount = amount,
+                Fee = 0M,
+                Nonce = 0,
+                Timestamp = TimeUtil.GetTime(),
+                TransactionType = TransactionType.VFX_UNSHIELD,
+                Data = PrivateTxPayloadCodec.SerializeToJson(payload),
+                Signature = PrivacyConstants.PlonkSignatureSentinel,
+            };
+            tx.BuildPrivate();
+            return tx;
+        }
+
+        private Transaction PrivateTransfer()
+        {
+            var payload = new PrivateTxPayload
+            {
+                Version = 1, Kind = "private_transfer", SubType = "Transfer", Asset = "VFX",
+                NullsB64 = new() { RandomScalar() }, SpentCommitmentTreePositions = new() { 0L },
+                MerkleRootB64 = _root, Fee = Globals.PrivateTxFixedFee,
+            };
+            var tx = new Transaction
+            {
+                FromAddress = PrivacyConstants.ShieldedPoolAddress, ToAddress = PrivacyConstants.ShieldedPoolAddress,
+                Amount = 0M, Fee = 0M, Nonce = 0, Timestamp = TimeUtil.GetTime(),
+                TransactionType = TransactionType.VFX_PRIVATE_TRANSFER,
+                Data = PrivateTxPayloadCodec.SerializeToJson(payload), Signature = PrivacyConstants.PlonkSignatureSentinel,
+            };
+            tx.BuildPrivate();
+            return tx;
+        }
+
+        private static void TipBelowGate() => Globals.LastBlock = new Block { Height = Gate - 2 }; // next block = Gate - 1
+        private static void TipAtGate() => Globals.LastBlock = new Block { Height = Gate - 1 };   // next block = Gate
+
+        // ── The audit's forged unshield ───────────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// An unshield's outer recipient and amount are not in its hash: below the gate, whoever served blocks to a
+        /// syncing node could change them and have it credit someone else (fifth review, round 18). For a downloaded
+        /// block of scanned history they must equal the payload's; a live block below the gate is judged as 8.x
+        /// producers judge it, or the upgrade splits (round 19).
+        /// </summary>
+        [Fact]
+        public async Task AnUnshieldsOuterFields_AreItsPayloads_InDownloadedScannedHistory()
+        {
+            var to = NewAddress();
+            TipBelowGate();
+            var redirected = Unshield(to, 1M, withNullifier: false, withRoot: false);
+            var hash = redirected.Hash;
+            redirected.ToAddress = NewAddress();                      // the hash does not change
+            Assert.Equal(hash, redirected.BuildPrivate());
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(redirected, blockDownloads: true);
+            Assert.False(ok);
+            Assert.Contains("transparent_output", msg);
+            var resized = Unshield(to, 1M, withNullifier: false, withRoot: false);
+            resized.Amount = 2M;
+            Assert.Contains("transparent_amount", (await TransactionValidatorService.VerifyTX(resized, blockDownloads: true)).Item2);
+            // ... on any path judging scanned history (height sync and catch-up do not set the download flag; round 20).
+            Assert.Contains("transparent_output", (await TransactionValidatorService.VerifyTX(redirected)).Item2 ?? "");
+            // Above the scanned height and below the gate (live blocks): as before, the binding starts at the gate there.
+            var prior = Globals.PrivateTxSupplyRulesHeight;
+            Globals.PrivateTxSupplyRulesHeight = PrivateTxSupplyRules.UnshieldBindingScannedThrough + 100;
+            try
+            {
+                var live = PrivateTxSupplyRules.UnshieldBindingScannedThrough + 1;
+                Assert.DoesNotContain("transparent_output", (await TransactionValidatorService.VerifyTX(redirected, blockHeight: live)).Item2 ?? "");
+            }
+            finally { Globals.PrivateTxSupplyRulesHeight = prior; }
+        }
+
+        /// <summary>
+        /// Spent nullifiers are compared as text while proofs read their bytes: Base64 decoding ignores spaces and the last
+        /// character's unused bits, so one nullifier spelled again spent one note twice, in one transaction or in later
+        /// ones; and a fraction of a satoshi was credited but not proven (fifth review, round 19). From the path-audit
+        /// rules each such field has its one spelling, a transaction's nullifiers are distinct and amounts are whole
+        /// satoshis. One nullifier twice in a transaction is refused at admission at every height (every block refuses it).
+        /// </summary>
+        [Fact]
+        public void APrivateTransactionsNullifiers_HaveOneSpelling_AndAreSpentOnce()
+        {
+            var n = RandomScalar();
+            var respelled = n.Insert(4, " ");
+            Assert.Equal(Convert.FromBase64String(n), Convert.FromBase64String(respelled));          // the same bytes
+            PrivateTxPayload Payload(params string[] nulls) => new PrivateTxPayload { Version = 1, Kind = "transfer", Asset = "VFX", NullsB64 = nulls.ToList(), MerkleRootB64 = _root };
+            var tx = new Transaction { TransactionType = TransactionType.VFX_PRIVATE_TRANSFER, Amount = 0M };
+            string? Refusal(PrivateTxPayload p) => VerifiedXCore.Privacy.PrivateTransactionValidatorService.EncodingRefusal(tx, p);
+
+            Assert.Null(Refusal(Payload(n, RandomScalar())));
+            Assert.Contains("one Base64 spelling", Refusal(Payload(n, respelled)));
+            Assert.Contains("each note once", Refusal(Payload(n, n)));
+            var unshield = new Transaction { TransactionType = TransactionType.VFX_UNSHIELD, Amount = 0.000000011M };
+            Assert.Contains("whole satoshis", VerifiedXCore.Privacy.PrivateTransactionValidatorService.EncodingRefusal(unshield, Payload(n)));
+
+            // A VFX private transaction names the pool "VFX" exactly (round 20): the store ignores case, the guards do not.
+            foreach (var asset in new[] { "vfx", "Vfx", "VFX​", "VBTC:abc:1" })
+            {
+                var other = Payload(n);
+                other.Asset = asset;
+                Assert.Contains("is \"VFX\"", Refusal(other));
+            }
+
+            // Admission refuses one nullifier twice in a transaction, at every height.
+            Assert.False(MempoolNullifierTracker.TryRegisterForMempool("dup-" + Guid.NewGuid().ToString("N"), "VFX", new List<string> { n, n }, out var why));
+            Assert.Contains("twice", why);
+        }
+
+        /// <summary>
+        /// The block builder deleted a private transaction that no longer passed (its root went stale with any private
+        /// transaction mined) without releasing its nullifier claims: the owner's rebuilt transaction was refused on that
+        /// validator until it restarted (fifth review, round 20).
+        /// </summary>
+        [Fact]
+        public async Task ABuilderDroppingAPrivateTransaction_ReleasesItsNullifierClaims()
+        {
+            TipBelowGate();
+            var dropped = Unshield(NewAddress(), 1M);
+            dropped.ToAddress = NewAddress();                                        // will not pass: its recipient is not its payload's
+            var nullifier = PrivateTxPayloadCodec.TryDecode(dropped.Data, out var p, out _) ? p!.NullsB64[0] : throw new InvalidOperationException();
+            Assert.True(MempoolNullifierTracker.TryRegisterForMempool(dropped.Hash, "VFX", new List<string> { nullifier }, out _));
+            dropped.TransactionRating = TransactionRating.A;                          // rated, as admission does
+            TransactionData.GetPool().Insert(dropped);
+            await TransactionData.ProcessTxPool();
+            Assert.Null(TransactionData.GetPool().FindOne(x => x.Hash == dropped.Hash));
+            Assert.True(MempoolNullifierTracker.TryRegisterForMempool("rebuilt-" + Guid.NewGuid().ToString("N"), "VFX", new List<string> { nullifier }, out var why), why);
+        }
+
+        [Fact]
+        public async Task ForgedUnshield_NoNoteNoRoot_AnyAmount_IsAcceptedBelowGate_AndRefusedAtGate()
+        {
+            var to = NewAddress();
+            TipBelowGate();
+            var (okBelow, msgBelow) = await TransactionValidatorService.VerifyTX(Unshield(to, 100_000M, withNullifier: false, withRoot: false));
+            Assert.True(okBelow, msgBelow); // replay of the Sept 8 transactions below the gate stays as mined
+
+            TipAtGate();
+            var (okAt, msgAt) = await TransactionValidatorService.VerifyTX(Unshield(to, 100_000M, withNullifier: false, withRoot: false));
+            Assert.False(okAt);
+            Assert.Contains("at least one note", msgAt);
+        }
+
+        [Fact]
+        public async Task Unshield_BeyondSupply_IsRefusedAtGate()
+        {
+            TipAtGate();
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 0.6M));
+            Assert.False(ok);
+            Assert.StartsWith(PrivateTxSupplyRules.SupplyReasonPrefix, msg);
+        }
+
+        [Fact]
+        public async Task Unshield_WithinSupply_IsAcceptedAtGate()
+        {
+            TipAtGate();
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 0.4M));
+            Assert.True(ok, msg);
+        }
+
+        [Fact]
+        public async Task Unshield_ExactlyTheSupplyLessFee_IsAccepted_OneSatoshiMore_IsRefused()
+        {
+            TipAtGate();
+            var exact = 0.5M - Globals.PrivateTxFixedFee;
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), exact));
+            Assert.True(ok, msg);
+            var (ok2, msg2) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), exact + 0.00000001M));
+            Assert.False(ok2);
+            Assert.StartsWith(PrivateTxSupplyRules.SupplyReasonPrefix, msg2);
+        }
+
+        [Fact]
+        public async Task Unshield_WithoutMerkleRoot_IsRefusedAtGate()
+        {
+            TipAtGate();
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 0.1M, withRoot: false));
+            Assert.False(ok);
+            Assert.Contains("Merkle root", msg);
+        }
+
+        [Fact]
+        public async Task Unshield_OuterRecipientDiffersFromPayload_IsRefusedAtGate()
+        {
+            TipAtGate();
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 0.1M, payloadTo: NewAddress()));
+            Assert.False(ok);
+            Assert.Contains("transparent_output", msg);
+        }
+
+        [Fact]
+        public async Task Unshield_OuterAmountDiffersFromPayload_IsRefusedAtGate()
+        {
+            TipAtGate();
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 0.1M, payloadAmount: 0.01M));
+            Assert.False(ok);
+            Assert.Contains("transparent_amount", msg);
+        }
+
+        [Fact]
+        public async Task PrivateTransfer_FeeWithinSupply_Accepted_EmptyPool_Refused()
+        {
+            TipAtGate();
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(PrivateTransfer());
+            Assert.True(ok, msg);
+
+            var pool = ShieldedPoolService.GetOrCreateState("VFX");
+            pool.TotalShieldedSupply = 0M;
+            PrivacyDbContext.PoolState().Update(pool);
+            var (ok2, msg2) = await TransactionValidatorService.VerifyTX(PrivateTransfer());
+            Assert.False(ok2);
+            Assert.StartsWith(PrivateTxSupplyRules.SupplyReasonPrefix, msg2);
+        }
+
+        // ── Replay determinism: block validation judges at the block's own height ─────────────────────────────────
+
+        [Fact]
+        public async Task BlockPath_UsesBlockHeight_NotTip()
+        {
+            var forged = Unshield(NewAddress(), 100_000M, withNullifier: false, withRoot: false);
+            Globals.LastBlock = new Block { Height = Gate + 5000 };
+            var (okHistorical, msg) = await TransactionValidatorService.VerifyTX(forged, blockDownloads: true, blockVerify: true, blockHeight: Gate - 1);
+            Assert.True(okHistorical, msg);
+
+            Globals.LastBlock = new Block { Height = 10 };
+            var (okAtGate, _) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 100_000M, withNullifier: false, withRoot: false), blockVerify: true, blockHeight: Gate);
+            Assert.False(okAtGate);
+        }
+
+        /// <summary>
+        /// A node whose pool counter is gone (its privacy store wiped and not rebuilt) judged the floor as the mainnet
+        /// correction alone, about 100,033 VFX, and accepted an unshield of that much on a downloaded block, where the
+        /// root check that would also refuse it is skipped. With no counter there is no supply: the unshield is refused,
+        /// and a pool row, however small, still gets its correction.
+        /// </summary>
+        [Fact]
+        public async Task MissingPoolCounter_IsNoSupply_TheCorrectionAloneDoesNotLetAnUnshieldThrough()
+        {
+            Globals.ShieldedSupplyCorrections["VFX"] = 100_033.000012M;
+            PrivacyDbContext.PoolState().DeleteAll();   // the startup rebuild's wipe with no replay after it
+            Assert.Equal(0M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate));
+
+            Globals.LastBlock = new Block { Height = Gate + 5 };
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 100_000M), blockDownloads: true, blockVerify: true, blockHeight: Gate);
+            Assert.False(ok);
+            Assert.StartsWith(PrivateTxSupplyRules.SupplyReasonPrefix, msg);
+
+            // A row made again from nothing (a status read creates one) or left by a rebuild that stopped before the forged
+            // blocks holds none of their debits: no correction. A counter that went through them is still corrected.
+            PrivacyDbContext.PoolState().Insert(new VerifiedXCore.Models.Privacy.ShieldedPoolState { AssetType = "VFX", TotalShieldedSupply = 1M, LastUpdateHeight = 0 });
+            Assert.Equal(1M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate));
+            var row = PrivacyDbContext.PoolState().FindOne(x => x.AssetType == "VFX");
+            row.LastUpdateHeight = Globals.ShieldedSupplyCorrectionsThroughHeight - 1;
+            PrivacyDbContext.PoolState().Update(row);
+            Assert.Equal(1M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate));
+            row.LastUpdateHeight = Globals.ShieldedSupplyCorrectionsThroughHeight;
+            PrivacyDbContext.PoolState().Update(row);
+            Assert.Equal(100_034.000012M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate));
+        }
+
+        // ── Same block: two unshields are judged against one supply ───────────────────────────────────────────────
+
+        [Fact]
+        public void SameBlock_TwoUnshieldsEachWithinSupply_TogetherBeyondIt_SecondIsRefused()
+        {
+            var a = Unshield(NewAddress(), 0.3M); a.Height = Gate;
+            var b = Unshield(NewAddress(), 0.3M); b.Height = Gate;
+            var state = new SameBlockDebitGuard.State(SameBlockDebitGuard.CommittedBalance) { BlockHeight = Gate };
+            var (ok1, _) = SameBlockDebitGuard.TryRegister(a, state);
+            Assert.True(ok1);
+            var (ok2, reason) = SameBlockDebitGuard.TryRegister(b, state);
+            Assert.False(ok2);
+            Assert.StartsWith(SameBlockDebitGuard.ReasonPrefix, reason);
+            Assert.Contains("VFX", reason);
+        }
+
+        [Fact]
+        public void SameBlock_PoolDebitIsNotCountedBelowGate()
+        {
+            // Judged at the height given, whatever the transaction's own Height field says (round 17).
+            var a = Unshield(NewAddress(), 0.3M); a.Height = Gate;
+            Assert.DoesNotContain(SameBlockDebitGuard.GetDebits(a, Gate - 1), d => d.Key.Kind == SameBlockDebitGuard.LedgerKind.ShieldedPool);
+            a.Height = 1;
+            var debit = Assert.Single(SameBlockDebitGuard.GetDebits(a, Gate));
+            Assert.Equal(SameBlockDebitGuard.LedgerKind.ShieldedPool, debit.Key.Kind);
+            Assert.Equal("VFX", debit.Key.ContractUid);
+            Assert.Equal(0.3M + Globals.PrivateTxFixedFee, debit.Amount);
+        }
+
+        // ── Mainnet counter correction: the forged debits are added back to the judgement, not to the counter ─────
+
+        [Fact]
+        public async Task RecordedCounterDrivenNegativeByForgedUnshields_HonestUnshieldStillPasses_WithTheCorrection()
+        {
+            var prior = new System.Collections.Generic.Dictionary<string, decimal>(Globals.ShieldedSupplyCorrections, StringComparer.Ordinal);
+            try
+            {
+                // The mainnet shape: honest notes 4.099985 outstanding, counter 4.099985 - 100,033.000012.
+                var pool = ShieldedPoolService.GetOrCreateState("VFX");
+                pool.TotalShieldedSupply = 4.099985M - 100_033.000012M;
+                pool.LastUpdateHeight = Globals.ShieldedSupplyCorrectionsThroughHeight;   // written through the forged blocks, as mainnet's
+                PrivacyDbContext.PoolState().Update(pool);
+                TipAtGate();
+
+                Globals.ShieldedSupplyCorrections.Clear();
+                var (okNoCorrection, msgNoCorrection) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 1M));
+                Assert.False(okNoCorrection);
+                Assert.StartsWith(PrivateTxSupplyRules.SupplyReasonPrefix, msgNoCorrection);
+
+                Globals.ShieldedSupplyCorrections["VFX"] = 100_033.000012M;
+                Assert.Equal(4.099985M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate));
+                var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 1M));
+                Assert.True(ok, msg);
+                var (okTooMuch, msgTooMuch) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 4.2M));
+                Assert.False(okTooMuch);
+                Assert.StartsWith(PrivateTxSupplyRules.SupplyReasonPrefix, msgTooMuch);
+
+                // The counter itself is untouched.
+                Assert.Equal(4.099985M - 100_033.000012M, ShieldedPoolService.GetState("VFX")!.TotalShieldedSupply);
+            }
+            finally
+            {
+                Globals.ShieldedSupplyCorrections.Clear();
+                foreach (var (k, v) in prior) Globals.ShieldedSupplyCorrections[k] = v;
+            }
+        }
+
+        // ── A store the floor cannot judge: refused, not judged against the correction alone ─────────────────────
+
+        [Fact]
+        public async Task MissingPoolRow_WhileACorrectionApplies_RefusesTheUnshield()
+        {
+            PrivacyDbContext.PoolState().DeleteMany(x => x.AssetType == "VFX");
+            Globals.ShieldedSupplyCorrections["VFX"] = 100_033.000012M;
+            TipAtGate();
+
+            Assert.False(PrivateTxSupplyRules.TryCommittedSupply("VFX", Gate, out _));
+            Assert.Equal(0M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate)); // what the same-block guard sums against
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 1M));
+            Assert.False(ok);
+            Assert.Equal(PrivateTxSupplyRules.UnreadableStoreReason, msg);
+        }
+
+        [Fact]
+        public void UnreadablePrivacyStore_RefusesTheUnshield()
+        {
+            Globals.ShieldedSupplyCorrections["VFX"] = 100_033.000012M;
+            var tx = Unshield(NewAddress(), 1M);
+            Assert.True(PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out var error), error);
+            var live = DbContext.DB_Privacy;
+            try
+            {
+                DbContext.DB_Privacy = null!;
+                Assert.False(PrivateTxSupplyRules.TryCommittedSupply("VFX", Gate, out _));
+                Assert.Equal(0M, PrivateTxSupplyRules.CommittedSupply("VFX", Gate));
+                Assert.Equal((false, PrivateTxSupplyRules.UnreadableStoreReason), PrivateTxSupplyRules.Check(tx, payload, Gate));
+            }
+            finally
+            {
+                DbContext.DB_Privacy = live;
+            }
+        }
+
+        [Fact]
+        public async Task MissingPoolRow_WithoutACorrection_IsAnEmptyPool()
+        {
+            PrivacyDbContext.PoolState().DeleteMany(x => x.AssetType == "VFX");
+            TipAtGate();
+
+            Assert.True(PrivateTxSupplyRules.TryCommittedSupply("VFX", Gate, out var supply));
+            Assert.Equal(0M, supply);
+            var (ok, msg) = await TransactionValidatorService.VerifyTX(Unshield(NewAddress(), 1M));
+            Assert.False(ok);
+            Assert.StartsWith(PrivateTxSupplyRules.SupplyReasonPrefix, msg);
+            Assert.NotEqual(PrivateTxSupplyRules.UnreadableStoreReason, msg);
+        }
+
+        [Fact]
+        public void ReadablePoolRow_WithTheCorrection_IsJudgedAsBefore()
+        {
+            Globals.ShieldedSupplyCorrections["VFX"] = 100M;
+            // A counter written through the forged blocks, as mainnet's is: only such a row gets the correction.
+            var pool = ShieldedPoolService.GetOrCreateState("VFX");
+            pool.LastUpdateHeight = Globals.ShieldedSupplyCorrectionsThroughHeight;
+            PrivacyDbContext.PoolState().Update(pool);
+            var tx = Unshield(NewAddress(), 100M);
+            Assert.True(PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out var error), error);
+
+            Assert.True(PrivateTxSupplyRules.TryCommittedSupply("VFX", Gate, out var supply));
+            Assert.Equal(100.5M, supply);
+            Assert.Equal((true, ""), PrivateTxSupplyRules.Check(tx, payload, Gate));
+        }
+
+        [Fact]
+        public void TheMainnetCorrection_IsTheSumOfTheFourForgedDebits()
+        {
+            var fee = Globals.PrivateTxFixedFee;
+            Assert.Equal((2M + fee) + (2M + fee) + (29M + fee) + (100_000M + fee), _priorCorrections["VFX"]); // the build's value, snapshotted by the fixture
+        }
+
+        // ── Pure rule unit checks ─────────────────────────────────────────────────────────────────────────────────
+
+        [Fact]
+        public void PoolDebit_PerType()
+        {
+            var payload = new PrivateTxPayload { Asset = "VFX", Fee = 0.000003M, VbtcTransparentAmount = 0.02M };
+            Assert.Equal(1.000003M, PrivateTxSupplyRules.PoolDebit(new Transaction { TransactionType = TransactionType.VFX_UNSHIELD, Amount = 1M }, payload));
+            Assert.Equal(0.000003M, PrivateTxSupplyRules.PoolDebit(new Transaction { TransactionType = TransactionType.VFX_PRIVATE_TRANSFER }, payload));
+            Assert.Equal(0.02M, PrivateTxSupplyRules.PoolDebit(new Transaction { TransactionType = TransactionType.VBTC_V2_UNSHIELD }, payload));
+            Assert.Equal(0M, PrivateTxSupplyRules.PoolDebit(new Transaction { TransactionType = TransactionType.VFX_SHIELD, Amount = 1M }, payload));
+        }
+
+        [Fact]
+        public void AppliesTo_OnlyZkTypes_AtOrAboveGate()
+        {
+            Assert.True(PrivateTxSupplyRules.AppliesTo(new Transaction { TransactionType = TransactionType.VFX_UNSHIELD }, Gate));
+            Assert.False(PrivateTxSupplyRules.AppliesTo(new Transaction { TransactionType = TransactionType.VFX_UNSHIELD }, Gate - 1));
+            Assert.False(PrivateTxSupplyRules.AppliesTo(new Transaction { TransactionType = TransactionType.VFX_SHIELD }, Gate));
+            Assert.False(PrivateTxSupplyRules.AppliesTo(new Transaction { TransactionType = TransactionType.TX }, Gate));
+        }
+    }
+}

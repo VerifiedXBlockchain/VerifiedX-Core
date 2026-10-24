@@ -30,8 +30,8 @@ namespace VerifiedXCore.Privacy
             || t == TransactionType.VBTC_V2_PRIVATE_TRANSFER;
 
         /// <summary>
-        /// Canonical transaction order within a block (matches block validation:
-        /// OrderBy FromAddress, ThenBy Nonce, ThenBy Hash).
+        /// The order block validation checks a block's transactions in (FromAddress, Nonce, Hash). Not the order they are
+        /// applied in: application, and so the privacy rebuild, takes the block's own order (round 21).
         /// </summary>
         public static IReadOnlyList<Transaction> OrderTransactionsForReplay(IEnumerable<Transaction> transactions) =>
             transactions

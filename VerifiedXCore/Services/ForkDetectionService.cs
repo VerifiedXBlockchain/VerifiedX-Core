@@ -27,7 +27,8 @@ namespace VerifiedXCore.Services
     ///    peers holding the majority hash (RecoverySourcePolicy) so fellow stranded nodes cannot
     ///    re-serve the dead branch.
     ///  • Stall override — a stalled node whose branch is more than a reorg window behind a
-    ///    confirmed majority follows the majority even if the pure rule says LocalWins.
+    ///    confirmed majority follows the majority even if the pure rule says LocalWins, unless
+    ///    the rule decided on certificate weight.
     ///  • Never terminal — every failed attempt schedules the next on a backoff (10/30/60/120s).
     ///  • Self-reporting — SyncState (Healthy | Stalled | Recovering) feeds ProducerReady, the
     ///    Health endpoint, the explorer notifier (goes silent) and the vBTC heartbeat loop (pauses).
@@ -80,6 +81,14 @@ namespace VerifiedXCore.Services
 
                 if (Globals.IsResyncing || ForkRecoveryUtility.IsRecoveryInProgress
                     || SnapshotRestoreUtility.IsRestoreRunning)
+                {
+                    LogIfBlockedWhileStuck(myTip);
+                    return;
+                }
+
+                // Without a membership record fork choice cannot weigh certificates and falls to lowest-hash-wins: a
+                // node waits for the record its peers hold before it chooses between branches.
+                if (CasterMembershipStore.MissingWhilePeersHaveOne())
                 {
                     LogIfBlockedWhileStuck(myTip);
                     return;
@@ -251,8 +260,13 @@ namespace VerifiedXCore.Services
             var outcome = ForkChoiceUtility.CompareBranches(local, remote);
             if (outcome == ForkChoiceUtility.Outcome.LocalWins)
             {
-                if (!ForkResolutionUtility.ShouldOverrideLocalWin(stalled, myTip.Height, remoteTip))
+                var decidedOnCertWeight = ForkChoiceUtility.DecidedOnCertWeight(local, remote);
+                if (!ForkResolutionUtility.ShouldOverrideLocalWin(stalled, myTip.Height, remoteTip, decidedOnCertWeight))
                 {
+                    if (decidedOnCertWeight && ForkResolutionUtility.ShouldOverrideLocalWin(stalled, myTip.Height, remoteTip, false))
+                        LogUtility.Log(
+                            $"[{caller}] STALL-OVERRIDE refused: this node is stalled at {myTip.Height} while the majority is at {remoteTip}, but its block at h={divergenceHeight} carries more valid certificate weight ({local.CertWeight} vs {remote.CertWeight}). Not following the majority; restore from a snapshot if this branch is dead.",
+                            "ForkDetection");
                     LogUtility.Log(
                         $"[{caller}] FORK-CHOICE: LocalWins at divergence h={divergenceHeight} (local cert={local.CertWeight} h={local.TipHeight} hash={Short(local.HashAtDivergence)} vs remote cert={remote.CertWeight} h={remote.TipHeight}). Serving — peers self-correct.",
                         "ForkDetection");
@@ -479,8 +493,10 @@ namespace VerifiedXCore.Services
                 if (!resp.IsSuccessStatusCode) return null;
                 var body = await resp.Content.ReadAsStringAsync();
                 if (string.IsNullOrEmpty(body) || body == "0") return null;
-                var parsed = JsonConvert.DeserializeAnonymousType(body, new { Hash = "", Validator = "", Height = 0L });
-                return parsed?.Hash;
+                // A peer's round draft for a height above its tip (Committed=false) is not a block it holds: counted, it
+                // made a quorum of casters still one behind read as the majority against a certified tip (mainnet 7,562,232).
+                var parsed = JsonConvert.DeserializeAnonymousType(body, new { Hash = "", Validator = "", Height = 0L, Committed = (bool?)null });
+                return parsed?.Committed == false ? null : parsed?.Hash;
             }
             catch { return null; }
         }

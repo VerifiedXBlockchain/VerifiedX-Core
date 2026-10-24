@@ -234,6 +234,19 @@ namespace VerifiedXCore.Config
 			return config;
 		}
 
+		/// <summary>
+		/// Why this config cannot be applied, or null. TestNet=true and TestNetName select testnet only after every
+		/// activation height was set from the network the node started on, so a node started for mainnet would run
+		/// testnet with mainnet heights (and in the mainnet data folder). Testnet is chosen with the 'testnet' argument.
+		/// </summary>
+		public static string? TestnetConfigMismatch(Config config)
+		{
+			if (Globals.IsTestNet) return null;
+			if (config.TestNet == true || !string.IsNullOrEmpty(config.TestNetName))
+				return "config.txt selects testnet (TestNet=true or TestNetName) but the node was started for mainnet. Start it with the 'testnet' argument instead.";
+			return null;
+		}
+
 		public static void ProcessConfig(Config config)
         {
 			Globals.Port = config.Port;
@@ -361,43 +374,20 @@ namespace VerifiedXCore.Config
                 Globals.TXHeightRule2 = 200;
                 Globals.DSTClientPort = 13341;
                 Globals.SelfSTUNPort = 13340;
-                Globals.BTCNetwork = NBitcoin.Network.TestNet4;
+                Globals.BTCNetwork = NBitcoin.Network.VfxSignet;
                 Globals.SegwitP2SHStartPrefix = "2";
                 Globals.SegwitTaprootStartPrefix = "tb1";
                 Globals.ArbiterEncryptPassword = ("s7K#Y6fA%L3P9*wN2@R4$qG5hT8*dE7!").ToSecureString(); //deprecated. only for legacy block purposes. No risk here.
                 Globals.TotalArbiterParties = 2;
                 Globals.TotalArbiterThreshold = 2;
-                Globals.ClientSettings = new List<Bitcoin.ElectrumX.ClientSettings> {
-                    new Bitcoin.ElectrumX.ClientSettings {
-                        Host = "blackie.c3-soft.com",
-                        Port = 57010,
-                        UseSsl = true,
-                        Count = 0,
-                        FailCount = 0
-                    },
-                    new Bitcoin.ElectrumX.ClientSettings {
-                        Host = "mempool.space",
-                        Port = 40002,
-                        UseSsl = true,
-                        Count = 0,
-                        FailCount = 0
-                    },
-                    new Bitcoin.ElectrumX.ClientSettings {
-                        Host = "bitcoin-testnet4.stackwallet.com",
-                        Port = 50002,
-                        UseSsl = true,
-                        Count = 0,
-                        FailCount = 0
-                    },
-                    new Bitcoin.ElectrumX.ClientSettings {
-                        Host = "testnet.aranguren.org",
-                        Port = 52002, //52002 is testnet4; 51002 on this host is testnet3
-                        UseSsl = true,
-                        Count = 0,
-                        FailCount = 0
-                    }
-
-                };
+                // The signet's own Electrum servers: no public server carries this chain.
+                Globals.ClientSettings = Bitcoin.VfxSignet.Hosts.Select(host => new Bitcoin.ElectrumX.ClientSettings {
+                    Host = host,
+                    Port = Bitcoin.VfxSignet.ElectrumTlsPort,
+                    UseSsl = true,
+                    Count = 0,
+                    FailCount = 0
+                }).ToList();
             }
 
             if(!string.IsNullOrEmpty(config.TestNetName ))
@@ -423,43 +413,20 @@ namespace VerifiedXCore.Config
                     Globals.TXHeightRule2 = 200;
                     Globals.DSTClientPort = 23341;
                     Globals.SelfSTUNPort = 23340;
-                    Globals.BTCNetwork = NBitcoin.Network.TestNet4;
+                    Globals.BTCNetwork = NBitcoin.Network.VfxSignet;
                     Globals.SegwitP2SHStartPrefix = "2";
                     Globals.SegwitTaprootStartPrefix = "tb1";
                     Globals.ArbiterEncryptPassword = ("s7K#Y6fA%L3P9*wN2@R4$qG5hT8*dE7!").ToSecureString(); //deprecated. only for legacy block purposes. No risk here.
                     Globals.TotalArbiterParties = 2;
                     Globals.TotalArbiterThreshold = 2;
-                    Globals.ClientSettings = new List<Bitcoin.ElectrumX.ClientSettings> {
-                        new Bitcoin.ElectrumX.ClientSettings {
-                            Host = "blackie.c3-soft.com",
-                            Port = 57010,
-                            UseSsl = true,
-                            Count = 0,
-                            FailCount = 0
-                        },
-                        new Bitcoin.ElectrumX.ClientSettings {
-                            Host = "mempool.space",
-                            Port = 40002,
-                            UseSsl = true,
-                            Count = 0,
-                            FailCount = 0
-                        },
-                        new Bitcoin.ElectrumX.ClientSettings {
-                            Host = "bitcoin-testnet4.stackwallet.com",
-                            Port = 50002,
-                            UseSsl = true,
-                            Count = 0,
-                            FailCount = 0
-                        },
-                        new Bitcoin.ElectrumX.ClientSettings {
-                            Host = "testnet.aranguren.org",
-                            Port = 52002, //52002 is testnet4; 51002 on this host is testnet3
-                            UseSsl = true,
-                            Count = 0,
-                            FailCount = 0
-                        }
-
-                    };
+                    // The signet's own Electrum servers: no public server carries this chain.
+                    Globals.ClientSettings = Bitcoin.VfxSignet.Hosts.Select(host => new Bitcoin.ElectrumX.ClientSettings {
+                        Host = host,
+                        Port = Bitcoin.VfxSignet.ElectrumTlsPort,
+                        UseSsl = true,
+                        Count = 0,
+                        FailCount = 0
+                    }).ToList();
                 }
                 else if(config.TestNetName == "someothernet")
                 {

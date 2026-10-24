@@ -186,13 +186,6 @@ namespace VerifiedXCore.P2P
                     return;
                 }
 
-                Globals.P2PValDict.TryAdd(peerIP, Context);
-
-                if (Globals.P2PValDict.TryGetValue(peerIP, out var context) && context.ConnectionId != Context.ConnectionId)
-                {
-                    context.Abort();
-                }
-
                 // Updated signed message to include nonce
                 var SignedMessage = address + ":" + time + ":" + publicKey + ":" + nonce;
 
@@ -262,6 +255,13 @@ namespace VerifiedXCore.P2P
                     await EndOnConnect(peerIP, $"Address is blocklisted", $"ABL violation by authenticated address {address} from IP: {peerIP}");
                     return;
                 }
+
+                // Registered only now that the connection has authenticated: a socket from the same IP (a shared NAT or
+                // host) used to abort the session already here before its own signature was checked.
+                var previousOnIp = Globals.P2PValDict.TryGetValue(peerIP, out var prior) ? prior : null;
+                Globals.P2PValDict[peerIP] = Context;
+                if (previousOnIp != null && previousOnIp.ConnectionId != Context.ConnectionId)
+                    previousOnIp.Abort();
 
                 var netVal = new NetworkValidator { 
                     Address = address,
@@ -880,11 +880,7 @@ namespace VerifiedXCore.P2P
                                 {
                                     try
                                     {
-                                        // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
-                                        // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
-                                        // carrying a real transaction's hash remove it (and free its claims) during propagation.
-                                        if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
-                                            TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                        TransactionData.RemoveRefusedFromPool(mempool, txReceived); // only the row identical to this copy
                                     }
                                     catch (Exception ex)
                                     {
@@ -897,9 +893,9 @@ namespace VerifiedXCore.P2P
                                 var rating = await TransactionRatingService.GetTransactionRating(txReceived);
                                 txReceived.TransactionRating = rating;
 
-                                if (txResult.Item1 == true && dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
+                                if (txResult.Item1 == true && dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
+                                    && MempoolEvictionUtility.TryAdmitAndInsert(txReceived, mempool))
                                 {
-                                mempool.InsertSafe(txReceived);
                                 
                                 // HAL-16 Fix: Broadcast guard - check if we should broadcast
                                 // Store broadcast decision but DON'T execute yet (release semaphore first)
@@ -942,13 +938,10 @@ namespace VerifiedXCore.P2P
                                 }
                                 else
                                 {
+                                    VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(txReceived.Hash); // verified but not pooled: claims nothing (round 32)
                                     try
                                     {
-                                        // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
-                                        // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
-                                        // carrying a real transaction's hash remove it (and free its claims) during propagation.
-                                        if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
-                                            TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                        TransactionData.RemoveRefusedFromPool(mempool, txReceived); // only the row identical to this copy
                                     }
                                     catch (Exception ex)
                                     {
@@ -1010,11 +1003,7 @@ namespace VerifiedXCore.P2P
                             {
                                 try
                                 {
-                                    // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
-                                    // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
-                                    // carrying a real transaction's hash remove it (and free its claims) during propagation.
-                                    if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
-                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                    TransactionData.RemoveRefusedFromPool(mempool, txReceived); // only the row identical to this copy
                                 }
                                 catch { }
 
@@ -1025,9 +1014,9 @@ namespace VerifiedXCore.P2P
                             var rating = await TransactionRatingService.GetTransactionRating(txReceived);
                             txReceived.TransactionRating = rating;
 
-                            if (txResult.Item1 == true && dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F)
+                            if (txResult.Item1 == true && dblspndChk == false && isCraftedIntoBlock == false && rating != TransactionRating.F
+                                    && MempoolEvictionUtility.TryAdmitAndInsert(txReceived, mempool))
                             {
-                                mempool.InsertSafe(txReceived);
                                 
                                 // HAL-16 Fix: Broadcast guard - check if we should broadcast
                                 // Store broadcast decision but DON'T execute yet (release semaphore first)
@@ -1073,13 +1062,10 @@ namespace VerifiedXCore.P2P
                             }
                             else
                             {
+                                VerifiedXCore.Privacy.MempoolNullifierTracker.ReleaseClaimsIfNotPooled(txReceived.Hash); // verified but not pooled: claims nothing (round 32)
                                 try
                                 {
-                                    // VX-06 (follow-up): remove only the row that IS this received transaction (same hash and signature),
-                                    // and release nullifier claims only if it was removed. Deleting by the received hash let a forged copy
-                                    // carrying a real transaction's hash remove it (and free its claims) during propagation.
-                                    if (mempool.DeleteManySafe(x => x.Hash == txReceived.Hash && x.Signature == txReceived.Signature) > 0)
-                                        TransactionData.ReleasePrivateMempoolNullifiersForTx(txReceived.Hash);
+                                    TransactionData.RemoveRefusedFromPool(mempool, txReceived); // only the row identical to this copy
                                 }
                                 catch { }
 

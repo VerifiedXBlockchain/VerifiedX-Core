@@ -81,7 +81,7 @@ namespace VerifiedXCore.Bitcoin.Services
             if (string.IsNullOrWhiteSpace(address)) return false;
             if (Globals.BootstrapCasterAddresses.Contains(address)) return true;
             if (Globals.BlockCasters.Any(p => string.Equals(p.ValidatorAddress, address, StringComparison.Ordinal))) return true;
-            lock (Globals.KnownCasters)
+            lock (Globals.KnownCastersLock) // the lock the list is rebuilt under (round 25)
             {
                 if (Globals.KnownCasters.Any(c => string.Equals(c.Address, address, StringComparison.Ordinal))) return true;
             }
@@ -135,6 +135,15 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         /// <summary>
+        /// Whether this node signs vBTCb validator ADD/REMOVE messages. It does not: on the deployed contract every such
+        /// message, read as mintWithProof arguments, is also a valid mint message under the same signers, so a set of
+        /// these signatures could mint vBTCb. The signatures were never submitted to Base (no validator set change is
+        /// lost); a contract with a separate signing domain per message is needed before they are signed again.
+        /// </summary>
+        internal const bool AdminChangesSigned = false;
+        internal const string AdminChangesNotSignedReason = "This node does not sign Base validator ADD/REMOVE messages.";
+
+        /// <summary>
         /// Authorizes a remote request to sign a validator ADD/REMOVE for the Base contract.
         /// A node only signs a change that it has INDEPENDENTLY detected (present in its own
         /// pending queue, past cooldown) and that still agrees with current VFX validator state,
@@ -145,6 +154,7 @@ namespace VerifiedXCore.Bitcoin.Services
         public static (bool Ok, string Reason) AuthorizeSignRequest(ValidatorUpdateSignRequest? req)
         {
             if (req == null) return (false, "Empty request");
+            if (!AdminChangesSigned) return (false, AdminChangesNotSignedReason);
             if (!BaseBridgeService.IsBridgeConfigured) return (false, "Base bridge not configured");
             if (string.IsNullOrEmpty(Globals.ValidatorAddress)) return (false, "Not a validator");
 
@@ -282,6 +292,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
         private static async Task ProcessPendingActions()
         {
+            if (!AdminChangesSigned) return;
             var currentBlock = Globals.LastBlock?.Height ?? 0;
 
             var readyAdds = _pendingAdds.Values
@@ -418,6 +429,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
         public static byte[]? SignValidatorUpdateLocally(string action, string[] targetAddresses, long vfxBlockHeight)
         {
+            if (!AdminChangesSigned) return null;
             try
             {
                 // Every signer must hash the SAME bytes: the authorization step verified a normalized

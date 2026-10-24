@@ -177,20 +177,37 @@ namespace VerifiedXCore.Utilities
 
         #region Phase 2: Functional Verification
 
+        /// <summary>
+        /// The FROST library version this build ships and was tested with (<c>frost_get_version</c> of every binary under
+        /// <c>Frost/</c>). A library that reports anything else, a stub or a later or earlier build, fails the startup check,
+        /// so <see cref="FrostLibraryGate"/> keeps the node out of ceremonies and signings rather than sign with a library
+        /// that may serialize or derive differently from its peers. A release that ships new binaries updates this value
+        /// with them.
+        /// </summary>
+        public const string PinnedLibraryVersion = "0.2.0-frost-real";
+
+        /// <summary>Replaceable for tests: the version the loaded native library reports.</summary>
+        internal static Func<string> Version = FrostNative.GetVersion;
+
+        /// <summary>Why <paramref name="version"/> is not the library version this build pins, or null when it is.</summary>
+        public static string? VersionMismatch(string? version)
+        {
+            return string.Equals(version, PinnedLibraryVersion, StringComparison.Ordinal)
+                ? null
+                : $"The native FROST library reports version '{version}', but this build pins '{PinnedLibraryVersion}'. Run the library that ships with this release.";
+        }
+
         private static void CheckVersion(FrostFFICheckResult result)
         {
             try
             {
-                var version = FrostNative.GetVersion();
-                if (!string.IsNullOrEmpty(version) && version != "Unknown" && version != "Error")
-                {
+                var version = Version();
+                result.LibraryVersion = string.IsNullOrEmpty(version) ? "Unknown" : version;
+                var mismatch = VersionMismatch(version);
+                if (mismatch == null)
                     result.VersionCheckPassed = true;
-                    result.LibraryVersion = version;
-                }
                 else
-                {
-                    result.Errors.Add($"frost_get_version returned: '{version}'");
-                }
+                    result.Errors.Add(mismatch);
             }
             catch (Exception ex)
             {

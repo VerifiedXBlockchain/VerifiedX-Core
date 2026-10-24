@@ -12,11 +12,16 @@ namespace VerifiedXCore.Privacy
         public static ReadOnlySpan<byte> VersionBytes => new byte[] { 0x7A, 0x66 };
 
         public const int VersionByteLength = 2;
+        /// <summary>v2 (stage 3): <c>0x7A</c> = 'z', <c>0x67</c> = 'g'; payload = version + encryption key + owner key.</summary>
+        public static ReadOnlySpan<byte> VersionBytesV2 => new byte[] { 0x7A, 0x67 };
+        /// <summary>The owner key <c>owner_pk = Poseidon(OWNER_PK_DOMAIN, nullifier_key)</c>, a canonical field element.</summary>
+        public const int OwnerKeyLength = 32;
 
         /// <summary>Compressed BLS12-381 G1 encoding key material in addresses (per privacy plan).</summary>
         public const int EncryptionKeyLength = 33;
 
         public const int PayloadLength = VersionByteLength + EncryptionKeyLength;
+        public const int PayloadLengthV2 = VersionByteLength + EncryptionKeyLength + OwnerKeyLength;
 
         /// <summary>BIP32-style path segment name (documentation only; on-wire path uses numeric <c>1'</c> chain — see <see cref="ShieldedHdDerivation"/>).</summary>
         public const string HdPathShieldedSegment = "shielded";
