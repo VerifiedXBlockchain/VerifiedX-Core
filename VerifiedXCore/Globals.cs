@@ -282,6 +282,17 @@ namespace VerifiedXCore
         public const long FundLossAuditTestnetHeight = 400L;
 
         /// <summary>
+        /// Shared mainnet activation height of the ledger and consensus rules fixed in the issue batch of 2026-10-16 to 18
+        /// (ReserveRecoverReadsEveryRowHeight through BtcNameSignerOwnsAddressHeight), which shipped in 9.0 inactive: tip
+        /// 7,568,059 on 2026-10-24 04:00 UTC plus 25 hours (~12.5 s/block, ~7,200 blocks). A node that does not run a
+        /// build with this height refuses no block the rules refuse, and VrfSeedHeight changes who may produce, so every
+        /// validator and caster runs it before the height. Each rule keeps its own field, so one can be moved alone.
+        /// </summary>
+        public const long LedgerRulesBatchHeight = 7_575_250L;
+        /// <summary>Testnet activation of the same rules (GlobalsNetworkHeights): tip 7,102 on 2026-10-24 03:59 UTC plus about an hour (~12.4 s/block).</summary>
+        public const long LedgerRulesBatchTestnetHeight = 7_400L;
+
+        /// <summary>
         /// Item 1 (stage 1): a ZK-authorized private transaction (VFX/vBTC unshield, private transfer) may not take more
         /// than its shielded pool holds, must carry at least one nullifier and a Merkle root, and an unshield's outer
         /// recipient and amount must equal the ones inside its (hashed) payload. Before this height no proof was ever
@@ -363,45 +374,45 @@ namespace VerifiedXCore
         /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
         /// a row whose Data was not an array of objects made the recovery throw part-way, so every later row, the balance
-        /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Not active yet.
+        /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long ReserveRecoverReadsEveryRowHeight = 999_999_999_999;
+        public static long ReserveRecoverReadsEveryRowHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// From this height a vBTC V2 transfer sent as a contract call (Function "TransferVBTCV2()" or
         /// "TransferVBTCMultiV2()" under another transaction type) is held to the rules the typed VBTC_V2_TRANSFER
         /// already meets: its Data names each key once, in one spelling. The apply reads the last of a repeated key while
-        /// other readers may take the first. Not active yet.
+        /// other readers may take the first. Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long VbtcEnvelopeRulesHeight = 999_999_999_999;
+        public static long VbtcEnvelopeRulesHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// From this height a reserve's transaction other than a TX (or its Register()) carries no Amount: the apply burned
         /// it at once and CallBack()/Recover() return only TX amounts (LedgerIntegrityRules.ReserveMovesVfxOnlyByTransfer).
-        /// Not active yet.
+        /// Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long ReserveNonTransferAmountHeight = 999_999_999_999;
+        public static long ReserveNonTransferAmountHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// From this height a transaction's fee is below 1 VFX, so amount digits cannot move into it under the same hash
-        /// (LedgerIntegrityRules.FeeBelowOneVfx). Not active yet.
+        /// (LedgerIntegrityRules.FeeBelowOneVfx). Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long FeeBelowOneVfxHeight = 999_999_999_999;
+        public static long FeeBelowOneVfxHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// From this height a block moves (Transfer() or Burn()) a contract at most once: each move was judged against the
         /// owner before the block, so a second one undid a confirmed transfer (LedgerIntegrityRules.RegisterNftStepInBlock).
-        /// Not active yet.
+        /// Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long OneMovePerContractHeight = 999_999_999_999;
+        public static long OneMovePerContractHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// From this height a block producer's VRF is seeded from its epoch's anchor block, not the parent's hash, which the
         /// previous producer could grind (VrfSeed). Height h is in epoch (h - VrfSeedHeight) / VrfEpochBlocks; the epoch's
         /// anchor is VrfAnchorLagBlocks below its first height, deeper than any reorg by the time the epoch starts, and only a
-        /// validator registered before its epoch's anchor produces in it. Not active yet.
+        /// validator registered before its epoch's anchor produces in it. Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long VrfSeedHeight = 999_999_999_999;
+        public static long VrfSeedHeight = LedgerRulesBatchHeight;
 
         /// <summary>The length of a VRF seed epoch, in blocks (about a day at 10 s blocks).</summary>
         public const long VrfEpochBlocks = 8_640;
@@ -411,42 +422,42 @@ namespace VerifiedXCore
 
         /// <summary>
         /// From this height the recent-transaction-hash replay guard holds every block within the transaction time window
-        /// of the newest block, by block timestamp, and never fewer than 400 blocks (TxHashGuard). Not active yet.
+        /// of the newest block, by block timestamp, and never fewer than 400 blocks (TxHashGuard). Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long TxHashGuardByTimeHeight = 999_999_999_999;
+        public static long TxHashGuardByTimeHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// From this height owner fields carried in a transaction's Data are bound to the signed transaction: a
         /// DecShopCreate()'s owner is its sender, and a TokenContractOwnerChange()'s new owner is its recipient
-        /// (TransactionValidatorService.DecShopOwnerRefusal, TokenOwnerChangeRefusal). Not active yet.
+        /// (TransactionValidatorService.DecShopOwnerRefusal, TokenOwnerChangeRefusal). Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long DataOwnerBoundHeight = 999_999_999_999;
+        public static long DataOwnerBoundHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// From this height a token transfer writes the recipient's record first and debits the sender only once that write
-        /// succeeded (StateData.TokenTransferRecipientFirst). Not active yet.
+        /// succeeded (StateData.TokenTransferRecipientFirst). Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long TokenTransferRecipientFirstHeight = 999_999_999_999;
+        public static long TokenTransferRecipientFirstHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// From this height an AdnrCreate() name is lowercase letters, digits and '-', 1 to ADNRLimit characters, with no
-        /// suffix (LedgerIntegrityRules.AdnrNameError): consensus checked only that the name was free. Not active yet.
+        /// suffix (LedgerIntegrityRules.AdnrNameError): consensus checked only that the name was free. Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long AdnrNameGrammarHeight = 999_999_999_999;
+        public static long AdnrNameGrammarHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// From this height a TokenMint() is refused on a paused contract, with more decimals than the token's
         /// DecimalPlaces, or when it would overflow the supply or the holder's balance (LedgerIntegrityRules.TokenMintRefusal).
-        /// Not active yet.
+        /// Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long TokenMintRulesHeight = 999_999_999_999;
+        public static long TokenMintRulesHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// From this height a block carries at most MaxTransactionsPerBlock transactions, its coinbase included: the 10 MB
         /// size bound alone let one block multiply every per-transaction cost (verification, state writes, proofs).
-        /// Not active yet.
+        /// Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long BlockTransactionCapHeight = 999_999_999_999;
+        public static long BlockTransactionCapHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// The most transactions a block carries from BlockTransactionCapHeight. A producer fills its block from at most
@@ -457,56 +468,56 @@ namespace VerifiedXCore
         /// <summary>
         /// From this height a transaction carrying a non-whole Amount must hash with that Amount: VerifyTX's re-hash
         /// fallback read it as 0 and accepted a signature over "0" (TransactionValidatorService.StandardHashMatches).
-        /// Not active yet.
+        /// Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long FractionalAmountRehashHeight = 999_999_999_999;
+        public static long FractionalAmountRehashHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// From this height a transaction's ToAddress carries this network's version byte (LedgerIntegrityRules.
-        /// RecipientIsThisNetworks; admission refuses another network's address at every height). Not active yet.
+        /// RecipientIsThisNetworks; admission refuses another network's address at every height). Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long RecipientNetworkByteHeight = 999_999_999_999;
+        public static long RecipientNetworkByteHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// From this height a VOTE_TOPIC's Function is TopicAdd() (admission refuses another at every height), and a new
         /// topic's owner, tally, creation time and validator count are set by the apply (StateData.NormalizeNewTopic), not
-        /// taken from its creator. Not active yet.
+        /// taken from its creator. Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long VoteTopicRulesHeight = 999_999_999_999;
+        public static long VoteTopicRulesHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// From this height a TopicAdd() is judged only on what every node holds alike (TransactionValidatorService.
         /// TopicAddRefusal): the signature, the validator balance, one open topic per owner at the block's time, and an
         /// AdjVoteIn topic's specs, in live apply and in a rebuild or replay alike. The sender need not have crafted a
         /// recent block, and the topic's height need not be in the node's recent-block window: both read node-local state.
-        /// Not active yet.
+        /// Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long TopicAddDeterministicHeight = 999_999_999_999;
+        public static long TopicAddDeterministicHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// From this height AdnrCreate() of a label is refused while the label's legacy "label.rbx" (registered before
-        /// V4Height) exists: the duplicate check matched only the bare label and "label.vfx". Not active yet.
+        /// V4Height) exists: the duplicate check matched only the bare label and "label.vfx". Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long LegacyNameReservedHeight = 999_999_999_999;
+        public static long LegacyNameReservedHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// From this height Evolve(), Devolve() and ChangeEvolveStateSpecific() need a contract with the Evolving feature
-        /// and carry a body that keeps it (LedgerIntegrityRules.EvolutionNeedsAnEvolvingContract). Not active yet.
+        /// and carry a body that keeps it (LedgerIntegrityRules.EvolutionNeedsAnEvolvingContract). Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long EvolveRulesHeight = 999_999_999_999;
+        public static long EvolveRulesHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// From this height a shield carries no nullifier, fee-leg nullifier or spent position (PrivateTxProofRules.
-        /// ShieldSpendsNothing; admission refuses one at every height). Not active yet.
+        /// ShieldSpendsNothing; admission refuses one at every height). Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long ShieldSpendsNothingHeight = 999_999_999_999;
+        public static long ShieldSpendsNothingHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// From this height the Bitcoin-report signer set taken before the validator bonds' first look holds only the
         /// grandfathered bonds (ValidatorBond.SignerEligible): a validator registered after the grandfather height
-        /// entered the epoch-zero set without waiting its age. Not active yet.
+        /// entered the epoch-zero set without waiting its age. Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long SignerAgeFromEpochZeroHeight = 999_999_999_999;
+        public static long SignerAgeFromEpochZeroHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// The addresses whose signature over a release asset's SHA-256 lets self-update install it (Utilities.ReleaseSignature).
@@ -517,25 +528,25 @@ namespace VerifiedXCore
         /// <summary>
         /// From this height a smart contract's Update(), Transfer(), Burn(), Evolve(), Devolve() or
         /// ChangeEvolveStateSpecific() must carry its Data in the array form those applies read. Validation also accepted
-        /// a single object, which every apply then skips, so the transaction was mined with no effect. Not active yet.
+        /// a single object, which every apply then skips, so the transaction was mined with no effect. Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long ContractPayloadArrayHeight = 999_999_999_999;
+        public static long ContractPayloadArrayHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// From this height a BTC name transfer to a Bitcoin address that already holds a name is skipped at apply.
         /// Validation reads the names as they were before the block, so two transfers to one address in one block both
         /// passed and left two records on it, and deleting either then removed both. From the same height a BTC name
-        /// delete or transfer acts only on the sender's own record at the address. Not active yet.
+        /// delete or transfer acts only on the sender's own record at the address. Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long BtcNameOneRecordPerAddressHeight = 999_999_999_999;
+        public static long BtcNameOneRecordPerAddressHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// From this height a BTC name create is signed by the key of the Bitcoin address it names, and a transfer by the key
         /// of the address it moves to. Each signed message names the VFX owner and the name (BtcNameSignatures), so a
         /// signature can't be reused for another owner or name. Validation checked the create signature only against the
-        /// key the signature itself carries, and a transfer's destination not at all. Not active yet.
+        /// key the signature itself carries, and a transfer's destination not at all. Active from LedgerRulesBatchHeight.
         /// </summary>
-        public static long BtcNameSignerOwnsAddressHeight = 999_999_999_999;
+        public static long BtcNameSignerOwnsAddressHeight = LedgerRulesBatchHeight;
 
         /// <summary>
         /// The validator stake is bonded from this height (Services.ValidatorBond; owner decision 2026-10-13): a
