@@ -6083,8 +6083,10 @@ namespace VerifiedXCore.Bitcoin.Controllers
         public string SmartContractUID { get; set; }
         public string OwnerAddress { get; set; }
         public string WithdrawalRequestHash { get; set; }
-        public string BTCTxHash { get; set; }
-        public string FailureProof { get; set; }
+        // Optional: CancelWithdrawal reads neither. Declared as plain strings they were required by model validation, so a
+        // request without them (a watched vault's cancel has neither) was answered 400 before the action ran.
+        public string? BTCTxHash { get; set; }
+        public string? FailureProof { get; set; }
     }
 
     public class VBTCCancellationVotePayload
@@ -6131,8 +6133,8 @@ namespace VerifiedXCore.Bitcoin.Controllers
         public string SmartContractUID { get; set; }
         public string OwnerAddress { get; set; }
         public string WithdrawalRequestHash { get; set; }
-        public string BTCTxHash { get; set; }
-        public string FailureProof { get; set; }         // Proof of BTC TX failure
+        public string? BTCTxHash { get; set; }           // Optional, as on VBTCCancellationPayload (signed as "" when absent)
+        public string? FailureProof { get; set; }        // Optional; proof of BTC TX failure
         public long Timestamp { get; set; }
         public string UniqueId { get; set; }
         public string OwnerSignature { get; set; }       // VFX signature
