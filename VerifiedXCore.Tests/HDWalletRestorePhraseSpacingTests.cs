@@ -152,6 +152,68 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task ExtraSpaces_ResultSaysHowToRestoreTheEarlierWallet()
+        {
+            var result = await HDWallet.HDWalletData.RestoreHDWallet(Phrase + " ");
+
+            Assert.EndsWith(HDWallet.HDWalletData.ExactSpacingHint, result);
+            Assert.Equal(PhraseSeed, HDWallet.HDWalletData.GetHDWallet()!.WalletSeed);
+        }
+
+        [Fact]
+        public async Task ExactSpacing_EarlierWalletBecomesTheHdWallet_NewAddressesReachPastTheScanGap()
+        {
+            var typed = Phrase + " ";
+            var extraSpaceSeed = new Mnemonic().MnemonicToSeedHex(typed, "");
+            var extra10 = AddressAt(extraSpaceSeed, 10); // first use after ten unused addresses: beyond the scan
+            var real0 = AddressAt(PhraseSeed, 0);
+            Fund(extra10);
+            Fund(real0);
+
+            var output = await new VerifiedXCore.Controllers.V1Controller().GetRestoreHDWallet(typed, exactSpacing: true);
+
+            Assert.Contains("1 more address(es) restored from this phrase's real wallet", output);
+            Assert.DoesNotContain("exact spacing", output);
+            var hdw = HDWallet.HDWalletData.GetHDWallet()!;
+            Assert.Equal(extraSpaceSeed, hdw.WalletSeed);
+            Assert.Equal(0, hdw.Nonce);
+            Assert.True(await InWallet(real0));
+
+            Account? generated = null;
+            for (int i = 0; i <= 10; i++)
+                generated = await HDWallet.HDWalletData.GenerateAddress();
+            Assert.Equal(extra10, generated!.Address);
+        }
+
+        [Theory]
+        [InlineData(Phrase)]
+        [InlineData("Abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about ")]
+        public async Task ExactSpacing_WithNoEarlierWallet_RestoresTheRealWallet(string typed)
+        {
+            // Earlier versions refused capitals, so no wallet was ever made from that spelling.
+            var result = await HDWallet.HDWalletData.RestoreHDWallet(typed, exactSpacing: true);
+
+            Assert.Equal("Mnemonic Restored... 0 previously used address(es) restored.", result);
+            Assert.Equal(PhraseSeed, HDWallet.HDWalletData.GetHDWallet()!.WalletSeed);
+        }
+
+        [Theory]
+        [InlineData("2", false)]
+        [InlineData("1", true)]
+        [InlineData("", true)]
+        public async Task CliRestore_ExtraSpaces_AsksWhichWallet(string choice, bool realWallet)
+        {
+            var typed = Phrase + " ";
+            Console.SetIn(new StringReader(typed + "\n" + choice + "\n"));
+
+            var result = await BaseCommandServices.RestoreHDWallet();
+
+            Assert.Contains("Restored", result);
+            var expected = realWallet ? PhraseSeed : new Mnemonic().MnemonicToSeedHex(typed, "");
+            Assert.Equal(expected, HDWallet.HDWalletData.GetHDWallet()!.WalletSeed);
+        }
+
+        [Fact]
         public async Task ApiRoute_TrailingSpace_RestoresThePhrasesOwnSeed()
         {
             var output = await new VerifiedXCore.Controllers.V1Controller().GetRestoreHDWallet(Phrase + " ");

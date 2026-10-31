@@ -66,7 +66,23 @@ namespace VerifiedXCore.Models
                     .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
                     .Select(w => w.ToLowerInvariant()));
 
-            public static async Task<string> RestoreHDWallet(string mnemonicStr, string password = "")
+            /// <summary>True when earlier versions restored a different wallet from this text: it passed their check
+            /// but differs from its rebuilt form in spacing, which their seed included.</summary>
+            public static bool HasExtraSpacing(string? typedMnemonic)
+            {
+                var typed = typedMnemonic ?? "";
+                string canonical;
+                try { canonical = CanonicalMnemonic(typed); }
+                catch (ArgumentException) { return false; }
+                return typed.Normalize(NormalizationForm.FormKD) != canonical
+                    && new Mnemonic().ValidateMnemonic(typed, BIP39Wordlist.English);
+            }
+
+            public const string ExactSpacingHint = " This phrase has extra spaces, which earlier versions restored as a different wallet. If you used that wallet, restore it with exact spacing on a node that has no HD wallet.";
+
+            /// <param name="exactSpacing">Restore the wallet earlier versions made from a phrase with extra spaces
+            /// (see <see cref="HasExtraSpacing"/>) as this node's HD wallet, so new addresses continue that wallet.</param>
+            public static async Task<string> RestoreHDWallet(string mnemonicStr, string password = "", bool exactSpacing = false)
             {
                 if (Globals.IsWalletEncrypted)
                     return EncryptedWalletRefusal;
@@ -87,14 +103,15 @@ namespace VerifiedXCore.Models
                     return "Invalid Mnemonic Entered... Please Try again.";
                 }
 
-                var myMnemonicSeed = mnemonic.MnemonicToSeedHex(mnemonicStr, password);
+                var realSeed = mnemonic.MnemonicToSeedHex(mnemonicStr, password);
 
                 // Restore used to accept extra spaces and derive the seed from the phrase as typed, a different wallet.
-                // When this input would have restored such a wallet, its used addresses are imported too.
-                var typedSeed = typedMnemonic.Normalize(NormalizationForm.FormKD) != mnemonicStr
-                    && mnemonic.ValidateMnemonic(typedMnemonic, BIP39Wordlist.English)
-                        ? mnemonic.MnemonicToSeedHex(typedMnemonic, password)
-                        : null;
+                // When this input would have restored such a wallet, the caller picks which one becomes the HD wallet
+                // and the other one's used addresses are imported too.
+                var typedSeed = HasExtraSpacing(typedMnemonic) ? mnemonic.MnemonicToSeedHex(typedMnemonic, password) : null;
+                var useTypedSeed = exactSpacing && typedSeed != null;
+                var myMnemonicSeed = useTypedSeed ? typedSeed! : realSeed;
+                var otherSeed = typedSeed == null ? null : useTypedSeed ? realSeed : typedSeed;
 
                 HDWallet hdw = new HDWallet
                 {
@@ -112,7 +129,9 @@ namespace VerifiedXCore.Models
                 // Stops after GapLimit consecutive addresses with no on-chain activity.
                 const int GapLimit = 10;
                 int restoredCount = 0;
-                int typedRestoredCount = 0;
+                int otherRestoredCount = 0;
+                bool scanningOther = false;
+                var hint = typedSeed != null && !useTypedSeed ? ExactSpacingHint : "";
                 try
                 {
                     var highestActiveIndex = await RestoreUsedAddresses(myMnemonicSeed, () => restoredCount++);
@@ -121,19 +140,25 @@ namespace VerifiedXCore.Models
                     hdw.Nonce = highestActiveIndex + 1;
                     hd.UpdateSafe(hdw);
 
-                    if (typedSeed != null)
-                        await RestoreUsedAddresses(typedSeed, () => typedRestoredCount++);
+                    scanningOther = otherSeed != null;
+                    if (otherSeed != null)
+                        await RestoreUsedAddresses(otherSeed, () => otherRestoredCount++);
                 }
                 catch (Exception ex)
                 {
-                    ErrorLogUtility.LogError($"HD address scan failed after restoring {restoredCount + typedRestoredCount} address(es). Error: {ex}", "HDWallet.RestoreHDWallet()");
-                    return $"Mnemonic Restored... Address scan failed after restoring {restoredCount + typedRestoredCount} address(es). Remaining addresses can be re-derived one at a time with the new address command.";
+                    ErrorLogUtility.LogError($"HD address scan failed after restoring {restoredCount + otherRestoredCount} address(es). Error: {ex}", "HDWallet.RestoreHDWallet()");
+                    var otherHint = useTypedSeed ? " To restore this phrase's real wallet, restore it without exact spacing on a node that has no HD wallet." : hint;
+                    if (scanningOther) // new addresses continue this wallet, not the other one
+                        return $"Mnemonic Restored... {restoredCount} previously used address(es) restored. Scanning {(useTypedSeed ? "this phrase's real wallet" : "the wallet earlier versions made from this phrase's extra spaces")} failed after restoring {otherRestoredCount} address(es).{otherHint}";
+                    return $"Mnemonic Restored... Address scan failed after restoring {restoredCount} address(es). Remaining addresses can be re-derived one at a time with the new address command.{otherHint}";
                 }
 
-                if (typedRestoredCount > 0)
-                    return $"Mnemonic Restored... {restoredCount} previously used address(es) restored. {typedRestoredCount} more address(es) restored from the different wallet an earlier restore made from this phrase as typed with its extra spaces; move their funds to this wallet.";
+                if (otherRestoredCount > 0)
+                    return useTypedSeed
+                        ? $"Mnemonic Restored... {restoredCount} previously used address(es) restored. {otherRestoredCount} more address(es) restored from this phrase's real wallet, the one other BIP39 wallets restore."
+                        : $"Mnemonic Restored... {restoredCount} previously used address(es) restored. {otherRestoredCount} more address(es) restored from the different wallet an earlier restore made from this phrase as typed with its extra spaces; move their funds to this wallet.{hint}";
 
-                return $"Mnemonic Restored... {restoredCount} previously used address(es) restored.";
+                return $"Mnemonic Restored... {restoredCount} previously used address(es) restored.{hint}";
 
                 async Task<int> RestoreUsedAddresses(string seed, Action restored)
                 {

@@ -372,13 +372,15 @@ namespace VerifiedXCore.Controllers
         /// </summary>
         /// <param name="mnemonic"></param>
         /// <returns></returns>
+        /// <param name="exactSpacing">Restore the wallet earlier versions made from a phrase with extra spaces instead
+        /// of the phrase's real wallet (the other one's used addresses are imported either way).</param>
         [HttpGet("GetRestoreHDWallet/{mnemonic}")]
-        public async Task<string> GetRestoreHDWallet(string mnemonic)
+        public async Task<string> GetRestoreHDWallet(string mnemonic, [FromQuery] bool exactSpacing = false)
         {
             var output = "";
             try
             {
-                var mnemonicRestore = await HDWallet.HDWalletData.RestoreHDWallet(mnemonic);
+                var mnemonicRestore = await HDWallet.HDWalletData.RestoreHDWallet(mnemonic, exactSpacing: exactSpacing);
 
                 output = JsonConvert.SerializeObject(new { Result = mnemonicRestore });
             }
