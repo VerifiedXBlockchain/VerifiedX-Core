@@ -3,6 +3,7 @@ using VerifiedXCore.Data;
 using VerifiedXCore.BIP39;
 using VerifiedXCore.BIP32;
 using VerifiedXCore.Utilities;
+using System.Text;
 
 namespace VerifiedXCore.Models
 {
@@ -58,6 +59,13 @@ namespace VerifiedXCore.Models
                 return (true,myMnemonic);
             }
 
+            /// <summary>The one spelling a phrase's seed is derived from: NFKD, words split on any whitespace,
+            /// lowercased and joined by single spaces. A generated phrase is already in this form.</summary>
+            public static string CanonicalMnemonic(string? mnemonicStr) =>
+                string.Join(" ", (mnemonicStr ?? "").Normalize(NormalizationForm.FormKD)
+                    .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(w => w.ToLowerInvariant()));
+
             public static async Task<string> RestoreHDWallet(string mnemonicStr, string password = "")
             {
                 if (Globals.IsWalletEncrypted)
@@ -70,6 +78,9 @@ namespace VerifiedXCore.Models
                 }
 
                 Mnemonic mnemonic = new Mnemonic();
+                var typedMnemonic = mnemonicStr ?? "";
+                try { mnemonicStr = CanonicalMnemonic(typedMnemonic); }
+                catch (ArgumentException) { mnemonicStr = ""; } // text that cannot be normalized is not a phrase
                 var validateMnemonic = mnemonic.ValidateMnemonic(mnemonicStr, BIP39Wordlist.English);
                 if(validateMnemonic == false)
                 {
@@ -77,6 +88,13 @@ namespace VerifiedXCore.Models
                 }
 
                 var myMnemonicSeed = mnemonic.MnemonicToSeedHex(mnemonicStr, password);
+
+                // Restore used to accept extra spaces and derive the seed from the phrase as typed, a different wallet.
+                // When this input would have restored such a wallet, its used addresses are imported too.
+                var typedSeed = typedMnemonic.Normalize(NormalizationForm.FormKD) != mnemonicStr
+                    && mnemonic.ValidateMnemonic(typedMnemonic, BIP39Wordlist.English)
+                        ? mnemonic.MnemonicToSeedHex(typedMnemonic, password)
+                        : null;
 
                 HDWallet hdw = new HDWallet
                 {
@@ -94,7 +112,30 @@ namespace VerifiedXCore.Models
                 // Stops after GapLimit consecutive addresses with no on-chain activity.
                 const int GapLimit = 10;
                 int restoredCount = 0;
+                int typedRestoredCount = 0;
                 try
+                {
+                    var highestActiveIndex = await RestoreUsedAddresses(myMnemonicSeed, () => restoredCount++);
+
+                    // Continue new-address derivation after the last used index.
+                    hdw.Nonce = highestActiveIndex + 1;
+                    hd.UpdateSafe(hdw);
+
+                    if (typedSeed != null)
+                        await RestoreUsedAddresses(typedSeed, () => typedRestoredCount++);
+                }
+                catch (Exception ex)
+                {
+                    ErrorLogUtility.LogError($"HD address scan failed after restoring {restoredCount + typedRestoredCount} address(es). Error: {ex}", "HDWallet.RestoreHDWallet()");
+                    return $"Mnemonic Restored... Address scan failed after restoring {restoredCount + typedRestoredCount} address(es). Remaining addresses can be re-derived one at a time with the new address command.";
+                }
+
+                if (typedRestoredCount > 0)
+                    return $"Mnemonic Restored... {restoredCount} previously used address(es) restored. {typedRestoredCount} more address(es) restored from the different wallet an earlier restore made from this phrase as typed with its extra spaces; move their funds to this wallet.";
+
+                return $"Mnemonic Restored... {restoredCount} previously used address(es) restored.";
+
+                async Task<int> RestoreUsedAddresses(string seed, Action restored)
                 {
                     BIP32.BIP32 bip32 = new BIP32.BIP32();
                     var scStateTrei = SmartContractStateTrei.GetSCST();
@@ -104,7 +145,7 @@ namespace VerifiedXCore.Models
 
                     while (consecutiveUnused < GapLimit)
                     {
-                        var derivePath = bip32.DerivePath($"{hdw.Path}/{index}'", myMnemonicSeed);
+                        var derivePath = bip32.DerivePath($"{hdw.Path}/{index}'", seed);
                         var key = derivePath.Key.ToStringHex();
                         var address = AccountData.GetAddressFromHDKey(key);
 
@@ -118,7 +159,7 @@ namespace VerifiedXCore.Models
                             await AccountData.RestoreHDAccount(key);
                             highestActiveIndex = index;
                             consecutiveUnused = 0;
-                            restoredCount++;
+                            restored();
                         }
                         else
                         {
@@ -127,17 +168,8 @@ namespace VerifiedXCore.Models
                         index++;
                     }
 
-                    // Continue new-address derivation after the last used index.
-                    hdw.Nonce = highestActiveIndex + 1;
-                    hd.UpdateSafe(hdw);
+                    return highestActiveIndex;
                 }
-                catch (Exception ex)
-                {
-                    ErrorLogUtility.LogError($"HD address scan failed after restoring {restoredCount} address(es). Error: {ex}", "HDWallet.RestoreHDWallet()");
-                    return $"Mnemonic Restored... Address scan failed after restoring {restoredCount} address(es). Remaining addresses can be re-derived one at a time with the new address command.";
-                }
-
-                return $"Mnemonic Restored... {restoredCount} previously used address(es) restored.";
             }
 
             public static HDWallet? GetHDWallet()
