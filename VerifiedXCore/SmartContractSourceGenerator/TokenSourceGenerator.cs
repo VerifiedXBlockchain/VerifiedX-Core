@@ -25,7 +25,7 @@ namespace VerifiedXCore.SmartContractSourceGenerator
                 strBuild.AppendLine("let TokenSupply = " + token.TokenSupply.ToString());
                 strBuild.AppendLine("let TokenBurnable = " + token.TokenBurnable.ToString().ToLower());
                 strBuild.AppendLine("let TokenVoting = " + token.TokenVoting.ToString().ToLower());
-                strBuild.AppendLine("let TokenMintable = " + token.TokenVoting.ToString().ToLower());
+                strBuild.AppendLine("let TokenMintable = " + token.TokenMintable.ToString().ToLower());
                 strBuild.AppendLine("let TokenImageURL = \"" + token.TokenImageURL + "\"");
                 strBuild.AppendLine("let TokenImageBase = \"" + token.TokenImageBase + "\"");
 
@@ -62,7 +62,7 @@ namespace VerifiedXCore.SmartContractSourceGenerator
 
                 strTokenBld.AppendLine("function GetTokenFunctions() : any");
                 strTokenBld.AppendLine("{");
-                strTokenBld.AppendLine("   return \"TokenTransfer()\"" + " + " + appendChar + "\"TokenDeploy()\"" + tokenFuncs);
+                strTokenBld.AppendLine("   return \"TokenTransfer()\"" + " + " + appendChar + " + \"TokenDeploy()\"" + tokenFuncs);
                 strTokenBld.AppendLine("}");
 
                 return (strBuild, strTokenBld);
