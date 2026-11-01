@@ -28,21 +28,20 @@ namespace VerifiedXCore.Controllers
         /// Returns summary of this API
         /// </summary>
         /// <returns></returns>
-        [HttpGet]
+        [HttpGet(Order = 1)] // after Get(id): one path segment matched both, and the ambiguous match was a 500
         public IEnumerable<string> Get()
         {
             return new string[] { "Smart", "Contracts", "API" };
         }
 
         /// <summary>
-        /// Another test command
+        /// Another test command. An unknown command (or action name) is a 404.
         /// </summary>
         /// <returns></returns>
         [HttpGet("{id}")]
-        public string Get(string id)
+        public IActionResult Get(string id)
         {
             //use Id to get specific commands
-            var output = "Command not recognized."; // this will only display if command not recognized.
             var command = id.ToLower();
             switch (command)
             {
@@ -52,7 +51,7 @@ namespace VerifiedXCore.Controllers
                     break;
             }
 
-            return output;
+            return NotFound();
         }
 
         /// <summary>
