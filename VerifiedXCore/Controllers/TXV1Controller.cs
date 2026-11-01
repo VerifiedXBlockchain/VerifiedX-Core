@@ -21,6 +21,14 @@ namespace VerifiedXCore.Controllers
     [ApiController]
     public class TXV1Controller : ControllerBase
     {
+        /// <summary>Raw-transaction Data as the node hashes and stores it: any JSON value as its JSON text, and a JSON
+        /// null as no data, the same as a missing Data (it hashes as empty, not as the text "null").</summary>
+        internal static void RawData(JToken txJToken)
+        {
+            var data = txJToken["Data"];
+            txJToken["Data"] = data != null && data.Type != JTokenType.Null ? data.ToString(Formatting.None) : null;
+        }
+
         /// <summary>
         /// Returns the timestamp of the given wallet.
         /// </summary>
@@ -835,8 +843,7 @@ namespace VerifiedXCore.Controllers
             {
                 var txJToken = JToken.Parse(jsonData.ToString());
                 Type type = typeof(string);
-                var dataTest = txJToken["Data"] != null ? txJToken["Data"].ToString(Formatting.None) : null;//sometest["Data"].ToObject<string>();
-                txJToken["Data"] = dataTest;
+                RawData(txJToken);
                 var tx = JsonConvert.DeserializeObject<Transaction>(txJToken.ToString());
 
                 var nTx = new Transaction
@@ -877,8 +884,7 @@ namespace VerifiedXCore.Controllers
             {
                 var txJToken = JToken.Parse(jsonData.ToString());
                 Type type = typeof(string);
-                var dataTest = txJToken["Data"] != null ? txJToken["Data"].ToString(Formatting.None) : null;//sometest["Data"].ToObject<string>();
-                txJToken["Data"] = dataTest;
+                RawData(txJToken);
                 var tx = JsonConvert.DeserializeObject<Transaction>(txJToken.ToString());
 
                 if(tx != null)
@@ -953,8 +959,7 @@ namespace VerifiedXCore.Controllers
             {
                 var txJToken = JToken.Parse(jsonData.ToString());
                 Type type = typeof(string);
-                var dataTest = txJToken["Data"] != null ? txJToken["Data"].ToString(Formatting.None) : null;//sometest["Data"].ToObject<string>();
-                txJToken["Data"] = dataTest;
+                RawData(txJToken);
                 var transaction = JsonConvert.DeserializeObject<Transaction>(txJToken.ToString());
 
                 if (transaction != null)
@@ -1002,8 +1007,7 @@ namespace VerifiedXCore.Controllers
             {
                 var txJToken = JToken.Parse(jsonData.ToString());
                 Type type = typeof(string);
-                var dataTest = txJToken["Data"] != null ? txJToken["Data"].ToString(Formatting.None) : null;//sometest["Data"].ToObject<string>();
-                txJToken["Data"] = dataTest;
+                RawData(txJToken);
                 var transaction = JsonConvert.DeserializeObject<Transaction>(txJToken.ToString());
                 if (transaction != null)
                 {
