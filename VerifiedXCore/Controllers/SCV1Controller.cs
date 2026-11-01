@@ -221,9 +221,10 @@ namespace VerifiedXCore.Controllers
         /// <param name="search"></param>
         /// <returns></returns>
         [HttpGet]
-        [Route("GetAllSmartContracts/{pageNumber}/{excludeToken?}")]
-        [Route("GetAllSmartContracts/{pageNumber}/{excludeToken?}/{tokensOnly?}")]
-        [Route("GetAllSmartContracts/{pageNumber}/{excludeToken?}/{tokensOnly?}/{**search}")]
+        // excludeToken is a bool: GetAllSmartContracts/{pageNumber}/{search} is the search overload above, not a failed bool binding
+        [Route("GetAllSmartContracts/{pageNumber}/{excludeToken:bool?}")]
+        [Route("GetAllSmartContracts/{pageNumber}/{excludeToken:bool?}/{tokensOnly?}")]
+        [Route("GetAllSmartContracts/{pageNumber}/{excludeToken:bool?}/{tokensOnly?}/{**search}")]
         public async Task<string> GetAllSmartContracts(int pageNumber = 1, bool? excludeToken = false, bool? tokensOnly = false, string? search = "")
         {
             var output = "";
