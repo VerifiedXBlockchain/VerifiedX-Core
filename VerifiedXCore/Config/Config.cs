@@ -95,14 +95,27 @@ namespace VerifiedXCore.Config
 
 				// (This loop reads every line until EOF or the first blank line.)
 				string line;
+				var lineNumber = 0;
 				while (!string.IsNullOrEmpty((line = sr.ReadLine())))
 				{
-					// Split each line around '=':
-					var tmp = line.Split(new[] { '=' },
-										 StringSplitOptions.RemoveEmptyEntries);
-					// Add the key-value pair to the dictionary:
-					dict[tmp[0]] = tmp[1];
+					lineNumber++;
+					// Key is everything before the first '=', value everything after it (a value may contain '=').
+					var eq = line.IndexOf('=');
+					if (eq <= 0 || eq == line.Length - 1)
+					{
+						// No key or no value: the default applies (this used to stop the node at startup). The line itself
+						// is not echoed: it may hold a password.
+						Console.WriteLine($"config.txt: line {lineNumber} is not key=value and was ignored.");
+						continue;
+					}
+					dict[line.Substring(0, eq)] = line.Substring(eq + 1);
 				}
+				var ignoredAfterBlank = 0;
+				while ((line = sr.ReadLine()) != null)
+					if (!string.IsNullOrWhiteSpace(line))
+						ignoredAfterBlank++;
+				if (ignoredAfterBlank > 0)
+					Console.WriteLine($"config.txt: reading stops at the first blank line; {ignoredAfterBlank} line(s) after it were ignored.");
 
                 config.CustomPath = dict.ContainsKey("CustomPath") ? dict["CustomPath"] : null;
                 if (!string.IsNullOrEmpty(config.CustomPath))
@@ -128,9 +141,12 @@ namespace VerifiedXCore.Config
 				config.ChainCheckPoint = dict.ContainsKey("ChainCheckPoint") ? Convert.ToBoolean(dict["ChainCheckPoint"]) : false;
 				config.ForceSoloBootstrap = dict.ContainsKey("ForceSoloBootstrap") ? Convert.ToBoolean(dict["ForceSoloBootstrap"]) : false;
 				config.APICallURLLogging = dict.ContainsKey("APICallURLLogging") ? Convert.ToBoolean(dict["APICallURLLogging"]) : false;
-				config.ChainCheckPointInterval = dict.ContainsKey("ChainCheckPointInternal") ? Convert.ToInt32(dict["ChainCheckPointInternal"]) : 12;
+				// The documented key names, and the spellings this loader has always read.
+				config.ChainCheckPointInterval = dict.ContainsKey("ChainCheckPointInterval") ? Convert.ToInt32(dict["ChainCheckPointInterval"]) :
+					dict.ContainsKey("ChainCheckPointInternal") ? Convert.ToInt32(dict["ChainCheckPointInternal"]) : 12;
 				config.ChainCheckPointRetain = dict.ContainsKey("ChainCheckPointRetain") ? Convert.ToInt32(dict["ChainCheckPointRetain"]) : 2;
-				config.ChainCheckpointLocation = dict.ContainsKey("ChainCheckpointLocation") ? dict["ChainCheckpointLocation"] : GetPathUtility.GetCheckpointPath();
+				config.ChainCheckpointLocation = dict.ContainsKey("ChainCheckPointLocation") ? dict["ChainCheckPointLocation"] :
+					dict.ContainsKey("ChainCheckpointLocation") ? dict["ChainCheckpointLocation"] : GetPathUtility.GetCheckpointPath();
 				config.PasswordClearTime = dict.ContainsKey("PasswordClearTime") ? Convert.ToInt32(dict["PasswordClearTime"]) : 10;
                 config.LogAPI = dict.ContainsKey("LogAPI") ? Convert.ToBoolean(dict["LogAPI"]) : false;
                 config.RefuseToCallSeed = dict.ContainsKey("RefuseToCallSeed") ? Convert.ToBoolean(dict["RefuseToCallSeed"]) : false;
@@ -206,7 +222,8 @@ namespace VerifiedXCore.Config
 					var rejExtListConfig = rejectedExtensions.Split(',');
 					foreach (var rejExt in rejExtListConfig)
 					{
-						config.RejectAssetExtensionTypes.Add(rejExt);
+						if (AssetExtension(rejExt) is { } ext)
+							config.RejectAssetExtensionTypes.Add(ext);
 					}
 
 					config.RejectAssetExtensionTypes.AddRange(rejExtList);
@@ -223,15 +240,23 @@ namespace VerifiedXCore.Config
                     var allowedExtensionsList = allowedExtensions.Split(',');
 					foreach(var allowedExtension in allowedExtensionsList)
 					{
-						if(config.RejectAssetExtensionTypes.Contains(allowedExtension))
-						{
-							config.RejectAssetExtensionTypes.Remove(allowedExtension);
-						}
+						if (AssetExtension(allowedExtension) is { } ext)
+							config.RejectAssetExtensionTypes.RemoveAll(r => string.Equals(r, ext, StringComparison.OrdinalIgnoreCase));
 					}
                 }
             }
 
 			return config;
+		}
+
+		/// <summary>An extension list entry as Path.GetExtension gives it: with its leading dot ("pdf" and ".pdf" are the
+		/// same entry), in the case the operator wrote. Null for an empty entry.</summary>
+		public static string? AssetExtension(string entry)
+		{
+			var ext = entry.Trim();
+			if (ext.Length == 0)
+				return null;
+			return ext.StartsWith(".") ? ext : "." + ext;
 		}
 
 		/// <summary>
