@@ -364,7 +364,51 @@ namespace VerifiedXCore.Bitcoin.FROST
             var row = VBTCWithdrawalRequest.GetByTransactionHash(wrh, vaultUid);
             if (row != null && (row.IsCompleted || row.Status == VBTCWithdrawalStatus.Completed || row.Status == VBTCWithdrawalStatus.Cancelled))
                 return IsWithdrawalSignable(row, vaultUid).Reason;
-            return null;
+            // A vault the chain watches has its own wait, on the pin (BtcWithdrawalSigner.SettleBlocks).
+            if (row == null || Attestation.BtcAttestBalance.IsAttestedVault(vaultUid)) return null;
+            return RequestNotSettled(wrh, row.RequestBlockHeight, Globals.LastBlock?.Height ?? -1, BlockHoldsRequest);
+        }
+
+        /// <summary>
+        /// How far below the tip a withdrawal request's block must be before a share is given for it: past any reorg the
+        /// chain makes on its own (<see cref="VerifiedXCore.Utilities.ForkChoiceUtility.MAX_REORG_DEPTH"/>). A request in a block that
+        /// is later replaced could otherwise be signed and paid on Bitcoin before its VFX side reverts. A signer's rule,
+        /// not a block's: no node has to agree on it, and it holds for a vault once that vault's threshold of signers run it.
+        /// </summary>
+        public const int WithdrawalSigningDepth = VerifiedXCore.Utilities.ForkChoiceUtility.MAX_REORG_DEPTH + 2;
+        /// <summary>Tests only, as BtcWithdrawalSigner.SettleBlocksOverride: tests of other rules have signers act in the block after the request.</summary>
+        internal static int? SigningDepthOverride;
+
+        /// <summary>Whether this node's block at a height holds a transaction. Test seam.</summary>
+        internal static Func<long, string, bool> BlockHoldsRequest = (height, hash) =>
+            VerifiedXCore.Data.BlockchainData.GetBlockByHeight(height)?.Transactions?.Any(t => string.Equals(t.Hash, hash, StringComparison.Ordinal)) == true;
+
+        /// <summary>
+        /// Pure: why a share is not given yet for the request in the block at <paramref name="requestHeight"/>, or null. Its depth
+        /// alone is not enough: it must still be on this node's chain by hash, or a reorg between the two checks passes. A row
+        /// with no mined height says nothing about its block and is judged by the rest of the rules.
+        /// </summary>
+        internal static string? RequestNotSettled(string wrh, long requestHeight, long tipHeight, Func<long, string, bool> blockHoldsRequest)
+        {
+            if (requestHeight <= 0 || SigningDepthOverride == 0) return null;
+            if (tipHeight - requestHeight < (SigningDepthOverride ?? WithdrawalSigningDepth))
+                return $"Withdrawal request is in block {requestHeight}, {Math.Max(0, tipHeight - requestHeight)} below the tip; signing starts at {WithdrawalSigningDepth} blocks";
+            return blockHoldsRequest(requestHeight, wrh) ? null : $"Withdrawal request is no longer in block {requestHeight} of this chain";
+        }
+
+        /// <summary>
+        /// The leader of a ceremony waits for the request to settle rather than start one every signer refuses: a completion
+        /// called as soon as a request is mined (an exchange, the S3C bridge) takes about two and a half minutes longer, and
+        /// does not fail. It stops waiting if the chain is not moving and leaves the answer to the signers.
+        /// </summary>
+        internal static async Task WaitForRequestToSettleAsync(long requestHeight, int maxSeconds = 300)
+        {
+            for (var waited = 0; waited < maxSeconds; waited += 2)
+            {
+                var tip = Globals.LastBlock?.Height ?? -1;
+                if (requestHeight <= 0 || tip < requestHeight || tip - requestHeight >= WithdrawalSigningDepth) return;
+                await Task.Delay(TimeSpan.FromSeconds(2));
+            }
         }
 
         /// <summary>

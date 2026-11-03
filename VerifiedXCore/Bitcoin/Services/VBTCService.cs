@@ -2190,6 +2190,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     return (false, string.Empty, string.Empty, $"Withdrawal request already completed: {withdrawalRequestHash}", null);
                 }
 
+                await FROST.FrostSigningAuthorization.WaitForRequestToSettleAsync(withdrawalRequest.RequestBlockHeight);
+
                 // Reclaim deferral (VbtcWithdrawalConcurrencyHeight): this withdrawal's tx took back coins of a
                 // withheld transaction, which could still replace it until it confirms, so its COMPLETE waits.
                 if (!signOnly && !isTransientRequest && !string.IsNullOrEmpty(withdrawalRequest.CompleteAfterBtcTxId))
