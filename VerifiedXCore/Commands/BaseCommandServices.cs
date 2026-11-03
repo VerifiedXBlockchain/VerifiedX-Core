@@ -1891,7 +1891,16 @@ namespace VerifiedXCore.Commands
             var mnemonicStr = Console.ReadLine();
             if (!string.IsNullOrWhiteSpace(mnemonicStr))
             {
-                var mnemonicResult = await HDWallet.HDWalletData.RestoreHDWallet(mnemonicStr);
+                var exactSpacing = false;
+                if (HDWallet.HDWalletData.HasExtraSpacing(mnemonicStr))
+                {
+                    Console.WriteLine("This phrase has extra spaces. Earlier versions restored a different wallet from it than other BIP39 wallets do.");
+                    Console.WriteLine("1. Restore the phrase's real wallet (recommended)");
+                    Console.WriteLine("2. Restore the wallet earlier versions made from this exact spacing");
+                    Console.WriteLine("Used addresses of the other wallet are restored too. Type 1 or 2:");
+                    exactSpacing = Console.ReadLine()?.Trim() == "2";
+                }
+                var mnemonicResult = await HDWallet.HDWalletData.RestoreHDWallet(mnemonicStr, exactSpacing: exactSpacing);
                 if(mnemonicResult.Contains("Restored"))
                 {
                     Globals.HDWallet = true;

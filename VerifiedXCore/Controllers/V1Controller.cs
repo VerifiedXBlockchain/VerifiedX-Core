@@ -28,21 +28,20 @@ namespace VerifiedXCore.Controllers
         /// Check Status of API
         /// </summary>
         /// <returns></returns>
-        [HttpGet]
+        [HttpGet(Order = 1)] // after Get(id): one path segment matched both, and the ambiguous match was a 500
         public IEnumerable<string> Get()
         {
             return new string[] { "VFX-Wallet", "API" };
         }
 
         /// <summary>
-        /// Another check method for API
+        /// Another check method for API. An unknown command (or action name) is a 404.
         /// </summary>
         /// <returns></returns>
         [HttpGet("{id}")]
-        public string Get(string id)
+        public IActionResult Get(string id)
         {
             //use Id to get specific commands
-            var output = "Command not recognized."; // this will only display if command not recognized.
             var command = id.ToLower();
             switch (command)
             {
@@ -50,11 +49,10 @@ namespace VerifiedXCore.Controllers
                 case "getgenesisblock":
                     var genBlock = BlockchainData.GetGenesisBlock();
                     BlockchainData.PrintBlock(genBlock);
-                    output = JsonConvert.SerializeObject(genBlock);
-                    break;
+                    return Content(JsonConvert.SerializeObject(genBlock));
             }
 
-            return output;
+            return NotFound();
         }
 
         [HttpGet("getabl")]
@@ -372,13 +370,15 @@ namespace VerifiedXCore.Controllers
         /// </summary>
         /// <param name="mnemonic"></param>
         /// <returns></returns>
+        /// <param name="exactSpacing">Restore the wallet earlier versions made from a phrase with extra spaces instead
+        /// of the phrase's real wallet (the other one's used addresses are imported either way).</param>
         [HttpGet("GetRestoreHDWallet/{mnemonic}")]
-        public async Task<string> GetRestoreHDWallet(string mnemonic)
+        public async Task<string> GetRestoreHDWallet(string mnemonic, [FromQuery] bool exactSpacing = false)
         {
             var output = "";
             try
             {
-                var mnemonicRestore = await HDWallet.HDWalletData.RestoreHDWallet(mnemonic);
+                var mnemonicRestore = await HDWallet.HDWalletData.RestoreHDWallet(mnemonic, exactSpacing: exactSpacing);
 
                 output = JsonConvert.SerializeObject(new { Result = mnemonicRestore });
             }
