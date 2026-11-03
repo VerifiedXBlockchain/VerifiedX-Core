@@ -28,6 +28,10 @@ namespace VerifiedXCore.Services
                 if (!Globals.BlockCasters.Any(x => x.ValidatorAddress == myAddr))
                     return;
 
+                // A caster that lost the validators signs nothing: see VreeService.StandDownReason.
+                if (VreeService.StandDownReason(block.Height) != null)
+                    return;
+
                 // One block per height (AttestationGuard): a block accepted after this node signed another one at the
                 // height — e.g. the majority block adopted by fork resolution — is already certified without us.
                 if (!AttestationGuard.TryClaim(block.Height, block.Hash))

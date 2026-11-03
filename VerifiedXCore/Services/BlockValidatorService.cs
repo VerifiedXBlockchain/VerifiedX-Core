@@ -767,6 +767,15 @@ namespace VerifiedXCore.Services
                     //no rules
                 }
 
+                // An election's first block carries its record, outside the block hash like the certificate. It is judged first:
+                // the certificate is judged under it, and a node that missed the gossip has no other way to get the record.
+                if (!validateOnly && VreeElection.PrepareBlockRecord(block) is { } recordWait)
+                {
+                    LogUtility.Log($"[ValidateBlock] VREE: {recordWait}", "BlockValidatorService");
+                    DbContext.Rollback("BlockValidatorService.ValidateBlock()-vreeRecord");
+                    return result;
+                }
+
                 // Certificates are attached after local craft (TryAttachCertificateAsync) and before broadcast.
                 // validateOnly preflight must not require a cert yet; full acceptance paths use validateOnly=false.
                 // blockDownloads is exempt: certs are not part of the block hash and attestations are
@@ -774,9 +783,20 @@ namespace VerifiedXCore.Services
                 // never have their certs re-verified (or repaired) — enforcement is live-broadcast only.
                 // Except for the next block on a synced node (AtSyncedTip), whatever the path and however long the chain
                 // has stalled: there the certificate exists (ValidateBlocks tops it up first) and is required.
-                if (!validateOnly && (!blockDownloads || AtSyncedTip(block)) && !ConsensusCertificateVerifier.VerifyOrNotRequired(block))
+                // A block carrying an election record has no such exemption: it is the record's first block, and its certificate is what ties the two.
+                if (!validateOnly && (!blockDownloads || AtSyncedTip(block) || block.MembershipRecord != null) && !ConsensusCertificateVerifier.VerifyOrNotRequired(block))
                 {
                     DbContext.Rollback("BlockValidatorService.ValidateBlock()-cert");
+                    return result;
+                }
+
+                // The record goes into the store once its block's certificate holds, on a sync as on a live block.
+                if (!validateOnly && block.MembershipRecord != null && block.Height == Globals.LastBlock.Height + 1
+                    && !VreeService.AdoptFromBlock(block, out var adoptRefusal))
+                {
+                    LogUtility.Log($"[ValidateBlock] VREE: block {block.Height} refused — {adoptRefusal}", "BlockValidatorService");
+                    ValidatorMembershipPull.RequestSoon();
+                    DbContext.Rollback("BlockValidatorService.ValidateBlock()-vreeAdopt");
                     return result;
                 }
 

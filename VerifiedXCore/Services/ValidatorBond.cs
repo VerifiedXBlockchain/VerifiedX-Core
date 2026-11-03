@@ -283,6 +283,15 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
+        /// Whether a bond was aged and unexited at <paramref name="height"/>, read from its row on a tip at or above that
+        /// height: an exit or a funding after the height does not count against it. The same as <see cref="IsAged"/> at the
+        /// tip, so a node judging an election at its stall tip and a node judging the same election a few blocks later agree.
+        /// </summary>
+        public static bool AgedAt(ValidatorBondRow? row, long height) =>
+            row != null && !row.Released && (row.ExitHeight == 0 || row.ExitHeight > height)
+            && row.FundedSinceHeight != 0 && height - row.FundedSinceHeight >= CeremonyAgeBlocks;
+
+        /// <summary>
         /// The validators that count for a vault's key ceremony judged at <paramref name="height"/>, out of those given
         /// (the active set): holding the validator balance now and, from the bond height, with a stake locked for the
         /// minimum age. The list a ceremony is checked against, and the list a coordinator picks from.

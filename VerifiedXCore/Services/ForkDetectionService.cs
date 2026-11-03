@@ -247,20 +247,31 @@ namespace VerifiedXCore.Services
                 TipHeight = myTip.Height,
                 HashAtDivergence = localBlock.Hash ?? "",
                 CertWeight = ForkChoiceUtility.CountValidCertWeight(localBlock),
-                CertRuleApplicable = ForkChoiceUtility.IsCertRuleApplicable(divergenceHeight, localBlock.Version)
+                CertRuleApplicable = ForkChoiceUtility.IsCertRuleApplicable(divergenceHeight, localBlock.Version),
+                ElectionRung = VreeElection.CarriedRung(localBlock)
             };
             var remote = new ForkChoiceUtility.BranchSummary
             {
                 TipHeight = remoteTip,
                 HashAtDivergence = remoteBlock.Hash ?? "",
                 CertWeight = ForkChoiceUtility.CountValidCertWeight(remoteBlock),
-                CertRuleApplicable = ForkChoiceUtility.IsCertRuleApplicable(divergenceHeight, remoteBlock.Version)
+                CertRuleApplicable = ForkChoiceUtility.IsCertRuleApplicable(divergenceHeight, remoteBlock.Version),
+                ElectionRung = VreeElection.CarriedRung(remoteBlock)
             };
+
+            // No path, whatever the depth or the majority, crosses a ratified election record for a branch without one.
+            if (VreeElection.CrossingRefusal(CasterMembershipStore.GetCurrent(), divergenceHeight, myTip.Height, remoteBlock, CasterMembershipStore.GetBySeq) is { } crossing)
+            {
+                LogUtility.Log($"[{caller}] FORK-CHOICE: refusing the reorg — {crossing}.", "ForkDetection");
+                LastRecoveryResult = "local-wins";
+                ResetStreak();
+                return;
+            }
 
             var outcome = ForkChoiceUtility.CompareBranches(local, remote);
             if (outcome == ForkChoiceUtility.Outcome.LocalWins)
             {
-                var decidedOnCertWeight = ForkChoiceUtility.DecidedOnCertWeight(local, remote);
+                var decidedOnCertWeight = ForkChoiceUtility.DecidedOnCertWeight(local, remote) || ForkChoiceUtility.DecidedOnElection(local, remote);
                 if (!ForkResolutionUtility.ShouldOverrideLocalWin(stalled, myTip.Height, remoteTip, decidedOnCertWeight))
                 {
                     if (decidedOnCertWeight && ForkResolutionUtility.ShouldOverrideLocalWin(stalled, myTip.Height, remoteTip, false))

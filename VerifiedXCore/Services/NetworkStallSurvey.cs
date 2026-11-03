@@ -47,6 +47,8 @@ namespace VerifiedXCore.Services
             public string Ip { get; init; } = "";
             public long Height { get; init; } = -1;
             public string TipHash { get; init; } = "";
+            /// <summary>What the node's Health reports as casting right now (false on a build without the field).</summary>
+            public bool Casting { get; init; }
         }
 
         public enum Verdict
@@ -188,9 +190,9 @@ namespace VerifiedXCore.Services
                     var resp = await client.GetAsync(uri, cts.Token);
                     if (!resp.IsSuccessStatusCode) return new Reply { Ip = n.Ip };
                     var body = await resp.Content.ReadAsStringAsync();
-                    var parsed = JsonConvert.DeserializeAnonymousType(body, new { Height = -1L, TipHash = "" });
+                    var parsed = JsonConvert.DeserializeAnonymousType(body, new { Height = -1L, TipHash = "", Casting = false });
                     if (parsed == null) return new Reply { Ip = n.Ip };
-                    return new Reply { Ip = n.Ip, Height = parsed.Height, TipHash = parsed.TipHash ?? "" };
+                    return new Reply { Ip = n.Ip, Height = parsed.Height, TipHash = parsed.TipHash ?? "", Casting = parsed.Casting };
                 }
                 catch
                 {

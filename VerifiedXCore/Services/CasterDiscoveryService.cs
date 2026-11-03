@@ -2478,7 +2478,7 @@ namespace VerifiedXCore.Services
 
             // SEAT-HEAL: in the record era the signed record is the answer. Peers' live lists drop a restarted member
             // until it resumes, so "nobody lists us" there would stand down every member mid-resume.
-            if (CasterMembershipStore.GetCurrent() is { } seatHead)
+            if (CasterMembershipStore.GetSeatRecord() is { } seatHead)
                 return !seatHead.Casters.Any(c => c.Address == Globals.ValidatorAddress);
 
             var peerCasters = Globals.BlockCasters.ToList()
