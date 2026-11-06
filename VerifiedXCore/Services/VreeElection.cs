@@ -528,22 +528,26 @@ namespace VerifiedXCore.Services
             if (c.Rung < 0) return "no such rung";
             if (c.Casters == null || c.Casters.Count < CasterMembershipStore.MinCommitteeSize) return "the rung has too few members";
             if (c.SchemeVersion != SchemeVersionV1) return "unknown signature scheme";
-            if ((c.Signatures?.Count ?? 0) > epoch.Electors.Count) return "more signatures than electors";
             if (!string.Equals(c.PrevRecordHash, prev.RecordHash, StringComparison.OrdinalIgnoreCase)) return "prevRecordHash mismatch";
             if (!string.Equals(c.EpochHash, epoch.EpochHash, StringComparison.OrdinalIgnoreCase)) return "epoch hash mismatch";
             if (epoch.Build(prev, c.Rung, c.EffectiveFromHeight).RecordHash != c.RecordHash || CasterMembershipStore.ComputeRecordHash(c) != c.RecordHash)
                 return "record is not the rung this chain gives";
 
+            // A collector puts on the record exactly the signatures it verified (CollectRungAsync), so an honest record
+            // carries as many as ratify, each valid, distinct and an elector's. Anything else is refused at the first one:
+            // the record is public and a verify costs milliseconds, so a copy with junk signatures, from anyone through
+            // ProbeTip or AnnounceMembershipRecord, would otherwise cost one verify per elector on every validator.
             var need = epoch.RatifyNeeded;
+            var signatures = c.Signatures ?? new List<RecordSignature>();
+            if (signatures.Count > need) return $"{signatures.Count} signatures, more than the {need} that ratify";
             var payload = CasterMembershipStore.CanonicalPayload(c);
             var valid = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var sig in c.Signatures ?? new List<RecordSignature>())
+            foreach (var sig in signatures)
             {
-                if (valid.Count >= need) break;
-                if (string.IsNullOrEmpty(sig?.SignerAddress) || string.IsNullOrEmpty(sig.Signature)) continue;
-                if (valid.Contains(sig.SignerAddress) || !epoch.Electors.ContainsKey(sig.SignerAddress)) continue;
-                if (!SignatureService.VerifySignature(sig.SignerAddress, payload, sig.Signature)) continue;
-                valid.Add(sig.SignerAddress);
+                if (string.IsNullOrEmpty(sig?.SignerAddress) || string.IsNullOrEmpty(sig.Signature)) return "an empty signature";
+                if (!epoch.Electors.ContainsKey(sig.SignerAddress)) return $"a signature from {sig.SignerAddress}, which is not an elector";
+                if (!valid.Add(sig.SignerAddress)) return $"two signatures from {sig.SignerAddress}";
+                if (!SignatureService.VerifySignature(sig.SignerAddress, payload, sig.Signature)) return $"an invalid signature from {sig.SignerAddress}";
             }
             return valid.Count >= need ? null : $"signatures {valid.Count}/{need} from the electorate";
         }

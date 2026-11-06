@@ -478,7 +478,7 @@ namespace VerifiedXCore.Tests
             var flooded = Signed(view.Build(0), _electors.Take(need));
             flooded.Signatures.AddRange(Enumerable.Range(0, 100).Select(_ => flooded.Signatures[0]));
             Assert.False(CasterMembershipStore.ValidateSuccessor(_head, flooded, out var f));
-            Assert.Contains("more signatures", f);
+            Assert.Contains("more than", f);
         }
 
         [Fact]
@@ -546,6 +546,48 @@ namespace VerifiedXCore.Tests
             Assert.Contains(bad.Address, epoch.Electors.Keys);
             Assert.DoesNotContain(bad.Address, epoch.Ranked);
             Assert.Equal(11, epoch.Ranked.Count);
+        }
+
+        [Fact]
+        public void ARecordIsRefusedAtItsFirstBadSignature_SoJunkCostsOneVerifyNotOnePerElector()
+        {
+            // The record is public and anyone can POST a copy of it (ProbeTip, AnnounceMembershipRecord). An honest collector
+            // puts exactly the ratifying signatures on it, each verified, so one bad or surplus signature ends the check.
+            var view = View();
+            var good = Ratified(0);
+            Assert.Null(VreeElection.ContentRefusal(view.Epoch, _head, good));
+            var need = view.Epoch.RatifyNeeded;
+            Assert.Equal(need, good.Signatures.Count);
+
+            CasterMembershipRecord Copy() => JsonConvert.DeserializeObject<CasterMembershipRecord>(JsonConvert.SerializeObject(good))!;
+            var spare = Of(view.Epoch.Electors.Keys.OrderBy(a => a, StringComparer.Ordinal).Skip(need).First());
+            var payload = CasterMembershipStore.CanonicalPayload(good);
+
+            var surplus = Copy();
+            surplus.Signatures.Add(new RecordSignature { SignerAddress = spare.Address, Signature = SignatureService.CreateSignature(payload, spare.Key, spare.Pub) });
+            Assert.Contains("more than", VreeElection.ContentRefusal(view.Epoch, _head, surplus)!); // every one valid, still one too many
+
+            var junk = Copy();
+            junk.Signatures[0] = new RecordSignature { SignerAddress = junk.Signatures[0].SignerAddress, Signature = "junk.junk" };
+            Assert.Contains("invalid signature", VreeElection.ContentRefusal(view.Epoch, _head, junk)!);
+
+            var twice = Copy();
+            twice.Signatures[1] = twice.Signatures[0];
+            Assert.Contains("two signatures", VreeElection.ContentRefusal(view.Epoch, _head, twice)!);
+
+            var outsider = Copy();
+            var caster = _committee[0]; // excluded from the electorate
+            outsider.Signatures[0] = new RecordSignature { SignerAddress = caster.Address, Signature = SignatureService.CreateSignature(payload, caster.Key, caster.Pub) };
+            Assert.Contains("not an elector", VreeElection.ContentRefusal(view.Epoch, _head, outsider)!);
+
+            var empty = Copy();
+            empty.Signatures[0] = new RecordSignature { SignerAddress = empty.Signatures[0].SignerAddress, Signature = "" };
+            Assert.Contains("empty", VreeElection.ContentRefusal(view.Epoch, _head, empty)!);
+
+            // The same copies through the production entry point a probe uses.
+            Assert.False(CasterMembershipStore.TryAppend(junk, out var why));
+            Assert.Contains("invalid signature", why);
+            Assert.True(CasterMembershipStore.TryAppend(good, out why), why);
         }
 
         [Fact]
