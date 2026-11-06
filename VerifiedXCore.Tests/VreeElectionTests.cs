@@ -731,6 +731,27 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ARelayThatRecasesTheEpochHash_LeavesTheNextRungsPredecessorAndTheHoldAsTheyWere()
+        {
+            var rung0 = Ratified(0);
+            var recased = JsonConvert.DeserializeObject<CasterMembershipRecord>(JsonConvert.SerializeObject(rung0))!;
+            recased.EpochHash = rung0.EpochHash.ToUpperInvariant();
+            Assert.NotEqual(rung0.EpochHash, recased.EpochHash);
+            Assert.Equal(rung0.RecordHash, CasterMembershipStore.ComputeRecordHash(recased)); // the signatures still hold
+            Assert.True(CasterMembershipStore.TryAppend(recased, out var why), why);
+            VreeElection.ClearCachesForTests();
+
+            StallAt(H, 700);
+            var view = View();
+            Assert.Equal(rung0.PrevRecordHash, view.Prev.RecordHash); // rung 3 is still rung 0's sibling
+            Assert.True(VreeElection.WithinRatifiedHold(CasterMembershipStore.GetCurrent(), view.Epoch.EpochHash, TimeUtil.GetTime()));
+
+            VreeElection.ClearCachesForTests();
+            VreeElection.NoteRatified(rung0.EpochHash.ToUpperInvariant(), rung0.RecordHash, 1_000_000);
+            Assert.True(VreeElection.WithinRatifiedHold(null, rung0.EpochHash, 1_000_000));
+        }
+
+        [Fact]
         public void ARungsOwnMemberInstallsItOverADeadSibling_UntilTheSiblingHasStarted()
         {
             var rung0 = Ratified(0);
