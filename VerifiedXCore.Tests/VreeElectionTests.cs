@@ -2061,7 +2061,7 @@ namespace VerifiedXCore.Tests
             Assert.False(contested.Ack);
             Assert.Equal(HeadSeq, CasterMembershipStore.GetCurrent()!.RecordSeq); // neither side
             Assert.Contains(_committee[1].Ip, asked); // the committee this node holds was asked
-            Assert.Contains(_committee[0].Ip, asked); // and the prober
+            Assert.Contains(_committee[0].Ip, asked);
 
             // The same probe where the peers hold what it carries: the record is taken, and the tip verifies.
             VreeService.ResetForTests();
@@ -2077,6 +2077,41 @@ namespace VerifiedXCore.Tests
             CasterDiscoveryService.FetchMembershipResponse = (_, _) => Task.FromResult<MembershipRecordResponse?>(null);
             Assert.False((await VreeService.AnswerProbeAsync(ProbeFor(tip, _committee[0].Address), _committee[0].Ip)).Ack);
             Assert.False((await VreeService.AnswerProbeAsync(probe, _committee[0].Ip)).Ack);
+            Assert.Equal(HeadSeq, CasterMembershipStore.GetCurrent()!.RecordSeq);
+        }
+
+        [Fact]
+        public async Task AnUnsignedRecordInAProbe_DoesNotHoldUpTheRecordItsPeersHold()
+        {
+            // The real promotion, which a committee member holds, and a made-up record at the same seq with no valid signature,
+            // which anyone can put in a probe. The made-up one is no response to the pull, so it contests nothing.
+            var real = Signed(Ordinary(HeadSeq + 1, H, _head.RecordHash, _committee.Take(4).Append(_electors[11]), "Promotion"), _committee.Take(3));
+            var madeUp = Ordinary(HeadSeq + 1, H, _head.RecordHash, _committee.Take(4).Append(_electors[10]), "Promotion");
+            var badlySigned = Signed(Ordinary(HeadSeq + 1, H, _head.RecordHash, _committee.Take(4).Append(_electors[9]), "Promotion"), _electors.Take(3));
+            StallAt(H - 1, 5);
+            var tip = BlockAt(H, Globals.LastBlock.Hash, 5, new[] { _committee[0], _committee[1], _electors[11] });
+            _who.Value = _electors[0];
+            CasterDiscoveryService.FetchMembershipResponse = (ip, _) => Task.FromResult<MembershipRecordResponse?>(
+                ip == _committee[1].Ip ? new MembershipRecordResponse { HeadSeq = real.RecordSeq, Records = new List<CasterMembershipRecord> { real } } : null);
+
+            foreach (var junk in new[] { madeUp, badlySigned })
+            {
+                var probe = ProbeFor(tip, _committee[0].Address);
+                probe.Records = new List<CasterMembershipRecord> { junk };
+                var answer = await VreeService.AnswerProbeAsync(probe, "203.0.113.7");
+                Assert.True(answer.Ack, answer.Reason);
+                Assert.Equal(real.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+
+                DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Delete(real.RecordSeq);
+                CasterMembershipStore.InvalidateCache();
+                VreeService.ResetForTests();
+            }
+
+            // Alone, with no peer answering, a made-up record is not taken either.
+            CasterDiscoveryService.FetchMembershipResponse = (_, _) => Task.FromResult<MembershipRecordResponse?>(null);
+            var lone = ProbeFor(tip, _committee[0].Address);
+            lone.Records = new List<CasterMembershipRecord> { madeUp };
+            Assert.False((await VreeService.AnswerProbeAsync(lone, "203.0.113.7")).Ack);
             Assert.Equal(HeadSeq, CasterMembershipStore.GetCurrent()!.RecordSeq);
         }
 

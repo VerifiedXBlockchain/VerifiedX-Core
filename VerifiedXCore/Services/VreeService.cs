@@ -497,18 +497,21 @@ namespace VerifiedXCore.Services
             if ((probe.Certificate?.Attestations?.Count ?? 0) > MaxProbeAttestations) return No("oversized certificate");
 
             // Records first: a validator behind on them cannot verify a new committee's tip (the ordinary promotion's window).
-            // Nobody has verified the probe, so its records are not taken on the prober's word: they go into one membership
-            // pull with the peers' own answers, and nothing is adopted at a seq the responders disagree on
-            // (CasterDiscoveryService.AdoptResponses). A probe within the pull's spacing waits for the next one.
+            // Nobody has verified the probe, so its records are not taken on the prober's word: the ones that are signed as a
+            // chain from this node's head go into one membership pull with the answers of the peers this node asks, and nothing
+            // is adopted at a seq the responders disagree on (CasterDiscoveryService.AdoptResponses). An unsigned record is no
+            // response at all, so a made-up one cannot hold up a record the peers hold. A probe within the pull's spacing waits
+            // for the next one.
             var verified = ProbeVerifies(probe);
-            var sender = string.IsNullOrEmpty(senderIp) ? null : senderIp!.Replace("::ffff:", "");
-            var carried = ProbeRecords(probe, sender);
-            if ((!verified || carried != null) && TimeUtil.GetTime() - _lastPullForProbeUnix >= ValidatorMembershipPull.RetrySeconds)
+            var headSeq = CasterMembershipStore.GetCurrent()?.RecordSeq ?? -1;
+            var carriesNew = probe.Records?.Any(r => r != null && r.RecordSeq > headSeq) == true;
+            if ((!verified || carriesNew) && TimeUtil.GetTime() - _lastPullForProbeUnix >= ValidatorMembershipPull.RetrySeconds)
             {
                 _lastPullForProbeUnix = TimeUtil.GetTime();
                 ValidatorMembershipPull.RequestSoon();
+                var sender = string.IsNullOrEmpty(senderIp) ? null : senderIp!.Replace("::ffff:", "");
+                var carried = carriesNew ? ProbeRecords(probe, sender) : null;
                 var peers = ValidatorMembershipPull.PeerIps();
-                if (sender != null && !peers.Contains(sender)) peers.Add(sender);
                 // The answer must reach the prober within its timeout (HttpTimeoutSeconds) whatever a slow peer does: the pull goes
                 // on without the answer past half of it, and what it adopts counts for the next probe.
                 var pull = Task.Run(async () => { try { await CasterDiscoveryService.FetchAndAdoptMembershipAsync(peers, reconcileWhenUnchanged: false, carried: carried); } catch { } });
@@ -551,12 +554,14 @@ namespace VerifiedXCore.Services
             return answer;
         }
 
-        /// <summary>The records a probe carries above this node's head, as the prober's response to a membership pull; null when it carries none.</summary>
+        /// <summary>
+        /// The records a probe carries above this node's head that are signed as a chain from it, as the prober's response to
+        /// a membership pull; null when there are none. Judged once per pull spacing, never per probe.
+        /// </summary>
         private static (string Ip, long HeadSeq, List<CasterMembershipRecord> Records)? ProbeRecords(VreeProbe probe, string? senderIp)
         {
-            var headSeq = CasterMembershipStore.GetCurrent()?.RecordSeq ?? -1;
-            var records = probe.Records?.Where(r => r != null && r.RecordSeq > headSeq).Take(MaxProbeRecords).ToList();
-            if (records == null || records.Count == 0) return null;
+            var records = CasterMembershipStore.ValidRunFromHead((probe.Records ?? new List<CasterMembershipRecord>()).Where(r => r != null).Take(MaxProbeRecords));
+            if (records.Count == 0) return null;
             return (senderIp ?? $"the prober {probe.Prober}", records.Max(r => r.RecordSeq), records);
         }
 
