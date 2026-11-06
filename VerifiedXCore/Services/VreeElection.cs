@@ -63,6 +63,18 @@ namespace VerifiedXCore.Services
             return Math.Max(0, TimeUtil.GetTime() - Math.Max(tip.Timestamp, Globals.LastBlockAddedTimestamp));
         }
 
+        /// <summary>
+        /// How long the tip has stood by its own timestamp: the earliest the stall can have begun, the same on every node
+        /// holding the tip. A node that took the tip late (it was behind, or it restarted) reads a shorter
+        /// <see cref="StallSeconds"/>, never a shorter one of these: the rung the rest of the network is on is read from it.
+        /// </summary>
+        public static long TipTimestampAgeSeconds()
+        {
+            var tip = Globals.LastBlock;
+            if (tip == null || tip.Height < 0) return long.MaxValue;
+            return Math.Max(0, TimeUtil.GetTime() - tip.Timestamp);
+        }
+
         /// <summary>Whether a record, or a block, at this height is under the election's rules.</summary>
         public static bool Active(long height) => height >= Globals.VreeActivationHeight;
 
@@ -319,8 +331,14 @@ namespace VerifiedXCore.Services
             public long TipHeight { get; init; }
             public string TipHash { get; init; } = "";
             public long TipAgeSeconds { get; init; }
-            /// <summary>The rung open now by this node's clock.</summary>
+            /// <summary>The rung open now by this node's clock: the stall counted from when it took the tip.</summary>
             public int ClockRung { get; init; }
+            /// <summary>
+            /// The rung open now by the tip's own age, the highest any node can honestly be on. A signer accepts rungs up to one
+            /// above it: its own clock would shut out every rung once it took the tip two minutes later than the collectors did,
+            /// and that offset never shrinks, so a third of the electors a block behind at the stall would have ended the election.
+            /// </summary>
+            public int TimestampRung { get; init; }
             /// <summary>A rotation's rung 0 opens at the lapse and needs no stall.</summary>
             public bool IsRotation => Epoch.ChangeType == ScheduledRotationChangeType;
             /// <summary>The height the term ends, for a rotation.</summary>
@@ -352,10 +370,11 @@ namespace VerifiedXCore.Services
         /// The election open at this tip: the rotation from an elected committee's lapse, otherwise an emergency once the
         /// tip is stale. Rungs of one election are siblings: they all succeed the record below any rung already installed.
         /// </summary>
-        public static ElectionView? ViewAt(CasterMembershipRecord? head, long tipHeight, string? tipHash, long tipAgeSeconds, Func<long, CasterMembershipRecord?> bySeq)
+        public static ElectionView? ViewAt(CasterMembershipRecord? head, long tipHeight, string? tipHash, long tipAgeSeconds, Func<long, CasterMembershipRecord?> bySeq, long tipTimestampAgeSeconds = -1)
         {
             if (head == null || tipHeight <= 0 || string.IsNullOrEmpty(tipHash))
                 return null;
+            if (tipTimestampAgeSeconds < tipAgeSeconds) tipTimestampAgeSeconds = tipAgeSeconds;
 
             // A rotation not in force yet leaves the record below it governing: its later rungs are its siblings.
             var governing = head.ChangeType == ScheduledRotationChangeType && head.EffectiveFromHeight > tipHeight ? bySeq(head.RecordSeq - 1) : head;
@@ -367,7 +386,7 @@ namespace VerifiedXCore.Services
                 return new ElectionView
                 {
                     Epoch = rotation, Prev = governing!, TipHeight = tipHeight, TipHash = tipHash!, TipAgeSeconds = tipAgeSeconds, LapseHeight = term.LapseHeight,
-                    ClockRung = ClockRungAt(tipAgeSeconds, rotation: true),
+                    ClockRung = ClockRungAt(tipAgeSeconds, rotation: true), TimestampRung = ClockRungAt(tipTimestampAgeSeconds, rotation: true),
                 };
             }
 
@@ -383,7 +402,7 @@ namespace VerifiedXCore.Services
             return new ElectionView
             {
                 Epoch = epoch, Prev = prev, TipHeight = tipHeight, TipHash = tipHash!, TipAgeSeconds = tipAgeSeconds,
-                ClockRung = ClockRungAt(tipAgeSeconds, rotation: false),
+                ClockRung = ClockRungAt(tipAgeSeconds, rotation: false), TimestampRung = ClockRungAt(tipTimestampAgeSeconds, rotation: false),
             };
         }
 
@@ -424,8 +443,10 @@ namespace VerifiedXCore.Services
                 return "rule 3: the committee is reachable";
             if (facts.HoldActive)
                 return "rule 4: a maintenance hold is active";
-            if (Math.Abs((long)rung - view.ClockRung) > 1)
-                return $"rule 6: rung {rung} is not within one of the rung open now ({view.ClockRung})";
+            // Rung 0 opens by this node's own clock (rule 1, above); which rungs are open is read from the tip's age, which every
+            // node reads alike. A rung below the open one is still collecting, and harmless to sign: the lower rung wins a fork.
+            if (rung > view.TimestampRung + 1)
+                return $"rule 6: rung {rung} is above the rung open by the tip's age ({view.TimestampRung})";
             if (facts.RatifiedHold)
                 return "rule 7: a ratified rung was seen within the hold";
             return null;

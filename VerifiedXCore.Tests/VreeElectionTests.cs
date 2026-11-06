@@ -169,7 +169,7 @@ namespace VerifiedXCore.Tests
         }
 
         private VreeElection.ElectionView View() =>
-            VreeElection.ViewAt(CasterMembershipStore.GetCurrent(), Globals.LastBlock.Height, Globals.LastBlock.Hash, VreeElection.StallSeconds(), CasterMembershipStore.GetBySeq)!;
+            VreeElection.ViewAt(CasterMembershipStore.GetCurrent(), Globals.LastBlock.Height, Globals.LastBlock.Hash, VreeElection.StallSeconds(), CasterMembershipStore.GetBySeq, VreeElection.TipTimestampAgeSeconds())!;
 
         /// <summary>Rung r at this tip, ratified by exactly as many electors as it needs.</summary>
         private CasterMembershipRecord Ratified(int rung)
@@ -302,6 +302,36 @@ namespace VerifiedXCore.Tests
             Assert.StartsWith("rule 4", VreeElection.SignRefusal(view, 0, new VreeElection.SignFacts { IsElector = true, CommitteeUnreachable = true, SurveyFresh = true, HoldActive = true })!);
             Assert.StartsWith("rule 6", VreeElection.SignRefusal(view, 5, Allowed())!);
             Assert.StartsWith("rule 7", VreeElection.SignRefusal(view, 0, new VreeElection.SignFacts { IsElector = true, CommitteeUnreachable = true, SurveyFresh = true, RatifiedHold = true })!);
+        }
+
+        [Fact]
+        public void AnElectorThatTookTheTipLate_SignsTheRungTheNetworkIsOn_OnceItsOwnStallIsOld()
+        {
+            // The tip is 700 s old; this node took it 300 s ago (it was a block behind, or restarted). Its own clock says
+            // rung 0; the collectors, who took the tip when it was made, are on rung 6. Before this the offset shut it out
+            // of every rung for the whole stall.
+            StallAt(H, 700);
+            Globals.LastBlockAddedTimestamp = TimeUtil.GetTime() - 300;
+            var view = View();
+            Assert.Equal(0, view.ClockRung);
+            Assert.Equal(6, view.TimestampRung);
+            Assert.Null(VreeElection.SignRefusal(view, 6, Allowed()));
+            Assert.Null(VreeElection.SignRefusal(view, 7, Allowed()));
+            Assert.Null(VreeElection.SignRefusal(view, 0, Allowed()));
+            Assert.StartsWith("rule 6", VreeElection.SignRefusal(view, 8, Allowed())!);
+
+            // Until its own stall is old it signs nothing at all (rule 1), whatever the tip's age says.
+            Globals.LastBlockAddedTimestamp = TimeUtil.GetTime() - 100;
+            Assert.Null(VreeElection.ViewAt(CasterMembershipStore.GetCurrent(), H, Globals.LastBlock.Hash, VreeElection.StallSeconds(), CasterMembershipStore.GetBySeq, VreeElection.TipTimestampAgeSeconds()));
+
+            // Clocks that agree: a rung two ahead of its time is still refused, so no rung jumps the queue.
+            Globals.LastBlockAddedTimestamp = 0;
+            StallAt(H, 400);
+            view = View();
+            Assert.Equal(1, view.ClockRung);
+            Assert.Equal(1, view.TimestampRung);
+            Assert.Null(VreeElection.SignRefusal(view, 2, Allowed()));
+            Assert.StartsWith("rule 6", VreeElection.SignRefusal(view, 3, Allowed())!);
         }
 
         [Fact]

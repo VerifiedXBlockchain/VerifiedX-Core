@@ -146,7 +146,7 @@ namespace VerifiedXCore.Services
         private static VreeElection.ElectionView? CurrentView()
         {
             var tip = Globals.LastBlock;
-            return tip == null ? null : VreeElection.ViewAt(CasterMembershipStore.GetCurrent(), tip.Height, tip.Hash, VreeElection.StallSeconds(), CasterMembershipStore.GetBySeq);
+            return tip == null ? null : VreeElection.ViewAt(CasterMembershipStore.GetCurrent(), tip.Height, tip.Hash, VreeElection.StallSeconds(), CasterMembershipStore.GetBySeq, VreeElection.TipTimestampAgeSeconds());
         }
 
         // ── Survey: rules 2, 3 and 8 ────────────────────────────────────────────────────────────
