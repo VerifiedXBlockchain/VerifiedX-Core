@@ -63,12 +63,15 @@ namespace VerifiedXCore.Bitcoin.Models
             catch { return new(); }
         }
 
-        /// <summary>Whether this validator gave a share for the withdrawal request with this transaction hash, on any of its vaults.</summary>
+        /// <summary>
+        /// Whether this validator gave a share for the withdrawal request with this transaction hash, on any of its vaults.
+        /// Throws when the records cannot be read: "no" from a failed read would let a signed-for request go unheld.
+        /// </summary>
         public static bool AnyFor(string withdrawalRequestHash)
         {
             if (string.IsNullOrEmpty(withdrawalRequestHash)) return false;
-            try { return Coll()?.Exists(x => x.WithdrawalRequestHash == withdrawalRequestHash) == true; }
-            catch { return false; }
+            var c = Coll() ?? throw new System.IO.IOException("the signing evidence store is not open");
+            return c.Exists(x => x.WithdrawalRequestHash == withdrawalRequestHash);
         }
 
         /// <summary>Every record this validator holds under a withdrawal request's transaction hash, on any of its vaults.</summary>

@@ -45,6 +45,8 @@ namespace VerifiedXCore.Bitcoin.FROST
 
         /// <summary>Whether this node may put a transaction back now: at the network's height, on a moving chain. Replaceable for tests.</summary>
         internal static Func<bool> AtNetworkHeight = () => Services.VBTCCancellationVoteService.NodeIsAtNetworkHeight().Ready;
+        /// <summary>Whether this validator gave a share for a request; throws when its evidence cannot be read. Replaceable for tests.</summary>
+        internal static Func<string, bool> SignedFor = FrostSignedWithdrawalEvidence.AnyFor;
         /// <summary>Sends a transaction this node put back in its mempool to its peers. Replaceable for tests.</summary>
         internal static Func<Transaction, Task> Broadcast = P2P.P2PClient.SendTXMempool;
 
@@ -53,19 +55,19 @@ namespace VerifiedXCore.Bitcoin.FROST
 
         /// <summary>
         /// Holds the withdrawal requests in <paramref name="removed"/> that this validator gave a share for, before the
-        /// blocks go. Returns how many were held.
+        /// blocks go. Returns how many were held. Throws when a request cannot be saved or the evidence cannot be read:
+        /// the caller must not remove the blocks then, or a signed-for request would be lost with them.
         /// </summary>
         public static int Hold(IEnumerable<Block> removed)
         {
             var held = 0;
-            var c = Coll();
-            if (c == null) return 0;
+            var c = Coll() ?? throw new System.IO.IOException("the vBTC store is not open");
             foreach (var block in removed)
             {
                 foreach (var tx in block.Transactions ?? new List<Transaction>())
                 {
                     if (tx?.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST || string.IsNullOrEmpty(tx.Hash)) continue;
-                    if (!FrostSignedWithdrawalEvidence.AnyFor(tx.Hash)) continue;
+                    if (!SignedFor(tx.Hash)) continue;
                     var row = c.FindOne(x => x.TxHash == tx.Hash) ?? new Carried { TxHash = tx.Hash, HeldAt = TimeUtil.GetTime() };
                     row.TxJson = JsonConvert.SerializeObject(tx);
                     row.RemovedAtHeight = block.Height;

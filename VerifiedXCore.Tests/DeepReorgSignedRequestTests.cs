@@ -27,6 +27,7 @@ namespace VerifiedXCore.Tests
         private const string BtcDest = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
         private readonly Func<bool> _priorAtHeight = SignedRequestCarry.AtNetworkHeight;
         private readonly Func<VfxTx, Task> _priorBroadcast = SignedRequestCarry.Broadcast;
+        private readonly Func<string, bool> _priorSignedFor = SignedRequestCarry.SignedFor;
         private readonly List<string> _sent = new();
 
         private static long Tip => Globals.LastBlock.Height;
@@ -41,15 +42,16 @@ namespace VerifiedXCore.Tests
         {
             SignedRequestCarry.AtNetworkHeight = _priorAtHeight;
             SignedRequestCarry.Broadcast = _priorBroadcast;
+            SignedRequestCarry.SignedFor = _priorSignedFor;
             SnapshotRestoreUtility.ClearStateDestroyed();
             base.Dispose();
         }
 
-        private static VfxTx RequestOf(V who, string vault, decimal amount)
+        private static VfxTx RequestOf(V who, string vault, decimal amount, long ageSeconds = 0)
         {
             var tx = new VfxTx
             {
-                Timestamp = TimeUtil.GetTime(), FromAddress = who.Address, ToAddress = who.Address, Amount = 0.0M, Fee = 0, Nonce = 0,
+                Timestamp = TimeUtil.GetTime() - ageSeconds, FromAddress = who.Address, ToAddress = who.Address, Amount = 0.0M, Fee = 0, Nonce = 0,
                 TransactionType = TransactionType.VBTC_V2_WITHDRAWAL_REQUEST,
                 Data = JsonConvert.SerializeObject(new { Function = "VBTCWithdrawalRequest()", ContractUID = vault, BTCAddress = BtcDest, Amount = amount, FeeRate = 10, UniqueId = Guid.NewGuid().ToString("N") }),
             };
@@ -109,6 +111,10 @@ namespace VerifiedXCore.Tests
             // Back at the network's height, the validator puts the request back in the mempool and sends it on; the one it gave no
             // share for is the requester's to send again, as before. Admission asks Bitcoin for the vault's deposit, as for any request.
             Globals.LastBlock = new Block { Height = slotHeight, Hash = BlockchainData.GetBlockByHeight(slotHeight)!.Hash, Timestamp = TimeUtil.GetTime() };
+            // While no Bitcoin server answers, admission refuses it: it stays held for the next pass, and is not let go.
+            Assert.Empty(await SignedRequestCarry.ResubmitDueAsync());
+            Assert.Equal(1, Assert.Single(SignedRequestCarry.Held()).Attempts);
+            Assert.Empty(_sent);
             using var electrum = new FakeElectrum(("a", true, 1M));
             var put = await SignedRequestCarry.ResubmitDueAsync();
             Assert.True(put.Count == 1 && put[0] == signedFor.Hash, $"not put back: {SignedRequestCarry.Held().FirstOrDefault()?.LastRefusal}");
@@ -126,6 +132,61 @@ namespace VerifiedXCore.Tests
             Assert.Equal(1, EscrowDebits(vault.Uid, Minter.Address, 0.0003M));
             Assert.Empty(await SignedRequestCarry.ResubmitDueAsync());
             Assert.Empty(SignedRequestCarry.Held());
+        }
+
+        /// <summary>
+        /// The hold comes before anything is wiped or deleted. A restore that cannot read whether this validator signed for a
+        /// request in the blocks it would remove does not start: the chain and the state stay as they are, and the next attempt
+        /// holds the request and goes through.
+        /// </summary>
+        [Fact]
+        public async Task ARestoreThatCannotHoldASignedForRequest_DoesNotStart()
+        {
+            var vault = await CreateVault(H1 - 50, keyHolders: Signers);
+            await Start();
+            foreach (var block in AppliedBlocks) BlockchainData.GetBlocks().InsertSafe(block);
+            StateTreiStatusService.SetSynced(Tip);
+            var slotHeight = Tip;
+            await StateSnapshotService.UpdateCycleAsync(slotHeight, Globals.LastBlock.Hash);
+            var request = RequestOf(Minter, vault.Uid, 0.0003M);
+            await MineStored(request);
+            var requestHeight = Tip;
+            Assert.True(FrostSignedWithdrawalEvidence.Record(vault.Uid, request.Hash, "cc".PadLeft(64, 'c'), new[] { "cc:0" }));
+
+            SignedRequestCarry.SignedFor = _ => throw new System.IO.IOException("the evidence store cannot be read");
+            Assert.False(await SnapshotRestoreUtility.TryRestoreAsync(slotHeight));
+            Assert.False(SnapshotRestoreUtility.StateDestroyedByFailedRestore);
+            Assert.True(StateTreiStatusService.IsSynced());
+            Assert.NotNull(BlockchainData.GetBlockByHeight(requestHeight));
+            Assert.NotNull(VBTCWithdrawalRequest.GetByTransactionHash(request.Hash, vault.Uid));
+            Assert.Equal(1, EscrowDebits(vault.Uid, Minter.Address, 0.0003M));
+            Assert.Empty(SignedRequestCarry.Held());
+
+            SignedRequestCarry.SignedFor = _priorSignedFor;
+            Assert.True(await SnapshotRestoreUtility.TryRestoreAsync(slotHeight));
+            Assert.Null(BlockchainData.GetBlockByHeight(requestHeight));
+            Assert.Equal(request.Hash, Assert.Single(SignedRequestCarry.Held()).TxHash);
+        }
+
+        /// <summary>
+        /// What this cannot mend, pinned so it stays visible: a block takes a transaction only within the chain's age limit
+        /// (Globals.MaxTxAgeSeconds), so a signed-for request older than that when the node is back at the network's height
+        /// cannot be mined again. It is let go, not retried for ever, and the loss is named for the operator.
+        /// </summary>
+        [Fact]
+        public async Task ASignedForRequestTooOldForTheChain_IsLetGo_NotSent()
+        {
+            var vault = await CreateVault(H1 - 50, keyHolders: Signers);
+            await Start();
+            using var electrum = new FakeElectrum(("a", true, 1M));
+            var old = RequestOf(Minter, vault.Uid, 0.0003M, ageSeconds: Globals.MaxTxAgeSeconds + 60);
+            Assert.True(FrostSignedWithdrawalEvidence.Record(vault.Uid, old.Hash, "dd".PadLeft(64, 'd'), new[] { "dd:0" }));
+            Assert.Equal(1, SignedRequestCarry.Hold(new[] { new Block { Height = Tip + 20, Transactions = new List<VfxTx> { old } } }));
+
+            Assert.Empty(await SignedRequestCarry.ResubmitDueAsync());
+            Assert.Empty(_sent);
+            Assert.Empty(SignedRequestCarry.Held());
+            Assert.Null(TransactionData.GetPool().FindOne(x => x.Hash == old.Hash));
         }
 
         [Fact]

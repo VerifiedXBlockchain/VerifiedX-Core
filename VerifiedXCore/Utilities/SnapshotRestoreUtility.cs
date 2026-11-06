@@ -81,6 +81,16 @@ namespace VerifiedXCore.Utilities
                 return false;
             }
 
+            // The withdrawal requests this validator signed for go with the blocks above the target. They are held first
+            // (SignedRequestCarry), before anything is wiped or deleted. A restore that cannot hold them, or cannot read
+            // whether it signed for them, does not start: the chain stays as it is and the caller tries again.
+            try { VerifiedXCore.Bitcoin.FROST.SignedRequestCarry.Hold(Block.GetBlocks().Query().Where(x => x.Height > targetHeight).ToEnumerable()); }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"[SnapshotRestore] The signed-for withdrawal requests in the blocks above {targetHeight} could not be held ({ex.Message}); the restore is not started.", "SnapshotRestoreUtility");
+                return false;
+            }
+
             _isRestoreRunning = true;
             await VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.WaitUntilStoppedAsync();
             var wasResyncing = Globals.IsResyncing;
@@ -131,9 +141,6 @@ namespace VerifiedXCore.Utilities
                 // 4) Fork case: drop blocks above the target. The re-download (caller) fetches the
                 //    canonical replacements. Crash case: target == tip, nothing to delete.
                 var blockStore = Block.GetBlocks();
-                // A withdrawal request this validator signed for goes with its block; it is held to be put back (SignedRequestCarry).
-                try { VerifiedXCore.Bitcoin.FROST.SignedRequestCarry.Hold(blockStore.Query().Where(x => x.Height > targetHeight).ToEnumerable()); }
-                catch (Exception ex) { ErrorLogUtility.LogError($"[SnapshotRestore] Holding the signed-for withdrawal requests of the removed blocks failed: {ex.Message}", "SnapshotRestoreUtility"); }
                 blockStore.DeleteManySafe(x => x.Height > targetHeight);
                 DbContext.DB.Checkpoint();
                 // Slots and deletion records above the target came from the removed blocks. Dropped now, while the state is
