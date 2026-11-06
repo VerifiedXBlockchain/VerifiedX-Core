@@ -797,9 +797,19 @@ namespace VerifiedXCore.Services
                 {
                     var same = col.FindById(carried.RecordSeq);
                     if (same != null && string.Equals(same.RecordHash, carried.RecordHash, StringComparison.OrdinalIgnoreCase)) return true;
-                    if (carried.RecordSeq != head.RecordSeq) { reason = $"seq {carried.RecordSeq} is below head {head.RecordSeq} with another record there"; return false; }
-                    if (!string.Equals(carried.PrevRecordHash, head.PrevRecordHash, StringComparison.OrdinalIgnoreCase)) { reason = "not a sibling of the head"; return false; }
-                    col.Update(carried.RecordSeq, carried);
+                    var prev = carried.RecordSeq > 0 ? col.FindById(carried.RecordSeq - 1) : null;
+                    if (prev == null || !string.Equals(carried.PrevRecordHash, prev.RecordHash, StringComparison.OrdinalIgnoreCase)) { reason = $"not a sibling of this chain's record at seq {carried.RecordSeq}"; return false; }
+                    // The block is this node's next, judged valid and certified under the record, so every record from the sibling's
+                    // seq up governed only blocks this node no longer has: the branch it left (a partition that demoted the
+                    // members it could not reach, then lost to the elected one). They go with those blocks; one that governed a
+                    // block this node still holds would be a real conflict, and the block is refused as before.
+                    var replaced = col.Query().Where(x => x.RecordSeq >= carried.RecordSeq).ToList();
+                    if (replaced.Any(r => r.EffectiveFromHeight < carried.EffectiveFromHeight))
+                    { reason = $"a record at or above seq {carried.RecordSeq} governs blocks below {carried.EffectiveFromHeight}"; return false; }
+                    foreach (var r in replaced.Where(r => r.RecordSeq != carried.RecordSeq)) col.Delete(r.RecordSeq);
+                    col.Upsert(carried.RecordSeq, carried);
+                    if (replaced.Count > 1)
+                        CasterLogUtility.Log($"MEMBERSHIP: records seq {carried.RecordSeq + 1}..{replaced.Max(r => r.RecordSeq)} belonged to a branch this node left; dropped.", "MEMBERSHIP");
                 }
                 _cachedHead = carried;
                 VreeElection.NoteRatified(carried.EpochHash, carried.RecordHash);

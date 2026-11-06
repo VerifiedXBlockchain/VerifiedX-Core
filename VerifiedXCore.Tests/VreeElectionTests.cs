@@ -931,6 +931,38 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ANodeTwoRecordsDownTheBranchItLeft_TakesTheElectedBranchsFirstBlock()
+        {
+            // A partition's three casters demoted the two they could not reach while they still produced; the other side
+            // elected. On heal the island's blocks are rolled back to the stall tip and the elected branch's first block
+            // arrives. Before this AdoptCarried took a sibling of the head only, so a head two records up refused the
+            // block for good, and the pull could not help (seq below head). The island's records governed blocks it no
+            // longer has, and go with them.
+            var record = Ratified(0);
+            var island1 = Ordinary(HeadSeq + 1, H + 2, _head.RecordHash, _committee.Take(4), "Demotion");
+            var island2 = Ordinary(HeadSeq + 2, H + 5, island1.RecordHash, _committee.Take(3), "Demotion");
+            Store(island1);
+            Store(island2);
+            Assert.Equal(island2.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+
+            var block = BlockAt(H + 1, Globals.LastBlock.Hash, 0, Members(record).Take(3), record);
+            Assert.Null(VreeElection.PrepareBlockRecord(block));
+            Assert.True(VreeService.AdoptFromBlock(block, out var why), why);
+            Assert.Equal(record.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+            Assert.Null(CasterMembershipStore.GetBySeq(HeadSeq + 2));
+            Assert.Equal(_head.RecordHash, CasterMembershipStore.GetBySeq(HeadSeq)!.RecordHash);
+
+            // A record above the sibling's seq that governed a block this node still holds is a real conflict: refused as before.
+            Store(island1);
+            var holdsOurBlock = Ordinary(HeadSeq + 2, H, island1.RecordHash, _committee, "Promotion"); // same five, so the epoch at H is unchanged
+            Store(holdsOurBlock);
+            VreeElection.ClearCachesForTests();
+            Assert.False(VreeService.AdoptFromBlock(block, out why));
+            Assert.Contains("governs blocks below", why);
+            Assert.Equal(holdsOurBlock.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+        }
+
+        [Fact]
         public void ANodePastTheRecordTakesItOnlyAsItsOwnChainCarriesIt()
         {
             var record = Ratified(0);
