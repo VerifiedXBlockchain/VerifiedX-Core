@@ -968,15 +968,23 @@ namespace VerifiedXCore.Services
         public static List<CasterMembershipRecord> RecordsFrom(long seq) =>
             Collection()?.Query().Where(x => x.RecordSeq >= seq).ToList() ?? new List<CasterMembershipRecord>();
 
-        /// <summary>Replaces the stored records from this seq up with ones taken by <see cref="RecordsFrom"/>.</summary>
-        public static void RestoreRecordsFrom(long seq, List<CasterMembershipRecord> records)
+        /// <summary>
+        /// Replaces the stored records from the adopted record's seq up with ones taken by <see cref="RecordsFrom"/>, only
+        /// while that record is still the only one there. False when another writer (gossip, a pull) has changed them since:
+        /// their record stands.
+        /// </summary>
+        public static bool RestoreRecordsFrom(CasterMembershipRecord adopted, List<CasterMembershipRecord> records)
         {
             lock (Mut)
             {
                 var col = Collection() ?? throw new InvalidOperationException("the record store is unavailable");
-                foreach (var r in col.Query().Where(x => x.RecordSeq >= seq).ToList()) col.Delete(r.RecordSeq);
+                var now = col.Query().Where(x => x.RecordSeq >= adopted.RecordSeq).ToList();
+                if (now.Count != 1 || !string.Equals(now[0].RecordHash, adopted.RecordHash, StringComparison.OrdinalIgnoreCase))
+                    return false;
+                col.Delete(adopted.RecordSeq);
                 foreach (var r in records) col.Upsert(r.RecordSeq, r);
                 _cachedHead = null;
+                return true;
             }
         }
 

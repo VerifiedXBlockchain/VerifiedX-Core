@@ -852,6 +852,28 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void UndoingACarriedRecord_LeavesARecordAnotherWriterStoredSince()
+        {
+            var rung0 = Ratified(0);
+            Assert.True(CasterMembershipStore.TryAppend(rung0, out _));
+            StallAt(H, 700);
+            var rung3 = Ratified(3);
+            var block = ProducedBlock(_electors[11], Members(rung3).Take(3), rung3);
+            Assert.True(VreeService.AdoptFromBlock(block, out var why, out var undo), why);
+            Assert.NotNull(undo);
+
+            var later = JsonConvert.DeserializeObject<CasterMembershipRecord>(JsonConvert.SerializeObject(rung3))!;
+            later.RecordHash = "stored-by-gossip-meanwhile";
+            Store(later);
+            var castersMeanwhile = new System.Collections.Concurrent.ConcurrentBag<Peers>();
+            Globals.BlockCasters = castersMeanwhile;
+
+            undo!();
+            Assert.Equal("stored-by-gossip-meanwhile", CasterMembershipStore.GetBySeq(rung3.RecordSeq)!.RecordHash);
+            Assert.Same(castersMeanwhile, Globals.BlockCasters);
+        }
+
+        [Fact]
         public void TheOldCommitteesCertificate_IsNoGoodUnderARecordCarried_OrHeld()
         {
             var record = Ratified(0);

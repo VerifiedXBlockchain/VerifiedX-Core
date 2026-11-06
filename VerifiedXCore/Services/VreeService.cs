@@ -436,11 +436,20 @@ namespace VerifiedXCore.Services
                 return false;
             CasterMembershipService.ReconcileBlockCastersToRecord(record);
             if (storedBefore.Count == 0) return true;
+            var castersAfter = Globals.BlockCasters;
             undo = () =>
             {
-                CasterMembershipStore.RestoreRecordsFrom(record.RecordSeq, storedBefore);
-                Globals.BlockCasters = castersBefore;
-                Globals.SyncKnownCastersFromBlockCasters();
+                if (!CasterMembershipStore.RestoreRecordsFrom(record, storedBefore))
+                {
+                    CasterLogUtility.Log($"MEMBERSHIP: block {block.Height} was refused, but the records from seq {record.RecordSeq} changed since its record went in; they are left as they are.", "MEMBERSHIP");
+                    return;
+                }
+                // The caster set goes back only if nothing has replaced it since the record went in.
+                if (ReferenceEquals(Globals.BlockCasters, castersAfter))
+                {
+                    Globals.BlockCasters = castersBefore;
+                    Globals.SyncKnownCastersFromBlockCasters();
+                }
                 Globals.IsBlockCaster = wasCaster;
                 CasterLogUtility.Log($"MEMBERSHIP: block {block.Height} was refused after its record seq {record.RecordSeq} replaced siblings; they are put back.", "MEMBERSHIP");
             };
