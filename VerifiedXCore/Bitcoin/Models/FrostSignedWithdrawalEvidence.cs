@@ -63,6 +63,22 @@ namespace VerifiedXCore.Bitcoin.Models
             catch { return new(); }
         }
 
+        /// <summary>Whether this validator gave a share for the withdrawal request with this transaction hash, on any of its vaults.</summary>
+        public static bool AnyFor(string withdrawalRequestHash)
+        {
+            if (string.IsNullOrEmpty(withdrawalRequestHash)) return false;
+            try { return Coll()?.Exists(x => x.WithdrawalRequestHash == withdrawalRequestHash) == true; }
+            catch { return false; }
+        }
+
+        /// <summary>Every record this validator holds under a withdrawal request's transaction hash, on any of its vaults.</summary>
+        public static List<FrostSignedWithdrawalEvidence> AllFor(string withdrawalRequestHash)
+        {
+            if (string.IsNullOrEmpty(withdrawalRequestHash)) return new();
+            try { return Coll()?.Find(x => x.WithdrawalRequestHash == withdrawalRequestHash).ToList() ?? new(); }
+            catch { return new(); }
+        }
+
         /// <summary>Whether a recorded reference may name the same payment of the same vault as <paramref name="reference"/>.</summary>
         internal static bool SamePayment(string? recorded, string reference)
         {

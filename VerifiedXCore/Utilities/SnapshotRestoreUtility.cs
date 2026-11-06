@@ -131,6 +131,9 @@ namespace VerifiedXCore.Utilities
                 // 4) Fork case: drop blocks above the target. The re-download (caller) fetches the
                 //    canonical replacements. Crash case: target == tip, nothing to delete.
                 var blockStore = Block.GetBlocks();
+                // A withdrawal request this validator signed for goes with its block; it is held to be put back (SignedRequestCarry).
+                try { VerifiedXCore.Bitcoin.FROST.SignedRequestCarry.Hold(blockStore.Query().Where(x => x.Height > targetHeight).ToEnumerable()); }
+                catch (Exception ex) { ErrorLogUtility.LogError($"[SnapshotRestore] Holding the signed-for withdrawal requests of the removed blocks failed: {ex.Message}", "SnapshotRestoreUtility"); }
                 blockStore.DeleteManySafe(x => x.Height > targetHeight);
                 DbContext.DB.Checkpoint();
                 // Slots and deletion records above the target came from the removed blocks. Dropped now, while the state is
