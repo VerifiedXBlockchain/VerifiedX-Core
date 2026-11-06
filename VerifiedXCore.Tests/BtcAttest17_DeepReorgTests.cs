@@ -7,6 +7,7 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using VerifiedXCore.Bitcoin.Attestation;
 using VerifiedXCore.Bitcoin.Controllers;
+using VerifiedXCore.Bitcoin.FROST;
 using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Bitcoin.Services;
 using VerifiedXCore.Data;
@@ -294,6 +295,39 @@ namespace VerifiedXCore.Tests
                 Assert.True(StateTreiStatusService.IsSynced());
             }
             finally { VBTCWithdrawalStoreRebuildService.ClearNeedsStateRebuildForTests(); }
+        }
+
+        /// <summary>
+        /// On a vault the chain watches, the transactions state fixes for a withdrawal all spend the same coins, so a signer
+        /// signs each of them. A transaction this validator signed that state does not hold was signed on a chain the node
+        /// has left (a rewind took the request and its fixed transaction; the request was mined again and fixed on other
+        /// coins): both could confirm, so no second one is signed while the first can still pay. One that spends a common
+        /// coin, or that state holds for the withdrawal, is signed as before.
+        /// </summary>
+        [Fact]
+        public async Task ASignerOfAWatchedVault_DoesNotSignASecondPayment_ForATransactionStateDoesNotHold()
+        {
+            var vault = await StoredChainWithAFundedVault();
+            var request = await Mine(await ValidRequest(vault.Uid, 0.0003M));
+            var pin = Assert.Single(Row(request, vault.Uid).Pins);
+            const string signedElsewhere = "ee11ee11ee11ee11ee11ee11ee11ee11ee11ee11ee11ee11ee11ee11ee11ee11";
+
+            // Nothing signed before, or only what state holds: signed.
+            Assert.True((await FrostStartup.CheckPriorSignedTransactionAsync(vault.Uid, request.Hash, pin.Txid, pin.Inputs)).Ok);
+            Assert.True(FrostSignedWithdrawalEvidence.Record(vault.Uid, request.Hash, pin.Txid, pin.Inputs));
+            Assert.True((await FrostStartup.CheckPriorSignedTransactionAsync(vault.Uid, request.Hash, pin.Txid, pin.Inputs)).Ok);
+
+            // A transaction signed on a chain this node left, on other coins: no Bitcoin server shows it dead, so the fixed
+            // transaction is not signed beside it.
+            Assert.True(FrostSignedWithdrawalEvidence.Record(vault.Uid, request.Hash, signedElsewhere, new[] { "dd22dd22dd22dd22dd22dd22dd22dd22dd22dd22dd22dd22dd22dd22dd22dd22:0" }));
+            var (ok, why) = await FrostStartup.CheckPriorSignedTransactionAsync(vault.Uid, request.Hash, pin.Txid, pin.Inputs);
+            Assert.False(ok);
+            Assert.Contains(signedElsewhere, why);
+
+            // The same earlier transaction spending one of the fixed transaction's coins: at most one confirms, so it is signed.
+            Assert.True(FrostSignedWithdrawalEvidence.Record(vault.Uid, request.Hash, signedElsewhere, pin.Inputs.Take(1)));
+            var conflicting = await FrostStartup.CheckPriorSignedTransactionAsync(vault.Uid, request.Hash, pin.Txid, pin.Inputs);
+            Assert.True(conflicting.Ok, conflicting.Reason);
         }
 
         // ── Deposits ────────────────────────────────────────────────────────────────────────────────────────
