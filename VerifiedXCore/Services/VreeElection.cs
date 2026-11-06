@@ -598,9 +598,11 @@ namespace VerifiedXCore.Services
         /// committee (reach is a per-vantage fact, and the signatures are the evidence). A node past the record takes it
         /// only as its own chain carries it: the block that carries it was judged when it was validated.
         /// </summary>
-        public static bool ValidateElection(CasterMembershipRecord prev, CasterMembershipRecord c, out string reason)
+        /// <param name="bySeq">The record at a sequence number; the store's unless a caller judges a run of records not stored yet.</param>
+        public static bool ValidateElection(CasterMembershipRecord prev, CasterMembershipRecord c, out string reason, Func<long, CasterMembershipRecord?>? bySeq = null)
         {
             reason = "";
+            bySeq ??= CasterMembershipStore.GetBySeq;
             if (!Active(c.EffectiveFromHeight)) { reason = "election records are not active at this height"; return false; }
             if (c.Casters == null) { reason = "no caster set"; return false; }
             if (CasterMembershipStore.ComputeRecordHash(c) != c.RecordHash) { reason = "recordHash mismatch"; return false; }
@@ -614,9 +616,9 @@ namespace VerifiedXCore.Services
                 return false;
             }
 
-            reason = BindingRefusal(prev, c, tip.Height, tip.Hash, StallSeconds(), VrfSeed.BlockHashAt, CasterMembershipStore.GetBySeq) ?? "";
+            reason = BindingRefusal(prev, c, tip.Height, tip.Hash, StallSeconds(), VrfSeed.BlockHashAt, bySeq) ?? "";
             if (reason.Length > 0) return false;
-            reason = ContentRefusal(EpochFor(prev, c), prev, c) ?? "";
+            reason = ContentRefusal(EpochFor(prev, c, bySeq), prev, c) ?? "";
             return reason.Length == 0;
         }
 
@@ -639,10 +641,10 @@ namespace VerifiedXCore.Services
             return JudgeCarried(withRecord) == CarriedVerdict.Valid && withRecord.ConsensusCertificate != null && ConsensusCertificateVerifier.VerifyOrNotRequired(withRecord);
         }
 
-        private static ElectionEpoch? EpochFor(CasterMembershipRecord prev, CasterMembershipRecord c) =>
+        private static ElectionEpoch? EpochFor(CasterMembershipRecord prev, CasterMembershipRecord c, Func<long, CasterMembershipRecord?> bySeq) =>
             c.ChangeType == EmergencyElectionChangeType
                 ? EpochForStall(c.EffectiveFromHeight - 1, c.EpochHash)
-                : TermOf(prev, CasterMembershipStore.GetBySeq) is { } term ? EpochForRotation(term, prev) : null;
+                : TermOf(prev, bySeq) is { } term ? EpochForRotation(term, prev) : null;
 
         /// <summary>Pure: the own-tip and own-stall binding of a live append.</summary>
         internal static string? BindingRefusal(CasterMembershipRecord prev, CasterMembershipRecord c, long tipHeight, string? tipHash, long tipAgeSeconds, Func<long, string?> hashAt, Func<long, CasterMembershipRecord?> bySeq)
@@ -723,7 +725,7 @@ namespace VerifiedXCore.Services
                 if (!string.Equals(r.EpochHash, VrfSeed.BlockHashAt(term.LapseHeight), StringComparison.OrdinalIgnoreCase)) return CarriedVerdict.Invalid;
                 if (r.Rung == 0 && block.Height != term.LapseHeight + HandoverBlocks) return CarriedVerdict.Invalid;
             }
-            return ContentRefusal(EpochFor(prev, r), prev, r) == null ? CarriedVerdict.Valid : CarriedVerdict.Invalid;
+            return ContentRefusal(EpochFor(prev, r, CasterMembershipStore.GetBySeq), prev, r) == null ? CarriedVerdict.Valid : CarriedVerdict.Invalid;
         }
 
         /// <summary>The committee of a block that carries a valid record, or null: it needs no record held here to be judged.</summary>

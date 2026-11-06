@@ -460,7 +460,9 @@ namespace VerifiedXCore.Services
         /// <param name="termEnded">The election record that ends the candidate's committee's term is in hand, validated as
         /// the candidate's own successor (membership sync carried both): the term limit's handover window no longer
         /// applies to the candidate (VreeElection.TermRefusal).</param>
-        public static bool ValidateSuccessor(CasterMembershipRecord? prev, CasterMembershipRecord candidate, out string reason, bool termEnded = false)
+        /// <param name="bySeq">The record at a sequence number; the store's unless a run of records not stored yet is being
+        /// judged (<see cref="ValidRunFromHead"/>).</param>
+        public static bool ValidateSuccessor(CasterMembershipRecord? prev, CasterMembershipRecord candidate, out string reason, bool termEnded = false, Func<long, CasterMembershipRecord?>? bySeq = null)
         {
             reason = "";
             if (candidate == null) { reason = "null candidate"; return false; }
@@ -509,7 +511,7 @@ namespace VerifiedXCore.Services
             { reason = "prevRecordHash mismatch"; return false; }
             // An election replaces a committee that is dead now, even if a rotation it had signed was still to take effect.
             if (VreeElection.IsElectionRecord(candidate))
-                return VreeElection.ValidateElection(prev, candidate, out reason);
+                return VreeElection.ValidateElection(prev, candidate, out reason, bySeq);
             if (candidate.EffectiveFromHeight <= prev.EffectiveFromHeight)
             { reason = "effective height not advancing"; return false; }
             if (candidate.Casters == null || candidate.Casters.Count < MinCommitteeSize)
@@ -530,7 +532,7 @@ namespace VerifiedXCore.Services
 
             if (VreeElection.IsHoldRecord(candidate) && VreeElection.HoldShapeRefusal(prev, candidate) is { } notAHold)
             { reason = notAHold; return false; }
-            if (VreeElection.TermRefusal(prev, candidate, Globals.LastBlock?.Height ?? -1, GetBySeq, termEnded) is { } termOver)
+            if (VreeElection.TermRefusal(prev, candidate, Globals.LastBlock?.Height ?? -1, bySeq ?? GetBySeq, termEnded) is { } termOver)
             { reason = termOver; return false; }
 
             var prevSet = prev.Casters.Select(c => c.Address).ToHashSet(StringComparer.Ordinal);
@@ -840,20 +842,51 @@ namespace VerifiedXCore.Services
             firstRefusal = null;
             var applied = 0;
             var ordered = records.Where(x => x != null).OrderBy(x => x.RecordSeq).ToList();
-            foreach (var r in ordered)
+            lock (Mut)
             {
-                var headSeq = GetCurrent()?.RecordSeq ?? -1;
-                // A committee's mid-term record is taken inside its term's handover window only together with the election that
-                // ended the term, ratified on top of it (VreeElection.TermRefusal). The election is judged before the record goes in.
-                var next = ordered.FirstOrDefault(x => x.RecordSeq == r.RecordSeq + 1);
-                var termEnded = next != null && !VreeElection.IsElectionRecord(r) && VreeElection.IsElectionRecord(next) && ValidateSuccessor(r, next, out _);
-                // Wave 6: genesis is appended like any record — validated by seed signatures.
-                if (TryAppend(r, out var why, fromSync: true, genesisHolders: genesisHolders, termEnded: termEnded))
-                    applied++;
-                else if (firstRefusal == null && r.RecordSeq > headSeq)
-                    firstRefusal = $"seq {r.RecordSeq}: {why}";
+                // A committee's mid-term records are taken inside its term's handover window only together with the election
+                // that ended the term, ratified on top of them (VreeElection.TermRefusal). The whole run from this node's head
+                // through that election is judged before any of it goes in, however many records the node missed.
+                var startSeq = GetCurrent()?.RecordSeq ?? -1;
+                var run = ordered.Any(x => x.RecordSeq > startSeq && VreeElection.IsElectionRecord(x)) ? ValidRunFromHead(ordered) : new List<CasterMembershipRecord>();
+                var endedBelow = run.Where(VreeElection.IsElectionRecord).Select(x => x.RecordSeq).DefaultIfEmpty(-1).Max();
+                foreach (var r in ordered)
+                {
+                    var headSeq = GetCurrent()?.RecordSeq ?? -1;
+                    var termEnded = r.RecordSeq < endedBelow && !VreeElection.IsElectionRecord(r) && run.Any(x => ReferenceEquals(x, r));
+                    // Wave 6: genesis is appended like any record — validated by seed signatures.
+                    if (TryAppend(r, out var why, fromSync: true, genesisHolders: genesisHolders, termEnded: termEnded))
+                        applied++;
+                    else if (firstRefusal == null && r.RecordSeq > headSeq)
+                        firstRefusal = $"seq {r.RecordSeq}: {why}";
+                }
             }
             return applied;
+        }
+
+        /// <summary>
+        /// The records of <paramref name="records"/> that extend this node's head one after another, each judged as the
+        /// successor of the one before, with nothing written: the run stands in for the store above the head. It answers
+        /// whether the chain is signed, not whether to take it now, so the handover window is read as ended; an append
+        /// applies the window itself. Empty when this node has no record, or the first record does not extend its head.
+        /// </summary>
+        internal static List<CasterMembershipRecord> ValidRunFromHead(IEnumerable<CasterMembershipRecord> records)
+        {
+            var run = new List<CasterMembershipRecord>();
+            var head = GetCurrent();
+            if (head == null || records == null) return run;
+            var above = new Dictionary<long, CasterMembershipRecord>();
+            foreach (var r in records)
+                if (r != null && r.RecordSeq > head.RecordSeq && !above.ContainsKey(r.RecordSeq)) above[r.RecordSeq] = r;
+            CasterMembershipRecord? BySeq(long seq) => seq > head.RecordSeq ? run.FirstOrDefault(x => x.RecordSeq == seq) : GetBySeq(seq);
+            var prev = head;
+            for (var seq = head.RecordSeq + 1; above.TryGetValue(seq, out var next); seq++)
+            {
+                if (!ValidateSuccessor(prev, next, out _, termEnded: true, bySeq: BySeq)) break;
+                run.Add(next);
+                prev = next;
+            }
+            return run;
         }
 
         // ── Double-sign protection ───────────────────────────────────────

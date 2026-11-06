@@ -1371,6 +1371,46 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ANodeThatMissedTwoMidTermRecords_TakesBothWithTheRotationThatEndsTheTerm()
+        {
+            var interim = InstallInterim();
+            var L = interim.LapseHeight;
+            var first = Signed(Ordinary(interim.RecordSeq + 1, H + 30, interim.RecordHash, Members(interim).Take(4), "Demotion"), Members(interim).Take(3));
+            var second = Signed(Ordinary(interim.RecordSeq + 2, H + 50, first.RecordHash, Members(interim), "Promotion"), Members(first).Take(3));
+
+            // The network: the rotation chains on the second of two mid-term records.
+            Store(first);
+            Store(second);
+            StallAt(L, 5);
+            VreeElection.ClearCachesForTests();
+            var view = View();
+            Assert.Equal(second.RecordHash, view.Prev.RecordHash);
+            var rotation = Signed(view.Build(0), view.Epoch.Electors.Keys.OrderBy(a => a, StringComparer.Ordinal).Take(view.Epoch.RatifyNeeded).Select(Of));
+
+            // This node missed both, and its tip stopped inside the window. The two alone are refused, as one alone is; the whole
+            // run through the ratified rotation is judged before any of it goes in, and then all three are taken.
+            var col = DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership");
+            col.Delete(second.RecordSeq);
+            col.Delete(first.RecordSeq);
+            CasterMembershipStore.InvalidateCache();
+            StallAt(L + 3, 5);
+            Assert.Equal(0, CasterMembershipStore.TryAppendChain(new List<CasterMembershipRecord> { first, second }, out var alone));
+            Assert.Contains("term ended", alone);
+            Assert.Equal(interim.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+            // A run that breaks before the rotation gives the first record no exception either.
+            var broken = JsonConvert.DeserializeObject<CasterMembershipRecord>(JsonConvert.SerializeObject(second))!;
+            broken.Signatures = broken.Signatures.Take(1).ToList();
+            Assert.Equal(0, CasterMembershipStore.TryAppendChain(new List<CasterMembershipRecord> { first, broken, rotation }, out _));
+            Assert.Equal(interim.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+
+            Assert.Equal(3, CasterMembershipStore.TryAppendChain(new List<CasterMembershipRecord> { first, second, rotation }, out var refusal));
+            Assert.Null(refusal);
+            Assert.Equal(rotation.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+            Assert.Equal(first.RecordHash, CasterMembershipStore.GetBySeq(first.RecordSeq)!.RecordHash);
+            Assert.Equal(second.RecordHash, CasterMembershipStore.GetBySeq(second.RecordSeq)!.RecordHash);
+        }
+
+        [Fact]
         public void test_drill_7_handover_rung_0_takes_effect_twelve_blocks_on_and_the_interim_produces_until_then()
         {
             var interim = InstallInterim();
