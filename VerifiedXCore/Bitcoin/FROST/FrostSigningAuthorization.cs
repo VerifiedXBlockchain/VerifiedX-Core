@@ -141,6 +141,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     var (exit, capSats, exitReason) = ResolveBtcExitForContract(wrh, vaultUid);
                     if (exit == null) return (false, exitReason);
                     if (exit.IsComplete) return (false, "Bridge exit already completed");
+                    if (watchedKey == null && ExitNotSettled(exit) is { } exitUnsettled) return (false, exitUnsettled);
                     if (!string.Equals(wrh, Attestation.BtcWithdrawals.ExitSigningReference(exit.BaseBurnTxHash, vaultUid), StringComparison.Ordinal))
                         return (false, NonCanonicalReference);
                     destination = exit.BtcDestination;
@@ -568,9 +569,9 @@ namespace VerifiedXCore.Bitcoin.FROST
         }
 
         /// <summary>
-        /// Why a bridge exit's share is no longer given: the reference names no exit on this contract any more, or the
-        /// exit was completed or failed after its ceremony started (sign/start judged it while it was open). Null while
-        /// the exit is still open.
+        /// Why a bridge exit's share is no longer given: the reference names no exit on this contract any more, the
+        /// exit was completed or failed after its ceremony started (sign/start judged it while it was open), or, on a
+        /// vault the chain does not watch, its EXIT_TO_BTC is not settled. Null while the exit is still open.
         /// </summary>
         public static string? BridgeExitNoLongerSignable(string reference, string scUID)
         {
@@ -578,8 +579,17 @@ namespace VerifiedXCore.Bitcoin.FROST
             if (exit == null) return reason;
             if (exit.IsFailedRecord) return "Bridge exit has failed";
             if (exit.IsComplete) return "Bridge exit already completed";
-            return null;
+            // A vault the chain watches has its own wait, on the pin (BtcWithdrawalSigner.SettleBlocks).
+            return Attestation.BtcAttestBalance.IsAttestedVault(scUID) ? null : ExitNotSettled(exit);
         }
+
+        /// <summary>
+        /// An exit's EXIT_TO_BTC waits for the same depth as a withdrawal request: a reorg that drops it after its Bitcoin
+        /// is signed has the FAIL and re-exit pay the same burn again from another vault. An exit recorded before
+        /// ExitVfxHeight was kept has no height and is judged by the rest of the rules.
+        /// </summary>
+        internal static string? ExitNotSettled(VBTCBridgeBtcExitState exit) =>
+            RequestNotSettled(exit.ExitTxHash, exit.ExitVfxHeight, Globals.LastBlock?.Height ?? -1, BlockHoldsRequest);
 
         /// <summary>
         /// Bridge exit signings use a synthetic reference "btcexit_{burnHash[..16]}_{scUID[..8]}"
