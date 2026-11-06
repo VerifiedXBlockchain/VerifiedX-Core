@@ -835,7 +835,6 @@ namespace VerifiedXCore.Tests
             var outgoing = rung0.Casters.First(c => rung3.Casters.All(z => z.Address != c.Address)).Address;
             Globals.ValidatorAddress = outgoing;
             Globals.IsBlockCaster = true;
-            var castersBefore = Globals.BlockCasters;
 
             // A real producer signature and certificate over a wrong merkle root: refused after the record went in.
             var producer = _electors[11];
@@ -847,7 +846,8 @@ namespace VerifiedXCore.Tests
 
             CasterMembershipStore.InvalidateCache();
             Assert.Equal(rung0.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
-            Assert.Same(castersBefore, Globals.BlockCasters);
+            Assert.Equal(rung0.Casters.Select(c => c.Address).OrderBy(a => a, StringComparer.Ordinal),
+                Globals.BlockCasters.Select(p => p.ValidatorAddress!).OrderBy(a => a, StringComparer.Ordinal));
             Assert.True(Globals.IsBlockCaster);
         }
 
