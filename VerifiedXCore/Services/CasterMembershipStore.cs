@@ -457,7 +457,10 @@ namespace VerifiedXCore.Services
         /// signatures from prev's caster set (skipped for genesis, which is deterministic).
         /// Pure — used by TryAppend, the signing endpoint, and chain verification.
         /// </summary>
-        public static bool ValidateSuccessor(CasterMembershipRecord? prev, CasterMembershipRecord candidate, out string reason)
+        /// <param name="termEnded">The election record that ends the candidate's committee's term is in hand, validated as
+        /// the candidate's own successor (membership sync carried both): the term limit's handover window no longer
+        /// applies to the candidate (VreeElection.TermRefusal).</param>
+        public static bool ValidateSuccessor(CasterMembershipRecord? prev, CasterMembershipRecord candidate, out string reason, bool termEnded = false)
         {
             reason = "";
             if (candidate == null) { reason = "null candidate"; return false; }
@@ -527,7 +530,7 @@ namespace VerifiedXCore.Services
 
             if (VreeElection.IsHoldRecord(candidate) && VreeElection.HoldShapeRefusal(prev, candidate) is { } notAHold)
             { reason = notAHold; return false; }
-            if (VreeElection.TermRefusal(prev, candidate, Globals.LastBlock?.Height ?? -1, GetBySeq) is { } termOver)
+            if (VreeElection.TermRefusal(prev, candidate, Globals.LastBlock?.Height ?? -1, GetBySeq, termEnded) is { } termOver)
             { reason = termOver; return false; }
 
             var prevSet = prev.Casters.Select(c => c.Address).ToHashSet(StringComparer.Ordinal);
@@ -641,7 +644,9 @@ namespace VerifiedXCore.Services
         /// </summary>
         /// <param name="genesisHolders">For a genesis: how many peers hold a valid copy of it (membership sync counts them;
         /// a single announce or this node's own genesis is one). Read only against an older reset marker.</param>
-        public static bool TryAppend(CasterMembershipRecord candidate, out string reason, bool fromSync = false, int genesisHolders = 1)
+        /// <param name="termEnded">Membership sync carried, with the candidate, the election record that ends its committee's
+        /// term, validated as the candidate's successor (see <see cref="ValidateSuccessor"/>).</param>
+        public static bool TryAppend(CasterMembershipRecord candidate, out string reason, bool fromSync = false, int genesisHolders = 1, bool termEnded = false)
         {
             lock (Mut)
             {
@@ -736,7 +741,7 @@ namespace VerifiedXCore.Services
                     reason = $"effective height {candidate.EffectiveFromHeight} has passed (tip {tip})";
                     return false;
                 }
-                if (!ValidateSuccessor(head, candidate, out reason))
+                if (!ValidateSuccessor(head, candidate, out reason, termEnded))
                     return false;
                 var col = Collection();
                 if (col == null) { reason = "db unavailable"; return false; }
@@ -834,11 +839,16 @@ namespace VerifiedXCore.Services
         {
             firstRefusal = null;
             var applied = 0;
-            foreach (var r in records.OrderBy(x => x.RecordSeq))
+            var ordered = records.Where(x => x != null).OrderBy(x => x.RecordSeq).ToList();
+            foreach (var r in ordered)
             {
                 var headSeq = GetCurrent()?.RecordSeq ?? -1;
+                // A committee's mid-term record is taken inside its term's handover window only together with the election that
+                // ended the term, ratified on top of it (VreeElection.TermRefusal). The election is judged before the record goes in.
+                var next = ordered.FirstOrDefault(x => x.RecordSeq == r.RecordSeq + 1);
+                var termEnded = next != null && !VreeElection.IsElectionRecord(r) && VreeElection.IsElectionRecord(next) && ValidateSuccessor(r, next, out _);
                 // Wave 6: genesis is appended like any record — validated by seed signatures.
-                if (TryAppend(r, out var why, fromSync: true, genesisHolders: genesisHolders))
+                if (TryAppend(r, out var why, fromSync: true, genesisHolders: genesisHolders, termEnded: termEnded))
                     applied++;
                 else if (firstRefusal == null && r.RecordSeq > headSeq)
                     firstRefusal = $"seq {r.RecordSeq}: {why}";

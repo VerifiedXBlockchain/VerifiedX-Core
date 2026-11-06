@@ -512,11 +512,18 @@ namespace VerifiedXCore.Services
         /// and takes effect nowhere past it: every new record would change what the electors sign, so a captured committee
         /// issuing one a minute could keep the rotation that ends its term from ever reaching two thirds.
         /// </summary>
-        internal static string? TermRefusal(CasterMembershipRecord prev, CasterMembershipRecord candidate, long tipHeight, Func<long, CasterMembershipRecord?> bySeq)
+        /// <param name="termEnded">The election record that ends this committee's term is in hand, ratified on top of
+        /// <paramref name="candidate"/> (membership sync carried both): nothing the committee signed can change what the
+        /// electors sign any more.</param>
+        internal static string? TermRefusal(CasterMembershipRecord prev, CasterMembershipRecord candidate, long tipHeight, Func<long, CasterMembershipRecord?> bySeq, bool termEnded = false)
         {
             if (TermOf(prev, bySeq) is not { } term || !Active(term.EffectiveFromHeight)) return null;
             if (candidate.EffectiveFromHeight > term.LapseHeight) return $"takes effect past the end of this committee's term at {term.LapseHeight}";
-            // Only while the rotation is open. A node far past it, rebuilding its record chain from peers, needs what the committee signed during its term.
+            // Only while the rotation is open, and only until it is ratified. A node far past the window, rebuilding its record
+            // chain from peers, needs what the committee signed during its term; so does one whose tip stopped inside the window,
+            // which cannot judge the rotation's own block without it. The window refusal guards the rotation's ratification, and
+            // the ratified rotation in hand, chained on the candidate, is proof that it is done.
+            if (termEnded) return null;
             return tipHeight >= term.LapseHeight && tipHeight <= term.LapseHeight + HandoverBlocks ? $"this committee's term ended at {term.LapseHeight}" : null;
         }
 

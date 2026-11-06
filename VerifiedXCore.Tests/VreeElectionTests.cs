@@ -1324,6 +1324,50 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ANodeCatchingUpInsideTheHandoverWindow_TakesTheRecordTheCommitteeSignedDuringItsTerm()
+        {
+            var interim = InstallInterim();
+            var L = interim.LapseHeight;
+            var midTerm = Signed(Ordinary(interim.RecordSeq + 1, H + 30, interim.RecordHash, Members(interim).Take(4), "Demotion"), Members(interim).Take(3));
+
+            // The network: the rotation that ends the term chains on the mid-term record.
+            Store(midTerm);
+            StallAt(L, 5);
+            VreeElection.ClearCachesForTests();
+            var view = View();
+            Assert.Equal(midTerm.RecordHash, view.Prev.RecordHash);
+            var rotation = Signed(view.Build(0), view.Epoch.Electors.Keys.OrderBy(a => a, StringComparer.Ordinal).Take(view.Epoch.RatifyNeeded).Select(Of));
+
+            // This node: it missed the mid-term record, and its tip stopped inside the window, where the rotation's first block
+            // cannot be judged without that record. Announced live the record is refused, as before. From its peers, too, while
+            // the rotation is still being ratified: the window guards that, and a committee's record alone, or one with a junk
+            // election on top, moves nothing. With the ratified rotation chained on it, both are taken.
+            DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Delete(midTerm.RecordSeq);
+            CasterMembershipStore.InvalidateCache();
+            StallAt(L + 3, 5);
+            var first = BlockAt(L + VreeElection.HandoverBlocks, "parent-not-here", 0, Members(rotation).Take(3), rotation);
+            Assert.Equal(VreeElection.CarriedVerdict.CannotJudge, VreeElection.JudgeCarried(first));
+            Assert.False(CasterMembershipStore.ValidateSuccessor(interim, midTerm, out var live));
+            Assert.Contains("term ended", live);
+            Assert.Equal(0, CasterMembershipStore.TryAppendChain(new List<CasterMembershipRecord> { midTerm }, out var alone));
+            Assert.Contains("term ended", alone);
+            var junk = JsonConvert.DeserializeObject<CasterMembershipRecord>(JsonConvert.SerializeObject(rotation))!;
+            junk.Signatures = junk.Signatures.Take(1).ToList();
+            Assert.Equal(0, CasterMembershipStore.TryAppendChain(new List<CasterMembershipRecord> { midTerm, junk }, out var withJunk));
+            Assert.Contains("term ended", withJunk);
+            Assert.Equal(interim.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+            Assert.Equal(2, CasterMembershipStore.TryAppendChain(new List<CasterMembershipRecord> { midTerm, rotation }, out var refusal));
+            Assert.Null(refusal);
+            Assert.Equal(rotation.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+            Assert.Equal(midTerm.RecordHash, CasterMembershipStore.GetBySeq(midTerm.RecordSeq)!.RecordHash);
+
+            // With them, the rotation's block is judged once this node reaches its parent.
+            StallAt(L + VreeElection.HandoverBlocks - 1, 5);
+            first = BlockAt(L + VreeElection.HandoverBlocks, Globals.LastBlock.Hash, 0, Members(rotation).Take(3), rotation);
+            Assert.Equal(VreeElection.CarriedVerdict.Valid, VreeElection.JudgeCarried(first));
+        }
+
+        [Fact]
         public void test_drill_7_handover_rung_0_takes_effect_twelve_blocks_on_and_the_interim_produces_until_then()
         {
             var interim = InstallInterim();
