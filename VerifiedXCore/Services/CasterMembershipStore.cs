@@ -431,11 +431,13 @@ namespace VerifiedXCore.Services
         /// <summary>The record at a sequence number, or null.</summary>
         public static CasterMembershipRecord? GetBySeq(long seq) => seq < 0 ? null : Collection()?.FindById(seq);
 
-        /// <summary>The record whose members hold the seats now: the head, unless the head is a rotation not in force yet.</summary>
+        /// <summary>The record whose members hold the seats now: the head, unless the head is a rotation not in force yet (or a hold over one).</summary>
         public static CasterMembershipRecord? GetSeatRecord()
         {
             var head = GetCurrent();
-            return VreeElection.RotationPending(head, Globals.LastBlock?.Height ?? -1) ? GetBySeq(head!.RecordSeq - 1) ?? head : head;
+            if (!VreeElection.RotationPending(head, Globals.LastBlock?.Height ?? -1, GetBySeq)) return head;
+            var rotation = VreeElection.UnderHolds(head, GetBySeq)!;
+            return GetBySeq(rotation.RecordSeq - 1) ?? head;
         }
 
         /// <summary>Committee addresses for a height, or null in the legacy era.</summary>

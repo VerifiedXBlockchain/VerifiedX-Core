@@ -134,11 +134,12 @@ namespace VerifiedXCore.Services
         private static string _reconciledRecord = "";
 
         /// <summary>A rotation's reconcile was put off while it was pending (CasterMembershipService); it takes over at the block before its effective height.</summary>
-        private static void ReconcileWhenRotationTakesOver()
+        internal static void ReconcileWhenRotationTakesOver()
         {
             var head = CasterMembershipStore.GetCurrent();
-            if (head?.ChangeType != VreeElection.ScheduledRotationChangeType || head.RecordHash == _reconciledRecord) return;
-            if (VreeElection.RotationPending(head, Globals.LastBlock?.Height ?? -1)) return;
+            if (head == null || head.RecordHash == _reconciledRecord) return;
+            if (VreeElection.UnderHolds(head, CasterMembershipStore.GetBySeq)?.ChangeType != VreeElection.ScheduledRotationChangeType) return;
+            if (VreeElection.RotationPending(head, Globals.LastBlock?.Height ?? -1, CasterMembershipStore.GetBySeq)) return;
             _reconciledRecord = head.RecordHash;
             CasterMembershipService.ReconcileBlockCastersToRecord(head);
         }
@@ -523,7 +524,7 @@ namespace VerifiedXCore.Services
             if (committee == null || !committee.Contains(probe.Prober)) return No("the prober is not on the committee here");
             // Having signed for this stall, this validator is not to be counted on the other side of it for the hold. The
             // committee it elected is not the other side: two thirds of the electorate signed, and it needs a third of them.
-            var elected = CasterMembershipStore.GetCurrent() is { } current && VreeElection.IsElectionRecord(current) && current.Casters.Any(c => c.Address == probe.Prober);
+            var elected = VreeElection.UnderHolds(CasterMembershipStore.GetCurrent(), CasterMembershipStore.GetBySeq) is { } current && VreeElection.IsElectionRecord(current) && current.Casters.Any(c => c.Address == probe.Prober);
             if (!elected && TimeUtil.GetTime() - _lastSignedUnix < VreeElection.RatifiedHoldSeconds) return No("signed an election within the hold");
 
             var mine = _myAck;
@@ -678,7 +679,7 @@ namespace VerifiedXCore.Services
                 return "this committee's term is over; a scheduled rotation replaces it";
             // A rung before its first block: validators holding a sibling do not acknowledge it until that block, which it
             // could then never produce. Standing down here would strand it; one block is what this can cost.
-            if (VreeElection.FreshlyElected(CasterMembershipStore.GetCurrent(), Globals.LastBlock?.Height ?? -1, Globals.ValidatorAddress))
+            if (VreeElection.FreshlyElected(CasterMembershipStore.GetCurrent(), Globals.LastBlock?.Height ?? -1, Globals.ValidatorAddress, CasterMembershipStore.GetBySeq))
                 return null;
             var now = TimeUtil.GetTime();
             return StandDownDecision(true, Globals.IsBootstrapMode, Globals.IsBlockCaster, _firstProbeUnix, now, AckCount(now), _reachCount);

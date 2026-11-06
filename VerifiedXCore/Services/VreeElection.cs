@@ -521,20 +521,33 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
+        /// The record under <paramref name="head"/>'s maintenance holds: the head itself unless it is a hold. A hold changes
+        /// nobody and takes effect at once, so the hand-over it sits on is the record's below it: a hold the incoming
+        /// committee signs over its rotation that has not taken effect yet leaves the outgoing members producing until it does.
+        /// </summary>
+        public static CasterMembershipRecord? UnderHolds(CasterMembershipRecord? head, Func<long, CasterMembershipRecord?> bySeq)
+        {
+            var r = head;
+            for (var hops = 0; r != null && IsHoldRecord(r) && hops < 64; hops++) r = bySeq(r.RecordSeq - 1);
+            return r;
+        }
+
+        /// <summary>
         /// Whether <paramref name="head"/> has not taken over yet and members must not act on it: a rotation replaces the
         /// whole committee a dozen blocks ahead, and the outgoing members produce until then. Every other record acts at
-        /// once, as records always did: its members are mostly the same people.
+        /// once, as records always did: its members are mostly the same people. Holds over the rotation change nobody
+        /// (<see cref="UnderHolds"/>).
         /// </summary>
-        public static bool RotationPending(CasterMembershipRecord? head, long tipHeight) =>
-            head?.ChangeType == ScheduledRotationChangeType && head.EffectiveFromHeight > tipHeight + 1;
+        public static bool RotationPending(CasterMembershipRecord? head, long tipHeight, Func<long, CasterMembershipRecord?> bySeq) =>
+            UnderHolds(head, bySeq) is { } rotation && rotation.ChangeType == ScheduledRotationChangeType && rotation.EffectiveFromHeight > tipHeight + 1;
 
         /// <summary>
         /// A rung's members are new to the seat: nobody can approve their resume, because the others wait for the same.
         /// True only until the record's first block is committed; after that a restarted member resumes as any other.
         /// </summary>
-        public static bool FreshlyElected(CasterMembershipRecord? head, long tipHeight, string? self) =>
-            IsElectionRecord(head) && !string.IsNullOrEmpty(self) && tipHeight + 1 == head!.EffectiveFromHeight
-            && Active(head.EffectiveFromHeight) && head.Casters.Any(c => c.Address == self);
+        public static bool FreshlyElected(CasterMembershipRecord? head, long tipHeight, string? self, Func<long, CasterMembershipRecord?> bySeq) =>
+            UnderHolds(head, bySeq) is { } elected && IsElectionRecord(elected) && !string.IsNullOrEmpty(self) && tipHeight + 1 == elected.EffectiveFromHeight
+            && Active(elected.EffectiveFromHeight) && elected.Casters.Any(c => c.Address == self);
 
         // ── Validating a record ─────────────────────────────────────────────────────────────────
 
@@ -816,6 +829,7 @@ namespace VerifiedXCore.Services
         public static bool WithinRatifiedHold(CasterMembershipRecord? head, string epochHash, long nowUnix)
         {
             epochHash = ConsensusMessageFormatter.NormalizeHash(epochHash);
+            head = UnderHolds(head, CasterMembershipStore.GetBySeq);
             if (IsElectionRecord(head) && ConsensusMessageFormatter.NormalizeHash(head!.EpochHash) == epochHash && !_ratifiedSeen.ContainsKey(epochHash))
                 _ratifiedSeen[epochHash] = nowUnix;
             return _ratifiedSeen.TryGetValue(epochHash, out var seen) && nowUnix - seen < RatifiedHoldSeconds;

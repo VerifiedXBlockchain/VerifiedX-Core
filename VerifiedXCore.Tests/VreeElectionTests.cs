@@ -862,7 +862,7 @@ namespace VerifiedXCore.Tests
             var electors = view0.Epoch.Electors.Keys.OrderBy(a => a, StringComparer.Ordinal).Take(view0.Epoch.RatifyNeeded).Select(Of).ToList();
             var rotation0 = Signed(view0.Build(0), electors);
             Assert.True(CasterMembershipStore.TryAppend(rotation0, out var why), why);
-            Assert.True(VreeElection.RotationPending(rotation0, L));
+            Assert.True(VreeElection.RotationPending(rotation0, L, CasterMembershipStore.GetBySeq));
 
             StallAt(L, 400);
             VreeElection.ClearCachesForTests();
@@ -1362,6 +1362,57 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void AHoldTheIncomingCommitteeSignsOverItsPendingRotation_LeavesTheOutgoingMembersInTheirSeats()
+        {
+            var interim = InstallInterim();
+            var L = interim.LapseHeight;
+            StallAt(L, 5);
+            VreeElection.ClearCachesForTests();
+            var view = View();
+            var electors = view.Epoch.Electors.Keys.OrderBy(a => a, StringComparer.Ordinal).Take(view.Epoch.RatifyNeeded).Select(Of);
+            var rotation = Signed(view.Build(0), electors);
+            Assert.True(CasterMembershipStore.TryAppend(rotation, out var why), why);
+            Assert.Equal(L + VreeElection.HandoverBlocks, rotation.EffectiveFromHeight);
+
+            // The incoming committee signs a hold over its rotation, which has not taken effect yet. The hold is a valid successor.
+            var hold = new CasterMembershipRecord
+            {
+                RecordSeq = rotation.RecordSeq + 1, PrevRecordHash = rotation.RecordHash, ChangeType = VreeElection.MaintenanceHoldChangeType,
+                EffectiveFromHeight = CasterMembershipStore.ComputeRotationEffectiveHeight(rotation.EffectiveFromHeight, L),
+                HoldSeconds = 600, SchemeVersion = VreeElection.SchemeVersionV1,
+                Casters = rotation.Casters.Select(c => new CasterInfo { Address = c.Address, PeerIP = c.PeerIP, PublicKey = c.PublicKey }).ToList(),
+            };
+            hold.RecordHash = CasterMembershipStore.ComputeRecordHash(hold);
+            Signed(hold, Members(rotation).Take(3));
+            Assert.True(CasterMembershipStore.TryAppend(hold, out why), why);
+            Assert.Equal(hold.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+
+            // The rotation is still pending under the hold: the seats stay with the interim, the live list does not move, and an
+            // interim member that is not in the rotation keeps its seat until the hand-over.
+            Assert.True(VreeElection.RotationPending(hold, L, CasterMembershipStore.GetBySeq));
+            Assert.Equal(interim.RecordHash, CasterMembershipStore.GetSeatRecord()!.RecordHash);
+            var sitting = interim.Casters.First(c => rotation.Casters.All(z => z.Address != c.Address)).Address;
+            Globals.ValidatorAddress = sitting;
+            Globals.IsBlockCaster = true;
+            CasterMembershipService.ReconcileBlockCastersToRecord(hold);
+            VreeService.ReconcileWhenRotationTakesOver();
+            Assert.Empty(Globals.BlockCasters);
+            Assert.True(Globals.IsBlockCaster);
+            // The rotation's members are freshly elected at its first block, hold or no hold.
+            Assert.True(VreeElection.FreshlyElected(hold, L + VreeElection.HandoverBlocks - 1, rotation.Casters[0].Address, CasterMembershipStore.GetBySeq));
+            Assert.False(VreeElection.FreshlyElected(hold, L + VreeElection.HandoverBlocks - 1, sitting, CasterMembershipStore.GetBySeq));
+
+            // At the block before its height the rotation takes the seats, through the hold, and the interim member stands down.
+            StallAt(L + VreeElection.HandoverBlocks - 1, 5);
+            Assert.False(VreeElection.RotationPending(hold, Globals.LastBlock.Height, CasterMembershipStore.GetBySeq));
+            Assert.Equal(hold.RecordHash, CasterMembershipStore.GetSeatRecord()!.RecordHash);
+            VreeService.ReconcileWhenRotationTakesOver();
+            Assert.Equal(rotation.Casters.Select(c => c.Address).OrderBy(a => a, StringComparer.Ordinal),
+                Globals.BlockCasters.Select(p => p.ValidatorAddress!).OrderBy(a => a, StringComparer.Ordinal));
+            Assert.False(Globals.IsBlockCaster);
+        }
+
+        [Fact]
         public void test_the_rotation_excludes_the_interim_and_the_old_committee_stands_again()
         {
             var interim = InstallInterim();
@@ -1470,9 +1521,9 @@ namespace VerifiedXCore.Tests
             // It told the electorate, not just the twenty peers an ordinary record reaches: the casters they pull from are dead.
             Assert.Equal(view.Epoch.Electors.Count, announced.Count(a => a.EndsWith("AnnounceMembershipRecord")));
             // Its members cast without a resume: nobody could approve one.
-            Assert.True(VreeElection.FreshlyElected(head, H, member.Address));
-            Assert.False(VreeElection.FreshlyElected(head, H, _electors.First(e => !head.Casters.Any(c => c.Address == e.Address)).Address));
-            Assert.False(VreeElection.FreshlyElected(head, H + 1, member.Address));
+            Assert.True(VreeElection.FreshlyElected(head, H, member.Address, CasterMembershipStore.GetBySeq));
+            Assert.False(VreeElection.FreshlyElected(head, H, _electors.First(e => !head.Casters.Any(c => c.Address == e.Address)).Address, CasterMembershipStore.GetBySeq));
+            Assert.False(VreeElection.FreshlyElected(head, H + 1, member.Address, CasterMembershipStore.GetBySeq));
 
             // H + 1 under the new committee, on a node that holds the record.
             var block = BlockAt(H + 1, Globals.LastBlock.Hash, 0, Members(head).Take(3));
