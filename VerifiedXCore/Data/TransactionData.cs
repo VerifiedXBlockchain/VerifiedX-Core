@@ -314,9 +314,10 @@ namespace VerifiedXCore.Data
             var currentTime = TimeUtil.GetTime();
             var timeDiff = currentTime - tx.Timestamp;
             
-            // Check if transaction is too old (exceeds max age)
+            // Check if transaction is too old (exceeds max age). A withdrawal request this validator signed for and holds
+            // over a rewind is kept past it: a key holder's block may still carry it (LedgerIntegrityRules.AgedWithdrawalRequestRefusal).
             if (timeDiff > Globals.MaxTxAgeSeconds)
-                return true;
+                return !VerifiedXCore.Bitcoin.FROST.SignedRequestCarry.KeepsPastTheAgeLimit(tx);
             
             // Check if transaction timestamp is too far in the future (clock skew protection)
             if (timeDiff < -Globals.MaxFutureSkewSeconds)
@@ -1347,7 +1348,38 @@ namespace VerifiedXCore.Data
         public static List<Transaction> ClosingPasses(List<Transaction> approved)
         {
             var inValidationOrder = BlockValidatorService.InValidationOrder(approved);
-            return DropContractSiblingConflicts(VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.KeepOnePerBlock(SameBlockDebitGuard.DropSameBlockOverspends(DropDuplicateContractCreations(inValidationOrder))));
+            return DropContractSiblingConflicts(VerifiedXCore.Bitcoin.Attestation.BtcAttestBlockRules.KeepOnePerBlock(SameBlockDebitGuard.DropSameBlockOverspends(DropDuplicateContractCreations(DropAgedRequestsOfOtherKeys(inValidationOrder)))));
+        }
+
+        /// <summary>
+        /// A withdrawal request past the age limit is valid only in a block produced by a holder of a share of its vault's
+        /// key (LedgerIntegrityRules.AgedWithdrawalRequestRefusal). This producer proposes one only when it is such a
+        /// holder, so it never builds a block its own validation refuses; otherwise the request stays in the mempool.
+        /// </summary>
+        public static List<Transaction> DropAgedRequestsOfOtherKeys(List<Transaction> approved)
+        {
+            // Below the height no request past the age limit reaches a proposal (admission refuses it), and nothing changes here.
+            if (!LedgerIntegrityRules.AgedRequestRuleActive((Globals.LastBlock?.Height ?? -1) + 1)) return approved;
+            var now = TimeUtil.GetTime();
+            var self = Globals.ValidatorAddress ?? "";
+            var kept = new List<Transaction>(approved.Count);
+            foreach (var tx in approved)
+            {
+                if (tx.TransactionType == TransactionType.VBTC_V2_WITHDRAWAL_REQUEST && now - tx.Timestamp > Globals.MaxTxAgeSeconds)
+                {
+                    // A holder set that cannot be read leaves the request out of this block; it must not cost the block.
+                    bool holder;
+                    try { holder = LedgerIntegrityRules.WithdrawalKeyHolders(tx).Contains(self); }
+                    catch (Exception ex) { holder = false; ErrorLogUtility.LogError($"Key holders of aged withdrawal request {tx.Hash} could not be read: {ex.Message}", "TransactionData.ProcessTxPool()"); }
+                    if (!holder)
+                    {
+                        LogUtility.Log($"[ProcessTxPool] Skipping aged withdrawal request {tx.Hash}: this producer holds no share of its vault's key.", "TransactionData.ProcessTxPool()");
+                        continue;
+                    }
+                }
+                kept.Add(tx);
+            }
+            return kept;
         }
 
         /// <summary>The types BlockValidatorService.ValidateBlock does not read as a contract call (besides attestations).</summary>

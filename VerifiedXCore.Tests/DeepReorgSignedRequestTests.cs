@@ -28,6 +28,8 @@ namespace VerifiedXCore.Tests
         private readonly Func<bool> _priorAtHeight = SignedRequestCarry.AtNetworkHeight;
         private readonly Func<VfxTx, Task> _priorBroadcast = SignedRequestCarry.Broadcast;
         private readonly Func<string, bool> _priorSignedFor = SignedRequestCarry.SignedFor;
+        private readonly long _priorVreeHeight = Globals.VreeActivationHeight;
+        private readonly string _priorValidator = Globals.ValidatorAddress;
         private readonly List<string> _sent = new();
 
         private static long Tip => Globals.LastBlock.Height;
@@ -36,6 +38,7 @@ namespace VerifiedXCore.Tests
         {
             SignedRequestCarry.AtNetworkHeight = () => true;
             SignedRequestCarry.Broadcast = tx => { _sent.Add(tx.Hash); return Task.CompletedTask; };
+            Globals.VreeActivationHeight = long.MaxValue; // as released: the aged-request rule is not active unless a test sets the height
         }
 
         public override void Dispose()
@@ -43,6 +46,8 @@ namespace VerifiedXCore.Tests
             SignedRequestCarry.AtNetworkHeight = _priorAtHeight;
             SignedRequestCarry.Broadcast = _priorBroadcast;
             SignedRequestCarry.SignedFor = _priorSignedFor;
+            Globals.VreeActivationHeight = _priorVreeHeight;
+            Globals.ValidatorAddress = _priorValidator;
             SnapshotRestoreUtility.ClearStateDestroyed();
             base.Dispose();
         }
@@ -187,6 +192,163 @@ namespace VerifiedXCore.Tests
             Assert.Empty(_sent);
             Assert.Empty(SignedRequestCarry.Held());
             Assert.Null(TransactionData.GetPool().FindOne(x => x.Hash == old.Hash));
+        }
+
+        // ── From the activation height: a request past the age limit, in a key holder's block ─────────────────────────
+
+        private static long TooOld => Globals.MaxTxAgeSeconds + LedgerIntegrityRules.BlockTimeMarginSeconds + 60;
+
+        /// <summary>Block validation's verdict on a transaction of the next block, produced by <paramref name="producer"/>.</summary>
+        private static async Task<(bool Ok, string Why)> InBlockOf(string? producer, VfxTx tx)
+        {
+            var (ok, why) = await TransactionValidatorService.VerifyTX(tx, false, true, false, null, false, Tip + 1, TimeUtil.GetTime(), producer);
+            return (ok, why);
+        }
+
+        /// <summary>
+        /// The consensus rule. From the height, a withdrawal request older than its block allows is valid in a block whose
+        /// producer holds a share of its vault's key, and nowhere else: not below the height, not in anybody else's block,
+        /// not ahead of its block, not a second time, and no other kind of transaction.
+        /// </summary>
+        [Fact]
+        public async Task ARequestPastTheAgeLimit_IsValidOnlyInAKeyHoldersBlock_FromTheHeight()
+        {
+            var vault = await CreateVault(H1 - 50, keyHolders: Signers);
+            await Start();
+            var aged = RequestOf(Minter, vault.Uid, 0.0003M, ageSeconds: TooOld);
+            var fresh = RequestOf(Minter, vault.Uid, 0.0001M);
+            var holder = Signers[0].Address;
+
+            // Not active: refused whoever produced the block, as before.
+            var dark = await InBlockOf(holder, aged);
+            Assert.False(dark.Ok);
+            Assert.Equal(LedgerIntegrityRules.TimestampOutsideItsBlockMessage, dark.Why);
+
+            Globals.VreeActivationHeight = Tip + 1;
+            Assert.Equal(new[] { holder }.Concat(Signers.Skip(1).Select(s => s.Address)).OrderBy(a => a), LedgerIntegrityRules.WithdrawalKeyHolders(aged).OrderBy(a => a));
+            var held = await InBlockOf(holder, aged);
+            Assert.True(held.Ok, held.Why);
+            foreach (var other in new[] { null, "", Unfunded.Address, Minter.Address })
+            {
+                var refused = await InBlockOf(other, aged);
+                Assert.False(refused.Ok);
+                Assert.Equal(LedgerIntegrityRules.AgedRequestProducerMessage, refused.Why);
+            }
+            // One block below the height: refused. And the rule never applies below the height from which a block's
+            // transactions are judged by the block's own time, whatever the activation height says.
+            Globals.VreeActivationHeight = Tip + 2;
+            Assert.False((await InBlockOf(holder, aged)).Ok);
+            Globals.VreeActivationHeight = Tip + 1;
+            Assert.True(LedgerIntegrityRules.AgedRequestRuleActive(Tip + 1));
+            var priorPathAudit = Globals.PathAuditRulesHeight;
+            Globals.PathAuditRulesHeight = Tip + 2;
+            Assert.False(LedgerIntegrityRules.AgedRequestRuleActive(Tip + 1));
+            Globals.PathAuditRulesHeight = priorPathAudit;
+
+            // Old has a limit too: past it a request is as expired as any other transaction, in anybody's block.
+            var ancient = RequestOf(Minter, vault.Uid, 0.0001M, ageSeconds: LedgerIntegrityRules.AgedRequestMaxAgeSeconds + 60);
+            Assert.Equal(LedgerIntegrityRules.TimestampOutsideItsBlockMessage, (await InBlockOf(holder, ancient)).Why);
+
+            // A request of ordinary age needs no such producer; one ahead of its block is refused even from a holder; and no
+            // other kind of transaction is let past the age limit.
+            Assert.True((await InBlockOf(null, fresh)).Ok);
+            var ahead = RequestOf(Minter, vault.Uid, 0.0001M, ageSeconds: -(Globals.MaxFutureSkewSeconds + LedgerIntegrityRules.BlockTimeMarginSeconds + 60));
+            Assert.Equal(LedgerIntegrityRules.TimestampOutsideItsBlockMessage, (await InBlockOf(holder, ahead)).Why);
+            var agedTransfer = new VfxTx
+            {
+                Timestamp = TimeUtil.GetTime() - TooOld, FromAddress = Minter.Address, ToAddress = holder, Amount = 0.0M, Fee = 0, Nonce = 0,
+                TransactionType = TransactionType.VBTC_V2_TRANSFER,
+                Data = JsonConvert.SerializeObject(new { Function = "TransferVBTCV2()", ContractUID = vault.Uid, FromAddress = Minter.Address, ToAddress = holder, Amount = 0.0001M }),
+            };
+            agedTransfer.Fee = FeeCalcService.CalculateTXFee(agedTransfer);
+            agedTransfer.Build();
+            agedTransfer.Signature = SignatureService.CreateSignature(agedTransfer.Hash, Minter.Key, Minter.Pub);
+            Assert.Equal(LedgerIntegrityRules.TimestampOutsideItsBlockMessage, (await InBlockOf(holder, agedTransfer)).Why);
+
+            // Mined once, it is never valid again, whoever produces the block: the hash guard no longer covers it.
+            await Apply(Tip + 1, aged);
+            Globals.VreeActivationHeight = 1;
+            Assert.NotNull(VBTCWithdrawalRequest.GetByTransactionHash(aged.Hash, vault.Uid));
+            var again = await InBlockOf(holder, aged);
+            Assert.False(again.Ok);
+            Assert.Contains("already mined", again.Why);
+        }
+
+        /// <summary>
+        /// The validator's side, from the height: a signed-for request past the age limit is no longer let go. It is kept
+        /// in this node's mempool, proposed only when this node holds a share of its vault's key, mined in such a block,
+        /// and then no longer held. One that is never mined is let go after the give-up time, with the loss named.
+        /// </summary>
+        [Fact]
+        public async Task ASignedForRequestPastTheAgeLimit_IsKeptAndMinedInAKeyHoldersBlock_FromTheHeight()
+        {
+            var vault = await CreateVault(H1 - 50, keyHolders: Signers);
+            await Start();
+            using var electrum = new FakeElectrum(("a", true, 1M));
+            Globals.VreeActivationHeight = 1;
+            var aged = RequestOf(Minter, vault.Uid, 0.0003M, ageSeconds: TooOld);
+            var notHeld = RequestOf(Minter, vault.Uid, 0.0001M, ageSeconds: TooOld);
+            Assert.True(FrostSignedWithdrawalEvidence.Record(vault.Uid, aged.Hash, "ee".PadLeft(64, 'e'), new[] { "ee:0" }));
+            Assert.Equal(1, SignedRequestCarry.Hold(new[] { new Block { Height = Tip + 20, Transactions = new List<VfxTx> { aged, notHeld } } }));
+
+            // Kept past the age limit here, and only what is held; put back and sent on.
+            Assert.False(await TransactionData.IsTxTimestampStale(aged));
+            Assert.True(await TransactionData.IsTxTimestampStale(notHeld));
+            Assert.Equal(new[] { aged.Hash }, await SignedRequestCarry.ResubmitDueAsync());
+            Assert.Equal(new[] { aged.Hash }, _sent);
+            var pooled = TransactionData.GetPool().FindOne(x => x.Hash == aged.Hash)!;
+            Assert.NotNull(pooled);
+
+            // This node proposes it only as a holder of a share of the vault's key. Below the height the pass changes nothing.
+            Globals.ValidatorAddress = Unfunded.Address;
+            Assert.Empty(TransactionData.DropAgedRequestsOfOtherKeys(new List<VfxTx> { pooled }));
+            Globals.VreeActivationHeight = long.MaxValue;
+            Assert.Single(TransactionData.DropAgedRequestsOfOtherKeys(new List<VfxTx> { pooled }));
+            Globals.VreeActivationHeight = 1;
+            Globals.ValidatorAddress = Signers[1].Address;
+            Assert.Single(TransactionData.DropAgedRequestsOfOtherKeys(new List<VfxTx> { pooled }));
+            Assert.Single(TransactionData.ClosingPasses(new List<VfxTx> { pooled }));
+
+            // Mined in a holder's block: the row and its escrow debit stand, and the request is let go.
+            var inBlock = await InBlockOf(Signers[1].Address, pooled);
+            Assert.True(inBlock.Ok, inBlock.Why);
+            await Apply(Tip + 1, pooled);
+            Assert.Equal(1, EscrowDebits(vault.Uid, Minter.Address, 0.0003M));
+            Assert.Empty(await SignedRequestCarry.ResubmitDueAsync());
+            Assert.Empty(SignedRequestCarry.Held());
+
+            // One that is never mined is not held for ever.
+            var stuck = RequestOf(Minter, vault.Uid, 0.0001M, ageSeconds: TooOld);
+            Assert.True(FrostSignedWithdrawalEvidence.Record(vault.Uid, stuck.Hash, "ff".PadLeft(64, 'f'), new[] { "ff:0" }));
+            Assert.Equal(1, SignedRequestCarry.Hold(new[] { new Block { Height = Tip + 20, Transactions = new List<VfxTx> { stuck } } }));
+            var rows = DbContext.DB_vBTC.GetCollection<SignedRequestCarry.Carried>(SignedRequestCarry.CollectionName);
+            var row = rows.FindOne(x => x.TxHash == stuck.Hash);
+            row.HeldAt = TimeUtil.GetTime() - SignedRequestCarry.GiveUpSeconds - 1;
+            rows.Update(row);
+            _sent.Clear();
+            Assert.Empty(await SignedRequestCarry.ResubmitDueAsync());
+            Assert.Empty(_sent);
+            Assert.Empty(SignedRequestCarry.Held());
+            Assert.True(await TransactionData.IsTxTimestampStale(stuck));
+        }
+
+        /// <summary>
+        /// The rule reads the block's producer, so block validation must hand it over for every transaction it judges:
+        /// without it an aged request is refused in every block (fail closed), and the rule would never apply.
+        /// </summary>
+        [Fact]
+        public void BlockValidation_HandsTheBlocksProducer_ToEveryTransactionItJudges()
+        {
+            string? source = null;
+            for (var dir = new System.IO.DirectoryInfo(AppContext.BaseDirectory); dir != null && source == null; dir = dir.Parent)
+            {
+                var candidate = System.IO.Path.Combine(dir.FullName, "VerifiedXCore", "Services", "BlockValidatorService.cs");
+                if (System.IO.File.Exists(candidate)) source = candidate;
+            }
+            Assert.NotNull(source);
+            var calls = System.IO.File.ReadAllLines(source!).Where(l => l.Contains("TransactionValidatorService.VerifyTX(")).ToList();
+            Assert.Equal(2, calls.Count);
+            Assert.All(calls, l => Assert.Contains("blockValidator: block.Validator", l));
         }
 
         [Fact]

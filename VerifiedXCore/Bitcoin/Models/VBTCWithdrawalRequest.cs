@@ -182,6 +182,21 @@ namespace VerifiedXCore.Bitcoin.Models
         }
         #endregion
 
+        #region A request already mined
+        /// <summary>
+        /// Consensus: why a request with this transaction hash may not be mined (again), or null: a row stamped with its
+        /// hash exists (mined rows exist on every node; a local pre-registration row carries no hash). Asked of a request
+        /// past the transaction age limit, which the hash guard no longer covers. A store that cannot be read refuses.
+        /// </summary>
+        public static string? MinedRowRefusal(string? txHash)
+        {
+            if (string.IsNullOrEmpty(txHash)) return "A withdrawal request without a hash cannot be judged.";
+            var vwrDb = GetVBTCWithdrawalRequestDb();
+            if (vwrDb == null) return "The withdrawal store cannot be read on this node.";
+            return vwrDb.Exists(x => x.TransactionHash == txHash) ? $"Withdrawal request {txHash} is already mined." : null;
+        }
+        #endregion
+
         #region Check for Incomplete Requests
         /// <summary>
         /// Check if there are any incomplete withdrawal requests for this address and contract

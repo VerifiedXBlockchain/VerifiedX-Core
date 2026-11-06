@@ -53,6 +53,22 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// <summary>The requests held now.</summary>
         public static List<Carried> Held() => Coll()?.FindAll().ToList() ?? new List<Carried>();
 
+        /// <summary>How long a request is held before this validator stops trying to put it back and reports it.</summary>
+        internal const long GiveUpSeconds = 3 * 24 * 60 * 60;
+
+        /// <summary>
+        /// Whether a transaction past the age limit stays in this node's mempool: a withdrawal request held here, once a key
+        /// holder's block may carry it at any age (Globals.VreeActivationHeight). Before that height nothing is kept.
+        /// </summary>
+        public static bool KeepsPastTheAgeLimit(Transaction tx)
+        {
+            if (tx?.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST || string.IsNullOrEmpty(tx.Hash)) return false;
+            if (!LedgerIntegrityRules.AgedRequestRuleActive((Globals.LastBlock?.Height ?? -1) + 1)) return false;
+            if (TimeUtil.GetTime() - tx.Timestamp > LedgerIntegrityRules.AgedRequestMaxAgeSeconds) return false;
+            try { return Coll()?.Exists(x => x.TxHash == tx.Hash) == true; }
+            catch { return false; }
+        }
+
         /// <summary>
         /// Holds the withdrawal requests in <paramref name="removed"/> that this validator gave a share for, before the
         /// blocks go. Returns how many were held. Throws when a request cannot be saved or the evidence cannot be read:
@@ -83,8 +99,9 @@ namespace VerifiedXCore.Bitcoin.FROST
 
         /// <summary>
         /// One pass over the held requests: one not on this chain is put back in the mempool and sent on; one that stands
-        /// on this chain again is let go; one the chain can no longer take (its timestamp is past the age a block accepts)
-        /// is let go with the loss named, for the operator. Returns the hashes put back this pass.
+        /// on this chain again is let go; one the chain can no longer take (before Globals.VreeActivationHeight, its
+        /// timestamp past the age a block accepts; after it, held for <see cref="GiveUpSeconds"/> without being mined) is
+        /// let go with the loss named, for the operator. Returns the hashes put back this pass.
         /// </summary>
         public static async Task<List<string>> ResubmitDueAsync()
         {
@@ -109,9 +126,10 @@ namespace VerifiedXCore.Bitcoin.FROST
                     continue;
                 }
                 var pool = TransactionData.GetPool();
-                if (pool.FindOne(x => x.Hash == tx.Hash) != null) continue;
+                var heldTooLong = TimeUtil.GetTime() - row.HeldAt > GiveUpSeconds;
+                if (!heldTooLong && pool.FindOne(x => x.Hash == tx.Hash) != null) continue;
 
-                var (ok, why) = await TransactionValidatorService.VerifyTX(tx);
+                var (ok, why) = heldTooLong ? (false, $"held for more than {GiveUpSeconds / 3600} hours without being mined") : await TransactionValidatorService.VerifyTX(tx);
                 if (ok)
                 {
                     if (!MempoolEvictionUtility.TryAdmitAndInsert(tx, pool, out var reason)) { why = reason; ok = false; }
@@ -123,11 +141,11 @@ namespace VerifiedXCore.Bitcoin.FROST
                     LogUtility.Log($"Withdrawal request {tx.Hash} (removed with block {row.RemovedAtHeight}) is back in the mempool.", "SignedRequestCarry.ResubmitDueAsync()");
                     continue;
                 }
-                if (await TransactionData.IsTxTimestampStale(tx))
+                if (heldTooLong || await TransactionData.IsTxTimestampStale(tx))
                 {
                     c.Delete(row.Id);
                     var paid = string.Join(", ", FrostSignedWithdrawalEvidence.AllFor(tx.Hash).Select(e => $"{e.ScUID}: Bitcoin {e.BtcTxId}"));
-                    var line = $"Withdrawal request {tx.Hash} (removed with block {row.RemovedAtHeight}) is too old for the chain to take back ({why}); it cannot be put back. " +
+                    var line = $"Withdrawal request {tx.Hash} (removed with block {row.RemovedAtHeight}) could not be put back on this chain ({why}). " +
                                $"This validator signed its payment ({paid}), which may be paid while the request's escrow is not debited on this chain. Operator attention required.";
                     ErrorLogUtility.LogError(line, "SignedRequestCarry.ResubmitDueAsync()");
                     ConsoleWriterService.Output(line);
