@@ -330,6 +330,39 @@ namespace VerifiedXCore.Tests
             Assert.True(conflicting.Ok, conflicting.Reason);
         }
 
+        /// <summary>
+        /// Every transaction a validator signed for a payment keeps its own record. After two rewinds a signer has signed a
+        /// first transaction, then a second that shared a coin with it; a third that shares a coin only with the second
+        /// would pay beside the first. The first is still on record, so the third is refused.
+        /// </summary>
+        [Fact]
+        public async Task ASigner_RemembersEveryTransactionItSignedForAPayment_NotOnlyTheLast()
+        {
+            var vault = await StoredChainWithAFundedVault();
+            var request = await Mine(await ValidRequest(vault.Uid, 0.0003M));
+            var pin = Assert.Single(Row(request, vault.Uid).Pins);
+            const string first = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+            const string second = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
+            const string coinA = "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3:0";
+            const string coinB = "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4:1";
+
+            // Signed on two chains this node has left: the first on coins A and B, the second on B and a coin the transaction
+            // fixed now also spends.
+            Assert.True(FrostSignedWithdrawalEvidence.Record(vault.Uid, request.Hash, first, new[] { coinA, coinB }));
+            Assert.True(FrostSignedWithdrawalEvidence.Record(vault.Uid, request.Hash, second, new[] { coinB }.Concat(pin.Inputs.Take(1))));
+            var records = FrostSignedWithdrawalEvidence.ForPayment(vault.Uid, request.Hash);
+            Assert.Equal(new[] { first, second }, records.Select(r => r.BtcTxId).OrderBy(t => t));
+            Assert.Equal(second, FrostSignedWithdrawalEvidence.Get(vault.Uid, request.Hash)!.BtcTxId); // the last one signed
+            // Signing the second again refreshes its record; it does not add one.
+            Assert.True(FrostSignedWithdrawalEvidence.Record(vault.Uid, request.Hash, second.ToUpperInvariant(), new[] { coinB }.Concat(pin.Inputs.Take(1))));
+            Assert.Equal(2, FrostSignedWithdrawalEvidence.ForPayment(vault.Uid, request.Hash).Count);
+
+            // The fixed transaction shares a coin with the second and none with the first, which may still pay: refused, naming the first.
+            var (ok, why) = await FrostStartup.CheckPriorSignedTransactionAsync(vault.Uid, request.Hash, pin.Txid, pin.Inputs);
+            Assert.False(ok);
+            Assert.Contains(first, why);
+        }
+
         // ── Deposits ────────────────────────────────────────────────────────────────────────────────────────
 
         [Fact]

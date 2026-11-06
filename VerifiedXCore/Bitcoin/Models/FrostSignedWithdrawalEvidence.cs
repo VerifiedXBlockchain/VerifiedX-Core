@@ -43,13 +43,23 @@ namespace VerifiedXCore.Bitcoin.Models
             get { try { return JsonConvert.DeserializeObject<List<string>>(OutpointsJson) ?? new(); } catch { return new(); } }
         }
 
-        /// <summary>The record for a payment: under its reference as given, else under another spelling of it (<see cref="ForPayment"/>).</summary>
+        /// <summary>
+        /// The record of the transaction this validator signed last for a payment: under its reference as given, else under
+        /// another spelling of it (<see cref="ForPayment"/>). Every transaction signed for it has its own record.
+        /// </summary>
         public static FrostSignedWithdrawalEvidence? Get(string scUID, string withdrawalRequestHash)
         {
             if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash)) return null;
-            try { return Coll()?.FindOne(x => x.ScUID == scUID && x.WithdrawalRequestHash == withdrawalRequestHash) ?? ForPayment(scUID, withdrawalRequestHash).FirstOrDefault(); }
+            try
+            {
+                return Latest(Coll()?.Find(x => x.ScUID == scUID && x.WithdrawalRequestHash == withdrawalRequestHash).ToList())
+                       ?? Latest(ForPayment(scUID, withdrawalRequestHash));
+            }
             catch { return null; }
         }
+
+        private static FrostSignedWithdrawalEvidence? Latest(List<FrostSignedWithdrawalEvidence>? records) =>
+            records?.OrderByDescending(r => r.Timestamp).ThenByDescending(r => r.Id).FirstOrDefault();
 
         /// <summary>
         /// Every record this validator holds for one payment of a vault: under the reference the chain names it by, and
@@ -103,7 +113,12 @@ namespace VerifiedXCore.Bitcoin.Models
             return p.StartsWith("0x") ? p.Substring(2) : p;
         }
 
-        /// <summary>Upsert: the most recently signed transaction for the withdrawal wins.</summary>
+        /// <summary>
+        /// One record per transaction signed for the payment; signing the same transaction again refreshes its record. A
+        /// second transaction used to be written over the first, so a validator that signed two forgot the first: a third
+        /// that shared no coin with it then met no record of it, and both could pay. A record without a transaction id
+        /// is completed by the first one that names one.
+        /// </summary>
         public static bool Record(string scUID, string withdrawalRequestHash, string? btcTxId, IEnumerable<string>? outpoints)
         {
             if (string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(withdrawalRequestHash)) return false;
@@ -111,9 +126,12 @@ namespace VerifiedXCore.Bitcoin.Models
             {
                 var c = Coll();
                 if (c == null) return false;
-                var rec = c.FindOne(x => x.ScUID == scUID && x.WithdrawalRequestHash == withdrawalRequestHash)
+                var txid = (btcTxId ?? string.Empty).Trim().ToLowerInvariant();
+                var held = c.Find(x => x.ScUID == scUID && x.WithdrawalRequestHash == withdrawalRequestHash).ToList();
+                var rec = held.FirstOrDefault(r => string.Equals((r.BtcTxId ?? string.Empty).Trim(), txid, StringComparison.OrdinalIgnoreCase))
+                          ?? held.FirstOrDefault(r => string.IsNullOrWhiteSpace(r.BtcTxId))
                           ?? new FrostSignedWithdrawalEvidence { ScUID = scUID, WithdrawalRequestHash = withdrawalRequestHash };
-                rec.BtcTxId = (btcTxId ?? string.Empty).Trim().ToLowerInvariant();
+                rec.BtcTxId = txid;
                 rec.OutpointsJson = JsonConvert.SerializeObject((outpoints ?? Enumerable.Empty<string>()).Select(o => o.Trim().ToLowerInvariant()).ToList());
                 rec.Timestamp = TimeUtil.GetTime();
                 if (rec.Id == 0) rec.FirstSignedAt = rec.Timestamp;
