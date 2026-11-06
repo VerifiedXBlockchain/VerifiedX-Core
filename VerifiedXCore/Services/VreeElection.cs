@@ -396,7 +396,7 @@ namespace VerifiedXCore.Services
             if (epoch == null) return null;
             // Rung r+1 of this stall is a sibling of rung r, and outranks a seed reset of this stall (the reset's sibling too).
             var prev = head.EffectiveFromHeight > tipHeight && (head.ChangeType == CasterMembershipStore.BootstrapResetChangeType
-                       || (head.ChangeType == EmergencyElectionChangeType && head.EpochHash == tipHash))
+                       || (head.ChangeType == EmergencyElectionChangeType && string.Equals(head.EpochHash, tipHash, StringComparison.OrdinalIgnoreCase)))
                 ? bySeq(head.RecordSeq - 1) : head;
             if (prev == null) return null;
             return new ElectionView
@@ -804,6 +804,9 @@ namespace VerifiedXCore.Services
         public static void NoteRatified(string? epochHash, string? recordHash, long? nowUnix = null)
         {
             if (string.IsNullOrEmpty(epochHash) || string.IsNullOrEmpty(recordHash)) return;
+            // The signed payload lowercases the epoch hash, so a relay can recase it: key on the canonical spelling.
+            epochHash = ConsensusMessageFormatter.NormalizeHash(epochHash);
+            recordHash = ConsensusMessageFormatter.NormalizeHash(recordHash);
             if (_ratifiedSeen.Count > 64) { _ratifiedSeen.Clear(); _ratifiedNoted.Clear(); }
             if (_ratifiedNoted.TryAdd(recordHash, 1))
                 _ratifiedSeen[epochHash] = nowUnix ?? TimeUtil.GetTime();
@@ -812,7 +815,8 @@ namespace VerifiedXCore.Services
         /// <summary>Whether a ratified rung of this election was seen within the hold. A record held from before a restart counts from the restart.</summary>
         public static bool WithinRatifiedHold(CasterMembershipRecord? head, string epochHash, long nowUnix)
         {
-            if (IsElectionRecord(head) && head!.EpochHash == epochHash && !_ratifiedSeen.ContainsKey(epochHash))
+            epochHash = ConsensusMessageFormatter.NormalizeHash(epochHash);
+            if (IsElectionRecord(head) && ConsensusMessageFormatter.NormalizeHash(head!.EpochHash) == epochHash && !_ratifiedSeen.ContainsKey(epochHash))
                 _ratifiedSeen[epochHash] = nowUnix;
             return _ratifiedSeen.TryGetValue(epochHash, out var seen) && nowUnix - seen < RatifiedHoldSeconds;
         }

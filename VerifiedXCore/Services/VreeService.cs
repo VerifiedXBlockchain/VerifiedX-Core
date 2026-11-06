@@ -402,9 +402,18 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>The record a block carries goes into the store once the block's certificate verifies under it. False: the block must wait.</summary>
-        public static bool AdoptFromBlock(Block block, out string refusal)
+        public static bool AdoptFromBlock(Block block, out string refusal) => AdoptFromBlock(block, out refusal, out _);
+
+        /// <summary>
+        /// As above. <paramref name="undo"/> is set when the record replaced siblings here: it puts the stored records back and
+        /// reconciles the caster set to them, for a block that is refused after its record went in (the store is outside the
+        /// block's rollback).
+        /// A record that only extends the head stays, as it would from gossip: it is ratified whatever its block turns out to be.
+        /// </summary>
+        public static bool AdoptFromBlock(Block block, out string refusal, out Action? undo)
         {
             refusal = "";
+            undo = null;
             var record = block.MembershipRecord;
             if (record == null) return true;
             var head = CasterMembershipStore.GetCurrent();
@@ -421,9 +430,28 @@ namespace VerifiedXCore.Services
                 refusal = "its certificate is not that of the record it carries";
                 return false;
             }
+            var storedBefore = CasterMembershipStore.RecordsFrom(record.RecordSeq);
+            var wasCaster = Globals.IsBlockCaster;
             if (!CasterMembershipStore.AdoptCarried(record, out refusal))
                 return false;
             CasterMembershipService.ReconcileBlockCastersToRecord(record);
+            if (storedBefore.Count == 0) return true;
+            undo = () =>
+            {
+                if (!CasterMembershipStore.RestoreRecordsFrom(record, storedBefore))
+                {
+                    CasterLogUtility.Log($"MEMBERSHIP: block {block.Height} was refused, but the records from seq {record.RecordSeq} changed since its record went in; they are left as they are.", "MEMBERSHIP");
+                    return;
+                }
+                // The caster set follows the restored record that holds the seats now (below a rotation not in force yet), the
+                // way every membership writer sets it, rather than an old copy put back over what discovery has done since.
+                var seats = CasterMembershipStore.GetSeatRecord();
+                if (seats == null) return;
+                CasterMembershipService.ReconcileBlockCastersToRecord(seats);
+                if (wasCaster && seats.Casters.Any(c => c.Address == Globals.ValidatorAddress))
+                    Globals.IsBlockCaster = true;
+                CasterLogUtility.Log($"MEMBERSHIP: block {block.Height} was refused after its record seq {record.RecordSeq} replaced siblings; they are put back.", "MEMBERSHIP");
+            };
             return true;
         }
 

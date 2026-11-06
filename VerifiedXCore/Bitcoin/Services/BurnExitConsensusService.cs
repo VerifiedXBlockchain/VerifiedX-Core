@@ -874,6 +874,10 @@ namespace VerifiedXCore.Bitcoin.Services
                     return;
                 }
 
+                // The signers give no share until the EXIT_TO_BTC is past reorg depth: a ceremony started sooner fails, and
+                // a failed one is retried through a FAIL and a fresh exit.
+                await FROST.FrostSigningAuthorization.WaitForRequestToSettleAsync(VBTCBridgeBtcExitState.GetByBurnHash(record.BaseBurnTxHash)?.ExitVfxHeight ?? 0);
+
                 LogUtility.Log($"[BurnExitConsensus] VFX EXIT_TO_BTC confirmed in block. Proceeding to FROST signing for burn {record.BaseBurnTxHash}.",
                     "BurnExitConsensusService.ExecuteBtcExit()");
             }

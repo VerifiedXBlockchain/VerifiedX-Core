@@ -964,6 +964,30 @@ namespace VerifiedXCore.Services
         internal static bool MissingWhilePeersHaveOne()
             => MissingWhilePeersHaveOne(GetCurrent()?.RecordSeq, CasterDiscoveryService.LastObservedPeerHeads);
 
+        /// <summary>The stored records from this seq up, so a block refused after its carried record was adopted can put them back.</summary>
+        public static List<CasterMembershipRecord> RecordsFrom(long seq) =>
+            Collection()?.Query().Where(x => x.RecordSeq >= seq).ToList() ?? new List<CasterMembershipRecord>();
+
+        /// <summary>
+        /// Replaces the stored records from the adopted record's seq up with ones taken by <see cref="RecordsFrom"/>, only
+        /// while that record is still the only one there. False when another writer (gossip, a pull) has changed them since:
+        /// their record stands.
+        /// </summary>
+        public static bool RestoreRecordsFrom(CasterMembershipRecord adopted, List<CasterMembershipRecord> records)
+        {
+            lock (Mut)
+            {
+                var col = Collection() ?? throw new InvalidOperationException("the record store is unavailable");
+                var now = col.Query().Where(x => x.RecordSeq >= adopted.RecordSeq).ToList();
+                if (now.Count != 1 || !string.Equals(now[0].RecordHash, adopted.RecordHash, StringComparison.OrdinalIgnoreCase))
+                    return false;
+                col.Delete(adopted.RecordSeq);
+                foreach (var r in records) col.Upsert(r.RecordSeq, r);
+                _cachedHead = null;
+                return true;
+            }
+        }
+
         /// <summary>Test/diagnostic support: clears the in-memory head cache (persisted data untouched).</summary>
         public static void InvalidateCache()
         {

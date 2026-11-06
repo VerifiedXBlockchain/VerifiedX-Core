@@ -619,6 +619,7 @@ namespace VerifiedXCore.Services
             await ValidateBlockSemaphore.WaitAsync();
 
             long? committedHeight = null; // set once the block is written: from then on a failure leaves the state behind it
+            Action? undoCarriedRecord = null; // set once the block's record replaces siblings, cleared once the block is taken
 
             try
             {
@@ -792,7 +793,7 @@ namespace VerifiedXCore.Services
 
                 // The record goes into the store once its block's certificate holds, on a sync as on a live block.
                 if (!validateOnly && block.MembershipRecord != null && block.Height == Globals.LastBlock.Height + 1
-                    && !VreeService.AdoptFromBlock(block, out var adoptRefusal))
+                    && !VreeService.AdoptFromBlock(block, out var adoptRefusal, out undoCarriedRecord))
                 {
                     LogUtility.Log($"[ValidateBlock] VREE: block {block.Height} refused — {adoptRefusal}", "BlockValidatorService");
                     ValidatorMembershipPull.RequestSoon();
@@ -1706,6 +1707,8 @@ namespace VerifiedXCore.Services
                         if (validateOnly)
                             return result;
 
+                        undoCarriedRecord = null; // the block is taken: its record stays
+
                         //For testing purposes
                         //if (block.Height == 272333)
                         //{
@@ -2104,6 +2107,12 @@ namespace VerifiedXCore.Services
             }
             finally
             {
+                // Every refusal after the record went in returns through here.
+                if (undoCarriedRecord != null)
+                {
+                    try { undoCarriedRecord(); }
+                    catch (Exception ex) { ErrorLogUtility.LogError($"[ValidateBlock] Could not undo the record of refused block {block.Height}: {ex.Message}", "BlockValidatorService.ValidateBlock()"); }
+                }
                 try { ValidateBlockSemaphore.Release(); } catch { }
             }
                         

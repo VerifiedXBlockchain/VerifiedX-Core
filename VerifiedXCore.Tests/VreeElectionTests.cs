@@ -731,6 +731,27 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ARelayThatRecasesTheEpochHash_LeavesTheNextRungsPredecessorAndTheHoldAsTheyWere()
+        {
+            var rung0 = Ratified(0);
+            var recased = JsonConvert.DeserializeObject<CasterMembershipRecord>(JsonConvert.SerializeObject(rung0))!;
+            recased.EpochHash = rung0.EpochHash.ToUpperInvariant();
+            Assert.NotEqual(rung0.EpochHash, recased.EpochHash);
+            Assert.Equal(rung0.RecordHash, CasterMembershipStore.ComputeRecordHash(recased)); // the signatures still hold
+            Assert.True(CasterMembershipStore.TryAppend(recased, out var why), why);
+            VreeElection.ClearCachesForTests();
+
+            StallAt(H, 700);
+            var view = View();
+            Assert.Equal(rung0.PrevRecordHash, view.Prev.RecordHash); // rung 3 is still rung 0's sibling
+            Assert.True(VreeElection.WithinRatifiedHold(CasterMembershipStore.GetCurrent(), view.Epoch.EpochHash, TimeUtil.GetTime()));
+
+            VreeElection.ClearCachesForTests();
+            VreeElection.NoteRatified(rung0.EpochHash.ToUpperInvariant(), rung0.RecordHash, 1_000_000);
+            Assert.True(VreeElection.WithinRatifiedHold(null, rung0.EpochHash, 1_000_000));
+        }
+
+        [Fact]
         public void ARungsOwnMemberInstallsItOverADeadSibling_UntilTheSiblingHasStarted()
         {
             var rung0 = Ratified(0);
@@ -802,6 +823,86 @@ namespace VerifiedXCore.Tests
             Assert.True(ConsensusCertificateVerifier.VerifyOrNotRequired(block));
             Assert.True(VreeService.AdoptFromBlock(block, out var why), why);
             Assert.Equal(record.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+        }
+
+        [Fact]
+        public async Task ABlockRefusedAfterItsRecordReplacedASibling_PutsTheSiblingAndTheCasterSetBack()
+        {
+            var rung0 = Ratified(0);
+            Assert.True(CasterMembershipStore.TryAppend(rung0, out _));
+            StallAt(H, 700);
+            var rung3 = Ratified(3);
+            var outgoing = rung0.Casters.First(c => rung3.Casters.All(z => z.Address != c.Address)).Address;
+            Globals.ValidatorAddress = outgoing;
+            Globals.IsBlockCaster = true;
+
+            // A real producer signature and certificate over a wrong merkle root: refused after the record went in.
+            var producer = _electors[11];
+            var block = ProducedBlock(producer, Members(rung3).Take(3), rung3, merkleRoot: "not-the-merkle-root");
+            var since = DateTime.UtcNow;
+
+            Assert.False(await BlockValidatorService.ValidateBlock(block, false));
+            Assert.Equal("BlockValidatorService.ValidateBlock()-10", StepsSince(since).LastOrDefault()); // the rebuilt hash covers the merkle root
+
+            CasterMembershipStore.InvalidateCache();
+            Assert.Equal(rung0.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+            Assert.Equal(rung0.Casters.Select(c => c.Address).OrderBy(a => a, StringComparer.Ordinal),
+                Globals.BlockCasters.Select(p => p.ValidatorAddress!).OrderBy(a => a, StringComparer.Ordinal));
+            Assert.True(Globals.IsBlockCaster);
+        }
+
+        [Fact]
+        public async Task ABlockRefusedAfterItsRungReplacedAPendingRotation_PutsTheSittingCommitteeBack()
+        {
+            var interim = InstallInterim();
+            var L = interim.LapseHeight;
+            StallAt(L, 5);
+            VreeElection.ClearCachesForTests();
+            var view0 = View();
+            var electors = view0.Epoch.Electors.Keys.OrderBy(a => a, StringComparer.Ordinal).Take(view0.Epoch.RatifyNeeded).Select(Of).ToList();
+            var rotation0 = Signed(view0.Build(0), electors);
+            Assert.True(CasterMembershipStore.TryAppend(rotation0, out var why), why);
+            Assert.True(VreeElection.RotationPending(rotation0, L));
+
+            StallAt(L, 400);
+            VreeElection.ClearCachesForTests();
+            var view = View();
+            var rung1 = Signed(view.Build(1), electors);
+            Assert.Equal(L + 1, rung1.EffectiveFromHeight);
+            var sitting = interim.Casters.First(c => rung1.Casters.All(z => z.Address != c.Address)).Address;
+            Globals.ValidatorAddress = sitting;
+            Globals.IsBlockCaster = true;
+
+            var block = ProducedBlock(_electors[11], Members(rung1).Take(3), rung1, merkleRoot: "not-the-merkle-root");
+            Assert.False(await BlockValidatorService.ValidateBlock(block, false));
+
+            CasterMembershipStore.InvalidateCache();
+            Assert.Equal(rotation0.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+            Assert.Equal(interim.Casters.Select(c => c.Address).OrderBy(a => a, StringComparer.Ordinal),
+                Globals.BlockCasters.Select(p => p.ValidatorAddress!).OrderBy(a => a, StringComparer.Ordinal));
+            Assert.True(Globals.IsBlockCaster);
+        }
+
+        [Fact]
+        public void UndoingACarriedRecord_LeavesARecordAnotherWriterStoredSince()
+        {
+            var rung0 = Ratified(0);
+            Assert.True(CasterMembershipStore.TryAppend(rung0, out _));
+            StallAt(H, 700);
+            var rung3 = Ratified(3);
+            var block = ProducedBlock(_electors[11], Members(rung3).Take(3), rung3);
+            Assert.True(VreeService.AdoptFromBlock(block, out var why, out var undo), why);
+            Assert.NotNull(undo);
+
+            var later = JsonConvert.DeserializeObject<CasterMembershipRecord>(JsonConvert.SerializeObject(rung3))!;
+            later.RecordHash = "stored-by-gossip-meanwhile";
+            Store(later);
+            var castersMeanwhile = new System.Collections.Concurrent.ConcurrentBag<Peers>();
+            Globals.BlockCasters = castersMeanwhile;
+
+            undo!();
+            Assert.Equal("stored-by-gossip-meanwhile", CasterMembershipStore.GetBySeq(rung3.RecordSeq)!.RecordHash);
+            Assert.Same(castersMeanwhile, Globals.BlockCasters);
         }
 
         [Fact]
@@ -1033,7 +1134,7 @@ namespace VerifiedXCore.Tests
 
         // ── Through ValidateBlock ────────────────────────────────────────────────────────────────
 
-        private Block ProducedBlock(Member producer, IEnumerable<Member> attestors, CasterMembershipRecord? carried)
+        private Block ProducedBlock(Member producer, IEnumerable<Member> attestors, CasterMembershipRecord? carried, string? merkleRoot = null)
         {
             var height = Globals.LastBlock.Height + 1;
             var prev = Globals.LastBlock.Hash;
@@ -1043,7 +1144,7 @@ namespace VerifiedXCore.Tests
                 Validator = producer.Address, ValidatorAnswer = ProofUtility.ComputeVrf(producer.Pub, height, VrfSeed.ThirdInput(height, prev)!).ProofHash,
                 ChainRefId = "test-chain", Transactions = new List<Transaction>(), MembershipRecord = carried,
             };
-            block.MerkleRoot = block.MerkleRootOf();
+            block.MerkleRoot = merkleRoot ?? block.MerkleRootOf();
             block.Hash = block.GetBlockHash();
             block.ValidatorSignature = SignatureService.CreateSignature(block.Hash, producer.Key, producer.Pub);
             var msg = ConsensusMessageFormatter.FormatAttestationV1(block.Height, block.Hash, block.Validator, block.PrevHash);
