@@ -2381,33 +2381,41 @@ namespace VerifiedXCore.Services
         /// <summary>The last time a peer's records above our head were all refused: who, and why. Diagnostics.</summary>
         internal static string? LastAdoptionRefusal { get; private set; }
 
+        /// <summary>One peer's membership records after a seq (GetMembershipRecord), or null when it does not answer. Replaceable for tests.</summary>
+        internal static Func<string, long, Task<MembershipRecordResponse?>> FetchMembershipResponse = async (ip, sinceSeq) =>
+        {
+            using var client = Globals.HttpClientFactory.CreateClient();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+            var url = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/GetMembershipRecord/{sinceSeq}";
+            var resp = await client.GetAsync(url, cts.Token);
+            if (!resp.IsSuccessStatusCode) return null;
+            var body = await resp.Content.ReadAsStringAsync();
+            return Newtonsoft.Json.JsonConvert.DeserializeObject<MembershipRecordResponse>(body);
+        };
+
         /// <summary>
         /// Wave 3: record-era adoption. Pulls membership records after our head from up to 10 peers
         /// in parallel, verifies each chain locally (TryAppendChain runs full successor validation),
         /// adopts the highest valid seq, heals stragglers by pushing them the records they miss,
         /// and returns the adopted committee as a Peers list (null = no record available anywhere).
         /// </summary>
-        internal static async Task<List<Peers>?> FetchAndAdoptMembershipAsync(List<string> peerIPs, bool reconcileWhenUnchanged = true, bool observeHeads = false)
+        /// <param name="carried">Records a peer pushed with its message (a caster's probe): one more response to the same pull,
+        /// adopted only as the responders' own are, so nothing is taken on that peer's word alone at a seq the others contest.</param>
+        internal static async Task<List<Peers>?> FetchAndAdoptMembershipAsync(List<string> peerIPs, bool reconcileWhenUnchanged = true, bool observeHeads = false,
+            (string Ip, long HeadSeq, List<CasterMembershipRecord> Records)? carried = null)
         {
             var localHead = CasterMembershipStore.GetCurrent();
             var localHeadSeq = localHead?.RecordSeq ?? -1;
 
             var responses = new System.Collections.Concurrent.ConcurrentBag<(string Ip, long HeadSeq, List<CasterMembershipRecord> Records)>();
+            if (carried is { } pushed) responses.Add(pushed);
             var tasks = peerIPs.Select(async ip =>
             {
                 try
                 {
-                    using var client = Globals.HttpClientFactory.CreateClient();
-                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
                     // ROTATION-LIVENESS: GetSince is exclusive; ask from head-1 so the peer also returns its record
-
                     // AT our head seq — a canonical sibling (same set, lower hash) is adopted by TryAppend.
-
-                    var url = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/GetMembershipRecord/{localHeadSeq - 1}";
-                    var resp = await client.GetAsync(url, cts.Token);
-                    if (!resp.IsSuccessStatusCode) return;
-                    var body = await resp.Content.ReadAsStringAsync();
-                    var parsed = Newtonsoft.Json.JsonConvert.DeserializeObject<MembershipRecordResponse>(body);
+                    var parsed = await FetchMembershipResponse(ip, localHeadSeq - 1);
                     if (parsed != null)
                         responses.Add((ip, parsed.HeadSeq, parsed.Records ?? new List<CasterMembershipRecord>()));
                 }

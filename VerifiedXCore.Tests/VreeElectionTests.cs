@@ -47,6 +47,7 @@ namespace VerifiedXCore.Tests
         private readonly Func<(string Address, PrivateKey? Key, string PublicKey)> _priorLocalKey = VreeService.LocalKey;
         private readonly Func<string, string, Task<string?>> _priorGet = VreeService.HttpGet;
         private readonly Func<string, string, string, Task<string?>> _priorPost = VreeService.HttpPost;
+        private readonly Func<string, long, Task<MembershipRecordResponse?>> _priorFetch = CasterDiscoveryService.FetchMembershipResponse;
         private readonly System.Collections.Concurrent.ConcurrentBag<Peers> _priorBag = Globals.BlockCasters;
 
         private readonly AsyncLocal<Member?> _who = new();
@@ -84,6 +85,7 @@ namespace VerifiedXCore.Tests
             VreeService.LocalKey = () => _who.Value is { } m ? (m.Address, m.Key, m.Pub) : ("", null, "");
             VreeService.HttpGet = (_, _) => Task.FromResult<string?>(null);
             VreeService.HttpPost = (_, _, _) => Task.FromResult<string?>(null);
+            CasterDiscoveryService.FetchMembershipResponse = (_, _) => Task.FromResult<MembershipRecordResponse?>(null);
 
             for (var i = 0; i < 5; i++) _committee.Add(NewMember());
             for (var i = 0; i < 12; i++) _electors.Add(NewMember());
@@ -111,6 +113,7 @@ namespace VerifiedXCore.Tests
             VreeService.LocalKey = _priorLocalKey;
             VreeService.HttpGet = _priorGet;
             VreeService.HttpPost = _priorPost;
+            CasterDiscoveryService.FetchMembershipResponse = _priorFetch;
             VreeElection.ClearCachesForTests();
             VreeService.ResetForTests();
             CasterMembershipStore.InvalidateCache();
@@ -1989,11 +1992,52 @@ namespace VerifiedXCore.Tests
             var without = await VreeService.AnswerProbeAsync(probe, null);
             Assert.False(without.Ack); // the elector is not on the committee it holds, so the certificate falls short
 
+            VreeService.ResetForTests(); // the pull the refused probe made spaces the next one
             probe.Records = new List<CasterMembershipRecord> { promoted };
             var with = await VreeService.AnswerProbeAsync(probe, null);
             Assert.True(with.Ack, with.Reason);
             Assert.Equal(HeadSeq + 1, with.RecordSeq);
             Assert.Equal(promoted.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+        }
+
+        [Fact]
+        public async Task AProbesRecord_IsNotTakenOnTheProbersWord_AtASeqItsPeersContest()
+        {
+            // Two majority-signed promotions at the same seq, the equivocation a released signed mark allows: the prober carries
+            // one, a committee member holds the other. The probe's record goes into one pull with the peers' answers.
+            var sideA = Signed(Ordinary(HeadSeq + 1, H, _head.RecordHash, _committee.Take(4).Append(_electors[11]), "Promotion"), _committee.Take(3));
+            var sideB = Signed(Ordinary(HeadSeq + 1, H, _head.RecordHash, _committee.Take(4).Append(_electors[10]), "Promotion"), _committee.Take(3));
+            StallAt(H - 1, 5);
+            var tip = BlockAt(H, Globals.LastBlock.Hash, 5, new[] { _committee[0], _committee[1], _electors[11] });
+            _who.Value = _electors[0];
+            var probe = ProbeFor(tip, _committee[0].Address);
+            probe.Records = new List<CasterMembershipRecord> { sideA };
+            var asked = new System.Collections.Concurrent.ConcurrentBag<string>();
+            MembershipRecordResponse? Holding(CasterMembershipRecord r) => new() { HeadSeq = r.RecordSeq, Records = new List<CasterMembershipRecord> { r } };
+            CasterDiscoveryService.FetchMembershipResponse = (ip, _) => { asked.Add(ip); return Task.FromResult(ip == _committee[1].Ip ? Holding(sideB) : null); };
+
+            var contested = await VreeService.AnswerProbeAsync(probe, _committee[0].Ip);
+
+            Assert.False(contested.Ack);
+            Assert.Equal(HeadSeq, CasterMembershipStore.GetCurrent()!.RecordSeq); // neither side
+            Assert.Contains(_committee[1].Ip, asked); // the committee this node holds was asked
+            Assert.Contains(_committee[0].Ip, asked); // and the prober
+
+            // The same probe where the peers hold what it carries: the record is taken, and the tip verifies.
+            VreeService.ResetForTests();
+            CasterDiscoveryService.FetchMembershipResponse = (ip, _) => Task.FromResult(ip == _committee[1].Ip ? Holding(sideA) : null);
+            var agreed = await VreeService.AnswerProbeAsync(probe, _committee[0].Ip);
+            Assert.True(agreed.Ack, agreed.Reason);
+            Assert.Equal(sideA.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+
+            // A second probe inside the pull's spacing adopts nothing on its own: the record waits for the next pull.
+            DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Delete(sideA.RecordSeq);
+            CasterMembershipStore.InvalidateCache();
+            VreeService.ResetForTests();
+            CasterDiscoveryService.FetchMembershipResponse = (_, _) => Task.FromResult<MembershipRecordResponse?>(null);
+            Assert.False((await VreeService.AnswerProbeAsync(ProbeFor(tip, _committee[0].Address), _committee[0].Ip)).Ack);
+            Assert.False((await VreeService.AnswerProbeAsync(probe, _committee[0].Ip)).Ack);
+            Assert.Equal(HeadSeq, CasterMembershipStore.GetCurrent()!.RecordSeq);
         }
 
         [Fact]
