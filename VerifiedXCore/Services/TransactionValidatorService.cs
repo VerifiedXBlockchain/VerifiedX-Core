@@ -243,7 +243,7 @@ namespace VerifiedXCore.Services
             return null;
         }
 
-        public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false, bool twSkipVerify = false, Dictionary<string, long> processedNonces = null, bool skipPrivatePlonkProofVerification = false, long? blockHeight = null, long? blockTimestamp = null)
+        public static async Task<(bool, string)> VerifyTX(Transaction txRequest, bool blockDownloads = false, bool blockVerify = false, bool twSkipVerify = false, Dictionary<string, long> processedNonces = null, bool skipPrivatePlonkProofVerification = false, long? blockHeight = null, long? blockTimestamp = null, string? blockValidator = null)
         {
             bool txResult = false;
             bool runReserveCheck = true;
@@ -489,8 +489,11 @@ namespace VerifiedXCore.Services
             // Skip validation during block sync, enforce for new transactions
             if (blockTime != null)
             {
-                if (LedgerIntegrityRules.TimestampOutsideItsBlock(txRequest, blockTime.Value))
-                    return (txResult, LedgerIntegrityRules.TimestampOutsideItsBlockMessage);
+                // A withdrawal request a validator signed for may be older than that in a block one of its vault's key holders
+                // produced (from Globals.VreeActivationHeight); everything else is refused as before.
+                if (LedgerIntegrityRules.TimestampOutsideItsBlock(txRequest, blockTime.Value)
+                    && LedgerIntegrityRules.AgedWithdrawalRequestRefusal(txRequest, blockHeight, blockTime.Value, blockValidator) is { } agedRefusal)
+                    return (txResult, agedRefusal);
             }
             else if (!blockDownloads)
             {

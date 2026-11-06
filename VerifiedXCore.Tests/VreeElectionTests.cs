@@ -47,6 +47,7 @@ namespace VerifiedXCore.Tests
         private readonly Func<(string Address, PrivateKey? Key, string PublicKey)> _priorLocalKey = VreeService.LocalKey;
         private readonly Func<string, string, Task<string?>> _priorGet = VreeService.HttpGet;
         private readonly Func<string, string, string, Task<string?>> _priorPost = VreeService.HttpPost;
+        private readonly Func<string, long, Task<MembershipRecordResponse?>> _priorFetch = CasterDiscoveryService.FetchMembershipResponse;
         private readonly System.Collections.Concurrent.ConcurrentBag<Peers> _priorBag = Globals.BlockCasters;
 
         private readonly AsyncLocal<Member?> _who = new();
@@ -84,6 +85,7 @@ namespace VerifiedXCore.Tests
             VreeService.LocalKey = () => _who.Value is { } m ? (m.Address, m.Key, m.Pub) : ("", null, "");
             VreeService.HttpGet = (_, _) => Task.FromResult<string?>(null);
             VreeService.HttpPost = (_, _, _) => Task.FromResult<string?>(null);
+            CasterDiscoveryService.FetchMembershipResponse = (_, _) => Task.FromResult<MembershipRecordResponse?>(null);
 
             for (var i = 0; i < 5; i++) _committee.Add(NewMember());
             for (var i = 0; i < 12; i++) _electors.Add(NewMember());
@@ -111,6 +113,7 @@ namespace VerifiedXCore.Tests
             VreeService.LocalKey = _priorLocalKey;
             VreeService.HttpGet = _priorGet;
             VreeService.HttpPost = _priorPost;
+            CasterDiscoveryService.FetchMembershipResponse = _priorFetch;
             VreeElection.ClearCachesForTests();
             VreeService.ResetForTests();
             CasterMembershipStore.InvalidateCache();
@@ -862,7 +865,7 @@ namespace VerifiedXCore.Tests
             var electors = view0.Epoch.Electors.Keys.OrderBy(a => a, StringComparer.Ordinal).Take(view0.Epoch.RatifyNeeded).Select(Of).ToList();
             var rotation0 = Signed(view0.Build(0), electors);
             Assert.True(CasterMembershipStore.TryAppend(rotation0, out var why), why);
-            Assert.True(VreeElection.RotationPending(rotation0, L));
+            Assert.True(VreeElection.RotationPending(rotation0, L, CasterMembershipStore.GetBySeq));
 
             StallAt(L, 400);
             VreeElection.ClearCachesForTests();
@@ -1324,6 +1327,90 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void ANodeCatchingUpInsideTheHandoverWindow_TakesTheRecordTheCommitteeSignedDuringItsTerm()
+        {
+            var interim = InstallInterim();
+            var L = interim.LapseHeight;
+            var midTerm = Signed(Ordinary(interim.RecordSeq + 1, H + 30, interim.RecordHash, Members(interim).Take(4), "Demotion"), Members(interim).Take(3));
+
+            // The network: the rotation that ends the term chains on the mid-term record.
+            Store(midTerm);
+            StallAt(L, 5);
+            VreeElection.ClearCachesForTests();
+            var view = View();
+            Assert.Equal(midTerm.RecordHash, view.Prev.RecordHash);
+            var rotation = Signed(view.Build(0), view.Epoch.Electors.Keys.OrderBy(a => a, StringComparer.Ordinal).Take(view.Epoch.RatifyNeeded).Select(Of));
+
+            // This node: it missed the mid-term record, and its tip stopped inside the window, where the rotation's first block
+            // cannot be judged without that record. Announced live the record is refused, as before. From its peers, too, while
+            // the rotation is still being ratified: the window guards that, and a committee's record alone, or one with a junk
+            // election on top, moves nothing. With the ratified rotation chained on it, both are taken.
+            DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Delete(midTerm.RecordSeq);
+            CasterMembershipStore.InvalidateCache();
+            StallAt(L + 3, 5);
+            var first = BlockAt(L + VreeElection.HandoverBlocks, "parent-not-here", 0, Members(rotation).Take(3), rotation);
+            Assert.Equal(VreeElection.CarriedVerdict.CannotJudge, VreeElection.JudgeCarried(first));
+            Assert.False(CasterMembershipStore.ValidateSuccessor(interim, midTerm, out var live));
+            Assert.Contains("term ended", live);
+            Assert.Equal(0, CasterMembershipStore.TryAppendChain(new List<CasterMembershipRecord> { midTerm }, out var alone));
+            Assert.Contains("term ended", alone);
+            var junk = JsonConvert.DeserializeObject<CasterMembershipRecord>(JsonConvert.SerializeObject(rotation))!;
+            junk.Signatures = junk.Signatures.Take(1).ToList();
+            Assert.Equal(0, CasterMembershipStore.TryAppendChain(new List<CasterMembershipRecord> { midTerm, junk }, out var withJunk));
+            Assert.Contains("term ended", withJunk);
+            Assert.Equal(interim.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+            Assert.Equal(2, CasterMembershipStore.TryAppendChain(new List<CasterMembershipRecord> { midTerm, rotation }, out var refusal));
+            Assert.Null(refusal);
+            Assert.Equal(rotation.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+            Assert.Equal(midTerm.RecordHash, CasterMembershipStore.GetBySeq(midTerm.RecordSeq)!.RecordHash);
+
+            // With them, the rotation's block is judged once this node reaches its parent.
+            StallAt(L + VreeElection.HandoverBlocks - 1, 5);
+            first = BlockAt(L + VreeElection.HandoverBlocks, Globals.LastBlock.Hash, 0, Members(rotation).Take(3), rotation);
+            Assert.Equal(VreeElection.CarriedVerdict.Valid, VreeElection.JudgeCarried(first));
+        }
+
+        [Fact]
+        public void ANodeThatMissedTwoMidTermRecords_TakesBothWithTheRotationThatEndsTheTerm()
+        {
+            var interim = InstallInterim();
+            var L = interim.LapseHeight;
+            var first = Signed(Ordinary(interim.RecordSeq + 1, H + 30, interim.RecordHash, Members(interim).Take(4), "Demotion"), Members(interim).Take(3));
+            var second = Signed(Ordinary(interim.RecordSeq + 2, H + 50, first.RecordHash, Members(interim), "Promotion"), Members(first).Take(3));
+
+            // The network: the rotation chains on the second of two mid-term records.
+            Store(first);
+            Store(second);
+            StallAt(L, 5);
+            VreeElection.ClearCachesForTests();
+            var view = View();
+            Assert.Equal(second.RecordHash, view.Prev.RecordHash);
+            var rotation = Signed(view.Build(0), view.Epoch.Electors.Keys.OrderBy(a => a, StringComparer.Ordinal).Take(view.Epoch.RatifyNeeded).Select(Of));
+
+            // This node missed both, and its tip stopped inside the window. The two alone are refused, as one alone is; the whole
+            // run through the ratified rotation is judged before any of it goes in, and then all three are taken.
+            var col = DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership");
+            col.Delete(second.RecordSeq);
+            col.Delete(first.RecordSeq);
+            CasterMembershipStore.InvalidateCache();
+            StallAt(L + 3, 5);
+            Assert.Equal(0, CasterMembershipStore.TryAppendChain(new List<CasterMembershipRecord> { first, second }, out var alone));
+            Assert.Contains("term ended", alone);
+            Assert.Equal(interim.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+            // A run that breaks before the rotation gives the first record no exception either.
+            var broken = JsonConvert.DeserializeObject<CasterMembershipRecord>(JsonConvert.SerializeObject(second))!;
+            broken.Signatures = broken.Signatures.Take(1).ToList();
+            Assert.Equal(0, CasterMembershipStore.TryAppendChain(new List<CasterMembershipRecord> { first, broken, rotation }, out _));
+            Assert.Equal(interim.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+
+            Assert.Equal(3, CasterMembershipStore.TryAppendChain(new List<CasterMembershipRecord> { first, second, rotation }, out var refusal));
+            Assert.Null(refusal);
+            Assert.Equal(rotation.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+            Assert.Equal(first.RecordHash, CasterMembershipStore.GetBySeq(first.RecordSeq)!.RecordHash);
+            Assert.Equal(second.RecordHash, CasterMembershipStore.GetBySeq(second.RecordSeq)!.RecordHash);
+        }
+
+        [Fact]
         public void test_drill_7_handover_rung_0_takes_effect_twelve_blocks_on_and_the_interim_produces_until_then()
         {
             var interim = InstallInterim();
@@ -1359,6 +1446,57 @@ namespace VerifiedXCore.Tests
             Assert.Null(VreeElection.PrepareBlockRecord(first));
             Assert.Equal(rotation.RecordHash, first.MembershipRecord!.RecordHash);
             Assert.True(ConsensusCertificateVerifier.VerifyOrNotRequired(first));
+        }
+
+        [Fact]
+        public void AHoldTheIncomingCommitteeSignsOverItsPendingRotation_LeavesTheOutgoingMembersInTheirSeats()
+        {
+            var interim = InstallInterim();
+            var L = interim.LapseHeight;
+            StallAt(L, 5);
+            VreeElection.ClearCachesForTests();
+            var view = View();
+            var electors = view.Epoch.Electors.Keys.OrderBy(a => a, StringComparer.Ordinal).Take(view.Epoch.RatifyNeeded).Select(Of);
+            var rotation = Signed(view.Build(0), electors);
+            Assert.True(CasterMembershipStore.TryAppend(rotation, out var why), why);
+            Assert.Equal(L + VreeElection.HandoverBlocks, rotation.EffectiveFromHeight);
+
+            // The incoming committee signs a hold over its rotation, which has not taken effect yet. The hold is a valid successor.
+            var hold = new CasterMembershipRecord
+            {
+                RecordSeq = rotation.RecordSeq + 1, PrevRecordHash = rotation.RecordHash, ChangeType = VreeElection.MaintenanceHoldChangeType,
+                EffectiveFromHeight = CasterMembershipStore.ComputeRotationEffectiveHeight(rotation.EffectiveFromHeight, L),
+                HoldSeconds = 600, SchemeVersion = VreeElection.SchemeVersionV1,
+                Casters = rotation.Casters.Select(c => new CasterInfo { Address = c.Address, PeerIP = c.PeerIP, PublicKey = c.PublicKey }).ToList(),
+            };
+            hold.RecordHash = CasterMembershipStore.ComputeRecordHash(hold);
+            Signed(hold, Members(rotation).Take(3));
+            Assert.True(CasterMembershipStore.TryAppend(hold, out why), why);
+            Assert.Equal(hold.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+
+            // The rotation is still pending under the hold: the seats stay with the interim, the live list does not move, and an
+            // interim member that is not in the rotation keeps its seat until the hand-over.
+            Assert.True(VreeElection.RotationPending(hold, L, CasterMembershipStore.GetBySeq));
+            Assert.Equal(interim.RecordHash, CasterMembershipStore.GetSeatRecord()!.RecordHash);
+            var sitting = interim.Casters.First(c => rotation.Casters.All(z => z.Address != c.Address)).Address;
+            Globals.ValidatorAddress = sitting;
+            Globals.IsBlockCaster = true;
+            CasterMembershipService.ReconcileBlockCastersToRecord(hold);
+            VreeService.ReconcileWhenRotationTakesOver();
+            Assert.Empty(Globals.BlockCasters);
+            Assert.True(Globals.IsBlockCaster);
+            // The rotation's members are freshly elected at its first block, hold or no hold.
+            Assert.True(VreeElection.FreshlyElected(hold, L + VreeElection.HandoverBlocks - 1, rotation.Casters[0].Address, CasterMembershipStore.GetBySeq));
+            Assert.False(VreeElection.FreshlyElected(hold, L + VreeElection.HandoverBlocks - 1, sitting, CasterMembershipStore.GetBySeq));
+
+            // At the block before its height the rotation takes the seats, through the hold, and the interim member stands down.
+            StallAt(L + VreeElection.HandoverBlocks - 1, 5);
+            Assert.False(VreeElection.RotationPending(hold, Globals.LastBlock.Height, CasterMembershipStore.GetBySeq));
+            Assert.Equal(hold.RecordHash, CasterMembershipStore.GetSeatRecord()!.RecordHash);
+            VreeService.ReconcileWhenRotationTakesOver();
+            Assert.Equal(rotation.Casters.Select(c => c.Address).OrderBy(a => a, StringComparer.Ordinal),
+                Globals.BlockCasters.Select(p => p.ValidatorAddress!).OrderBy(a => a, StringComparer.Ordinal));
+            Assert.False(Globals.IsBlockCaster);
         }
 
         [Fact]
@@ -1470,9 +1608,9 @@ namespace VerifiedXCore.Tests
             // It told the electorate, not just the twenty peers an ordinary record reaches: the casters they pull from are dead.
             Assert.Equal(view.Epoch.Electors.Count, announced.Count(a => a.EndsWith("AnnounceMembershipRecord")));
             // Its members cast without a resume: nobody could approve one.
-            Assert.True(VreeElection.FreshlyElected(head, H, member.Address));
-            Assert.False(VreeElection.FreshlyElected(head, H, _electors.First(e => !head.Casters.Any(c => c.Address == e.Address)).Address));
-            Assert.False(VreeElection.FreshlyElected(head, H + 1, member.Address));
+            Assert.True(VreeElection.FreshlyElected(head, H, member.Address, CasterMembershipStore.GetBySeq));
+            Assert.False(VreeElection.FreshlyElected(head, H, _electors.First(e => !head.Casters.Any(c => c.Address == e.Address)).Address, CasterMembershipStore.GetBySeq));
+            Assert.False(VreeElection.FreshlyElected(head, H + 1, member.Address, CasterMembershipStore.GetBySeq));
 
             // H + 1 under the new committee, on a node that holds the record.
             var block = BlockAt(H + 1, Globals.LastBlock.Hash, 0, Members(head).Take(3));
@@ -1894,11 +2032,87 @@ namespace VerifiedXCore.Tests
             var without = await VreeService.AnswerProbeAsync(probe, null);
             Assert.False(without.Ack); // the elector is not on the committee it holds, so the certificate falls short
 
+            VreeService.ResetForTests(); // the pull the refused probe made spaces the next one
             probe.Records = new List<CasterMembershipRecord> { promoted };
             var with = await VreeService.AnswerProbeAsync(probe, null);
             Assert.True(with.Ack, with.Reason);
             Assert.Equal(HeadSeq + 1, with.RecordSeq);
             Assert.Equal(promoted.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+        }
+
+        [Fact]
+        public async Task AProbesRecord_IsNotTakenOnTheProbersWord_AtASeqItsPeersContest()
+        {
+            // Two majority-signed promotions at the same seq, the equivocation a released signed mark allows: the prober carries
+            // one, a committee member holds the other. The probe's record goes into one pull with the peers' answers.
+            var sideA = Signed(Ordinary(HeadSeq + 1, H, _head.RecordHash, _committee.Take(4).Append(_electors[11]), "Promotion"), _committee.Take(3));
+            var sideB = Signed(Ordinary(HeadSeq + 1, H, _head.RecordHash, _committee.Take(4).Append(_electors[10]), "Promotion"), _committee.Take(3));
+            StallAt(H - 1, 5);
+            var tip = BlockAt(H, Globals.LastBlock.Hash, 5, new[] { _committee[0], _committee[1], _electors[11] });
+            _who.Value = _electors[0];
+            var probe = ProbeFor(tip, _committee[0].Address);
+            probe.Records = new List<CasterMembershipRecord> { sideA };
+            var asked = new System.Collections.Concurrent.ConcurrentBag<string>();
+            MembershipRecordResponse? Holding(CasterMembershipRecord r) => new() { HeadSeq = r.RecordSeq, Records = new List<CasterMembershipRecord> { r } };
+            CasterDiscoveryService.FetchMembershipResponse = (ip, _) => { asked.Add(ip); return Task.FromResult(ip == _committee[1].Ip ? Holding(sideB) : null); };
+
+            var contested = await VreeService.AnswerProbeAsync(probe, _committee[0].Ip);
+
+            Assert.False(contested.Ack);
+            Assert.Equal(HeadSeq, CasterMembershipStore.GetCurrent()!.RecordSeq); // neither side
+            Assert.Contains(_committee[1].Ip, asked); // the committee this node holds was asked
+            Assert.Contains(_committee[0].Ip, asked);
+
+            // The same probe where the peers hold what it carries: the record is taken, and the tip verifies.
+            VreeService.ResetForTests();
+            CasterDiscoveryService.FetchMembershipResponse = (ip, _) => Task.FromResult(ip == _committee[1].Ip ? Holding(sideA) : null);
+            var agreed = await VreeService.AnswerProbeAsync(probe, _committee[0].Ip);
+            Assert.True(agreed.Ack, agreed.Reason);
+            Assert.Equal(sideA.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+
+            // A second probe inside the pull's spacing adopts nothing on its own: the record waits for the next pull.
+            DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Delete(sideA.RecordSeq);
+            CasterMembershipStore.InvalidateCache();
+            VreeService.ResetForTests();
+            CasterDiscoveryService.FetchMembershipResponse = (_, _) => Task.FromResult<MembershipRecordResponse?>(null);
+            Assert.False((await VreeService.AnswerProbeAsync(ProbeFor(tip, _committee[0].Address), _committee[0].Ip)).Ack);
+            Assert.False((await VreeService.AnswerProbeAsync(probe, _committee[0].Ip)).Ack);
+            Assert.Equal(HeadSeq, CasterMembershipStore.GetCurrent()!.RecordSeq);
+        }
+
+        [Fact]
+        public async Task AnUnsignedRecordInAProbe_DoesNotHoldUpTheRecordItsPeersHold()
+        {
+            // The real promotion, which a committee member holds, and a made-up record at the same seq with no valid signature,
+            // which anyone can put in a probe. The made-up one is no response to the pull, so it contests nothing.
+            var real = Signed(Ordinary(HeadSeq + 1, H, _head.RecordHash, _committee.Take(4).Append(_electors[11]), "Promotion"), _committee.Take(3));
+            var madeUp = Ordinary(HeadSeq + 1, H, _head.RecordHash, _committee.Take(4).Append(_electors[10]), "Promotion");
+            var badlySigned = Signed(Ordinary(HeadSeq + 1, H, _head.RecordHash, _committee.Take(4).Append(_electors[9]), "Promotion"), _electors.Take(3));
+            StallAt(H - 1, 5);
+            var tip = BlockAt(H, Globals.LastBlock.Hash, 5, new[] { _committee[0], _committee[1], _electors[11] });
+            _who.Value = _electors[0];
+            CasterDiscoveryService.FetchMembershipResponse = (ip, _) => Task.FromResult<MembershipRecordResponse?>(
+                ip == _committee[1].Ip ? new MembershipRecordResponse { HeadSeq = real.RecordSeq, Records = new List<CasterMembershipRecord> { real } } : null);
+
+            foreach (var junk in new[] { madeUp, badlySigned })
+            {
+                var probe = ProbeFor(tip, _committee[0].Address);
+                probe.Records = new List<CasterMembershipRecord> { junk };
+                var answer = await VreeService.AnswerProbeAsync(probe, "203.0.113.7");
+                Assert.True(answer.Ack, answer.Reason);
+                Assert.Equal(real.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+
+                DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Delete(real.RecordSeq);
+                CasterMembershipStore.InvalidateCache();
+                VreeService.ResetForTests();
+            }
+
+            // Alone, with no peer answering, a made-up record is not taken either.
+            CasterDiscoveryService.FetchMembershipResponse = (_, _) => Task.FromResult<MembershipRecordResponse?>(null);
+            var lone = ProbeFor(tip, _committee[0].Address);
+            lone.Records = new List<CasterMembershipRecord> { madeUp };
+            Assert.False((await VreeService.AnswerProbeAsync(lone, "203.0.113.7")).Ack);
+            Assert.Equal(HeadSeq, CasterMembershipStore.GetCurrent()!.RecordSeq);
         }
 
         [Fact]

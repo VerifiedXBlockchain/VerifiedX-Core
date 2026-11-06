@@ -185,7 +185,7 @@ namespace VerifiedXCore.Services
         public static void ReconcileBlockCastersToRecord(CasterMembershipRecord record)
         {
             // A rotation replaces the whole committee a dozen blocks ahead: the outgoing members produce until then.
-            if (VreeElection.RotationPending(record, Globals.LastBlock?.Height ?? -1))
+            if (VreeElection.RotationPending(record, Globals.LastBlock?.Height ?? -1, CasterMembershipStore.GetBySeq))
                 return;
 
             var recordAddrs = record.Casters.Select(c => c.Address).ToHashSet(StringComparer.Ordinal);

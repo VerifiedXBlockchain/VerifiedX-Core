@@ -231,6 +231,27 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
         }
 
+        /// <summary>
+        /// Every Bitcoin transaction state has fixed for a payment of a vault the chain watches, live or dead: a withdrawal
+        /// by its request hash, one vault's part of a bridge exit by its signing reference. Empty when state holds none.
+        /// </summary>
+        public static List<string> TxidsFixedFor(string scUID, string signingReference)
+        {
+            // A signing session names its key; a later key of a vault has its own UID, and the rows are kept under the vault's.
+            var vault = BtcVaultKeys.VaultOf(scUID) ?? scUID;
+            vault = Stored(vault) ?? vault;
+            VaultWithdrawalRow? row;
+            if ((signingReference ?? "").StartsWith(VerifiedXCore.Bitcoin.FROST.FrostSigningAuthorization.BtcExitPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                var (exit, _, _) = VerifiedXCore.Bitcoin.FROST.FrostSigningAuthorization.ResolveBtcExitForContract(signingReference!, vault);
+                row = exit == null ? null : BtcAttestStore.Withdrawal(ExitRefOf(exit, vault));
+            }
+            else
+                // A withdrawal's row is named by its request and vault; a sweep's by its reference alone.
+                row = BtcAttestStore.Withdrawal(RefOf(signingReference ?? "", vault)) ?? BtcAttestStore.Withdrawal(signingReference ?? "");
+            return row?.Pins.Select(p => p.Txid).Where(t => !string.IsNullOrEmpty(t)).ToList() ?? new List<string>();
+        }
+
         /// <summary>The contract's UID as state holds it (a lookup ignores case; the tables here are keyed by the stored spelling).</summary>
         private static string? Stored(string? scUID) =>
             string.IsNullOrEmpty(scUID) ? scUID : SmartContractStateTrei.GetSmartContractState(scUID)?.SmartContractUID ?? scUID;

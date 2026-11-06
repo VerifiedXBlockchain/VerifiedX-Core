@@ -512,29 +512,49 @@ namespace VerifiedXCore.Services
         /// and takes effect nowhere past it: every new record would change what the electors sign, so a captured committee
         /// issuing one a minute could keep the rotation that ends its term from ever reaching two thirds.
         /// </summary>
-        internal static string? TermRefusal(CasterMembershipRecord prev, CasterMembershipRecord candidate, long tipHeight, Func<long, CasterMembershipRecord?> bySeq)
+        /// <param name="termEnded">The election record that ends this committee's term is in hand, ratified on top of
+        /// <paramref name="candidate"/> (membership sync carried both): nothing the committee signed can change what the
+        /// electors sign any more.</param>
+        internal static string? TermRefusal(CasterMembershipRecord prev, CasterMembershipRecord candidate, long tipHeight, Func<long, CasterMembershipRecord?> bySeq, bool termEnded = false)
         {
             if (TermOf(prev, bySeq) is not { } term || !Active(term.EffectiveFromHeight)) return null;
             if (candidate.EffectiveFromHeight > term.LapseHeight) return $"takes effect past the end of this committee's term at {term.LapseHeight}";
-            // Only while the rotation is open. A node far past it, rebuilding its record chain from peers, needs what the committee signed during its term.
+            // Only while the rotation is open, and only until it is ratified. A node far past the window, rebuilding its record
+            // chain from peers, needs what the committee signed during its term; so does one whose tip stopped inside the window,
+            // which cannot judge the rotation's own block without it. The window refusal guards the rotation's ratification, and
+            // the ratified rotation in hand, chained on the candidate, is proof that it is done.
+            if (termEnded) return null;
             return tipHeight >= term.LapseHeight && tipHeight <= term.LapseHeight + HandoverBlocks ? $"this committee's term ended at {term.LapseHeight}" : null;
+        }
+
+        /// <summary>
+        /// The record under <paramref name="head"/>'s maintenance holds: the head itself unless it is a hold. A hold changes
+        /// nobody and takes effect at once, so the hand-over it sits on is the record's below it: a hold the incoming
+        /// committee signs over its rotation that has not taken effect yet leaves the outgoing members producing until it does.
+        /// </summary>
+        public static CasterMembershipRecord? UnderHolds(CasterMembershipRecord? head, Func<long, CasterMembershipRecord?> bySeq)
+        {
+            var r = head;
+            for (var hops = 0; r != null && IsHoldRecord(r) && hops < 64; hops++) r = bySeq(r.RecordSeq - 1);
+            return r;
         }
 
         /// <summary>
         /// Whether <paramref name="head"/> has not taken over yet and members must not act on it: a rotation replaces the
         /// whole committee a dozen blocks ahead, and the outgoing members produce until then. Every other record acts at
-        /// once, as records always did: its members are mostly the same people.
+        /// once, as records always did: its members are mostly the same people. Holds over the rotation change nobody
+        /// (<see cref="UnderHolds"/>).
         /// </summary>
-        public static bool RotationPending(CasterMembershipRecord? head, long tipHeight) =>
-            head?.ChangeType == ScheduledRotationChangeType && head.EffectiveFromHeight > tipHeight + 1;
+        public static bool RotationPending(CasterMembershipRecord? head, long tipHeight, Func<long, CasterMembershipRecord?> bySeq) =>
+            UnderHolds(head, bySeq) is { } rotation && rotation.ChangeType == ScheduledRotationChangeType && rotation.EffectiveFromHeight > tipHeight + 1;
 
         /// <summary>
         /// A rung's members are new to the seat: nobody can approve their resume, because the others wait for the same.
         /// True only until the record's first block is committed; after that a restarted member resumes as any other.
         /// </summary>
-        public static bool FreshlyElected(CasterMembershipRecord? head, long tipHeight, string? self) =>
-            IsElectionRecord(head) && !string.IsNullOrEmpty(self) && tipHeight + 1 == head!.EffectiveFromHeight
-            && Active(head.EffectiveFromHeight) && head.Casters.Any(c => c.Address == self);
+        public static bool FreshlyElected(CasterMembershipRecord? head, long tipHeight, string? self, Func<long, CasterMembershipRecord?> bySeq) =>
+            UnderHolds(head, bySeq) is { } elected && IsElectionRecord(elected) && !string.IsNullOrEmpty(self) && tipHeight + 1 == elected.EffectiveFromHeight
+            && Active(elected.EffectiveFromHeight) && elected.Casters.Any(c => c.Address == self);
 
         // ── Validating a record ─────────────────────────────────────────────────────────────────
 
@@ -578,9 +598,11 @@ namespace VerifiedXCore.Services
         /// committee (reach is a per-vantage fact, and the signatures are the evidence). A node past the record takes it
         /// only as its own chain carries it: the block that carries it was judged when it was validated.
         /// </summary>
-        public static bool ValidateElection(CasterMembershipRecord prev, CasterMembershipRecord c, out string reason)
+        /// <param name="bySeq">The record at a sequence number; the store's unless a caller judges a run of records not stored yet.</param>
+        public static bool ValidateElection(CasterMembershipRecord prev, CasterMembershipRecord c, out string reason, Func<long, CasterMembershipRecord?>? bySeq = null)
         {
             reason = "";
+            bySeq ??= CasterMembershipStore.GetBySeq;
             if (!Active(c.EffectiveFromHeight)) { reason = "election records are not active at this height"; return false; }
             if (c.Casters == null) { reason = "no caster set"; return false; }
             if (CasterMembershipStore.ComputeRecordHash(c) != c.RecordHash) { reason = "recordHash mismatch"; return false; }
@@ -594,9 +616,9 @@ namespace VerifiedXCore.Services
                 return false;
             }
 
-            reason = BindingRefusal(prev, c, tip.Height, tip.Hash, StallSeconds(), VrfSeed.BlockHashAt, CasterMembershipStore.GetBySeq) ?? "";
+            reason = BindingRefusal(prev, c, tip.Height, tip.Hash, StallSeconds(), VrfSeed.BlockHashAt, bySeq) ?? "";
             if (reason.Length > 0) return false;
-            reason = ContentRefusal(EpochFor(prev, c), prev, c) ?? "";
+            reason = ContentRefusal(EpochFor(prev, c, bySeq), prev, c) ?? "";
             return reason.Length == 0;
         }
 
@@ -619,10 +641,10 @@ namespace VerifiedXCore.Services
             return JudgeCarried(withRecord) == CarriedVerdict.Valid && withRecord.ConsensusCertificate != null && ConsensusCertificateVerifier.VerifyOrNotRequired(withRecord);
         }
 
-        private static ElectionEpoch? EpochFor(CasterMembershipRecord prev, CasterMembershipRecord c) =>
+        private static ElectionEpoch? EpochFor(CasterMembershipRecord prev, CasterMembershipRecord c, Func<long, CasterMembershipRecord?> bySeq) =>
             c.ChangeType == EmergencyElectionChangeType
                 ? EpochForStall(c.EffectiveFromHeight - 1, c.EpochHash)
-                : TermOf(prev, CasterMembershipStore.GetBySeq) is { } term ? EpochForRotation(term, prev) : null;
+                : TermOf(prev, bySeq) is { } term ? EpochForRotation(term, prev) : null;
 
         /// <summary>Pure: the own-tip and own-stall binding of a live append.</summary>
         internal static string? BindingRefusal(CasterMembershipRecord prev, CasterMembershipRecord c, long tipHeight, string? tipHash, long tipAgeSeconds, Func<long, string?> hashAt, Func<long, CasterMembershipRecord?> bySeq)
@@ -703,7 +725,7 @@ namespace VerifiedXCore.Services
                 if (!string.Equals(r.EpochHash, VrfSeed.BlockHashAt(term.LapseHeight), StringComparison.OrdinalIgnoreCase)) return CarriedVerdict.Invalid;
                 if (r.Rung == 0 && block.Height != term.LapseHeight + HandoverBlocks) return CarriedVerdict.Invalid;
             }
-            return ContentRefusal(EpochFor(prev, r), prev, r) == null ? CarriedVerdict.Valid : CarriedVerdict.Invalid;
+            return ContentRefusal(EpochFor(prev, r, CasterMembershipStore.GetBySeq), prev, r) == null ? CarriedVerdict.Valid : CarriedVerdict.Invalid;
         }
 
         /// <summary>The committee of a block that carries a valid record, or null: it needs no record held here to be judged.</summary>
@@ -816,6 +838,7 @@ namespace VerifiedXCore.Services
         public static bool WithinRatifiedHold(CasterMembershipRecord? head, string epochHash, long nowUnix)
         {
             epochHash = ConsensusMessageFormatter.NormalizeHash(epochHash);
+            head = UnderHolds(head, CasterMembershipStore.GetBySeq);
             if (IsElectionRecord(head) && ConsensusMessageFormatter.NormalizeHash(head!.EpochHash) == epochHash && !_ratifiedSeen.ContainsKey(epochHash))
                 _ratifiedSeen[epochHash] = nowUnix;
             return _ratifiedSeen.TryGetValue(epochHash, out var seen) && nowUnix - seen < RatifiedHoldSeconds;

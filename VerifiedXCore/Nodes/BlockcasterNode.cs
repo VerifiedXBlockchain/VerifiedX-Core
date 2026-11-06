@@ -1403,7 +1403,7 @@ namespace VerifiedXCore.Nodes
                     // reachability and evicted for not casting, in a loop. A seed bootstrap casts without resuming.
                     if (Globals.IsBootstrapMode)
                         CasterSeatService.ConfirmCasting("cast during a seed bootstrap");
-                    if (VreeElection.FreshlyElected(CasterMembershipStore.GetCurrent(), Globals.LastBlock.Height, Globals.ValidatorAddress))
+                    if (VreeElection.FreshlyElected(CasterMembershipStore.GetCurrent(), Globals.LastBlock.Height, Globals.ValidatorAddress, CasterMembershipStore.GetBySeq))
                         CasterSeatService.ConfirmCasting("elected by the validators");
                     var resumeHold = await CasterSeatService.TryResumeAsync();
                     if (resumeHold != null)

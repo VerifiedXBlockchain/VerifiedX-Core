@@ -134,11 +134,12 @@ namespace VerifiedXCore.Services
         private static string _reconciledRecord = "";
 
         /// <summary>A rotation's reconcile was put off while it was pending (CasterMembershipService); it takes over at the block before its effective height.</summary>
-        private static void ReconcileWhenRotationTakesOver()
+        internal static void ReconcileWhenRotationTakesOver()
         {
             var head = CasterMembershipStore.GetCurrent();
-            if (head?.ChangeType != VreeElection.ScheduledRotationChangeType || head.RecordHash == _reconciledRecord) return;
-            if (VreeElection.RotationPending(head, Globals.LastBlock?.Height ?? -1)) return;
+            if (head == null || head.RecordHash == _reconciledRecord) return;
+            if (VreeElection.UnderHolds(head, CasterMembershipStore.GetBySeq)?.ChangeType != VreeElection.ScheduledRotationChangeType) return;
+            if (VreeElection.RotationPending(head, Globals.LastBlock?.Height ?? -1, CasterMembershipStore.GetBySeq)) return;
             _reconciledRecord = head.RecordHash;
             CasterMembershipService.ReconcileBlockCastersToRecord(head);
         }
@@ -496,13 +497,25 @@ namespace VerifiedXCore.Services
             if ((probe.Certificate?.Attestations?.Count ?? 0) > MaxProbeAttestations) return No("oversized certificate");
 
             // Records first: a validator behind on them cannot verify a new committee's tip (the ordinary promotion's window).
-            AdoptProbeRecords(probe);
+            // Nobody has verified the probe, so its records are not taken on the prober's word: the ones that are signed as a
+            // chain from this node's head go into one membership pull with the answers of the peers this node asks, and nothing
+            // is adopted at a seq the responders disagree on (CasterDiscoveryService.AdoptResponses). An unsigned record is no
+            // response at all, so a made-up one cannot hold up a record the peers hold. A probe within the pull's spacing waits
+            // for the next one.
             var verified = ProbeVerifies(probe);
-            if (!verified && !string.IsNullOrEmpty(senderIp) && TimeUtil.GetTime() - _lastPullForProbeUnix >= ValidatorMembershipPull.RetrySeconds)
+            var headSeq = CasterMembershipStore.GetCurrent()?.RecordSeq ?? -1;
+            var carriesNew = probe.Records?.Any(r => r != null && r.RecordSeq > headSeq) == true;
+            if ((!verified || carriesNew) && TimeUtil.GetTime() - _lastPullForProbeUnix >= ValidatorMembershipPull.RetrySeconds)
             {
                 _lastPullForProbeUnix = TimeUtil.GetTime();
                 ValidatorMembershipPull.RequestSoon();
-                try { await CasterDiscoveryService.FetchAndAdoptMembershipAsync(new List<string> { senderIp!.Replace("::ffff:", "") }, reconcileWhenUnchanged: false); } catch { }
+                var sender = string.IsNullOrEmpty(senderIp) ? null : senderIp!.Replace("::ffff:", "");
+                var carried = carriesNew ? ProbeRecords(probe, sender) : null;
+                var peers = ValidatorMembershipPull.PeerIps();
+                // The answer must reach the prober within its timeout (HttpTimeoutSeconds) whatever a slow peer does: the pull goes
+                // on without the answer past half of it, and what it adopts counts for the next probe.
+                var pull = Task.Run(async () => { try { await CasterDiscoveryService.FetchAndAdoptMembershipAsync(peers, reconcileWhenUnchanged: false, carried: carried); } catch { } });
+                await Task.WhenAny(pull, Task.Delay(TimeSpan.FromSeconds(HttpTimeoutSeconds / 2.0)));
                 verified = ProbeVerifies(probe);
             }
             if (!verified) return No("the tip's certificate does not verify here");
@@ -523,7 +536,7 @@ namespace VerifiedXCore.Services
             if (committee == null || !committee.Contains(probe.Prober)) return No("the prober is not on the committee here");
             // Having signed for this stall, this validator is not to be counted on the other side of it for the hold. The
             // committee it elected is not the other side: two thirds of the electorate signed, and it needs a third of them.
-            var elected = CasterMembershipStore.GetCurrent() is { } current && VreeElection.IsElectionRecord(current) && current.Casters.Any(c => c.Address == probe.Prober);
+            var elected = VreeElection.UnderHolds(CasterMembershipStore.GetCurrent(), CasterMembershipStore.GetBySeq) is { } current && VreeElection.IsElectionRecord(current) && current.Casters.Any(c => c.Address == probe.Prober);
             if (!elected && TimeUtil.GetTime() - _lastSignedUnix < VreeElection.RatifiedHoldSeconds) return No("signed an election within the hold");
 
             var mine = _myAck;
@@ -541,14 +554,15 @@ namespace VerifiedXCore.Services
             return answer;
         }
 
-        private static void AdoptProbeRecords(VreeProbe probe)
+        /// <summary>
+        /// The records a probe carries above this node's head that are signed as a chain from it, as the prober's response to
+        /// a membership pull; null when there are none. Judged once per pull spacing, never per probe.
+        /// </summary>
+        private static (string Ip, long HeadSeq, List<CasterMembershipRecord> Records)? ProbeRecords(VreeProbe probe, string? senderIp)
         {
-            var records = probe.Records?.Where(r => r != null).Take(MaxProbeRecords).ToList();
-            if (records == null || records.Count == 0) return;
-            var before = CasterMembershipStore.GetCurrent();
-            if (before != null && records.Max(r => r.RecordSeq) <= before.RecordSeq) return;
-            if (CasterMembershipStore.TryAppendChain(records) > 0 && CasterMembershipStore.GetCurrent() is { } head)
-                CasterMembershipService.ReconcileBlockCastersToRecord(head);
+            var records = CasterMembershipStore.ValidRunFromHead((probe.Records ?? new List<CasterMembershipRecord>()).Where(r => r != null).Take(MaxProbeRecords));
+            if (records.Count == 0) return null;
+            return (senderIp ?? $"the prober {probe.Prober}", records.Max(r => r.RecordSeq), records);
         }
 
         // ── Layer 2: the caster's side ──────────────────────────────────────────────────────────
@@ -678,7 +692,7 @@ namespace VerifiedXCore.Services
                 return "this committee's term is over; a scheduled rotation replaces it";
             // A rung before its first block: validators holding a sibling do not acknowledge it until that block, which it
             // could then never produce. Standing down here would strand it; one block is what this can cost.
-            if (VreeElection.FreshlyElected(CasterMembershipStore.GetCurrent(), Globals.LastBlock?.Height ?? -1, Globals.ValidatorAddress))
+            if (VreeElection.FreshlyElected(CasterMembershipStore.GetCurrent(), Globals.LastBlock?.Height ?? -1, Globals.ValidatorAddress, CasterMembershipStore.GetBySeq))
                 return null;
             var now = TimeUtil.GetTime();
             return StandDownDecision(true, Globals.IsBootstrapMode, Globals.IsBlockCaster, _firstProbeUnix, now, AckCount(now), _reachCount);

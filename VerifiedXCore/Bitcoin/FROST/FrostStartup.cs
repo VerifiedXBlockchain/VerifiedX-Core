@@ -2549,7 +2549,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // transaction for this withdrawal, allow a new one only if the old one was
                             // conflicted away on-chain. If it confirmed, the withdrawal is already paid —
                             // refuse regardless of what the in-memory tracker remembers (it expires after 24h).
-                            var (priorOk, priorReason) = await CheckPriorSignedTransactionAsync(request.SmartContractUID, request.WithdrawalRequestHash!, request.BtcTxId);
+                            var (priorOk, priorReason) = await CheckPriorSignedTransactionAsync(request.SmartContractUID, request.WithdrawalRequestHash!, request.BtcTxId, request.TxInputOutpoints);
                             if (!priorOk)
                             {
                                 LogUtility.Log($"[FROST Dedup] BLOCKED signing start for withdrawal {request.WithdrawalRequestHash}: {priorReason}", "FrostStartup.SignStart");
@@ -3844,22 +3844,36 @@ namespace VerifiedXCore.Bitcoin.FROST
         internal static bool FromStartEndpoint(DKGSession session, HttpContext context) =>
             session.LeaderSigned || FrostSigningAuthorization.SameLeaderEndpoint(session.StartRemoteIp, FrostSigningAuthorization.NormalizeRemoteIp(context.Connection.RemoteIpAddress));
 
-        internal static async Task<(bool Ok, string Reason)> CheckPriorSignedTransactionAsync(string scUID, string withdrawalRequestHash, string? requestedTxId)
+        internal static async Task<(bool Ok, string Reason)> CheckPriorSignedTransactionAsync(string scUID, string withdrawalRequestHash, string? requestedTxId, IEnumerable<string>? requestedOutpoints = null)
         {
             try
             {
-                // A vault the chain watches: which transactions may be signed for a withdrawal is fixed in state
-                // (FrostSigningAuthorization has just checked this one against it). They all spend the same coins, so
-                // at most one confirms; a replacement at a higher fee is one of them and must be signable.
-                if (VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(scUID) != null)
-                    return (true, "");
-
                 // Every record for this payment, under whatever spelling of its reference it was signed under (several
                 // can share one stored reference). A new transaction is signed only once every other one can never confirm.
                 var allRecords = VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence.ForPayment(scUID, withdrawalRequestHash);
                 var records = allRecords.Where(e => !string.IsNullOrEmpty(e.BtcTxId)).ToList();
                 bool IsRequested(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence e) =>
                     string.Equals(e.BtcTxId, (requestedTxId ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
+
+                // A vault the chain watches: which transactions may be signed for a withdrawal is fixed in state
+                // (FrostSigningAuthorization has just checked this one against it). They all spend the same coins, so
+                // at most one confirms; a replacement at a higher fee is one of them and must be signable. That holds for
+                // the transactions state knows. One this validator signed that state does not hold for the payment was
+                // signed on a chain this node has left: a rewind took the request with its fixed transaction, and the
+                // request was mined again and fixed on what coins were free then. Unless the two spend a common coin, both
+                // could confirm, so that one is judged as on a vault the chain does not watch: no second transaction while
+                // the first can still pay.
+                if (VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.KeyRow(scUID) != null)
+                {
+                    var fixedInState = VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.TxidsFixedFor(scUID, withdrawalRequestHash);
+                    var requestedCoins = (requestedOutpoints ?? Enumerable.Empty<string>()).Select(o => (o ?? "").Trim().ToLowerInvariant()).Where(o => o.Length > 0).ToHashSet(StringComparer.Ordinal);
+                    records = records.Where(e => !IsRequested(e)
+                        && !fixedInState.Contains(e.BtcTxId, StringComparer.OrdinalIgnoreCase)
+                        && !e.Outpoints.Any(requestedCoins.Contains)).ToList();
+                    if (records.Count == 0)
+                        return (true, "");
+                    allRecords = records;
+                }
                 var dead = new List<(VerifiedXCore.Bitcoin.Models.FrostSignedWithdrawalEvidence Record, string Detail)>();
                 // A record from before exact spellings, not released, may be the only trace of two transactions (one signed
                 // under another spelling was recorded over): no share is given for this payment at all, not even for the

@@ -1201,7 +1201,7 @@ namespace VerifiedXCore.Services
                         {
                             if (blkTransaction.FromAddress != "Coinbase_TrxFees" && blkTransaction.FromAddress != "Coinbase_BlkRwd")
                             {
-                                var txResult = await TransactionValidatorService.VerifyTX(blkTransaction, blockDownloads, true, false, processedNonces, skipPrivatePlonkProofVerification: !blockDownloads, blockHeight: block.Height, blockTimestamp: block.Timestamp);
+                                var txResult = await TransactionValidatorService.VerifyTX(blkTransaction, blockDownloads, true, false, processedNonces, skipPrivatePlonkProofVerification: !blockDownloads, blockHeight: block.Height, blockTimestamp: block.Timestamp, blockValidator: block.Validator);
 
                                 var effectiveTxResult = txResult;
                                 if (txResult.Item1 && PrivateTransactionTypes.IsPrivateTransaction(blkTransaction.TransactionType))
@@ -2226,7 +2226,7 @@ namespace VerifiedXCore.Services
                 {
                     if (transaction.FromAddress != "Coinbase_TrxFees" && transaction.FromAddress != "Coinbase_BlkRwd")
                     {
-                        var txResult = await TransactionValidatorService.VerifyTX(transaction, blockDownloads, false, false, null, skipPrivatePlonkProofVerification: !blockDownloads, blockHeight: block.Height, blockTimestamp: block.Timestamp);
+                        var txResult = await TransactionValidatorService.VerifyTX(transaction, blockDownloads, false, false, null, skipPrivatePlonkProofVerification: !blockDownloads, blockHeight: block.Height, blockTimestamp: block.Timestamp, blockValidator: block.Validator);
                         var effectiveTxResult = txResult;
                         if (txResult.Item1 && PrivateTransactionTypes.IsPrivateTransaction(transaction.TransactionType))
                         {

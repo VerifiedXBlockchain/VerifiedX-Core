@@ -81,6 +81,16 @@ namespace VerifiedXCore.Utilities
                 return false;
             }
 
+            // The withdrawal requests this validator signed for go with the blocks above the target. They are held first
+            // (SignedRequestCarry), before anything is wiped or deleted. A restore that cannot hold them, or cannot read
+            // whether it signed for them, does not start: the chain stays as it is and the caller tries again.
+            try { VerifiedXCore.Bitcoin.FROST.SignedRequestCarry.Hold(Block.GetBlocks().Query().Where(x => x.Height > targetHeight).ToEnumerable()); }
+            catch (Exception ex)
+            {
+                ErrorLogUtility.LogError($"[SnapshotRestore] The signed-for withdrawal requests in the blocks above {targetHeight} could not be held ({ex.Message}); the restore is not started.", "SnapshotRestoreUtility");
+                return false;
+            }
+
             _isRestoreRunning = true;
             await VerifiedXCore.Bitcoin.Services.VBTCWithdrawalStoreRebuildService.WaitUntilStoppedAsync();
             var wasResyncing = Globals.IsResyncing;
