@@ -402,9 +402,17 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>The record a block carries goes into the store once the block's certificate verifies under it. False: the block must wait.</summary>
-        public static bool AdoptFromBlock(Block block, out string refusal)
+        public static bool AdoptFromBlock(Block block, out string refusal) => AdoptFromBlock(block, out refusal, out _);
+
+        /// <summary>
+        /// As above. <paramref name="undo"/> is set when the record replaced siblings here: it puts the store and the caster set
+        /// back as they were, for a block that is refused after its record went in (the store is outside the block's rollback).
+        /// A record that only extends the head stays, as it would from gossip: it is ratified whatever its block turns out to be.
+        /// </summary>
+        public static bool AdoptFromBlock(Block block, out string refusal, out Action? undo)
         {
             refusal = "";
+            undo = null;
             var record = block.MembershipRecord;
             if (record == null) return true;
             var head = CasterMembershipStore.GetCurrent();
@@ -421,9 +429,21 @@ namespace VerifiedXCore.Services
                 refusal = "its certificate is not that of the record it carries";
                 return false;
             }
+            var storedBefore = CasterMembershipStore.RecordsFrom(record.RecordSeq);
+            var castersBefore = Globals.BlockCasters;
+            var wasCaster = Globals.IsBlockCaster;
             if (!CasterMembershipStore.AdoptCarried(record, out refusal))
                 return false;
             CasterMembershipService.ReconcileBlockCastersToRecord(record);
+            if (storedBefore.Count == 0) return true;
+            undo = () =>
+            {
+                CasterMembershipStore.RestoreRecordsFrom(record.RecordSeq, storedBefore);
+                Globals.BlockCasters = castersBefore;
+                Globals.SyncKnownCastersFromBlockCasters();
+                Globals.IsBlockCaster = wasCaster;
+                CasterLogUtility.Log($"MEMBERSHIP: block {block.Height} was refused after its record seq {record.RecordSeq} replaced siblings; they are put back.", "MEMBERSHIP");
+            };
             return true;
         }
 

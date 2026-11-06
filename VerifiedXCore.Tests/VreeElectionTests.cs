@@ -826,6 +826,32 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task ABlockRefusedAfterItsRecordReplacedASibling_PutsTheSiblingAndTheCasterSetBack()
+        {
+            var rung0 = Ratified(0);
+            Assert.True(CasterMembershipStore.TryAppend(rung0, out _));
+            StallAt(H, 700);
+            var rung3 = Ratified(3);
+            var outgoing = rung0.Casters.First(c => rung3.Casters.All(z => z.Address != c.Address)).Address;
+            Globals.ValidatorAddress = outgoing;
+            Globals.IsBlockCaster = true;
+            var castersBefore = Globals.BlockCasters;
+
+            // A real producer signature and certificate over a wrong merkle root: refused after the record went in.
+            var producer = _electors[11];
+            var block = ProducedBlock(producer, Members(rung3).Take(3), rung3, merkleRoot: "not-the-merkle-root");
+            var since = DateTime.UtcNow;
+
+            Assert.False(await BlockValidatorService.ValidateBlock(block, false));
+            Assert.Equal("BlockValidatorService.ValidateBlock()-10", StepsSince(since).LastOrDefault()); // the rebuilt hash covers the merkle root
+
+            CasterMembershipStore.InvalidateCache();
+            Assert.Equal(rung0.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+            Assert.Same(castersBefore, Globals.BlockCasters);
+            Assert.True(Globals.IsBlockCaster);
+        }
+
+        [Fact]
         public void TheOldCommitteesCertificate_IsNoGoodUnderARecordCarried_OrHeld()
         {
             var record = Ratified(0);
@@ -1054,7 +1080,7 @@ namespace VerifiedXCore.Tests
 
         // ── Through ValidateBlock ────────────────────────────────────────────────────────────────
 
-        private Block ProducedBlock(Member producer, IEnumerable<Member> attestors, CasterMembershipRecord? carried)
+        private Block ProducedBlock(Member producer, IEnumerable<Member> attestors, CasterMembershipRecord? carried, string? merkleRoot = null)
         {
             var height = Globals.LastBlock.Height + 1;
             var prev = Globals.LastBlock.Hash;
@@ -1064,7 +1090,7 @@ namespace VerifiedXCore.Tests
                 Validator = producer.Address, ValidatorAnswer = ProofUtility.ComputeVrf(producer.Pub, height, VrfSeed.ThirdInput(height, prev)!).ProofHash,
                 ChainRefId = "test-chain", Transactions = new List<Transaction>(), MembershipRecord = carried,
             };
-            block.MerkleRoot = block.MerkleRootOf();
+            block.MerkleRoot = merkleRoot ?? block.MerkleRootOf();
             block.Hash = block.GetBlockHash();
             block.ValidatorSignature = SignatureService.CreateSignature(block.Hash, producer.Key, producer.Pub);
             var msg = ConsensusMessageFormatter.FormatAttestationV1(block.Height, block.Hash, block.Validator, block.PrevHash);

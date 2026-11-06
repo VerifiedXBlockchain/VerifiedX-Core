@@ -964,6 +964,22 @@ namespace VerifiedXCore.Services
         internal static bool MissingWhilePeersHaveOne()
             => MissingWhilePeersHaveOne(GetCurrent()?.RecordSeq, CasterDiscoveryService.LastObservedPeerHeads);
 
+        /// <summary>The stored records from this seq up, so a block refused after its carried record was adopted can put them back.</summary>
+        public static List<CasterMembershipRecord> RecordsFrom(long seq) =>
+            Collection()?.Query().Where(x => x.RecordSeq >= seq).ToList() ?? new List<CasterMembershipRecord>();
+
+        /// <summary>Replaces the stored records from this seq up with ones taken by <see cref="RecordsFrom"/>.</summary>
+        public static void RestoreRecordsFrom(long seq, List<CasterMembershipRecord> records)
+        {
+            lock (Mut)
+            {
+                var col = Collection() ?? throw new InvalidOperationException("the record store is unavailable");
+                foreach (var r in col.Query().Where(x => x.RecordSeq >= seq).ToList()) col.Delete(r.RecordSeq);
+                foreach (var r in records) col.Upsert(r.RecordSeq, r);
+                _cachedHead = null;
+            }
+        }
+
         /// <summary>Test/diagnostic support: clears the in-memory head cache (persisted data untouched).</summary>
         public static void InvalidateCache()
         {
