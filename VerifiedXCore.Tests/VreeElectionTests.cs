@@ -852,6 +852,38 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task ABlockRefusedAfterItsRungReplacedAPendingRotation_PutsTheSittingCommitteeBack()
+        {
+            var interim = InstallInterim();
+            var L = interim.LapseHeight;
+            StallAt(L, 5);
+            VreeElection.ClearCachesForTests();
+            var view0 = View();
+            var electors = view0.Epoch.Electors.Keys.OrderBy(a => a, StringComparer.Ordinal).Take(view0.Epoch.RatifyNeeded).Select(Of).ToList();
+            var rotation0 = Signed(view0.Build(0), electors);
+            Assert.True(CasterMembershipStore.TryAppend(rotation0, out var why), why);
+            Assert.True(VreeElection.RotationPending(rotation0, L));
+
+            StallAt(L, 400);
+            VreeElection.ClearCachesForTests();
+            var view = View();
+            var rung1 = Signed(view.Build(1), electors);
+            Assert.Equal(L + 1, rung1.EffectiveFromHeight);
+            var sitting = interim.Casters.First(c => rung1.Casters.All(z => z.Address != c.Address)).Address;
+            Globals.ValidatorAddress = sitting;
+            Globals.IsBlockCaster = true;
+
+            var block = ProducedBlock(_electors[11], Members(rung1).Take(3), rung1, merkleRoot: "not-the-merkle-root");
+            Assert.False(await BlockValidatorService.ValidateBlock(block, false));
+
+            CasterMembershipStore.InvalidateCache();
+            Assert.Equal(rotation0.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+            Assert.Equal(interim.Casters.Select(c => c.Address).OrderBy(a => a, StringComparer.Ordinal),
+                Globals.BlockCasters.Select(p => p.ValidatorAddress!).OrderBy(a => a, StringComparer.Ordinal));
+            Assert.True(Globals.IsBlockCaster);
+        }
+
+        [Fact]
         public void UndoingACarriedRecord_LeavesARecordAnotherWriterStoredSince()
         {
             var rung0 = Ratified(0);
