@@ -1496,6 +1496,9 @@ namespace VerifiedXCore.Controllers
                 VreeAckCount = vree.AckCount,
                 VreeReachSet = vree.ReachSet,
                 VreeStandDown = vree.StandDown,
+                // How long this node's tip has stood still: the clock an election reads (StallSeconds below is fork detection's,
+                // which counts only while peers are ahead, so it reads 0 through a stall of the whole network).
+                VreeStallSeconds = lastBlock == null || lastBlock.Height < 0 ? -1L : VreeElection.StallSeconds(),
                 Version = Globals.CLIVersion,
                 ConsensusVersion = Globals.ConsensusVersion,
                 Height = lastBlock?.Height ?? -1L,

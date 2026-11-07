@@ -12,6 +12,7 @@ using VerifiedXCore;
 using VerifiedXCore.Data;
 using VerifiedXCore.Models;
 using VerifiedXCore.Services;
+using VerifiedXCore.Utilities;
 using Xunit;
 
 namespace VerifiedXCore.Tests
@@ -83,6 +84,31 @@ namespace VerifiedXCore.Tests
             Assert.NotNull(answer);
             Assert.False(answer!.Ack); // this node holds no validator key: refused by the route itself, not by the web layer
             Assert.False(string.IsNullOrEmpty(answer.Reason));
+        }
+
+        [Fact]
+        public async Task Health_ShowsHowLongTheTipHasStoodStill_ThroughAStallOfTheWholeNetwork()
+        {
+            var priorTip = Globals.LastBlock;
+            var priorAdded = Globals.LastBlockAddedTimestamp;
+            try
+            {
+                var stalledSince = TimeUtil.GetTime() - 400;
+                Globals.LastBlock = new Block { Height = 107_907, Hash = "aa", Timestamp = stalledSince };
+                Globals.LastBlockAddedTimestamp = stalledSince;
+
+                using var server = new TestServer(new WebHostBuilder().UseStartup<StartupP2PCaster>());
+                var body = await server.CreateClient().GetStringAsync("/valapi/validator/Health");
+                var health = Newtonsoft.Json.Linq.JObject.Parse(body);
+
+                Assert.InRange((long)health["VreeStallSeconds"]!, 400, 460);
+                Assert.Equal(0L, (long)health["StallSeconds"]!); // fork detection's: no peer is ahead, so no fork stall
+            }
+            finally
+            {
+                Globals.LastBlock = priorTip;
+                Globals.LastBlockAddedTimestamp = priorAdded;
+            }
         }
 
         [Fact]
