@@ -306,6 +306,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public long ReportTimestamp { get; set; }
         /// <summary>The withdrawal or exit part it settled, once one claimed it.</summary>
         public string? ClaimedByRef { get; set; }
+        /// <summary>Bitcoin dropped the block it confirmed in (a rewind): not claimable until it confirms again.</summary>
+        public bool Dropped { get; set; }
         public long LastModifiedHeight { get; set; }
 
         public static string IdOf(string txid, string scUID) => $"{txid}|{scUID}";
@@ -356,6 +358,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             withdrawals.EnsureIndex(x => x.RequestVfxHeight); // the sweep rate reads the last thousand blocks' requests only
             var payments = db.GetCollection<VaultPaymentRow>(Payments);
             payments.EnsureIndex(x => x.SmartContractUID);
+            payments.EnsureIndex(x => x.BitcoinHeight);
             payments.EnsureIndex(x => x.LastModifiedHeight);
             VerifiedXCore.Services.ValidatorBond.EnsureIndexes(db); // validator bonds are kept with the other height-stamped tables
         }
@@ -541,6 +544,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
 
         public static List<VaultPaymentRow> PaymentsOf(string scUID, LiteDatabase? db = null) =>
             (db ?? Db).GetCollection<VaultPaymentRow>(Payments).Find(x => x.SmartContractUID == scUID).ToList();
+
+        /// <summary>The kept payments confirmed above a Bitcoin height and not yet marked dropped (what a rewind to that height drops).</summary>
+        public static List<VaultPaymentRow> PaymentsConfirmedAbove(long bitcoinHeight, LiteDatabase? db = null) =>
+            (db ?? Db).GetCollection<VaultPaymentRow>(Payments).Find(x => x.BitcoinHeight > bitcoinHeight).Where(x => !x.Dropped).ToList();
 
         /// <summary>Every vault's part of one bridge exit (the exit transaction, and the block it was applied in).</summary>
         public static List<VaultWithdrawalRow> ExitParts(string exitTxHash, long exitVfxHeight, LiteDatabase? db = null) =>

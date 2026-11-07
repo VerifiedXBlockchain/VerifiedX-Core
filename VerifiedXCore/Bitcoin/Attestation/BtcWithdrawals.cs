@@ -369,7 +369,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         }
                         // Not one of its transactions, but it pays this holder what it is owed: the transaction its signers
                         // signed on a chain this node has left, confirming in place of the one fixed here (payment attribution).
-                        if (!answered && BtcAttestRules.PaysByDestination(vfxHeight) && spend.Outputs != null)
+                        // One transaction pays one: not a second holder, of another coin it spends, owed the same.
+                        if (!answered && BtcAttestRules.PaysByDestination(vfxHeight) && spend.Outputs != null && !PaidAlready(coin.SmartContractUID, spend.Txid, db))
                         {
                             var (inputs, inputSats) = SpendsOf(spend.Txid, coin.SmartContractUID, effects);
                             var paid = PaidOutput(row, spend.Outputs, inputSats);

@@ -41,6 +41,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
             return null;
         }
 
+        /// <summary>Whether a transaction already settled a row of the vault: one transaction pays one, whichever of its coins is looked at.</summary>
+        private static bool PaidAlready(string vault, string txid, LiteDatabase? db) =>
+            BtcAttestStore.WithdrawalsOf(vault, VaultWithdrawalState.Settled, db).Any(r => r.SettledTxid == txid);
+
         /// <summary>The spends of one transaction in a report's effects: the vault coins it spent, and what they held.</summary>
         private static (List<string> Inputs, long Sats) SpendsOf(string txid, string vault, IReadOnlyList<BtcCoinEffect> effects)
         {
@@ -58,7 +62,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (!BtcAttestRules.PaysByDestination(vfxHeight) || spend.Outputs == null) return false;
             var vault = coin.SmartContractUID;
             // One transaction pays one: an earlier coin of this transaction settled a row already.
-            if (BtcAttestStore.WithdrawalsOf(vault, VaultWithdrawalState.Settled, db).Any(r => r.SettledTxid == spend.Txid)) return true;
+            if (PaidAlready(vault, spend.Txid, db)) return true;
             var (inputs, inputSats) = SpendsOf(spend.Txid, vault, effects);
             var open = BtcAttestStore.WithdrawalsOf(vault, VaultWithdrawalState.Waiting, db).Concat(BtcAttestStore.WithdrawalsOf(vault, VaultWithdrawalState.Pinned, db))
                 .OrderBy(r => r.RequestVfxHeight).ThenBy(r => r.Ref, StringComparer.Ordinal);
@@ -70,7 +74,19 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 return true;
             }
 
-            if (BtcAttestStore.Payment(spend.Txid, vault, db) != null) return false;
+            var kept = BtcAttestStore.Payment(spend.Txid, vault, db);
+            if (kept != null)
+            {
+                // Confirmed again after a Bitcoin rewind dropped it: claimable again, as of this confirmation.
+                if (!kept.Dropped) return false;
+                kept.Dropped = false;
+                kept.BitcoinHeight = spend.BitcoinHeight;
+                kept.SeenAtVfxHeight = vfxHeight;
+                kept.ReportHash = report?.Hash;
+                kept.ReportTimestamp = report?.Timestamp ?? 0;
+                BtcAttestStore.SavePayment(kept, db);
+                return false;
+            }
             BtcAttestStore.SavePayment(new VaultPaymentRow
             {
                 Txid = spend.Txid, SmartContractUID = vault, TxHex = spend.TxHex ?? "", Inputs = inputs, InputSats = inputSats,
@@ -89,7 +105,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         {
             if (!BtcAttestRules.PaysByDestination(vfxHeight) || row.State != VaultWithdrawalState.Waiting || row.IsSweep || string.IsNullOrEmpty(row.DestinationScriptHex)) return false;
             foreach (var payment in BtcAttestStore.PaymentsOf(row.SmartContractUID, db)
-                         .Where(p => p.ClaimedByRef == null && p.SeenAtVfxHeight >= vfxHeight - BtcAttestRules.RememberedPaymentBlocks)
+                         .Where(p => p.ClaimedByRef == null && !p.Dropped && p.SeenAtVfxHeight >= vfxHeight - BtcAttestRules.RememberedPaymentBlocks)
                          .OrderBy(p => p.BitcoinHeight).ThenBy(p => p.Txid, StringComparer.Ordinal))
             {
                 var paid = PaidOutput(row, payment.Outputs, payment.InputSats);
@@ -101,6 +117,20 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 return true;
             }
             return false;
+        }
+
+        /// <summary>
+        /// A Bitcoin rewind to <paramref name="bitcoinHeight"/>: a kept payment confirmed above it is no longer on Bitcoin. It is
+        /// marked dropped, and claims nothing until it confirms again (<see cref="AttributeSpend"/> then takes it back up).
+        /// One claimed already is reopened through its row, as any settlement is.
+        /// </summary>
+        private static void DropPaymentsAbove(long bitcoinHeight, LiteDatabase? db)
+        {
+            foreach (var payment in BtcAttestStore.PaymentsConfirmedAbove(bitcoinHeight, db).OrderBy(p => p.Id, StringComparer.Ordinal))
+            {
+                payment.Dropped = true;
+                BtcAttestStore.SavePayment(payment, db);
+            }
         }
 
         /// <summary>

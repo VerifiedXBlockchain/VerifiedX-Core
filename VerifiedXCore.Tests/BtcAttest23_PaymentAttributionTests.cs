@@ -323,6 +323,79 @@ namespace VerifiedXCore.Tests
             Assert.NotEqual(txid, Assert.Single(Row(third, vault.Uid).Pins).Txid);
         }
 
+        /// <summary>
+        /// One transaction pays one. Two requests to the same destination for the same amount are pinned on two coins; a transaction
+        /// that spends both and pays the destination once settles one of them, and the other, robbed of its coin, is void and
+        /// refunded, whichever order the coins are looked at in.
+        /// </summary>
+        [Fact]
+        public async Task ATransactionSpendingTheCoinsOfTwoRequestsOwedTheSame_PaysOne_AndTheOtherIsRefunded()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var a = Pay(vault.Script, 40_000);
+            var b = Pay(vault.Script, 40_000);
+            await MineAndReport(a, b);
+            await Mine(Transfer(vault.Uid, 0.0006M));
+            foreach (var block in AppliedBlocks) BlockchainData.GetBlocks().InsertSafe(block);
+            StateTreiStatusService.SetSynced(Tip);
+            var first = await Mine(RequestTx(vault.Uid, 0.0003M));
+            var second = await Mine(RequestTx(vault.Uid, 0.0003M));
+            var coinOfFirst = Assert.Single(Assert.Single(Row(first, vault.Uid).Pins).Inputs);
+            var coinOfSecond = Assert.Single(Assert.Single(Row(second, vault.Uid).Pins).Inputs);
+            Assert.NotEqual(coinOfFirst, coinOfSecond);
+            Assert.Equal(0M, await Spendable(vault.Uid, _holder));
+
+            var payment = PaymentOf(new[] { coinOfFirst, coinOfSecond }, 80_000, vault.Script, 30_000, feeSats: 1_000);
+            await MineAndReport(payment);
+            var rows = new[] { Row(first, vault.Uid), Row(second, vault.Uid) };
+            var paid = Assert.Single(rows, r => r.State == VaultWithdrawalState.Settled);
+            var robbed = Assert.Single(rows, r => r.State == VaultWithdrawalState.Void);
+            Assert.Equal(payment.GetHash().ToString(), paid.SettledTxid);
+            Assert.Equal(0.0003M, await Spendable(vault.Uid, _holder)); // the robbed one refunded, the paid one not
+            Assert.Equal(VBTCWithdrawalStatus.Completed, VBTCWithdrawalRequest.GetByTransactionHash(paid.RequestHash, vault.Uid)!.Status);
+            Assert.Equal(VBTCWithdrawalStatus.Cancelled, VBTCWithdrawalRequest.GetByTransactionHash(robbed.RequestHash, vault.Uid)!.Status);
+        }
+
+        /// <summary>
+        /// A kept payment that Bitcoin drops is no payment: a request mined meanwhile is fixed on the vault's coins, not completed by
+        /// it. When the transaction confirms again it pays what is open for it then.
+        /// </summary>
+        [Fact]
+        public async Task AKeptPaymentBitcoinDrops_CompletesNothing_UntilItConfirmsAgain()
+        {
+            var vault = await StoredChainWithAFundedVault();
+            var slot = await Snapshot();
+            var request = await MineStored(RequestTx(vault.Uid, 0.0003M));
+            var signed = BtcTx.Parse(Assert.Single(Row(request, vault.Uid).Pins).TxHex, Network.Main);
+            var txid = signed.GetHash().ToString();
+            await Restore(slot);
+            var at = await MineAndReport(signed);
+            Assert.False(BtcAttestStore.Payment(txid, vault.Uid)!.Dropped);
+
+            // Bitcoin drops its block: the vault has not paid anything after all.
+            await Reorganise(at - 1);
+            var kept = BtcAttestStore.Payment(txid, vault.Uid)!;
+            Assert.True(kept.Dropped);
+            Assert.Null(kept.ClaimedByRef);
+            Assert.Equal(VaultCoinStatus.Unspent, Coin(kept.Inputs[0]).Status);
+
+            // The request mined now is not completed by a payment Bitcoin does not contain: it is fixed on the coins, which are back.
+            var again = await MineStored(RequestTx(vault.Uid, 0.0003M));
+            var row = Row(again, vault.Uid);
+            Assert.Equal(VaultWithdrawalState.Pinned, row.State);
+            Assert.Null(row.SettledTxid);
+            Assert.Null(BtcAttestStore.Payment(txid, vault.Uid)!.ClaimedByRef);
+            Assert.Equal(0.0002M, await Spendable(vault.Uid, _holder));
+
+            // It confirms again on the new branch: it pays the request open for it now, and the holder is debited once.
+            await MineAndReport(signed);
+            row = Row(again, vault.Uid);
+            Assert.Equal(VaultWithdrawalState.Settled, row.State);
+            Assert.Equal(txid, row.SettledTxid);
+            Assert.Equal(0.0002M, await Spendable(vault.Uid, _holder));
+        }
+
         /// <summary>The same for a bridge exit's part: kept while nothing is open, and settling the exit filed again, which completes and consumes the burn.</summary>
         [Fact]
         public async Task APaymentOfAnExitPart_IsKept_AndSettlesTheExitFiledAgain()
