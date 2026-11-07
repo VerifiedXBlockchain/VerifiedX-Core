@@ -379,6 +379,9 @@ namespace VerifiedXCore.Nodes
                         CasterLogUtility.Log(
                             $"MonitorTick SKIP promotion-related work — IsBlockCaster=false. Will retry in 10s.",
                             "CasterFlow");
+                        // SEAT-HEAL: not casting, this node keeps no absence timers.
+                        try { await CasterSeatService.ObserveCommitteeAsync(); }
+                        catch (Exception ex) { CasterLogUtility.Log($"SEAT error: {ex.Message}", "SEAT"); }
                         await Task.Delay(new TimeSpan(0, 0, 10));
                         continue;
                     }
