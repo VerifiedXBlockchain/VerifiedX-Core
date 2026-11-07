@@ -974,6 +974,32 @@ namespace VerifiedXCore.Tests
             Assert.Equal(VreeElection.CarriedVerdict.Invalid, VreeElection.JudgeCarried(sameBlockJunkRecord));
         }
 
+        /// <summary>
+        /// A node holding another record at the seq below the election (a sibling the store later replaces: a canonical sibling,
+        /// a rung over a seed reset, a put-back) refuses the block that carries it. Once the store holds the record the
+        /// election really extends, the same block is judged afresh and installs: the refusal was about the predecessor
+        /// held then, not about the block.
+        /// </summary>
+        [Fact]
+        public void ABlockRefusedUnderAnotherPredecessor_IsJudgedAgainOnceTheStoreHoldsTheRightOne()
+        {
+            var record = Ratified(0);
+            var block = BlockAt(H + 1, Globals.LastBlock.Hash, 0, Members(record).Take(3), record);
+
+            var sibling = Ordinary(HeadSeq, 500, "another-prev", _committee);
+            Assert.NotEqual(_head.RecordHash, sibling.RecordHash);
+            Store(sibling);
+            Assert.Equal(VreeElection.CarriedVerdict.Invalid, VreeElection.JudgeCarried(block));
+            Assert.Null(VreeElection.PrepareBlockRecord(block));
+            Assert.Null(block.MembershipRecord); // stripped: the block must then pass on the old committee's certificate, which it has not
+
+            Store(_head);
+            block.MembershipRecord = record;
+            Assert.Equal(VreeElection.CarriedVerdict.Valid, VreeElection.JudgeCarried(block));
+            Assert.Null(VreeElection.PrepareBlockRecord(block));
+            Assert.Same(record, block.MembershipRecord);
+        }
+
         [Fact]
         public void AFirstBlockCraftedBeforeTheStall_StillCarriesTheRecord()
         {

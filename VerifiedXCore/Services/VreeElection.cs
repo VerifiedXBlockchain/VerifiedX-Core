@@ -673,12 +673,15 @@ namespace VerifiedXCore.Services
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, CarriedVerdict> _carriedVerdicts = new(StringComparer.Ordinal);
         private const int CarriedVerdictCacheSize = 64;
 
-        private static string CarriedKey(Block block, CasterMembershipRecord r)
+        private static string CarriedKey(Block block, CasterMembershipRecord r, CasterMembershipRecord prev)
         {
             // The signatures are outside the record's hash, so they are part of the key: a copy with junk ones is its own question.
+            // So is the record this node holds below it: a verdict against one predecessor says nothing about the sibling the
+            // store may hold there next (a canonical sibling, a rung over a seed reset, a put-back), and the chain of hashes
+            // below that one is bound through it.
             using var sha = SHA256.Create();
             var signatures = string.Join(",", (r.Signatures ?? new()).Select(s => $"{s?.SignerAddress}:{s?.Signature}"));
-            return $"{block.Hash}|{r.RecordHash}|{Convert.ToHexString(sha.ComputeHash(Encoding.UTF8.GetBytes(signatures)))}";
+            return $"{block.Hash}|{r.RecordHash}|{prev.RecordHash}|{Convert.ToHexString(sha.ComputeHash(Encoding.UTF8.GetBytes(signatures)))}";
         }
 
         /// <summary>
@@ -693,10 +696,12 @@ namespace VerifiedXCore.Services
             if (!Active(block!.Height) || !IsElectionRecord(r) || r.EffectiveFromHeight != block.Height || r.Casters == null) return CarriedVerdict.Invalid;
             // Before the cache: the key names the record by its claimed hash, so the fields must be shown to be what it hashes.
             if (CasterMembershipStore.FieldHoldingTheSeparator(r) != null || CasterMembershipStore.ComputeRecordHash(r) != r.RecordHash) return CarriedVerdict.Invalid;
-            var key = CarriedKey(block, r);
+            var prev = CasterMembershipStore.GetBySeq(r.RecordSeq - 1);
+            if (prev == null) return CarriedVerdict.CannotJudge; // the record chain below it is not here yet
+            var key = CarriedKey(block, r, prev);
             if (_carriedVerdicts.TryGetValue(key, out var known)) return known;
 
-            var verdict = JudgeCarriedUncached(block, r);
+            var verdict = JudgeCarriedUncached(block, r, prev);
             if (verdict != CarriedVerdict.CannotJudge)
             {
                 if (_carriedVerdicts.Count >= CarriedVerdictCacheSize) _carriedVerdicts.Clear();
@@ -705,12 +710,10 @@ namespace VerifiedXCore.Services
             return verdict;
         }
 
-        private static CarriedVerdict JudgeCarriedUncached(Block block, CasterMembershipRecord r)
+        private static CarriedVerdict JudgeCarriedUncached(Block block, CasterMembershipRecord r, CasterMembershipRecord prev)
         {
-            var prev = CasterMembershipStore.GetBySeq(r.RecordSeq - 1);
             var parent = BlockAt(block.Height - 1);
             if (parent == null || parent.Hash != block.PrevHash) return CarriedVerdict.CannotJudge;
-            if (prev == null) return CarriedVerdict.CannotJudge; // the record chain below it is not here yet
             if (!string.Equals(r.PrevRecordHash, prev.RecordHash, StringComparison.OrdinalIgnoreCase)) return CarriedVerdict.Invalid;
             // No check of the stall in block time: a validator crafts its next block once, just after the tip, so the block
             // that ends a stall is dated from before it. Two thirds of the electorate each checked the stall by their own clock.
