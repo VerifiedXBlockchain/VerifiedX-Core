@@ -1070,7 +1070,7 @@ namespace VerifiedXCore
         /// </summary>
         public static long VreeActivationHeight = long.MaxValue;
         /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
-        public const long VreeActivationTestnetHeight = long.MaxValue;
+        public const long VreeActivationTestnetHeight = 107_700;
 
         /// <summary>Blocks with Height &gt;= this require a valid <see cref="Models.Block.ConsensusCertificate"/>.
         /// Wave 6: armed automatically from the genesis membership record's EffectiveFromHeight
