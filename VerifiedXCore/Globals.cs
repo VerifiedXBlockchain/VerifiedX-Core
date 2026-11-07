@@ -799,8 +799,8 @@ namespace VerifiedXCore
         public static int ValAPIPort = 7294;
         public static int APIPortSSL = 7777;
         public static int MajorVer = 9;
-        public static int MinorVer = 0;
-        public static int RevisionVer = 1;
+        public static int MinorVer = 1;
+        public static int RevisionVer = 0;
         public static int BuildVer = 0;
         public static int SCVersion = 1;
         public static int ValidatorIssueCount = 0;
@@ -1059,6 +1059,18 @@ namespace VerifiedXCore
         /// <summary>Legacy proofs, GET block fallback, optional cert skip, and seed peer injection apply only for seed casters when the tip looks stopped. Other nodes always use normal snapshot/signed paths and discovery.
         /// Phase E: additionally requires a signed ≥2-of-3 seed agreement (<see cref="Services.BootstrapCoordinationService.AgreementActive"/>) — bootstrap is never entered unilaterally.</summary>
         public static bool IsBootstrapMode => IsLocalBootstrapCaster && IsChainStalledForBootstrap && Services.BootstrapCoordinationService.AgreementActive;
+
+        /// <summary>
+        /// The height the validator-ratified emergency election goes live on mainnet (election signing and acceptance, the
+        /// casters' stand-down, the fork-choice criteria and the record carried in a block: one height, so they are never
+        /// live without each other). Until it casters probe and validators acknowledge, and no rule fires. It is set from
+        /// the acknowledgement count casters report on Health, in a release that changes nothing else: a validator on an
+        /// older build never acknowledges and still counts, so a caster standing down before enough validators upgraded
+        /// would halt a healthy chain.
+        /// </summary>
+        public static long VreeActivationHeight = long.MaxValue;
+        /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
+        public const long VreeActivationTestnetHeight = long.MaxValue;
 
         /// <summary>Blocks with Height &gt;= this require a valid <see cref="Models.Block.ConsensusCertificate"/>.
         /// Wave 6: armed automatically from the genesis membership record's EffectiveFromHeight

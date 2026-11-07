@@ -30,6 +30,7 @@ namespace VerifiedXCore.Tests
         private readonly string? _priorCustomPath;
         private readonly Network? _priorNetwork;
         private readonly Block _priorLastBlock;
+        private readonly Func<long, string, bool> _priorDepth;
         private readonly bool _priorLibrary = Globals.FrostFFIAvailable;
         private readonly BitcoinAddress _vaultAddr = new Key().PubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, Net);
         private readonly BitcoinAddress _destAddr = new Key().PubKey.GetAddress(ScriptPubKeyType.Segwit, Net);
@@ -48,6 +49,8 @@ namespace VerifiedXCore.Tests
             Globals.BTCNetwork = Net;
             _priorLastBlock = Globals.LastBlock;
             Globals.LastBlock = new Block { Height = 500 };
+            _priorDepth = VerifiedXCore.Bitcoin.FROST.FrostSigningAuthorization.BlockHoldsRequest;
+            VerifiedXCore.Bitcoin.FROST.FrostSigningAuthorization.BlockHoldsRequest = (_, _) => true; // the rows name block 400, which these tests do not store
             Globals.FrostFFIAvailable = true;   // a validator whose FROST library passed its check
             DbContext.Initialize();
             CompletedWithdrawalConfirmation.ResetForTests();
@@ -71,6 +74,7 @@ namespace VerifiedXCore.Tests
             try { DbContext.CloseDB(); } catch { }
             Globals.BTCNetwork = _priorNetwork;
             Globals.LastBlock = _priorLastBlock;
+            VerifiedXCore.Bitcoin.FROST.FrostSigningAuthorization.BlockHoldsRequest = _priorDepth;
             Globals.FrostFFIAvailable = _priorLibrary;
             Globals.CustomPath = _priorCustomPath;
             try { Directory.Delete(_tempRoot, recursive: true); } catch { }

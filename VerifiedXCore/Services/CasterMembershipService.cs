@@ -22,7 +22,7 @@ namespace VerifiedXCore.Services
         /// Returns false when the record era is active but the rotation could not be completed —
         /// callers must then ABORT the live-set mutation.
         /// </summary>
-        public static async Task<bool> ProposeRotationAsync(string changeType, string changedAddress, CasterInfo? addedCaster)
+        public static async Task<bool> ProposeRotationAsync(string changeType, string changedAddress, CasterInfo? addedCaster, long holdSeconds = 0)
         {
             if (!CasterMembershipStore.RecordEraActive)
                 return true; // legacy era — nothing to do
@@ -52,7 +52,7 @@ namespace VerifiedXCore.Services
                         return false;
                     }
                 }
-                else // Demotion | Departure
+                else if (changeType != VreeElection.MaintenanceHoldChangeType) // Demotion | Departure
                 {
                     newSet.RemoveAll(c => c.Address == changedAddress);
                     if (newSet.Count < CasterMembershipStore.MinCommitteeSize)
@@ -72,7 +72,9 @@ namespace VerifiedXCore.Services
                     PrevRecordHash = head.RecordHash,
                     ChangeType = changeType,
                     ChangedAddress = changedAddress ?? "",
-                    Signatures = new List<RecordSignature>()
+                    Signatures = new List<RecordSignature>(),
+                    HoldSeconds = changeType == VreeElection.MaintenanceHoldChangeType ? holdSeconds : 0,
+                    SchemeVersion = changeType == VreeElection.MaintenanceHoldChangeType ? VreeElection.SchemeVersionV1 : 0,
                 };
                 candidate.RecordHash = CasterMembershipStore.ComputeRecordHash(candidate);
 
@@ -182,6 +184,10 @@ namespace VerifiedXCore.Services
         /// </summary>
         public static void ReconcileBlockCastersToRecord(CasterMembershipRecord record)
         {
+            // A rotation replaces the whole committee a dozen blocks ahead: the outgoing members produce until then.
+            if (VreeElection.RotationPending(record, Globals.LastBlock?.Height ?? -1, CasterMembershipStore.GetBySeq))
+                return;
+
             var recordAddrs = record.Casters.Select(c => c.Address).ToHashSet(StringComparer.Ordinal);
 
             var keep = Globals.BlockCasters.ToList().Where(p => !string.IsNullOrEmpty(p.ValidatorAddress) && recordAddrs.Contains(p.ValidatorAddress!)).ToList();
@@ -426,6 +432,7 @@ namespace VerifiedXCore.Services
             {
                 "Promotion" => added.Count == 1 && removed.Count == 0 && added[0] == candidate.ChangedAddress,
                 "Demotion" or "Departure" => added.Count == 0 && removed.Count == 1 && removed[0] == candidate.ChangedAddress,
+                VreeElection.MaintenanceHoldChangeType => added.Count == 0 && removed.Count == 0 && VreeElection.HoldShapeRefusal(head, candidate) == null,
                 _ => false
             };
             if (!validChange) return null;
@@ -497,11 +504,15 @@ namespace VerifiedXCore.Services
                 return null;
             if (BootstrapCoordinationService.State != BootstrapCoordinationService.BootstrapState.Agreed)
                 return null;
-            if (candidate.RecordSeq != head.RecordSeq + 1) return null;
-            if (!string.Equals(candidate.PrevRecordHash, head.RecordHash, StringComparison.OrdinalIgnoreCase)) return null;
-            if (candidate.EffectiveFromHeight <= head.EffectiveFromHeight) return null;
-            if (!CasterMembershipStore.EffectiveHeightWithinReach(candidate.EffectiveFromHeight, head.EffectiveFromHeight, Globals.LastBlock?.Height ?? 0))
-                return null;
+            var replacesRung = VreeElection.ResetMayReplace(head, candidate, Globals.LastBlock?.Height ?? 0, CasterMembershipStore.TipAgeSeconds());
+            if (!replacesRung)
+            {
+                if (candidate.RecordSeq != head.RecordSeq + 1) return null;
+                if (!string.Equals(candidate.PrevRecordHash, head.RecordHash, StringComparison.OrdinalIgnoreCase)) return null;
+                if (candidate.EffectiveFromHeight <= head.EffectiveFromHeight) return null;
+                if (!CasterMembershipStore.EffectiveHeightWithinReach(candidate.EffectiveFromHeight, head.EffectiveFromHeight, Globals.LastBlock?.Height ?? 0))
+                    return null;
+            }
             if (CasterMembershipStore.ComputeRecordHash(candidate) != candidate.RecordHash) return null;
 
             // Same set + stale-tip rule the append path enforces (signatures are checked at append).

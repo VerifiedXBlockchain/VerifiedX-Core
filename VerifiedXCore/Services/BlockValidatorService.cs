@@ -619,6 +619,7 @@ namespace VerifiedXCore.Services
             await ValidateBlockSemaphore.WaitAsync();
 
             long? committedHeight = null; // set once the block is written: from then on a failure leaves the state behind it
+            Action? undoCarriedRecord = null; // set once the block's record replaces siblings, cleared once the block is taken
 
             try
             {
@@ -767,6 +768,15 @@ namespace VerifiedXCore.Services
                     //no rules
                 }
 
+                // An election's first block carries its record, outside the block hash like the certificate. It is judged first:
+                // the certificate is judged under it, and a node that missed the gossip has no other way to get the record.
+                if (!validateOnly && VreeElection.PrepareBlockRecord(block) is { } recordWait)
+                {
+                    LogUtility.Log($"[ValidateBlock] VREE: {recordWait}", "BlockValidatorService");
+                    DbContext.Rollback("BlockValidatorService.ValidateBlock()-vreeRecord");
+                    return result;
+                }
+
                 // Certificates are attached after local craft (TryAttachCertificateAsync) and before broadcast.
                 // validateOnly preflight must not require a cert yet; full acceptance paths use validateOnly=false.
                 // blockDownloads is exempt: certs are not part of the block hash and attestations are
@@ -774,9 +784,20 @@ namespace VerifiedXCore.Services
                 // never have their certs re-verified (or repaired) — enforcement is live-broadcast only.
                 // Except for the next block on a synced node (AtSyncedTip), whatever the path and however long the chain
                 // has stalled: there the certificate exists (ValidateBlocks tops it up first) and is required.
-                if (!validateOnly && (!blockDownloads || AtSyncedTip(block)) && !ConsensusCertificateVerifier.VerifyOrNotRequired(block))
+                // A block carrying an election record has no such exemption: it is the record's first block, and its certificate is what ties the two.
+                if (!validateOnly && (!blockDownloads || AtSyncedTip(block) || block.MembershipRecord != null) && !ConsensusCertificateVerifier.VerifyOrNotRequired(block))
                 {
                     DbContext.Rollback("BlockValidatorService.ValidateBlock()-cert");
+                    return result;
+                }
+
+                // The record goes into the store once its block's certificate holds, on a sync as on a live block.
+                if (!validateOnly && block.MembershipRecord != null && block.Height == Globals.LastBlock.Height + 1
+                    && !VreeService.AdoptFromBlock(block, out var adoptRefusal, out undoCarriedRecord))
+                {
+                    LogUtility.Log($"[ValidateBlock] VREE: block {block.Height} refused — {adoptRefusal}", "BlockValidatorService");
+                    ValidatorMembershipPull.RequestSoon();
+                    DbContext.Rollback("BlockValidatorService.ValidateBlock()-vreeAdopt");
                     return result;
                 }
 
@@ -1180,7 +1201,7 @@ namespace VerifiedXCore.Services
                         {
                             if (blkTransaction.FromAddress != "Coinbase_TrxFees" && blkTransaction.FromAddress != "Coinbase_BlkRwd")
                             {
-                                var txResult = await TransactionValidatorService.VerifyTX(blkTransaction, blockDownloads, true, false, processedNonces, skipPrivatePlonkProofVerification: !blockDownloads, blockHeight: block.Height, blockTimestamp: block.Timestamp);
+                                var txResult = await TransactionValidatorService.VerifyTX(blkTransaction, blockDownloads, true, false, processedNonces, skipPrivatePlonkProofVerification: !blockDownloads, blockHeight: block.Height, blockTimestamp: block.Timestamp, blockValidator: block.Validator);
 
                                 var effectiveTxResult = txResult;
                                 if (txResult.Item1 && PrivateTransactionTypes.IsPrivateTransaction(blkTransaction.TransactionType))
@@ -1686,6 +1707,8 @@ namespace VerifiedXCore.Services
                         if (validateOnly)
                             return result;
 
+                        undoCarriedRecord = null; // the block is taken: its record stays
+
                         //For testing purposes
                         //if (block.Height == 272333)
                         //{
@@ -2084,6 +2107,12 @@ namespace VerifiedXCore.Services
             }
             finally
             {
+                // Every refusal after the record went in returns through here.
+                if (undoCarriedRecord != null)
+                {
+                    try { undoCarriedRecord(); }
+                    catch (Exception ex) { ErrorLogUtility.LogError($"[ValidateBlock] Could not undo the record of refused block {block.Height}: {ex.Message}", "BlockValidatorService.ValidateBlock()"); }
+                }
                 try { ValidateBlockSemaphore.Release(); } catch { }
             }
                         
@@ -2197,7 +2226,7 @@ namespace VerifiedXCore.Services
                 {
                     if (transaction.FromAddress != "Coinbase_TrxFees" && transaction.FromAddress != "Coinbase_BlkRwd")
                     {
-                        var txResult = await TransactionValidatorService.VerifyTX(transaction, blockDownloads, false, false, null, skipPrivatePlonkProofVerification: !blockDownloads, blockHeight: block.Height, blockTimestamp: block.Timestamp);
+                        var txResult = await TransactionValidatorService.VerifyTX(transaction, blockDownloads, false, false, null, skipPrivatePlonkProofVerification: !blockDownloads, blockHeight: block.Height, blockTimestamp: block.Timestamp, blockValidator: block.Validator);
                         var effectiveTxResult = txResult;
                         if (txResult.Item1 && PrivateTransactionTypes.IsPrivateTransaction(transaction.TransactionType))
                         {

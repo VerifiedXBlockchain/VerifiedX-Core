@@ -207,6 +207,8 @@ namespace VerifiedXCore.Nodes
             _ = StartCastingRounds();
 
             _ = MonitorCasters();
+
+            _ = VreeService.RunAsync();
         }
 
         #endregion
@@ -244,7 +246,7 @@ namespace VerifiedXCore.Nodes
                 // SEAT-HEAL: in the record era the record decides whether this node holds a seat; peers' live lists
                 // don't (they drop a restarted member until it resumes). The round loop's resume gate decides when it
                 // may cast. Before a record exists the old majority-of-live-lists rule below still applies.
-                if (!Globals.IsBlockCaster && CasterMembershipStore.GetCurrent() is { } seatHead
+                if (!Globals.IsBlockCaster && CasterMembershipStore.GetSeatRecord() is { } seatHead
                     && seatHead.Casters.Any(c => c.Address == Globals.ValidatorAddress))
                 {
                     CasterLogUtility.Log($"SelfRecovery: record seq {seatHead.RecordSeq} lists this node — IsBlockCaster=true; casting waits for the resume checks.", "CasterFlow");
@@ -1254,7 +1256,7 @@ namespace VerifiedXCore.Nodes
                 var selfInList = casterList.Exists(x => x.ValidatorAddress == Globals.ValidatorAddress);
                 // SEAT-HEAL: in the record era the record decides (MonitorCasters' SelfRecovery uses the same rule, so the
                 // two loops can't flip the flag back and forth); keep our own entry in the live list.
-                var seatRecord = CasterMembershipStore.GetCurrent();
+                var seatRecord = CasterMembershipStore.GetSeatRecord();
                 var selfSeat = seatRecord?.Casters.FirstOrDefault(c => c.Address == Globals.ValidatorAddress);
                 if (seatRecord != null)
                 {
@@ -1401,6 +1403,8 @@ namespace VerifiedXCore.Nodes
                     // reachability and evicted for not casting, in a loop. A seed bootstrap casts without resuming.
                     if (Globals.IsBootstrapMode)
                         CasterSeatService.ConfirmCasting("cast during a seed bootstrap");
+                    if (VreeElection.FreshlyElected(CasterMembershipStore.GetCurrent(), Globals.LastBlock.Height, Globals.ValidatorAddress, CasterMembershipStore.GetBySeq))
+                        CasterSeatService.ConfirmCasting("elected by the validators");
                     var resumeHold = await CasterSeatService.TryResumeAsync();
                     if (resumeHold != null)
                     {
@@ -2321,7 +2325,7 @@ namespace VerifiedXCore.Nodes
                 reason = RecordHoldReason(CasterMembershipStore.GetCurrent()?.RecordSeq, CasterDiscoveryService.LastObservedPeerHeads,
                     CasterMembershipStore.GetCommitteeForHeight(height), Globals.ValidatorAddress, seedBootstrap);
             }
-            return reason;
+            return reason ?? VreeService.StandDownReason(height);
         }
 
         /// <summary>

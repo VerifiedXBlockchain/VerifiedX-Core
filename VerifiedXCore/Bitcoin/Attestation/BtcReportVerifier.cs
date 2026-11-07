@@ -20,6 +20,20 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public bool IsCoinbase { get; init; }
         /// <summary>For a new coin: the vault deposit script it pays (which of the vault's keys holds it).</summary>
         public string? ScriptHex { get; init; }
+        /// <summary>
+        /// For a spend read from the transaction's bytes: the transaction without witness data and every output it pays,
+        /// so that what it paid can be matched to a withdrawal or exit part the chain has not fixed on it
+        /// (<see cref="BtcWithdrawals"/>, payment attribution). Null for a spend-only event.
+        /// </summary>
+        public string? TxHex { get; init; }
+        public IReadOnlyList<BtcTxOutput>? Outputs { get; init; }
+    }
+
+    /// <summary>One output of a reported Bitcoin transaction: the script it pays and how much.</summary>
+    public sealed class BtcTxOutput
+    {
+        public string ScriptHex { get; set; } = "";
+        public long Sats { get; set; }
     }
 
     public sealed class BtcReportOutcome
@@ -285,7 +299,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 var spends = isCoinbase ? new List<string>() : tx.Inputs.Select(i => BtcAttestStore.OutpointKey(i.PrevOut.Hash.ToString(), i.PrevOut.N)).ToList();
                 var outputs = tx.Outputs.Select((o, i) => ((long)i, o.ScriptPubKey.ToHex().ToLowerInvariant(), o.Value.Satoshi)).ToList();
 
-                var added = DeriveEffects(txid, isCoinbase, spends, outputs, block, scopedVault?.SmartContractUID, overlay, effects, db);
+                var added = DeriveEffects(txid, isCoinbase, spends, outputs, block, scopedVault?.SmartContractUID, overlay, effects, db, ev.TxHex);
                 if (added == 0)
                     return BtcReportOutcome.Fail($"transaction {txid} touches no vault coin{(scopedVault != null ? " of " + scopedVault.SmartContractUID : "")}; a report carries only transactions that do");
             }
@@ -371,9 +385,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// The verifier and the scanner that builds reports both call this, so they cannot disagree.
         /// </summary>
         internal static int DeriveEffects(string txid, bool isCoinbase, IReadOnlyList<string> spends, IReadOnlyList<(long Vout, string ScriptHex, long Sats)> outputs,
-            long block, string? scopedVault, Dictionary<string, VaultCoinStatus> overlay, List<BtcCoinEffect> effects, LiteDatabase? db)
+            long block, string? scopedVault, Dictionary<string, VaultCoinStatus> overlay, List<BtcCoinEffect> effects, LiteDatabase? db, string? txHex = null)
         {
             var before = effects.Count;
+            IReadOnlyList<BtcTxOutput>? paid = null; // built once, for the first spend
 
             foreach (var outpoint in spends)
             {
@@ -383,7 +398,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 var created = coin == null ? effects.First(e => !e.IsSpend && !e.IsFreeze && e.Outpoint == outpoint) : null;
                 var owner = coin?.SmartContractUID ?? created!.SmartContractUID;
                 if (scopedVault != null && owner != scopedVault) continue;
-                effects.Add(new BtcCoinEffect { IsSpend = true, Outpoint = outpoint, SmartContractUID = owner, Sats = coin?.ValueSats ?? created!.Sats, Txid = txid, BitcoinHeight = block });
+                paid ??= outputs.Select(o => new BtcTxOutput { ScriptHex = o.ScriptHex, Sats = o.Sats }).ToList();
+                effects.Add(new BtcCoinEffect { IsSpend = true, Outpoint = outpoint, SmartContractUID = owner, Sats = coin?.ValueSats ?? created!.Sats, Txid = txid, BitcoinHeight = block, TxHex = txHex, Outputs = paid });
                 overlay[outpoint] = VaultCoinStatus.Spent;
             }
 

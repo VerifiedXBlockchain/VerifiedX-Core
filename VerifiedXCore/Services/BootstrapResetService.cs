@@ -109,6 +109,10 @@ namespace VerifiedXCore.Services
                 var head = CasterMembershipStore.GetCurrent();
                 if (head == null)
                     return; // no record → genesis minting handles it
+                // The validators already ratified a replacement for this stall: it outranks a reset of it, for as long as a
+                // rung could still follow. Past that the electors left alive are too few, and this ladder takes over.
+                if (VreeElection.ElectionNotStarted(head, Globals.LastBlock?.Height ?? 0) && CasterMembershipStore.TipAgeSeconds() < VreeElection.ResetAfterElectionSeconds)
+                    return;
                 if (BootstrapCoordinationService.AgreedSeedCount < CasterMembershipStore.GenesisMinSeedSignatures)
                     return;
 
@@ -216,11 +220,15 @@ namespace VerifiedXCore.Services
                 .OrderBy(c => c.Address, StringComparer.Ordinal)
                 .ToList();
 
+            // Over a ratified rung that never started, the reset is its sibling: see VreeElection.ResetMayReplace.
+            var replacesRung = VreeElection.ElectionNotStarted(head, Globals.LastBlock?.Height ?? 0);
             var candidate = new CasterMembershipRecord
             {
-                RecordSeq = head.RecordSeq + 1,
-                EffectiveFromHeight = Math.Max(head.EffectiveFromHeight + 1, (Globals.LastBlock?.Height ?? 0) + 1),
-                PrevRecordHash = head.RecordHash,
+                RecordSeq = replacesRung ? head.RecordSeq : head.RecordSeq + 1,
+                EffectiveFromHeight = replacesRung
+                    ? (Globals.LastBlock?.Height ?? 0) + 1
+                    : Math.Max(head.EffectiveFromHeight + 1, (Globals.LastBlock?.Height ?? 0) + 1),
+                PrevRecordHash = replacesRung ? head.PrevRecordHash : head.RecordHash,
                 ChangeType = CasterMembershipStore.BootstrapResetChangeType,
                 ChangedAddress = "",
                 Casters = seeds,
