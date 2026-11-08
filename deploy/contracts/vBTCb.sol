@@ -26,7 +26,11 @@ import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
  *   upgradeWithValidatorApproval is removed.
  * - upgradeDelay() is 48 hours until changed; proposeUpgradeDelay sets it between 48 hours and 30 days, and the
  *   change itself waits the current delay.
- * - cancelPending lets a majority of validators drop a pending upgrade or delay change.
+ * - Every change to the validator set needs the mint threshold (2/3), so no smaller group can remove the others
+ *   and become 2/3 of what is left. A majority can still clear validators that went dark, but only through
+ *   proposeRemoval, which waits upgradeDelay() in public.
+ * - cancelPending drops whatever is pending (upgrade, delay change, removal). It needs only the blocking minority
+ *   (validatorCount - requiredMintSignatures + 1): the validators who could already refuse to sign a mint.
  * - The validator set stays between 3 and 50; only batch add/remove remain.
  * - A malformed or unknown signature is skipped instead of reverting the call.
  */
@@ -60,6 +64,8 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         keccak256("ProposeUpgrade(address implementation,uint256 adminNonce)");
     bytes32 public constant PROPOSE_UPGRADE_DELAY_TYPEHASH =
         keccak256("ProposeUpgradeDelay(uint256 delay,uint256 adminNonce)");
+    bytes32 public constant PROPOSE_REMOVAL_TYPEHASH =
+        keccak256("ProposeRemoval(address[] validators,uint256 vfxBlockHeight,uint256 adminNonce)");
     bytes32 public constant CANCEL_PENDING_TYPEHASH =
         keccak256("CancelPending(uint256 adminNonce)");
 
@@ -75,7 +81,8 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     event UpgradeProposed(address indexed newImplementation, uint256 eta, uint256 adminNonce);
     event UpgradeDelayProposed(uint256 newDelay, uint256 eta, uint256 adminNonce);
     event UpgradeDelayChanged(uint256 newDelay);
-    event PendingCancelled(address implementation, uint256 upgradeDelay, uint256 adminNonce);
+    event RemovalProposed(address[] validators, uint256 vfxBlockHeight, uint256 eta, uint256 adminNonce);
+    event PendingCancelled(address implementation, uint256 upgradeDelay, uint256 removals, uint256 adminNonce);
 
     bool private _upgradeAuthorized;
 
@@ -85,6 +92,9 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     uint256 private _upgradeDelay;
     uint256 public pendingUpgradeDelay;
     uint256 public pendingUpgradeDelayEta;
+    address[] private _pendingRemovals;
+    uint256 public pendingRemovalHeight;
+    uint256 public pendingRemovalEta;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -196,8 +206,70 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(
             REMOVE_VALIDATORS_TYPEHASH, keccak256(abi.encodePacked(oldValidators)), vfxBlockHeight, adminNonce)));
+        // The mint threshold: with less, a group could remove the rest and be 2/3 of the set that is left.
+        _requireSignatures(digest, signatures, requiredMintSignatures, "Insufficient valid admin signatures");
+
+        adminNonce++;
+        _removeValidators(oldValidators, vfxBlockHeight);
+    }
+
+    /**
+     * @notice A majority proposes removing validators that went dark (too many for the 2/3 threshold to be reached).
+     *         The removal waits upgradeDelay() and any blocking minority can cancel it meanwhile, so a majority short of
+     *         2/3 cannot use it to take the set over while the others are watching.
+     */
+    function proposeRemoval(address[] calldata oldValidators, uint256 vfxBlockHeight, bytes[] calldata signatures) external {
+        require(oldValidators.length > 0, "Empty batch");
+        require(oldValidators.length <= validatorCount && validatorCount - oldValidators.length >= MIN_VALIDATORS,
+            "Cannot remove below minimum");
+        require(pendingRemovalEta == 0, "Removal already pending");
+
+        bytes32 digest = _hashTypedData(keccak256(abi.encode(
+            PROPOSE_REMOVAL_TYPEHASH, keccak256(abi.encodePacked(oldValidators)), vfxBlockHeight, adminNonce)));
         _requireSignatures(digest, signatures, requiredRemoveSignatures, "Insufficient valid admin signatures");
 
+        for (uint256 i = 0; i < oldValidators.length; i++) {
+            require(isValidator[oldValidators[i]], "Not a validator");
+            for (uint256 j = 0; j < i; j++) require(oldValidators[j] != oldValidators[i], "Duplicate in batch");
+        }
+
+        _pendingRemovals = oldValidators;
+        pendingRemovalHeight = vfxBlockHeight;
+        pendingRemovalEta = block.timestamp + upgradeDelay();
+
+        emit RemovalProposed(oldValidators, vfxBlockHeight, pendingRemovalEta, adminNonce);
+        adminNonce++;
+    }
+
+    /// @notice Anyone may carry out a proposed removal once its delay has passed.
+    function executeRemoval() external {
+        require(pendingRemovalEta != 0, "No removal pending");
+        require(block.timestamp >= pendingRemovalEta, "Upgrade delay not elapsed");
+
+        // Skip any already removed since the proposal (by the 2/3 path).
+        uint256 n = 0;
+        for (uint256 i = 0; i < _pendingRemovals.length; i++) {
+            if (isValidator[_pendingRemovals[i]]) n++;
+        }
+        address[] memory list = new address[](n);
+        uint256 k = 0;
+        for (uint256 i = 0; i < _pendingRemovals.length; i++) {
+            if (isValidator[_pendingRemovals[i]]) list[k++] = _pendingRemovals[i];
+        }
+        uint256 height = pendingRemovalHeight;
+        delete _pendingRemovals;
+        pendingRemovalHeight = 0;
+        pendingRemovalEta = 0;
+
+        require(validatorCount - n >= MIN_VALIDATORS, "Cannot remove below minimum");
+        _removeValidators(list, height);
+    }
+
+    function getPendingRemovals() external view returns (address[] memory) {
+        return _pendingRemovals;
+    }
+
+    function _removeValidators(address[] memory oldValidators, uint256 vfxBlockHeight) internal {
         for (uint256 i = 0; i < oldValidators.length; i++) {
             require(isValidator[oldValidators[i]], "Not a validator"); // also rejects a repeat within the batch
 
@@ -213,13 +285,12 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         }
 
         validatorCount -= oldValidators.length;
-        adminNonce++;
         _recalculateThresholds();
 
         emit ValidatorBatchRemoved(oldValidators, vfxBlockHeight);
     }
 
-    /// @notice How long a proposed upgrade or delay change waits before it can be executed.
+    /// @notice How long a proposed upgrade, delay change or removal waits before it can be executed.
     function upgradeDelay() public view returns (uint256) {
         return _upgradeDelay == 0 ? DEFAULT_UPGRADE_DELAY : _upgradeDelay;
     }
@@ -277,19 +348,27 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         emit UpgradeDelayChanged(_upgradeDelay);
     }
 
-    /// @notice A majority of validators (the removal threshold) drops any pending upgrade and delay change.
+    /// @notice The validators who could refuse a mint: validatorCount - requiredMintSignatures + 1.
+    function requiredVetoSignatures() public view returns (uint256) {
+        return validatorCount - requiredMintSignatures + 1;
+    }
+
+    /// @notice A blocking minority drops whatever is pending: an upgrade, a delay change and a removal.
     function cancelPending(bytes[] calldata signatures) external {
-        require(pendingImplementation != address(0) || pendingUpgradeDelayEta != 0, "Nothing pending");
+        require(pendingImplementation != address(0) || pendingUpgradeDelayEta != 0 || pendingRemovalEta != 0, "Nothing pending");
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(CANCEL_PENDING_TYPEHASH, adminNonce)));
-        _requireSignatures(digest, signatures, requiredRemoveSignatures, "Insufficient valid admin signatures");
+        _requireSignatures(digest, signatures, requiredVetoSignatures(), "Insufficient valid admin signatures");
 
-        emit PendingCancelled(pendingImplementation, pendingUpgradeDelay, adminNonce);
+        emit PendingCancelled(pendingImplementation, pendingUpgradeDelay, _pendingRemovals.length, adminNonce);
 
         pendingImplementation = address(0);
         pendingUpgradeEta = 0;
         pendingUpgradeDelay = 0;
         pendingUpgradeDelayEta = 0;
+        delete _pendingRemovals;
+        pendingRemovalHeight = 0;
+        pendingRemovalEta = 0;
         adminNonce++;
     }
 
@@ -318,12 +397,9 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         // Mints ALWAYS use 2/3 Byzantine fault tolerance — no exceptions
         requiredMintSignatures = _max(MIN_REQUIRED_SIGNATURES, (validatorCount * 2 + 2) / 3);
 
-        if (validatorCount <= MIN_VALIDATORS_FOR_HIGH_THRESHOLD) {
-            // Low validator count: use 51% for removals only (prevents lockout)
-            requiredRemoveSignatures = _max(MIN_REQUIRED_SIGNATURES, (validatorCount + 1) / 2);
-        } else {
-            requiredRemoveSignatures = (validatorCount * 51 + 99) / 100;
-        }
+        // A strict majority, for proposeRemoval only (the timelocked way out when too many validators went dark for
+        // 2/3 to be reached). MIN_VALIDATORS_FOR_HIGH_THRESHOLD is V3's and no longer used.
+        requiredRemoveSignatures = _max(MIN_REQUIRED_SIGNATURES, validatorCount / 2 + 1);
     }
 
     /// @dev Counts distinct current validators that signed `digest`; malformed signatures and non-validators are skipped.
@@ -356,9 +432,9 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     }
 
     /**
-     * @dev Reserved storage slots for future upgrades. V4 took four slots (its address shares V3's last slot).
+     * @dev Reserved storage slots for future upgrades. V4 took seven slots (its address shares V3's last slot).
      */
-    uint256[46] private __gap;
+    uint256[43] private __gap;
 
     function _authorizeUpgrade(address newImplementation) internal override {
         newImplementation; // silence

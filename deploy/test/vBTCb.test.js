@@ -32,6 +32,11 @@ const TYPES = {
         { name: "delay", type: "uint256" },
         { name: "adminNonce", type: "uint256" },
     ],
+    ProposeRemoval: [
+        { name: "validators", type: "address[]" },
+        { name: "vfxBlockHeight", type: "uint256" },
+        { name: "adminNonce", type: "uint256" },
+    ],
     CancelPending: [{ name: "adminNonce", type: "uint256" }],
 };
 
@@ -297,14 +302,16 @@ describe("vBTCb V4", function () {
             );
         });
 
-        it("removes with the majority threshold, and a removed validator's signature stops counting", async function () {
+        it("removes with the mint threshold, and a removed validator's signature stops counting", async function () {
             const { token, vals, user } = await loadFixture(deployV4Fixture);
             const extra = wallets(1);
             await addBatch(token, vals, [extra[0].address]);
-            // 4 validators: mint needs 3, remove needs 2
+            // 4 validators: mint needs 3, and so does an immediate removal
             expect(await token.requiredMintSignatures()).to.equal(3n);
-            expect(await token.requiredRemoveSignatures()).to.equal(2n);
-            await expect(removeBatch(token, [vals[0], vals[1]], [vals[2].address])).to.emit(token, "ValidatorBatchRemoved");
+            await expect(removeBatch(token, [vals[0], vals[1]], [vals[2].address])).to.be.revertedWith(
+                "Insufficient valid admin signatures"
+            );
+            await expect(removeBatch(token, [vals[0], vals[1], extra[0]], [vals[2].address])).to.emit(token, "ValidatorBatchRemoved");
             expect(await token.isValidator(vals[2].address)).to.equal(false);
             expect(await token.validatorCount()).to.equal(3n);
             expect(await token.requiredMintSignatures()).to.equal(2n);
@@ -312,6 +319,105 @@ describe("vBTCb V4", function () {
                 "Insufficient valid signatures"
             );
             await mint(token, [extra[0], vals[0]], user.address, 1n, "after-remove");
+        });
+    });
+
+    describe("a group short of 2/3 cannot take the set over", function () {
+        // 7 validators: mint and immediate removal 5, a removal proposal 4 (majority), a veto 3 (blocking minority).
+        async function deploy7Fixture() {
+            const vals = wallets(7);
+            const [, user] = await ethers.getSigners();
+            const V4 = await ethers.getContractFactory("vBTCb");
+            const token = await upgrades.deployProxy(V4, ["n", "s", vals.map((v) => v.address)], { kind: "uups" });
+            return { token, vals, user, majority: vals.slice(0, 4), others: vals.slice(4) };
+        }
+
+        async function proposeRemoval(token, signers, addrs, height = 9n) {
+            const adminNonce = await token.adminNonce();
+            const sigs = await signTyped(token, signers, "ProposeRemoval", { validators: addrs, vfxBlockHeight: height, adminNonce });
+            return token.proposeRemoval(addrs, height, sigs);
+        }
+
+        async function cancel(token, signers) {
+            const sigs = await signTyped(token, signers, "CancelPending", { adminNonce: await token.adminNonce() });
+            return token.cancelPending(sigs);
+        }
+
+        it("has the thresholds 5 / 4 / 3 at 7 validators and keeps veto = n - mint + 1 at every size", async function () {
+            const { token } = await loadFixture(deploy7Fixture);
+            expect(await token.requiredMintSignatures()).to.equal(5n);
+            expect(await token.requiredRemoveSignatures()).to.equal(4n);
+            expect(await token.requiredVetoSignatures()).to.equal(3n);
+            const V4 = await ethers.getContractFactory("vBTCb");
+            for (const n of [3, 4, 5, 6, 10, 49, 50]) {
+                const t = await upgrades.deployProxy(V4, ["n", "s", wallets(n).map((v) => v.address)], { kind: "uups" });
+                const mint = await t.requiredMintSignatures();
+                const majority = await t.requiredRemoveSignatures();
+                expect(mint * 3n >= BigInt(n) * 2n, `n=${n}`).to.equal(true);
+                expect(majority * 2n > BigInt(n), `n=${n}`).to.equal(true);
+                expect(await t.requiredVetoSignatures()).to.equal(BigInt(n) - mint + 1n);
+            }
+        });
+
+        it("a majority cannot remove the others at once and then mint", async function () {
+            const { token, majority, others, user } = await loadFixture(deploy7Fixture);
+            await expect(removeBatch(token, majority, others.map((o) => o.address))).to.be.revertedWith(
+                "Insufficient valid admin signatures"
+            );
+            await expect(mint(token, majority, user.address, 1n, "x")).to.be.revertedWith("Insufficient valid signatures");
+        });
+
+        it("a majority's removal waits the delay, and the minority it targets vetoes it", async function () {
+            const { token, majority, others } = await loadFixture(deploy7Fixture);
+            const targets = others.map((o) => o.address);
+            await expect(proposeRemoval(token, majority.slice(0, 3), targets)).to.be.revertedWith(
+                "Insufficient valid admin signatures"
+            );
+            await expect(proposeRemoval(token, majority, targets)).to.emit(token, "RemovalProposed");
+            expect(await token.getPendingRemovals()).to.deep.equal(targets);
+            await expect(token.executeRemoval()).to.be.revertedWith("Upgrade delay not elapsed");
+            await expect(proposeRemoval(token, majority, targets)).to.be.revertedWith("Removal already pending");
+
+            await expect(cancel(token, others.slice(0, 2))).to.be.revertedWith("Insufficient valid admin signatures");
+            await expect(cancel(token, others)).to.emit(token, "PendingCancelled");
+            await time.increase(49 * HOUR);
+            await expect(token.executeRemoval()).to.be.revertedWith("No removal pending");
+            expect(await token.validatorCount()).to.equal(7n);
+        });
+
+        it("a live majority clears validators that went dark, after the delay, and can then mint", async function () {
+            const { token, majority, others, user } = await loadFixture(deploy7Fixture);
+            await proposeRemoval(token, majority, others.map((o) => o.address));
+            await time.increase(48 * HOUR);
+            await expect(token.connect(user).executeRemoval()).to.emit(token, "ValidatorBatchRemoved");
+            expect(await token.validatorCount()).to.equal(4n);
+            expect(await token.requiredMintSignatures()).to.equal(3n);
+            expect(await token.getPendingRemovals()).to.deep.equal([]);
+            await mint(token, majority.slice(0, 3), user.address, 7n, "after-recovery");
+            expect(await token.balanceOf(user.address)).to.equal(7n);
+        });
+
+        it("a pending removal skips a validator the 2/3 path already removed", async function () {
+            const { token, vals, majority, others } = await loadFixture(deploy7Fixture);
+            await proposeRemoval(token, majority, [others[0].address, others[1].address]);
+            await removeBatch(token, vals.slice(0, 5), [others[0].address]);
+            await time.increase(48 * HOUR);
+            await token.executeRemoval();
+            expect(await token.validatorCount()).to.equal(5n);
+            expect(await token.isValidator(others[1].address)).to.equal(false);
+        });
+
+        it("a removal proposal refuses repeats, non-validators and going below 3", async function () {
+            const { token, vals, majority, others } = await loadFixture(deploy7Fixture);
+            await expect(proposeRemoval(token, majority, [others[0].address, others[0].address])).to.be.revertedWith(
+                "Duplicate in batch"
+            );
+            await expect(proposeRemoval(token, majority, [ethers.Wallet.createRandom().address])).to.be.revertedWith(
+                "Not a validator"
+            );
+            await expect(proposeRemoval(token, majority, vals.slice(0, 5).map((v) => v.address))).to.be.revertedWith(
+                "Cannot remove below minimum"
+            );
         });
     });
 

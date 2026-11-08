@@ -29,11 +29,16 @@ on the contract, and every message is EIP-712 typed data under the domain `("vBT
 |---|---|---|
 | Mint against a VFX lock | `Mint(to, amount, lockId, nonce)` | 2/3 of validators (at least 2) |
 | Add validators | `AddValidators(validators[], vfxBlockHeight, adminNonce)` | 2/3 |
-| Remove validators | `RemoveValidators(validators[], vfxBlockHeight, adminNonce)` | 51% (at least 2) |
+| Remove validators | `RemoveValidators(validators[], vfxBlockHeight, adminNonce)` | 2/3 |
+| Propose removing validators that went dark | `ProposeRemoval(validators[], vfxBlockHeight, adminNonce)` | more than half |
 | Propose a code upgrade | `ProposeUpgrade(implementation, adminNonce)` | 2/3 |
 | Propose a new upgrade delay | `ProposeUpgradeDelay(delay, adminNonce)` | 2/3 |
-| Cancel what is pending | `CancelPending(adminNonce)` | 51% |
+| Cancel what is pending | `CancelPending(adminNonce)` | blocking minority: `validatorCount - requiredMintSignatures + 1` |
 
+- No group short of 2/3 can change the set at once, so none can remove the others and become 2/3 of what is left.
+- If so many validators go dark that 2/3 can no longer sign, a live majority proposes removing them. The removal waits
+  `upgradeDelay()`, then anyone runs `executeRemoval()`. Meanwhile any blocking minority (the validators who could
+  already refuse a mint) can cancel it, so a majority cannot use it against validators who are still running.
 - A proposed upgrade waits `upgradeDelay()` (48 hours until changed) and is then executed by anyone with
   `executeUpgrade()`. Holders who disagree have that long to burn and exit.
 - The delay can be set between 48 hours and 30 days. The change itself waits the current delay.
