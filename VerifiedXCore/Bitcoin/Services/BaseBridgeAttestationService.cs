@@ -33,6 +33,8 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         internal const string DestinationIsAdminTagReason = "EVM destination begins with a Base admin message tag";
+        internal const string ContractOrChainMismatchReason = "Invalid contract or chain id";
+        internal const string UnsupportedMessageVersionReason = "Unsupported Base message version";
 
         /// <summary>The text tags the vBTCb contract's admin messages begin with (ADD_BATCH and REMOVE_BATCH start with ADD and REMOVE).</summary>
         private static readonly byte[][] AdminMessageTags = { Encoding.ASCII.GetBytes("ADD"), Encoding.ASCII.GetBytes("REMOVE"), Encoding.ASCII.GetBytes("UPGRADE") };
@@ -156,10 +158,20 @@ namespace VerifiedXCore.Bitcoin.Services
                     return Task.FromResult<(bool, string?, string?)>((false, null, "Amount mismatch"));
                 }
 
-                if (string.IsNullOrEmpty(request.ContractAddress) || request.ChainId != Globals.BaseEvmChainId)
+                // Only for the contract this node is configured for: a signature over any other address (a contract
+                // deployed with the same validators, say) is a mint there that no lock on this chain stands behind.
+                if (string.IsNullOrEmpty(request.ContractAddress) || request.ChainId != Globals.BaseEvmChainId
+                    || string.IsNullOrEmpty(BaseBridgeService.ContractAddress)
+                    || !string.Equals(request.ContractAddress.Trim(), BaseBridgeService.ContractAddress, StringComparison.OrdinalIgnoreCase))
                 {
-                    LogUtility.Log($"[BridgeAttest] REJECT: Invalid contract or chainId. RequestContract={request.ContractAddress}, RequestChainId={request.ChainId}, ExpectedChainId={Globals.BaseEvmChainId}", TAG);
-                    return Task.FromResult<(bool, string?, string?)>((false, null, "Invalid contract or chain id"));
+                    LogUtility.Log($"[BridgeAttest] REJECT: Invalid contract or chainId. RequestContract={request.ContractAddress}, ExpectedContract={BaseBridgeService.ContractAddress}, RequestChainId={request.ChainId}, ExpectedChainId={Globals.BaseEvmChainId}", TAG);
+                    return Task.FromResult<(bool, string?, string?)>((false, null, ContractOrChainMismatchReason));
+                }
+
+                if (request.MessageVersion is not (0 or 3 or VbtcbTypedData.MessageVersion))
+                {
+                    LogUtility.Log($"[BridgeAttest] REJECT: unsupported message version {request.MessageVersion}. lockId={request.LockId}", TAG);
+                    return Task.FromResult<(bool, string?, string?)>((false, null, UnsupportedMessageVersionReason));
                 }
 
                 // Last before the key: a request that is right in itself is signed only by a node on the network's chain.
@@ -184,17 +196,16 @@ namespace VerifiedXCore.Bitcoin.Services
                 
                 LogUtility.Log($"[BridgeAttest] All checks passed. Signing message hash. ValidatorVFX={Globals.ValidatorAddress}, ValidatorBase={derivedBaseAddr}, lockId={request.LockId}", TAG);
 
-                var hash = ConstructMintMessageHash(
-                    request.EvmDestination,
-                    request.AmountSats,
-                    chainLock.LockId,
-                    request.Nonce,
-                    request.ChainId,
-                    request.ContractAddress);
-                
-                LogUtility.Log($"[BridgeAttest] Message hash constructed: 0x{Convert.ToHexString(hash).ToLowerInvariant().Substring(0, 16)}... Params: to={request.EvmDestination}, amount={request.AmountSats}, lockId={request.LockId}, nonce={request.Nonce}, chainId={request.ChainId}, contract={request.ContractAddress}", TAG);
+                // V4 reads an EIP-712 Mint; the deployed V3 reads the packed hash under the personal-message prefix. Either
+                // signature is worthless to the other contract version.
+                var typed = request.MessageVersion == VbtcbTypedData.MessageVersion;
+                var hash = typed
+                    ? VbtcbTypedData.MintDigest(request.EvmDestination, request.AmountSats, chainLock.LockId, request.Nonce, request.ChainId, BaseBridgeService.ContractAddress)
+                    : ConstructMintMessageHash(request.EvmDestination, request.AmountSats, chainLock.LockId, request.Nonce, request.ChainId, BaseBridgeService.ContractAddress);
 
-                var sigHex = ValidatorEthKeyService.EthSignMessageHex(hash, privBytes);
+                LogUtility.Log($"[BridgeAttest] Message hash constructed (v{(typed ? 4 : 3)}): 0x{Convert.ToHexString(hash).ToLowerInvariant().Substring(0, 16)}... Params: to={request.EvmDestination}, amount={request.AmountSats}, lockId={request.LockId}, nonce={request.Nonce}, chainId={request.ChainId}, contract={request.ContractAddress}", TAG);
+
+                var sigHex = typed ? ValidatorEthKeyService.SignDigestHex(hash, privBytes) : ValidatorEthKeyService.EthSignMessageHex(hash, privBytes);
                 
                 LogUtility.Log($"[BridgeAttest] SIGNED successfully. lockId={request.LockId}, sig={sigHex?.Substring(0, Math.Min(20, sigHex?.Length ?? 0))}..., signerBase={derivedBaseAddr}", TAG);
 

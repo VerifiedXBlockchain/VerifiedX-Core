@@ -27,6 +27,8 @@ namespace VerifiedXCore.Bitcoin.Models
         public long ChainId { get; set; }
         public string ContractAddress { get; set; } = string.Empty;
         public string SmartContractUID { get; set; } = string.Empty;
+        /// <summary>The contract's MESSAGE_VERSION(): 4 for an EIP-712 mint; 0 (not sent) or 3 for the deployed V3's packed hash.</summary>
+        public int MessageVersion { get; set; }
     }
 
     public class ValidatorUpdateSigningRequest

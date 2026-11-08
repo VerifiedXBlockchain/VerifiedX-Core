@@ -407,11 +407,13 @@ namespace VerifiedXCore.Tests
             var priorSynced = Globals.IsChainSynced;
             var priorResyncing = Globals.IsResyncing;
             var priorStopTimers = Globals.StopAllTimers;
+            var priorContract = BaseBridgeService.ContractAddress;
             Globals.ValidatorAddress = "xNotLoadedHere";
             Globals.BaseValidatorSetCastersOnly = false;
             Globals.IsChainSynced = true;
             Globals.IsResyncing = false;
             Globals.StopAllTimers = false;
+            BaseBridgeService.ContractAddress = "0x" + new string('b', 40);   // the node's configured contract
             try
             {
                 async Task<string?> Ask() => (await VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.HandleMintAttestationRequest(new()
@@ -445,6 +447,86 @@ namespace VerifiedXCore.Tests
                 Globals.IsChainSynced = priorSynced;
                 Globals.IsResyncing = priorResyncing;
                 Globals.StopAllTimers = priorStopTimers;
+                BaseBridgeService.ContractAddress = priorContract;
+            }
+        }
+
+        /// <summary>
+        /// A validator signed a mint for whatever contract address the request named (only the chain id was checked), so a
+        /// second contract deployed with the same validators could be minted on with this chain's locks. It now signs only
+        /// for the contract it is configured for, and in the form that contract reads: the V4 EIP-712 Mint when the
+        /// request says version 4, the deployed V3's packed hash otherwise. Neither signature is valid as the other.
+        /// </summary>
+        [Fact]
+        public async Task AMintAttestation_IsSignedOnlyForTheConfiguredContract_InTheFormItReads()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.004M);
+            for (var i = 0; i < VerifiedXCore.Bitcoin.Services.BaseBridgeAttestationService.MintAttestationDepth; i++) await Apply(Tip + 1);
+
+            var validator = NewKey();
+            AccountData.GetAccounts().InsertSafe(new Account { Address = validator.Address, PublicKey = validator.Pub, PrivateKey = "0" + validator.Key.secret.ToString("x") });
+            var validatorBase = ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(validator.Pub);
+            const string configured = "0x09096c6eBf35F0aDAEeC02D06a0dE77E790F132D";
+            var destination = "0x" + new string('a', 40);
+
+            var priorValidator = Globals.ValidatorAddress;
+            var priorCastersOnly = Globals.BaseValidatorSetCastersOnly;
+            var priorSynced = Globals.IsChainSynced;
+            var priorResyncing = Globals.IsResyncing;
+            var priorStopTimers = Globals.StopAllTimers;
+            var priorContract = BaseBridgeService.ContractAddress;
+            Globals.ValidatorAddress = validator.Address;
+            Globals.BaseValidatorSetCastersOnly = false;
+            Globals.IsChainSynced = true;
+            Globals.IsResyncing = false;
+            Globals.StopAllTimers = false;
+            BaseBridgeService.ContractAddress = configured;
+            try
+            {
+                Task<(bool success, string? signatureHex, string? error)> Ask(string contract, int version) =>
+                    BaseBridgeAttestationService.HandleMintAttestationRequest(new MintAttestationRequest
+                    {
+                        LockId = lockId, EvmDestination = destination, AmountSats = 400_000, Nonce = 77,
+                        ChainId = Globals.BaseEvmChainId, ContractAddress = contract, MessageVersion = version,
+                    });
+
+                foreach (var other in new[] { "0x" + new string('b', 40), "" })
+                {
+                    var (ok, _, error) = await Ask(other, 4);
+                    Assert.False(ok);
+                    Assert.Equal(BaseBridgeAttestationService.ContractOrChainMismatchReason, error);
+                }
+                var (okUnknown, _, unknownError) = await Ask(configured, 5);
+                Assert.False(okUnknown);
+                Assert.Equal(BaseBridgeAttestationService.UnsupportedMessageVersionReason, unknownError);
+
+                var v4Digest = VbtcbTypedData.MintDigest(destination, 400_000, lockId, 77, Globals.BaseEvmChainId, configured);
+                var v3Hash = BaseBridgeAttestationService.ConstructMintMessageHash(destination, 400_000, lockId, 77, Globals.BaseEvmChainId, configured);
+
+                var (ok4, sig4, err4) = await Ask(configured.ToLowerInvariant(), 4);   // the address in any case
+                Assert.True(ok4, err4);
+                Assert.Equal(validatorBase, ValidatorEthKeyService.RecoverSigner(v4Digest, sig4, personalMessage: false), StringComparer.OrdinalIgnoreCase);
+                Assert.NotEqual(validatorBase, ValidatorEthKeyService.RecoverSigner(v3Hash, sig4, personalMessage: true), StringComparer.OrdinalIgnoreCase);
+
+                foreach (var v3 in new[] { 0, 3 })
+                {
+                    var (ok3, sig3, err3) = await Ask(configured, v3);
+                    Assert.True(ok3, err3);
+                    Assert.Equal(validatorBase, ValidatorEthKeyService.RecoverSigner(v3Hash, sig3, personalMessage: true), StringComparer.OrdinalIgnoreCase);
+                    Assert.NotEqual(validatorBase, ValidatorEthKeyService.RecoverSigner(v4Digest, sig3, personalMessage: false), StringComparer.OrdinalIgnoreCase);
+                }
+            }
+            finally
+            {
+                Globals.ValidatorAddress = priorValidator;
+                Globals.BaseValidatorSetCastersOnly = priorCastersOnly;
+                Globals.IsChainSynced = priorSynced;
+                Globals.IsResyncing = priorResyncing;
+                Globals.StopAllTimers = priorStopTimers;
+                BaseBridgeService.ContractAddress = priorContract;
             }
         }
 
