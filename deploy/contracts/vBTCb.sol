@@ -31,7 +31,8 @@ import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
  *   proposeRemoval, which waits upgradeDelay() in public.
  * - cancelPending drops whatever is pending (upgrade, delay change, removal). It needs only the blocking minority
  *   (validatorCount - requiredMintSignatures + 1): the validators who could already refuse to sign a mint.
- * - The validator set stays between 3 and 50; only batch add/remove remain.
+ * - The validator set stays between 3 and 50; only batch add/remove remain. Each new validator signs its own
+ *   addition, so no seat goes to an address whose key nobody holds.
  * - A malformed or unknown signature is skipped instead of reverting the call.
  */
 contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
@@ -176,9 +177,20 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         emit BTCExitBurned(msg.sender, amount, btcDestination, block.chainid);
     }
 
-    function addValidatorBatch(address[] calldata newValidators, uint256 vfxBlockHeight, bytes[] calldata signatures) external {
+    /**
+     * @param newValidatorSignatures one per new validator, in the same order: its own signature over the same
+     *        AddValidators message. A seat goes only to an address whose key is held, so the set cannot be filled with
+     *        addresses nobody can sign for (enough of those would freeze every threshold for good).
+     */
+    function addValidatorBatch(
+        address[] calldata newValidators,
+        uint256 vfxBlockHeight,
+        bytes[] calldata signatures,
+        bytes[] calldata newValidatorSignatures
+    ) external {
         require(newValidators.length > 0, "Empty batch");
         require(validatorCount + newValidators.length <= MAX_VALIDATORS, "Too many validators");
+        require(newValidatorSignatures.length == newValidators.length, "One signature per new validator");
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(
             ADD_VALIDATORS_TYPEHASH, keccak256(abi.encodePacked(newValidators)), vfxBlockHeight, adminNonce)));
@@ -187,6 +199,8 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         for (uint256 i = 0; i < newValidators.length; i++) {
             require(newValidators[i] != address(0), "Invalid address");
             require(!isValidator[newValidators[i]], "Already a validator"); // also rejects a repeat within the batch
+            (address own, ECDSA.RecoverError error, ) = ECDSA.tryRecover(digest, newValidatorSignatures[i]);
+            require(error == ECDSA.RecoverError.NoError && own == newValidators[i], "New validator did not sign");
 
             isValidator[newValidators[i]] = true;
             validators.push(newValidators[i]);

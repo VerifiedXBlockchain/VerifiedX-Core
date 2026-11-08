@@ -91,10 +91,16 @@ async function mint(token, signers, to, amount, lockId, nonce = 1n) {
     return token.mintWithProof(to, amount, lockId, nonce, sigs);
 }
 
-async function addBatch(token, signers, addrs, height = 100n) {
+// `added` are the new validators' wallets (each signs its own addition) or plain addresses (no such signature).
+async function addBatch(token, signers, added, height = 100n) {
     const adminNonce = await token.adminNonce();
-    const sigs = await signTyped(token, signers, "AddValidators", { validators: addrs, vfxBlockHeight: height, adminNonce });
-    return token.addValidatorBatch(addrs, height, sigs);
+    const addrs = added.map((a) => (typeof a === "string" ? a : a.address));
+    const value = { validators: addrs, vfxBlockHeight: height, adminNonce };
+    const sigs = await signTyped(token, signers, "AddValidators", value);
+    const own = await Promise.all(
+        added.map((a) => (typeof a === "string" ? "0x" : signTyped(token, [a], "AddValidators", value).then((s) => s[0])))
+    );
+    return token.addValidatorBatch(addrs, height, sigs, own);
 }
 
 async function removeBatch(token, signers, addrs, height = 100n) {
@@ -228,8 +234,9 @@ describe("vBTCb V4", function () {
 
         it("AddValidators signatures do not validate as RemoveValidators, and the reverse", async function () {
             const { token, vals } = await loadFixture(deployV4Fixture);
-            const extra = wallets(1).map((w) => w.address);
-            await addBatch(token, vals, extra);
+            const extraW = wallets(1);
+            const extra = extraW.map((w) => w.address);
+            await addBatch(token, vals, extraW);
             const adminNonce = await token.adminNonce();
             const value = { validators: extra, vfxBlockHeight: 7n, adminNonce };
             const addSigs = await signTyped(token, vals, "AddValidators", value);
@@ -238,7 +245,7 @@ describe("vBTCb V4", function () {
             );
             const fresh = wallets(1).map((w) => w.address);
             const removeSigs = await signTyped(token, vals, "RemoveValidators", { ...value, validators: fresh });
-            await expect(token.addValidatorBatch(fresh, 7n, removeSigs)).to.be.revertedWith(
+            await expect(token.addValidatorBatch(fresh, 7n, removeSigs, ["0x"])).to.be.revertedWith(
                 "Insufficient valid admin signatures"
             );
         });
@@ -258,29 +265,51 @@ describe("vBTCb V4", function () {
     describe("validator set", function () {
         it("adds a batch with 2 of 3, bumps the nonce and refuses a replay", async function () {
             const { token, vals } = await loadFixture(deployV4Fixture);
-            const add = wallets(3).map((w) => w.address);
+            const addW = wallets(3);
+            const add = addW.map((w) => w.address);
             const value = { validators: add, vfxBlockHeight: 100n, adminNonce: 0n };
             const sigs = await signTyped(token, vals.slice(0, 2), "AddValidators", value);
-            await expect(token.addValidatorBatch(add, 100n, sigs)).to.emit(token, "ValidatorBatchAdded");
+            const own = await signTyped(token, addW, "AddValidators", value);
+            await expect(token.addValidatorBatch(add, 100n, sigs, own)).to.emit(token, "ValidatorBatchAdded");
             expect(await token.validatorCount()).to.equal(6n);
             expect(await token.adminNonce()).to.equal(1n);
             expect(await token.requiredMintSignatures()).to.equal(4n);
             expect(await token.requiredRemoveSignatures()).to.equal(4n);
-            await expect(token.addValidatorBatch(add, 100n, sigs)).to.be.revertedWith("Insufficient valid admin signatures");
+            await expect(token.addValidatorBatch(add, 100n, sigs, own)).to.be.revertedWith("Insufficient valid admin signatures");
+        });
+
+        it("adds only an address that signed its own addition", async function () {
+            const { token, vals } = await loadFixture(deployV4Fixture);
+            const newcomer = ethers.Wallet.createRandom();
+            const value = { validators: [newcomer.address], vfxBlockHeight: 100n, adminNonce: 0n };
+            const sigs = await signTyped(token, vals, "AddValidators", value);
+            const [byOther] = await signTyped(token, [ethers.Wallet.createRandom()], "AddValidators", value);
+            const [ownOtherMessage] = await signTyped(token, [newcomer], "AddValidators", { ...value, vfxBlockHeight: 101n });
+            for (const own of ["0x", byOther, ownOtherMessage, ethers.hexlify(ethers.randomBytes(65))]) {
+                await expect(token.addValidatorBatch([newcomer.address], 100n, sigs, [own])).to.be.revertedWith(
+                    "New validator did not sign"
+                );
+            }
+            await expect(token.addValidatorBatch([newcomer.address], 100n, sigs, [])).to.be.revertedWith(
+                "One signature per new validator"
+            );
+            const [own] = await signTyped(token, [newcomer], "AddValidators", value);
+            await token.addValidatorBatch([newcomer.address], 100n, sigs, [own]);
+            expect(await token.isValidator(newcomer.address)).to.equal(true);
         });
 
         it("refuses one signature, a repeated address in a batch, and an existing validator", async function () {
             const { token, vals } = await loadFixture(deployV4Fixture);
-            const a = ethers.Wallet.createRandom().address;
+            const a = ethers.Wallet.createRandom();
             await expect(addBatch(token, vals.slice(0, 1), [a])).to.be.revertedWith("Insufficient valid admin signatures");
             await expect(addBatch(token, vals, [a, a])).to.be.revertedWith("Already a validator");
-            await expect(addBatch(token, vals, [vals[0].address])).to.be.revertedWith("Already a validator");
+            await expect(addBatch(token, vals, [vals[0]])).to.be.revertedWith("Already a validator");
             await expect(addBatch(token, vals, [ethers.ZeroAddress])).to.be.revertedWith("Invalid address");
         });
 
         it("never holds more than 50 validators", async function () {
             const { token, vals } = await loadFixture(deployV4Fixture);
-            await addBatch(token, vals, wallets(47).map((w) => w.address));
+            await addBatch(token, vals, wallets(47));
             expect(await token.validatorCount()).to.equal(50n);
             const all = vals; // the original 3 alone are not 2/3 of 50, but the cap check runs first
             await expect(addBatch(token, all, [ethers.Wallet.createRandom().address])).to.be.revertedWith(
@@ -292,7 +321,7 @@ describe("vBTCb V4", function () {
             const { token, vals } = await loadFixture(deployV4Fixture);
             await expect(removeBatch(token, vals, [vals[2].address])).to.be.revertedWith("Cannot remove below minimum");
             const four = wallets(1);
-            await addBatch(token, vals, [four[0].address]);
+            await addBatch(token, vals, [four[0]]);
             const set = [...vals, ...four];
             await expect(removeBatch(token, set, [vals[2].address, four[0].address])).to.be.revertedWith(
                 "Cannot remove below minimum"
@@ -305,7 +334,7 @@ describe("vBTCb V4", function () {
         it("removes with the mint threshold, and a removed validator's signature stops counting", async function () {
             const { token, vals, user } = await loadFixture(deployV4Fixture);
             const extra = wallets(1);
-            await addBatch(token, vals, [extra[0].address]);
+            await addBatch(token, vals, [extra[0]]);
             // 4 validators: mint needs 3, and so does an immediate removal
             expect(await token.requiredMintSignatures()).to.equal(3n);
             await expect(removeBatch(token, [vals[0], vals[1]], [vals[2].address])).to.be.revertedWith(

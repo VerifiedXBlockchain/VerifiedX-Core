@@ -28,7 +28,7 @@ on the contract, and every message is EIP-712 typed data under the domain `("vBT
 | Action | Message type | Signatures needed |
 |---|---|---|
 | Mint against a VFX lock | `Mint(to, amount, lockId, nonce)` | 2/3 of validators (at least 2) |
-| Add validators | `AddValidators(validators[], vfxBlockHeight, adminNonce)` | 2/3 |
+| Add validators | `AddValidators(validators[], vfxBlockHeight, adminNonce)` | 2/3, and each new validator signs the same message itself |
 | Remove validators | `RemoveValidators(validators[], vfxBlockHeight, adminNonce)` | 2/3 |
 | Propose removing validators that went dark | `ProposeRemoval(validators[], vfxBlockHeight, adminNonce)` | more than half |
 | Propose a code upgrade | `ProposeUpgrade(implementation, adminNonce)` | 2/3 |
