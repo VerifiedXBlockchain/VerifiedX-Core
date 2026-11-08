@@ -1,73 +1,69 @@
-const { ethers, upgrades } = require("hardhat");
+const { ethers, upgrades, network } = require("hardhat");
 
+/**
+ * Deploys a NEW vBTCb proxy (current contracts/vBTCb.sol) with the given validator set.
+ * Use this for a fresh network (Base Sepolia). Base mainnet already has a proxy: upgrade it with
+ * prepare-upgrade.js / submit-upgrade.js instead, or every holder's balance is left on the old one.
+ *
+ * Usage (Windows cmd):
+ *   set DEPLOYER_PRIVATE_KEY=0x...      any funded account; it gets no rights on the contract
+ *   set VALIDATORS=0xA...,0xB...,0xC... the validators' Base addresses (at least 3)
+ *   npx hardhat run scripts/deploy.js --network baseSepolia
+ *
+ * Each validator's Base address: GET http://<validator>:<port>/wallet/api/base-address/<validatorVfxAddress>
+ */
 async function main() {
-    console.log("=== vBTCb Deployment to Base Mainnet ===\n");
+    const { chainId } = await ethers.provider.getNetwork();
+    console.log(`=== vBTCb deployment to ${network.name} (chain ${chainId}) ===\n`);
 
-    const [deployer] = await ethers.getSigners();
-    console.log("Deployer address:", deployer.address);
-    
-    const balance = await ethers.provider.getBalance(deployer.address);
-    console.log("Deployer balance:", ethers.formatEther(balance), "ETH\n");
-
-    if (balance === 0n) {
-        console.error("ERROR: Deployer has no ETH. Get Base Sepolia ETH from a faucet.");
+    const initialValidators = (process.env.VALIDATORS || "")
+        .split(",")
+        .map((v) => v.trim())
+        .filter((v) => v.length > 0)
+        .map((v) => ethers.getAddress(v));
+    if (initialValidators.length < 3) {
+        console.error("ERROR: set VALIDATORS to at least 3 comma-separated validator Base addresses.");
         process.exit(1);
     }
 
-    // ============================================================
-    // IMPORTANT: Replace these with your 3 validator Base addresses!
-    // Get them from: GET http://<validator-ip>:<port>/wallet/api/base-address/<vfxAddress>
-    // ============================================================
-    const initialValidators = [
-        "0xD140DfAB7F08B5ce8E54A8b364E447b49E6EEda6",  // Validator 1 Base Address
-        "0x95bDa4f2009A2998871c0BA3852Dc62617672Ed7",  // Validator 2 Base Address
-        "0x5C44Cf6E3a022a49904e6139a49ae72866c02440",  // Validator 3 Base Address
-    ];
+    const [deployer] = await ethers.getSigners();
+    const balance = await ethers.provider.getBalance(deployer.address);
+    console.log("Deployer address:", deployer.address);
+    console.log("Deployer balance:", ethers.formatEther(balance), "ETH\n");
+    if (balance === 0n) {
+        console.error("ERROR: Deployer has no ETH on this network.");
+        process.exit(1);
+    }
 
     console.log("Initial validators:");
     initialValidators.forEach((v, i) => console.log(`  ${i + 1}. ${v}`));
     console.log();
 
-    // Deploy as UUPS proxy
     const vBTCb = await ethers.getContractFactory("vBTCb");
-    
     console.log("Deploying vBTCb as UUPS proxy...");
-    const proxy = await upgrades.deployProxy(
-        vBTCb,
-        [
-            "Verified Bitcoin on Base",  // name
-            "vBTC.b",                    // symbol
-            initialValidators            // initial validator set
-        ],
-        {
-            initializer: "initialize",
-            kind: "uups"
-        }
-    );
-
+    const proxy = await upgrades.deployProxy(vBTCb, ["Verified Bitcoin on Base", "vBTC.b", initialValidators], {
+        initializer: "initialize",
+        kind: "uups",
+    });
     await proxy.waitForDeployment();
     const proxyAddress = await proxy.getAddress();
 
     console.log("\n=== DEPLOYMENT SUCCESSFUL ===");
     console.log("Proxy address (USE THIS):", proxyAddress);
+    console.log("Implementation:", await upgrades.erc1967.getImplementationAddress(proxyAddress));
 
     // Public RPCs sometimes lag right after a tx; eth_call can briefly return empty (BAD_DATA).
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-    let count;
-    let requiredMint;
-    let requiredRemove;
-    let decimals;
-    let validators;
-    const delaysMs = [0, 2000, 4000, 8000];
     let lastErr;
-    for (const ms of delaysMs) {
+    for (const ms of [0, 2000, 4000, 8000]) {
         if (ms) await sleep(ms);
         try {
-            count = await proxy.validatorCount();
-            requiredMint = await proxy.requiredMintSignatures();
-            requiredRemove = await proxy.requiredRemoveSignatures();
-            decimals = await proxy.decimals();
-            validators = await proxy.getValidators();
+            console.log("\nContract state:");
+            console.log("  Message version:", (await proxy.MESSAGE_VERSION()).toString());
+            console.log("  Validators on contract:", await proxy.getValidators());
+            console.log("  Required mint signatures:", (await proxy.requiredMintSignatures()).toString());
+            console.log("  Required remove signatures:", (await proxy.requiredRemoveSignatures()).toString());
+            console.log("  Upgrade delay (s):", (await proxy.upgradeDelay()).toString());
             lastErr = undefined;
             break;
         } catch (e) {
@@ -75,25 +71,16 @@ async function main() {
         }
     }
     if (lastErr) {
-        console.warn(
-            "\nCould not read contract state yet (often public RPC lag). Deployment tx already succeeded — confirm on BaseScan:"
-        );
-        console.warn("  https://basescan.org/address/" + proxyAddress);
+        console.warn("\nCould not read contract state yet (often public RPC lag). The deployment tx succeeded.");
         console.warn("Underlying error:", lastErr.message || lastErr);
-    } else {
-        console.log("\nContract state:");
-        console.log("  Validator count:", count.toString());
-        console.log("  Required mint signatures:", requiredMint.toString());
-        console.log("  Required remove signatures:", requiredRemove.toString());
-        console.log("  Decimals:", decimals.toString());
-        console.log("  Validators on contract:", validators);
     }
 
+    const explorer = chainId === 8453n ? "https://basescan.org" : "https://sepolia.basescan.org";
     console.log("\n=== NEXT STEPS ===");
-    console.log("1. Set this environment variable on ALL VFX nodes:");
-    console.log(`   set BASE_BRIDGE_V3_CONTRACT=${proxyAddress}`);
-    console.log("2. Restart all VFX nodes");
-    console.log("3. Verify on BaseScan: https://basescan.org/address/" + proxyAddress);
+    console.log(`1. On every VFX node of this network set in config.txt:  BaseBridgeContract=${proxyAddress}`);
+    console.log("2. Restart the nodes");
+    console.log(`3. Verify on ${explorer}/address/${proxyAddress}`);
+    console.log("4. Commit deploy/.openzeppelin/*.json: it records the storage layout later upgrades are checked against");
 }
 
 main()
