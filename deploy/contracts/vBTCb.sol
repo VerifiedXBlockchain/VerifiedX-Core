@@ -31,6 +31,8 @@ import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
  *   proposeRemoval, which waits upgradeDelay() in public.
  * - cancelPending drops whatever is pending (upgrade, delay change, removal). It needs only the blocking minority
  *   (validatorCount - requiredMintSignatures + 1): the validators who could already refuse to sign a mint.
+ * - A pending upgrade, delay change or removal lapses PROPOSAL_GRACE_PERIOD (14 days) after it became executable,
+ *   and a lapsed one may be replaced, so nothing approved long ago can be run after holders stopped watching.
  * - The validator set stays between 3 and 50; only batch add/remove remain. Each new validator signs its own
  *   addition, so no seat goes to an address whose key nobody holds.
  * - A malformed or unknown signature is skipped instead of reverting the call.
@@ -48,6 +50,8 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     uint256 public constant MAX_VALIDATORS = 50;
     uint256 public constant DEFAULT_UPGRADE_DELAY = 48 hours;
     uint256 public constant MAX_UPGRADE_DELAY = 30 days;
+    /// @notice A proposal that is not executed within this long after it became executable lapses.
+    uint256 public constant PROPOSAL_GRACE_PERIOD = 14 days;
     uint256 public constant MESSAGE_VERSION = 4;
 
     bytes32 private constant DOMAIN_TYPEHASH =
@@ -236,7 +240,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         require(oldValidators.length > 0, "Empty batch");
         require(oldValidators.length <= validatorCount && validatorCount - oldValidators.length >= MIN_VALIDATORS,
             "Cannot remove below minimum");
-        require(pendingRemovalEta == 0, "Removal already pending");
+        require(pendingRemovalEta == 0 || _lapsed(pendingRemovalEta), "Removal already pending");
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(
             PROPOSE_REMOVAL_TYPEHASH, keccak256(abi.encodePacked(oldValidators)), vfxBlockHeight, adminNonce)));
@@ -259,6 +263,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     function executeRemoval() external {
         require(pendingRemovalEta != 0, "No removal pending");
         require(block.timestamp >= pendingRemovalEta, "Upgrade delay not elapsed");
+        require(!_lapsed(pendingRemovalEta), "Proposal lapsed");
 
         // Skip any already removed since the proposal (by the 2/3 path).
         uint256 n = 0;
@@ -311,7 +316,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
 
     function proposeUpgrade(address newImplementation, bytes[] calldata signatures) external {
         require(newImplementation.code.length > 0, "Invalid implementation");
-        require(pendingImplementation == address(0), "Upgrade already pending");
+        require(pendingImplementation == address(0) || _lapsed(pendingUpgradeEta), "Upgrade already pending");
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(PROPOSE_UPGRADE_TYPEHASH, newImplementation, adminNonce)));
         _requireSignatures(digest, signatures, requiredMintSignatures, "Insufficient valid admin signatures");
@@ -328,6 +333,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         address impl = pendingImplementation;
         require(impl != address(0), "No upgrade pending");
         require(block.timestamp >= pendingUpgradeEta, "Upgrade delay not elapsed");
+        require(!_lapsed(pendingUpgradeEta), "Proposal lapsed");
 
         pendingImplementation = address(0);
         pendingUpgradeEta = 0;
@@ -339,7 +345,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
 
     function proposeUpgradeDelay(uint256 newDelay, bytes[] calldata signatures) external {
         require(newDelay >= DEFAULT_UPGRADE_DELAY && newDelay <= MAX_UPGRADE_DELAY, "Delay out of range");
-        require(pendingUpgradeDelayEta == 0, "Delay change already pending");
+        require(pendingUpgradeDelayEta == 0 || _lapsed(pendingUpgradeDelayEta), "Delay change already pending");
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(PROPOSE_UPGRADE_DELAY_TYPEHASH, newDelay, adminNonce)));
         _requireSignatures(digest, signatures, requiredMintSignatures, "Insufficient valid admin signatures");
@@ -354,6 +360,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     function executeUpgradeDelay() external {
         require(pendingUpgradeDelayEta != 0, "No delay change pending");
         require(block.timestamp >= pendingUpgradeDelayEta, "Upgrade delay not elapsed");
+        require(!_lapsed(pendingUpgradeDelayEta), "Proposal lapsed");
 
         _upgradeDelay = pendingUpgradeDelay;
         pendingUpgradeDelay = 0;
@@ -439,6 +446,10 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         }
 
         require(validSigCount >= required, err);
+    }
+
+    function _lapsed(uint256 eta) internal view returns (bool) {
+        return block.timestamp > eta + PROPOSAL_GRACE_PERIOD;
     }
 
     function _max(uint256 a, uint256 b) internal pure returns (uint256) {

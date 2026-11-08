@@ -529,6 +529,47 @@ describe("vBTCb V4", function () {
             expect((await token.pendingUpgradeEta()) - BigInt(await time.latest())).to.equal(sevenDays);
         });
 
+        it("an upgrade, a delay change and a removal lapse 14 days after they became executable, and can then be replaced", async function () {
+            const { token, vals } = await loadFixture(deployV4Fixture);
+            const extra = wallets(1);
+            await addBatch(token, vals, extra); // 4 validators, so one can be removed; nonce 1
+            const set = [...vals, ...extra];
+            const impl = await newImplementation();
+            await token.proposeUpgrade(impl, await signTyped(token, set, "ProposeUpgrade", { implementation: impl, adminNonce: 1n }));
+            const delay = BigInt(7 * DAY);
+            await token.proposeUpgradeDelay(delay, await signTyped(token, set, "ProposeUpgradeDelay", { delay, adminNonce: 2n }));
+            const removal = { validators: [extra[0].address], vfxBlockHeight: 9n, adminNonce: 3n };
+            await token.proposeRemoval(removal.validators, 9n, await signTyped(token, set, "ProposeRemoval", removal));
+
+            const latest = await token.pendingRemovalEta(); // proposed last of the three
+            await time.increaseTo(latest + BigInt(14 * DAY) + 1n); // one second past the last second it may run
+            await expect(token.executeUpgrade()).to.be.revertedWith("Proposal lapsed");
+            await expect(token.executeUpgradeDelay()).to.be.revertedWith("Proposal lapsed");
+            await expect(token.executeRemoval()).to.be.revertedWith("Proposal lapsed");
+
+            const impl2 = await newImplementation();
+            await token.proposeUpgrade(impl2, await signTyped(token, set, "ProposeUpgrade", { implementation: impl2, adminNonce: 4n }));
+            expect(await token.pendingImplementation()).to.equal(impl2);
+            await token.proposeUpgradeDelay(delay, await signTyped(token, set, "ProposeUpgradeDelay", { delay, adminNonce: 5n }));
+            await token.proposeRemoval(removal.validators, 9n, await signTyped(token, set, "ProposeRemoval", { ...removal, adminNonce: 6n }));
+            await time.increaseTo(await token.pendingUpgradeEta());
+            await token.executeUpgrade();
+            await token.executeUpgradeDelay();
+            await token.executeRemoval();
+            expect(await upgrades.erc1967.getImplementationAddress(await token.getAddress())).to.equal(impl2);
+            expect(await token.upgradeDelay()).to.equal(delay);
+            expect(await token.validatorCount()).to.equal(3n);
+        });
+
+        it("a proposal still runs on the last second of its grace period", async function () {
+            const { token, vals } = await loadFixture(deployV4Fixture);
+            const impl = await newImplementation();
+            await token.proposeUpgrade(impl, await signTyped(token, vals, "ProposeUpgrade", { implementation: impl, adminNonce: 0n }));
+            await time.setNextBlockTimestamp((await token.pendingUpgradeEta()) + BigInt(14 * DAY));
+            await token.executeUpgrade();
+            expect(await upgrades.erc1967.getImplementationAddress(await token.getAddress())).to.equal(impl);
+        });
+
         it("refuses a delay under 48 hours or over 30 days", async function () {
             const { token, vals } = await loadFixture(deployV4Fixture);
             for (const delay of [BigInt(47 * HOUR), BigInt(31 * DAY), 0n]) {

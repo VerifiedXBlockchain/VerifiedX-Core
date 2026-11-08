@@ -42,6 +42,8 @@ on the contract, and every message is EIP-712 typed data under the domain `("vBT
 - A proposed upgrade waits `upgradeDelay()` (48 hours until changed) and is then executed by anyone with
   `executeUpgrade()`. Holders who disagree have that long to burn and exit.
 - The delay can be set between 48 hours and 30 days. The change itself waits the current delay.
+- A pending upgrade, delay change or removal lapses 14 days after it became executable; a lapsed one can be
+  replaced by a new proposal.
 - The set stays between 3 and 50 validators. Each admin message carries `adminNonce`, so a signature set is used once.
 
 ## Setup and tests
