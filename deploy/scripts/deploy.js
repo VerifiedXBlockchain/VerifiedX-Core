@@ -16,6 +16,14 @@ async function main() {
     const { chainId } = await ethers.provider.getNetwork();
     console.log(`=== vBTCb deployment to ${network.name} (chain ${chainId}) ===\n`);
 
+    // Base mainnet already has the vBTC.b proxy that holders hold. A second one would be a different token, and the
+    // next steps below would point nodes at it.
+    if (chainId === 8453n && process.env.ALLOW_SECOND_MAINNET_PROXY !== "yes") {
+        console.error("ERROR: Base mainnet already has the vBTC.b proxy 0x09096c6eBf35F0aDAEeC02D06a0dE77E790F132D.");
+        console.error("Upgrade it with prepare-upgrade.js / submit-upgrade.js. Nothing was deployed.");
+        process.exit(1);
+    }
+
     const initialValidators = (process.env.VALIDATORS || "")
         .split(",")
         .map((v) => v.trim())
