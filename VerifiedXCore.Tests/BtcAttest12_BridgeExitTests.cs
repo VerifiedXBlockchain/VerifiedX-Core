@@ -634,6 +634,59 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        /// <summary>
+        /// A validator signed a mint only while it sat in the caster committee. The contract counts only its own validators
+        /// anyway, so the rule added nothing, and an election that rotated two contract validators out of the committee
+        /// stopped every mint. Under the released settings (casters-only on), a validator outside the committee signs.
+        /// </summary>
+        [Fact]
+        public async Task AMintAttestation_IsGivenByAValidatorOutsideTheCasterCommittee()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.004M);
+            for (var i = 0; i < BaseBridgeAttestationService.MintAttestationDepth; i++) await Apply(Tip + 1);
+
+            var validator = NewKey();
+            AccountData.GetAccounts().InsertSafe(new Account { Address = validator.Address, PublicKey = validator.Pub, PrivateKey = "0" + validator.Key.secret.ToString("x") });
+            const string configured = "0x09096c6eBf35F0aDAEeC02D06a0dE77E790F132D";
+            var destination = "0x" + new string('a', 40);
+
+            var priorValidator = Globals.ValidatorAddress;
+            var priorSynced = Globals.IsChainSynced;
+            var priorResyncing = Globals.IsResyncing;
+            var priorStopTimers = Globals.StopAllTimers;
+            var priorContract = BaseBridgeService.ContractAddress;
+            Globals.ValidatorAddress = validator.Address;
+            Globals.IsChainSynced = true;
+            Globals.IsResyncing = false;
+            Globals.StopAllTimers = false;
+            BaseBridgeService.ContractAddress = configured;
+            try
+            {
+                Assert.True(Globals.BaseValidatorSetCastersOnly);                                   // as released
+                Assert.DoesNotContain(validator.Address, BridgeCasterConsensus.GetCommitteeForHeight(Tip));
+                var (ok, sig, error) = await BaseBridgeAttestationService.HandleMintAttestationRequest(new MintAttestationRequest
+                {
+                    LockId = lockId, EvmDestination = destination, AmountSats = 400_000, Nonce = 77,
+                    ChainId = Globals.BaseEvmChainId, ContractAddress = configured, MessageVersion = VbtcbTypedData.MessageVersion,
+                });
+                Assert.True(ok, error);
+                Assert.Equal(ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(validator.Pub),
+                    ValidatorEthKeyService.RecoverSigner(VbtcbTypedData.MintDigest(destination, 400_000, lockId, 77, Globals.BaseEvmChainId, configured), sig, personalMessage: false),
+                    StringComparer.OrdinalIgnoreCase);
+            }
+            finally
+            {
+                Globals.ValidatorAddress = priorValidator;
+                Globals.IsChainSynced = priorSynced;
+                Globals.IsResyncing = priorResyncing;
+                Globals.StopAllTimers = priorStopTimers;
+                BaseBridgeService.ContractAddress = priorContract;
+            }
+        }
+
         /// <summary>Hands each SignMintAttestation request to the given answer, as the node at that IP would.</summary>
         private sealed class AttesterHttpClientFactory : System.Net.Http.IHttpClientFactory
         {

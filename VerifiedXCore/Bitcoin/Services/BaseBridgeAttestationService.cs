@@ -100,13 +100,9 @@ namespace VerifiedXCore.Bitcoin.Services
                     return Task.FromResult<(bool, string?, string?)>((false, null, "Not a validator node"));
                 }
 
-                // SECURITY: mint attestations are issued only by the accountable Base validator set
-                // (caster committee members when BaseValidatorSetCastersOnly), not by any free registration.
-                if (!BaseValidatorSyncService.IsLocalNodeEligibleAttester())
-                {
-                    LogUtility.Log($"[BridgeAttest] REJECT: This node is not in the Base minting validator set (caster committee). lockId={request.LockId}", TAG);
-                    return Task.FromResult<(bool, string?, string?)>((false, null, "Not a Base minting validator (caster committee)"));
-                }
+                // No caster-committee condition: the contract counts a signature only from its own validators, so the
+                // condition added nothing, and it stopped a contract validator the election had rotated out of the
+                // committee from signing (two such and no mint could be made).
 
                 LogUtility.Log($"[BridgeAttest] Processing attestation request: lockId={request.LockId}, evmDest={request.EvmDestination}, amountSats={request.AmountSats}, nonce={request.Nonce}, chainId={request.ChainId}, contract={request.ContractAddress}", TAG);
 

@@ -108,14 +108,6 @@ namespace VerifiedXCore.Bitcoin.Services
             return SelectBaseValidatorSet(VBTCValidatorRegistry.GetPublicValidators(), committee, Globals.BaseValidatorSetCastersOnly);
         }
 
-        /// <summary>Whether THIS node may issue Base-side signatures (mint attestations, validator updates).</summary>
-        public static bool IsLocalNodeEligibleAttester()
-        {
-            if (string.IsNullOrEmpty(Globals.ValidatorAddress)) return false;
-            if (!Globals.BaseValidatorSetCastersOnly) return true;
-            return BridgeCasterConsensus.GetCommitteeForHeight(Globals.LastBlock?.Height ?? 0).Contains(Globals.ValidatorAddress);
-        }
-
         /// <summary>
         /// Builds the current (lower-cased Base address -> VFX address) map of the validators that
         /// SHOULD be on the Base contract (see <see cref="SelectAttestingValidators"/>).
