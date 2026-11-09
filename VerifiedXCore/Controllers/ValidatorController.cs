@@ -63,40 +63,50 @@ namespace VerifiedXCore.Controllers
         }
 
         /// <summary>
-        /// Validators sign add/remove operations for the Base contract.
-        /// Called by BaseValidatorSyncService when collecting signatures.
+        /// Validators sign a vBTCb validator addition or removal (BaseValidatorSyncService). Publicly reachable: the node
+        /// signs only the change it computes itself for the current epoch, so the caller chooses nothing that is signed.
         /// </summary>
         [HttpPost]
         [Route("SignValidatorUpdate")]
-        public ActionResult<string> SignValidatorUpdate([FromBody] Bitcoin.Services.BaseValidatorSyncService.ValidatorUpdateSignRequest? request)
+        public async Task<ActionResult<string>> SignValidatorUpdate([FromBody] Bitcoin.Services.BaseValidatorSyncService.ValidatorUpdateSignRequest? request)
         {
             var reqIp = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
             try
             {
-                // Security: this endpoint is publicly reachable. Only sign a validator set change
-                // that this node has independently queued from VFX state AND that a known caster
-                // has signed for. Never sign caller-chosen targets.
-                var (ok, reason) = Bitcoin.Services.BaseValidatorSyncService.AuthorizeSignRequest(request);
-                if (!ok)
+                var (signature, reason) = await Bitcoin.Services.BaseValidatorSyncService.SignValidatorUpdateAsync(request);
+                if (signature == null)
                 {
-                    LogUtility.Log($"[BaseValidatorSync] SignValidatorUpdate REJECTED from IP={reqIp}, requester={request?.RequesterAddress}, action={request?.Action}: {reason}",
+                    LogUtility.Log($"[BaseValidatorSync] SignValidatorUpdate REJECTED from IP={reqIp}, action={request?.Action}, epoch={request?.VfxBlockHeight}: {reason}",
                         "ValidatorController.SignValidatorUpdate");
                     return StatusCode(403, JsonConvert.SerializeObject(new { Success = false, Message = reason }));
                 }
-
-                var sig = Bitcoin.Services.BaseValidatorSyncService.SignValidatorUpdateLocally(
-                    request!.Action, request.TargetAddresses, request.VfxBlockHeight);
-
-                if (sig == null)
-                    return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = "Failed to sign" }));
-
-                LogUtility.Log($"[BaseValidatorSync] SignValidatorUpdate signed {request.Action} for {request.TargetAddresses.Length} target(s), requester={request.RequesterAddress}",
-                    "ValidatorController.SignValidatorUpdate");
-                return Ok(JsonConvert.SerializeObject(new { Success = true, Signature = "0x" + Convert.ToHexString(sig).ToLowerInvariant() }));
+                return Ok(JsonConvert.SerializeObject(new { Success = true, Signature = signature }));
             }
             catch (Exception ex)
             {
                 return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = ApiErrorText.Generic(ex) }));
+            }
+        }
+
+        /// <summary>
+        /// The node operator signs a vBTCb contract change with this validator's Base key: UPGRADE (V3), or on V4
+        /// PROPOSE_UPGRADE, PROPOSE_UPGRADE_DELAY, PROPOSE_REMOVAL, CANCEL_PENDING (BaseAdminSigningService). Localhost only:
+        /// these signatures change the contract's code and validator set, so only the operator asks for them.
+        /// </summary>
+        [HttpPost]
+        [Route("SignBaseAdminAction")]
+        public async Task<ActionResult<string>> SignBaseAdminAction([FromBody] Bitcoin.Services.BaseAdminSigningService.Request? request)
+        {
+            if (!IsLoopbackCaller())
+                return Unauthorized(JsonConvert.SerializeObject(new { Success = false, Error = "SignBaseAdminAction is localhost-only." }));
+            try
+            {
+                var result = await Bitcoin.Services.BaseAdminSigningService.SignAsync(request);
+                return result.Success ? Ok(JsonConvert.SerializeObject(result)) : BadRequest(JsonConvert.SerializeObject(result));
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, JsonConvert.SerializeObject(new { Success = false, Error = ApiErrorText.Generic(ex) }));
             }
         }
 

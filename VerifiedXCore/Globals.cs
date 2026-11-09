@@ -754,6 +754,16 @@ namespace VerifiedXCore
         /// Sybil reach the 2/3 mint threshold. The caster committee is the accountable set.
         /// </summary>
         public static bool BaseValidatorSetCastersOnly = true;
+
+        /// <summary>
+        /// The first epoch boundary (BaseSignerSetPolicy) at which validators keep the vBTCb contract's validator set in
+        /// step with the registered vBTC validators: they sign an AddValidators / RemoveValidators that each computes for
+        /// itself, and one of them submits it. Also needs the contract to read version 4 messages. Not a block rule: an
+        /// older node just does not take part. Dark on mainnet until the release that follows the V3 to V4 upgrade.
+        /// </summary>
+        public static long BaseBridgeV4Height = long.MaxValue;
+        /// <summary>The same height on testnet (GlobalsNetworkHeights): live as soon as the testnet contract is V4.</summary>
+        public const long BaseBridgeV4TestnetHeight = 0;
         public static int BlockTime = 12000; //12 seconds
         public static int BlockTimeMin = 10000; //10 seconds
         public static int BlockTimeMax = 15000; //15 seconds

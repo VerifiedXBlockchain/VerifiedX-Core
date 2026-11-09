@@ -87,6 +87,37 @@ namespace VerifiedXCore.Bitcoin.Services
             return "0x" + BitConverter.ToString(sig).Replace("-", "", StringComparison.Ordinal);
         }
 
+        /// <summary>Sign a 32-byte EIP-712 digest as is (no personal-message prefix): 0x + r || s || v.</summary>
+        public static string SignDigestHex(byte[] digest32, byte[] privateKeyBytes)
+        {
+            if (digest32 == null || digest32.Length != 32)
+                throw new ArgumentException("digest32 must be 32 bytes", nameof(digest32));
+            var sig = SignatureTo65(new EthECKey(privateKeyBytes, true).SignAndCalculateV(digest32));
+            return "0x" + Convert.ToHexString(sig).ToLowerInvariant();
+        }
+
+        /// <summary>
+        /// The address that made a 65-byte signature over <paramref name="hash32"/>, or null when it is not one: as an
+        /// EIP-712 digest when <paramref name="personalMessage"/> is false, under the EIP-191 32-byte prefix when true.
+        /// </summary>
+        public static string? RecoverSigner(byte[] hash32, string? signatureHex, bool personalMessage)
+        {
+            try
+            {
+                var hex = (signatureHex ?? "").Trim();
+                if (hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) hex = hex[2..];
+                var sig = Convert.FromHexString(hex);
+                if (hash32 == null || hash32.Length != 32 || sig.Length != 65) return null;
+                var signed = personalMessage ? ToEthereumSignedMessageHash32(hash32) : hash32;
+                var ecdsa = EthECDSASignatureFactory.FromComponents(sig.AsSpan(0, 32).ToArray(), sig.AsSpan(32, 32).ToArray(), new[] { sig[64] });
+                return EthECKey.RecoverFromSignature(ecdsa, signed).GetPublicAddress();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         public static bool VerifyEthSignature(string baseAddress, byte[] messageHash32, byte[] signature65)
         {
             try

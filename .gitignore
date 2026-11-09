@@ -301,6 +301,8 @@ docs/
 deploy/artifacts/
 deploy/cache/
 deploy/typechain-types/
+deploy/upgrade-request.localhost.json
+deploy/upgrade-request.hardhat.json
 .env
 .env.*
 .github/copilot-instructions.md

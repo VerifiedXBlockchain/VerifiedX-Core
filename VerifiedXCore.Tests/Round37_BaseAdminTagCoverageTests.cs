@@ -13,24 +13,26 @@ namespace VerifiedXCore.Tests
     /// admin message begins with a text tag and a mint message begins with its destination, so validators refuse to sign a
     /// mint (and the chain refuses a lock) whose destination begins with one of those tags. This pins that list to the
     /// contract source: every signed message other than the mint begins with a tag, and every tag is refused. A contract
-    /// change that adds a message fails here until the list covers it.
+    /// change that adds a message fails here until the list covers it. The guard is for the deployed V3 (kept as
+    /// deploy/contracts/legacy/vBTCbV3.sol); V4 signs every message as EIP-712 typed data, so it has no packed message
+    /// for a mint to be read as.
     /// </summary>
     public class Round37_BaseAdminTagCoverageTests
     {
-        private static string ContractSource()
+        private static string ContractSource(params string[] relative)
         {
             for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
             {
-                var candidate = Path.Combine(dir.FullName, "deploy", "contracts", "vBTCb.sol");
+                var candidate = Path.Combine(new[] { dir.FullName, "deploy", "contracts" }.Concat(relative).ToArray());
                 if (File.Exists(candidate)) return File.ReadAllText(candidate);
             }
-            throw new FileNotFoundException("deploy/contracts/vBTCb.sol not found above the test directory");
+            throw new FileNotFoundException($"deploy/contracts/{string.Join("/", relative)} not found above the test directory");
         }
 
         [Fact]
         public void EveryAdminMessageTagOfTheContract_IsRefusedAsAMintDestination()
         {
-            var source = ContractSource();
+            var source = ContractSource("legacy", "vBTCbV3.sol");
             var tags = Regex.Matches(source, @"abi\.encodePacked\(\s*""([A-Za-z_]+)""").Select(m => m.Groups[1].Value).Distinct().ToList();
             var signedMessages = Regex.Matches(source, @"\.toEthSignedMessageHash\(\)").Count;
 
@@ -45,6 +47,14 @@ namespace VerifiedXCore.Tests
                 Assert.True(BaseBridgeAttestationService.DestinationStartsWithAdminTag(destination), $"a destination beginning with \"{tag}\" is not refused");
             }
             Assert.False(BaseBridgeAttestationService.DestinationStartsWithAdminTag("0x" + new string('a', 40)));
+        }
+
+        [Fact]
+        public void TheV4Contract_SignsNoPackedMessage()
+        {
+            var source = ContractSource("vBTCb.sol");
+            Assert.DoesNotContain("toEthSignedMessageHash", source);
+            Assert.Matches(@"MESSAGE_VERSION\s*=\s*" + VbtcbTypedData.MessageVersion + ";", source);
         }
     }
 }

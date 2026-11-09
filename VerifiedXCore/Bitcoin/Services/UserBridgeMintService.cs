@@ -193,51 +193,59 @@ namespace VerifiedXCore.Bitcoin.Services
             }
         }
 
-        private static async Task<Dictionary<string, string>?> CollectValidatorSignatures(
+        /// <summary>
+        /// Asks the validators that are on the Base contract (getValidators()) for the form the contract reads
+        /// (MESSAGE_VERSION()), and keeps a signature only when it recovers to the validator it was asked of. Signatures
+        /// from anyone else are ignored by the contract, so collecting them ended the round short and the mint reverted.
+        /// </summary>
+        internal static async Task<Dictionary<string, string>?> CollectValidatorSignatures(
             BridgeLockRecord record, long nonce, long chainId, string contractAddress, int requiredSigs)
         {
-            var signatures = new Dictionary<string, string>();
+            var signatures = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             // Validators sign only once the lock's block is past the reorg window (BaseBridgeAttestationService): wait for
             // that here rather than spend the short retry rounds below on refusals.
             await WaitPastReorgWindow(record.LockId);
-            var validators = BaseValidatorSyncService.SelectAttestingValidators();
-            if (validators == null || validators.Count == 0)
+            var view = await BaseBridgeService.ReadSignerViewAsync();
+            if (view == null)
             {
-                LogUtility.Log("[UserBridgeMint] No eligible attesting validators (registered vBTC validators that are committee casters). Minting cannot proceed.", "UserBridgeMintService");
+                LogUtility.Log("[UserBridgeMint] Could not read the Base contract's validators. Minting cannot proceed.", "UserBridgeMintService");
                 return signatures;
             }
-
-            // Fail fast with a clear diagnosis instead of three rounds of futile HTTP: the Base
-            // contract's requiredMintSignatures is derived from ITS validator count. If fewer attesters
-            // than that are eligible here, the on-chain validator set is out of sync with the caster
-            // committee and must be reconciled before minting can succeed.
-            if (validators.Count < requiredSigs)
+            if (view.MessageVersion is not (3 or VbtcbTypedData.MessageVersion))
             {
-                ErrorLogUtility.LogError($"[UserBridgeMint] Only {validators.Count} eligible attester(s) but the Base contract requires {requiredSigs} signatures. The on-chain validator set must be reconciled with the caster committee (BaseValidatorSetCastersOnly).", "UserBridgeMintService");
+                ErrorLogUtility.LogError($"[UserBridgeMint] The Base contract reads message version {view.MessageVersion}, which this node cannot collect for.", "UserBridgeMintService");
+                return signatures;
+            }
+            requiredSigs = Math.Max(requiredSigs, view.RequiredMintSignatures);
+            var typed = view.MessageVersion == VbtcbTypedData.MessageVersion;
+            var hash = typed
+                ? VbtcbTypedData.MintDigest(record.EvmDestination, record.AmountSats, record.LockId, nonce, chainId, contractAddress)
+                : BaseBridgeAttestationService.ConstructMintMessageHash(record.EvmDestination, record.AmountSats, record.LockId, nonce, chainId, contractAddress);
+
+            var validators = ContractSigners(view);
+            if (!Enough(view, requiredSigs, validators.Select(v => v.BaseAddress)))
+            {
+                ErrorLogUtility.LogError($"[UserBridgeMint] Of the Base contract's {view.Validators.Count} validators and {view.CasterList.Count} casters, only {validators.Count(v => v.Validator)} and {validators.Count(v => v.Caster)} can be reached on VFX; the contract requires {requiredSigs} and {view.RequiredCasterSignatures}.", "UserBridgeMintService");
                 return signatures;
             }
 
             var client = Globals.HttpClientFactory?.CreateClient() ?? new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
 
             // Retry up to 3 rounds with delay between rounds
-            for (int attempt = 0; attempt < 3 && signatures.Count < requiredSigs; attempt++)
+            for (int attempt = 0; attempt < 3 && !Enough(view, requiredSigs, signatures.Keys); attempt++)
             {
                 if (attempt > 0)
                 {
                     LogUtility.Log($"[UserBridgeMint] Retry round {attempt + 1} for attestations. Have {signatures.Count}/{requiredSigs}.", "UserBridgeMintService");
                     await Task.Delay(15_000);
                     // Refresh validator list
-                    validators = BaseValidatorSyncService.SelectAttestingValidators();
+                    validators = ContractSigners(view);
                 }
 
                 foreach (var v in validators)
                 {
-                    if (string.IsNullOrEmpty(v.IPAddress)) continue;
-                    // Use the validator's registered Base address for dedup (matches the address
-                    // that signs attestations and is registered on the Base contract).
-                    // Fall back to ValidatorAddress if BaseAddress not set.
-                    var dedupKey = !string.IsNullOrEmpty(v.BaseAddress) ? v.BaseAddress : v.ValidatorAddress;
-                    if (string.IsNullOrEmpty(dedupKey) || signatures.ContainsKey(dedupKey)) continue;
+                    var baseAddress = v.BaseAddress;
+                    if (signatures.ContainsKey(baseAddress)) continue;
 
                     var url = $"http://{v.IPAddress.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/Validator/SignMintAttestation";
                     var body = JsonConvert.SerializeObject(new MintAttestationRequest
@@ -248,7 +256,8 @@ namespace VerifiedXCore.Bitcoin.Services
                         Nonce = nonce,
                         ChainId = chainId,
                         ContractAddress = contractAddress,
-                        SmartContractUID = record.SmartContractUID
+                        SmartContractUID = record.SmartContractUID,
+                        MessageVersion = view.MessageVersion
                     });
 
                     try
@@ -260,23 +269,76 @@ namespace VerifiedXCore.Bitcoin.Services
                         var jo = Newtonsoft.Json.Linq.JObject.Parse(txt);
                         if (jo["success"]?.ToObject<bool>() != true) continue;
                         var sig = jo["signature"]?.ToString();
-                        if (!string.IsNullOrEmpty(sig))
+                        if (string.IsNullOrEmpty(sig)) continue;
+                        var signer = ValidatorEthKeyService.RecoverSigner(hash, sig, personalMessage: !typed);
+                        if (!string.Equals(signer, baseAddress, StringComparison.OrdinalIgnoreCase))
                         {
-                            signatures[dedupKey] = sig;
-                            LogUtility.Log($"[UserBridgeMint] Got attestation from validator {dedupKey} for lock {record.LockId}", "UserBridgeMintService");
+                            LogUtility.Log($"[UserBridgeMint] Validator {v.VfxAddress} returned a signature that is not its own for lock {record.LockId}; ignored.", "UserBridgeMintService");
+                            continue;
                         }
+                        signatures[baseAddress] = sig;
+                        LogUtility.Log($"[UserBridgeMint] Got attestation from {baseAddress} for lock {record.LockId}", "UserBridgeMintService");
                     }
                     catch (Exception ex)
                     {
                         LogUtility.Log($"[UserBridgeMint] Failed to get attestation from {v.IPAddress}: {ex.Message}", "UserBridgeMintService");
                     }
 
-                    if (signatures.Count >= requiredSigs)
+                    if (Enough(view, requiredSigs, signatures.Keys))
                         break;
                 }
             }
 
+            if (!Enough(view, requiredSigs, signatures.Keys))
+            {
+                // Short of either group the contract refuses the mint: nothing to send, and the lock is asked for again.
+                LogUtility.Log($"[UserBridgeMint] Lock {record.LockId}: {view.Validators.Count(signatures.ContainsKey)}/{requiredSigs} validator and {view.CasterList.Count(signatures.ContainsKey)}/{view.RequiredCasterSignatures} caster signatures.", "UserBridgeMintService");
+                return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            }
             return signatures;
+        }
+
+        /// <summary>How many caster records before the head are searched for a contract caster no longer in the committee.</summary>
+        internal const int EarlierCasterRecords = 200;
+
+        /// <summary>A key the contract counts (on its validators, its casters or both), and where to ask it.</summary>
+        internal sealed record ContractSigner(string BaseAddress, string IPAddress, string VfxAddress, bool Validator, bool Caster);
+
+        /// <summary>
+        /// Everyone whose signature the contract counts: the registered vBTC validators whose Base address (derived from
+        /// their own key: a registration's FrostPublicKey is the validator's own, by consensus rule) is on its validators or
+        /// casters, and the members of the caster committee whose Base address is on its casters, at the address their
+        /// record gives.
+        /// </summary>
+        internal static List<ContractSigner> ContractSigners(BaseBridgeService.SignerView view)
+        {
+            var onValidators = new HashSet<string>(view.Validators, StringComparer.OrdinalIgnoreCase);
+            var onCasters = new HashSet<string>(view.CasterList, StringComparer.OrdinalIgnoreCase);
+            var found = new Dictionary<string, ContractSigner>(StringComparer.OrdinalIgnoreCase);
+            void Add(string? publicKey, string? ip, string vfxAddress)
+            {
+                var baseAddress = BaseSignerSetPolicy.BaseAddressOf(publicKey);
+                if (baseAddress.Length == 0 || string.IsNullOrEmpty(ip) || found.ContainsKey(baseAddress)) return;
+                if (onValidators.Contains(baseAddress) || onCasters.Contains(baseAddress))
+                    found[baseAddress] = new ContractSigner(baseAddress, ip, vfxAddress, onValidators.Contains(baseAddress), onCasters.Contains(baseAddress));
+            }
+            foreach (var v in VBTCValidatorRegistry.GetActiveValidators()) Add(v.FrostPublicKey, v.IPAddress, v.ValidatorAddress);
+            var head = VerifiedXCore.Services.CasterMembershipStore.GetCurrent();
+            foreach (var c in head?.Casters ?? new List<VerifiedXCore.Models.CasterInfo>()) Add(c.PublicKey, c.PeerIP, c.Address);
+            // A caster that left the committee stays on the contract for two more days (BaseSignerSetPolicy.ComputeCasters)
+            // and still signs: its address is in the records before the head.
+            for (var seq = (head?.RecordSeq ?? 0) - 1; head != null && seq >= Math.Max(0, head.RecordSeq - EarlierCasterRecords)
+                 && onCasters.Any(b => !found.ContainsKey(b)); seq--)
+                foreach (var c in VerifiedXCore.Services.CasterMembershipStore.GetBySeq(seq)?.Casters ?? new List<VerifiedXCore.Models.CasterInfo>())
+                    Add(c.PublicKey, c.PeerIP, c.Address);
+            return found.Values.ToList();
+        }
+
+        /// <summary>Whether these signers meet both of the contract's thresholds: its validators', and its casters' (none on V3).</summary>
+        internal static bool Enough(BaseBridgeService.SignerView view, int requiredValidators, IEnumerable<string> signedBaseAddresses)
+        {
+            var signed = signedBaseAddresses.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            return view.Validators.Count(signed.Contains) >= requiredValidators && view.CasterList.Count(signed.Contains) >= view.RequiredCasterSignatures;
         }
 
         /// <summary>

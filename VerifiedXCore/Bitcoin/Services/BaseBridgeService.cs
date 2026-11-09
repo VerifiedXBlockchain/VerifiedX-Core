@@ -213,6 +213,88 @@ namespace VerifiedXCore.Bitcoin.Services
             return 2;
         }
 
+        /// <summary>
+        /// What the contract checks a signature set against: its current validators, the message form it reads (3 for the
+        /// deployed V3, which has no MESSAGE_VERSION(); 4 for V4), its mint threshold and its admin nonce; on V4 also its
+        /// casters and how many of them must sign besides (none while it has no casters, and on V3).
+        /// </summary>
+        public sealed record SignerView(IReadOnlyList<string> Validators, int MessageVersion, int RequiredMintSignatures, BigInteger AdminNonce,
+            IReadOnlyList<string>? Casters = null, int RequiredCasterSignatures = 0)
+        {
+            public IReadOnlyList<string> CasterList => Casters ?? Array.Empty<string>();
+        }
+
+        private const string SIGNER_VIEW_ABI = @"[
+            {""inputs"":[],""name"":""getValidators"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
+            {""inputs"":[],""name"":""requiredMintSignatures"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},
+            {""inputs"":[],""name"":""adminNonce"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},
+            {""inputs"":[],""name"":""MESSAGE_VERSION"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},
+            {""inputs"":[],""name"":""getCasters"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
+            {""inputs"":[],""name"":""requiredCasterSignatures"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""}
+        ]";
+
+        /// <summary>Stands in for the Base RPC in tests.</summary>
+        internal static Func<Task<SignerView?>>? ReadSignerViewForTests;
+
+        /// <summary>The contract's <see cref="SignerView"/> from the first RPC that answers; null when none does.</summary>
+        public static async Task<SignerView?> ReadSignerViewAsync()
+        {
+            if (ReadSignerViewForTests != null) return await ReadSignerViewForTests();
+            if (!IsBridgeConfigured) return null;
+            foreach (var url in RpcUrlCandidates())
+            {
+                try
+                {
+                    var c = new Web3(url).Eth.GetContract(SIGNER_VIEW_ABI, ContractAddress);
+                    var validators = await c.GetFunction("getValidators").CallAsync<List<string>>();
+                    var required = (int)await c.GetFunction("requiredMintSignatures").CallAsync<BigInteger>();
+                    var nonce = await c.GetFunction("adminNonce").CallAsync<BigInteger>();
+                    var version = 3;
+                    try { version = (int)await c.GetFunction("MESSAGE_VERSION").CallAsync<BigInteger>(); }
+                    catch (Exception ex) when (ex is Nethereum.JsonRpc.Client.RpcResponseException or Nethereum.ABI.FunctionEncoding.SmartContractRevertException) { } // V3: no such function
+                    if (version != VbtcbTypedData.MessageVersion) return new SignerView(validators, version, Math.Max(2, required), nonce);
+                    var casters = await c.GetFunction("getCasters").CallAsync<List<string>>();
+                    var requiredCasters = (int)await c.GetFunction("requiredCasterSignatures").CallAsync<BigInteger>();
+                    return new SignerView(validators, version, Math.Max(2, required), nonce, casters, requiredCasters);
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        /// <summary>The contract's pending proposeRemoval: the validators and casters it names, and when it can run (0: none).</summary>
+        public sealed record PendingRemoval(IReadOnlyList<string> Validators, IReadOnlyList<string> Casters, BigInteger Eta);
+
+        private const string PENDING_REMOVAL_ABI = @"[
+            {""inputs"":[],""name"":""getPendingRemovals"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
+            {""inputs"":[],""name"":""getPendingCasterRemovals"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
+            {""inputs"":[],""name"":""pendingRemovalEta"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""}
+        ]";
+
+        /// <summary>Stands in for the Base RPC in tests.</summary>
+        internal static Func<Task<PendingRemoval?>>? ReadPendingRemovalForTests;
+
+        /// <summary>The V4 contract's pending removal from the first RPC that answers; null when none does.</summary>
+        public static async Task<PendingRemoval?> ReadPendingRemovalAsync()
+        {
+            if (ReadPendingRemovalForTests != null) return await ReadPendingRemovalForTests();
+            if (!IsBridgeConfigured) return null;
+            foreach (var url in RpcUrlCandidates())
+            {
+                try
+                {
+                    var c = new Web3(url).Eth.GetContract(PENDING_REMOVAL_ABI, ContractAddress);
+                    var eta = await c.GetFunction("pendingRemovalEta").CallAsync<BigInteger>();
+                    if (eta == 0) return new PendingRemoval(Array.Empty<string>(), Array.Empty<string>(), 0);
+                    var validators = await c.GetFunction("getPendingRemovals").CallAsync<List<string>>();
+                    var casters = await c.GetFunction("getPendingCasterRemovals").CallAsync<List<string>>();
+                    return new PendingRemoval(validators, casters, eta);
+                }
+                catch { }
+            }
+            return null;
+        }
+
         public sealed class BurnEventInfo
         {
             public long AmountSats { get; set; }
