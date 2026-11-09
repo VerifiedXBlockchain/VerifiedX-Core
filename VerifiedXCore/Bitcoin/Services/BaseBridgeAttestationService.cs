@@ -33,6 +33,8 @@ namespace VerifiedXCore.Bitcoin.Services
         }
 
         internal const string DestinationIsAdminTagReason = "EVM destination begins with a Base admin message tag";
+        internal const string ContractOrChainMismatchReason = "Invalid contract or chain id";
+        internal const string UnsupportedMessageVersionReason = "Unsupported Base message version";
 
         /// <summary>The text tags the vBTCb contract's admin messages begin with (ADD_BATCH and REMOVE_BATCH start with ADD and REMOVE).</summary>
         private static readonly byte[][] AdminMessageTags = { Encoding.ASCII.GetBytes("ADD"), Encoding.ASCII.GetBytes("REMOVE"), Encoding.ASCII.GetBytes("UPGRADE") };
@@ -98,13 +100,9 @@ namespace VerifiedXCore.Bitcoin.Services
                     return Task.FromResult<(bool, string?, string?)>((false, null, "Not a validator node"));
                 }
 
-                // SECURITY: mint attestations are issued only by the accountable Base validator set
-                // (caster committee members when BaseValidatorSetCastersOnly), not by any free registration.
-                if (!BaseValidatorSyncService.IsLocalNodeEligibleAttester())
-                {
-                    LogUtility.Log($"[BridgeAttest] REJECT: This node is not in the Base minting validator set (caster committee). lockId={request.LockId}", TAG);
-                    return Task.FromResult<(bool, string?, string?)>((false, null, "Not a Base minting validator (caster committee)"));
-                }
+                // No caster-committee condition: the contract counts a signature only from its own validators, so the
+                // condition added nothing, and it stopped a contract validator the election had rotated out of the
+                // committee from signing (two such and no mint could be made).
 
                 LogUtility.Log($"[BridgeAttest] Processing attestation request: lockId={request.LockId}, evmDest={request.EvmDestination}, amountSats={request.AmountSats}, nonce={request.Nonce}, chainId={request.ChainId}, contract={request.ContractAddress}", TAG);
 
@@ -156,10 +154,20 @@ namespace VerifiedXCore.Bitcoin.Services
                     return Task.FromResult<(bool, string?, string?)>((false, null, "Amount mismatch"));
                 }
 
-                if (string.IsNullOrEmpty(request.ContractAddress) || request.ChainId != Globals.BaseEvmChainId)
+                // Only for the contract this node is configured for: a signature over any other address (a contract
+                // deployed with the same validators, say) is a mint there that no lock on this chain stands behind.
+                if (string.IsNullOrEmpty(request.ContractAddress) || request.ChainId != Globals.BaseEvmChainId
+                    || string.IsNullOrEmpty(BaseBridgeService.ContractAddress)
+                    || !string.Equals(request.ContractAddress.Trim(), BaseBridgeService.ContractAddress, StringComparison.OrdinalIgnoreCase))
                 {
-                    LogUtility.Log($"[BridgeAttest] REJECT: Invalid contract or chainId. RequestContract={request.ContractAddress}, RequestChainId={request.ChainId}, ExpectedChainId={Globals.BaseEvmChainId}", TAG);
-                    return Task.FromResult<(bool, string?, string?)>((false, null, "Invalid contract or chain id"));
+                    LogUtility.Log($"[BridgeAttest] REJECT: Invalid contract or chainId. RequestContract={request.ContractAddress}, ExpectedContract={BaseBridgeService.ContractAddress}, RequestChainId={request.ChainId}, ExpectedChainId={Globals.BaseEvmChainId}", TAG);
+                    return Task.FromResult<(bool, string?, string?)>((false, null, ContractOrChainMismatchReason));
+                }
+
+                if (request.MessageVersion is not (0 or 3 or VbtcbTypedData.MessageVersion))
+                {
+                    LogUtility.Log($"[BridgeAttest] REJECT: unsupported message version {request.MessageVersion}. lockId={request.LockId}", TAG);
+                    return Task.FromResult<(bool, string?, string?)>((false, null, UnsupportedMessageVersionReason));
                 }
 
                 // Last before the key: a request that is right in itself is signed only by a node on the network's chain.
@@ -184,17 +192,16 @@ namespace VerifiedXCore.Bitcoin.Services
                 
                 LogUtility.Log($"[BridgeAttest] All checks passed. Signing message hash. ValidatorVFX={Globals.ValidatorAddress}, ValidatorBase={derivedBaseAddr}, lockId={request.LockId}", TAG);
 
-                var hash = ConstructMintMessageHash(
-                    request.EvmDestination,
-                    request.AmountSats,
-                    chainLock.LockId,
-                    request.Nonce,
-                    request.ChainId,
-                    request.ContractAddress);
-                
-                LogUtility.Log($"[BridgeAttest] Message hash constructed: 0x{Convert.ToHexString(hash).ToLowerInvariant().Substring(0, 16)}... Params: to={request.EvmDestination}, amount={request.AmountSats}, lockId={request.LockId}, nonce={request.Nonce}, chainId={request.ChainId}, contract={request.ContractAddress}", TAG);
+                // V4 reads an EIP-712 Mint; the deployed V3 reads the packed hash under the personal-message prefix. Either
+                // signature is worthless to the other contract version.
+                var typed = request.MessageVersion == VbtcbTypedData.MessageVersion;
+                var hash = typed
+                    ? VbtcbTypedData.MintDigest(request.EvmDestination, request.AmountSats, chainLock.LockId, request.Nonce, request.ChainId, BaseBridgeService.ContractAddress)
+                    : ConstructMintMessageHash(request.EvmDestination, request.AmountSats, chainLock.LockId, request.Nonce, request.ChainId, BaseBridgeService.ContractAddress);
 
-                var sigHex = ValidatorEthKeyService.EthSignMessageHex(hash, privBytes);
+                LogUtility.Log($"[BridgeAttest] Message hash constructed (v{(typed ? 4 : 3)}): 0x{Convert.ToHexString(hash).ToLowerInvariant().Substring(0, 16)}... Params: to={request.EvmDestination}, amount={request.AmountSats}, lockId={request.LockId}, nonce={request.Nonce}, chainId={request.ChainId}, contract={request.ContractAddress}", TAG);
+
+                var sigHex = typed ? ValidatorEthKeyService.SignDigestHex(hash, privBytes) : ValidatorEthKeyService.EthSignMessageHex(hash, privBytes);
                 
                 LogUtility.Log($"[BridgeAttest] SIGNED successfully. lockId={request.LockId}, sig={sigHex?.Substring(0, Math.Min(20, sigHex?.Length ?? 0))}..., signerBase={derivedBaseAddr}", TAG);
 
@@ -248,12 +255,25 @@ namespace VerifiedXCore.Bitcoin.Services
             record.Status = BridgeLockStatus.AttestationPending;
             BridgeLockRecord.Save(record);
 
-            var validators = BaseValidatorSyncService.SelectAttestingValidators();
+            // Asked in the form the contract reads (MESSAGE_VERSION()), and kept only when it recovers to the validator asked:
+            // a signature in the other form, or by another key, is one the contract does not count.
+            var view = await BaseBridgeService.ReadSignerViewAsync();
+            if (view == null || view.MessageVersion is not (3 or VbtcbTypedData.MessageVersion))
+            {
+                LogUtility.Log($"[BaseBridgeAttestation] Could not read a Base contract version this node collects for (lock {record.LockId}). Retrying next round.", "BaseBridgeAttestationService");
+                return;
+            }
+            var typed = view.MessageVersion == VbtcbTypedData.MessageVersion;
+            var hash = typed
+                ? VbtcbTypedData.MintDigest(record.EvmDestination, record.AmountSats, record.LockId, nonce, Globals.BaseEvmChainId, contract)
+                : ConstructMintMessageHash(record.EvmDestination, record.AmountSats, record.LockId, nonce, Globals.BaseEvmChainId, contract);
+
+            // Everyone the contract counts, validators and casters: it needs both groups (UserBridgeMintService.Enough).
+            var validators = UserBridgeMintService.ContractSigners(view);
             var client = Globals.HttpClientFactory?.CreateClient() ?? new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
 
             foreach (var v in validators)
             {
-                if (string.IsNullOrEmpty(v.IPAddress)) continue;
                 var url = $"http://{v.IPAddress.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/Validator/SignMintAttestation";
                 var body = JsonConvert.SerializeObject(new MintAttestationRequest
                 {
@@ -263,7 +283,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     Nonce = nonce,
                     ChainId = Globals.BaseEvmChainId,
                     ContractAddress = contract,
-                    SmartContractUID = record.SmartContractUID
+                    SmartContractUID = record.SmartContractUID,
+                    MessageVersion = view.MessageVersion
                 });
                 try
                 {
@@ -274,16 +295,16 @@ namespace VerifiedXCore.Bitcoin.Services
                     var jo = Newtonsoft.Json.Linq.JObject.Parse(txt);
                     if (jo["success"]?.ToObject<bool>() != true) continue;
                     var sig = jo["signature"]?.ToString();
-                    var derived = ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(v.FrostPublicKey);
-                    if (!string.IsNullOrEmpty(sig) && !string.IsNullOrEmpty(derived))
-                        state.ValidatorSignatures[derived] = sig;
+                    if (!string.IsNullOrEmpty(sig)
+                        && string.Equals(ValidatorEthKeyService.RecoverSigner(hash, sig, personalMessage: !typed), v.BaseAddress, StringComparison.OrdinalIgnoreCase))
+                        state.ValidatorSignatures[v.BaseAddress] = sig;
                 }
                 catch
                 {
                 }
             }
 
-            if (state.IsReady)
+            if (UserBridgeMintService.Enough(view, Math.Max(requiredSignatures, view.RequiredMintSignatures), state.ValidatorSignatures.Keys))
             {
                 state.Status = "Ready";
                 record.ValidatorSignatures = new Dictionary<string, string>(state.ValidatorSignatures);

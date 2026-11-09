@@ -81,6 +81,13 @@ namespace VerifiedXCore.Bitcoin.Services
             return scanned;
         }
 
+        /// <summary>
+        /// The validators with a REGISTER or HEARTBEAT in the <paramref name="window"/> blocks up to <paramref name="height"/>
+        /// and no EXIT after it, from committed blocks only (as <see cref="GetActiveValidatorsAt"/>, over a longer window).
+        /// </summary>
+        public static List<VBTCValidator> GetValidatorsSeenWithin(long height, int window) =>
+            height < 0 ? new List<VBTCValidator>() : ScanBlocks(height, consensus: true, windowBlocks: window);
+
         private sealed record AtHeight(long Height, string Hash, List<VBTCValidator> Validators);
         private static volatile AtHeight? _atHeightCache;
 
@@ -222,9 +229,9 @@ namespace VerifiedXCore.Bitcoin.Services
             return window;
         }
 
-        private static List<VBTCValidator> ScanBlocks(long currentHeight, bool consensus = false)
+        private static List<VBTCValidator> ScanBlocks(long currentHeight, bool consensus = false, int windowBlocks = SCAN_WINDOW)
         {
-            var scanFrom = Math.Max(0, currentHeight - SCAN_WINDOW);
+            var scanFrom = Math.Max(0, currentHeight - windowBlocks);
             var validatorMap = new Dictionary<string, VBTCValidator>();
 
             try

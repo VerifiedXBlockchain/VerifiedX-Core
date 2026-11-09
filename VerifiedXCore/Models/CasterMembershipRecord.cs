@@ -1,3 +1,5 @@
+using Microsoft.AspNetCore.Mvc.ModelBinding.Validation;
+
 namespace VerifiedXCore.Models
 {
     /// <summary>
@@ -10,6 +12,9 @@ namespace VerifiedXCore.Models
     /// production that resumes during minting) and must carry ≥2 signatures from
     /// the hardcoded seed allowlist — the same trust root as the bootstrap agreement itself.
     /// </summary>
+    // Checked by its hash chain and signatures, never by the web layer: an ordinary record has no election hash and an
+    // election record no changed address, and inferred [Required] fields refused both with a 400 before the route ran.
+    [ValidateNever]
     public class CasterMembershipRecord
     {
         /// <summary>LiteDB id; strictly increasing, no gaps. Genesis = 0.</summary>

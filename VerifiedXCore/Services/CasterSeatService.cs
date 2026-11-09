@@ -93,6 +93,13 @@ namespace VerifiedXCore.Services
         /// <summary>Probes every other member of the newest record each monitor tick and updates the timers.</summary>
         public static async Task ObserveCommitteeAsync()
         {
+            // A node that is not casting times nobody. Kept, its timers would date an absence from before it stood down:
+            // back on a committee, a member it last saw gone reads as gone ever since and is removed at once.
+            if (!Globals.IsBlockCaster)
+            {
+                _absent.Clear();
+                return;
+            }
             var head = CasterMembershipStore.GetCurrent();
             if (head == null)
             {
