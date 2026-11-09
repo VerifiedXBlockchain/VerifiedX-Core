@@ -7,6 +7,8 @@ const ABI = [
     "function getValidators() view returns (address[])",
     "function isValidator(address) view returns (bool)",
     "function requiredMintSignatures() view returns (uint256)",
+    "function isCaster(address) view returns (bool)",
+    "function requiredCasterSignatures() view returns (uint256)",
     "function MESSAGE_VERSION() view returns (uint256)",
     "function upgradeDelay() view returns (uint256)",
     "function pendingImplementation() view returns (address)",
@@ -49,9 +51,31 @@ function requestPath() {
     return path.join(__dirname, "..", `upgrade-request.${network.name}.json`);
 }
 
-/** Recovers each signature for the request and returns the distinct current validators among them. */
+/** Whether `signer` is on the contract's caster list (V3 has none). */
+async function isCaster(contract, signer) {
+    try {
+        return await contract.isCaster(signer);
+    } catch {
+        return false;
+    }
+}
+
+/** The casters' share V4 needs besides 2/3 of the validators (0 on V3 and on a V4 without casters yet). */
+async function requiredCasterSignatures(contract) {
+    try {
+        return await contract.requiredCasterSignatures();
+    } catch {
+        return 0n;
+    }
+}
+
+/**
+ * Recovers each signature for the request and returns the distinct current validators and the distinct current casters
+ * among them (an address on both lists is in both).
+ */
 async function validSigners(contract, request, signatures) {
     const found = new Set();
+    const casters = new Set();
     for (const sig of signatures) {
         let signer;
         try {
@@ -63,10 +87,13 @@ async function validSigners(contract, request, signatures) {
             console.warn("  skipped malformed signature", sig.slice(0, 12) + "...");
             continue;
         }
-        if (await contract.isValidator(signer)) found.add(signer);
-        else console.warn("  skipped signature from non-validator", signer);
+        const asValidator = await contract.isValidator(signer);
+        const asCaster = await isCaster(contract, signer);
+        if (asValidator) found.add(signer);
+        if (asCaster) casters.add(signer);
+        if (!asValidator && !asCaster) console.warn("  skipped signature from a non-validator, non-caster", signer);
     }
-    return [...found];
+    return { validators: [...found], casters: [...casters] };
 }
 
-module.exports = { ABI, PROPOSE_UPGRADE_TYPES, requireProxy, contractAt, messageVersion, requestPath, validSigners };
+module.exports = { ABI, PROPOSE_UPGRADE_TYPES, requireProxy, contractAt, messageVersion, requestPath, validSigners, requiredCasterSignatures };

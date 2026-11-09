@@ -34,10 +34,17 @@ const TYPES = {
     ],
     ProposeRemoval: [
         { name: "validators", type: "address[]" },
+        { name: "casters", type: "address[]" },
         { name: "vfxBlockHeight", type: "uint256" },
         { name: "adminNonce", type: "uint256" },
     ],
     CancelPending: [{ name: "adminNonce", type: "uint256" }],
+    UpdateCasters: [
+        { name: "add", type: "address[]" },
+        { name: "remove", type: "address[]" },
+        { name: "vfxBlockHeight", type: "uint256" },
+        { name: "adminNonce", type: "uint256" },
+    ],
 };
 
 async function domainOf(token) {
@@ -78,12 +85,35 @@ async function deployV4Fixture() {
     const vals = wallets(3);
     const [payer, user] = await ethers.getSigners();
     const V4 = await ethers.getContractFactory("vBTCb");
-    const token = await upgrades.deployProxy(V4, ["Verified Bitcoin on Base", "vBTC.b", vals.map((v) => v.address)], {
-        initializer: "initialize",
-        kind: "uups",
-    });
+    // The same three keys sit on both lists, as the seed casters do on mainnet.
+    const token = await upgrades.deployProxy(
+        V4,
+        ["Verified Bitcoin on Base", "vBTC.b", vals.map((v) => v.address), vals.map((v) => v.address)],
+        { initializer: "initialize", kind: "uups" }
+    );
     await token.waitForDeployment();
     return { token, vals, payer, user, V4 };
+}
+
+// Three validators and three casters, no key on both.
+async function deploySplitFixture() {
+    const vals = wallets(3);
+    const casters = wallets(3);
+    const [, user] = await ethers.getSigners();
+    const V4 = await ethers.getContractFactory("vBTCb");
+    const token = await upgrades.deployProxy(V4, ["n", "s", vals.map((v) => v.address), casters.map((c) => c.address)], {
+        kind: "uups",
+    });
+    return { token, vals, casters, user };
+}
+
+async function updateCasters(token, signers, added, removed = [], height = 100n) {
+    const adminNonce = await token.adminNonce();
+    const add = added.map((a) => a.address);
+    const value = { add, remove: removed, vfxBlockHeight: height, adminNonce };
+    const sigs = await signTyped(token, signers, "UpdateCasters", value);
+    const own = await Promise.all(added.map((a) => signTyped(token, [a], "UpdateCasters", value).then((s) => s[0])));
+    return token.updateCasters(add, removed, height, sigs, own);
 }
 
 async function mint(token, signers, to, amount, lockId, nonce = 1n) {
@@ -130,21 +160,21 @@ describe("vBTCb V4", function () {
         it("refuses fewer than 3 validators", async function () {
             const V4 = await ethers.getContractFactory("vBTCb");
             await expect(
-                upgrades.deployProxy(V4, ["n", "s", wallets(2).map((v) => v.address)], { kind: "uups" })
+                upgrades.deployProxy(V4, ["n", "s", wallets(2).map((v) => v.address), wallets(3).map((v) => v.address)], { kind: "uups" })
             ).to.be.revertedWith("Need at least 3 validators");
         });
 
         it("refuses more than 50 validators", async function () {
             const V4 = await ethers.getContractFactory("vBTCb");
             await expect(
-                upgrades.deployProxy(V4, ["n", "s", wallets(51).map((v) => v.address)], { kind: "uups" })
+                upgrades.deployProxy(V4, ["n", "s", wallets(51).map((v) => v.address), wallets(3).map((v) => v.address)], { kind: "uups" })
             ).to.be.revertedWith("Too many validators");
         });
 
         it("cannot be initialized on the implementation itself", async function () {
             const V4 = await ethers.getContractFactory("vBTCb");
             const impl = await V4.deploy();
-            await expect(impl.initialize("n", "s", wallets(3).map((v) => v.address))).to.be.revertedWithCustomError(
+            await expect(impl.initialize("n", "s", wallets(3).map((v) => v.address), wallets(3).map((v) => v.address))).to.be.revertedWithCustomError(
                 impl,
                 "InvalidInitialization"
             );
@@ -347,7 +377,7 @@ describe("vBTCb V4", function () {
             await expect(mint(token, [vals[2], vals[0]], user.address, 1n, "after-remove")).to.be.revertedWith(
                 "Insufficient valid signatures"
             );
-            await mint(token, [extra[0], vals[0]], user.address, 1n, "after-remove");
+            await mint(token, [extra[0], vals[0], vals[1]], user.address, 1n, "after-remove"); // vals[0..1]: the caster majority
         });
     });
 
@@ -357,14 +387,15 @@ describe("vBTCb V4", function () {
             const vals = wallets(7);
             const [, user] = await ethers.getSigners();
             const V4 = await ethers.getContractFactory("vBTCb");
-            const token = await upgrades.deployProxy(V4, ["n", "s", vals.map((v) => v.address)], { kind: "uups" });
+            // The first three are also the casters: every group named below holds or lacks a caster majority as it says.
+            const token = await upgrades.deployProxy(V4, ["n", "s", vals.map((v) => v.address), vals.slice(0, 3).map((v) => v.address)], { kind: "uups" });
             return { token, vals, user, majority: vals.slice(0, 4), others: vals.slice(4) };
         }
 
         async function proposeRemoval(token, signers, addrs, height = 9n) {
             const adminNonce = await token.adminNonce();
-            const sigs = await signTyped(token, signers, "ProposeRemoval", { validators: addrs, vfxBlockHeight: height, adminNonce });
-            return token.proposeRemoval(addrs, height, sigs);
+            const sigs = await signTyped(token, signers, "ProposeRemoval", { validators: addrs, casters: [], vfxBlockHeight: height, adminNonce });
+            return token.proposeRemoval(addrs, [], height, sigs);
         }
 
         async function cancel(token, signers) {
@@ -379,7 +410,7 @@ describe("vBTCb V4", function () {
             expect(await token.requiredVetoSignatures()).to.equal(3n);
             const V4 = await ethers.getContractFactory("vBTCb");
             for (const n of [3, 4, 5, 6, 10, 49, 50]) {
-                const t = await upgrades.deployProxy(V4, ["n", "s", wallets(n).map((v) => v.address)], { kind: "uups" });
+                const t = await upgrades.deployProxy(V4, ["n", "s", wallets(n).map((v) => v.address), wallets(3).map((v) => v.address)], { kind: "uups" });
                 const mint = await t.requiredMintSignatures();
                 const majority = await t.requiredRemoveSignatures();
                 expect(mint * 3n >= BigInt(n) * 2n, `n=${n}`).to.equal(true);
@@ -447,6 +478,143 @@ describe("vBTCb V4", function () {
             await expect(proposeRemoval(token, majority, vals.slice(0, 5).map((v) => v.address))).to.be.revertedWith(
                 "Cannot remove below minimum"
             );
+        });
+    });
+
+    describe("two groups sign: 2/3 of the validators and a majority of the casters", function () {
+        it("a mint needs both: either group alone, or one short, mints nothing", async function () {
+            const { token, vals, casters, user } = await loadFixture(deploySplitFixture);
+            expect(await token.requiredMintSignatures()).to.equal(2n);
+            expect(await token.requiredCasterSignatures()).to.equal(2n);
+            await expect(mint(token, vals, user.address, 1n, "v")).to.be.revertedWith("Insufficient valid signatures");
+            await expect(mint(token, casters, user.address, 1n, "c")).to.be.revertedWith("Insufficient valid signatures");
+            await expect(mint(token, [...vals.slice(0, 2), casters[0]], user.address, 1n, "vc")).to.be.revertedWith(
+                "Insufficient valid signatures"
+            );
+            await mint(token, [vals[0], casters[1], vals[2], casters[2]], user.address, 1n, "both");
+            expect(await token.balanceOf(user.address)).to.equal(1n);
+        });
+
+        it("however many validator seats one party holds, without the casters it mints and changes nothing", async function () {
+            const { token, vals, casters, user } = await loadFixture(deploySplitFixture);
+            const sybils = wallets(47);
+            await addBatch(token, [...vals, ...casters.slice(0, 2)], sybils); // 50 validators, 47 of them one party's
+            expect(await token.validatorCount()).to.equal(50n);
+            const impl = await newImplementation();
+            const nonce = await token.adminNonce();
+
+            await expect(mint(token, sybils, user.address, 1_000_000n, "unbacked")).to.be.revertedWith("Insufficient valid signatures");
+            await expect(removeBatch(token, sybils, vals.map((v) => v.address))).to.be.revertedWith("Insufficient valid admin signatures");
+            await expect(token.proposeUpgrade(impl, await signTyped(token, sybils, "ProposeUpgrade", { implementation: impl, adminNonce: nonce })))
+                .to.be.revertedWith("Insufficient valid admin signatures");
+            const own = wallets(3);
+            await expect(updateCasters(token, sybils, own, casters.map((c) => c.address))).to.be.revertedWith(
+                "Insufficient valid admin signatures"
+            );
+            expect(await token.totalSupply()).to.equal(0n);
+        });
+
+        it("the casters alone change nothing either", async function () {
+            const { token, casters } = await loadFixture(deploySplitFixture);
+            await expect(addBatch(token, casters, wallets(1))).to.be.revertedWith("Insufficient valid admin signatures");
+            await expect(updateCasters(token, casters, wallets(1))).to.be.revertedWith("Insufficient valid admin signatures");
+        });
+
+        it("updateCasters swaps a caster with both groups, needs the new caster's own signature, and keeps 3 to 10", async function () {
+            const { token, vals, casters } = await loadFixture(deploySplitFixture);
+            const both = [...vals.slice(0, 2), ...casters.slice(0, 2)];
+            const fresh = ethers.Wallet.createRandom();
+            const value = { add: [fresh.address], remove: [casters[2].address], vfxBlockHeight: 100n, adminNonce: 0n };
+            const sigs = await signTyped(token, both, "UpdateCasters", value);
+            const [byOther] = await signTyped(token, [ethers.Wallet.createRandom()], "UpdateCasters", value);
+            await expect(token.updateCasters(value.add, value.remove, 100n, sigs, [byOther])).to.be.revertedWith("New caster did not sign");
+            await expect(token.updateCasters(value.add, value.remove, 100n, sigs, [])).to.be.revertedWith("One signature per new caster");
+            const [own] = await signTyped(token, [fresh], "UpdateCasters", value);
+            await expect(token.updateCasters(value.add, value.remove, 100n, sigs, [own])).to.emit(token, "CastersUpdated");
+            expect(await token.isCaster(casters[2].address)).to.equal(false);
+            expect(await token.isCaster(fresh.address)).to.equal(true);
+            expect(await token.adminNonce()).to.equal(1n);
+            await expect(token.updateCasters(value.add, value.remove, 100n, sigs, [own])).to.be.revertedWith("Insufficient valid admin signatures");
+
+            const now = [casters[0], casters[1], fresh];
+            await expect(updateCasters(token, [...vals, ...now], [], [fresh.address])).to.be.revertedWith("Caster count out of range");
+            const sevenMore = wallets(7);
+            await updateCasters(token, [...vals, ...now], sevenMore);
+            expect(await token.casterCount()).to.equal(10n);
+            await expect(updateCasters(token, [...vals, ...now, ...sevenMore], wallets(1))).to.be.revertedWith("Caster count out of range");
+        });
+
+        it("a removed caster's signature stops counting", async function () {
+            const { token, vals, casters, user } = await loadFixture(deploySplitFixture);
+            const fresh = wallets(1);
+            await updateCasters(token, [...vals, ...casters], fresh, [casters[2].address]);
+            await expect(mint(token, [...vals, casters[2], casters[0]], user.address, 1n, "x")).to.be.revertedWith(
+                "Insufficient valid signatures"
+            );
+            await mint(token, [...vals, fresh[0], casters[0]], user.address, 1n, "x");
+        });
+
+        async function proposeCasterRemoval(token, signers, casterAddrs, validatorAddrs = []) {
+            const adminNonce = await token.adminNonce();
+            const value = { validators: validatorAddrs, casters: casterAddrs, vfxBlockHeight: 9n, adminNonce };
+            return token.proposeRemoval(validatorAddrs, casterAddrs, 9n, await signTyped(token, signers, "ProposeRemoval", value));
+        }
+
+        it("dark casters are cleared by 2/3 of the validators after the delay, and a caster blocking minority can stop it", async function () {
+            const { token, vals, casters, user } = await loadFixture(deploySplitFixture);
+            const replacements = wallets(3);
+            await updateCasters(token, [...vals, ...casters], replacements); // 6 casters: majority 4, blocking minority 3
+            const gone = casters.map((c) => c.address);
+
+            // A majority of the validators is not enough alone; 2/3 is, and it waits the delay.
+            const more = wallets(4);
+            await addBatch(token, [...vals, ...casters, replacements[0]], more); // 7 validators: majority 4, 2/3 5
+            const seven = [...vals, ...more];
+            await expect(proposeCasterRemoval(token, seven.slice(0, 4), gone)).to.be.revertedWith("Insufficient valid admin signatures");
+            await expect(proposeCasterRemoval(token, seven.slice(0, 5), gone)).to.emit(token, "RemovalProposed");
+            expect(await token.getPendingCasterRemovals()).to.deep.equal(gone);
+            await expect(token.executeRemoval()).to.be.revertedWith("Upgrade delay not elapsed");
+
+            // Casters who are not dark cancel it: three of six is their blocking minority.
+            const cancelSigs = async (signers) => signTyped(token, signers, "CancelPending", { adminNonce: await token.adminNonce() });
+            await expect(token.cancelPending(await cancelSigs(replacements.slice(0, 2)))).to.be.revertedWith("Insufficient valid admin signatures");
+            await expect(token.cancelPending(await cancelSigs(replacements))).to.emit(token, "PendingCancelled");
+
+            // Truly dark: nobody cancels, and after the delay the remaining casters carry on.
+            await proposeCasterRemoval(token, seven.slice(0, 5), gone);
+            await time.increase(48 * HOUR);
+            await expect(token.connect(user).executeRemoval()).to.emit(token, "CastersUpdated");
+            expect([...(await token.getCasters())].sort()).to.deep.equal(replacements.map((r) => r.address).sort());
+            expect(await token.requiredCasterSignatures()).to.equal(2n);
+            await mint(token, [...seven.slice(0, 5), ...replacements.slice(0, 2)], user.address, 3n, "after-clearing");
+        });
+
+        it("a caster removal refuses going below 3 casters, a non-caster and a repeat", async function () {
+            const { token, vals, casters } = await loadFixture(deploySplitFixture);
+            await expect(proposeCasterRemoval(token, vals, [casters[0].address])).to.be.revertedWith("Cannot remove casters below minimum");
+            await updateCasters(token, [...vals, ...casters], wallets(2));
+            await expect(proposeCasterRemoval(token, vals, [vals[0].address])).to.be.revertedWith("Not a caster");
+            await expect(proposeCasterRemoval(token, vals, [casters[0].address, casters[0].address])).to.be.revertedWith("Duplicate in batch");
+        });
+
+        it("a caster blocking minority cancels a pending upgrade", async function () {
+            const { token, vals, casters } = await loadFixture(deploySplitFixture);
+            const impl = await newImplementation();
+            await token.proposeUpgrade(impl, await signTyped(token, [...vals, ...casters], "ProposeUpgrade", { implementation: impl, adminNonce: 0n }));
+            await expect(token.cancelPending(await signTyped(token, casters.slice(0, 1), "CancelPending", { adminNonce: 1n }))).to.be.revertedWith(
+                "Insufficient valid admin signatures"
+            );
+            await token.cancelPending(await signTyped(token, casters.slice(1), "CancelPending", { adminNonce: 1n }));
+            expect(await token.pendingImplementation()).to.equal(ethers.ZeroAddress);
+        });
+
+        it("initialize refuses fewer than 3 or more than 10 casters and a repeated caster", async function () {
+            const V4 = await ethers.getContractFactory("vBTCb");
+            const v = wallets(3).map((w) => w.address);
+            for (const c of [wallets(2).map((w) => w.address), wallets(11).map((w) => w.address)])
+                await expect(upgrades.deployProxy(V4, ["n", "s", v, c], { kind: "uups" })).to.be.revertedWith("Caster count out of range");
+            const one = ethers.Wallet.createRandom().address;
+            await expect(upgrades.deployProxy(V4, ["n", "s", v, [one, one, v[0]]], { kind: "uups" })).to.be.revertedWith("Duplicate caster");
         });
     });
 
@@ -538,8 +706,8 @@ describe("vBTCb V4", function () {
             await token.proposeUpgrade(impl, await signTyped(token, set, "ProposeUpgrade", { implementation: impl, adminNonce: 1n }));
             const delay = BigInt(7 * DAY);
             await token.proposeUpgradeDelay(delay, await signTyped(token, set, "ProposeUpgradeDelay", { delay, adminNonce: 2n }));
-            const removal = { validators: [extra[0].address], vfxBlockHeight: 9n, adminNonce: 3n };
-            await token.proposeRemoval(removal.validators, 9n, await signTyped(token, set, "ProposeRemoval", removal));
+            const removal = { validators: [extra[0].address], casters: [], vfxBlockHeight: 9n, adminNonce: 3n };
+            await token.proposeRemoval(removal.validators, [], 9n, await signTyped(token, set, "ProposeRemoval", removal));
 
             const latest = await token.pendingRemovalEta(); // proposed last of the three
             await time.increaseTo(latest + BigInt(14 * DAY) + 1n); // one second past the last second it may run
@@ -551,7 +719,7 @@ describe("vBTCb V4", function () {
             await token.proposeUpgrade(impl2, await signTyped(token, set, "ProposeUpgrade", { implementation: impl2, adminNonce: 4n }));
             expect(await token.pendingImplementation()).to.equal(impl2);
             await token.proposeUpgradeDelay(delay, await signTyped(token, set, "ProposeUpgradeDelay", { delay, adminNonce: 5n }));
-            await token.proposeRemoval(removal.validators, 9n, await signTyped(token, set, "ProposeRemoval", { ...removal, adminNonce: 6n }));
+            await token.proposeRemoval(removal.validators, [], 9n, await signTyped(token, set, "ProposeRemoval", { ...removal, adminNonce: 6n }));
             await time.increaseTo(await token.pendingUpgradeEta());
             await token.executeUpgrade();
             await token.executeUpgradeDelay();
@@ -649,6 +817,33 @@ describe("vBTCb V4", function () {
             const collide = await Promise.all(vals.map((v) => v.signMessage(ethers.getBytes(c.addHash))));
             await expect(v4.mintWithProof(c.mint.to, c.mint.amount, c.mint.lockId, c.mint.nonce, collide)).to.be.revertedWith(
                 "Insufficient valid signatures"
+            );
+        });
+
+        it("has no casters after the upgrade until updateCasters adds them, and then needs them", async function () {
+            const { token, vals, user, self } = await loadFixture(deployV3Fixture);
+            const V4 = await ethers.getContractFactory("vBTCb");
+            const impl = await upgrades.prepareUpgrade(self, V4, { kind: "uups" });
+            const { chainId } = await ethers.provider.getNetwork();
+            const h = ethers.solidityPackedKeccak256(["string", "address", "uint256", "uint256", "address"], ["UPGRADE", impl, 0n, chainId, self]);
+            await token.upgradeWithValidatorApproval(impl, await Promise.all(vals.slice(0, 2).map((v) => v.signMessage(ethers.getBytes(h)))));
+            const v4 = V4.attach(self);
+
+            // As today until the casters are set: the validators alone mint.
+            expect(await v4.getCasters()).to.deep.equal([]);
+            expect(await v4.requiredCasterSignatures()).to.equal(0n);
+            await mint(v4, vals.slice(0, 2), user.address, 1n, "before-casters");
+
+            const casters = wallets(3);
+            await expect(updateCasters(v4, vals, casters.slice(0, 2))).to.be.revertedWith("Caster count out of range");
+            await expect(updateCasters(v4, vals, casters)).to.emit(v4, "CastersUpdated");
+            expect(await v4.getCasters()).to.deep.equal(casters.map((c) => c.address));
+            expect(await v4.requiredCasterSignatures()).to.equal(2n);
+
+            await expect(mint(v4, vals, user.address, 1n, "after-casters")).to.be.revertedWith("Insufficient valid signatures");
+            await mint(v4, [...vals.slice(0, 2), ...casters.slice(0, 2)], user.address, 1n, "after-casters");
+            await expect(updateCasters(v4, [...vals, ...casters], [], casters.map((c) => c.address))).to.be.revertedWith(
+                "Caster count out of range"
             );
         });
 

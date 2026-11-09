@@ -215,15 +215,22 @@ namespace VerifiedXCore.Bitcoin.Services
 
         /// <summary>
         /// What the contract checks a signature set against: its current validators, the message form it reads (3 for the
-        /// deployed V3, which has no MESSAGE_VERSION(); 4 for V4), its mint threshold and its admin nonce.
+        /// deployed V3, which has no MESSAGE_VERSION(); 4 for V4), its mint threshold and its admin nonce; on V4 also its
+        /// casters and how many of them must sign besides (none while it has no casters, and on V3).
         /// </summary>
-        public sealed record SignerView(IReadOnlyList<string> Validators, int MessageVersion, int RequiredMintSignatures, BigInteger AdminNonce);
+        public sealed record SignerView(IReadOnlyList<string> Validators, int MessageVersion, int RequiredMintSignatures, BigInteger AdminNonce,
+            IReadOnlyList<string>? Casters = null, int RequiredCasterSignatures = 0)
+        {
+            public IReadOnlyList<string> CasterList => Casters ?? Array.Empty<string>();
+        }
 
         private const string SIGNER_VIEW_ABI = @"[
             {""inputs"":[],""name"":""getValidators"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
             {""inputs"":[],""name"":""requiredMintSignatures"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},
             {""inputs"":[],""name"":""adminNonce"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},
-            {""inputs"":[],""name"":""MESSAGE_VERSION"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""}
+            {""inputs"":[],""name"":""MESSAGE_VERSION"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},
+            {""inputs"":[],""name"":""getCasters"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
+            {""inputs"":[],""name"":""requiredCasterSignatures"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""}
         ]";
 
         /// <summary>Stands in for the Base RPC in tests.</summary>
@@ -245,7 +252,10 @@ namespace VerifiedXCore.Bitcoin.Services
                     var version = 3;
                     try { version = (int)await c.GetFunction("MESSAGE_VERSION").CallAsync<BigInteger>(); }
                     catch (Exception ex) when (ex is Nethereum.JsonRpc.Client.RpcResponseException or Nethereum.ABI.FunctionEncoding.SmartContractRevertException) { } // V3: no such function
-                    return new SignerView(validators, version, Math.Max(2, required), nonce);
+                    if (version != VbtcbTypedData.MessageVersion) return new SignerView(validators, version, Math.Max(2, required), nonce);
+                    var casters = await c.GetFunction("getCasters").CallAsync<List<string>>();
+                    var requiredCasters = (int)await c.GetFunction("requiredCasterSignatures").CallAsync<BigInteger>();
+                    return new SignerView(validators, version, Math.Max(2, required), nonce, casters, requiredCasters);
                 }
                 catch { }
             }

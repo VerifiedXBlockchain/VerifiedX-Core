@@ -34,7 +34,11 @@ namespace VerifiedXCore.Tests
             var validators = new[] { "0xD140DfAB7F08B5ce8E54A8b364E447b49E6EEda6", "0x00000000000000000000000000000000000000aa" };
             Assert.Equal(Hex("0x9c2350acd424c69ca56c23acdcc2d0f47c28609da939de02c5ca03d1bf091546"), VbtcbTypedData.AddValidatorsDigest(validators, 7_603_200, 5, 8453, Proxy));
             Assert.Equal(Hex("0x5519f1f7a86c3a8bd9d6fd192a147c4787a4c9b3958f82e034fe74635755e15f"), VbtcbTypedData.RemoveValidatorsDigest(validators, 7_603_200, 5, 8453, Proxy));
-            Assert.Equal(Hex("0x46abf760aabbd9655c290b4eb61a650d926734167d65207ff0092a90867146fc"), VbtcbTypedData.ProposeRemovalDigest(validators, 7_603_200, 5, 8453, Proxy));
+            var casters = new[] { "0x00000000000000000000000000000000000000bb" };
+            Assert.Equal(Hex("0xeb13d078200ad88fb09073f25064b4cc7ae225e724fde6897cefe01af2269e55"), VbtcbTypedData.ProposeRemovalDigest(validators, casters, 7_603_200, 5, 8453, Proxy));
+            Assert.Equal(Hex("0x14a1b144a32d46dc301689c102534addd8b8af62e3780c9c644d9709c1bbde4e"), VbtcbTypedData.ProposeRemovalDigest(validators, Array.Empty<string>(), 7_603_200, 5, 8453, Proxy));
+            Assert.Equal(Hex("0x1dc7589a5e142003da5187296c5daae368b8004345ad8e9ee97e06d52d81d290"), VbtcbTypedData.UpdateCastersDigest(validators, casters, 7_603_200, 5, 8453, Proxy));
+            Assert.Equal(Hex("0x2efaeb9e79a603a544bdf529de4f2fc5310f8a9136e3743c7441fd7d74cbe8ab"), VbtcbTypedData.UpdateCastersDigest(validators, Array.Empty<string>(), 7_603_200, 5, 8453, Proxy));
         }
 
         [Fact]

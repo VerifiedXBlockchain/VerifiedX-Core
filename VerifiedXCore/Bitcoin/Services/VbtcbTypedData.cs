@@ -31,7 +31,8 @@ namespace VerifiedXCore.Bitcoin.Services
 
         private static readonly byte[] ProposeUpgradeTypeHash = Keccak("ProposeUpgrade(address implementation,uint256 adminNonce)");
         private static readonly byte[] ProposeUpgradeDelayTypeHash = Keccak("ProposeUpgradeDelay(uint256 delay,uint256 adminNonce)");
-        private static readonly byte[] ProposeRemovalTypeHash = Keccak("ProposeRemoval(address[] validators,uint256 vfxBlockHeight,uint256 adminNonce)");
+        private static readonly byte[] ProposeRemovalTypeHash = Keccak("ProposeRemoval(address[] validators,address[] casters,uint256 vfxBlockHeight,uint256 adminNonce)");
+        private static readonly byte[] UpdateCastersTypeHash = Keccak("UpdateCasters(address[] add,address[] remove,uint256 vfxBlockHeight,uint256 adminNonce)");
         private static readonly byte[] CancelPendingTypeHash = Keccak("CancelPending(uint256 adminNonce)");
         private static readonly byte[] AddValidatorsTypeHash = Keccak("AddValidators(address[] validators,uint256 vfxBlockHeight,uint256 adminNonce)");
         private static readonly byte[] RemoveValidatorsTypeHash = Keccak("RemoveValidators(address[] validators,uint256 vfxBlockHeight,uint256 adminNonce)");
@@ -48,8 +49,11 @@ namespace VerifiedXCore.Bitcoin.Services
         public static byte[] ProposeUpgradeDelayDigest(BigInteger delaySeconds, BigInteger adminNonce, long chainId, string contractAddress) =>
             Digest(chainId, contractAddress, Keccak(Concat(ProposeUpgradeDelayTypeHash, Uint(delaySeconds), Uint(adminNonce))));
 
-        public static byte[] ProposeRemovalDigest(IEnumerable<string> validators, long vfxBlockHeight, BigInteger adminNonce, long chainId, string contractAddress) =>
-            Digest(chainId, contractAddress, Keccak(Concat(ProposeRemovalTypeHash, AddressList(validators), Uint(vfxBlockHeight), Uint(adminNonce))));
+        public static byte[] ProposeRemovalDigest(IEnumerable<string> validators, IEnumerable<string> casters, long vfxBlockHeight, BigInteger adminNonce, long chainId, string contractAddress) =>
+            Digest(chainId, contractAddress, Keccak(Concat(ProposeRemovalTypeHash, AddressList(validators), AddressList(casters), Uint(vfxBlockHeight), Uint(adminNonce))));
+
+        public static byte[] UpdateCastersDigest(IEnumerable<string> add, IEnumerable<string> remove, long vfxBlockHeight, BigInteger adminNonce, long chainId, string contractAddress) =>
+            Digest(chainId, contractAddress, Keccak(Concat(UpdateCastersTypeHash, AddressList(add), AddressList(remove), Uint(vfxBlockHeight), Uint(adminNonce))));
 
         public static byte[] CancelPendingDigest(BigInteger adminNonce, long chainId, string contractAddress) =>
             Digest(chainId, contractAddress, Keccak(Concat(CancelPendingTypeHash, Uint(adminNonce))));

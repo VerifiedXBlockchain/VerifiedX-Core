@@ -88,7 +88,9 @@ namespace VerifiedXCore.Tests
 
         private void Contract(int version, int nonce) =>
             BaseBridgeService.ReadSignerViewForTests = () => Task.FromResult<BaseBridgeService.SignerView?>(
-                new BaseBridgeService.SignerView(new[] { Seed, Dark, _myBase }, version, 2, nonce));
+                new BaseBridgeService.SignerView(new[] { Seed, Dark, _myBase }, version, 2, nonce, new[] { DarkCaster, Seed, _myBase }, 2));
+
+        private const string DarkCaster = "0x00000000000000000000000000000000000000bb";
 
         private static async Task<(HttpStatusCode Code, JObject Body)> Sign(object request, string from = "127.0.0.1")
         {
@@ -140,7 +142,9 @@ namespace VerifiedXCore.Tests
             AssertSignedBy((await Sign(new { Action = "cancel_pending" })).Body,
                 "0x60b2be5f3ad61d24cce4698888a6f7d469245106c4fe285b4cde24e009ba635c", personal: false);
             AssertSignedBy((await Sign(new { Action = "PROPOSE_REMOVAL", Validators = new[] { Seed, Dark }, VfxBlockHeight = 7_603_200 })).Body,
-                "0x46abf760aabbd9655c290b4eb61a650d926734167d65207ff0092a90867146fc", personal: false);
+                "0x14a1b144a32d46dc301689c102534addd8b8af62e3780c9c644d9709c1bbde4e", personal: false);
+            AssertSignedBy((await Sign(new { Action = "PROPOSE_REMOVAL", Validators = new[] { Seed, Dark }, Casters = new[] { DarkCaster }, VfxBlockHeight = 7_603_200 })).Body,
+                "0xeb13d078200ad88fb09073f25064b4cc7ae225e724fde6897cefe01af2269e55", personal: false);
         }
 
         [Fact]
@@ -173,6 +177,8 @@ namespace VerifiedXCore.Tests
             Assert.Contains("still a registered vBTC validator", await Refusal(new { Action = "PROPOSE_REMOVAL", Validators = new[] { _myBase }, VfxBlockHeight = 20 }));
             Assert.Contains("validator on the contract", await Refusal(new { Action = "PROPOSE_REMOVAL", Validators = new[] { "0x" + new string('4', 40) }, VfxBlockHeight = 20 }));
             Assert.Contains("repeat", await Refusal(new { Action = "PROPOSE_REMOVAL", Validators = new[] { Dark, Dark.ToUpperInvariant().Replace("0X", "0x") }, VfxBlockHeight = 20 }));
+            Assert.Contains("caster on the contract", await Refusal(new { Action = "PROPOSE_REMOVAL", Casters = new[] { Dark }, VfxBlockHeight = 20 }));
+            Assert.Contains("Name the validators or casters", await Refusal(new { Action = "PROPOSE_REMOVAL", VfxBlockHeight = 20 }));
             Assert.Contains("DelaySeconds", await Refusal(new { Action = "PROPOSE_UPGRADE_DELAY", DelaySeconds = 3600 }));
             Assert.Contains("Unknown action", await Refusal(new { Action = "MINT" }));
         }

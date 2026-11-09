@@ -1,6 +1,6 @@
 const { ethers, upgrades, network } = require("hardhat");
 const fs = require("fs");
-const { requireProxy, contractAt, messageVersion, requestPath, validSigners } = require("./upgrade-common");
+const { requireProxy, contractAt, messageVersion, requestPath, validSigners, requiredCasterSignatures } = require("./upgrade-common");
 
 /**
  * Step 2 of an upgrade. Reads upgrade-request.<network>.json, checks the signatures locally (distinct current
@@ -28,11 +28,14 @@ async function main() {
         throw new Error(`Admin nonce moved from ${request.adminNonce} to ${adminNonce}; prepare again and re-sign`);
 
     const signatures = (process.env.SIGNATURES || "").split(",").map((s) => s.trim()).filter((s) => s.length > 0);
-    const signers = await validSigners(contract, request, signatures);
+    const { validators: signers, casters } = await validSigners(contract, request, signatures);
     const required = await contract.requiredMintSignatures();
+    const requiredCasters = await requiredCasterSignatures(contract);
     console.log(`Valid validator signatures: ${signers.length} of ${required} required`);
     signers.forEach((s) => console.log("  " + s));
-    if (BigInt(signers.length) < required) {
+    console.log(`Valid caster signatures: ${casters.length} of ${requiredCasters} required`);
+    casters.forEach((s) => console.log("  " + s));
+    if (BigInt(signers.length) < required || BigInt(casters.length) < requiredCasters) {
         console.error("ERROR: not enough valid signatures; nothing sent.");
         process.exit(1);
     }

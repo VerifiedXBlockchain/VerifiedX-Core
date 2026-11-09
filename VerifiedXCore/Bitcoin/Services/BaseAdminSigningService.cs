@@ -9,7 +9,7 @@ namespace VerifiedXCore.Bitcoin.Services
     /// <summary>
     /// The node operator's signature on a vBTCb contract change (the localhost-only route SignBaseAdminAction): the V3
     /// UPGRADE message for the one move to V4, and on V4 a proposed upgrade or delay change, a proposed removal of
-    /// validators that went dark, or a veto of whatever is pending. The node reads the contract's version and admin nonce
+    /// validators or casters that went dark, or a veto of whatever is pending. The node reads the contract's version and admin nonce
     /// itself and signs for the contract and chain it is configured for, in the form that contract reads; the caller names
     /// only the action and its fields. For an upgrade it returns the implementation's code hash, for the operator to
     /// compare with the build they reviewed before handing the signature on.
@@ -31,6 +31,7 @@ namespace VerifiedXCore.Bitcoin.Services
             public string? Implementation { get; set; }
             public long? DelaySeconds { get; set; }
             public string[]? Validators { get; set; }
+            public string[]? Casters { get; set; }
             public long? VfxBlockHeight { get; set; }
         }
 
@@ -90,15 +91,24 @@ namespace VerifiedXCore.Bitcoin.Services
                     break;
                 case ProposeRemoval:
                     var targets = (req.Validators ?? Array.Empty<string>()).Select(t => t?.Trim() ?? "").ToArray();
-                    if (targets.Length == 0 || targets.Any(t => !IsAddress(t))) return Fail("Validators must be 0x addresses");
+                    var casterTargets = (req.Casters ?? Array.Empty<string>()).Select(t => t?.Trim() ?? "").ToArray();
+                    if (targets.Length + casterTargets.Length == 0) return Fail("Name the validators or casters to remove");
+                    if (targets.Any(t => !IsAddress(t))) return Fail("Validators must be 0x addresses");
+                    if (casterTargets.Any(t => !IsAddress(t))) return Fail("Casters must be 0x addresses");
                     if (targets.Distinct(StringComparer.OrdinalIgnoreCase).Count() != targets.Length) return Fail("Validators repeat an address");
+                    if (casterTargets.Distinct(StringComparer.OrdinalIgnoreCase).Count() != casterTargets.Length) return Fail("Casters repeat an address");
                     if (targets.Any(t => !view.Validators.Contains(t, StringComparer.OrdinalIgnoreCase))) return Fail("Every address must be a validator on the contract");
-                    // The way out for validators that went dark: not for one that still runs as a vBTC validator.
+                    if (casterTargets.Any(t => !view.CasterList.Contains(t, StringComparer.OrdinalIgnoreCase))) return Fail("Every caster must be a caster on the contract");
+                    // The way out for validators and casters that went dark: not for one that still runs as a vBTC
+                    // validator, or that still sits in the caster committee.
                     var active = VBTCValidatorRegistry.GetActiveValidatorsAt(Globals.LastBlock?.Height ?? 0)
                         .Select(v => SafeBaseAddress(v.FrostPublicKey)).Where(a => a.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
                     if (targets.FirstOrDefault(active.Contains) is { } live) return Fail($"{live} is still a registered vBTC validator");
+                    var committee = (VerifiedXCore.Services.CasterMembershipStore.GetCurrent()?.Casters ?? new List<VerifiedXCore.Models.CasterInfo>())
+                        .Select(c => SafeBaseAddress(c.PublicKey)).Where(a => a.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    if (casterTargets.FirstOrDefault(committee.Contains) is { } sitting) return Fail($"{sitting} is still in the caster committee");
                     if (req.VfxBlockHeight is not long height || height < 0) return Fail("VfxBlockHeight required");
-                    digest = VbtcbTypedData.ProposeRemovalDigest(targets, height, view.AdminNonce, chainId, contract);
+                    digest = VbtcbTypedData.ProposeRemovalDigest(targets, casterTargets, height, view.AdminNonce, chainId, contract);
                     break;
                 default:
                     digest = VbtcbTypedData.CancelPendingDigest(view.AdminNonce, chainId, contract);

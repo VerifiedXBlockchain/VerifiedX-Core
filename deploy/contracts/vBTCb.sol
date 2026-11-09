@@ -36,6 +36,12 @@ import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
  * - The validator set stays between 3 and 50; only batch add/remove remain. Each new validator signs its own
  *   addition, so no seat goes to an address whose key nobody holds.
  * - A malformed or unknown signature is skipped instead of reverting the call.
+ * - Two groups sign: the validators (registered vBTC validators, up to 50) and the casters (the VFX caster committee,
+ *   3 to 10). A mint and every change (either list, an upgrade, the delay) needs 2/3 of the validators AND a majority
+ *   of the casters, so neither many validator seats nor the casters alone can mint. A V3 contract upgraded in place
+ *   has no casters until updateCasters adds them; until then the caster part is not required.
+ * - proposeRemoval also clears casters: with a majority of the validators and of the casters, or with 2/3 of the
+ *   validators alone when the casters went dark. Either group's blocking minority cancels whatever is pending.
  */
 contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     mapping(address => bool) public isValidator;
@@ -48,6 +54,8 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     uint256 public constant MIN_REQUIRED_SIGNATURES = 2;
     uint256 public constant MIN_VALIDATORS = 3;
     uint256 public constant MAX_VALIDATORS = 50;
+    uint256 public constant MIN_CASTERS = 3;
+    uint256 public constant MAX_CASTERS = 10;
     uint256 public constant DEFAULT_UPGRADE_DELAY = 48 hours;
     uint256 public constant MAX_UPGRADE_DELAY = 30 days;
     /// @notice A proposal that is not executed within this long after it became executable lapses.
@@ -70,7 +78,9 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     bytes32 public constant PROPOSE_UPGRADE_DELAY_TYPEHASH =
         keccak256("ProposeUpgradeDelay(uint256 delay,uint256 adminNonce)");
     bytes32 public constant PROPOSE_REMOVAL_TYPEHASH =
-        keccak256("ProposeRemoval(address[] validators,uint256 vfxBlockHeight,uint256 adminNonce)");
+        keccak256("ProposeRemoval(address[] validators,address[] casters,uint256 vfxBlockHeight,uint256 adminNonce)");
+    bytes32 public constant UPDATE_CASTERS_TYPEHASH =
+        keccak256("UpdateCasters(address[] add,address[] remove,uint256 vfxBlockHeight,uint256 adminNonce)");
     bytes32 public constant CANCEL_PENDING_TYPEHASH =
         keccak256("CancelPending(uint256 adminNonce)");
 
@@ -86,7 +96,8 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     event UpgradeProposed(address indexed newImplementation, uint256 eta, uint256 adminNonce);
     event UpgradeDelayProposed(uint256 newDelay, uint256 eta, uint256 adminNonce);
     event UpgradeDelayChanged(uint256 newDelay);
-    event RemovalProposed(address[] validators, uint256 vfxBlockHeight, uint256 eta, uint256 adminNonce);
+    event RemovalProposed(address[] validators, address[] casters, uint256 vfxBlockHeight, uint256 eta, uint256 adminNonce);
+    event CastersUpdated(address[] added, address[] removed, uint256 vfxBlockHeight);
     event PendingCancelled(address implementation, uint256 upgradeDelay, uint256 removals, uint256 adminNonce);
 
     bool private _upgradeAuthorized;
@@ -100,6 +111,9 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     address[] private _pendingRemovals;
     uint256 public pendingRemovalHeight;
     uint256 public pendingRemovalEta;
+    mapping(address => bool) public isCaster;
+    address[] private _casters;
+    address[] private _pendingCasterRemovals;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -109,7 +123,8 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     function initialize(
         string memory name_,
         string memory symbol_,
-        address[] memory initialValidators
+        address[] memory initialValidators,
+        address[] memory initialCasters
     ) public initializer {
         __ERC20_init(name_, symbol_);
 
@@ -125,6 +140,14 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
 
         validatorCount = initialValidators.length;
         _recalculateThresholds();
+
+        require(initialCasters.length >= MIN_CASTERS && initialCasters.length <= MAX_CASTERS, "Caster count out of range");
+        for (uint256 i = 0; i < initialCasters.length; i++) {
+            require(initialCasters[i] != address(0), "Invalid caster address");
+            require(!isCaster[initialCasters[i]], "Duplicate caster");
+            isCaster[initialCasters[i]] = true;
+            _casters.push(initialCasters[i]);
+        }
     }
 
     function decimals() public pure override returns (uint8) {
@@ -145,7 +168,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         require(!usedLockIds[lockIdHash], "LockId already used");
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(MINT_TYPEHASH, to, amount, lockIdHash, nonce)));
-        _requireSignatures(digest, signatures, requiredMintSignatures, "Insufficient valid signatures");
+        _requireApproval(digest, signatures, "Insufficient valid signatures");
 
         usedLockIds[lockIdHash] = true;
         _mint(to, amount);
@@ -198,7 +221,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(
             ADD_VALIDATORS_TYPEHASH, keccak256(abi.encodePacked(newValidators)), vfxBlockHeight, adminNonce)));
-        _requireSignatures(digest, signatures, requiredMintSignatures, "Insufficient valid admin signatures");
+        _requireApproval(digest, signatures, "Insufficient valid admin signatures");
 
         for (uint256 i = 0; i < newValidators.length; i++) {
             require(newValidators[i] != address(0), "Invalid address");
@@ -224,38 +247,54 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(
             REMOVE_VALIDATORS_TYPEHASH, keccak256(abi.encodePacked(oldValidators)), vfxBlockHeight, adminNonce)));
-        // The mint threshold: with less, a group could remove the rest and be 2/3 of the set that is left.
-        _requireSignatures(digest, signatures, requiredMintSignatures, "Insufficient valid admin signatures");
+        // The mint approval: with less, a group could remove the rest and be 2/3 of the set that is left.
+        _requireApproval(digest, signatures, "Insufficient valid admin signatures");
 
         adminNonce++;
         _removeValidators(oldValidators, vfxBlockHeight);
     }
 
     /**
-     * @notice A majority proposes removing validators that went dark (too many for the 2/3 threshold to be reached).
-     *         The removal waits upgradeDelay() and any blocking minority can cancel it meanwhile, so a majority short of
-     *         2/3 cannot use it to take the set over while the others are watching.
+     * @notice Clears validators or casters that went dark (too many for the approval to be reached). Needs a majority of
+     *         the validators and of the casters, or 2/3 of the validators alone (the casters are the ones gone). The
+     *         removal waits upgradeDelay() and either group's blocking minority can cancel it meanwhile, so neither
+     *         group can use it to push the other out while the other is watching.
      */
-    function proposeRemoval(address[] calldata oldValidators, uint256 vfxBlockHeight, bytes[] calldata signatures) external {
-        require(oldValidators.length > 0, "Empty batch");
+    function proposeRemoval(
+        address[] calldata oldValidators,
+        address[] calldata oldCasters,
+        uint256 vfxBlockHeight,
+        bytes[] calldata signatures
+    ) external {
+        require(oldValidators.length + oldCasters.length > 0, "Empty batch");
         require(oldValidators.length <= validatorCount && validatorCount - oldValidators.length >= MIN_VALIDATORS,
             "Cannot remove below minimum");
+        require(oldCasters.length == 0 || (oldCasters.length <= _casters.length && _casters.length - oldCasters.length >= MIN_CASTERS),
+            "Cannot remove casters below minimum");
         require(pendingRemovalEta == 0 || _lapsed(pendingRemovalEta), "Removal already pending");
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(
-            PROPOSE_REMOVAL_TYPEHASH, keccak256(abi.encodePacked(oldValidators)), vfxBlockHeight, adminNonce)));
-        _requireSignatures(digest, signatures, requiredRemoveSignatures, "Insufficient valid admin signatures");
+            PROPOSE_REMOVAL_TYPEHASH, keccak256(abi.encodePacked(oldValidators)), keccak256(abi.encodePacked(oldCasters)),
+            vfxBlockHeight, adminNonce)));
+        (uint256 v, uint256 c) = _countSigners(digest, signatures, requiredMintSignatures, requiredCasterSignatures());
+        require((v >= requiredRemoveSignatures && c >= requiredCasterSignatures()) || v >= requiredMintSignatures,
+            "Insufficient valid admin signatures");
 
         for (uint256 i = 0; i < oldValidators.length; i++) {
             require(isValidator[oldValidators[i]], "Not a validator");
             for (uint256 j = 0; j < i; j++) require(oldValidators[j] != oldValidators[i], "Duplicate in batch");
         }
+        for (uint256 i = 0; i < oldCasters.length; i++) {
+            require(isCaster[oldCasters[i]], "Not a caster");
+            for (uint256 j = 0; j < i; j++) require(oldCasters[j] != oldCasters[i], "Duplicate in batch");
+        }
 
         _pendingRemovals = oldValidators;
+        _pendingCasterRemovals = oldCasters;
         pendingRemovalHeight = vfxBlockHeight;
         pendingRemovalEta = block.timestamp + upgradeDelay();
 
-        emit RemovalProposed(oldValidators, vfxBlockHeight, pendingRemovalEta, adminNonce);
+        emit RemovalProposed(oldValidators, oldCasters, vfxBlockHeight, pendingRemovalEta, adminNonce);
         adminNonce++;
     }
 
@@ -275,17 +314,85 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         for (uint256 i = 0; i < _pendingRemovals.length; i++) {
             if (isValidator[_pendingRemovals[i]]) list[k++] = _pendingRemovals[i];
         }
+        // Casters likewise, skipping any already gone.
+        uint256 m = 0;
+        for (uint256 i = 0; i < _pendingCasterRemovals.length; i++) {
+            if (isCaster[_pendingCasterRemovals[i]]) m++;
+        }
+        address[] memory casterList = new address[](m);
+        k = 0;
+        for (uint256 i = 0; i < _pendingCasterRemovals.length; i++) {
+            if (isCaster[_pendingCasterRemovals[i]]) casterList[k++] = _pendingCasterRemovals[i];
+        }
         uint256 height = pendingRemovalHeight;
         delete _pendingRemovals;
+        delete _pendingCasterRemovals;
         pendingRemovalHeight = 0;
         pendingRemovalEta = 0;
 
         require(validatorCount - n >= MIN_VALIDATORS, "Cannot remove below minimum");
-        _removeValidators(list, height);
+        require(m == 0 || _casters.length - m >= MIN_CASTERS, "Cannot remove casters below minimum");
+        if (n > 0) _removeValidators(list, height);
+        if (m > 0) {
+            for (uint256 i = 0; i < m; i++) _removeCaster(casterList[i]);
+            emit CastersUpdated(new address[](0), casterList, height);
+        }
     }
 
     function getPendingRemovals() external view returns (address[] memory) {
         return _pendingRemovals;
+    }
+
+    function getPendingCasterRemovals() external view returns (address[] memory) {
+        return _pendingCasterRemovals;
+    }
+
+    /**
+     * @notice Brings the caster list in step with the VFX caster committee: removals, then additions, in one call.
+     * @param newCasterSignatures one per added caster, in the same order: its own signature over the same UpdateCasters
+     *        message, so no seat goes to an address whose key nobody holds.
+     */
+    function updateCasters(
+        address[] calldata add,
+        address[] calldata remove,
+        uint256 vfxBlockHeight,
+        bytes[] calldata signatures,
+        bytes[] calldata newCasterSignatures
+    ) external {
+        require(add.length + remove.length > 0, "Empty batch");
+        require(newCasterSignatures.length == add.length, "One signature per new caster");
+
+        bytes32 digest = _hashTypedData(keccak256(abi.encode(
+            UPDATE_CASTERS_TYPEHASH, keccak256(abi.encodePacked(add)), keccak256(abi.encodePacked(remove)), vfxBlockHeight, adminNonce)));
+        _requireApproval(digest, signatures, "Insufficient valid admin signatures");
+
+        for (uint256 i = 0; i < remove.length; i++) {
+            require(isCaster[remove[i]], "Not a caster"); // also rejects a repeat within the batch
+            _removeCaster(remove[i]);
+        }
+        for (uint256 i = 0; i < add.length; i++) {
+            require(add[i] != address(0), "Invalid address");
+            require(!isCaster[add[i]], "Already a caster"); // also rejects a repeat within the batch
+            (address own, ECDSA.RecoverError error, ) = ECDSA.tryRecover(digest, newCasterSignatures[i]);
+            require(error == ECDSA.RecoverError.NoError && own == add[i], "New caster did not sign");
+            isCaster[add[i]] = true;
+            _casters.push(add[i]);
+        }
+        require(_casters.length >= MIN_CASTERS && _casters.length <= MAX_CASTERS, "Caster count out of range");
+
+        adminNonce++;
+        emit CastersUpdated(add, remove, vfxBlockHeight);
+    }
+
+    function _removeCaster(address caster) internal {
+        isCaster[caster] = false;
+        for (uint256 j = 0; j < _casters.length; j++) {
+            if (_casters[j] == caster) {
+                _casters[j] = _casters[_casters.length - 1];
+                _casters.pop();
+                break;
+            }
+        }
     }
 
     function _removeValidators(address[] memory oldValidators, uint256 vfxBlockHeight) internal {
@@ -319,7 +426,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         require(pendingImplementation == address(0) || _lapsed(pendingUpgradeEta), "Upgrade already pending");
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(PROPOSE_UPGRADE_TYPEHASH, newImplementation, adminNonce)));
-        _requireSignatures(digest, signatures, requiredMintSignatures, "Insufficient valid admin signatures");
+        _requireApproval(digest, signatures, "Insufficient valid admin signatures");
 
         pendingImplementation = newImplementation;
         pendingUpgradeEta = block.timestamp + upgradeDelay();
@@ -348,7 +455,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         require(pendingUpgradeDelayEta == 0 || _lapsed(pendingUpgradeDelayEta), "Delay change already pending");
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(PROPOSE_UPGRADE_DELAY_TYPEHASH, newDelay, adminNonce)));
-        _requireSignatures(digest, signatures, requiredMintSignatures, "Insufficient valid admin signatures");
+        _requireApproval(digest, signatures, "Insufficient valid admin signatures");
 
         pendingUpgradeDelay = newDelay;
         pendingUpgradeDelayEta = block.timestamp + upgradeDelay();
@@ -374,20 +481,34 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         return validatorCount - requiredMintSignatures + 1;
     }
 
-    /// @notice A blocking minority drops whatever is pending: an upgrade, a delay change and a removal.
+    /// @notice A majority of the casters (0 while the contract has none, after an upgrade from V3).
+    function requiredCasterSignatures() public view returns (uint256) {
+        return _casters.length == 0 ? 0 : _casters.length / 2 + 1;
+    }
+
+    /// @notice The casters who could refuse a mint: casterCount - requiredCasterSignatures + 1 (0: no casters, no caster veto).
+    function requiredCasterVetoSignatures() public view returns (uint256) {
+        return _casters.length == 0 ? 0 : _casters.length - requiredCasterSignatures() + 1;
+    }
+
+    /// @notice Either group's blocking minority drops whatever is pending: an upgrade, a delay change and a removal.
     function cancelPending(bytes[] calldata signatures) external {
         require(pendingImplementation != address(0) || pendingUpgradeDelayEta != 0 || pendingRemovalEta != 0, "Nothing pending");
 
         bytes32 digest = _hashTypedData(keccak256(abi.encode(CANCEL_PENDING_TYPEHASH, adminNonce)));
-        _requireSignatures(digest, signatures, requiredVetoSignatures(), "Insufficient valid admin signatures");
+        uint256 validatorVeto = requiredVetoSignatures();
+        uint256 casterVeto = requiredCasterVetoSignatures();
+        (uint256 v, uint256 c) = _countSigners(digest, signatures, validatorVeto, casterVeto == 0 ? type(uint256).max : casterVeto);
+        require(v >= validatorVeto || (casterVeto > 0 && c >= casterVeto), "Insufficient valid admin signatures");
 
-        emit PendingCancelled(pendingImplementation, pendingUpgradeDelay, _pendingRemovals.length, adminNonce);
+        emit PendingCancelled(pendingImplementation, pendingUpgradeDelay, _pendingRemovals.length + _pendingCasterRemovals.length, adminNonce);
 
         pendingImplementation = address(0);
         pendingUpgradeEta = 0;
         pendingUpgradeDelay = 0;
         pendingUpgradeDelayEta = 0;
         delete _pendingRemovals;
+        delete _pendingCasterRemovals;
         pendingRemovalHeight = 0;
         pendingRemovalEta = 0;
         adminNonce++;
@@ -395,6 +516,14 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
 
     function getValidators() external view returns (address[] memory) {
         return validators;
+    }
+
+    function getCasters() external view returns (address[] memory) {
+        return _casters;
+    }
+
+    function casterCount() external view returns (uint256) {
+        return _casters.length;
     }
 
     function getAdminNonce() external view returns (uint256) {
@@ -423,29 +552,41 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         requiredRemoveSignatures = _max(MIN_REQUIRED_SIGNATURES, validatorCount / 2 + 1);
     }
 
-    /// @dev Counts distinct current validators that signed `digest`; malformed signatures and non-validators are skipped.
-    function _requireSignatures(bytes32 digest, bytes[] calldata signatures, uint256 required, string memory err) internal view {
-        uint256 validSigCount = 0;
-        address[] memory signers = new address[](signatures.length);
+    /// @dev Both groups: 2/3 of the validators and a majority of the casters.
+    function _requireApproval(bytes32 digest, bytes[] calldata signatures, string memory err) internal view {
+        uint256 needCasters = requiredCasterSignatures();
+        (uint256 v, uint256 c) = _countSigners(digest, signatures, requiredMintSignatures, needCasters);
+        require(v >= requiredMintSignatures && c >= needCasters, err);
+    }
 
-        for (uint256 i = 0; i < signatures.length && validSigCount < required; i++) {
+    /**
+     * @dev Distinct current validators and distinct current casters that signed `digest` (an address on both lists counts
+     *      on both); malformed signatures and other signers are skipped. Stops once both counts reach what is asked.
+     */
+    function _countSigners(bytes32 digest, bytes[] calldata signatures, uint256 needValidators, uint256 needCasters)
+        internal view returns (uint256 v, uint256 c)
+    {
+        address[] memory seen = new address[](signatures.length);
+        uint256 n = 0;
+        for (uint256 i = 0; i < signatures.length && (v < needValidators || c < needCasters); i++) {
             (address recovered, ECDSA.RecoverError error, ) = ECDSA.tryRecover(digest, signatures[i]);
-            if (error != ECDSA.RecoverError.NoError || !isValidator[recovered]) continue;
+            if (error != ECDSA.RecoverError.NoError) continue;
+            bool asValidator = isValidator[recovered];
+            bool asCaster = isCaster[recovered];
+            if (!asValidator && !asCaster) continue;
 
             bool isDuplicate = false;
-            for (uint256 j = 0; j < validSigCount; j++) {
-                if (signers[j] == recovered) {
+            for (uint256 j = 0; j < n; j++) {
+                if (seen[j] == recovered) {
                     isDuplicate = true;
                     break;
                 }
             }
             if (isDuplicate) continue;
-
-            signers[validSigCount] = recovered;
-            validSigCount++;
+            seen[n++] = recovered;
+            if (asValidator) v++;
+            if (asCaster) c++;
         }
-
-        require(validSigCount >= required, err);
     }
 
     function _lapsed(uint256 eta) internal view returns (bool) {
@@ -457,9 +598,9 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
     }
 
     /**
-     * @dev Reserved storage slots for future upgrades. V4 took seven slots (its address shares V3's last slot).
+     * @dev Reserved storage slots for future upgrades. V4 took ten slots (its address shares V3's last slot).
      */
-    uint256[43] private __gap;
+    uint256[40] private __gap;
 
     function _authorizeUpgrade(address newImplementation) internal override {
         newImplementation; // silence

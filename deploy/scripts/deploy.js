@@ -8,6 +8,7 @@ const { ethers, upgrades, network } = require("hardhat");
  * Usage (Windows cmd):
  *   set DEPLOYER_PRIVATE_KEY=0x...      any funded account; it gets no rights on the contract
  *   set VALIDATORS=0xA...,0xB...,0xC... the validators' Base addresses (at least 3)
+ *   set CASTERS=0xD...,0xE...,0xF...    the VFX casters' Base addresses (3 to 10); a validator may be on both
  *   npx hardhat run scripts/deploy.js --network baseSepolia
  *
  * Each validator's Base address: GET http://<validator>:<port>/wallet/api/base-address/<validatorVfxAddress>
@@ -33,6 +34,15 @@ async function main() {
         console.error("ERROR: set VALIDATORS to at least 3 comma-separated validator Base addresses.");
         process.exit(1);
     }
+    const initialCasters = (process.env.CASTERS || "")
+        .split(",")
+        .map((v) => v.trim())
+        .filter((v) => v.length > 0)
+        .map((v) => ethers.getAddress(v));
+    if (initialCasters.length < 3 || initialCasters.length > 10) {
+        console.error("ERROR: set CASTERS to 3 to 10 comma-separated caster Base addresses.");
+        process.exit(1);
+    }
 
     const [deployer] = await ethers.getSigners();
     const balance = await ethers.provider.getBalance(deployer.address);
@@ -45,11 +55,13 @@ async function main() {
 
     console.log("Initial validators:");
     initialValidators.forEach((v, i) => console.log(`  ${i + 1}. ${v}`));
+    console.log("Initial casters:");
+    initialCasters.forEach((v, i) => console.log(`  ${i + 1}. ${v}`));
     console.log();
 
     const vBTCb = await ethers.getContractFactory("vBTCb");
     console.log("Deploying vBTCb as UUPS proxy...");
-    const proxy = await upgrades.deployProxy(vBTCb, ["Verified Bitcoin on Base", "vBTC.b", initialValidators], {
+    const proxy = await upgrades.deployProxy(vBTCb, ["Verified Bitcoin on Base", "vBTC.b", initialValidators, initialCasters], {
         initializer: "initialize",
         kind: "uups",
     });
@@ -71,6 +83,8 @@ async function main() {
             console.log("  Validators on contract:", await proxy.getValidators());
             console.log("  Required mint signatures:", (await proxy.requiredMintSignatures()).toString());
             console.log("  Required remove signatures:", (await proxy.requiredRemoveSignatures()).toString());
+            console.log("  Casters on contract:", await proxy.getCasters());
+            console.log("  Required caster signatures:", (await proxy.requiredCasterSignatures()).toString());
             console.log("  Upgrade delay (s):", (await proxy.upgradeDelay()).toString());
             lastErr = undefined;
             break;
