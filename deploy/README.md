@@ -81,8 +81,15 @@ The proxy address, balances, used lock ids and validators all stay. Only the imp
    set PROXY_ADDRESS=0x09096c6eBf35F0aDAEeC02D06a0dE77E790F132D
    npx hardhat run scripts/prepare-upgrade.js --network baseMainnet
    ```
-2. **Sign**: the validators on the contract sign the request with their VFX validator key (their Base address is
-   derived from it). V3 takes an EIP-191 signature over the hash; V4 takes EIP-712 `ProposeUpgrade`.
+2. **Sign**: each validator on the contract signs on its own node, which holds the key. The node reads the
+   contract's version and admin nonce itself, and returns the implementation's code hash to check against the
+   build reviewed. The route answers localhost only (port 7294 on mainnet, 17294 on testnet):
+   ```cmd
+   curl -X POST http://127.0.0.1:7294/valapi/Validator/SignBaseAdminAction -H "Content-Type: application/json" -d "{\"Action\":\"UPGRADE\",\"Implementation\":\"0x...\"}"
+   ```
+   `UPGRADE` is the V3 message (EIP-191). On V4 the actions are `PROPOSE_UPGRADE` (with `Implementation`),
+   `PROPOSE_UPGRADE_DELAY` (`DelaySeconds`), `PROPOSE_REMOVAL` (`Validators`, `VfxBlockHeight`) and `CANCEL_PENDING`.
+   The `Digest` it returns must equal the hash in `upgrade-request.<network>.json`.
 3. **Submit**: verifies the signatures locally first and sends nothing if there are too few.
    ```cmd
    set SIGNATURES=0xsig1,0xsig2
@@ -96,9 +103,8 @@ The proxy address, balances, used lock ids and validators all stay. Only the imp
    npx hardhat run scripts/execute-upgrade.js --network baseMainnet
    ```
 
-The V3 → V4 upgrade changes the mint message from V3's packed hash to EIP-712. VFX nodes produce the new form from
-the release that switches at its activation height, so run the Base upgrade close to that height. Mints attempted
-between the two revert and are retried.
+The V3 → V4 upgrade changes the mint message from V3's packed hash to EIP-712. VFX nodes read `MESSAGE_VERSION()`
+from the contract and sign the form it reads, so mints carry on across the upgrade without a gap.
 
 ## Testing the bridge (from a regular node)
 

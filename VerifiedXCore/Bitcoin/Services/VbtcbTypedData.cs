@@ -29,6 +29,26 @@ namespace VerifiedXCore.Bitcoin.Services
             Digest(chainId, contractAddress,
                 Keccak(Concat(MintTypeHash, Address(to), Uint(amountSats), Keccak(lockId ?? ""), Uint(nonce))));
 
+        private static readonly byte[] ProposeUpgradeTypeHash = Keccak("ProposeUpgrade(address implementation,uint256 adminNonce)");
+        private static readonly byte[] ProposeUpgradeDelayTypeHash = Keccak("ProposeUpgradeDelay(uint256 delay,uint256 adminNonce)");
+        private static readonly byte[] ProposeRemovalTypeHash = Keccak("ProposeRemoval(address[] validators,uint256 vfxBlockHeight,uint256 adminNonce)");
+        private static readonly byte[] CancelPendingTypeHash = Keccak("CancelPending(uint256 adminNonce)");
+
+        public static byte[] ProposeUpgradeDigest(string implementation, BigInteger adminNonce, long chainId, string contractAddress) =>
+            Digest(chainId, contractAddress, Keccak(Concat(ProposeUpgradeTypeHash, Address(implementation), Uint(adminNonce))));
+
+        public static byte[] ProposeUpgradeDelayDigest(BigInteger delaySeconds, BigInteger adminNonce, long chainId, string contractAddress) =>
+            Digest(chainId, contractAddress, Keccak(Concat(ProposeUpgradeDelayTypeHash, Uint(delaySeconds), Uint(adminNonce))));
+
+        public static byte[] ProposeRemovalDigest(IEnumerable<string> validators, long vfxBlockHeight, BigInteger adminNonce, long chainId, string contractAddress) =>
+            Digest(chainId, contractAddress, Keccak(Concat(ProposeRemovalTypeHash, AddressList(validators), Uint(vfxBlockHeight), Uint(adminNonce))));
+
+        public static byte[] CancelPendingDigest(BigInteger adminNonce, long chainId, string contractAddress) =>
+            Digest(chainId, contractAddress, Keccak(Concat(CancelPendingTypeHash, Uint(adminNonce))));
+
+        /// <summary>An address[] field: keccak256 of the 32-byte words in order (the contract's keccak256(abi.encodePacked(list))).</summary>
+        internal static byte[] AddressList(IEnumerable<string> addresses) => Keccak(Concat(addresses.Select(Address).ToArray()));
+
         internal static byte[] Keccak(string s) => Sha3Keccack.Current.CalculateHash(Encoding.UTF8.GetBytes(s));
         internal static byte[] Keccak(byte[] b) => Sha3Keccack.Current.CalculateHash(b);
 

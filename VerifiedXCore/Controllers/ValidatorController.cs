@@ -101,6 +101,28 @@ namespace VerifiedXCore.Controllers
         }
 
         /// <summary>
+        /// The node operator signs a vBTCb contract change with this validator's Base key: UPGRADE (V3), or on V4
+        /// PROPOSE_UPGRADE, PROPOSE_UPGRADE_DELAY, PROPOSE_REMOVAL, CANCEL_PENDING (BaseAdminSigningService). Localhost only:
+        /// these signatures change the contract's code and validator set, so only the operator asks for them.
+        /// </summary>
+        [HttpPost]
+        [Route("SignBaseAdminAction")]
+        public async Task<ActionResult<string>> SignBaseAdminAction([FromBody] Bitcoin.Services.BaseAdminSigningService.Request? request)
+        {
+            if (!IsLoopbackCaller())
+                return Unauthorized(JsonConvert.SerializeObject(new { Success = false, Error = "SignBaseAdminAction is localhost-only." }));
+            try
+            {
+                var result = await Bitcoin.Services.BaseAdminSigningService.SignAsync(request);
+                return result.Success ? Ok(JsonConvert.SerializeObject(result)) : BadRequest(JsonConvert.SerializeObject(result));
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, JsonConvert.SerializeObject(new { Success = false, Error = ApiErrorText.Generic(ex) }));
+            }
+        }
+
+        /// <summary>
         /// Returns the current Base contract state: validators, nonce, thresholds.
         /// </summary>
         [HttpGet]
