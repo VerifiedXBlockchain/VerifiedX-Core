@@ -116,7 +116,7 @@ namespace VerifiedXCore
             }
 
             //////////////////////////////Forced Testnet//////////////////////////////
-            //Globals.IsTestNet = true;
+            Globals.IsTestNet = true;
             //////////////////////////////////////////////////////////////////////////
 
             Globals.ApplyNetworkHeights(); // every per-network activation height, in one place (the Warden calls it too)
