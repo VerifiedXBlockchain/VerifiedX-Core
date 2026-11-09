@@ -28,7 +28,7 @@ async function main() {
         throw new Error(`Admin nonce moved from ${request.adminNonce} to ${adminNonce}; prepare again and re-sign`);
 
     const signatures = (process.env.SIGNATURES || "").split(",").map((s) => s.trim()).filter((s) => s.length > 0);
-    const { validators: signers, casters } = await validSigners(contract, request, signatures);
+    const { validators: signers, casters, signatures: good } = await validSigners(contract, request, signatures);
     const required = await contract.requiredMintSignatures();
     const requiredCasters = await requiredCasterSignatures(contract);
     console.log(`Valid validator signatures: ${signers.length} of ${required} required`);
@@ -42,13 +42,13 @@ async function main() {
 
     if (version === 3) {
         console.log(`\nUpgrading ${proxy} to ${request.implementation} (V3 path, immediate)...`);
-        const tx = await contract.upgradeWithValidatorApproval(request.implementation, signatures);
+        const tx = await contract.upgradeWithValidatorApproval(request.implementation, good);
         console.log("TX hash:", tx.hash);
         await tx.wait();
         console.log("Implementation now:", await upgrades.erc1967.getImplementationAddress(proxy));
     } else {
         console.log(`\nProposing upgrade of ${proxy} to ${request.implementation}...`);
-        const tx = await contract.proposeUpgrade(request.implementation, signatures);
+        const tx = await contract.proposeUpgrade(request.implementation, good);
         console.log("TX hash:", tx.hash);
         await tx.wait();
         const eta = await contract.pendingUpgradeEta();

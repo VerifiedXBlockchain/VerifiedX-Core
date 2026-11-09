@@ -729,6 +729,19 @@ describe("vBTCb V4", function () {
             expect(await token.validatorCount()).to.equal(3n);
         });
 
+        it("the prepare script treats a lapsed proposal as nothing pending, as the contract does", async function () {
+            const common = require("../scripts/upgrade-common");
+            const { token, vals } = await loadFixture(deployV4Fixture);
+            const impl = await newImplementation();
+            await token.proposeUpgrade(impl, await signTyped(token, vals, "ProposeUpgrade", { implementation: impl, adminNonce: 0n }));
+            const read = await common.contractAt(await token.getAddress());
+            expect(await common.livePendingUpgrade(read)).to.equal(impl);
+            await time.increaseTo((await token.pendingUpgradeEta()) + BigInt(14 * DAY));
+            expect(await common.livePendingUpgrade(read)).to.equal(impl);             // its last second
+            await time.increase(1);
+            expect(await common.livePendingUpgrade(read)).to.equal(null);
+        });
+
         it("a proposal still runs on the last second of its grace period", async function () {
             const { token, vals } = await loadFixture(deployV4Fixture);
             const impl = await newImplementation();
@@ -867,6 +880,24 @@ describe("vBTCb V4", function () {
             };
             await expect(propose(vals.slice(0, 2))).to.be.revertedWith("Insufficient valid admin signatures");
             await expect(propose(vals.slice(0, 3))).to.emit(v4, "RemovalProposed");
+        });
+
+        it("the submit script sends only the signatures that count: V3 reverts the whole upgrade on one malformed signature", async function () {
+            const common = require("../scripts/upgrade-common");
+            const { token, vals, chainId, self } = await loadFixture(deployV3Fixture);
+            const V4 = await ethers.getContractFactory("vBTCb");
+            const impl = await upgrades.prepareUpgrade(self, V4, { kind: "uups" });
+            const hash = ethers.solidityPackedKeccak256(["string", "address", "uint256", "uint256", "address"], ["UPGRADE", impl, 0n, chainId, self]);
+            const [s0, s1] = await Promise.all(vals.slice(0, 2).map((v) => v.signMessage(ethers.getBytes(hash))));
+            const outsider = await ethers.Wallet.createRandom().signMessage(ethers.getBytes(hash));
+            const given = ["0x1234", s0, s0, outsider, s1];
+
+            const { validators, signatures } = await common.validSigners(await common.contractAt(self), { messageVersion: 3, hash }, given);
+            expect(validators.length).to.equal(2);
+            expect(signatures).to.deep.equal([s0, s1]);
+            await expect(token.upgradeWithValidatorApproval(impl, given)).to.be.reverted;
+            await token.upgradeWithValidatorApproval(impl, signatures);
+            expect(await upgrades.erc1967.getImplementationAddress(self)).to.equal(impl);
         });
 
         it("keeps every V3 storage slot recorded in the Base mainnet manifest", async function () {

@@ -13,6 +13,7 @@ const ABI = [
     "function upgradeDelay() view returns (uint256)",
     "function pendingImplementation() view returns (address)",
     "function pendingUpgradeEta() view returns (uint256)",
+    "function PROPOSAL_GRACE_PERIOD() view returns (uint256)",
     "function upgradeWithValidatorApproval(address newImplementation, bytes[] signatures)",
     "function proposeUpgrade(address newImplementation, bytes[] signatures)",
     "function executeUpgrade()",
@@ -70,12 +71,28 @@ async function requiredCasterSignatures(contract) {
 }
 
 /**
+ * The implementation of a V4 upgrade that is pending and can still be executed, or null. One whose grace period ran out
+ * can no longer be executed and may be replaced by a new proposal.
+ */
+async function livePendingUpgrade(contract) {
+    const pending = await contract.pendingImplementation();
+    if (pending === ethers.ZeroAddress) return null;
+    const eta = await contract.pendingUpgradeEta();
+    const grace = await contract.PROPOSAL_GRACE_PERIOD();
+    const now = BigInt((await ethers.provider.getBlock("latest")).timestamp);
+    return now > eta + grace ? null : pending;
+}
+
+/**
  * Recovers each signature for the request and returns the distinct current validators and the distinct current casters
- * among them (an address on both lists is in both).
+ * among them (an address on both lists is in both), and `signatures`: one per distinct signer that counts, malformed
+ * ones and the rest left out. Send only those: V3 reverts the whole call on a single malformed signature.
  */
 async function validSigners(contract, request, signatures) {
     const found = new Set();
     const casters = new Set();
+    const good = [];
+    const seen = new Set();
     for (const sig of signatures) {
         let signer;
         try {
@@ -92,8 +109,12 @@ async function validSigners(contract, request, signatures) {
         if (asValidator) found.add(signer);
         if (asCaster) casters.add(signer);
         if (!asValidator && !asCaster) console.warn("  skipped signature from a non-validator, non-caster", signer);
+        else if (!seen.has(signer)) {
+            seen.add(signer);
+            good.push(sig);
+        }
     }
-    return { validators: [...found], casters: [...casters] };
+    return { validators: [...found], casters: [...casters], signatures: good };
 }
 
-module.exports = { ABI, PROPOSE_UPGRADE_TYPES, requireProxy, contractAt, messageVersion, requestPath, validSigners, requiredCasterSignatures };
+module.exports = { ABI, PROPOSE_UPGRADE_TYPES, requireProxy, contractAt, messageVersion, requestPath, validSigners, requiredCasterSignatures, livePendingUpgrade };

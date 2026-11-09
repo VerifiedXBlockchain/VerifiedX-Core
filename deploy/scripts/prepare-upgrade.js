@@ -1,6 +1,6 @@
 const { ethers, upgrades, network } = require("hardhat");
 const fs = require("fs");
-const { PROPOSE_UPGRADE_TYPES, requireProxy, contractAt, messageVersion, requestPath } = require("./upgrade-common");
+const { PROPOSE_UPGRADE_TYPES, requireProxy, contractAt, messageVersion, requestPath, livePendingUpgrade } = require("./upgrade-common");
 
 /**
  * Step 1 of an upgrade. Checks the new contracts/vBTCb.sol against the storage layout recorded in
@@ -24,8 +24,8 @@ async function main() {
     console.log("Current message version:", version);
 
     if (version >= 4) {
-        const pending = await contract.pendingImplementation();
-        if (pending !== ethers.ZeroAddress) {
+        const pending = await livePendingUpgrade(contract);
+        if (pending !== null) {
             console.error(`ERROR: an upgrade to ${pending} is already pending. Execute or cancel it first.`);
             process.exit(1);
         }
