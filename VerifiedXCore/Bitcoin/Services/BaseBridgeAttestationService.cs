@@ -255,6 +255,19 @@ namespace VerifiedXCore.Bitcoin.Services
             record.Status = BridgeLockStatus.AttestationPending;
             BridgeLockRecord.Save(record);
 
+            // Asked in the form the contract reads (MESSAGE_VERSION()), and kept only when it recovers to the validator asked:
+            // a signature in the other form, or by another key, is one the contract does not count.
+            var view = await BaseBridgeService.ReadSignerViewAsync();
+            if (view == null || view.MessageVersion is not (3 or VbtcbTypedData.MessageVersion))
+            {
+                LogUtility.Log($"[BaseBridgeAttestation] Could not read a Base contract version this node collects for (lock {record.LockId}). Retrying next round.", "BaseBridgeAttestationService");
+                return;
+            }
+            var typed = view.MessageVersion == VbtcbTypedData.MessageVersion;
+            var hash = typed
+                ? VbtcbTypedData.MintDigest(record.EvmDestination, record.AmountSats, record.LockId, nonce, Globals.BaseEvmChainId, contract)
+                : ConstructMintMessageHash(record.EvmDestination, record.AmountSats, record.LockId, nonce, Globals.BaseEvmChainId, contract);
+
             var validators = BaseValidatorSyncService.SelectAttestingValidators();
             var client = Globals.HttpClientFactory?.CreateClient() ?? new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
 
@@ -270,7 +283,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     Nonce = nonce,
                     ChainId = Globals.BaseEvmChainId,
                     ContractAddress = contract,
-                    SmartContractUID = record.SmartContractUID
+                    SmartContractUID = record.SmartContractUID,
+                    MessageVersion = view.MessageVersion
                 });
                 try
                 {
@@ -282,7 +296,8 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (jo["success"]?.ToObject<bool>() != true) continue;
                     var sig = jo["signature"]?.ToString();
                     var derived = ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(v.FrostPublicKey);
-                    if (!string.IsNullOrEmpty(sig) && !string.IsNullOrEmpty(derived))
+                    if (!string.IsNullOrEmpty(sig) && !string.IsNullOrEmpty(derived)
+                        && string.Equals(ValidatorEthKeyService.RecoverSigner(hash, sig, personalMessage: !typed), derived, StringComparison.OrdinalIgnoreCase))
                         state.ValidatorSignatures[derived] = sig;
                 }
                 catch

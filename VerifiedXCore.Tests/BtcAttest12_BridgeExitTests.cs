@@ -635,6 +635,106 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// The caster's attestation loop asked for a mint signature without saying which form the contract reads, so after
+        /// the V4 upgrade it gathered V3 signatures the contract rejects and the lock retried for ever. It now asks in the
+        /// form the contract reads and keeps a signature only when it is the asked validator's own, on V4 and on V3.
+        /// </summary>
+        [Fact]
+        public async Task TheCasterCollector_AsksInTheContractsForm_AndKeepsOnlyEachValidatorsOwnSignature()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.004M);
+            for (var i = 0; i < BaseBridgeAttestationService.MintAttestationDepth; i++) await Apply(Tip + 1);
+
+            // Three registered validators, each at its own IP; the second answers with another key's signature.
+            var keys = Enumerable.Range(0, 4).Select(_ => NewKey()).ToList();
+            var ipOf = new Dictionary<string, V>();
+            for (var i = 0; i < 3; i++)
+            {
+                var v = keys[i];
+                var ip = $"10.0.8.{i + 1}";
+                ipOf[ip] = v;
+                AccountData.GetAccounts().InsertSafe(new Account { Address = v.Address, PublicKey = v.Pub, PrivateKey = "0" + v.Key.secret.ToString("x") });
+                BlockchainData.GetBlocks().InsertSafe(new VerifiedXCore.Models.Block
+                {
+                    Height = 40 + i, Hash = $"h{40 + i}-{Guid.NewGuid():N}",
+                    Transactions = new List<VfxTx> { new VfxTx
+                    {
+                        TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = v.Address, ToAddress = v.Address, Hash = "rk" + i,
+                        Data = JsonConvert.SerializeObject(new { ValidatorAddress = v.Address, IPAddress = ip, FrostPublicKey = v.Pub, IsS3C = false }),
+                    } },
+                });
+            }
+            var outsider = keys[3];
+            AccountData.GetAccounts().InsertSafe(new Account { Address = outsider.Address, PublicKey = outsider.Pub, PrivateKey = "0" + outsider.Key.secret.ToString("x") });
+            string BaseOf(V v) => ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(v.Pub);
+            const string configured = "0x09096c6eBf35F0aDAEeC02D06a0dE77E790F132D";
+
+            var priorValidator = Globals.ValidatorAddress;
+            var priorCastersOnly = Globals.BaseValidatorSetCastersOnly;
+            var priorSynced = Globals.IsChainSynced;
+            var priorResyncing = Globals.IsResyncing;
+            var priorStopTimers = Globals.StopAllTimers;
+            var priorContract = BaseBridgeService.ContractAddress;
+            var priorFactory = Globals.HttpClientFactory;
+            Globals.BaseValidatorSetCastersOnly = false;
+            Globals.IsChainSynced = true;
+            Globals.IsResyncing = false;
+            Globals.StopAllTimers = false;
+            BaseBridgeService.ContractAddress = configured;
+            VBTCValidatorRegistry.InvalidateCache();
+            Globals.HttpClientFactory = new AttesterHttpClientFactory(async (ip, request) =>
+            {
+                Globals.ValidatorAddress = ipOf[ip].Address;                      // the node at that IP answers
+                var answer = await BaseBridgeAttestationService.HandleMintAttestationRequest(request);
+                if (ip == "10.0.8.2" && answer.success)                            // hands back another key's signature
+                {
+                    Globals.ValidatorAddress = outsider.Address;
+                    answer = await BaseBridgeAttestationService.HandleMintAttestationRequest(request);
+                }
+                return answer;
+            });
+            try
+            {
+                foreach (var version in new[] { 4, 3 })
+                {
+                    BaseBridgeService.ReadSignerViewForTests = () => Task.FromResult<BaseBridgeService.SignerView?>(
+                        new BaseBridgeService.SignerView(keys.Take(3).Select(BaseOf).ToArray(), version, 2, 0));
+                    BridgeLockRecord.Save(new BridgeLockRecord
+                    {
+                        LockId = lockId, SmartContractUID = vault.Uid, OwnerAddress = Minter.Address, Amount = 0.004M, AmountSats = 400_000,
+                        EvmDestination = "0x" + new string('a', 40), Status = BridgeLockStatus.Locked, VfxLockConfirmedOnChain = true, VfxLockBlockHeight = Tip,
+                    });
+
+                    await BaseBridgeAttestationService.CollectMintAttestationsForLock(BridgeLockRecord.GetByLockId(lockId)!, 2);
+
+                    var stored = BridgeLockRecord.GetByLockId(lockId)!;
+                    Assert.Equal(BridgeLockStatus.AttestationReady, stored.Status);
+                    Assert.Equal(new[] { BaseOf(keys[0]), BaseOf(keys[2]) }.OrderBy(x => x), stored.ValidatorSignatures.Keys.OrderBy(x => x), StringComparer.OrdinalIgnoreCase);
+                    var hash = version == 4
+                        ? VbtcbTypedData.MintDigest(stored.EvmDestination, 400_000, lockId, stored.MintNonce, Globals.BaseEvmChainId, configured)
+                        : BaseBridgeAttestationService.ConstructMintMessageHash(stored.EvmDestination, 400_000, lockId, stored.MintNonce, Globals.BaseEvmChainId, configured);
+                    foreach (var (signer, sig) in stored.ValidatorSignatures)
+                        Assert.Equal(signer, ValidatorEthKeyService.RecoverSigner(hash, sig, personalMessage: version != 4), StringComparer.OrdinalIgnoreCase);
+                }
+            }
+            finally
+            {
+                BaseBridgeService.ReadSignerViewForTests = null;
+                Globals.HttpClientFactory = priorFactory;
+                Globals.ValidatorAddress = priorValidator;
+                Globals.BaseValidatorSetCastersOnly = priorCastersOnly;
+                Globals.IsChainSynced = priorSynced;
+                Globals.IsResyncing = priorResyncing;
+                Globals.StopAllTimers = priorStopTimers;
+                BaseBridgeService.ContractAddress = priorContract;
+                VBTCValidatorRegistry.InvalidateCache();
+            }
+        }
+
+        /// <summary>
         /// A validator signed a mint only while it sat in the caster committee. The contract counts only its own validators
         /// anyway, so the rule added nothing, and an election that rotated two contract validators out of the committee
         /// stopped every mint. Under the released settings (casters-only on), a validator outside the committee signs.
@@ -831,6 +931,8 @@ namespace VerifiedXCore.Tests
             VerifiedXCore.Bitcoin.Services.BaseBridgeService.ContractAddress = "0x" + new string('b', 40);
             Globals.BaseValidatorSetCastersOnly = false;
             Globals.HttpClientFactory = new RecordingHttpClientFactory(asked);
+            BaseBridgeService.ReadSignerViewForTests = () => Task.FromResult<BaseBridgeService.SignerView?>(
+                new BaseBridgeService.SignerView(Array.Empty<string>(), 3, 2, 0));
             try
             {
                 BridgeLockRecord Recorded(string id, decimal amount) => new()
@@ -856,6 +958,7 @@ namespace VerifiedXCore.Tests
             }
             finally
             {
+                BaseBridgeService.ReadSignerViewForTests = null;
                 VerifiedXCore.Bitcoin.Services.BaseBridgeService.ContractAddress = priorContract;
                 Globals.BaseValidatorSetCastersOnly = priorCastersOnly;
                 Globals.HttpClientFactory = priorFactory;
