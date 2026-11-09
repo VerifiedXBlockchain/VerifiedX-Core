@@ -100,8 +100,13 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 var casterPlan = BaseSignerSetPolicy.CastersForEpoch(epoch, view.CasterList);
                 if (casterPlan == null) return (null, "No block at the epoch boundary");
-                if (casterPlan.Empty || !targets.SequenceEqual(casterPlan.Add, StringComparer.OrdinalIgnoreCase) || !removing.SequenceEqual(casterPlan.Remove, StringComparer.OrdinalIgnoreCase))
+                // The removal exactly as computed; of the additions, those that signed their own seat, in plan order (one
+                // that does not answer waits for the next epoch rather than holding the others back).
+                if (casterPlan.Empty || !InPlanOrder(targets, casterPlan.Add) || !removing.SequenceEqual(casterPlan.Remove, StringComparer.OrdinalIgnoreCase))
                     return (null, "Not the caster change this node computes for the epoch");
+                var castersAfter = view.CasterList.Count - removing.Length + targets.Length;
+                if (castersAfter < BaseSignerSetPolicy.MinCasters || castersAfter > BaseSignerSetPolicy.MaxCasters)
+                    return (null, "The caster change would leave the contract outside 3 to 10 casters");
                 if (!asMember && !targets.Contains(myBase, StringComparer.OrdinalIgnoreCase))
                     return (null, "Only a validator or caster on the contract, or a caster being added, signs a caster change");
                 if (asMember && BaseSignerSignLog.Get(CasterLogKey) is { } casterLog && casterLog.Epoch == epoch && casterLog.AdminNonce != view.AdminNonce.ToString())
@@ -249,32 +254,11 @@ namespace VerifiedXCore.Bitcoin.Services
             // once an epoch: after one went through, this node signs no second one, so it does not try to send one.
             var casterPlan = BaseSignerSetPolicy.CastersForEpoch(epoch, view.CasterList);
             var casterChangeDone = BaseSignerSignLog.Get(CasterLogKey) is { } casterLog && casterLog.Epoch == epoch && casterLog.AdminNonce != nonce;
-            if (casterPlan is { Empty: false } && !casterChangeDone)
-            {
-                var casterAdd = casterPlan.Add.ToArray();
-                var casterRemove = casterPlan.Remove.ToArray();
-                var casterDigest = VbtcbTypedData.UpdateCastersDigest(casterAdd, casterRemove, epoch, view.AdminNonce, BaseBridgeService.BaseChainId, BaseBridgeService.ContractAddress);
-                var seat = new Dictionary<string, string>();
-                foreach (var a in casterAdd)
-                    if (ipOf.TryGetValue(a, out var ip) && await AskAsync(ip, "CASTERS", casterAdd, epoch, nonce, casterDigest, a, casterRemove) is { } sig)
-                        seat[a] = sig;
-                if (seat.Count != casterAdd.Length)
-                {
-                    LogUtility.Log($"[BaseValidatorSync] Caster change for epoch {epoch}: {seat.Count}/{casterAdd.Length} new casters signed their own seat.", "BaseValidatorSyncService");
-                    return;
-                }
-                var casterSigs = await CollectAsync("CASTERS", casterAdd, epoch, nonce, members, ipOf, myBase, view, casterDigest, casterRemove);
-                if (!UserBridgeMintService.Enough(view, view.RequiredMintSignatures, casterSigs.Keys))
-                {
-                    LogUtility.Log($"[BaseValidatorSync] Caster change for epoch {epoch}: {Tally(view, casterSigs)}.", "BaseValidatorSyncService");
-                    return;
-                }
-                await SubmitAsync("updateCasters", new object[]
-                {
-                    casterAdd.ToList(), casterRemove.ToList(), new System.Numerics.BigInteger(epoch), casterSigs.Values.Select(HexBytes).ToList(), casterAdd.Select(a => HexBytes(seat[a])).ToList(),
-                });
+            // A caster change that cannot be made (a new caster does not answer, too few sign) does not hold the validators'
+            // change back: the loop goes on to it.
+            if (casterPlan is { Empty: false } && !casterChangeDone
+                && await SendCasterChangeAsync(casterPlan, view, epoch, nonce, members, ipOf, myBase))
                 return;
-            }
             if (view.CasterList.Count == 0) return;
 
             var plan = BaseSignerSetPolicy.ForEpoch(epoch, view.Validators);
@@ -321,6 +305,49 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 adds.ToList(), new System.Numerics.BigInteger(epoch), memberSigs.Values.Select(HexBytes).ToList(), adds.Select(a => HexBytes(own[a])).ToList(),
             });
+        }
+
+        /// <summary>
+        /// Gathers and sends the epoch's caster change: each new caster's own signature (one that does not answer is left
+        /// out and the others asked again over the shorter list, as for validators), then the members'. False when there is
+        /// nothing it can send this time.
+        /// </summary>
+        private static async Task<bool> SendCasterChangeAsync(BaseSignerSetPolicy.CasterPlan plan, BaseBridgeService.SignerView view, long epoch,
+            string nonce, List<string> members, Dictionary<string, string> ipOf, string myBase)
+        {
+            var add = plan.Add.ToArray();
+            var remove = plan.Remove.ToArray();
+            var seat = new Dictionary<string, string>();
+            var allSigned = add.Length == 0;
+            for (var round = 0; round < 3 && add.Length > 0 && !allSigned; round++)
+            {
+                seat.Clear();
+                var roundDigest = VbtcbTypedData.UpdateCastersDigest(add, remove, epoch, view.AdminNonce, BaseBridgeService.BaseChainId, BaseBridgeService.ContractAddress);
+                foreach (var a in add)
+                    if (ipOf.TryGetValue(a, out var ip) && await AskAsync(ip, "CASTERS", add, epoch, nonce, roundDigest, a, remove) is { } sig)
+                        seat[a] = sig;
+                allSigned = seat.Count == add.Length;
+                if (!allSigned) add = add.Where(seat.ContainsKey).ToArray();   // signed over the longer list: asked again
+            }
+            if (!allSigned) add = Array.Empty<string>();
+            var after = view.CasterList.Count - remove.Length + add.Length;
+            if (add.Length + remove.Length == 0 || after < BaseSignerSetPolicy.MinCasters || after > BaseSignerSetPolicy.MaxCasters)
+            {
+                LogUtility.Log($"[BaseValidatorSync] Caster change for epoch {epoch}: {plan.Add.Count - add.Length} new casters did not sign their own seat; nothing to send yet.", "BaseValidatorSyncService");
+                return false;
+            }
+            var digest = VbtcbTypedData.UpdateCastersDigest(add, remove, epoch, view.AdminNonce, BaseBridgeService.BaseChainId, BaseBridgeService.ContractAddress);
+            var sigs = await CollectAsync("CASTERS", add, epoch, nonce, members, ipOf, myBase, view, digest, remove);
+            if (!UserBridgeMintService.Enough(view, view.RequiredMintSignatures, sigs.Keys))
+            {
+                LogUtility.Log($"[BaseValidatorSync] Caster change for epoch {epoch}: {Tally(view, sigs)}.", "BaseValidatorSyncService");
+                return false;
+            }
+            await SubmitAsync("updateCasters", new object[]
+            {
+                add.ToList(), remove.ToList(), new System.Numerics.BigInteger(epoch), sigs.Values.Select(HexBytes).ToList(), add.Select(a => HexBytes(seat[a])).ToList(),
+            });
+            return true;
         }
 
         /// <summary>

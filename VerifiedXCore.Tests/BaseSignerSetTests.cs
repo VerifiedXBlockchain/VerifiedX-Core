@@ -662,5 +662,69 @@ namespace VerifiedXCore.Tests
                 Globals.HttpClientFactory = priorFactory;
             }
         }
+
+        /// <summary>
+        /// A caster due to join that does not answer is left out: it holds back neither the validators' change nor the
+        /// removal of a caster that left the committee, and joins at a later epoch once it signs its seat.
+        /// </summary>
+        [Fact]
+        public async Task ACasterThatDoesNotAnswer_IsLeftOut_AndHoldsNothingBack()
+        {
+            const long boundary = 4 * BaseSignerSetPolicy.EpochBlocks;
+            var c = Enumerable.Range(0, 5).Select(_ => NewKey()).ToArray();               // c[3] left the committee, c[4] joined and is down
+            foreach (var k in c)
+                AccountData.GetAccounts().InsertSafe(new Account { Address = k.Address, PublicKey = k.Pub, PrivateKey = "0" + k.Key.secret.ToString("x") });
+            CasterMembershipRecord Record(long seq, long from, params int[] members) => new()
+            {
+                RecordSeq = seq, EffectiveFromHeight = from,
+                Casters = members.Select(i => new CasterInfo { Address = c[i].Address, PeerIP = $"10.0.4.{i + 1}", PublicKey = c[i].Pub }).ToList(),
+            };
+            var records = new[] { Record(1, 0, 0, 1, 2, 3), Record(2, boundary - 2 * BaseSignerSetPolicy.EpochBlocks - 10, 0, 1, 2, 4) };
+            foreach (var r in records) DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Upsert(r.RecordSeq, r);
+            VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
+            BlockchainData.GetBlocks().InsertSafe(new Block { Height = boundary, Hash = $"b{boundary}-{Guid.NewGuid():N}", Transactions = new List<Transaction>() });
+            var validators = new[] { _me, _seed2, _seed3 };
+            BlockchainData.GetBlocks().InsertSafe(new Block
+            {
+                Height = boundary - 100, Hash = $"r{boundary}-{Guid.NewGuid():N}",
+                Transactions = validators.Select((v, i) => new Transaction
+                {
+                    TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = v.Address, ToAddress = v.Address, Hash = $"rd{i}",
+                    Data = JsonConvert.SerializeObject(new { ValidatorAddress = v.Address, IPAddress = $"10.0.0.{i + 1}", FrostPublicKey = v.Pub, IsS3C = false }),
+                }).ToList(),
+            });
+
+            var at = validators.Select((v, i) => (v, ip: $"10.0.0.{i + 1}")).Concat(c.Take(4).Select((k, i) => (v: k, ip: $"10.0.4.{i + 1}"))).ToDictionary(x => x.ip, x => x.v);
+            var priorFactory = Globals.HttpClientFactory;
+            Globals.HttpClientFactory = new ValidatorNetwork(at);                      // c[4] cannot be reached
+            var sent = new List<(string Function, object[] Args)>();
+            BaseValidatorSyncService.SubmitForTests = (f, a) => { sent.Add((f, a)); return Task.FromResult<string?>("0xtx"); };
+            Globals.LastBlock = new Block { Height = boundary + BaseSignerSetPolicy.SettleBlocks + 8 * BaseValidatorSyncService.SubmitTurnBlocks, Timestamp = TimeUtil.GetTime() };
+            try
+            {
+                // Only c[4] is due to join, and it does not answer: the validator that left VFX is removed all the same.
+                Contract(9, validators.Append(_gone).ToArray(), c.Take(3).ToArray());
+                await BaseValidatorSyncService.SyncOnceAsync();
+                var (fn, args) = Assert.Single(sent);
+                Assert.Equal("removeValidatorBatch", fn);
+                Assert.Equal(new[] { _gone.Base }, (List<string>)args[0]);
+
+                // A swap whose newcomer does not answer still removes the caster that left the committee.
+                sent.Clear();
+                Contract(10, validators, c.Take(4).ToArray());
+                await BaseValidatorSyncService.SyncOnceAsync();
+                (fn, args) = Assert.Single(sent);
+                Assert.Equal("updateCasters", fn);
+                Assert.Empty((List<string>)args[0]);
+                Assert.Equal(new[] { c[3].Base }, (List<string>)args[1]);
+            }
+            finally
+            {
+                foreach (var r in records) DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Delete(r.RecordSeq);
+                VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
+                BaseValidatorSyncService.SubmitForTests = null;
+                Globals.HttpClientFactory = priorFactory;
+            }
+        }
     }
 }
