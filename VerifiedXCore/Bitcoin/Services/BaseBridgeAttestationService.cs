@@ -268,12 +268,12 @@ namespace VerifiedXCore.Bitcoin.Services
                 ? VbtcbTypedData.MintDigest(record.EvmDestination, record.AmountSats, record.LockId, nonce, Globals.BaseEvmChainId, contract)
                 : ConstructMintMessageHash(record.EvmDestination, record.AmountSats, record.LockId, nonce, Globals.BaseEvmChainId, contract);
 
-            var validators = BaseValidatorSyncService.SelectAttestingValidators();
+            // Everyone the contract counts, validators and casters: it needs both groups (UserBridgeMintService.Enough).
+            var validators = UserBridgeMintService.ContractSigners(view);
             var client = Globals.HttpClientFactory?.CreateClient() ?? new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
 
             foreach (var v in validators)
             {
-                if (string.IsNullOrEmpty(v.IPAddress)) continue;
                 var url = $"http://{v.IPAddress.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/Validator/SignMintAttestation";
                 var body = JsonConvert.SerializeObject(new MintAttestationRequest
                 {
@@ -295,17 +295,16 @@ namespace VerifiedXCore.Bitcoin.Services
                     var jo = Newtonsoft.Json.Linq.JObject.Parse(txt);
                     if (jo["success"]?.ToObject<bool>() != true) continue;
                     var sig = jo["signature"]?.ToString();
-                    var derived = ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(v.FrostPublicKey);
-                    if (!string.IsNullOrEmpty(sig) && !string.IsNullOrEmpty(derived)
-                        && string.Equals(ValidatorEthKeyService.RecoverSigner(hash, sig, personalMessage: !typed), derived, StringComparison.OrdinalIgnoreCase))
-                        state.ValidatorSignatures[derived] = sig;
+                    if (!string.IsNullOrEmpty(sig)
+                        && string.Equals(ValidatorEthKeyService.RecoverSigner(hash, sig, personalMessage: !typed), v.BaseAddress, StringComparison.OrdinalIgnoreCase))
+                        state.ValidatorSignatures[v.BaseAddress] = sig;
                 }
                 catch
                 {
                 }
             }
 
-            if (state.IsReady)
+            if (UserBridgeMintService.Enough(view, Math.Max(requiredSignatures, view.RequiredMintSignatures), state.ValidatorSignatures.Keys))
             {
                 state.Status = "Ready";
                 record.ValidatorSignatures = new Dictionary<string, string>(state.ValidatorSignatures);
