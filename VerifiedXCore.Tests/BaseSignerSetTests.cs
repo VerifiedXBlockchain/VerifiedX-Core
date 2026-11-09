@@ -244,5 +244,105 @@ namespace VerifiedXCore.Tests
             Globals.BaseBridgeV4Height = long.MaxValue;                             // mainnet as released
             Assert.Equal(BaseValidatorSyncService.AdminChangesNotSignedReason, Refusal(await Ask("ADD", new[] { first }, Epoch, 8)));
         }
+        // ── Who sends it ────────────────────────────────────────────────────────────────────────────────────
+
+        /// <summary>Routes each request to the validator API as the node at that IP answers it; unreachable IPs fail.</summary>
+        private sealed class ValidatorNetwork : System.Net.Http.IHttpClientFactory
+        {
+            private readonly TestServer _server = new(new WebHostBuilder().UseStartup<StartupP2PCaster>());
+            private readonly Dictionary<string, V> _at;
+            public readonly HashSet<string> Down = new();
+            public ValidatorNetwork(Dictionary<string, V> at) => _at = at;
+            public System.Net.Http.HttpClient CreateClient(string name) => new(new Router(this));
+            private sealed class Router : System.Net.Http.HttpMessageHandler
+            {
+                private readonly ValidatorNetwork _net;
+                public Router(ValidatorNetwork net) => _net = net;
+                protected override async Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request, System.Threading.CancellationToken ct)
+                {
+                    var ip = request.RequestUri!.Host;
+                    if (_net.Down.Contains(ip) || !_net._at.TryGetValue(ip, out var v)) throw new System.Net.Http.HttpRequestException("unreachable");
+                    var body = await request.Content!.ReadAsStringAsync(ct);
+                    var caller = Globals.ValidatorAddress;
+                    Globals.ValidatorAddress = v.Address;                         // the node at that IP answers
+                    try
+                    {
+                        var ctx = await _net._server.SendAsync(c =>
+                        {
+                            c.Request.Method = "POST";
+                            c.Request.Path = request.RequestUri.AbsolutePath;
+                            c.Request.ContentType = "application/json";
+                            c.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(body));
+                            c.Connection.RemoteIpAddress = IPAddress.Parse("203.0.113.7");
+                        });
+                        using var reader = new StreamReader(ctx.Response.Body);
+                        return new System.Net.Http.HttpResponseMessage((HttpStatusCode)ctx.Response.StatusCode) { Content = new System.Net.Http.StringContent(await reader.ReadToEndAsync()) };
+                    }
+                    finally { Globals.ValidatorAddress = caller; }
+                }
+            }
+        }
+
+        [Fact]
+        public async Task TheValidatorInTurn_SendsTheRemovalThenTheAddition_WithEachValidatorsOwnSignature()
+        {
+            var at = new[] { _me, _seed2, _seed3, _new1, _new2, _unfunded }.Select((v, i) => (v, i)).ToDictionary(x => $"10.0.0.{x.i + 1}", x => x.v);
+            var network = new ValidatorNetwork(at);
+            var sent = new List<(string Function, object[] Args)>();
+            var priorFactory = Globals.HttpClientFactory;
+            Globals.HttpClientFactory = network;
+            BaseValidatorSyncService.SubmitForTests = (f, a) => { sent.Add((f, a)); return Task.FromResult<string?>("0xtx"); };
+            Globals.LastBlock = new Block { Height = Epoch + BaseSignerSetPolicy.SettleBlocks + 3 * BaseValidatorSyncService.SubmitTurnBlocks, Timestamp = TimeUtil.GetTime() };
+            try
+            {
+                static List<string> Sigs(object arg) => ((List<byte[]>)arg).Select(b => "0x" + Convert.ToHexString(b)).ToList();
+                static void SignedByDistinct(IEnumerable<string> sigs, byte[] digest, IEnumerable<V> allowed, int atLeast)
+                {
+                    var signers = sigs.Select(s => ValidatorEthKeyService.RecoverSigner(digest, s, personalMessage: false)!.ToLowerInvariant()).ToList();
+                    Assert.True(signers.Count >= atLeast, $"{signers.Count} < {atLeast}");
+                    Assert.Equal(signers.Count, signers.Distinct().Count());
+                    Assert.All(signers, s => Assert.Contains(s, allowed.Select(v => v.Base)));
+                }
+
+                // The departed validator is removed with 2/3 of the contract's validators signing.
+                Contract(7, _me, _seed2, _seed3, _gone);
+                await BaseValidatorSyncService.SyncOnceAsync();
+                var (removeFn, removeArgs) = Assert.Single(sent);
+                Assert.Equal("removeValidatorBatch", removeFn);
+                Assert.Equal(new[] { _gone.Base }, (List<string>)removeArgs[0]);
+                Assert.Equal(Epoch, (long)(System.Numerics.BigInteger)removeArgs[1]);
+                SignedByDistinct(Sigs(removeArgs[2]), VbtcbTypedData.RemoveValidatorsDigest(new[] { _gone.Base }, Epoch, 7, 8453, Proxy), new[] { _me, _seed2, _seed3 }, 3);
+
+                // Then the first newcomer, which signs its own seat, while its turn has not come for a later validator.
+                sent.Clear();
+                Contract(8, _me, _seed2, _seed3);
+                var first = BaseSignerSetPolicy.ForEpoch(Epoch, new[] { _me.Base, _seed2.Base, _seed3.Base })!.Adds.Single();
+                var newcomer = first == _new1.Base ? _new1 : _new2;
+                var order = new[] { _me, _seed2, _seed3 }.OrderBy(v => BaseSignerSetPolicy.RankOf(EpochHash, v.Base), StringComparer.Ordinal).ToList();
+                Globals.ValidatorAddress = order[2].Address;
+                Globals.LastBlock = new Block { Height = Epoch + BaseSignerSetPolicy.SettleBlocks + 2 * BaseValidatorSyncService.SubmitTurnBlocks - 1, Timestamp = TimeUtil.GetTime() };
+                await BaseValidatorSyncService.SyncOnceAsync();
+                Assert.Empty(sent);                                                // third in order: not yet
+
+                network.Down.Add(at.Single(x => x.Value == newcomer).Key);        // the newcomer is down: no seat this time
+                Globals.LastBlock = new Block { Height = Epoch + BaseSignerSetPolicy.SettleBlocks + 2 * BaseValidatorSyncService.SubmitTurnBlocks, Timestamp = TimeUtil.GetTime() };
+                await BaseValidatorSyncService.SyncOnceAsync();
+                Assert.Empty(sent);
+
+                network.Down.Clear();
+                await BaseValidatorSyncService.SyncOnceAsync();
+                var (addFn, addArgs) = Assert.Single(sent);
+                Assert.Equal("addValidatorBatch", addFn);
+                Assert.Equal(new[] { first }, (List<string>)addArgs[0]);
+                var addDigest = VbtcbTypedData.AddValidatorsDigest(new[] { first }, Epoch, 8, 8453, Proxy);
+                SignedByDistinct(Sigs(addArgs[2]), addDigest, new[] { _me, _seed2, _seed3 }, 2);
+                SignedByDistinct(Sigs(addArgs[3]), addDigest, new[] { newcomer }, 1);
+            }
+            finally
+            {
+                BaseValidatorSyncService.SubmitForTests = null;
+                Globals.HttpClientFactory = priorFactory;
+            }
+        }
     }
 }

@@ -117,6 +117,178 @@ namespace VerifiedXCore.Bitcoin.Services
             return (signature, "");
         }
 
+        // ── The submitting half ─────────────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Blocks each contract validator waits after the one before it in the epoch's order (keccak256(boundary block
+        /// hash, address)) before it gathers the signatures and sends the change itself: one sender at a time, and the next
+        /// steps in when one has no gas or is down. A second send of the same change fails at the gas estimate (the admin
+        /// nonce has moved), so it costs nothing.
+        /// </summary>
+        public const int SubmitTurnBlocks = 50;
+
+        private const string ValidatorSetAbi = @"[
+            {""inputs"":[{""internalType"":""address[]"",""name"":""newValidators"",""type"":""address[]""},{""internalType"":""uint256"",""name"":""vfxBlockHeight"",""type"":""uint256""},{""internalType"":""bytes[]"",""name"":""signatures"",""type"":""bytes[]""},{""internalType"":""bytes[]"",""name"":""newValidatorSignatures"",""type"":""bytes[]""}],""name"":""addValidatorBatch"",""outputs"":[],""stateMutability"":""nonpayable"",""type"":""function""},
+            {""inputs"":[{""internalType"":""address[]"",""name"":""oldValidators"",""type"":""address[]""},{""internalType"":""uint256"",""name"":""vfxBlockHeight"",""type"":""uint256""},{""internalType"":""bytes[]"",""name"":""signatures"",""type"":""bytes[]""}],""name"":""removeValidatorBatch"",""outputs"":[],""stateMutability"":""nonpayable"",""type"":""function""}
+        ]";
+
+        /// <summary>Stands in for the Base transaction in tests: function name and arguments in, transaction hash out.</summary>
+        internal static Func<string, object[], Task<string?>>? SubmitForTests;
+
+        /// <summary>Background: once an epoch, the contract validators bring the contract's set in step with VFX.</summary>
+        public static Task ValidatorSyncLoop() =>
+            PausableLoop.RunAsync(async () =>
+            {
+                try { await SyncOnceAsync(); }
+                catch (Exception ex) { ErrorLogUtility.LogError($"[BaseValidatorSync] {ex.Message}", "BaseValidatorSyncService.ValidatorSyncLoop"); }
+            }, 60_000, "BaseValidatorSyncService.ValidatorSyncLoop");
+
+        /// <summary>
+        /// One step: when it is this node's turn, it sends the epoch's removal, or once there is none its addition. Every
+        /// signature is asked of the validator itself through SignValidatorUpdate, where each node checks the change
+        /// against its own computation, and kept only when it recovers to that validator.
+        /// </summary>
+        internal static async Task SyncOnceAsync()
+        {
+            if (string.IsNullOrEmpty(Globals.ValidatorAddress) || !BaseBridgeService.IsBridgeConfigured) return;
+            var tip = Globals.LastBlock?.Height ?? -1;
+            var epoch = BaseSignerSetPolicy.EpochAt(tip);
+            if (epoch < 0 || epoch < Globals.BaseBridgeV4Height || tip - epoch < BaseSignerSetPolicy.SettleBlocks) return;
+            if (BaseBridgeAttestationService.NotReadyToAttest() != null) return;
+
+            var view = await BaseBridgeService.ReadSignerViewAsync();
+            if (view == null || view.MessageVersion != VbtcbTypedData.MessageVersion) return;
+            var myBase = ValidatorEthKeyService.DeriveBaseAddressFromAccount(Globals.ValidatorAddress);
+            var members = view.Validators.Select(m => m.ToLowerInvariant()).ToList();
+            if (string.IsNullOrEmpty(myBase) || !members.Contains(myBase.ToLowerInvariant())) return;
+            var epochHash = BlockchainData.GetBlockByHeight(epoch)?.Hash;
+            if (string.IsNullOrEmpty(epochHash)) return;
+            var plan = BaseSignerSetPolicy.ForEpoch(epoch, view.Validators);
+            if (plan == null || (plan.Removes.Count == 0 && plan.Adds.Count == 0)) return;
+
+            var turn = members.OrderBy(m => BaseSignerSetPolicy.RankOf(epochHash, m), StringComparer.Ordinal).ToList().IndexOf(myBase.ToLowerInvariant());
+            if (tip < epoch + BaseSignerSetPolicy.SettleBlocks + (long)turn * SubmitTurnBlocks) return;
+
+            var ipOf = VBTCValidatorRegistry.GetActiveValidatorsAt(tip)
+                .Select(v => (Base: BaseSignerSetPolicy.BaseAddressOf(v.FrostPublicKey).ToLowerInvariant(), v.IPAddress))
+                .Where(x => x.Base.Length > 0 && !string.IsNullOrEmpty(x.IPAddress))
+                .GroupBy(x => x.Base).ToDictionary(g => g.Key, g => g.First().IPAddress);
+            var nonce = view.AdminNonce.ToString();
+
+            if (plan.Removes.Count > 0)
+            {
+                var removes = plan.Removes.ToArray();
+                var sigs = await CollectAsync("REMOVE", removes, epoch, nonce, members, ipOf, myBase, view.RequiredMintSignatures,
+                    VbtcbTypedData.RemoveValidatorsDigest(removes, epoch, view.AdminNonce, BaseBridgeService.BaseChainId, BaseBridgeService.ContractAddress));
+                if (sigs.Count < view.RequiredMintSignatures)
+                {
+                    LogUtility.Log($"[BaseValidatorSync] Removal for epoch {epoch}: {sigs.Count}/{view.RequiredMintSignatures} signatures. If too many validators went dark for 2/3, a majority proposes the removal (SignBaseAdminAction PROPOSE_REMOVAL).", "BaseValidatorSyncService");
+                    return;
+                }
+                await SubmitAsync("removeValidatorBatch", new object[] { removes.ToList(), new System.Numerics.BigInteger(epoch), sigs.Select(HexBytes).ToList() });
+                return;
+            }
+
+            // Each newcomer signs its own addition over the exact list; one that does not answer waits for the next epoch.
+            var adds = plan.Adds.ToArray();
+            var own = new Dictionary<string, string>();
+            var allSigned = false;
+            for (var round = 0; round < 3 && adds.Length > 0 && !allSigned; round++)
+            {
+                own.Clear();
+                var digest = VbtcbTypedData.AddValidatorsDigest(adds, epoch, view.AdminNonce, BaseBridgeService.BaseChainId, BaseBridgeService.ContractAddress);
+                foreach (var a in adds)
+                    if (ipOf.TryGetValue(a, out var ip) && await AskAsync(ip, "ADD", adds, epoch, nonce, digest, a) is { } sig)
+                        own[a] = sig;
+                allSigned = own.Count == adds.Length;
+                if (!allSigned) adds = adds.Where(own.ContainsKey).ToArray();   // signed over the longer list: asked again
+            }
+            if (!allSigned || adds.Length == 0) return;
+            var memberSigs = await CollectAsync("ADD", adds, epoch, nonce, members, ipOf, myBase, view.RequiredMintSignatures,
+                VbtcbTypedData.AddValidatorsDigest(adds, epoch, view.AdminNonce, BaseBridgeService.BaseChainId, BaseBridgeService.ContractAddress));
+            if (memberSigs.Count < view.RequiredMintSignatures)
+            {
+                LogUtility.Log($"[BaseValidatorSync] Addition for epoch {epoch}: {memberSigs.Count}/{view.RequiredMintSignatures} signatures.", "BaseValidatorSyncService");
+                return;
+            }
+            await SubmitAsync("addValidatorBatch", new object[]
+            {
+                adds.ToList(), new System.Numerics.BigInteger(epoch), memberSigs.Select(HexBytes).ToList(), adds.Select(a => HexBytes(own[a])).ToList(),
+            });
+        }
+
+        /// <summary>Distinct contract validators' signatures over the digest, this node's own first, until enough.</summary>
+        private static async Task<List<string>> CollectAsync(string action, string[] targets, long epoch, string nonce, List<string> members,
+            Dictionary<string, string> ipOf, string myBase, int required, byte[] digest)
+        {
+            var sigs = new List<string>();
+            var (mine, _) = await SignValidatorUpdateAsync(new ValidatorUpdateSignRequest { Action = action, TargetAddresses = targets, VfxBlockHeight = epoch, AdminNonce = nonce });
+            if (mine != null) sigs.Add(mine);
+            foreach (var m in members)
+            {
+                if (sigs.Count >= required) break;
+                if (string.Equals(m, myBase, StringComparison.OrdinalIgnoreCase) || !ipOf.TryGetValue(m, out var ip)) continue;
+                if (await AskAsync(ip, action, targets, epoch, nonce, digest, m) is { } sig) sigs.Add(sig);
+            }
+            return sigs;
+        }
+
+        /// <summary>One validator's signature over the digest, or null when it refuses, cannot be reached, or signs with another key.</summary>
+        private static async Task<string?> AskAsync(string ip, string action, string[] targets, long epoch, string nonce, byte[] digest, string expectedSigner)
+        {
+            try
+            {
+                var client = Globals.HttpClientFactory?.CreateClient() ?? new HttpClient();
+                client.Timeout = TimeSpan.FromSeconds(10);
+                var body = Newtonsoft.Json.JsonConvert.SerializeObject(new ValidatorUpdateSignRequest { Action = action, TargetAddresses = targets, VfxBlockHeight = epoch, AdminNonce = nonce });
+                using var content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
+                var resp = await client.PostAsync($"http://{ip.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/Validator/SignValidatorUpdate", content);
+                if (!resp.IsSuccessStatusCode) return null;
+                var text = await resp.Content.ReadAsStringAsync();
+                if (text.TrimStart().StartsWith("\"")) text = Newtonsoft.Json.JsonConvert.DeserializeObject<string>(text) ?? "";
+                var sig = Newtonsoft.Json.Linq.JObject.Parse(text)["Signature"]?.ToString();
+                return string.Equals(ValidatorEthKeyService.RecoverSigner(digest, sig, personalMessage: false), expectedSigner, StringComparison.OrdinalIgnoreCase) ? sig : null;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Sends the change from this validator's Base address (it pays the gas); a send the contract would refuse stops at the estimate.</summary>
+        private static async Task SubmitAsync(string function, object[] args)
+        {
+            string? txHash;
+            if (SubmitForTests != null) txHash = await SubmitForTests(function, args);
+            else
+            {
+                var account = AccountData.GetSingleAccount(Globals.ValidatorAddress);
+                if (account == null) return;
+                var privHex = account.GetKey;
+                if (privHex.Length % 2 != 0) privHex = "0" + privHex;
+                var ethAccount = new Nethereum.Web3.Accounts.Account(new Nethereum.Signer.EthECKey(HexByteUtility.HexToByte(privHex), true), BaseBridgeService.BaseChainId);
+                var (ethOk, eth, _) = await BaseBridgeService.GetEthBalanceAsync(ethAccount.Address);
+                if (!ethOk || eth <= 0)
+                {
+                    LogUtility.Log($"[BaseValidatorSync] {function}: this validator's Base address {ethAccount.Address} has no ETH for gas; the next validator in turn sends it.", "BaseValidatorSyncService");
+                    return;
+                }
+                var web3 = new Nethereum.Web3.Web3(ethAccount, BaseBridgeService.BaseRpcUrl);
+                var fn = web3.Eth.GetContract(ValidatorSetAbi, BaseBridgeService.ContractAddress).GetFunction(function);
+                var gas = await fn.EstimateGasAsync(ethAccount.Address, null, null, args);
+                txHash = await fn.SendTransactionAsync(ethAccount.Address, new Nethereum.Hex.HexTypes.HexBigInteger(gas.Value * 12 / 10), null, null, args);
+                // Wait for it, so the next step reads the contract after it rather than sending it again.
+                for (var i = 0; i < 60; i++)
+                {
+                    await Task.Delay(3_000);
+                    var receipt = await web3.Eth.Transactions.GetTransactionReceipt.SendRequestAsync(txHash);
+                    if (receipt == null) continue;
+                    LogUtility.Log($"[BaseValidatorSync] {function} {txHash} {(receipt.Status?.Value == 1 ? "confirmed" : "reverted")} in Base block {receipt.BlockNumber?.Value}", "BaseValidatorSyncService");
+                    return;
+                }
+            }
+            LogUtility.Log($"[BaseValidatorSync] Sent {function}: {txHash}", "BaseValidatorSyncService");
+        }
+
+        private static byte[] HexBytes(string hex) => Convert.FromHexString(hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? hex[2..] : hex);
+
         /// <summary>Every target is in the plan's list, without repeats, in the plan's order.</summary>
         private static bool InPlanOrder(string[] targets, IReadOnlyList<string> plan)
         {
