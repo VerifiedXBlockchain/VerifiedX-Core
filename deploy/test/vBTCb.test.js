@@ -847,6 +847,28 @@ describe("vBTCb V4", function () {
             );
         });
 
+        it("a V3 proxy with 4 validators needs a strict majority (3) for a removal proposal after the upgrade, not V3's 2", async function () {
+            const vals = wallets(4);
+            const V3 = await ethers.getContractFactory("vBTCbV3");
+            const token = await upgrades.deployProxy(V3, ["n", "s", vals.map((v) => v.address)], { initializer: "initialize", kind: "uups" });
+            const self = await token.getAddress();
+            const { chainId } = await ethers.provider.getNetwork();
+            expect(await token.requiredRemoveSignatures()).to.equal(2n);              // V3's 51% at 4
+            const V4 = await ethers.getContractFactory("vBTCb");
+            const impl = await upgrades.prepareUpgrade(self, V4, { kind: "uups" });
+            const h = ethers.solidityPackedKeccak256(["string", "address", "uint256", "uint256", "address"], ["UPGRADE", impl, 0n, chainId, self]);
+            await token.upgradeWithValidatorApproval(impl, await Promise.all(vals.slice(0, 3).map((v) => v.signMessage(ethers.getBytes(h)))));
+            const v4 = V4.attach(self);
+
+            const target = [vals[3].address];
+            const propose = async (signers) => {
+                const value = { validators: target, casters: [], vfxBlockHeight: 9n, adminNonce: await v4.adminNonce() };
+                return v4.proposeRemoval(target, [], 9n, await signTyped(v4, signers, "ProposeRemoval", value));
+            };
+            await expect(propose(vals.slice(0, 2))).to.be.revertedWith("Insufficient valid admin signatures");
+            await expect(propose(vals.slice(0, 3))).to.emit(v4, "RemovalProposed");
+        });
+
         it("keeps every V3 storage slot recorded in the Base mainnet manifest", async function () {
             const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "..", ".openzeppelin", "base.json"), "utf8"));
             const impls = Object.values(manifest.impls);

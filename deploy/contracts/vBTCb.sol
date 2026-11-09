@@ -277,7 +277,7 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
             PROPOSE_REMOVAL_TYPEHASH, keccak256(abi.encodePacked(oldValidators)), keccak256(abi.encodePacked(oldCasters)),
             vfxBlockHeight, adminNonce)));
         (uint256 v, uint256 c) = _countSigners(digest, signatures, requiredMintSignatures, requiredCasterSignatures());
-        require((v >= requiredRemoveSignatures && c >= requiredCasterSignatures()) || v >= requiredMintSignatures,
+        require((v >= _validatorMajority() && c >= requiredCasterSignatures()) || v >= requiredMintSignatures,
             "Insufficient valid admin signatures");
 
         for (uint256 i = 0; i < oldValidators.length; i++) {
@@ -474,6 +474,12 @@ contract vBTCb is ERC20Upgradeable, UUPSUpgradeable {
         pendingUpgradeDelayEta = 0;
 
         emit UpgradeDelayChanged(_upgradeDelay);
+    }
+
+    /// @dev A strict majority of the validators, from the count itself: the stored requiredRemoveSignatures may still be
+    ///      V3's (a 51% figure, lower at 4 validators) until the first validator change after an upgrade from V3.
+    function _validatorMajority() internal view returns (uint256) {
+        return _max(MIN_REQUIRED_SIGNATURES, validatorCount / 2 + 1);
     }
 
     /// @notice The validators who could refuse a mint: validatorCount - requiredMintSignatures + 1.
