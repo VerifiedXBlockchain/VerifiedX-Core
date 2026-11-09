@@ -139,6 +139,18 @@ namespace VerifiedXCore.Bitcoin.Services
                 CommitteeAt(epochHeight - 2 * EpochBlocks), contractCasters);
         }
 
+        /// <summary>
+        /// The Base addresses of the validators that keep their seat at <paramref name="epochHeight"/> (funded, seen in the
+        /// KeepSeenBlocks before it), lower-cased; empty when the boundary block is not on this chain.
+        /// </summary>
+        public static HashSet<string> KeptAt(long epochHeight)
+        {
+            var block = BlockchainData.GetBlockByHeight(epochHeight);
+            if (block == null || string.IsNullOrEmpty(block.Hash)) return new HashSet<string>();
+            return VBTCValidatorRegistry.FundedOnly(SeenAt(epochHeight, block.Hash)).Select(v => BaseAddressOf(v.FrostPublicKey).ToLowerInvariant())
+                .Where(a => a.Length > 0).ToHashSet();
+        }
+
         private static (long Height, string Hash, List<Models.VBTCValidator> Seen)? _seen;
 
         /// <summary>The public validators seen in the KeepSeenBlocks up to the boundary: one block scan per boundary block.</summary>

@@ -262,6 +262,39 @@ namespace VerifiedXCore.Bitcoin.Services
             return null;
         }
 
+        /// <summary>The contract's pending proposeRemoval: the validators and casters it names, and when it can run (0: none).</summary>
+        public sealed record PendingRemoval(IReadOnlyList<string> Validators, IReadOnlyList<string> Casters, BigInteger Eta);
+
+        private const string PENDING_REMOVAL_ABI = @"[
+            {""inputs"":[],""name"":""getPendingRemovals"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
+            {""inputs"":[],""name"":""getPendingCasterRemovals"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
+            {""inputs"":[],""name"":""pendingRemovalEta"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""}
+        ]";
+
+        /// <summary>Stands in for the Base RPC in tests.</summary>
+        internal static Func<Task<PendingRemoval?>>? ReadPendingRemovalForTests;
+
+        /// <summary>The V4 contract's pending removal from the first RPC that answers; null when none does.</summary>
+        public static async Task<PendingRemoval?> ReadPendingRemovalAsync()
+        {
+            if (ReadPendingRemovalForTests != null) return await ReadPendingRemovalForTests();
+            if (!IsBridgeConfigured) return null;
+            foreach (var url in RpcUrlCandidates())
+            {
+                try
+                {
+                    var c = new Web3(url).Eth.GetContract(PENDING_REMOVAL_ABI, ContractAddress);
+                    var eta = await c.GetFunction("pendingRemovalEta").CallAsync<BigInteger>();
+                    if (eta == 0) return new PendingRemoval(Array.Empty<string>(), Array.Empty<string>(), 0);
+                    var validators = await c.GetFunction("getPendingRemovals").CallAsync<List<string>>();
+                    var casters = await c.GetFunction("getPendingCasterRemovals").CallAsync<List<string>>();
+                    return new PendingRemoval(validators, casters, eta);
+                }
+                catch { }
+            }
+            return null;
+        }
+
         public sealed class BurnEventInfo
         {
             public long AmountSats { get; set; }

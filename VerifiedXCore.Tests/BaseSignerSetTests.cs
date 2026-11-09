@@ -87,6 +87,8 @@ namespace VerifiedXCore.Tests
         public void Dispose()
         {
             BaseBridgeService.ReadSignerViewForTests = null;
+            BaseBridgeService.ReadPendingRemovalForTests = null;
+            BaseValidatorSyncService.Clock = () => DateTime.UtcNow;
             BaseBridgeService.ContractAddress = _priorContract;
             BaseBridgeService.BaseChainId = _priorChainId;
             Globals.BaseBridgeV4Height = _priorHeight;
@@ -117,6 +119,7 @@ namespace VerifiedXCore.Tests
         private static void Contract(int nonce, V[] validators, V[] casters)
         {
             BaseValidatorSyncService.SignerViewCache = null;                        // the contract changed: read it again
+            BaseValidatorSyncService.PendingCache = null;
             BaseBridgeService.ReadSignerViewForTests = () => Task.FromResult<BaseBridgeService.SignerView?>(new BaseBridgeService.SignerView(
                 validators.Select(v => v.Base).ToList(), 4, Math.Max(2, (validators.Length * 2 + 2) / 3), nonce,
                 casters.Select(v => v.Base).ToList(), casters.Length == 0 ? 0 : casters.Length / 2 + 1));
@@ -721,6 +724,85 @@ namespace VerifiedXCore.Tests
             finally
             {
                 foreach (var r in records) DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Delete(r.RecordSeq);
+                VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
+                BaseValidatorSyncService.SubmitForTests = null;
+                Globals.HttpClientFactory = priorFactory;
+            }
+        }
+
+        /// <summary>
+        /// A pending removal that names a live member (a caster still in the committee, a validator still seen) is vetoed by
+        /// the members themselves: each signs CancelPending only when it sees that itself, and the member in turn sends it
+        /// once either group's blocking minority signed. One that only clears members gone dark is left to run.
+        /// </summary>
+        [Fact]
+        public async Task APendingRemovalOfALiveMember_IsCancelledByTheMembers_OneThatClearsTheDarkIsNot()
+        {
+            var casters = new[] { NewKey(), NewKey(), NewKey() };
+            foreach (var k in casters)
+                AccountData.GetAccounts().InsertSafe(new Account { Address = k.Address, PublicKey = k.Pub, PrivateKey = "0" + k.Key.secret.ToString("x") });
+            var record = new CasterMembershipRecord
+            {
+                RecordSeq = 1, EffectiveFromHeight = 0,
+                Casters = casters.Select((k, i) => new CasterInfo { Address = k.Address, PeerIP = $"10.0.5.{i + 1}", PublicKey = k.Pub }).ToList(),
+            };
+            DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Upsert(record.RecordSeq, record);
+            VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
+            var validators = new[] { _me, _seed2, _seed3 };
+            var at = validators.Select((v, i) => (v, ip: $"10.0.0.{i + 1}")).Concat(casters.Select((k, i) => (v: k, ip: $"10.0.5.{i + 1}"))).ToDictionary(x => x.ip, x => x.v);
+            var priorFactory = Globals.HttpClientFactory;
+            var network = new ValidatorNetwork(at);
+            Globals.HttpClientFactory = network;
+            var sent = new List<(string Function, object[] Args)>();
+            BaseValidatorSyncService.SubmitForTests = (f, a) => { sent.Add((f, a)); return Task.FromResult<string?>("0xtx"); };
+            var t0 = DateTime.UtcNow;
+            BaseValidatorSyncService.Clock = () => t0;
+            var dark = NewKey();
+            BaseBridgeService.PendingRemoval Pending(IEnumerable<string> v, IEnumerable<string> c) =>
+                new(v.ToList(), c.ToList(), new System.Numerics.BigInteger(Random.Shared.NextInt64(1, long.MaxValue)));
+            async Task Watch()                                                    // as the loop runs it: before and after every turn came
+            {
+                BaseValidatorSyncService.Clock = () => t0;
+                await BaseValidatorSyncService.CancelHostileRemovalAsync();
+                BaseValidatorSyncService.Clock = () => t0.AddDays(1);
+                if (sent.Count == 0) await BaseValidatorSyncService.CancelHostileRemovalAsync();
+            }
+            try
+            {
+                Contract(13, validators, casters);
+                var cancelDigest = VbtcbTypedData.CancelPendingDigest(13, 8453, Proxy);
+
+                // Two of the three casters, still in the committee, named by a pending removal: vetoed.
+                var hostile = Pending(Array.Empty<string>(), casters.Take(2).Select(k => k.Base));
+                BaseBridgeService.ReadPendingRemovalForTests = () => Task.FromResult<BaseBridgeService.PendingRemoval?>(hostile);
+                SignedBy(_me, await Ask("CANCEL", Array.Empty<string>(), Epoch, 13), cancelDigest);
+                Globals.ValidatorAddress = _new1.Address;
+                Assert.Contains("Only a validator or caster on the contract", Refusal(await Ask("CANCEL", Array.Empty<string>(), Epoch, 13)));
+                Globals.ValidatorAddress = _me.Address;
+                network.Down.UnionWith(new[] { "10.0.0.2", "10.0.0.3" });        // the other validators knocked offline: the casters' veto alone
+                await Watch();
+                network.Down.Clear();
+                var (fn, args) = Assert.Single(sent);
+                Assert.Equal("cancelPending", fn);
+                var signers = ((List<byte[]>)args[0]).Select(b => ValidatorEthKeyService.RecoverSigner(cancelDigest, "0x" + Convert.ToHexString(b), personalMessage: false)!.ToLowerInvariant()).ToList();
+                Assert.True(signers.Count(s => casters.Any(k => k.Base == s)) >= 2);
+
+                // A validator still seen on VFX, named alone: vetoed too.
+                sent.Clear();
+                Contract(14, validators, casters);
+                BaseBridgeService.ReadPendingRemovalForTests = () => Task.FromResult<BaseBridgeService.PendingRemoval?>(Pending(new[] { _seed2.Base }, Array.Empty<string>()));
+                SignedBy(_me, await Ask("CANCEL", Array.Empty<string>(), Epoch, 14), VbtcbTypedData.CancelPendingDigest(14, 8453, Proxy));
+
+                // Members gone dark (a caster out of the committee, a validator never seen): nobody vetoes.
+                Contract(15, validators, casters);
+                BaseBridgeService.ReadPendingRemovalForTests = () => Task.FromResult<BaseBridgeService.PendingRemoval?>(Pending(new[] { _gone.Base }, new[] { dark.Base }));
+                Assert.Contains("No pending removal names", Refusal(await Ask("CANCEL", Array.Empty<string>(), Epoch, 15)));
+                await Watch();
+                Assert.Empty(sent);
+            }
+            finally
+            {
+                DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Delete(record.RecordSeq);
                 VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
                 BaseValidatorSyncService.SubmitForTests = null;
                 Globals.HttpClientFactory = priorFactory;

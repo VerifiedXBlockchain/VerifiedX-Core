@@ -47,7 +47,10 @@ the casters cannot without the validators.
 - If so many validators or casters go dark that the approval can no longer be reached, a proposal removes them: a
   majority of each group, or 2/3 of the validators when the casters are the ones gone. The removal waits
   `upgradeDelay()`, then anyone runs `executeRemoval()`. Meanwhile either group's blocking minority can cancel it, so
-  neither group can use it against the other while the other is running.
+  neither group can use it against the other while the other is running. VFX nodes do this themselves: a member's node
+  signs and, in its turn, sends `cancelPending` for a pending removal that names a caster still in the committee or a
+  validator still seen on VFX (validators and casters both, so stopping the veto means keeping both offline for the whole
+  delay).
 - A proposed upgrade waits `upgradeDelay()` (48 hours until changed) and is then executed by anyone with
   `executeUpgrade()`. Holders who disagree have that long to burn and exit.
 - The delay can be set between 48 hours and 30 days. The change itself waits the current delay.

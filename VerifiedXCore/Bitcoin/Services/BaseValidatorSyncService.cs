@@ -36,7 +36,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Request body of <c>valapi/Validator/SignValidatorUpdate</c>.</summary>
         public class ValidatorUpdateSignRequest
         {
-            /// <summary>ADD or REMOVE (validators), or CASTERS.</summary>
+            /// <summary>ADD or REMOVE (validators), CASTERS, or CANCEL (a pending removal that names a live member).</summary>
             public string Action { get; set; } = "";
             /// <summary>The batch, in the order it is sent (for CASTERS, the casters added).</summary>
             public string[] TargetAddresses { get; set; } = Array.Empty<string>();
@@ -69,8 +69,9 @@ namespace VerifiedXCore.Bitcoin.Services
             if (string.IsNullOrEmpty(Globals.ValidatorAddress)) return (null, "Not a validator");
             if (!BaseBridgeService.IsBridgeConfigured) return (null, "Base bridge not configured");
             var action = (req.Action ?? "").Trim().ToUpperInvariant();
-            if (action is not ("ADD" or "REMOVE" or "CASTERS")) return (null, "Unsupported action");
+            if (action is not ("ADD" or "REMOVE" or "CASTERS" or "CANCEL")) return (null, "Unsupported action");
             var casters = action == "CASTERS";
+            var cancel = action == "CANCEL";
 
             // Everything this node can judge by itself comes before the contract is read: a request it refuses anyway
             // costs it no Base call.
@@ -82,12 +83,12 @@ namespace VerifiedXCore.Bitcoin.Services
             if (BaseBridgeAttestationService.NotReadyToAttest() is { } notReady) return (null, notReady);
             var targets = (req.TargetAddresses ?? Array.Empty<string>()).Select(t => (t ?? "").Trim()).ToArray();
             var removing = casters ? (req.RemoveAddresses ?? Array.Empty<string>()).Select(t => (t ?? "").Trim()).ToArray() : Array.Empty<string>();
-            if (targets.Length + removing.Length == 0 || targets.Concat(removing).Any(t => !BaseSignerSetPolicy.IsAddress(t))) return (null, "Invalid target address");
+            if (!cancel && (targets.Length + removing.Length == 0 || targets.Concat(removing).Any(t => !BaseSignerSetPolicy.IsAddress(t)))) return (null, "Invalid target address");
 
             var view = await SignerViewForSigningAsync();
             if (view == null) return (null, "Could not read the Base contract");
             if (view.MessageVersion != VbtcbTypedData.MessageVersion) return (null, AdminChangesNotSignedReason);
-            if (!casters && view.CasterList.Count == 0) return (null, NoCastersYetReason);
+            if (!casters && !cancel && view.CasterList.Count == 0) return (null, NoCastersYetReason);
             if (req.AdminNonce != view.AdminNonce.ToString()) return (null, "Admin nonce is not the contract's");
 
             // A member is on either of the contract's lists: the change needs both groups' signatures.
@@ -95,6 +96,17 @@ namespace VerifiedXCore.Bitcoin.Services
             var asMember = !string.IsNullOrEmpty(myBase)
                 && (view.Validators.Contains(myBase, StringComparer.OrdinalIgnoreCase) || view.CasterList.Contains(myBase, StringComparer.OrdinalIgnoreCase));
             long chainId = BaseBridgeService.BaseChainId;
+
+            if (cancel)
+            {
+                // A veto only for a removal that would push out a member this node sees live: one that merely clears
+                // validators or casters gone dark is left to run.
+                if (!asMember) return (null, "Only a validator or caster on the contract signs a cancellation");
+                var pending = await PendingForSigningAsync();
+                if (pending == null) return (null, "Could not read the Base contract");
+                if (LiveTargetOf(pending, epoch) == null) return (null, "No pending removal names a validator or caster that is still live");
+                return (new Authorized(VbtcbTypedData.CancelPendingDigest(view.AdminNonce, chainId, BaseBridgeService.ContractAddress), action, null, epoch, view.AdminNonce.ToString()), "");
+            }
 
             if (casters)
             {
@@ -172,6 +184,37 @@ namespace VerifiedXCore.Bitcoin.Services
             }
         }
 
+        internal static (DateTime At, string Contract, Task<BaseBridgeService.PendingRemoval?> Pending)? PendingCache;
+
+        /// <summary>The contract's pending removal as SignValidatorUpdate judges it, shared like the signer view.</summary>
+        private static Task<BaseBridgeService.PendingRemoval?> PendingForSigningAsync()
+        {
+            lock (SignerViewLock)
+            {
+                var contract = BaseBridgeService.ContractAddress ?? "";
+                if (PendingCache is { } c && c.Contract == contract && (DateTime.UtcNow - c.At).TotalSeconds < SignerViewSeconds)
+                    return c.Pending;
+                var pending = BaseBridgeService.ReadPendingRemovalAsync();
+                PendingCache = (DateTime.UtcNow, contract, pending);
+                return pending;
+            }
+        }
+
+        /// <summary>
+        /// The first member a pending removal names that this node sees live: a caster in its current caster record, or a
+        /// validator that keeps its seat at the epoch boundary (funded, seen in the two days before it). Null when it names
+        /// none, as when it clears members that went dark.
+        /// </summary>
+        internal static string? LiveTargetOf(BaseBridgeService.PendingRemoval pending, long epoch)
+        {
+            if (pending.Eta == 0) return null;
+            var committee = (VerifiedXCore.Services.CasterMembershipStore.GetCurrent()?.Casters ?? new List<VerifiedXCore.Models.CasterInfo>())
+                .Select(c => BaseSignerSetPolicy.BaseAddressOf(c.PublicKey).ToLowerInvariant()).Where(a => a.Length > 0).ToHashSet();
+            if (pending.Casters.FirstOrDefault(c => committee.Contains(c.ToLowerInvariant())) is { } caster) return caster;
+            var kept = BaseSignerSetPolicy.KeptAt(epoch);
+            return pending.Validators.FirstOrDefault(v => kept.Contains(v.ToLowerInvariant()));
+        }
+
         /// <summary>This node's signature on the request, or null and why not (see <see cref="AuthorizeAsync"/>).</summary>
         public static async Task<(string? Signature, string Reason)> SignValidatorUpdateAsync(ValidatorUpdateSignRequest? req)
         {
@@ -200,19 +243,89 @@ namespace VerifiedXCore.Bitcoin.Services
         private const string ValidatorSetAbi = @"[
             {""inputs"":[{""internalType"":""address[]"",""name"":""newValidators"",""type"":""address[]""},{""internalType"":""uint256"",""name"":""vfxBlockHeight"",""type"":""uint256""},{""internalType"":""bytes[]"",""name"":""signatures"",""type"":""bytes[]""},{""internalType"":""bytes[]"",""name"":""newValidatorSignatures"",""type"":""bytes[]""}],""name"":""addValidatorBatch"",""outputs"":[],""stateMutability"":""nonpayable"",""type"":""function""},
             {""inputs"":[{""internalType"":""address[]"",""name"":""oldValidators"",""type"":""address[]""},{""internalType"":""uint256"",""name"":""vfxBlockHeight"",""type"":""uint256""},{""internalType"":""bytes[]"",""name"":""signatures"",""type"":""bytes[]""}],""name"":""removeValidatorBatch"",""outputs"":[],""stateMutability"":""nonpayable"",""type"":""function""},
+            {""inputs"":[{""internalType"":""bytes[]"",""name"":""signatures"",""type"":""bytes[]""}],""name"":""cancelPending"",""outputs"":[],""stateMutability"":""nonpayable"",""type"":""function""},
             {""inputs"":[{""internalType"":""address[]"",""name"":""add"",""type"":""address[]""},{""internalType"":""address[]"",""name"":""remove"",""type"":""address[]""},{""internalType"":""uint256"",""name"":""vfxBlockHeight"",""type"":""uint256""},{""internalType"":""bytes[]"",""name"":""signatures"",""type"":""bytes[]""},{""internalType"":""bytes[]"",""name"":""newCasterSignatures"",""type"":""bytes[]""}],""name"":""updateCasters"",""outputs"":[],""stateMutability"":""nonpayable"",""type"":""function""}
         ]";
 
         /// <summary>Stands in for the Base transaction in tests: function name and arguments in, transaction hash out.</summary>
         internal static Func<string, object[], Task<string?>>? SubmitForTests;
 
-        /// <summary>Background: once an epoch, the contract's members bring its casters and validators in step with VFX.</summary>
+        /// <summary>
+        /// Background: the contract's members veto a pending removal that names a live member, and once an epoch bring its
+        /// casters and validators in step with VFX.
+        /// </summary>
         public static Task ValidatorSyncLoop() =>
             PausableLoop.RunAsync(async () =>
             {
+                try { await CancelHostileRemovalAsync(); }
+                catch (Exception ex) { ErrorLogUtility.LogError($"[BaseValidatorSync] {ex.Message}", "BaseValidatorSyncService.ValidatorSyncLoop"); }
                 try { await SyncOnceAsync(); }
                 catch (Exception ex) { ErrorLogUtility.LogError($"[BaseValidatorSync] {ex.Message}", "BaseValidatorSyncService.ValidatorSyncLoop"); }
             }, 60_000, "BaseValidatorSyncService.ValidatorSyncLoop");
+
+        /// <summary>
+        /// Minutes each member waits after the one before it, in an order drawn from the proposal, before it gathers the
+        /// veto and sends cancelPending itself: one sender at a time inside the proposal's 48 hours, the next stepping in when
+        /// one is down or has no gas.
+        /// </summary>
+        public const int CancelTurnMinutes = 10;
+
+        /// <summary>The clock the cancel turns run on (tests move it).</summary>
+        internal static Func<DateTime> Clock = () => DateTime.UtcNow;
+
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> FirstSeenPending = new();
+
+        /// <summary>
+        /// A pending proposeRemoval that names a member this node sees live (a caster still in the committee, a validator
+        /// still seen on VFX) is how a group could push the other out while it is running, after 48 hours. Every member that
+        /// sees one asks the others for their veto (each signs only when it sees the same itself) and, in its turn, sends
+        /// cancelPending once either group's blocking minority signed. A proposal that only clears dark members is left.
+        /// </summary>
+        internal static async Task CancelHostileRemovalAsync()
+        {
+            if (string.IsNullOrEmpty(Globals.ValidatorAddress) || !BaseBridgeService.IsBridgeConfigured) return;
+            var tip = Globals.LastBlock?.Height ?? -1;
+            var epoch = BaseSignerSetPolicy.EpochAt(tip);
+            if (epoch < 0 || epoch < Globals.BaseBridgeV4Height || tip - epoch < BaseSignerSetPolicy.SettleBlocks) return;
+            if (BaseBridgeAttestationService.NotReadyToAttest() != null) return;
+
+            var view = await BaseBridgeService.ReadSignerViewAsync();
+            if (view == null || view.MessageVersion != VbtcbTypedData.MessageVersion) return;
+            var myBase = ValidatorEthKeyService.DeriveBaseAddressFromAccount(Globals.ValidatorAddress);
+            var members = view.Validators.Concat(view.CasterList).Select(m => m.ToLowerInvariant()).Distinct().ToList();
+            if (string.IsNullOrEmpty(myBase) || !members.Contains(myBase.ToLowerInvariant())) return;
+            var pending = await BaseBridgeService.ReadPendingRemovalAsync();
+            if (pending == null || pending.Eta == 0 || LiveTargetOf(pending, epoch) is not { } live) return;
+
+            var seed = pending.Eta.ToString();
+            var first = FirstSeenPending.GetOrAdd(BaseBridgeService.ContractAddress + ":" + seed, Clock());
+            var turn = members.OrderBy(m => BaseSignerSetPolicy.RankOf(seed, m), StringComparer.Ordinal).ToList().IndexOf(myBase.ToLowerInvariant());
+            if (Clock() < first.AddMinutes((double)turn * CancelTurnMinutes)) return;
+
+            var ipOf = VBTCValidatorRegistry.GetActiveValidatorsAt(tip)
+                .Select(v => (Base: BaseSignerSetPolicy.BaseAddressOf(v.FrostPublicKey).ToLowerInvariant(), v.IPAddress))
+                .Where(x => x.Base.Length > 0 && !string.IsNullOrEmpty(x.IPAddress))
+                .GroupBy(x => x.Base).ToDictionary(g => g.Key, g => g.First().IPAddress);
+            foreach (var s in UserBridgeMintService.ContractSigners(view)) ipOf.TryAdd(s.BaseAddress.ToLowerInvariant(), s.IPAddress);
+
+            var validatorVeto = view.Validators.Count - view.RequiredMintSignatures + 1;
+            var casterVeto = view.CasterList.Count == 0 ? int.MaxValue : view.CasterList.Count - view.RequiredCasterSignatures + 1;
+            bool Vetoed(IEnumerable<string> signers)
+            {
+                var set = signers.ToHashSet(StringComparer.OrdinalIgnoreCase);
+                return view.Validators.Count(set.Contains) >= validatorVeto || view.CasterList.Count(set.Contains) >= casterVeto;
+            }
+            var nonce = view.AdminNonce.ToString();
+            var digest = VbtcbTypedData.CancelPendingDigest(view.AdminNonce, BaseBridgeService.BaseChainId, BaseBridgeService.ContractAddress);
+            var sigs = await CollectAsync("CANCEL", Array.Empty<string>(), epoch, nonce, members, ipOf, myBase, view, digest, null, Vetoed);
+            if (!Vetoed(sigs.Keys))
+            {
+                LogUtility.Log($"[BaseValidatorSync] A pending removal names {live}, still live; veto so far: {Tally(view, sigs)}.", "BaseValidatorSyncService");
+                return;
+            }
+            LogUtility.Log($"[BaseValidatorSync] Cancelling the pending removal that names {live}, still live.", "BaseValidatorSyncService");
+            await SubmitAsync("cancelPending", new object[] { sigs.Values.Select(HexBytes).ToList() });
+        }
 
         /// <summary>
         /// One step: when it is this node's turn, it sends the epoch's caster change, else its validator removal, or once there
@@ -355,14 +468,15 @@ namespace VerifiedXCore.Bitcoin.Services
         /// the contract's thresholds (2/3 of its validators and a majority of its casters).
         /// </summary>
         private static async Task<Dictionary<string, string>> CollectAsync(string action, string[] targets, long epoch, string nonce, List<string> members,
-            Dictionary<string, string> ipOf, string myBase, BaseBridgeService.SignerView view, byte[] digest, string[]? removes = null)
+            Dictionary<string, string> ipOf, string myBase, BaseBridgeService.SignerView view, byte[] digest, string[]? removes = null,
+            Func<IEnumerable<string>, bool>? done = null)
         {
             var sigs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var (mine, _) = await SignValidatorUpdateAsync(new ValidatorUpdateSignRequest { Action = action, TargetAddresses = targets, RemoveAddresses = removes ?? Array.Empty<string>(), VfxBlockHeight = epoch, AdminNonce = nonce });
             if (mine != null) sigs[myBase] = mine;
             foreach (var m in members)
             {
-                if (UserBridgeMintService.Enough(view, view.RequiredMintSignatures, sigs.Keys)) break;
+                if (done?.Invoke(sigs.Keys) ?? UserBridgeMintService.Enough(view, view.RequiredMintSignatures, sigs.Keys)) break;
                 if (sigs.ContainsKey(m) || !ipOf.TryGetValue(m, out var ip)) continue;
                 if (await AskAsync(ip, action, targets, epoch, nonce, digest, m, removes) is { } sig) sigs[m] = sig;
             }
