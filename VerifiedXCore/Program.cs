@@ -742,9 +742,6 @@ namespace VerifiedXCore
             // Caster attestation loop kept for backwards compatibility — but user nodes now handle minting directly via UserBridgeMintService.
             _ = Task.Run(Bitcoin.Services.BaseBridgeAttestationService.ProcessPendingAttestationsLoop);
 
-            // V2 Bridge: Sync VFX validator set to Base contract
-            _ = Task.Run(() => Bitcoin.Services.BaseValidatorSyncService.ValidatorSyncLoop(CancellationToken.None));
-
             // V2 Bridge: Caster consensus for burn exits
             _ = Task.Run(() => Bitcoin.Services.BurnExitConsensusService.ConsensusLoop(CancellationToken.None));
 

@@ -145,21 +145,36 @@ namespace VerifiedXCore.Tests
             Assert.NotEqual(TransactionValidatorService.RegisteredBaseAddressReason, registerMsg);   // refused for the missing key itself
         }
 
+        /// <summary>
+        /// On the deployed V3 contract an ADD/REMOVE signature set is also a valid mint, so none is signed for a contract
+        /// that does not read version 4 messages, whatever the request (the V4 rules: Round B part 2, BaseSignerSetTests).
+        /// </summary>
         [Fact]
-        public void NoValidatorAddOrRemoveMessageIsSigned()
+        public async Task NoValidatorAddOrRemoveMessageIsSigned()
         {
-            var request = new BaseValidatorSyncService.ValidatorUpdateSignRequest { Action = "ADD", TargetAddresses = new[] { "0x" + new string('2', 40) }, VfxBlockHeight = 10, Timestamp = TimeUtil.GetTime() };
-            var (ok, reason) = BaseValidatorSyncService.AuthorizeSignRequest(request);
-            Assert.False(ok);
-            Assert.Equal(BaseValidatorSyncService.AdminChangesNotSignedReason, reason);
-
+            var priorContract = BaseBridgeService.ContractAddress;
             Globals.ValidatorAddress = _validator.Address;
+            BaseBridgeService.ContractAddress = "0x09096c6eBf35F0aDAEeC02D06a0dE77E790F132D";
+            BaseBridgeService.ReadSignerViewForTests = () => Task.FromResult<BaseBridgeService.SignerView?>(new BaseBridgeService.SignerView(
+                new[] { ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(_validator.PublicKey), "0x" + new string('3', 40), "0x" + new string('4', 40) }, 3, 2, 0));
             try
             {
-                Assert.Null(BaseValidatorSyncService.SignValidatorUpdateLocally("ADD", new[] { "0x" + new string('2', 40) }, 10));
-                Assert.Null(BaseValidatorSyncService.SignValidatorUpdateLocally("REMOVE", new[] { "0x" + new string('2', 40) }, 10));
+                foreach (var action in new[] { "ADD", "REMOVE" })
+                {
+                    var (signature, reason) = await BaseValidatorSyncService.SignValidatorUpdateAsync(new BaseValidatorSyncService.ValidatorUpdateSignRequest
+                    {
+                        Action = action, TargetAddresses = new[] { "0x" + new string('2', 40) }, VfxBlockHeight = 0, AdminNonce = "0",
+                    });
+                    Assert.Null(signature);
+                    Assert.Equal(BaseValidatorSyncService.AdminChangesNotSignedReason, reason);
+                }
             }
-            finally { Globals.ValidatorAddress = ""; }
+            finally
+            {
+                BaseBridgeService.ReadSignerViewForTests = null;
+                BaseBridgeService.ContractAddress = priorContract;
+                Globals.ValidatorAddress = "";
+            }
         }
     }
 }

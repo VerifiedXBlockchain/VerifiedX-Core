@@ -75,6 +75,7 @@ namespace VerifiedXCore
             Globals.BitcoinAttestationRecordHeight = Globals.IsTestNet ? Globals.BitcoinAttestationRecordTestnetHeight : Globals.BitcoinAttestationRecordHeight;
             Globals.BitcoinAttestationHeight = Globals.IsTestNet ? Globals.BitcoinAttestationTestnetHeight : Globals.BitcoinAttestationHeight;
             Globals.VreeActivationHeight = Globals.IsTestNet ? Globals.VreeActivationTestnetHeight : Globals.VreeActivationHeight;
+            Globals.BaseBridgeV4Height = Globals.IsTestNet ? Globals.BaseBridgeV4TestnetHeight : Globals.BaseBridgeV4Height;
             if (Globals.IsTestNet) Globals.ShieldedSupplyCorrections.Clear(); // the testnet pool was never forged against
         }
     }

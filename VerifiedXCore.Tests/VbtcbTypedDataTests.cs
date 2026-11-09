@@ -29,6 +29,15 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void TheValidatorSetDigests_MatchEthers()
+        {
+            var validators = new[] { "0xD140DfAB7F08B5ce8E54A8b364E447b49E6EEda6", "0x00000000000000000000000000000000000000aa" };
+            Assert.Equal(Hex("0x9c2350acd424c69ca56c23acdcc2d0f47c28609da939de02c5ca03d1bf091546"), VbtcbTypedData.AddValidatorsDigest(validators, 7_603_200, 5, 8453, Proxy));
+            Assert.Equal(Hex("0x5519f1f7a86c3a8bd9d6fd192a147c4787a4c9b3958f82e034fe74635755e15f"), VbtcbTypedData.RemoveValidatorsDigest(validators, 7_603_200, 5, 8453, Proxy));
+            Assert.Equal(Hex("0x46abf760aabbd9655c290b4eb61a650d926734167d65207ff0092a90867146fc"), VbtcbTypedData.ProposeRemovalDigest(validators, 7_603_200, 5, 8453, Proxy));
+        }
+
+        [Fact]
         public void TheDigest_ChangesWithEveryFieldOfTheDomainAndTheMint()
         {
             var baseline = VbtcbTypedData.MintDigest("0xD140DfAB7F08B5ce8E54A8b364E447b49E6EEda6", 400_000, "l", 1, 8453, Proxy);

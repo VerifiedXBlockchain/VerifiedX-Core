@@ -33,6 +33,14 @@ namespace VerifiedXCore.Bitcoin.Services
         private static readonly byte[] ProposeUpgradeDelayTypeHash = Keccak("ProposeUpgradeDelay(uint256 delay,uint256 adminNonce)");
         private static readonly byte[] ProposeRemovalTypeHash = Keccak("ProposeRemoval(address[] validators,uint256 vfxBlockHeight,uint256 adminNonce)");
         private static readonly byte[] CancelPendingTypeHash = Keccak("CancelPending(uint256 adminNonce)");
+        private static readonly byte[] AddValidatorsTypeHash = Keccak("AddValidators(address[] validators,uint256 vfxBlockHeight,uint256 adminNonce)");
+        private static readonly byte[] RemoveValidatorsTypeHash = Keccak("RemoveValidators(address[] validators,uint256 vfxBlockHeight,uint256 adminNonce)");
+
+        public static byte[] AddValidatorsDigest(IEnumerable<string> validators, long vfxBlockHeight, BigInteger adminNonce, long chainId, string contractAddress) =>
+            Digest(chainId, contractAddress, Keccak(Concat(AddValidatorsTypeHash, AddressList(validators), Uint(vfxBlockHeight), Uint(adminNonce))));
+
+        public static byte[] RemoveValidatorsDigest(IEnumerable<string> validators, long vfxBlockHeight, BigInteger adminNonce, long chainId, string contractAddress) =>
+            Digest(chainId, contractAddress, Keccak(Concat(RemoveValidatorsTypeHash, AddressList(validators), Uint(vfxBlockHeight), Uint(adminNonce))));
 
         public static byte[] ProposeUpgradeDigest(string implementation, BigInteger adminNonce, long chainId, string contractAddress) =>
             Digest(chainId, contractAddress, Keccak(Concat(ProposeUpgradeTypeHash, Address(implementation), Uint(adminNonce))));
