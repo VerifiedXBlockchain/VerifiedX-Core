@@ -213,6 +213,45 @@ namespace VerifiedXCore.Bitcoin.Services
             return 2;
         }
 
+        /// <summary>
+        /// What the contract checks a signature set against: its current validators, the message form it reads (3 for the
+        /// deployed V3, which has no MESSAGE_VERSION(); 4 for V4), its mint threshold and its admin nonce.
+        /// </summary>
+        public sealed record SignerView(IReadOnlyList<string> Validators, int MessageVersion, int RequiredMintSignatures, BigInteger AdminNonce);
+
+        private const string SIGNER_VIEW_ABI = @"[
+            {""inputs"":[],""name"":""getValidators"",""outputs"":[{""internalType"":""address[]"",""name"":"""",""type"":""address[]""}],""stateMutability"":""view"",""type"":""function""},
+            {""inputs"":[],""name"":""requiredMintSignatures"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},
+            {""inputs"":[],""name"":""adminNonce"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""},
+            {""inputs"":[],""name"":""MESSAGE_VERSION"",""outputs"":[{""internalType"":""uint256"",""name"":"""",""type"":""uint256""}],""stateMutability"":""view"",""type"":""function""}
+        ]";
+
+        /// <summary>Stands in for the Base RPC in tests.</summary>
+        internal static Func<Task<SignerView?>>? ReadSignerViewForTests;
+
+        /// <summary>The contract's <see cref="SignerView"/> from the first RPC that answers; null when none does.</summary>
+        public static async Task<SignerView?> ReadSignerViewAsync()
+        {
+            if (ReadSignerViewForTests != null) return await ReadSignerViewForTests();
+            if (!IsBridgeConfigured) return null;
+            foreach (var url in RpcUrlCandidates())
+            {
+                try
+                {
+                    var c = new Web3(url).Eth.GetContract(SIGNER_VIEW_ABI, ContractAddress);
+                    var validators = await c.GetFunction("getValidators").CallAsync<List<string>>();
+                    var required = (int)await c.GetFunction("requiredMintSignatures").CallAsync<BigInteger>();
+                    var nonce = await c.GetFunction("adminNonce").CallAsync<BigInteger>();
+                    var version = 3;
+                    try { version = (int)await c.GetFunction("MESSAGE_VERSION").CallAsync<BigInteger>(); }
+                    catch (Exception ex) when (ex is Nethereum.JsonRpc.Client.RpcResponseException or Nethereum.ABI.FunctionEncoding.SmartContractRevertException) { } // V3: no such function
+                    return new SignerView(validators, version, Math.Max(2, required), nonce);
+                }
+                catch { }
+            }
+            return null;
+        }
+
         public sealed class BurnEventInfo
         {
             public long AmountSats { get; set; }

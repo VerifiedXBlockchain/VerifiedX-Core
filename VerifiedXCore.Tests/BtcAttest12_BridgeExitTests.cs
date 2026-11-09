@@ -530,6 +530,132 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        /// <summary>
+        /// The mint collector asked caster-committee members, not the contract's validators, and kept whatever signature
+        /// came back, so a round could end "complete" with signatures the contract ignores and the mint reverted. It now
+        /// asks only validators on the contract, in the form the contract reads, and keeps a signature only when it is the
+        /// asked validator's own. The validators answer through the node's own attestation code.
+        /// </summary>
+        [Fact]
+        public async Task TheMintCollector_AsksOnlyTheContractsValidators_AndKeepsOnlyTheirOwnSignatures()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.004M);
+            for (var i = 0; i < BaseBridgeAttestationService.MintAttestationDepth; i++) await Apply(Tip + 1);
+
+            // Five registered validators, each at its own IP; four on the contract, and one of those answers with a
+            // signature by another key.
+            var keys = Enumerable.Range(0, 5).Select(_ => NewKey()).ToList();
+            var ipOf = new Dictionary<string, V>();
+            for (var i = 0; i < keys.Count; i++)
+            {
+                var v = keys[i];
+                var ip = $"10.0.9.{i + 1}";
+                ipOf[ip] = v;
+                AccountData.GetAccounts().InsertSafe(new Account { Address = v.Address, PublicKey = v.Pub, PrivateKey = "0" + v.Key.secret.ToString("x") });
+                BlockchainData.GetBlocks().InsertSafe(new VerifiedXCore.Models.Block
+                {
+                    Height = 30 + i, Hash = $"h{30 + i}-{Guid.NewGuid():N}",
+                    Transactions = new List<VfxTx> { new VfxTx
+                    {
+                        TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = v.Address, ToAddress = v.Address, Hash = "rc" + i,
+                        Data = JsonConvert.SerializeObject(new { ValidatorAddress = v.Address, IPAddress = ip, FrostPublicKey = v.Pub, IsS3C = false }),
+                    } },
+                });
+            }
+            string BaseOf(V v) => ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(v.Pub);
+            var (a, b, c, d, outsider) = (keys[0], keys[1], keys[2], keys[3], keys[4]);
+            const string configured = "0x09096c6eBf35F0aDAEeC02D06a0dE77E790F132D";
+            var record = new BridgeLockRecord
+            {
+                LockId = lockId, SmartContractUID = vault.Uid, OwnerAddress = Minter.Address, Amount = 0.004M, AmountSats = 400_000,
+                EvmDestination = "0x" + new string('a', 40), Status = BridgeLockStatus.Locked, VfxLockConfirmedOnChain = true, VfxLockBlockHeight = Tip,
+            };
+
+            var priorValidator = Globals.ValidatorAddress;
+            var priorCastersOnly = Globals.BaseValidatorSetCastersOnly;
+            var priorSynced = Globals.IsChainSynced;
+            var priorResyncing = Globals.IsResyncing;
+            var priorStopTimers = Globals.StopAllTimers;
+            var priorContract = BaseBridgeService.ContractAddress;
+            var priorFactory = Globals.HttpClientFactory;
+            var asked = new List<string>();
+            Globals.BaseValidatorSetCastersOnly = false;
+            Globals.IsChainSynced = true;
+            Globals.IsResyncing = false;
+            Globals.StopAllTimers = false;
+            BaseBridgeService.ContractAddress = configured;
+            VBTCValidatorRegistry.InvalidateCache();
+            Globals.HttpClientFactory = new AttesterHttpClientFactory(async (ip, request) =>
+            {
+                lock (asked) asked.Add(ip);
+                Globals.ValidatorAddress = ipOf[ip].Address;                      // the node at that IP answers
+                var answer = await BaseBridgeAttestationService.HandleMintAttestationRequest(request);
+                if (ipOf[ip] == b && answer.success)                               // b hands back another key's signature
+                {
+                    Globals.ValidatorAddress = outsider.Address;
+                    answer = await BaseBridgeAttestationService.HandleMintAttestationRequest(request);
+                }
+                return answer;
+            });
+            try
+            {
+                foreach (var version in new[] { 4, 3 })
+                {
+                    asked.Clear();
+                    BaseBridgeService.ReadSignerViewForTests = () => Task.FromResult<BaseBridgeService.SignerView?>(
+                        new BaseBridgeService.SignerView(new[] { BaseOf(a), BaseOf(b), BaseOf(c), BaseOf(d) }, version, 3, 0));
+
+                    var got = await UserBridgeMintService.CollectValidatorSignatures(record, 77, Globals.BaseEvmChainId, configured, 2);
+
+                    Assert.DoesNotContain("10.0.9.5", asked);                     // not on the contract: never asked
+                    Assert.Contains("10.0.9.2", asked);                            // three good signers exist; b had to be asked
+                    Assert.Equal(new[] { BaseOf(a), BaseOf(c), BaseOf(d) }.OrderBy(x => x), got!.Keys.OrderBy(x => x), StringComparer.OrdinalIgnoreCase);
+                    var hash = version == 4
+                        ? VbtcbTypedData.MintDigest(record.EvmDestination, 400_000, lockId, 77, Globals.BaseEvmChainId, configured)
+                        : BaseBridgeAttestationService.ConstructMintMessageHash(record.EvmDestination, 400_000, lockId, 77, Globals.BaseEvmChainId, configured);
+                    foreach (var (signer, sig) in got)
+                        Assert.Equal(signer, ValidatorEthKeyService.RecoverSigner(hash, sig, personalMessage: version != 4), StringComparer.OrdinalIgnoreCase);
+                }
+            }
+            finally
+            {
+                BaseBridgeService.ReadSignerViewForTests = null;
+                Globals.HttpClientFactory = priorFactory;
+                Globals.ValidatorAddress = priorValidator;
+                Globals.BaseValidatorSetCastersOnly = priorCastersOnly;
+                Globals.IsChainSynced = priorSynced;
+                Globals.IsResyncing = priorResyncing;
+                Globals.StopAllTimers = priorStopTimers;
+                BaseBridgeService.ContractAddress = priorContract;
+                VBTCValidatorRegistry.InvalidateCache();
+            }
+        }
+
+        /// <summary>Hands each SignMintAttestation request to the given answer, as the node at that IP would.</summary>
+        private sealed class AttesterHttpClientFactory : System.Net.Http.IHttpClientFactory
+        {
+            private readonly Func<string, MintAttestationRequest, Task<(bool success, string? signatureHex, string? error)>> _answer;
+            public AttesterHttpClientFactory(Func<string, MintAttestationRequest, Task<(bool success, string? signatureHex, string? error)>> answer) => _answer = answer;
+            public System.Net.Http.HttpClient CreateClient(string name) => new(new Handler(_answer));
+            private sealed class Handler : System.Net.Http.HttpMessageHandler
+            {
+                private readonly Func<string, MintAttestationRequest, Task<(bool success, string? signatureHex, string? error)>> _answer;
+                public Handler(Func<string, MintAttestationRequest, Task<(bool success, string? signatureHex, string? error)>> answer) => _answer = answer;
+                protected override async Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request, System.Threading.CancellationToken ct)
+                {
+                    var body = JsonConvert.DeserializeObject<MintAttestationRequest>(await request.Content!.ReadAsStringAsync(ct))!;
+                    var (success, signature, error) = await _answer(request.RequestUri!.Host, body);
+                    return new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK)
+                    {
+                        Content = new System.Net.Http.StringContent(JsonConvert.SerializeObject(new { success, signature, error })),
+                    };
+                }
+            }
+        }
+
         /// <summary>A lock written before its block height was recorded (0) is not held back: it predates the rule.</summary>
         [Fact]
         public void ALockRowWithoutItsBlockHeight_IsNotHeldBack() =>

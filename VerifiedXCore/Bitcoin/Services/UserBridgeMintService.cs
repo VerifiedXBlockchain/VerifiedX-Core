@@ -193,27 +193,39 @@ namespace VerifiedXCore.Bitcoin.Services
             }
         }
 
-        private static async Task<Dictionary<string, string>?> CollectValidatorSignatures(
+        /// <summary>
+        /// Asks the validators that are on the Base contract (getValidators()) for the form the contract reads
+        /// (MESSAGE_VERSION()), and keeps a signature only when it recovers to the validator it was asked of. Signatures
+        /// from anyone else are ignored by the contract, so collecting them ended the round short and the mint reverted.
+        /// </summary>
+        internal static async Task<Dictionary<string, string>?> CollectValidatorSignatures(
             BridgeLockRecord record, long nonce, long chainId, string contractAddress, int requiredSigs)
         {
-            var signatures = new Dictionary<string, string>();
+            var signatures = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             // Validators sign only once the lock's block is past the reorg window (BaseBridgeAttestationService): wait for
             // that here rather than spend the short retry rounds below on refusals.
             await WaitPastReorgWindow(record.LockId);
-            var validators = BaseValidatorSyncService.SelectAttestingValidators();
-            if (validators == null || validators.Count == 0)
+            var view = await BaseBridgeService.ReadSignerViewAsync();
+            if (view == null)
             {
-                LogUtility.Log("[UserBridgeMint] No eligible attesting validators (registered vBTC validators that are committee casters). Minting cannot proceed.", "UserBridgeMintService");
+                LogUtility.Log("[UserBridgeMint] Could not read the Base contract's validators. Minting cannot proceed.", "UserBridgeMintService");
                 return signatures;
             }
+            if (view.MessageVersion is not (3 or VbtcbTypedData.MessageVersion))
+            {
+                ErrorLogUtility.LogError($"[UserBridgeMint] The Base contract reads message version {view.MessageVersion}, which this node cannot collect for.", "UserBridgeMintService");
+                return signatures;
+            }
+            requiredSigs = Math.Max(requiredSigs, view.RequiredMintSignatures);
+            var typed = view.MessageVersion == VbtcbTypedData.MessageVersion;
+            var hash = typed
+                ? VbtcbTypedData.MintDigest(record.EvmDestination, record.AmountSats, record.LockId, nonce, chainId, contractAddress)
+                : BaseBridgeAttestationService.ConstructMintMessageHash(record.EvmDestination, record.AmountSats, record.LockId, nonce, chainId, contractAddress);
 
-            // Fail fast with a clear diagnosis instead of three rounds of futile HTTP: the Base
-            // contract's requiredMintSignatures is derived from ITS validator count. If fewer attesters
-            // than that are eligible here, the on-chain validator set is out of sync with the caster
-            // committee and must be reconciled before minting can succeed.
+            var validators = ContractSigners(view);
             if (validators.Count < requiredSigs)
             {
-                ErrorLogUtility.LogError($"[UserBridgeMint] Only {validators.Count} eligible attester(s) but the Base contract requires {requiredSigs} signatures. The on-chain validator set must be reconciled with the caster committee (BaseValidatorSetCastersOnly).", "UserBridgeMintService");
+                ErrorLogUtility.LogError($"[UserBridgeMint] Only {validators.Count} of the Base contract's {view.Validators.Count} validators are registered on VFX, and the contract requires {requiredSigs} signatures.", "UserBridgeMintService");
                 return signatures;
             }
 
@@ -227,17 +239,12 @@ namespace VerifiedXCore.Bitcoin.Services
                     LogUtility.Log($"[UserBridgeMint] Retry round {attempt + 1} for attestations. Have {signatures.Count}/{requiredSigs}.", "UserBridgeMintService");
                     await Task.Delay(15_000);
                     // Refresh validator list
-                    validators = BaseValidatorSyncService.SelectAttestingValidators();
+                    validators = ContractSigners(view);
                 }
 
-                foreach (var v in validators)
+                foreach (var (v, baseAddress) in validators)
                 {
-                    if (string.IsNullOrEmpty(v.IPAddress)) continue;
-                    // Use the validator's registered Base address for dedup (matches the address
-                    // that signs attestations and is registered on the Base contract).
-                    // Fall back to ValidatorAddress if BaseAddress not set.
-                    var dedupKey = !string.IsNullOrEmpty(v.BaseAddress) ? v.BaseAddress : v.ValidatorAddress;
-                    if (string.IsNullOrEmpty(dedupKey) || signatures.ContainsKey(dedupKey)) continue;
+                    if (string.IsNullOrEmpty(v.IPAddress) || signatures.ContainsKey(baseAddress)) continue;
 
                     var url = $"http://{v.IPAddress.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/Validator/SignMintAttestation";
                     var body = JsonConvert.SerializeObject(new MintAttestationRequest
@@ -248,7 +255,8 @@ namespace VerifiedXCore.Bitcoin.Services
                         Nonce = nonce,
                         ChainId = chainId,
                         ContractAddress = contractAddress,
-                        SmartContractUID = record.SmartContractUID
+                        SmartContractUID = record.SmartContractUID,
+                        MessageVersion = view.MessageVersion
                     });
 
                     try
@@ -260,11 +268,15 @@ namespace VerifiedXCore.Bitcoin.Services
                         var jo = Newtonsoft.Json.Linq.JObject.Parse(txt);
                         if (jo["success"]?.ToObject<bool>() != true) continue;
                         var sig = jo["signature"]?.ToString();
-                        if (!string.IsNullOrEmpty(sig))
+                        if (string.IsNullOrEmpty(sig)) continue;
+                        var signer = ValidatorEthKeyService.RecoverSigner(hash, sig, personalMessage: !typed);
+                        if (!string.Equals(signer, baseAddress, StringComparison.OrdinalIgnoreCase))
                         {
-                            signatures[dedupKey] = sig;
-                            LogUtility.Log($"[UserBridgeMint] Got attestation from validator {dedupKey} for lock {record.LockId}", "UserBridgeMintService");
+                            LogUtility.Log($"[UserBridgeMint] Validator {v.ValidatorAddress} returned a signature that is not its own for lock {record.LockId}; ignored.", "UserBridgeMintService");
+                            continue;
                         }
+                        signatures[baseAddress] = sig;
+                        LogUtility.Log($"[UserBridgeMint] Got attestation from validator {baseAddress} for lock {record.LockId}", "UserBridgeMintService");
                     }
                     catch (Exception ex)
                     {
@@ -277,6 +289,26 @@ namespace VerifiedXCore.Bitcoin.Services
             }
 
             return signatures;
+        }
+
+        /// <summary>
+        /// The registered vBTC validators whose Base address is on the contract, each with that address: the one derived
+        /// from its own key (a registration's FrostPublicKey is the validator's own, by consensus rule).
+        /// </summary>
+        private static List<(VBTCValidator Validator, string BaseAddress)> ContractSigners(BaseBridgeService.SignerView view)
+        {
+            var onContract = new HashSet<string>(view.Validators, StringComparer.OrdinalIgnoreCase);
+            var found = new List<(VBTCValidator, string)>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var v in VBTCValidatorRegistry.GetActiveValidators())
+            {
+                string baseAddress;
+                try { baseAddress = ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(v.FrostPublicKey); }
+                catch { continue; }
+                if (!string.IsNullOrEmpty(baseAddress) && onContract.Contains(baseAddress) && seen.Add(baseAddress))
+                    found.Add((v, baseAddress));
+            }
+            return found;
         }
 
         /// <summary>
