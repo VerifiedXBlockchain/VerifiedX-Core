@@ -111,11 +111,15 @@ namespace VerifiedXCore.Tests
         private static IEnumerable<string> Addresses(int n, char c = 'a') =>
             Enumerable.Range(1, n).Select(i => "0x" + c + i.ToString("x").PadLeft(39, '0'));
 
-        private static void Contract(int nonce, params V[] on)
+        /// <summary>The contract with these validators, and the same keys as its casters (as the seeds are on mainnet).</summary>
+        private static void Contract(int nonce, params V[] on) => Contract(nonce, on, on);
+
+        private static void Contract(int nonce, V[] validators, V[] casters)
         {
             BaseValidatorSyncService.SignerViewCache = null;                        // the contract changed: read it again
-            BaseBridgeService.ReadSignerViewForTests = () => Task.FromResult<BaseBridgeService.SignerView?>(
-                new BaseBridgeService.SignerView(on.Select(v => v.Base).ToList(), 4, Math.Max(2, (on.Length * 2 + 2) / 3), nonce));
+            BaseBridgeService.ReadSignerViewForTests = () => Task.FromResult<BaseBridgeService.SignerView?>(new BaseBridgeService.SignerView(
+                validators.Select(v => v.Base).ToList(), 4, Math.Max(2, (validators.Length * 2 + 2) / 3), nonce,
+                casters.Select(v => v.Base).ToList(), casters.Length == 0 ? 0 : casters.Length / 2 + 1));
         }
 
         private static async Task<(HttpStatusCode Code, JObject Body)> Ask(string action, IEnumerable<string> targets, long epoch, int nonce)
@@ -284,8 +288,8 @@ namespace VerifiedXCore.Tests
             Globals.ValidatorAddress = newcomer.Address;
             SignedBy(newcomer, await Ask("ADD", new[] { first }, Epoch, 8), VbtcbTypedData.AddValidatorsDigest(new[] { first }, Epoch, 8, 8453, Proxy));
             Globals.ValidatorAddress = other.Address;                               // neither on the contract nor being added
-            Assert.Contains("Only a validator on the contract, or one being added", Refusal(await Ask("ADD", new[] { first }, Epoch, 8)));
-            Assert.Contains("Only a validator on the contract signs a removal", Refusal(await Ask("REMOVE", new[] { _seed3.Base }, Epoch, 8)));
+            Assert.Contains("Only a validator or caster on the contract, or one being added", Refusal(await Ask("ADD", new[] { first }, Epoch, 8)));
+            Assert.Contains("Only a validator or caster on the contract signs a removal", Refusal(await Ask("REMOVE", new[] { _seed3.Base }, Epoch, 8)));
 
             Globals.ValidatorAddress = _me.Address;
             Globals.LastBlock = new Block { Height = Epoch + BaseSignerSetPolicy.SettleBlocks - 1, Timestamp = TimeUtil.GetTime() };
@@ -310,7 +314,8 @@ namespace VerifiedXCore.Tests
             BaseBridgeService.ReadSignerViewForTests = () =>
             {
                 Interlocked.Increment(ref reads);
-                return Task.FromResult<BaseBridgeService.SignerView?>(new BaseBridgeService.SignerView(new[] { _me.Base, _seed2.Base, _seed3.Base }, 4, 2, 8));
+                return Task.FromResult<BaseBridgeService.SignerView?>(new BaseBridgeService.SignerView(new[] { _me.Base, _seed2.Base, _seed3.Base }, 4, 2, 8,
+                    new[] { _me.Base, _seed2.Base, _seed3.Base }, 2));
             };
             var first = BaseSignerSetPolicy.ForEpoch(Epoch, new[] { _me.Base, _seed2.Base, _seed3.Base })!.Adds.Single();
 
@@ -426,6 +431,66 @@ namespace VerifiedXCore.Tests
             }
             finally
             {
+                BaseValidatorSyncService.SubmitForTests = null;
+                Globals.HttpClientFactory = priorFactory;
+            }
+        }
+
+        /// <summary>
+        /// On a contract with its own casters, a validator change needs both groups: a caster signs the change it computes
+        /// itself, the validator in turn gathers 2/3 of the validators and a majority of the casters (at the address the
+        /// caster record gives) before it sends, and while the contract has no casters nothing is signed or sent.
+        /// </summary>
+        [Fact]
+        public async Task AValidatorChange_IsSignedByTheCastersToo_AndNothingChangesWhileTheContractHasNone()
+        {
+            var casters = new[] { NewKey(), NewKey(), NewKey() };
+            foreach (var c in casters)
+                AccountData.GetAccounts().InsertSafe(new Account { Address = c.Address, PublicKey = c.Pub, PrivateKey = "0" + c.Key.secret.ToString("x") });
+            var record = new CasterMembershipRecord
+            {
+                RecordSeq = 1, EffectiveFromHeight = 0,
+                Casters = casters.Select((c, i) => new CasterInfo { Address = c.Address, PeerIP = $"10.0.5.{i + 1}", PublicKey = c.Pub }).ToList(),
+            };
+            DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Upsert(record.RecordSeq, record);
+            VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
+
+            var at = new[] { _me, _seed2, _seed3, _new1, _new2, _unfunded }.Select((v, i) => (v, ip: $"10.0.0.{i + 1}"))
+                .Concat(casters.Select((c, i) => (v: c, ip: $"10.0.5.{i + 1}"))).ToDictionary(x => x.ip, x => x.v);
+            var network = new ValidatorNetwork(at);
+            var sent = new List<(string Function, object[] Args)>();
+            var priorFactory = Globals.HttpClientFactory;
+            Globals.HttpClientFactory = network;
+            BaseValidatorSyncService.SubmitForTests = (f, a) => { sent.Add((f, a)); return Task.FromResult<string?>("0xtx"); };
+            var validators = new[] { _me, _seed2, _seed3, _gone };
+            var digest = VbtcbTypedData.RemoveValidatorsDigest(new[] { _gone.Base }, Epoch, 7, 8453, Proxy);
+            try
+            {
+                // While the contract has no casters (a proxy just upgraded from V3), nothing is signed or sent.
+                Contract(7, validators, Array.Empty<V>());
+                Assert.Equal(BaseValidatorSyncService.NoCastersYetReason, Refusal(await Ask("REMOVE", new[] { _gone.Base }, Epoch, 7)));
+                Globals.LastBlock = new Block { Height = Epoch + BaseSignerSetPolicy.SettleBlocks + 8 * BaseValidatorSyncService.SubmitTurnBlocks, Timestamp = TimeUtil.GetTime() };
+                await BaseValidatorSyncService.SyncOnceAsync();
+                Assert.Empty(sent);
+
+                Contract(7, validators, casters);
+                Globals.ValidatorAddress = casters[0].Address;                     // a caster signs the removal it computes
+                SignedBy(casters[0], await Ask("REMOVE", new[] { _gone.Base }, Epoch, 7), digest);
+                Globals.ValidatorAddress = _new1.Address;                          // on neither list
+                Assert.Contains("Only a validator or caster on the contract", Refusal(await Ask("REMOVE", new[] { _gone.Base }, Epoch, 7)));
+
+                Globals.ValidatorAddress = _me.Address;
+                await BaseValidatorSyncService.SyncOnceAsync();
+                var (fn, args) = Assert.Single(sent);
+                Assert.Equal("removeValidatorBatch", fn);
+                var signers = ((List<byte[]>)args[2]).Select(b => ValidatorEthKeyService.RecoverSigner(digest, "0x" + Convert.ToHexString(b), personalMessage: false)!.ToLowerInvariant()).ToList();
+                Assert.True(signers.Count(s => new[] { _me, _seed2, _seed3 }.Any(v => v.Base == s)) >= 3);
+                Assert.True(signers.Count(s => casters.Any(c => c.Base == s)) >= 2);
+            }
+            finally
+            {
+                DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Delete(record.RecordSeq);
+                VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
                 BaseValidatorSyncService.SubmitForTests = null;
                 Globals.HttpClientFactory = priorFactory;
             }
