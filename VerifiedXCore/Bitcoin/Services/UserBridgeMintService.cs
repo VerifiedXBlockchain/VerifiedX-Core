@@ -298,6 +298,9 @@ namespace VerifiedXCore.Bitcoin.Services
             return signatures;
         }
 
+        /// <summary>How many caster records before the head are searched for a contract caster no longer in the committee.</summary>
+        internal const int EarlierCasterRecords = 200;
+
         /// <summary>A key the contract counts (on its validators, its casters or both), and where to ask it.</summary>
         internal sealed record ContractSigner(string BaseAddress, string IPAddress, string VfxAddress, bool Validator, bool Caster);
 
@@ -320,7 +323,14 @@ namespace VerifiedXCore.Bitcoin.Services
                     found[baseAddress] = new ContractSigner(baseAddress, ip, vfxAddress, onValidators.Contains(baseAddress), onCasters.Contains(baseAddress));
             }
             foreach (var v in VBTCValidatorRegistry.GetActiveValidators()) Add(v.FrostPublicKey, v.IPAddress, v.ValidatorAddress);
-            foreach (var c in VerifiedXCore.Services.CasterMembershipStore.GetCurrent()?.Casters ?? new List<VerifiedXCore.Models.CasterInfo>()) Add(c.PublicKey, c.PeerIP, c.Address);
+            var head = VerifiedXCore.Services.CasterMembershipStore.GetCurrent();
+            foreach (var c in head?.Casters ?? new List<VerifiedXCore.Models.CasterInfo>()) Add(c.PublicKey, c.PeerIP, c.Address);
+            // A caster that left the committee stays on the contract for two more days (BaseSignerSetPolicy.ComputeCasters)
+            // and still signs: its address is in the records before the head.
+            for (var seq = (head?.RecordSeq ?? 0) - 1; head != null && seq >= Math.Max(0, head.RecordSeq - EarlierCasterRecords)
+                 && onCasters.Any(b => !found.ContainsKey(b)); seq--)
+                foreach (var c in VerifiedXCore.Services.CasterMembershipStore.GetBySeq(seq)?.Casters ?? new List<VerifiedXCore.Models.CasterInfo>())
+                    Add(c.PublicKey, c.PeerIP, c.Address);
             return found.Values.ToList();
         }
 

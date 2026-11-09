@@ -827,9 +827,22 @@ namespace VerifiedXCore.Tests
                 BridgeLockRecord.Save(Recorded());
                 await BaseBridgeAttestationService.CollectMintAttestationsForLock(BridgeLockRecord.GetByLockId(lockId)!, 2);
                 Assert.Equal(BridgeLockStatus.AttestationPending, BridgeLockRecord.GetByLockId(lockId)!.Status);
+
+                // casters[2] has left the committee (the newest record) but is still on the contract for two days; with
+                // casters[1] down, its signature is the one that makes the majority, at the address an earlier record gives.
+                down.Clear();
+                down.Add("10.0.6.2");
+                DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Upsert(2L, new CasterMembershipRecord
+                {
+                    RecordSeq = 2, EffectiveFromHeight = 1,
+                    Casters = casters.Take(2).Select((c, i) => new CasterInfo { Address = c.Address, PeerIP = $"10.0.6.{i + 1}", PublicKey = c.Pub }).ToList(),
+                });
+                VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
+                MeetsBoth((await UserBridgeMintService.CollectValidatorSignatures(Recorded(), Tip, Globals.BaseEvmChainId, configured, 2))!);
             }
             finally
             {
+                DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Delete(2L);
                 DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Delete(record.RecordSeq);
                 VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
                 BaseBridgeService.ReadSignerViewForTests = null;
