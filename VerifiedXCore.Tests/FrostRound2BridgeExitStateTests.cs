@@ -27,6 +27,7 @@ namespace VerifiedXCore.Tests
         private readonly string? _priorCustomPath = Globals.CustomPath;
         private readonly Block _priorLastBlock = Globals.LastBlock;
         private readonly bool _priorLibrary = Globals.FrostFFIAvailable;
+        private readonly Func<long, string, bool> _priorHolds = FrostSigningAuthorization.BlockHoldsRequest;
         private readonly string _vault = Guid.NewGuid().ToString("N") + ":" + TimeUtil.GetTime();
         private readonly string _burn = "0x" + Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
 
@@ -37,6 +38,7 @@ namespace VerifiedXCore.Tests
             Globals.CustomPath = _tempRoot;
             Globals.LastBlock = new Block { Height = 500 };
             Globals.FrostFFIAvailable = true;   // a validator whose FROST library passed its check
+            FrostSigningAuthorization.BlockHoldsRequest = (_, _) => true; // the EXIT_TO_BTC is still in block 450, 50 down
             DbContext.Initialize();
             Assert.True(VBTCBridgeLockState.TryInsertFromLockTx(new Transaction { Hash = "lock-tx", FromAddress = "xLockOwner", Height = 440 }, _vault, "lock-1", 0.01M, 1_000_000, "0x" + new string('a', 40)));
             Assert.True(VBTCBridgeBtcExitState.TryInsert(new VBTCBridgeBtcExitState
@@ -53,6 +55,7 @@ namespace VerifiedXCore.Tests
             try { DbContext.CloseDB(); } catch { }
             Globals.LastBlock = _priorLastBlock;
             Globals.FrostFFIAvailable = _priorLibrary;
+            FrostSigningAuthorization.BlockHoldsRequest = _priorHolds;
             Globals.CustomPath = _priorCustomPath;
             try { Directory.Delete(_tempRoot, recursive: true); } catch { }
         }

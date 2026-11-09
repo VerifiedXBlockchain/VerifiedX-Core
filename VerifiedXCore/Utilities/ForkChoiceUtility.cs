@@ -32,6 +32,8 @@ namespace VerifiedXCore.Utilities
             public string HashAtDivergence { get; set; } = "";
             public int CertWeight { get; set; }
             public bool CertRuleApplicable { get; set; }
+            /// <summary>The rung of the ratified election record the branch's block at the divergence carries; null without one.</summary>
+            public int? ElectionRung { get; set; }
         }
 
         public static Outcome CompareBranches(BranchSummary local, BranchSummary remote)
@@ -42,6 +44,12 @@ namespace VerifiedXCore.Utilities
             // Defensive: identical hash at divergence = same block = no fork.
             if (string.Equals(local.HashAtDivergence, remote.HashAtDivergence, StringComparison.Ordinal))
                 return Outcome.LocalWins;
+
+            // Rule 0: the branch carrying a ratified election record wins, then the lower rung. Two thirds of the electorate
+            // signed it, and the other branch is what they found dead; deterministic, resolved in one block.
+            if (DecidedOnElection(local, remote))
+                return remote.ElectionRung == null || (local.ElectionRung != null && local.ElectionRung < remote.ElectionRung)
+                    ? Outcome.LocalWins : Outcome.RemoteWins;
 
             // Rule 1: certificate weight (both sides must be cert-era).
             if (DecidedOnCertWeight(local, remote))
@@ -57,9 +65,16 @@ namespace VerifiedXCore.Utilities
                 : Outcome.RemoteWins;
         }
 
+        /// <summary>Whether <see cref="CompareBranches"/> decides between two distinct branches on rule 0, the election record.</summary>
+        public static bool DecidedOnElection(BranchSummary local, BranchSummary remote)
+            => local != null && remote != null
+               && !string.Equals(local.HashAtDivergence, remote.HashAtDivergence, StringComparison.Ordinal)
+               && local.ElectionRung != remote.ElectionRung;
+
         /// <summary>Whether <see cref="CompareBranches"/> decides between two distinct branches on rule 1, certificate weight.</summary>
         public static bool DecidedOnCertWeight(BranchSummary local, BranchSummary remote)
             => local != null && remote != null
+               && !DecidedOnElection(local, remote)
                && !string.Equals(local.HashAtDivergence, remote.HashAtDivergence, StringComparison.Ordinal)
                && local.CertRuleApplicable && remote.CertRuleApplicable && local.CertWeight != remote.CertWeight;
 
@@ -71,7 +86,7 @@ namespace VerifiedXCore.Utilities
         {
             if (block?.ConsensusCertificate?.Attestations == null)
                 return 0;
-            var attestorSet = ConsensusCertificateVerifier.AttestorSetForHeight(block.Height);
+            var attestorSet = ConsensusCertificateVerifier.AttestorSetFor(block);
             var msg = ConsensusMessageFormatter.FormatAttestationV1(block.Height, block.Hash, block.Validator, block.PrevHash);
             var signers = new HashSet<string>(StringComparer.Ordinal);
             foreach (var a in block.ConsensusCertificate.Attestations)

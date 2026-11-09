@@ -323,6 +323,57 @@ namespace VerifiedXCore.Tests
             Assert.False((await Verify(Send(gone, _friend, 5_000M), 1_601)).Ok);
         }
 
+        /// <summary>
+        /// An election is judged at the height of the stall it answers, by whoever judges it and whenever: from fork choice at
+        /// a divergence below the tip, or from a record pulled after a restart. A stake that was aged at that height must
+        /// still read as aged there after the row has moved on: an exit and a heartbeat inside the wait (the age starts
+        /// again), or an exit, the wait and a new registration (a new bond). The row keeps the spans it closed.
+        /// </summary>
+        [Fact]
+        public async Task AStakeAgedAtAnEarlierHeight_StillReadsAsAgedThere_AfterItsBondResumedOrStartedAgain()
+        {
+            await StartTheRule();
+            var prior = Globals.PathAuditRulesHeight;
+            Globals.PathAuditRulesHeight = 250;
+            try
+            {
+                var (back, gone, stays) = (_old[1], _old[2], _old[3]);
+                const long election = 20_000;
+                await Apply(election);
+                foreach (var v in new[] { back, gone, stays }) Assert.True(ValidatorBond.AgedAt(ValidatorBond.Row(v.Address), election));
+
+                // After the election: both exit; one heartbeats inside the wait, the other waits it out and registers again.
+                await Apply(20_300, LifecycleTx(back, TransactionType.VBTC_V2_VALIDATOR_EXIT), LifecycleTx(gone, TransactionType.VBTC_V2_VALIDATOR_EXIT));
+                await Apply(20_350, LifecycleTx(back, TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT));
+                await Apply(20_400);  // the next funded look: the resumed bond's age starts here
+                await Apply(21_600, LifecycleTx(gone, TransactionType.VBTC_V2_VALIDATOR_REGISTER));
+                Assert.Equal(20_400, ValidatorBond.Row(back.Address)!.FundedSinceHeight);
+                Assert.Equal(21_600, ValidatorBond.Row(gone.Address)!.BondedAtHeight);
+                Assert.False(ValidatorBond.IsAged(back.Address, 21_601));
+                Assert.False(ValidatorBond.IsAged(gone.Address, 21_601));
+
+                // Judged again at the election's height, from the rows as they are now: the same electorate.
+                foreach (var v in new[] { back, gone, stays }) Assert.True(ValidatorBond.AgedAt(ValidatorBond.Row(v.Address), election));
+                // Not between its exit and its return, and not under the new age before it is reached.
+                Assert.False(ValidatorBond.AgedAt(ValidatorBond.Row(back.Address), 20_320));
+                Assert.False(ValidatorBond.AgedAt(ValidatorBond.Row(gone.Address), 21_000));
+                Assert.False(ValidatorBond.AgedAt(ValidatorBond.Row(back.Address), 20_400 + ValidatorBond.CeremonyAgeBlocks - 1));
+                Assert.True(ValidatorBond.AgedAt(ValidatorBond.Row(back.Address), 20_400 + ValidatorBond.CeremonyAgeBlocks));
+
+                // A second round of the same keeps both spans.
+                await Apply(40_000, LifecycleTx(back, TransactionType.VBTC_V2_VALIDATOR_EXIT));
+                await Apply(40_100, LifecycleTx(back, TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT));
+                Assert.Equal(2, ValidatorBond.Row(back.Address)!.ClosedSpans.Count);
+                Assert.True(ValidatorBond.AgedAt(ValidatorBond.Row(back.Address), election));
+                Assert.True(ValidatorBond.AgedAt(ValidatorBond.Row(back.Address), 39_000));
+                Assert.False(ValidatorBond.AgedAt(ValidatorBond.Row(back.Address), 40_050));
+            }
+            finally
+            {
+                Globals.PathAuditRulesHeight = prior;
+            }
+        }
+
         [Fact]
         public async Task GoingQuiet_UnlocksNothing_OnlyTheExitDoes()
         {

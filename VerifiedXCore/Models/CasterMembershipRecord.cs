@@ -1,3 +1,5 @@
+using Microsoft.AspNetCore.Mvc.ModelBinding.Validation;
+
 namespace VerifiedXCore.Models
 {
     /// <summary>
@@ -10,6 +12,9 @@ namespace VerifiedXCore.Models
     /// production that resumes during minting) and must carry ≥2 signatures from
     /// the hardcoded seed allowlist — the same trust root as the bootstrap agreement itself.
     /// </summary>
+    // Checked by its hash chain and signatures, never by the web layer: an ordinary record has no election hash and an
+    // election record no changed address, and inferred [Required] fields refused both with a 400 before the route ran.
+    [ValidateNever]
     public class CasterMembershipRecord
     {
         /// <summary>LiteDB id; strictly increasing, no gaps. Genesis = 0.</summary>
@@ -27,14 +32,28 @@ namespace VerifiedXCore.Models
         /// <summary>SHA256 hex (lowercase) of the canonical FormatCasterMembershipV1 payload.</summary>
         public string RecordHash { get; set; } = "";
 
-        /// <summary>Genesis | Promotion | Demotion | Departure</summary>
+        /// <summary>Genesis | Promotion | Demotion | Departure | BootstrapReset | EmergencyElection | ScheduledRotation | MaintenanceHold</summary>
         public string ChangeType { get; set; } = "";
 
         /// <summary>The address added or removed by this rotation ("" for genesis).</summary>
         public string ChangedAddress { get; set; } = "";
 
-        /// <summary>Signatures over the canonical payload from members of the PREVIOUS record's set.</summary>
+        /// <summary>Signatures over the canonical payload from members of the PREVIOUS record's set
+        /// (for an election or a rotation: from the electorate, see <see cref="Services.VreeElection"/>).</summary>
         public List<RecordSignature> Signatures { get; set; } = new();
+
+        // The fields below are read, and covered by the hash, only for the ChangeTypes of VreeElection.
+
+        /// <summary>The block the election is bound to (replay binding only; it never feeds the ranking).</summary>
+        public string EpochHash { get; set; } = "";
+        /// <summary>The election rung this record installs.</summary>
+        public int Rung { get; set; }
+        /// <summary>The signature scheme of the record's signatures.</summary>
+        public int SchemeVersion { get; set; }
+        /// <summary>EmergencyElection: the height its term ends (0 for every other record).</summary>
+        public long LapseHeight { get; set; }
+        /// <summary>MaintenanceHold: how long the hold lasts, in seconds (0 for every other record).</summary>
+        public long HoldSeconds { get; set; }
     }
 
     /// <summary>One rotation signature: signer must be a member of the previous record's caster set.</summary>

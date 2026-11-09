@@ -46,6 +46,24 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
+        /// The attestors of this block. A block carrying a valid election record is judged by that record's committee,
+        /// whatever this node holds: the record is what a node reorging onto the branch, or one that missed the gossip,
+        /// does not have yet. A block past an elected committee's term has no attestors.
+        /// </summary>
+        public static HashSet<string> AttestorSetFor(Block block)
+        {
+            var carried = VreeElection.CarriedCommittee(block);
+            if (carried != null) return carried;
+            if (VreeElection.Lapsed(CasterMembershipStore.GetForHeight(block.Height), block.Height, CasterMembershipStore.GetBySeq))
+                return new HashSet<string>(StringComparer.Ordinal);
+            return AttestorSetForHeight(block.Height);
+        }
+
+        /// <summary>The attestations this block needs, for the attestors of <see cref="AttestorSetFor"/>.</summary>
+        public static int RequiredAttestationsFor(Block block) =>
+            VreeElection.CarriedCommittee(block) is { } carried ? ConsensusQuorum.Required(carried.Count) : RequiredAttestationsForHeight(block.Height);
+
+        /// <summary>
         /// How many attestations a block at this height needs. ONE-QUORUM (Sep 2026): delegates to
         /// <see cref="ConsensusQuorum.RequiredForHeight"/> — the same number block-hash agreement
         /// uses. The former bootstrap branch (majority of the agreed seeds, floored at 2) is gone:
@@ -86,12 +104,12 @@ namespace VerifiedXCore.Services
                 return false;
 
             // Wave 3: committee for the block's height when the record era is active; legacy view otherwise.
-            var casterSet = AttestorSetForHeight(block.Height);
+            var casterSet = AttestorSetFor(block);
             if (casterSet.Count == 0)
                 return false;
 
             // Wave 4: single shared need computation (matches the attach + top-up paths exactly).
-            var need = RequiredAttestationsForHeight(block.Height);
+            var need = RequiredAttestationsFor(block);
             var validSigners = new HashSet<string>(StringComparer.Ordinal);
 
             if (cert.Attestations == null)

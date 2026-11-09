@@ -231,6 +231,27 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
         }
 
+        /// <summary>
+        /// Every Bitcoin transaction state has fixed for a payment of a vault the chain watches, live or dead: a withdrawal
+        /// by its request hash, one vault's part of a bridge exit by its signing reference. Empty when state holds none.
+        /// </summary>
+        public static List<string> TxidsFixedFor(string scUID, string signingReference)
+        {
+            // A signing session names its key; a later key of a vault has its own UID, and the rows are kept under the vault's.
+            var vault = BtcVaultKeys.VaultOf(scUID) ?? scUID;
+            vault = Stored(vault) ?? vault;
+            VaultWithdrawalRow? row;
+            if ((signingReference ?? "").StartsWith(VerifiedXCore.Bitcoin.FROST.FrostSigningAuthorization.BtcExitPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                var (exit, _, _) = VerifiedXCore.Bitcoin.FROST.FrostSigningAuthorization.ResolveBtcExitForContract(signingReference!, vault);
+                row = exit == null ? null : BtcAttestStore.Withdrawal(ExitRefOf(exit, vault));
+            }
+            else
+                // A withdrawal's row is named by its request and vault; a sweep's by its reference alone.
+                row = BtcAttestStore.Withdrawal(RefOf(signingReference ?? "", vault)) ?? BtcAttestStore.Withdrawal(signingReference ?? "");
+            return row?.Pins.Select(p => p.Txid).Where(t => !string.IsNullOrEmpty(t)).ToList() ?? new List<string>();
+        }
+
         /// <summary>The contract's UID as state holds it (a lookup ignores case; the tables here are keyed by the stored spelling).</summary>
         private static string? Stored(string? scUID) =>
             string.IsNullOrEmpty(scUID) ? scUID : SmartContractStateTrei.GetSmartContractState(scUID)?.SmartContractUID ?? scUID;
@@ -322,8 +343,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     if (coin.PinnedToRef == null)
                     {
                         // Not pinned: the Bitcoin left, nothing was owed for it (plan 5.7). Unless it is a transaction of a
-                        // withdrawal that had stopped holding the coin (#262).
-                        ShownWithoutAHolder(coin, spend, report, vfxHeight, db);
+                        // withdrawal that had stopped holding the coin (#262), or it pays an open one (payment attribution).
+                        ShownWithoutAHolder(coin, spend, effects, report, vfxHeight, db);
                         continue;
                     }
 
@@ -346,6 +367,20 @@ namespace VerifiedXCore.Bitcoin.Attestation
                             else Settle(row, spend.Txid, report, vfxHeight, db);
                             continue;
                         }
+                        // Not one of its transactions, but it pays this holder what it is owed: the transaction its signers
+                        // signed on a chain this node has left, confirming in place of the one fixed here (payment attribution).
+                        // One transaction pays one: not a second holder, of another coin it spends, owed the same.
+                        if (!answered && BtcAttestRules.PaysByDestination(vfxHeight) && spend.Outputs != null && !PaidAlready(coin.SmartContractUID, spend.Txid, db))
+                        {
+                            var (inputs, inputSats) = SpendsOf(spend.Txid, coin.SmartContractUID, effects);
+                            var paid = PaidOutput(row, spend.Outputs, inputSats);
+                            if (paid != null)
+                            {
+                                answered = true;
+                                SettleByPayment(row, spend.Txid, spend.TxHex ?? "", inputs, inputSats, spend.Outputs, paid, report, vfxHeight, db);
+                                continue;
+                            }
+                        }
                         foreach (var pin in row.Pins.Where(p => !p.Dead && p.Inputs.Contains(spend.Outpoint)))
                             pin.Dead = true;
                         if (row.Pins.All(p => p.Dead))
@@ -355,7 +390,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                             BtcAttestStore.SaveWithdrawal(row, db);
                     }
                     if (!answered)
-                        ShownWithoutAHolder(coin, spend, report, vfxHeight, db);
+                        ShownWithoutAHolder(coin, spend, effects, report, vfxHeight, db);
                 }
 
                 RetryWaiting(vaults, vfxHeight, db);
@@ -375,14 +410,18 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// Bitcoin reorganisation later dropped (#262). A withdrawal still open is paid by it, and settled: its other
         /// transactions' coins are freed, so no validator signs them. One already paid or closed was paid again from the
         /// vault: nothing was owed for it, and the payment is recorded on it (<see cref="VaultWithdrawalRow.UnowedPaymentTxids"/>).
+        /// A transaction of no row at all pays the open row it matches, or is kept for one (payment attribution).
         /// </summary>
-        private static void ShownWithoutAHolder(VaultCoinRow coin, BtcCoinEffect spend, Transaction report, long vfxHeight, LiteDatabase? db)
+        private static void ShownWithoutAHolder(VaultCoinRow coin, BtcCoinEffect spend, IReadOnlyList<BtcCoinEffect> effects, Transaction report, long vfxHeight, LiteDatabase? db)
         {
+            var ofARow = false;
             foreach (var state in Enum.GetValues<VaultWithdrawalState>())
                 foreach (var row in BtcAttestStore.WithdrawalsOf(coin.SmartContractUID, state, db).OrderBy(r => r.Ref, StringComparer.Ordinal))
                 {
                     var pin = row.Pins.FirstOrDefault(p => !p.IsRelease && p.Txid == spend.Txid && p.Inputs.Contains(spend.Outpoint));
-                    if (pin == null || row.SettledTxid == spend.Txid) continue;
+                    if (pin == null) continue;
+                    ofARow = true;
+                    if (row.SettledTxid == spend.Txid) continue;
                     if (row.State is VaultWithdrawalState.Waiting or VaultWithdrawalState.Pinned)
                     {
                         ErrorLogUtility.LogError($"Withdrawal {row.Ref} on {row.SmartContractUID} is paid by its earlier transaction {spend.Txid}, voided before by a spend Bitcoin no longer contains; its other transactions are given up.",
@@ -397,6 +436,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     ErrorLogUtility.LogError($"UNOWED PAYMENT: vault {row.SmartContractUID} paid withdrawal {row.Ref}{(row.IsBridgeExit ? $" (bridge exit {row.ExitBurnHash})" : "")} again: Bitcoin transaction {spend.Txid} confirmed after it was {row.State}{(row.SettledTxid != null ? $" by {row.SettledTxid}" : "")}. {pin.DestinationSats} sats left the vault for nothing owed.",
                         "BtcWithdrawals.ShownWithoutAHolder()");
                 }
+            if (!ofARow)
+                AttributeSpend(coin, spend, effects, report, vfxHeight, db);
         }
 
         /// <summary>
@@ -482,6 +523,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
         {
             if (row.IsBridgeExit) return TryPinExit(row, vfxHeight, db); // with the exit's other vaults, or not at all
             if (row.State != VaultWithdrawalState.Waiting || string.IsNullOrEmpty(row.DestinationScriptHex)) return false;
+            if (ClaimRememberedPayment(row, vfxHeight, db)) return true; // paid already, by a transaction the chain had not seen a request for
             // Not fixed on a key that cannot sign any more (plan 8.8): pinned, it could be neither paid nor given up; waiting,
             // it expires and its requester is refunded.
             if (BtcVaultKeys.CannotSignRefusal(row.SmartContractUID, db) is { } cannotSign)

@@ -399,7 +399,11 @@ namespace VerifiedXCore.Bitcoin.Services
                     // RunOnce acts only at the network's height: a vote built against forked, stale or
                     // still-syncing state must not go out.
                     if (!string.IsNullOrEmpty(Globals.ValidatorAddress))
+                    {
                         await RunOnce();
+                        // A request this validator signed for that a rewind removed is put back on the chain the node is on now.
+                        await FROST.SignedRequestCarry.ResubmitDueAsync();
+                    }
                 }
                 catch (Exception ex)
                 {

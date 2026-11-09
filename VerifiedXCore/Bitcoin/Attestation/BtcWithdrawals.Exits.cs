@@ -261,6 +261,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
         {
             var parts = BtcAttestStore.ExitParts(anyPart.RequestHash, anyPart.RequestVfxHeight, db).OrderBy(p => p.Ref, StringComparer.Ordinal).ToList();
             if (parts.Count == 0) return false;
+            // A part paid already, by a transaction the chain had not seen an exit for (payment attribution), is settled by it;
+            // the exit is then paying, and its other parts are fixed each as it can be.
+            if (parts.Where(p => p.State == VaultWithdrawalState.Waiting).Count(p => ClaimRememberedPayment(p, vfxHeight, db)) > 0)
+                parts = BtcAttestStore.ExitParts(anyPart.RequestHash, anyPart.RequestVfxHeight, db).OrderBy(p => p.Ref, StringComparer.Ordinal).ToList();
             var committed = parts.Any(p => p.State is VaultWithdrawalState.Pinned or VaultWithdrawalState.Settled);
             if (!committed && parts.Any(p => p.State != VaultWithdrawalState.Waiting)) return false;
 

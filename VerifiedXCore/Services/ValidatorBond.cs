@@ -32,7 +32,21 @@ namespace VerifiedXCore.Services
         /// nothing of it. (A later registration or heartbeat, which needs the balance, starts a bond of its own.)
         /// </summary>
         public bool Released { get; set; }
+        /// <summary>
+        /// The funded spans this address held before the current one, closed by an exit: by a heartbeat that resumed the
+        /// bond and started its age again, or by a registration after a full exit. An election is judged at the height
+        /// of the stall or lapse it answers, on any tip above it (<see cref="ValidatorBond.AgedAt"/>): the stake that was
+        /// aged there must still read as aged there once the row has moved on.
+        /// </summary>
+        public List<BondSpan> ClosedSpans { get; set; } = new();
         public long LastModifiedHeight { get; set; }
+    }
+
+    /// <summary>A span during which a stake was seen funded under the bond, from its first funded look to the exit that closed it.</summary>
+    public sealed class BondSpan
+    {
+        public long FundedSinceHeight { get; set; }
+        public long ExitHeight { get; set; }
     }
 
     /// <summary>
@@ -217,14 +231,26 @@ namespace VerifiedXCore.Services
                     if (row != null && row.ExitHeight == 0) return;          // bonded already: nothing changes
                     if (row != null && Holds(row, height))
                     {
-                        row.ExitHeight = 0;                                    // in its exit wait: the bond resumes, the stake never left
                         // ... but its age starts again (from the path-audit rules): a validator could leave in the middle of
                         // each ceremony and come back aged at once, so every re-key including it failed (fifth review, round 14).
-                        if (height >= Globals.PathAuditRulesHeight) row.FundedSinceHeight = 0;
+                        // The span it closes stays on the row: an election judged at a height inside it still counts the stake.
+                        if (height >= Globals.PathAuditRulesHeight)
+                        {
+                            CloseSpan(row);
+                            row.FundedSinceHeight = 0;
+                        }
+                        row.ExitHeight = 0;                                    // in its exit wait: the bond resumes, the stake never left
                         Save(row, db);
                         return;
                     }
-                    Save(new ValidatorBondRow { Address = tx.FromAddress, BondedAtHeight = height }, db); // a new bond (or one after a full exit)
+                    // A new bond (or one after a full exit, which keeps the spans the old bond held).
+                    var fresh = new ValidatorBondRow { Address = tx.FromAddress, BondedAtHeight = height };
+                    if (row != null)
+                    {
+                        CloseSpan(row);
+                        fresh.ClosedSpans = row.ClosedSpans;
+                    }
+                    Save(fresh, db);
                     return;
                 }
                 case TransactionType.VBTC_V2_VALIDATOR_EXIT:
@@ -280,6 +306,29 @@ namespace VerifiedXCore.Services
         {
             var row = Row(address, db);
             return row != null && row.ExitHeight == 0 && row.FundedSinceHeight != 0 && height - row.FundedSinceHeight >= CeremonyAgeBlocks;
+        }
+
+        /// <summary>
+        /// Whether a bond was aged and unexited at <paramref name="height"/>, read from its row on a tip at or above that
+        /// height: an exit or a funding after the height does not count against it, and neither does a heartbeat or a
+        /// registration after that exit, which closed the span the height falls in (<see cref="ValidatorBondRow.ClosedSpans"/>).
+        /// The same as <see cref="IsAged"/> at the tip, so a node judging an election at its stall tip and a node judging the
+        /// same election later, from fork choice or a record it missed, agree.
+        /// </summary>
+        public static bool AgedAt(ValidatorBondRow? row, long height) =>
+            row != null
+            && ((!row.Released && AgedIn(row.FundedSinceHeight, row.ExitHeight, height))
+                || (row.ClosedSpans?.Any(s => AgedIn(s.FundedSinceHeight, s.ExitHeight, height)) ?? false));
+
+        private static bool AgedIn(long fundedSinceHeight, long exitHeight, long height) =>
+            fundedSinceHeight != 0 && height - fundedSinceHeight >= CeremonyAgeBlocks && (exitHeight == 0 || exitHeight > height);
+
+        /// <summary>Keeps the funded span an exit closed on the row, before the bond moves on from it.</summary>
+        private static void CloseSpan(ValidatorBondRow row)
+        {
+            if (row.Released || row.FundedSinceHeight == 0 || row.ExitHeight == 0) return;
+            row.ClosedSpans ??= new List<BondSpan>();
+            row.ClosedSpans.Add(new BondSpan { FundedSinceHeight = row.FundedSinceHeight, ExitHeight = row.ExitHeight });
         }
 
         /// <summary>

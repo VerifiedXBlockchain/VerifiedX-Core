@@ -1588,6 +1588,59 @@ namespace VerifiedXCore.Services
 
         public const string TimestampOutsideItsBlockMessage = "The timestamp of this transaction is too far from its block's.";
 
+        public const string AgedRequestProducerMessage = "A withdrawal request older than its block allows is valid only in a block produced by a holder of a share of its vault's key.";
+
+        /// <summary>
+        /// How old a withdrawal request may be in a key holder's block. An automatic rewind reaches at most the oldest
+        /// snapshot (about a thousand blocks), and the validator that holds the request gives up after three days
+        /// (SignedRequestCarry.GiveUpSeconds): past this a signed request is as expired as any other transaction.
+        /// </summary>
+        public const long AgedRequestMaxAgeSeconds = 4 * 24 * 60 * 60;
+
+        /// <summary>
+        /// Whether the rule for a withdrawal request past the age limit applies at a height: from the activation height,
+        /// and never below the height from which a block's transactions are judged by the block's own timestamp
+        /// (<see cref="BlockTime"/>): below it block validation reads each node's clock, and what one node holds.
+        /// </summary>
+        public static bool AgedRequestRuleActive(long height) => height >= Globals.VreeActivationHeight && height >= Globals.PathAuditRulesHeight;
+
+        /// <summary>
+        /// Why a transaction older than its block allows is still not valid in the block, or null when it is (from
+        /// Globals.VreeActivationHeight, a vBTC withdrawal request only). A validator gives its share for a withdrawal for
+        /// good: the Bitcoin transaction stays payable, so a request it signed for is put back on the chain a rewind left
+        /// it off (Bitcoin.FROST.SignedRequestCarry) however old the request has become by then. Nobody else can show what
+        /// was signed, so the block must be produced by a holder of a share of the key of one of the request's vaults: an
+        /// old request is not mined on anybody else's say-so. A request that already has a mined row is refused: the age
+        /// rule is what bounds the replay guard (TxHashGuard), so a request past it needs its own. Every other
+        /// transaction, a request ahead of its block and one older than <see cref="AgedRequestMaxAgeSeconds"/> keep the
+        /// rule as it was.
+        /// </summary>
+        public static string? AgedWithdrawalRequestRefusal(Transaction tx, long? blockHeight, long blockTime, string? blockValidator)
+        {
+            if (tx.TransactionType != TransactionType.VBTC_V2_WITHDRAWAL_REQUEST || blockHeight == null || !AgedRequestRuleActive(blockHeight.Value))
+                return TimestampOutsideItsBlockMessage;
+            if (tx.Timestamp - blockTime > Globals.MaxFutureSkewSeconds + BlockTimeMarginSeconds || blockTime - tx.Timestamp > AgedRequestMaxAgeSeconds)
+                return TimestampOutsideItsBlockMessage;
+            if (string.IsNullOrEmpty(blockValidator) || !WithdrawalKeyHolders(tx).Contains(blockValidator))
+                return AgedRequestProducerMessage;
+            return VBTCWithdrawalRequest.MinedRowRefusal(tx.Hash);
+        }
+
+        /// <summary>The validators that hold a share of any key of any vault a withdrawal request names: state, the same on every node.</summary>
+        public static HashSet<string> WithdrawalKeyHolders(Transaction tx)
+        {
+            var holders = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var (scUid, _) in VBTCService.GetVbtcV2WithdrawalOutflows(tx))
+            {
+                foreach (var key in VerifiedXCore.Bitcoin.Attestation.BtcAttestStore.ScriptRowsForVault(scUid))
+                    foreach (var holder in VerifiedXCore.Bitcoin.Attestation.BtcVaultKeys.Holders(key))
+                        holders.Add(holder);
+                foreach (var holder in VBTCChainView.GetVault(scUid)?.Feature.ValidatorAddressesSnapshot ?? new List<string>())
+                    if (!string.IsNullOrEmpty(holder)) holders.Add(holder);
+            }
+            return holders;
+        }
+
         #endregion
     }
 }

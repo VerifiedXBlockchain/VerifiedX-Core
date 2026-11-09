@@ -29,6 +29,11 @@ namespace VerifiedXCore.Models
 		/// <summary>Optional caster quorum certificate; not included in <see cref="GetBlockHash"/>.</summary>
 		public ConsensusCertificate? ConsensusCertificate { get; set; }
 
+		/// <summary>The ratified election or rotation record this block is the first block under (VreeElection); not included in
+		/// <see cref="GetBlockHash"/>. Left out of the JSON when null, so every other block serializes as it always did.</summary>
+		[Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
+		public CasterMembershipRecord? MembershipRecord { get; set; }
+
 		public IList<Transaction> Transactions { get; set; }
 		//Methods
 		public void Build()

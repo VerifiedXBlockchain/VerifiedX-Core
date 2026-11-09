@@ -156,6 +156,28 @@ namespace VerifiedXCore.Services
             return Convert.ToHexString(sha256.ComputeHash(Encoding.UTF8.GetBytes("CASTER-SET-V1|" + joined))).ToLowerInvariant();
         }
 
+        /// <summary>What this node signed for one rung of one election (Id = epoch hash | rung).</summary>
+        public class ElectionSignMark
+        {
+            public string Id { get; set; } = "";
+            public string RecordHash { get; set; } = "";
+        }
+
+        /// <summary>A validator signs one record per rung of an election: false when another record was signed for it, or the store cannot say.</summary>
+        public static bool TryMarkElectionSigned(string epochHash, int rung, string recordHash)
+        {
+            lock (Mut)
+            {
+                var col = DbContext.DB_Config?.GetCollection<ElectionSignMark>("rsrv_vree_signed");
+                if (col == null) return false;
+                var id = $"{epochHash}|{rung}";
+                var existing = col.FindById(id);
+                if (existing != null) return string.Equals(existing.RecordHash, recordHash, StringComparison.OrdinalIgnoreCase);
+                col.Insert(id, new ElectionSignMark { Id = id, RecordHash = recordHash });
+                return true;
+            }
+        }
+
         internal enum SignedMarkDecision { Insert, Idempotent, SameSetRefresh, LegacyUpgrade, Refuse }
 
         /// <summary>
@@ -277,8 +299,9 @@ namespace VerifiedXCore.Services
         {
             var sorted = r.Casters.OrderBy(c => c.Address, StringComparer.Ordinal)
                 .Select(c => (c.Address, c.PeerIP, c.PublicKey));
-            return ConsensusMessageFormatter.FormatCasterMembershipV1(
+            var payload = ConsensusMessageFormatter.FormatCasterMembershipV1(
                 r.RecordSeq, r.EffectiveFromHeight, r.PrevRecordHash, r.ChangeType, r.ChangedAddress, sorted);
+            return VreeElection.IsVreeRecord(r) ? payload + VreeElection.PayloadSuffix(r) : payload;
         }
 
         public static string ComputeRecordHash(CasterMembershipRecord r)
@@ -405,6 +428,18 @@ namespace VerifiedXCore.Services
                 .OrderByDescending(x => x.RecordSeq).FirstOrDefault();
         }
 
+        /// <summary>The record at a sequence number, or null.</summary>
+        public static CasterMembershipRecord? GetBySeq(long seq) => seq < 0 ? null : Collection()?.FindById(seq);
+
+        /// <summary>The record whose members hold the seats now: the head, unless the head is a rotation not in force yet (or a hold over one).</summary>
+        public static CasterMembershipRecord? GetSeatRecord()
+        {
+            var head = GetCurrent();
+            if (!VreeElection.RotationPending(head, Globals.LastBlock?.Height ?? -1, GetBySeq)) return head;
+            var rotation = VreeElection.UnderHolds(head, GetBySeq)!;
+            return GetBySeq(rotation.RecordSeq - 1) ?? head;
+        }
+
         /// <summary>Committee addresses for a height, or null in the legacy era.</summary>
         public static HashSet<string>? GetCommitteeForHeight(long height)
         {
@@ -422,7 +457,12 @@ namespace VerifiedXCore.Services
         /// signatures from prev's caster set (skipped for genesis, which is deterministic).
         /// Pure — used by TryAppend, the signing endpoint, and chain verification.
         /// </summary>
-        public static bool ValidateSuccessor(CasterMembershipRecord? prev, CasterMembershipRecord candidate, out string reason)
+        /// <param name="termEnded">The election record that ends the candidate's committee's term is in hand, validated as
+        /// the candidate's own successor (membership sync carried both): the term limit's handover window no longer
+        /// applies to the candidate (VreeElection.TermRefusal).</param>
+        /// <param name="bySeq">The record at a sequence number; the store's unless a run of records not stored yet is being
+        /// judged (<see cref="ValidRunFromHead"/>).</param>
+        public static bool ValidateSuccessor(CasterMembershipRecord? prev, CasterMembershipRecord candidate, out string reason, bool termEnded = false, Func<long, CasterMembershipRecord?>? bySeq = null)
         {
             reason = "";
             if (candidate == null) { reason = "null candidate"; return false; }
@@ -469,6 +509,9 @@ namespace VerifiedXCore.Services
             if (candidate.RecordSeq != prev.RecordSeq + 1) { reason = $"seq {candidate.RecordSeq} != {prev.RecordSeq + 1}"; return false; }
             if (!string.Equals(candidate.PrevRecordHash, prev.RecordHash, StringComparison.OrdinalIgnoreCase))
             { reason = "prevRecordHash mismatch"; return false; }
+            // An election replaces a committee that is dead now, even if a rotation it had signed was still to take effect.
+            if (VreeElection.IsElectionRecord(candidate))
+                return VreeElection.ValidateElection(prev, candidate, out reason, bySeq);
             if (candidate.EffectiveFromHeight <= prev.EffectiveFromHeight)
             { reason = "effective height not advancing"; return false; }
             if (candidate.Casters == null || candidate.Casters.Count < MinCommitteeSize)
@@ -486,6 +529,11 @@ namespace VerifiedXCore.Services
             // only acceptable while OUR tip is provably stale (see ValidateBootstrapReset).
             if (string.Equals(candidate.ChangeType, BootstrapResetChangeType, StringComparison.Ordinal))
                 return ValidateBootstrapReset(candidate, TipAgeSeconds(), out reason);
+
+            if (VreeElection.IsHoldRecord(candidate) && VreeElection.HoldShapeRefusal(prev, candidate) is { } notAHold)
+            { reason = notAHold; return false; }
+            if (VreeElection.TermRefusal(prev, candidate, Globals.LastBlock?.Height ?? -1, bySeq ?? GetBySeq, termEnded) is { } termOver)
+            { reason = termOver; return false; }
 
             var prevSet = prev.Casters.Select(c => c.Address).ToHashSet(StringComparer.Ordinal);
             var need = prevSet.Count / 2 + 1;
@@ -516,6 +564,7 @@ namespace VerifiedXCore.Services
             if (Has(r.PrevRecordHash)) return "PrevRecordHash";
             if (Has(r.ChangeType)) return "ChangeType";
             if (Has(r.ChangedAddress)) return "ChangedAddress";
+            if (Has(r.EpochHash)) return "EpochHash";
             foreach (var c in r.Casters ?? new List<CasterInfo>())
                 if (c == null || Has(c.Address) || Has(c.PeerIP) || Has(c.PublicKey)) return "a caster entry";
             return null;
@@ -597,7 +646,9 @@ namespace VerifiedXCore.Services
         /// </summary>
         /// <param name="genesisHolders">For a genesis: how many peers hold a valid copy of it (membership sync counts them;
         /// a single announce or this node's own genesis is one). Read only against an older reset marker.</param>
-        public static bool TryAppend(CasterMembershipRecord candidate, out string reason, bool fromSync = false, int genesisHolders = 1)
+        /// <param name="termEnded">Membership sync carried, with the candidate, the election record that ends its committee's
+        /// term, validated as the candidate's successor (see <see cref="ValidateSuccessor"/>).</param>
+        public static bool TryAppend(CasterMembershipRecord candidate, out string reason, bool fromSync = false, int genesisHolders = 1, bool termEnded = false)
         {
             lock (Mut)
             {
@@ -624,6 +675,42 @@ namespace VerifiedXCore.Services
                             return true;
                         }
                         CasterLogUtility.Log($"MEMBERSHIP: sibling at seq={candidate.RecordSeq} NOT adopted — {siblingReason}.", "MEMBERSHIP");
+                    }
+
+                    // Rungs of one election are siblings. A rung seen here starts the signers' hold. It replaces a head that has
+                    // not started only if the head is the seed reset of the same stall (an election outranks it), or the rung
+                    // names this node and the head does not: its members must all install it to reach their quorum, and one
+                    // member's announce is how the others hear of it, and a member of both rungs takes the higher: nobody signs
+                    // it until the lower has had its hold. Everyone else waits for its first block (AdoptCarried).
+                    if (VreeElection.IsElectionRecord(candidate) && candidate.RecordSeq == head.RecordSeq
+                        && !string.Equals(candidate.RecordHash, head.RecordHash, StringComparison.OrdinalIgnoreCase)
+                        && !EffectiveHeightHasPassed(candidate.EffectiveFromHeight, Globals.LastBlock?.Height ?? -1)
+                        && GetBySeq(candidate.RecordSeq - 1) is { } siblingPrev && ValidateSuccessor(siblingPrev, candidate, out var electionReason))
+                    {
+                        VreeElection.NoteRatified(candidate.EpochHash, candidate.RecordHash);
+                        var self = Globals.ValidatorAddress;
+                        var namesThisNode = !string.IsNullOrEmpty(self) && candidate.Casters.Any(c => c.Address == self)
+                            && (!head.Casters.Any(c => c.Address == self) || (VreeElection.IsElectionRecord(head) && candidate.Rung > head.Rung));
+                        if ((head.ChangeType == BootstrapResetChangeType || namesThisNode) && !EffectiveHeightHasPassed(head.EffectiveFromHeight, Globals.LastBlock?.Height ?? -1))
+                        {
+                            Collection()!.Update(candidate.RecordSeq, candidate);
+                            _cachedHead = candidate;
+                            CasterLogUtility.Log($"MEMBERSHIP: election seq={candidate.RecordSeq} rung {candidate.Rung} replaces {head.ChangeType} of the same stall.", "MEMBERSHIP");
+                            reason = "replaced a record that had not started";
+                            return true;
+                        }
+                    }
+
+                    // A seed reset of a stall whose ratified rung never started, once no other rung can follow it.
+                    if (VreeElection.ResetMayReplace(head, candidate, Globals.LastBlock?.Height ?? -1, TipAgeSeconds())
+                        && GetBySeq(candidate.RecordSeq - 1) is { } resetPrev && ValidateSuccessor(resetPrev, candidate, out _))
+                    {
+                        Collection()!.Update(candidate.RecordSeq, candidate);
+                        _cachedHead = candidate;
+                        VreeElection.NoteRatified(Globals.LastBlock?.Hash, candidate.RecordHash); // the seeds get the hold a rung gets, to produce
+                        CasterLogUtility.Log($"MEMBERSHIP: seed reset seq={candidate.RecordSeq} replaces {head.ChangeType} rung {head.Rung}, which never started.", "MEMBERSHIP");
+                        reason = "replaced a rung that never started";
+                        return true;
                     }
 
                     // Wave 6 FIRST-GENESIS-WINS: a DIFFERENT genesis than ours is loud evidence of
@@ -656,17 +743,86 @@ namespace VerifiedXCore.Services
                     reason = $"effective height {candidate.EffectiveFromHeight} has passed (tip {tip})";
                     return false;
                 }
-                if (!ValidateSuccessor(head, candidate, out reason))
+                if (!ValidateSuccessor(head, candidate, out reason, termEnded))
                     return false;
                 var col = Collection();
                 if (col == null) { reason = "db unavailable"; return false; }
                 col.Insert(candidate.RecordSeq, candidate);
                 _cachedHead = candidate;
+                if (VreeElection.IsElectionRecord(candidate)) VreeElection.NoteRatified(candidate.EpochHash, candidate.RecordHash);
                 CasterLogUtility.Log(
                     $"MEMBERSHIP: appended record seq={candidate.RecordSeq} ({candidate.ChangeType} {candidate.ChangedAddress}) effective={candidate.EffectiveFromHeight} casters=[{string.Join(",", candidate.Casters.Select(c => c.Address))}]",
                     "MEMBERSHIP");
                 if (candidate.RecordSeq == 0)
                     TryArmFromGenesis(); // Wave 6: installing genesis arms cert enforcement
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// A rung's member ratified its own rung while the head is a sibling (a lower rung that died before its first block):
+        /// it installs its own so it can cast. Fully validated, and only until the sibling's first block is committed.
+        /// </summary>
+        public static bool ReplaceHeadWithOwnRung(CasterMembershipRecord candidate, out string reason)
+        {
+            lock (Mut)
+            {
+                var head = GetCurrent();
+                reason = "not a sibling of the head";
+                if (head == null || !VreeElection.IsElectionRecord(candidate) || candidate.RecordSeq != head.RecordSeq) return false;
+                var tip = Globals.LastBlock?.Height ?? -1;
+                if (EffectiveHeightHasPassed(head.EffectiveFromHeight, tip)) { reason = "the head is in force"; return false; }
+                var prev = GetBySeq(candidate.RecordSeq - 1);
+                if (prev == null || !ValidateSuccessor(prev, candidate, out reason)) return false;
+                Collection()!.Update(candidate.RecordSeq, candidate);
+                _cachedHead = candidate;
+                VreeElection.NoteRatified(candidate.EpochHash, candidate.RecordHash);
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Takes the record a block carries, already judged valid (VreeElection.JudgeCarried) and with the block's certificate
+        /// verified under it: as the next record, or in place of a sibling that has not started. The first block of a
+        /// committee decides which of its siblings counts. This is the only way a node with a stale view or a late start gets
+        /// a record it could not bind to its own tip by gossip.
+        /// </summary>
+        public static bool AdoptCarried(CasterMembershipRecord carried, out string reason)
+        {
+            lock (Mut)
+            {
+                reason = "";
+                var head = GetCurrent();
+                if (head == null) { reason = "no record here"; return false; }
+                if (carried.RecordSeq > head.RecordSeq + 1) { reason = $"seq {carried.RecordSeq} is above head {head.RecordSeq} + 1"; return false; }
+                var col = Collection();
+                if (col == null) { reason = "db unavailable"; return false; }
+                if (carried.RecordSeq == head.RecordSeq + 1)
+                {
+                    if (!string.Equals(carried.PrevRecordHash, head.RecordHash, StringComparison.OrdinalIgnoreCase)) { reason = "does not extend the head"; return false; }
+                    col.Insert(carried.RecordSeq, carried);
+                }
+                else
+                {
+                    var same = col.FindById(carried.RecordSeq);
+                    if (same != null && string.Equals(same.RecordHash, carried.RecordHash, StringComparison.OrdinalIgnoreCase)) return true;
+                    var prev = carried.RecordSeq > 0 ? col.FindById(carried.RecordSeq - 1) : null;
+                    if (prev == null || !string.Equals(carried.PrevRecordHash, prev.RecordHash, StringComparison.OrdinalIgnoreCase)) { reason = $"not a sibling of this chain's record at seq {carried.RecordSeq}"; return false; }
+                    // The block is this node's next, judged valid and certified under the record, so every record from the sibling's
+                    // seq up governed only blocks this node no longer has: the branch it left (a partition that demoted the
+                    // members it could not reach, then lost to the elected one). They go with those blocks; one that governed a
+                    // block this node still holds would be a real conflict, and the block is refused as before.
+                    var replaced = col.Query().Where(x => x.RecordSeq >= carried.RecordSeq).ToList();
+                    if (replaced.Any(r => r.EffectiveFromHeight < carried.EffectiveFromHeight))
+                    { reason = $"a record at or above seq {carried.RecordSeq} governs blocks below {carried.EffectiveFromHeight}"; return false; }
+                    foreach (var r in replaced.Where(r => r.RecordSeq != carried.RecordSeq)) col.Delete(r.RecordSeq);
+                    col.Upsert(carried.RecordSeq, carried);
+                    if (replaced.Count > 1)
+                        CasterLogUtility.Log($"MEMBERSHIP: records seq {carried.RecordSeq + 1}..{replaced.Max(r => r.RecordSeq)} belonged to a branch this node left; dropped.", "MEMBERSHIP");
+                }
+                _cachedHead = carried;
+                VreeElection.NoteRatified(carried.EpochHash, carried.RecordHash);
+                CasterLogUtility.Log($"MEMBERSHIP: adopted {carried.ChangeType} seq={carried.RecordSeq} rung {carried.Rung} from the block at {carried.EffectiveFromHeight}.", "MEMBERSHIP");
                 return true;
             }
         }
@@ -685,16 +841,52 @@ namespace VerifiedXCore.Services
         {
             firstRefusal = null;
             var applied = 0;
-            foreach (var r in records.OrderBy(x => x.RecordSeq))
+            var ordered = records.Where(x => x != null).OrderBy(x => x.RecordSeq).ToList();
+            lock (Mut)
             {
-                var headSeq = GetCurrent()?.RecordSeq ?? -1;
-                // Wave 6: genesis is appended like any record — validated by seed signatures.
-                if (TryAppend(r, out var why, fromSync: true, genesisHolders: genesisHolders))
-                    applied++;
-                else if (firstRefusal == null && r.RecordSeq > headSeq)
-                    firstRefusal = $"seq {r.RecordSeq}: {why}";
+                // A committee's mid-term records are taken inside its term's handover window only together with the election
+                // that ended the term, ratified on top of them (VreeElection.TermRefusal). The whole run from this node's head
+                // through that election is judged before any of it goes in, however many records the node missed.
+                var startSeq = GetCurrent()?.RecordSeq ?? -1;
+                var run = ordered.Any(x => x.RecordSeq > startSeq && VreeElection.IsElectionRecord(x)) ? ValidRunFromHead(ordered) : new List<CasterMembershipRecord>();
+                var endedBelow = run.Where(VreeElection.IsElectionRecord).Select(x => x.RecordSeq).DefaultIfEmpty(-1).Max();
+                foreach (var r in ordered)
+                {
+                    var headSeq = GetCurrent()?.RecordSeq ?? -1;
+                    var termEnded = r.RecordSeq < endedBelow && !VreeElection.IsElectionRecord(r) && run.Any(x => ReferenceEquals(x, r));
+                    // Wave 6: genesis is appended like any record — validated by seed signatures.
+                    if (TryAppend(r, out var why, fromSync: true, genesisHolders: genesisHolders, termEnded: termEnded))
+                        applied++;
+                    else if (firstRefusal == null && r.RecordSeq > headSeq)
+                        firstRefusal = $"seq {r.RecordSeq}: {why}";
+                }
             }
             return applied;
+        }
+
+        /// <summary>
+        /// The records of <paramref name="records"/> that extend this node's head one after another, each judged as the
+        /// successor of the one before, with nothing written: the run stands in for the store above the head. It answers
+        /// whether the chain is signed, not whether to take it now, so the handover window is read as ended; an append
+        /// applies the window itself. Empty when this node has no record, or the first record does not extend its head.
+        /// </summary>
+        internal static List<CasterMembershipRecord> ValidRunFromHead(IEnumerable<CasterMembershipRecord> records)
+        {
+            var run = new List<CasterMembershipRecord>();
+            var head = GetCurrent();
+            if (head == null || records == null) return run;
+            var above = new Dictionary<long, CasterMembershipRecord>();
+            foreach (var r in records)
+                if (r != null && r.RecordSeq > head.RecordSeq && !above.ContainsKey(r.RecordSeq)) above[r.RecordSeq] = r;
+            CasterMembershipRecord? BySeq(long seq) => seq > head.RecordSeq ? run.FirstOrDefault(x => x.RecordSeq == seq) : GetBySeq(seq);
+            var prev = head;
+            for (var seq = head.RecordSeq + 1; above.TryGetValue(seq, out var next); seq++)
+            {
+                if (!ValidateSuccessor(prev, next, out _, termEnded: true, bySeq: BySeq)) break;
+                run.Add(next);
+                prev = next;
+            }
+            return run;
         }
 
         // ── Double-sign protection ───────────────────────────────────────
@@ -816,6 +1008,30 @@ namespace VerifiedXCore.Services
         /// <summary>This node, against the record heads its last membership pull observed.</summary>
         internal static bool MissingWhilePeersHaveOne()
             => MissingWhilePeersHaveOne(GetCurrent()?.RecordSeq, CasterDiscoveryService.LastObservedPeerHeads);
+
+        /// <summary>The stored records from this seq up, so a block refused after its carried record was adopted can put them back.</summary>
+        public static List<CasterMembershipRecord> RecordsFrom(long seq) =>
+            Collection()?.Query().Where(x => x.RecordSeq >= seq).ToList() ?? new List<CasterMembershipRecord>();
+
+        /// <summary>
+        /// Replaces the stored records from the adopted record's seq up with ones taken by <see cref="RecordsFrom"/>, only
+        /// while that record is still the only one there. False when another writer (gossip, a pull) has changed them since:
+        /// their record stands.
+        /// </summary>
+        public static bool RestoreRecordsFrom(CasterMembershipRecord adopted, List<CasterMembershipRecord> records)
+        {
+            lock (Mut)
+            {
+                var col = Collection() ?? throw new InvalidOperationException("the record store is unavailable");
+                var now = col.Query().Where(x => x.RecordSeq >= adopted.RecordSeq).ToList();
+                if (now.Count != 1 || !string.Equals(now[0].RecordHash, adopted.RecordHash, StringComparison.OrdinalIgnoreCase))
+                    return false;
+                col.Delete(adopted.RecordSeq);
+                foreach (var r in records) col.Upsert(r.RecordSeq, r);
+                _cachedHead = null;
+                return true;
+            }
+        }
 
         /// <summary>Test/diagnostic support: clears the in-memory head cache (persisted data untouched).</summary>
         public static void InvalidateCache()

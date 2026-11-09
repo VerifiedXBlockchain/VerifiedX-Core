@@ -113,6 +113,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 Unsettle(row, bitcoinHeight, rewind, db);
 
             ReviveVoidedExitParts(touched, bitcoinHeight, db);
+            DropPaymentsAbove(bitcoinHeight, db); // kept payments confirmed in the dropped blocks (payment attribution)
 
             // Coins.
             var vaults = new SortedSet<string>(StringComparer.Ordinal);

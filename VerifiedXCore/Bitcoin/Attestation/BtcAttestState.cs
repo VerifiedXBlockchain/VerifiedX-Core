@@ -284,6 +284,36 @@ namespace VerifiedXCore.Bitcoin.Attestation
     }
 
     /// <summary>
+    /// A vault's coins that left in a transaction the chain had not fixed and that paid no withdrawal or exit part open at
+    /// the time (payment attribution, from the VREE height). Kept as consensus state so that a request or exit part applied
+    /// later for that destination and amount is settled by it instead of being fixed on other coins: the chain the node is
+    /// on after a deep VFX rewind has not seen the request whose payment this is. The id is "txid|scUID". Never deleted;
+    /// one is claimable for <see cref="BtcAttestRules.RememberedPaymentBlocks"/> blocks after it was seen.
+    /// </summary>
+    public sealed class VaultPaymentRow
+    {
+        [BsonId] public string Id { get; set; } = "";
+        public string Txid { get; set; } = "";
+        public string SmartContractUID { get; set; } = "";
+        public string TxHex { get; set; } = "";
+        /// <summary>The vault coins it spent, and what they held.</summary>
+        public List<string> Inputs { get; set; } = new();
+        public long InputSats { get; set; }
+        public List<BtcTxOutput> Outputs { get; set; } = new();
+        public long BitcoinHeight { get; set; }
+        public long SeenAtVfxHeight { get; set; }
+        public string? ReportHash { get; set; }
+        public long ReportTimestamp { get; set; }
+        /// <summary>The withdrawal or exit part it settled, once one claimed it.</summary>
+        public string? ClaimedByRef { get; set; }
+        /// <summary>Bitcoin dropped the block it confirmed in (a rewind): not claimable until it confirms again.</summary>
+        public bool Dropped { get; set; }
+        public long LastModifiedHeight { get; set; }
+
+        public static string IdOf(string txid, string scUID) => $"{txid}|{scUID}";
+    }
+
+    /// <summary>
     /// Reads and writes of the attestation tables. Every write goes through here and is stamped with the height of the
     /// block being applied (<see cref="StateWriteContext.StampHeight"/>), which is what the snapshot diff copies by.
     /// Methods take the database so a replay into a scratch database uses the same code as the live node.
@@ -297,9 +327,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public const string Meta = "btc_attest_meta";
         public const string SignerSets = "btc_attest_signers";
         public const string Withdrawals = "btc_vault_withdrawals";
+        public const string Payments = "btc_vault_payments";
 
         /// <summary>Every collection of this layer (state wipe, chain-reference migration, snapshot list).</summary>
-        public static readonly string[] AllCollections = { Headers, Scripts, Coins, Totals, Meta, SignerSets, Withdrawals, VerifiedXCore.Services.ValidatorBond.Collection };
+        public static readonly string[] AllCollections = { Headers, Scripts, Coins, Totals, Meta, SignerSets, Withdrawals, Payments, VerifiedXCore.Services.ValidatorBond.Collection };
 
         public static LiteDatabase Db => DbContext.DB_BtcAttest;
 
@@ -325,6 +356,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
             withdrawals.EnsureIndex(x => x.RequestHash);
             withdrawals.EnsureIndex(x => x.LastModifiedHeight);
             withdrawals.EnsureIndex(x => x.RequestVfxHeight); // the sweep rate reads the last thousand blocks' requests only
+            var payments = db.GetCollection<VaultPaymentRow>(Payments);
+            payments.EnsureIndex(x => x.SmartContractUID);
+            payments.EnsureIndex(x => x.BitcoinHeight);
+            payments.EnsureIndex(x => x.LastModifiedHeight);
             VerifiedXCore.Services.ValidatorBond.EnsureIndexes(db); // validator bonds are kept with the other height-stamped tables
         }
 
@@ -495,6 +530,25 @@ namespace VerifiedXCore.Bitcoin.Attestation
         public static List<VaultWithdrawalRow> WithdrawalsInState(VaultWithdrawalState state, LiteDatabase? db = null) =>
             (db ?? Db).GetCollection<VaultWithdrawalRow>(Withdrawals).Find(x => x.State == state).ToList();
 
+        // ── Payments nothing was open for ───────────────────────────────────────────────────────────────────
+
+        public static VaultPaymentRow? Payment(string txid, string scUID, LiteDatabase? db = null) =>
+            (db ?? Db).GetCollection<VaultPaymentRow>(Payments).FindById(VaultPaymentRow.IdOf(txid, scUID));
+
+        public static void SavePayment(VaultPaymentRow row, LiteDatabase? db = null)
+        {
+            row.Id = VaultPaymentRow.IdOf(row.Txid, row.SmartContractUID);
+            row.LastModifiedHeight = StateWriteContext.StampHeight;
+            (db ?? Db).GetCollection<VaultPaymentRow>(Payments).Upsert(row);
+        }
+
+        public static List<VaultPaymentRow> PaymentsOf(string scUID, LiteDatabase? db = null) =>
+            (db ?? Db).GetCollection<VaultPaymentRow>(Payments).Find(x => x.SmartContractUID == scUID).ToList();
+
+        /// <summary>The kept payments confirmed above a Bitcoin height and not yet marked dropped (what a rewind to that height drops).</summary>
+        public static List<VaultPaymentRow> PaymentsConfirmedAbove(long bitcoinHeight, LiteDatabase? db = null) =>
+            (db ?? Db).GetCollection<VaultPaymentRow>(Payments).Find(x => x.BitcoinHeight > bitcoinHeight).Where(x => !x.Dropped).ToList();
+
         /// <summary>Every vault's part of one bridge exit (the exit transaction, and the block it was applied in).</summary>
         public static List<VaultWithdrawalRow> ExitParts(string exitTxHash, long exitVfxHeight, LiteDatabase? db = null) =>
             (db ?? Db).GetCollection<VaultWithdrawalRow>(Withdrawals).Find(x => x.RequestHash == exitTxHash)
@@ -521,6 +575,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             if (d == null) return false;
             return d.GetCollection<AttestationMetaRow>(Meta).Exists(x => x.LastModifiedHeight > vfxHeight)
                 || d.GetCollection<VaultWithdrawalRow>(Withdrawals).Exists(x => x.LastModifiedHeight > vfxHeight)
+                || d.GetCollection<VaultPaymentRow>(Payments).Exists(x => x.LastModifiedHeight > vfxHeight)
                 || d.GetCollection<VaultCoinRow>(Coins).Exists(x => x.LastModifiedHeight > vfxHeight)
                 || d.GetCollection<VaultDepositTotalRow>(Totals).Exists(x => x.LastModifiedHeight > vfxHeight)
                 || d.GetCollection<VaultDepositScriptRow>(Scripts).Exists(x => x.LastModifiedHeight > vfxHeight)

@@ -1489,8 +1489,16 @@ namespace VerifiedXCore.Controllers
         {
             var lastBlock = Globals.LastBlock;
             var probation = BlockValidatorService.GetProbationStatus();
+            var vree = VreeService.Status();
             var payload = new
             {
+                VreeActive = vree.Active,
+                VreeAckCount = vree.AckCount,
+                VreeReachSet = vree.ReachSet,
+                VreeStandDown = vree.StandDown,
+                // How long this node's tip has stood still: the clock an election reads (StallSeconds below is fork detection's,
+                // which counts only while peers are ahead, so it reads 0 through a stall of the whole network).
+                VreeStallSeconds = lastBlock == null || lastBlock.Height < 0 ? -1L : VreeElection.StallSeconds(),
                 Version = Globals.CLIVersion,
                 ConsensusVersion = Globals.ConsensusVersion,
                 Height = lastBlock?.Height ?? -1L,
@@ -1524,6 +1532,42 @@ namespace VerifiedXCore.Controllers
                 UpTimeSeconds = (long)(DateTime.UtcNow - System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds
             };
             return Ok(JsonConvert.SerializeObject(payload));
+        }
+
+        /// <summary>A rung's member asks for this validator's signature on the rung its own chain gives. A read: the record is public, and the answer names the rule that refused.</summary>
+        [HttpGet]
+        [Route("GetElectionSignature/{height}/{rung}")]
+        public ActionResult<string> GetElectionSignature(long height, int rung) =>
+            Ok(JsonConvert.SerializeObject(VreeService.AnswerSignature(height, rung)));
+
+        /// <summary>A caster's certified tip. The acknowledgement says this validator verified it and does not sign an election against it.</summary>
+        [HttpPost]
+        [Route("ProbeTip")]
+        public async Task<ActionResult<string>> ProbeTip([FromBody] VreeProbe? probe) =>
+            Ok(JsonConvert.SerializeObject(await VreeService.AnswerProbeAsync(probe, HttpContext.Connection.RemoteIpAddress?.ToString())));
+
+        /// <summary>The electorate as this node computes it near its tip.</summary>
+        [HttpGet]
+        [Route("GetElectorate")]
+        public ActionResult<string> GetElectorate() =>
+            Ok(JsonConvert.SerializeObject(VreeService.Electorate()));
+
+        /// <summary>
+        /// Operator maintenance, LOCALHOST ONLY, on a committee member: a majority-signed hold so a planned restart of the
+        /// committee does not trigger an election. Issue it before stopping anything.
+        /// </summary>
+        [HttpGet]
+        [Route("VreeMaintenanceHold/{seconds}")]
+        public async Task<ActionResult<string>> VreeMaintenanceHold(long seconds)
+        {
+            var remoteIp = HttpContext.Connection.RemoteIpAddress;
+            var mapped = remoteIp != null && remoteIp.IsIPv4MappedToIPv6 ? remoteIp.MapToIPv4() : remoteIp;
+            if (mapped == null || !System.Net.IPAddress.IsLoopback(mapped))
+                return Unauthorized(JsonConvert.SerializeObject(new { Success = false, Message = "VreeMaintenanceHold is localhost-only." }));
+            if (seconds <= 0 || seconds > VreeElection.MaxHoldSeconds)
+                return BadRequest(JsonConvert.SerializeObject(new { Success = false, Message = $"seconds must be 1..{VreeElection.MaxHoldSeconds}." }));
+            var ok = await CasterMembershipService.ProposeRotationAsync(VreeElection.MaintenanceHoldChangeType, "", null, seconds);
+            return Ok(JsonConvert.SerializeObject(new { Success = ok, Seconds = seconds, RecordSeq = CasterMembershipStore.GetCurrent()?.RecordSeq ?? -1 }));
         }
 
         [HttpGet]

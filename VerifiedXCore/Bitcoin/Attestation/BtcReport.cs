@@ -97,6 +97,15 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <summary>H2 reached: balances and withdrawals follow the attested state.</summary>
         public static bool Enforced(long vfxHeight) => vfxHeight >= Globals.BitcoinAttestationHeight;
 
+        /// <summary>
+        /// From the VREE height: a vault's coins leaving in a transaction the chain did not fix pay the open withdrawal or exit
+        /// part whose destination and amount they match, and a payment nothing was open for is kept to be matched by a request
+        /// that comes later (<see cref="BtcWithdrawals"/>, payment attribution). Before it such a spend is a foreign spend.
+        /// </summary>
+        public static bool PaysByDestination(long vfxHeight) => vfxHeight >= Globals.VreeActivationHeight;
+        /// <summary>VFX blocks a payment nothing was open for stays claimable by a later request or exit part: seven days.</summary>
+        public const int RememberedPaymentBlocks = 50_400;
+
         /// <summary>The signer-set epoch a VFX height is in; -1 before recording starts.</summary>
         public static long EpochOf(long vfxHeight) =>
             vfxHeight < Globals.BitcoinAttestationRecordHeight ? -1 : (vfxHeight - Globals.BitcoinAttestationRecordHeight) / EpochBlocks;

@@ -92,6 +92,8 @@ namespace VerifiedXCore.Services
             if (winner != block.Validator)
                 return false;
 
+            VreeElection.AttachRecord(block);
+
             if (block.ConsensusCertificate != null && block.ConsensusCertificate.Attestations?.Count > 0)
             {
                 var have = ConsensusCertificateVerifier.RequiredAttestationsForHeight(block.Height);
@@ -111,6 +113,10 @@ namespace VerifiedXCore.Services
                 return false;
 
             if (!Globals.BlockCasters.Any(x => x.ValidatorAddress == acc.Address))
+                return false;
+
+            // A caster that lost the validators signs nothing: see VreeService.StandDownReason.
+            if (VreeService.StandDownReason(block.Height) != null)
                 return false;
 
             // One block per height: never sign a second, different block at a height this node already signed.
