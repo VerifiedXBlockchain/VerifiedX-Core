@@ -221,6 +221,36 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void TheCasters_FollowTheCommitteeTwoDaysBehind_OneInAndOneOutAnEpoch()
+        {
+            var c = Addresses(12, 'c').ToList();
+            BaseSignerSetPolicy.CasterPlan Plan(IEnumerable<string> now, IEnumerable<string> day, IEnumerable<string> two, IEnumerable<string> contract) =>
+                BaseSignerSetPolicy.ComputeCasters(Epoch, EpochHash, now, day, two, contract);
+            var five = c.Take(5).ToList();
+
+            // Out at the boundary and both before: out. Out at the boundary only (or back since): stays.
+            Assert.Equal(new[] { c[4] }, Plan(c.Take(4), c.Take(4), c.Take(4), five).Remove);
+            Assert.Empty(Plan(c.Take(4), c.Take(4), five, five).Remove);
+            Assert.Empty(Plan(c.Take(4), five, c.Take(4), five).Remove);
+
+            // In at all three: in. In for less: waits. One of each an epoch.
+            var swap = Plan(c.Take(4).Append(c[5]), c.Take(4).Append(c[5]), c.Take(4).Append(c[5]), five);
+            Assert.Equal(new[] { c[5] }, swap.Add);
+            Assert.Equal(new[] { c[4] }, swap.Remove);
+            Assert.Empty(Plan(five.Append(c[5]), five.Append(c[5]), five, five).Add);
+            var many = c.Take(3).ToList();
+            Assert.Single(Plan(c.Take(8), c.Take(8), c.Take(8), many).Add);
+            Assert.Single(Plan(c.Take(3), c.Take(3), c.Take(3), c.Skip(5).Take(5)).Remove);
+
+            // Never below 3 or above 10; no record, no change; a contract without casters gets every member in for two days.
+            Assert.Empty(Plan(c.Take(2), c.Take(2), c.Take(2), c.Take(3)).Remove);
+            Assert.Empty(Plan(c.Take(11), c.Take(11), c.Take(11), c.Take(10)).Add);
+            Assert.True(Plan(null, five, five, five).Empty);
+            Assert.Equal(five.OrderBy(a => a), Plan(c.Take(6), five, five, Array.Empty<string>()).Add.OrderBy(a => a));
+            Assert.True(Plan(c.Take(2), c.Take(2), c.Take(2), Array.Empty<string>()).Empty);
+        }
+
+        [Fact]
         public void TheSetGrowsByLessThanAThirdAnEpoch_UpToFifty()
         {
             var newcomers = Addresses(100, 'b').ToList();
@@ -466,12 +496,19 @@ namespace VerifiedXCore.Tests
             var digest = VbtcbTypedData.RemoveValidatorsDigest(new[] { _gone.Base }, Epoch, 7, 8453, Proxy);
             try
             {
-                // While the contract has no casters (a proxy just upgraded from V3), nothing is signed or sent.
+                // While the contract has no casters (a proxy just upgraded from V3), no validator change is signed; what the
+                // validator in turn sends is the first caster list: the committee's members, each signing its own seat.
                 Contract(7, validators, Array.Empty<V>());
                 Assert.Equal(BaseValidatorSyncService.NoCastersYetReason, Refusal(await Ask("REMOVE", new[] { _gone.Base }, Epoch, 7)));
                 Globals.LastBlock = new Block { Height = Epoch + BaseSignerSetPolicy.SettleBlocks + 8 * BaseValidatorSyncService.SubmitTurnBlocks, Timestamp = TimeUtil.GetTime() };
                 await BaseValidatorSyncService.SyncOnceAsync();
-                Assert.Empty(sent);
+                var (initFn, initArgs) = Assert.Single(sent);
+                Assert.Equal("updateCasters", initFn);
+                Assert.Equal(casters.Select(c => c.Base).OrderBy(a => a), ((List<string>)initArgs[0]).OrderBy(a => a));
+                Assert.Empty((List<string>)initArgs[1]);
+                var initDigest = VbtcbTypedData.UpdateCastersDigest((List<string>)initArgs[0], Array.Empty<string>(), Epoch, 7, 8453, Proxy);
+                Assert.Equal((List<string>)initArgs[0], ((List<byte[]>)initArgs[4]).Select(b => ValidatorEthKeyService.RecoverSigner(initDigest, "0x" + Convert.ToHexString(b), personalMessage: false)!.ToLowerInvariant()).ToList());
+                sent.Clear();
 
                 Contract(7, validators, casters);
                 Globals.ValidatorAddress = casters[0].Address;                     // a caster signs the removal it computes
@@ -494,6 +531,92 @@ namespace VerifiedXCore.Tests
                 BaseValidatorSyncService.SubmitForTests = null;
                 Globals.HttpClientFactory = priorFactory;
             }
+        }
+
+        /// <summary>
+        /// A caster out of the committee for two days leaves the contract and one in for two days joins, in one updateCasters
+        /// the validator in turn sends: signed by 2/3 of the validators and a majority of the casters, each computing the
+        /// same change from its own caster records, and by the new caster for its own seat.
+        /// </summary>
+        [Fact]
+        public async Task ACasterOutOfTheCommitteeForTwoDays_IsSwappedForOneInForTwoDays()
+        {
+            const long boundary = 4 * BaseSignerSetPolicy.EpochBlocks;
+            var c = Enumerable.Range(0, 5).Select(_ => NewKey()).ToArray();               // c[3] leaves the committee, c[4] joins
+            foreach (var k in c)
+                AccountData.GetAccounts().InsertSafe(new Account { Address = k.Address, PublicKey = k.Pub, PrivateKey = "0" + k.Key.secret.ToString("x") });
+            CasterMembershipRecord Record(long seq, long from, params int[] members) => new()
+            {
+                RecordSeq = seq, EffectiveFromHeight = from,
+                Casters = members.Select(i => new CasterInfo { Address = c[i].Address, PeerIP = $"10.0.4.{i + 1}", PublicKey = c[i].Pub }).ToList(),
+            };
+            var records = new[] { Record(1, 0, 0, 1, 2, 3), Record(2, boundary - 2 * BaseSignerSetPolicy.EpochBlocks - 10, 0, 1, 2, 4) };
+            foreach (var r in records) DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Upsert(r.RecordSeq, r);
+            VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
+            BlockchainData.GetBlocks().InsertSafe(new Block { Height = boundary, Hash = $"b{boundary}-{Guid.NewGuid():N}", Transactions = new List<Transaction>() });
+
+            var validators = new[] { _me, _seed2, _seed3 };
+            BlockchainData.GetBlocks().InsertSafe(new Block
+            {
+                Height = boundary - 100, Hash = $"r{boundary}-{Guid.NewGuid():N}",
+                Transactions = validators.Select((v, i) => new Transaction
+                {
+                    TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = v.Address, ToAddress = v.Address, Hash = $"rr{i}",
+                    Data = JsonConvert.SerializeObject(new { ValidatorAddress = v.Address, IPAddress = $"10.0.0.{i + 1}", FrostPublicKey = v.Pub, IsS3C = false }),
+                }).ToList(),
+            });
+            var at = validators.Select((v, i) => (v, ip: $"10.0.0.{i + 1}")).Concat(c.Select((k, i) => (v: k, ip: $"10.0.4.{i + 1}"))).ToDictionary(x => x.ip, x => x.v);
+            var priorFactory = Globals.HttpClientFactory;
+            Globals.HttpClientFactory = new ValidatorNetwork(at);
+            var sent = new List<(string Function, object[] Args)>();
+            BaseValidatorSyncService.SubmitForTests = (f, a) => { sent.Add((f, a)); return Task.FromResult<string?>("0xtx"); };
+            Globals.LastBlock = new Block { Height = boundary + BaseSignerSetPolicy.SettleBlocks + 8 * BaseValidatorSyncService.SubmitTurnBlocks, Timestamp = TimeUtil.GetTime() };
+            try
+            {
+                Contract(9, validators, c.Take(4).ToArray());
+                var digest = VbtcbTypedData.UpdateCastersDigest(new[] { c[4].Base }, new[] { c[3].Base }, boundary, 9, 8453, Proxy);
+                Assert.Contains("Not the caster change", Refusal(await Ask("CASTERS", new[] { c[4].Base }, boundary, 9)));      // the removal left out
+                Globals.ValidatorAddress = c[0].Address;
+                SignedBy(c[0], await AskCasters(new[] { c[4].Base }, new[] { c[3].Base }, boundary, 9), digest);
+
+                Globals.ValidatorAddress = _me.Address;
+                await BaseValidatorSyncService.SyncOnceAsync();
+                var (fn, args) = Assert.Single(sent);
+                Assert.Equal("updateCasters", fn);
+                Assert.Equal(new[] { c[4].Base }, (List<string>)args[0]);
+                Assert.Equal(new[] { c[3].Base }, (List<string>)args[1]);
+                var signers = ((List<byte[]>)args[3]).Select(b => ValidatorEthKeyService.RecoverSigner(digest, "0x" + Convert.ToHexString(b), personalMessage: false)!.ToLowerInvariant()).ToList();
+                Assert.True(signers.Count(s => validators.Any(v => v.Base == s)) >= 2);
+                Assert.True(signers.Count(s => c.Take(4).Any(k => k.Base == s)) >= 3);
+                Assert.Equal(c[4].Base, ValidatorEthKeyService.RecoverSigner(digest, "0x" + Convert.ToHexString(((List<byte[]>)args[4]).Single()), personalMessage: false)!.ToLowerInvariant());
+            }
+            finally
+            {
+                foreach (var r in records) DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Delete(r.RecordSeq);
+                VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
+                BaseValidatorSyncService.SubmitForTests = null;
+                Globals.HttpClientFactory = priorFactory;
+            }
+        }
+
+        private static async Task<(HttpStatusCode Code, JObject Body)> AskCasters(IEnumerable<string> add, IEnumerable<string> remove, long epoch, int nonce)
+        {
+            using var server = new TestServer(new WebHostBuilder().UseStartup<StartupP2PCaster>());
+            var ctx = await server.SendAsync(x =>
+            {
+                x.Request.Method = "POST";
+                x.Request.Path = "/valapi/validator/SignValidatorUpdate";
+                x.Request.ContentType = "application/json";
+                x.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new
+                {
+                    Action = "CASTERS", TargetAddresses = add.ToArray(), RemoveAddresses = remove.ToArray(), VfxBlockHeight = epoch, AdminNonce = nonce.ToString(),
+                })));
+                x.Connection.RemoteIpAddress = IPAddress.Parse("203.0.113.7");
+            });
+            using var reader = new StreamReader(ctx.Response.Body);
+            var text = await reader.ReadToEndAsync();
+            var json = text.Trim().StartsWith("\"") ? JsonConvert.DeserializeObject<string>(text)! : text;
+            return ((HttpStatusCode)ctx.Response.StatusCode, JObject.Parse(json));
         }
     }
 }

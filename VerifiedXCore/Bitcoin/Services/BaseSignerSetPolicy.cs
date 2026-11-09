@@ -82,6 +82,63 @@ namespace VerifiedXCore.Bitcoin.Services
             return Compute(epochHeight, block.Hash, registered, kept, contractValidators);
         }
 
+        // ── The casters ─────────────────────────────────────────────────────────────────────────────────────
+
+        /// <summary>vBTCb.sol MIN_CASTERS and MAX_CASTERS.</summary>
+        public const int MinCasters = 3, MaxCasters = 10;
+
+        /// <summary>The epoch's change to the contract's casters: at most one out and one in, sent as one updateCasters.</summary>
+        public sealed record CasterPlan(long EpochHeight, IReadOnlyList<string> Add, IReadOnlyList<string> Remove)
+        {
+            public bool Empty => Add.Count == 0 && Remove.Count == 0;
+        }
+
+        /// <summary>
+        /// The contract's casters follow the VFX caster committee, slowly: a caster joins once it was in the committee at
+        /// this boundary and the two before (two days), and leaves once it was out at all three, one of each per epoch.
+        /// Taking a committee seat for hours (by knocking a caster offline, say) moves nothing on Base, and the team has
+        /// the two days to see it. A contract with no casters yet (upgraded from V3) gets every member that was in at all
+        /// three boundaries, once there are at least three. Addresses are compared and returned lower-cased; null
+        /// committees (no record) change nothing.
+        /// </summary>
+        public static CasterPlan ComputeCasters(long epochHeight, string epochBlockHash, IEnumerable<string>? now, IEnumerable<string>? dayBefore,
+            IEnumerable<string>? twoDaysBefore, IEnumerable<string> contractCasters)
+        {
+            static string Norm(string a) => a.Trim().ToLowerInvariant();
+            var none = new CasterPlan(epochHeight, Array.Empty<string>(), Array.Empty<string>());
+            if (now == null || dayBefore == null || twoDaysBefore == null) return none;
+            var samples = new[] { now, dayBefore, twoDaysBefore }.Select(s => s.Where(IsAddress).Select(Norm).ToHashSet()).ToArray();
+            var contract = contractCasters.Where(IsAddress).Select(Norm).Distinct().ToList();
+            string Rank(string a) => RankOf(epochBlockHash, a);
+
+            var stayedIn = samples[0].Where(c => samples[1].Contains(c) && samples[2].Contains(c)).OrderBy(Rank, StringComparer.Ordinal).ToList();
+            if (contract.Count == 0)
+                return stayedIn.Count >= MinCasters ? new CasterPlan(epochHeight, stayedIn.Take(MaxCasters).ToList(), Array.Empty<string>()) : none;
+
+            var add = stayedIn.Where(c => !contract.Contains(c)).Take(1).ToList();
+            var remove = contract.Where(c => samples.All(s => !s.Contains(c))).OrderBy(Rank, StringComparer.Ordinal).Take(1).ToList();
+            if (contract.Count - remove.Count + add.Count > MaxCasters) add.Clear();
+            if (contract.Count - remove.Count + add.Count < MinCasters) remove.Clear();
+            return new CasterPlan(epochHeight, add, remove);
+        }
+
+        /// <summary>The Base addresses of the caster committee in force at <paramref name="height"/>, or null without a record.</summary>
+        public static List<string>? CommitteeAt(long height)
+        {
+            if (height < 0) return null;
+            var record = VerifiedXCore.Services.CasterMembershipStore.GetForHeight(height);
+            return record?.Casters.Select(c => BaseAddressOf(c.PublicKey)).Where(a => a.Length > 0).ToList();
+        }
+
+        /// <summary>The casters' change at <paramref name="epochHeight"/> from this node's caster records (see <see cref="ComputeCasters"/>).</summary>
+        public static CasterPlan? CastersForEpoch(long epochHeight, IEnumerable<string> contractCasters)
+        {
+            var block = BlockchainData.GetBlockByHeight(epochHeight);
+            if (block == null || string.IsNullOrEmpty(block.Hash)) return null;
+            return ComputeCasters(epochHeight, block.Hash, CommitteeAt(epochHeight), CommitteeAt(epochHeight - EpochBlocks),
+                CommitteeAt(epochHeight - 2 * EpochBlocks), contractCasters);
+        }
+
         private static (long Height, string Hash, List<Models.VBTCValidator> Seen)? _seen;
 
         /// <summary>The public validators seen in the KeepSeenBlocks up to the boundary: one block scan per boundary block.</summary>

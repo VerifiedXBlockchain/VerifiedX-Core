@@ -36,10 +36,12 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Request body of <c>valapi/Validator/SignValidatorUpdate</c>.</summary>
         public class ValidatorUpdateSignRequest
         {
-            /// <summary>ADD or REMOVE.</summary>
+            /// <summary>ADD or REMOVE (validators), or CASTERS.</summary>
             public string Action { get; set; } = "";
-            /// <summary>The batch, in the order it is sent.</summary>
+            /// <summary>The batch, in the order it is sent (for CASTERS, the casters added).</summary>
             public string[] TargetAddresses { get; set; } = Array.Empty<string>();
+            /// <summary>For CASTERS, the casters removed, in the order they are sent.</summary>
+            public string[] RemoveAddresses { get; set; } = Array.Empty<string>();
             /// <summary>The epoch boundary the change is computed at.</summary>
             public long VfxBlockHeight { get; set; }
             /// <summary>The contract's admin nonce the signature is for.</summary>
@@ -52,8 +54,14 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>A V4 contract upgraded from V3 has no casters until they are added; the validators alone change nothing.</summary>
         internal const string NoCastersYetReason = "The Base contract has no casters yet: they are added before any validator change.";
 
-        /// <summary>A request this node will sign: the digest, and whether it is an addition signed as a contract validator.</summary>
-        internal sealed record Authorized(byte[] Digest, bool Add, bool AsMember, long Epoch, string AdminNonce);
+        /// <summary>
+        /// A request this node will sign: the digest, and the once-an-epoch log it is recorded in (an addition or a caster
+        /// change signed as a member of the contract; null for anything else).
+        /// </summary>
+        internal sealed record Authorized(byte[] Digest, string Action, string? LogKey, long Epoch, string AdminNonce);
+
+        /// <summary>The once-an-epoch log of caster changes this node signed as a member.</summary>
+        private static string CasterLogKey => BaseBridgeService.ContractAddress + "#casters";
 
         internal static async Task<(Authorized? Ok, string Reason)> AuthorizeAsync(ValidatorUpdateSignRequest? req)
         {
@@ -61,7 +69,8 @@ namespace VerifiedXCore.Bitcoin.Services
             if (string.IsNullOrEmpty(Globals.ValidatorAddress)) return (null, "Not a validator");
             if (!BaseBridgeService.IsBridgeConfigured) return (null, "Base bridge not configured");
             var action = (req.Action ?? "").Trim().ToUpperInvariant();
-            if (action is not ("ADD" or "REMOVE")) return (null, "Unsupported action");
+            if (action is not ("ADD" or "REMOVE" or "CASTERS")) return (null, "Unsupported action");
+            var casters = action == "CASTERS";
 
             // Everything this node can judge by itself comes before the contract is read: a request it refuses anyway
             // costs it no Base call.
@@ -72,21 +81,37 @@ namespace VerifiedXCore.Bitcoin.Services
             if (tip - epoch < BaseSignerSetPolicy.SettleBlocks) return (null, "The epoch boundary is not settled yet");
             if (BaseBridgeAttestationService.NotReadyToAttest() is { } notReady) return (null, notReady);
             var targets = (req.TargetAddresses ?? Array.Empty<string>()).Select(t => (t ?? "").Trim()).ToArray();
-            if (targets.Length == 0 || targets.Any(t => !BaseSignerSetPolicy.IsAddress(t))) return (null, "Invalid target address");
+            var removing = casters ? (req.RemoveAddresses ?? Array.Empty<string>()).Select(t => (t ?? "").Trim()).ToArray() : Array.Empty<string>();
+            if (targets.Length + removing.Length == 0 || targets.Concat(removing).Any(t => !BaseSignerSetPolicy.IsAddress(t))) return (null, "Invalid target address");
 
             var view = await SignerViewForSigningAsync();
             if (view == null) return (null, "Could not read the Base contract");
             if (view.MessageVersion != VbtcbTypedData.MessageVersion) return (null, AdminChangesNotSignedReason);
-            if (view.CasterList.Count == 0) return (null, NoCastersYetReason);
+            if (!casters && view.CasterList.Count == 0) return (null, NoCastersYetReason);
             if (req.AdminNonce != view.AdminNonce.ToString()) return (null, "Admin nonce is not the contract's");
-
-            var plan = BaseSignerSetPolicy.ForEpoch(epoch, view.Validators);
-            if (plan == null) return (null, "No block at the epoch boundary");
 
             // A member is on either of the contract's lists: the change needs both groups' signatures.
             var myBase = ValidatorEthKeyService.DeriveBaseAddressFromAccount(Globals.ValidatorAddress);
             var asMember = !string.IsNullOrEmpty(myBase)
                 && (view.Validators.Contains(myBase, StringComparer.OrdinalIgnoreCase) || view.CasterList.Contains(myBase, StringComparer.OrdinalIgnoreCase));
+            long chainId = BaseBridgeService.BaseChainId;
+
+            if (casters)
+            {
+                var casterPlan = BaseSignerSetPolicy.CastersForEpoch(epoch, view.CasterList);
+                if (casterPlan == null) return (null, "No block at the epoch boundary");
+                if (casterPlan.Empty || !targets.SequenceEqual(casterPlan.Add, StringComparer.OrdinalIgnoreCase) || !removing.SequenceEqual(casterPlan.Remove, StringComparer.OrdinalIgnoreCase))
+                    return (null, "Not the caster change this node computes for the epoch");
+                if (!asMember && !targets.Contains(myBase, StringComparer.OrdinalIgnoreCase))
+                    return (null, "Only a validator or caster on the contract, or a caster being added, signs a caster change");
+                if (asMember && BaseSignerSignLog.Get(CasterLogKey) is { } casterLog && casterLog.Epoch == epoch && casterLog.AdminNonce != view.AdminNonce.ToString())
+                    return (null, "This node already signed a caster change that went through this epoch");
+                return (new Authorized(VbtcbTypedData.UpdateCastersDigest(targets, removing, epoch, view.AdminNonce, chainId, BaseBridgeService.ContractAddress),
+                    action, asMember ? CasterLogKey : null, epoch, view.AdminNonce.ToString()), "");
+            }
+
+            var plan = BaseSignerSetPolicy.ForEpoch(epoch, view.Validators);
+            if (plan == null) return (null, "No block at the epoch boundary");
             var add = action == "ADD";
             if (!add)
             {
@@ -103,11 +128,10 @@ namespace VerifiedXCore.Bitcoin.Services
                     return (null, "This node already signed an addition that went through this epoch");
             }
 
-            long chainId = BaseBridgeService.BaseChainId;
             var digest = add
                 ? VbtcbTypedData.AddValidatorsDigest(targets, epoch, view.AdminNonce, chainId, BaseBridgeService.ContractAddress)
                 : VbtcbTypedData.RemoveValidatorsDigest(targets, epoch, view.AdminNonce, chainId, BaseBridgeService.ContractAddress);
-            return (new Authorized(digest, add, asMember, epoch, view.AdminNonce.ToString()), "");
+            return (new Authorized(digest, action, add && asMember ? BaseBridgeService.ContractAddress : null, epoch, view.AdminNonce.ToString()), "");
         }
 
         /// <summary>Seconds one read of the contract answers every signing request for (one read in flight at a time).</summary>
@@ -143,8 +167,8 @@ namespace VerifiedXCore.Bitcoin.Services
             var privHex = account.GetKey;
             if (privHex.Length % 2 != 0) privHex = "0" + privHex;
             var signature = ValidatorEthKeyService.SignDigestHex(auth.Digest, HexByteUtility.HexToByte(privHex));
-            if (auth.Add && auth.AsMember) BaseSignerSignLog.Save(BaseBridgeService.ContractAddress, auth.Epoch, auth.AdminNonce);
-            LogUtility.Log($"[BaseValidatorSync] Signed {(auth.Add ? "ADD" : "REMOVE")} of {req!.TargetAddresses.Length} for epoch {auth.Epoch} at admin nonce {auth.AdminNonce}", "BaseValidatorSyncService");
+            if (auth.LogKey != null) BaseSignerSignLog.Save(auth.LogKey, auth.Epoch, auth.AdminNonce);
+            LogUtility.Log($"[BaseValidatorSync] Signed {auth.Action} of {(req!.TargetAddresses?.Length ?? 0) + (req.RemoveAddresses?.Length ?? 0)} for epoch {auth.Epoch} at admin nonce {auth.AdminNonce}", "BaseValidatorSyncService");
             return (signature, "");
         }
 
@@ -160,13 +184,14 @@ namespace VerifiedXCore.Bitcoin.Services
 
         private const string ValidatorSetAbi = @"[
             {""inputs"":[{""internalType"":""address[]"",""name"":""newValidators"",""type"":""address[]""},{""internalType"":""uint256"",""name"":""vfxBlockHeight"",""type"":""uint256""},{""internalType"":""bytes[]"",""name"":""signatures"",""type"":""bytes[]""},{""internalType"":""bytes[]"",""name"":""newValidatorSignatures"",""type"":""bytes[]""}],""name"":""addValidatorBatch"",""outputs"":[],""stateMutability"":""nonpayable"",""type"":""function""},
-            {""inputs"":[{""internalType"":""address[]"",""name"":""oldValidators"",""type"":""address[]""},{""internalType"":""uint256"",""name"":""vfxBlockHeight"",""type"":""uint256""},{""internalType"":""bytes[]"",""name"":""signatures"",""type"":""bytes[]""}],""name"":""removeValidatorBatch"",""outputs"":[],""stateMutability"":""nonpayable"",""type"":""function""}
+            {""inputs"":[{""internalType"":""address[]"",""name"":""oldValidators"",""type"":""address[]""},{""internalType"":""uint256"",""name"":""vfxBlockHeight"",""type"":""uint256""},{""internalType"":""bytes[]"",""name"":""signatures"",""type"":""bytes[]""}],""name"":""removeValidatorBatch"",""outputs"":[],""stateMutability"":""nonpayable"",""type"":""function""},
+            {""inputs"":[{""internalType"":""address[]"",""name"":""add"",""type"":""address[]""},{""internalType"":""address[]"",""name"":""remove"",""type"":""address[]""},{""internalType"":""uint256"",""name"":""vfxBlockHeight"",""type"":""uint256""},{""internalType"":""bytes[]"",""name"":""signatures"",""type"":""bytes[]""},{""internalType"":""bytes[]"",""name"":""newCasterSignatures"",""type"":""bytes[]""}],""name"":""updateCasters"",""outputs"":[],""stateMutability"":""nonpayable"",""type"":""function""}
         ]";
 
         /// <summary>Stands in for the Base transaction in tests: function name and arguments in, transaction hash out.</summary>
         internal static Func<string, object[], Task<string?>>? SubmitForTests;
 
-        /// <summary>Background: once an epoch, the contract validators bring the contract's set in step with VFX.</summary>
+        /// <summary>Background: once an epoch, the contract's members bring its casters and validators in step with VFX.</summary>
         public static Task ValidatorSyncLoop() =>
             PausableLoop.RunAsync(async () =>
             {
@@ -175,7 +200,8 @@ namespace VerifiedXCore.Bitcoin.Services
             }, 60_000, "BaseValidatorSyncService.ValidatorSyncLoop");
 
         /// <summary>
-        /// One step: when it is this node's turn, it sends the epoch's removal, or once there is none its addition. Every
+        /// One step: when it is this node's turn, it sends the epoch's caster change, else its validator removal, or once there
+        /// is none its addition. Every
         /// signature is asked of the validator itself through SignValidatorUpdate, where each node checks the change
         /// against its own computation, and kept only when it recovers to that validator.
         /// </summary>
@@ -188,14 +214,12 @@ namespace VerifiedXCore.Bitcoin.Services
             if (BaseBridgeAttestationService.NotReadyToAttest() != null) return;
 
             var view = await BaseBridgeService.ReadSignerViewAsync();
-            if (view == null || view.MessageVersion != VbtcbTypedData.MessageVersion || view.CasterList.Count == 0) return;
+            if (view == null || view.MessageVersion != VbtcbTypedData.MessageVersion) return;
             var myBase = ValidatorEthKeyService.DeriveBaseAddressFromAccount(Globals.ValidatorAddress);
             var members = view.Validators.Concat(view.CasterList).Select(m => m.ToLowerInvariant()).Distinct().ToList();
             if (string.IsNullOrEmpty(myBase) || !members.Contains(myBase.ToLowerInvariant())) return;
             var epochHash = BlockchainData.GetBlockByHeight(epoch)?.Hash;
             if (string.IsNullOrEmpty(epochHash)) return;
-            var plan = BaseSignerSetPolicy.ForEpoch(epoch, view.Validators);
-            if (plan == null || (plan.Removes.Count == 0 && plan.Adds.Count == 0)) return;
 
             var turn = members.OrderBy(m => BaseSignerSetPolicy.RankOf(epochHash, m), StringComparer.Ordinal).ToList().IndexOf(myBase.ToLowerInvariant());
             if (tip < epoch + BaseSignerSetPolicy.SettleBlocks + (long)turn * SubmitTurnBlocks) return;
@@ -206,7 +230,45 @@ namespace VerifiedXCore.Bitcoin.Services
                 .GroupBy(x => x.Base).ToDictionary(g => g.Key, g => g.First().IPAddress);
             foreach (var s in UserBridgeMintService.ContractSigners(view))   // casters too, at the address their record gives
                 ipOf.TryAdd(s.BaseAddress.ToLowerInvariant(), s.IPAddress);
+            foreach (var c in VerifiedXCore.Services.CasterMembershipStore.GetForHeight(epoch)?.Casters ?? new List<VerifiedXCore.Models.CasterInfo>())
+                if (BaseSignerSetPolicy.BaseAddressOf(c.PublicKey) is { Length: > 0 } b && !string.IsNullOrEmpty(c.PeerIP))
+                    ipOf.TryAdd(b.ToLowerInvariant(), c.PeerIP);                // casters joining the contract
             var nonce = view.AdminNonce.ToString();
+
+            // The casters' change goes first (a contract upgraded from V3 has none, and nothing else changes until it has),
+            // once an epoch: after one went through, this node signs no second one, so it does not try to send one.
+            var casterPlan = BaseSignerSetPolicy.CastersForEpoch(epoch, view.CasterList);
+            var casterChangeDone = BaseSignerSignLog.Get(CasterLogKey) is { } casterLog && casterLog.Epoch == epoch && casterLog.AdminNonce != nonce;
+            if (casterPlan is { Empty: false } && !casterChangeDone)
+            {
+                var casterAdd = casterPlan.Add.ToArray();
+                var casterRemove = casterPlan.Remove.ToArray();
+                var casterDigest = VbtcbTypedData.UpdateCastersDigest(casterAdd, casterRemove, epoch, view.AdminNonce, BaseBridgeService.BaseChainId, BaseBridgeService.ContractAddress);
+                var seat = new Dictionary<string, string>();
+                foreach (var a in casterAdd)
+                    if (ipOf.TryGetValue(a, out var ip) && await AskAsync(ip, "CASTERS", casterAdd, epoch, nonce, casterDigest, a, casterRemove) is { } sig)
+                        seat[a] = sig;
+                if (seat.Count != casterAdd.Length)
+                {
+                    LogUtility.Log($"[BaseValidatorSync] Caster change for epoch {epoch}: {seat.Count}/{casterAdd.Length} new casters signed their own seat.", "BaseValidatorSyncService");
+                    return;
+                }
+                var casterSigs = await CollectAsync("CASTERS", casterAdd, epoch, nonce, members, ipOf, myBase, view, casterDigest, casterRemove);
+                if (!UserBridgeMintService.Enough(view, view.RequiredMintSignatures, casterSigs.Keys))
+                {
+                    LogUtility.Log($"[BaseValidatorSync] Caster change for epoch {epoch}: {Tally(view, casterSigs)}.", "BaseValidatorSyncService");
+                    return;
+                }
+                await SubmitAsync("updateCasters", new object[]
+                {
+                    casterAdd.ToList(), casterRemove.ToList(), new System.Numerics.BigInteger(epoch), casterSigs.Values.Select(HexBytes).ToList(), casterAdd.Select(a => HexBytes(seat[a])).ToList(),
+                });
+                return;
+            }
+            if (view.CasterList.Count == 0) return;
+
+            var plan = BaseSignerSetPolicy.ForEpoch(epoch, view.Validators);
+            if (plan == null || (plan.Removes.Count == 0 && plan.Adds.Count == 0)) return;
 
             if (plan.Removes.Count > 0)
             {
@@ -255,16 +317,16 @@ namespace VerifiedXCore.Bitcoin.Services
         /// the contract's thresholds (2/3 of its validators and a majority of its casters).
         /// </summary>
         private static async Task<Dictionary<string, string>> CollectAsync(string action, string[] targets, long epoch, string nonce, List<string> members,
-            Dictionary<string, string> ipOf, string myBase, BaseBridgeService.SignerView view, byte[] digest)
+            Dictionary<string, string> ipOf, string myBase, BaseBridgeService.SignerView view, byte[] digest, string[]? removes = null)
         {
             var sigs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            var (mine, _) = await SignValidatorUpdateAsync(new ValidatorUpdateSignRequest { Action = action, TargetAddresses = targets, VfxBlockHeight = epoch, AdminNonce = nonce });
+            var (mine, _) = await SignValidatorUpdateAsync(new ValidatorUpdateSignRequest { Action = action, TargetAddresses = targets, RemoveAddresses = removes ?? Array.Empty<string>(), VfxBlockHeight = epoch, AdminNonce = nonce });
             if (mine != null) sigs[myBase] = mine;
             foreach (var m in members)
             {
                 if (UserBridgeMintService.Enough(view, view.RequiredMintSignatures, sigs.Keys)) break;
                 if (sigs.ContainsKey(m) || !ipOf.TryGetValue(m, out var ip)) continue;
-                if (await AskAsync(ip, action, targets, epoch, nonce, digest, m) is { } sig) sigs[m] = sig;
+                if (await AskAsync(ip, action, targets, epoch, nonce, digest, m, removes) is { } sig) sigs[m] = sig;
             }
             return sigs;
         }
@@ -273,13 +335,13 @@ namespace VerifiedXCore.Bitcoin.Services
             $"{view.Validators.Count(sigs.ContainsKey)}/{view.RequiredMintSignatures} validator and {view.CasterList.Count(sigs.ContainsKey)}/{view.RequiredCasterSignatures} caster signatures";
 
         /// <summary>One validator's signature over the digest, or null when it refuses, cannot be reached, or signs with another key.</summary>
-        private static async Task<string?> AskAsync(string ip, string action, string[] targets, long epoch, string nonce, byte[] digest, string expectedSigner)
+        private static async Task<string?> AskAsync(string ip, string action, string[] targets, long epoch, string nonce, byte[] digest, string expectedSigner, string[]? removes = null)
         {
             try
             {
                 var client = Globals.HttpClientFactory?.CreateClient() ?? new HttpClient();
                 client.Timeout = TimeSpan.FromSeconds(10);
-                var body = Newtonsoft.Json.JsonConvert.SerializeObject(new ValidatorUpdateSignRequest { Action = action, TargetAddresses = targets, VfxBlockHeight = epoch, AdminNonce = nonce });
+                var body = Newtonsoft.Json.JsonConvert.SerializeObject(new ValidatorUpdateSignRequest { Action = action, TargetAddresses = targets, RemoveAddresses = removes ?? Array.Empty<string>(), VfxBlockHeight = epoch, AdminNonce = nonce });
                 using var content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
                 var resp = await client.PostAsync($"http://{ip.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/Validator/SignValidatorUpdate", content);
                 if (!resp.IsSuccessStatusCode) return null;
