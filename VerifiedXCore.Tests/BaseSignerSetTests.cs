@@ -830,5 +830,42 @@ namespace VerifiedXCore.Tests
             Contract(22, new[] { _me, _seed2, _seed3 }, casters);
             Assert.True(VerifiedXCore.Bitcoin.Models.BaseSignerSignLog.WentThrough(Proxy + "#remove", Epoch, Array.Empty<string>(), new[] { _me.Base, _seed2.Base, _seed3.Base }));
         }
+
+        /// <summary>
+        /// The removal plan reads balances as they are now, so it can change inside an epoch, and a signature over the
+        /// earlier plan stays usable at the same nonce. Every plan signed in the epoch counts: once either went through, no
+        /// further removal is signed that epoch.
+        /// </summary>
+        [Fact]
+        public async Task EveryRemovalSignedInTheEpochCounts_NotOnlyTheLast()
+        {
+            void Balance(V v, decimal amount)
+            {
+                var row = StateData.GetSpecificAccountStateTrei(v.Address)!;
+                row.Balance = amount;
+                StateData.GetAccountStateTrei().UpdateSafe(row);
+            }
+            var validators = new[] { _me, _seed2, _seed3, _new1, _new2 };          // 5: one may leave an epoch
+            var casters = new[] { _me, _seed2, _seed3 };
+            try
+            {
+                Balance(_new1, 10M);                                               // plan A: _new1 lost the balance
+                Contract(30, validators, casters);
+                SignedBy(_me, await Ask("REMOVE", new[] { _new1.Base }, Epoch, 30), VbtcbTypedData.RemoveValidatorsDigest(new[] { _new1.Base }, Epoch, 30, 8453, Proxy));
+
+                Balance(_new1, 5_000M);                                            // plan B, same nonce: _new2 instead
+                Balance(_new2, 10M);
+                SignedBy(_me, await Ask("REMOVE", new[] { _new2.Base }, Epoch, 30), VbtcbTypedData.RemoveValidatorsDigest(new[] { _new2.Base }, Epoch, 30, 8453, Proxy));
+
+                // Plan A's signatures were sent: _new1 is off the contract. _new2 waits for the next epoch.
+                Contract(31, validators.Where(v => v != _new1).ToArray(), casters);
+                Assert.Contains("already signed a removal", Refusal(await Ask("REMOVE", new[] { _new2.Base }, Epoch, 31)));
+            }
+            finally
+            {
+                Balance(_new1, 5_000M);
+                Balance(_new2, 5_000M);
+            }
+        }
     }
 }
