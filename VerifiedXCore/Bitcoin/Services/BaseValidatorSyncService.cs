@@ -60,20 +60,22 @@ namespace VerifiedXCore.Bitcoin.Services
             var action = (req.Action ?? "").Trim().ToUpperInvariant();
             if (action is not ("ADD" or "REMOVE")) return (null, "Unsupported action");
 
-            var view = await BaseBridgeService.ReadSignerViewAsync();
-            if (view == null) return (null, "Could not read the Base contract");
-            if (view.MessageVersion != VbtcbTypedData.MessageVersion || req.VfxBlockHeight < Globals.BaseBridgeV4Height)
-                return (null, AdminChangesNotSignedReason);
-
+            // Everything this node can judge by itself comes before the contract is read: a request it refuses anyway
+            // costs it no Base call.
+            if (req.VfxBlockHeight < Globals.BaseBridgeV4Height) return (null, AdminChangesNotSignedReason);
             var tip = Globals.LastBlock?.Height ?? -1;
             var epoch = BaseSignerSetPolicy.EpochAt(tip);
             if (req.VfxBlockHeight != epoch) return (null, "VfxBlockHeight is not the current epoch boundary");
             if (tip - epoch < BaseSignerSetPolicy.SettleBlocks) return (null, "The epoch boundary is not settled yet");
             if (BaseBridgeAttestationService.NotReadyToAttest() is { } notReady) return (null, notReady);
-            if (req.AdminNonce != view.AdminNonce.ToString()) return (null, "Admin nonce is not the contract's");
-
             var targets = (req.TargetAddresses ?? Array.Empty<string>()).Select(t => (t ?? "").Trim()).ToArray();
             if (targets.Length == 0 || targets.Any(t => !BaseSignerSetPolicy.IsAddress(t))) return (null, "Invalid target address");
+
+            var view = await SignerViewForSigningAsync();
+            if (view == null) return (null, "Could not read the Base contract");
+            if (view.MessageVersion != VbtcbTypedData.MessageVersion) return (null, AdminChangesNotSignedReason);
+            if (req.AdminNonce != view.AdminNonce.ToString()) return (null, "Admin nonce is not the contract's");
+
             var plan = BaseSignerSetPolicy.ForEpoch(epoch, view.Validators);
             if (plan == null) return (null, "No block at the epoch boundary");
 
@@ -100,6 +102,29 @@ namespace VerifiedXCore.Bitcoin.Services
                 ? VbtcbTypedData.AddValidatorsDigest(targets, epoch, view.AdminNonce, chainId, BaseBridgeService.ContractAddress)
                 : VbtcbTypedData.RemoveValidatorsDigest(targets, epoch, view.AdminNonce, chainId, BaseBridgeService.ContractAddress);
             return (new Authorized(digest, add, asMember, epoch, view.AdminNonce.ToString()), "");
+        }
+
+        /// <summary>Seconds one read of the contract answers every signing request for (one read in flight at a time).</summary>
+        internal const int SignerViewSeconds = 10;
+        private static readonly object SignerViewLock = new();
+        internal static (DateTime At, string Contract, Task<BaseBridgeService.SignerView?> View)? SignerViewCache;
+
+        /// <summary>
+        /// The contract as SignValidatorUpdate judges it. The route is open to anyone, so requests share one read for a few
+        /// seconds rather than each making its own Base calls; a nonce read a moment late only makes the signature one the
+        /// contract refuses.
+        /// </summary>
+        private static Task<BaseBridgeService.SignerView?> SignerViewForSigningAsync()
+        {
+            lock (SignerViewLock)
+            {
+                var contract = BaseBridgeService.ContractAddress ?? "";
+                if (SignerViewCache is { } c && c.Contract == contract && (DateTime.UtcNow - c.At).TotalSeconds < SignerViewSeconds)
+                    return c.View;
+                var view = BaseBridgeService.ReadSignerViewAsync();
+                SignerViewCache = (DateTime.UtcNow, contract, view);
+                return view;
+            }
         }
 
         /// <summary>This node's signature on the request, or null and why not (see <see cref="AuthorizeAsync"/>).</summary>

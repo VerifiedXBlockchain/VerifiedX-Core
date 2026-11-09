@@ -111,9 +111,12 @@ namespace VerifiedXCore.Tests
         private static IEnumerable<string> Addresses(int n, char c = 'a') =>
             Enumerable.Range(1, n).Select(i => "0x" + c + i.ToString("x").PadLeft(39, '0'));
 
-        private static void Contract(int nonce, params V[] on) =>
+        private static void Contract(int nonce, params V[] on)
+        {
+            BaseValidatorSyncService.SignerViewCache = null;                        // the contract changed: read it again
             BaseBridgeService.ReadSignerViewForTests = () => Task.FromResult<BaseBridgeService.SignerView?>(
                 new BaseBridgeService.SignerView(on.Select(v => v.Base).ToList(), 4, Math.Max(2, (on.Length * 2 + 2) / 3), nonce));
+        }
 
         private static async Task<(HttpStatusCode Code, JObject Body)> Ask(string action, IEnumerable<string> targets, long epoch, int nonce)
         {
@@ -244,6 +247,40 @@ namespace VerifiedXCore.Tests
             Globals.BaseBridgeV4Height = long.MaxValue;                             // mainnet as released
             Assert.Equal(BaseValidatorSyncService.AdminChangesNotSignedReason, Refusal(await Ask("ADD", new[] { first }, Epoch, 8)));
         }
+
+        /// <summary>
+        /// SignValidatorUpdate is open to anyone. A request this node refuses on what it knows itself (below the height,
+        /// another epoch, an unsettled boundary, a malformed target) makes no Base call, and requests that do need the
+        /// contract share one read for a few seconds.
+        /// </summary>
+        [Fact]
+        public async Task ARequestRefusedOnWhatTheNodeKnows_ReadsNothingFromBase_AndOthersShareOneRead()
+        {
+            var reads = 0;
+            BaseValidatorSyncService.SignerViewCache = null;
+            BaseBridgeService.ReadSignerViewForTests = () =>
+            {
+                Interlocked.Increment(ref reads);
+                return Task.FromResult<BaseBridgeService.SignerView?>(new BaseBridgeService.SignerView(new[] { _me.Base, _seed2.Base, _seed3.Base }, 4, 2, 8));
+            };
+            var first = BaseSignerSetPolicy.ForEpoch(Epoch, new[] { _me.Base, _seed2.Base, _seed3.Base })!.Adds.Single();
+
+            Globals.BaseBridgeV4Height = long.MaxValue;                             // mainnet as released
+            Assert.Equal(BaseValidatorSyncService.AdminChangesNotSignedReason, Refusal(await Ask("ADD", new[] { first }, Epoch, 8)));
+            Globals.BaseBridgeV4Height = Globals.BaseBridgeV4TestnetHeight;
+            Assert.Contains("current epoch", Refusal(await Ask("ADD", new[] { first }, Epoch - BaseSignerSetPolicy.EpochBlocks, 8)));
+            Assert.Contains("Invalid target", Refusal(await Ask("ADD", new[] { "0x12" }, Epoch, 8)));
+            Globals.LastBlock = new Block { Height = Epoch + BaseSignerSetPolicy.SettleBlocks - 1, Timestamp = TimeUtil.GetTime() };
+            Assert.Contains("not settled", Refusal(await Ask("ADD", new[] { first }, Epoch, 8)));
+            Assert.Equal(0, reads);
+
+            Globals.LastBlock = new Block { Height = Epoch + BaseSignerSetPolicy.SettleBlocks, Timestamp = TimeUtil.GetTime() };
+            for (var i = 0; i < 5; i++)
+                SignedBy(_me, await Ask("ADD", new[] { first }, Epoch, 8), VbtcbTypedData.AddValidatorsDigest(new[] { first }, Epoch, 8, 8453, Proxy));
+            Assert.Contains("Admin nonce", Refusal(await Ask("ADD", new[] { first }, Epoch, 7)));
+            Assert.Equal(1, reads);
+        }
+
         // ── Who sends it ────────────────────────────────────────────────────────────────────────────────────
 
         /// <summary>Routes each request to the validator API as the node at that IP answers it; unreachable IPs fail.</summary>
