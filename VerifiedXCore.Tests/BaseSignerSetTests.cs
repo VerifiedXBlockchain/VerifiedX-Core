@@ -808,5 +808,27 @@ namespace VerifiedXCore.Tests
                 Globals.HttpClientFactory = priorFactory;
             }
         }
+
+        /// <summary>
+        /// A signed change counts as done only once the contract shows it, not when anything else moves the admin nonce:
+        /// anyone can have a member sign the epoch's removal, and a caster change sent first must not make that member refuse
+        /// the removal itself for the rest of the epoch.
+        /// </summary>
+        [Fact]
+        public async Task AnotherChangeMovingTheNonce_DoesNotCountAsTheRemovalThisNodeSigned()
+        {
+            var casters = new[] { _me, _seed2, _seed3 };
+            var validators = new[] { _me, _seed2, _seed3, _gone };
+            Contract(20, validators, casters);
+            SignedBy(_me, await Ask("REMOVE", new[] { _gone.Base }, Epoch, 20), VbtcbTypedData.RemoveValidatorsDigest(new[] { _gone.Base }, Epoch, 20, 8453, Proxy));
+
+            // The caster list changed (nonce 21); the removal did not go through and is still signed at the new nonce.
+            Contract(21, validators, new[] { _me, _seed2, _seed3, _new1 });
+            SignedBy(_me, await Ask("REMOVE", new[] { _gone.Base }, Epoch, 21), VbtcbTypedData.RemoveValidatorsDigest(new[] { _gone.Base }, Epoch, 21, 8453, Proxy));
+
+            // Once it went through, the next removal waits for the next epoch.
+            Contract(22, new[] { _me, _seed2, _seed3 }, casters);
+            Assert.True(VerifiedXCore.Bitcoin.Models.BaseSignerSignLog.WentThrough(Proxy + "#remove", Epoch, Array.Empty<string>(), new[] { _me.Base, _seed2.Base, _seed3.Base }));
+        }
     }
 }

@@ -58,7 +58,8 @@ namespace VerifiedXCore.Bitcoin.Services
         /// A request this node will sign: the digest, and the once-an-epoch log it is recorded in (an addition or a caster
         /// change signed as a member of the contract; null for anything else).
         /// </summary>
-        internal sealed record Authorized(byte[] Digest, string Action, string? LogKey, long Epoch, string AdminNonce);
+        internal sealed record Authorized(byte[] Digest, string Action, string? LogKey, long Epoch, string AdminNonce,
+            IReadOnlyList<string>? LogAdded = null, IReadOnlyList<string>? LogRemoved = null);
 
         /// <summary>The once-an-epoch log of caster changes this node signed as a member.</summary>
         private static string CasterLogKey => BaseBridgeService.ContractAddress + "#casters";
@@ -121,10 +122,10 @@ namespace VerifiedXCore.Bitcoin.Services
                     return (null, "The caster change would leave the contract outside 3 to 10 casters");
                 if (!asMember && !targets.Contains(myBase, StringComparer.OrdinalIgnoreCase))
                     return (null, "Only a validator or caster on the contract, or a caster being added, signs a caster change");
-                if (asMember && BaseSignerSignLog.Get(CasterLogKey) is { } casterLog && casterLog.Epoch == epoch && casterLog.AdminNonce != view.AdminNonce.ToString())
+                if (asMember && BaseSignerSignLog.WentThrough(CasterLogKey, epoch, view.CasterList, view.CasterList))
                     return (null, "This node already signed a caster change that went through this epoch");
                 return (new Authorized(VbtcbTypedData.UpdateCastersDigest(targets, removing, epoch, view.AdminNonce, chainId, BaseBridgeService.ContractAddress),
-                    action, asMember ? CasterLogKey : null, epoch, view.AdminNonce.ToString()), "");
+                    action, asMember ? CasterLogKey : null, epoch, view.AdminNonce.ToString(), casterPlan.Add, casterPlan.Remove), "");
             }
 
             var plan = BaseSignerSetPolicy.ForEpoch(epoch, view.Validators);
@@ -136,7 +137,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (!targets.SequenceEqual(plan.Removes, StringComparer.OrdinalIgnoreCase)) return (null, "Not the removal this node computes for the epoch");
                 // One removal an epoch: the next batch, computed against the smaller set, waits for the next boundary, so
                 // fewer than a third leave in an epoch however often the loop runs.
-                if (RemovalDone(epoch, view.AdminNonce.ToString())) return (null, "This node already signed a removal that went through this epoch");
+                if (RemovalDone(epoch, view)) return (null, "This node already signed a removal that went through this epoch");
             }
             else
             {
@@ -144,22 +145,23 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (!InPlanOrder(targets, plan.Adds)) return (null, "Not an addition this node computes for the epoch");
                 if (!asMember && !targets.Contains(myBase, StringComparer.OrdinalIgnoreCase))
                     return (null, "Only a validator or caster on the contract, or one being added, signs an addition");
-                if (asMember && BaseSignerSignLog.Get(BaseBridgeService.ContractAddress) is { } log && log.Epoch == epoch && log.AdminNonce != view.AdminNonce.ToString())
+                if (asMember && BaseSignerSignLog.WentThrough(BaseBridgeService.ContractAddress, epoch, view.Validators, view.Validators))
                     return (null, "This node already signed an addition that went through this epoch");
             }
 
             var digest = add
                 ? VbtcbTypedData.AddValidatorsDigest(targets, epoch, view.AdminNonce, chainId, BaseBridgeService.ContractAddress)
                 : VbtcbTypedData.RemoveValidatorsDigest(targets, epoch, view.AdminNonce, chainId, BaseBridgeService.ContractAddress);
-            return (new Authorized(digest, action, add && asMember ? BaseBridgeService.ContractAddress : add ? null : RemovalLogKey, epoch, view.AdminNonce.ToString()), "");
+            return (new Authorized(digest, action, add && asMember ? BaseBridgeService.ContractAddress : add ? null : RemovalLogKey, epoch, view.AdminNonce.ToString(),
+                add ? plan.Adds : null, add ? null : plan.Removes), "");
         }
 
         /// <summary>The once-an-epoch log of validator removals this node signed.</summary>
         private static string RemovalLogKey => BaseBridgeService.ContractAddress + "#remove";
 
-        /// <summary>Whether a removal this node signed this epoch went through (the admin nonce has moved since).</summary>
-        private static bool RemovalDone(long epoch, string adminNonce) =>
-            BaseSignerSignLog.Get(RemovalLogKey) is { } log && log.Epoch == epoch && log.AdminNonce != adminNonce;
+        /// <summary>Whether a removal this node signed this epoch went through: one it removes is off the contract.</summary>
+        private static bool RemovalDone(long epoch, BaseBridgeService.SignerView view) =>
+            BaseSignerSignLog.WentThrough(RemovalLogKey, epoch, Array.Empty<string>(), view.Validators);
 
         /// <summary>Seconds one read of the contract answers every signing request for (one read in flight at a time).</summary>
         internal const int SignerViewSeconds = 10;
@@ -225,7 +227,7 @@ namespace VerifiedXCore.Bitcoin.Services
             var privHex = account.GetKey;
             if (privHex.Length % 2 != 0) privHex = "0" + privHex;
             var signature = ValidatorEthKeyService.SignDigestHex(auth.Digest, HexByteUtility.HexToByte(privHex));
-            if (auth.LogKey != null) BaseSignerSignLog.Save(auth.LogKey, auth.Epoch, auth.AdminNonce);
+            if (auth.LogKey != null) BaseSignerSignLog.Save(auth.LogKey, auth.Epoch, auth.LogAdded ?? Array.Empty<string>(), auth.LogRemoved ?? Array.Empty<string>());
             LogUtility.Log($"[BaseValidatorSync] Signed {auth.Action} of {(req!.TargetAddresses?.Length ?? 0) + (req.RemoveAddresses?.Length ?? 0)} for epoch {auth.Epoch} at admin nonce {auth.AdminNonce}", "BaseValidatorSyncService");
             return (signature, "");
         }
@@ -366,7 +368,7 @@ namespace VerifiedXCore.Bitcoin.Services
             // The casters' change goes first (a contract upgraded from V3 has none, and nothing else changes until it has),
             // once an epoch: after one went through, this node signs no second one, so it does not try to send one.
             var casterPlan = BaseSignerSetPolicy.CastersForEpoch(epoch, view.CasterList);
-            var casterChangeDone = BaseSignerSignLog.Get(CasterLogKey) is { } casterLog && casterLog.Epoch == epoch && casterLog.AdminNonce != nonce;
+            var casterChangeDone = BaseSignerSignLog.WentThrough(CasterLogKey, epoch, view.CasterList, view.CasterList);
             // A caster change that cannot be made (a new caster does not answer, too few sign) does not hold the validators'
             // change back: the loop goes on to it.
             if (casterPlan is { Empty: false } && !casterChangeDone
@@ -379,7 +381,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
             if (plan.Removes.Count > 0)
             {
-                if (RemovalDone(epoch, nonce)) return;                           // the rest leave at the next boundary
+                if (RemovalDone(epoch, view)) return;                            // the rest leave at the next boundary
                 var removes = plan.Removes.ToArray();
                 var sigs = await CollectAsync("REMOVE", removes, epoch, nonce, members, ipOf, myBase, view,
                     VbtcbTypedData.RemoveValidatorsDigest(removes, epoch, view.AdminNonce, BaseBridgeService.BaseChainId, BaseBridgeService.ContractAddress));
