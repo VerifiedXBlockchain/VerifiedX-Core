@@ -1068,7 +1068,7 @@ namespace VerifiedXCore
         /// older build never acknowledges and still counts, so a caster standing down before enough validators upgraded
         /// would halt a healthy chain.
         /// </summary>
-        public static long VreeActivationHeight = long.MaxValue;
+        public static long VreeActivationHeight = 7_681_800;
         /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
         public const long VreeActivationTestnetHeight = 107_700;
 
