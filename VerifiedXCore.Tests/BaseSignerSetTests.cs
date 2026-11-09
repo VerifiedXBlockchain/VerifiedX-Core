@@ -158,13 +158,62 @@ namespace VerifiedXCore.Tests
         {
             var contract = Addresses(5).ToList();
             var plan = BaseSignerSetPolicy.Compute(Epoch, EpochHash, contract.Take(3), contract);
-            Assert.Equal(contract.Skip(3).OrderBy(a => BaseSignerSetPolicy.RankOf(EpochHash, a), StringComparer.Ordinal), plan.Removes);
-            Assert.Empty(plan.Adds);                                               // 3 left: room for one, nobody new
+            Assert.Equal(contract.Skip(3).OrderBy(a => BaseSignerSetPolicy.RankOf(EpochHash, a), StringComparer.Ordinal).Take(1), plan.Removes); // under a third of 5 an epoch
+            Assert.Empty(plan.Adds);                                               // removals first
 
             var two = BaseSignerSetPolicy.Compute(Epoch, EpochHash, contract.Take(1), contract.Take(3));
             Assert.Empty(two.Removes);                                             // would leave fewer than 3
             var four = BaseSignerSetPolicy.Compute(Epoch, EpochHash, contract.Take(1), contract.Take(4));
             Assert.Single(four.Removes);                                           // down to 3, no further
+        }
+
+        [Fact]
+        public void FewerThanAThirdLeaveInOneEpoch_AndAValidatorStillSeenStays()
+        {
+            var contract = Addresses(10).ToList();
+            Assert.Equal(3, BaseSignerSetPolicy.Compute(Epoch, EpochHash, Array.Empty<string>(), contract).Removes.Count); // not all 7 above the floor
+            Assert.Empty(BaseSignerSetPolicy.Compute(Epoch, EpochHash, Array.Empty<string>(), contract, contract).Removes);
+            var left = contract.ToList();
+            for (var epoch = 1; left.Count > BaseSignerSetPolicy.MinValidators; epoch++)
+            {
+                var removes = BaseSignerSetPolicy.Compute(epoch * BaseSignerSetPolicy.EpochBlocks, $"h{epoch}", Array.Empty<string>(), left).Removes;
+                Assert.True(3 * removes.Count < left.Count);
+                left = left.Except(removes).ToList();
+            }
+        }
+
+        /// <summary>
+        /// A validator on the contract keeps its seat while it was seen (REGISTER or HEARTBEAT) in the two days before the
+        /// boundary, even when it is not active at the boundary itself; it loses it when not seen for two days or once it
+        /// exits.
+        /// </summary>
+        [Fact]
+        public void AValidatorOnTheContract_KeepsItsSeatForTwoDaysWithoutAHeartbeat_NotLongerOrAfterItExits()
+        {
+            const long boundary = 3 * BaseSignerSetPolicy.EpochBlocks;
+            var (quiet, old, exited) = (NewKey(), NewKey(), NewKey());
+            foreach (var v in new[] { quiet, old, exited })
+                StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = v.Address, Balance = 5_000M, Nonce = 0 });
+            Transaction Register(V v) => new()
+            {
+                TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = v.Address, ToAddress = v.Address, Hash = "r" + v.Address,
+                Data = JsonConvert.SerializeObject(new { ValidatorAddress = v.Address, IPAddress = "10.0.1.1", FrostPublicKey = v.Pub, IsS3C = false }),
+            };
+            void At(long height, params Transaction[] txs) => BlockchainData.GetBlocks().InsertSafe(new Block { Height = height, Hash = $"b{height}-{Guid.NewGuid():N}", Transactions = txs.ToList() });
+            At(boundary - BaseSignerSetPolicy.KeepSeenBlocks - 1, Register(old));                // seen just over two days before
+            At(boundary - 5_000, Register(quiet));                                                 // seen 5,000 blocks before: not active, still seen
+            At(boundary - 200, Register(exited));
+            At(boundary - 100, new Transaction
+            {
+                TransactionType = TransactionType.VBTC_V2_VALIDATOR_EXIT, FromAddress = exited.Address, ToAddress = exited.Address, Hash = "x" + exited.Address,
+                Data = JsonConvert.SerializeObject(new { ValidatorAddress = exited.Address }),
+            });
+            At(boundary);
+
+            var contract = new[] { _me, _seed2, _seed3, _new1, _new2, quiet, old, exited }.Select(v => v.Base).ToList();
+            var plan = BaseSignerSetPolicy.ForEpoch(boundary, contract)!;
+            Assert.Equal(new[] { old.Base, exited.Base }.OrderBy(a => a), plan.Removes.OrderBy(a => a));
+            Assert.DoesNotContain(quiet.Base, VBTCValidatorRegistry.GetActiveValidatorsAt(boundary).Select(v => BaseSignerSetPolicy.BaseAddressOf(v.FrostPublicKey).ToLowerInvariant()));
         }
 
         [Fact]
