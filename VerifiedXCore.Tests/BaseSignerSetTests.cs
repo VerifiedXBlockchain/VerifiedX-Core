@@ -618,5 +618,49 @@ namespace VerifiedXCore.Tests
             var json = text.Trim().StartsWith("\"") ? JsonConvert.DeserializeObject<string>(text)! : text;
             return ((HttpStatusCode)ctx.Response.StatusCode, JObject.Parse(json));
         }
+
+        /// <summary>
+        /// Fewer than a third of the validators leave in one epoch through the loop as it runs, not only in one batch: once
+        /// a removal went through, the loop computes the next batch against the smaller set but nobody signs it until the
+        /// next boundary.
+        /// </summary>
+        [Fact]
+        public async Task OneRemovalAnEpoch_TheLoopDoesNotRemoveAgainAgainstTheSmallerSet()
+        {
+            var (s1, s2) = (NewKey(), NewKey());                                // on the contract, never seen on VFX
+            var validators = new[] { _me, _seed2, _seed3, _new1, _new2, _unfunded, s1, s2 };   // 8: two may leave an epoch
+            var at = new[] { _me, _seed2, _seed3, _new1, _new2, _unfunded }.Select((v, i) => (v, ip: $"10.0.0.{i + 1}")).ToDictionary(x => x.ip, x => x.v);
+            var priorFactory = Globals.HttpClientFactory;
+            Globals.HttpClientFactory = new ValidatorNetwork(at);
+            var sent = new List<(string Function, object[] Args)>();
+            BaseValidatorSyncService.SubmitForTests = (f, a) => { sent.Add((f, a)); return Task.FromResult<string?>("0xtx"); };
+            Globals.LastBlock = new Block { Height = Epoch + BaseSignerSetPolicy.SettleBlocks + 8 * BaseValidatorSyncService.SubmitTurnBlocks, Timestamp = TimeUtil.GetTime() };
+            var casters = new[] { _me, _seed2, _seed3 };
+            try
+            {
+                Contract(11, validators, casters);
+                await BaseValidatorSyncService.SyncOnceAsync();
+                var (fn, args) = Assert.Single(sent);
+                Assert.Equal("removeValidatorBatch", fn);
+                var removed = (List<string>)args[0];
+                Assert.Equal(2, removed.Count);                                   // of the three that should go
+
+                // It went through. Against the six left the rule would remove the third now; it waits for the next epoch.
+                sent.Clear();
+                var left = validators.Where(v => !removed.Contains(v.Base)).ToArray();
+                var third = BaseSignerSetPolicy.ForEpoch(Epoch, left.Select(v => v.Base))!.Removes;
+                Assert.Single(third);
+                Contract(12, left, casters);
+                await BaseValidatorSyncService.SyncOnceAsync();
+                Assert.Empty(sent);
+                Globals.ValidatorAddress = _seed2.Address;
+                Assert.Contains("already signed a removal", Refusal(await Ask("REMOVE", third, Epoch, 12)));
+            }
+            finally
+            {
+                BaseValidatorSyncService.SubmitForTests = null;
+                Globals.HttpClientFactory = priorFactory;
+            }
+        }
     }
 }

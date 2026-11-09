@@ -117,6 +117,9 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 if (!asMember) return (null, "Only a validator or caster on the contract signs a removal");
                 if (!targets.SequenceEqual(plan.Removes, StringComparer.OrdinalIgnoreCase)) return (null, "Not the removal this node computes for the epoch");
+                // One removal an epoch: the next batch, computed against the smaller set, waits for the next boundary, so
+                // fewer than a third leave in an epoch however often the loop runs.
+                if (RemovalDone(epoch, view.AdminNonce.ToString())) return (null, "This node already signed a removal that went through this epoch");
             }
             else
             {
@@ -131,8 +134,15 @@ namespace VerifiedXCore.Bitcoin.Services
             var digest = add
                 ? VbtcbTypedData.AddValidatorsDigest(targets, epoch, view.AdminNonce, chainId, BaseBridgeService.ContractAddress)
                 : VbtcbTypedData.RemoveValidatorsDigest(targets, epoch, view.AdminNonce, chainId, BaseBridgeService.ContractAddress);
-            return (new Authorized(digest, action, add && asMember ? BaseBridgeService.ContractAddress : null, epoch, view.AdminNonce.ToString()), "");
+            return (new Authorized(digest, action, add && asMember ? BaseBridgeService.ContractAddress : add ? null : RemovalLogKey, epoch, view.AdminNonce.ToString()), "");
         }
+
+        /// <summary>The once-an-epoch log of validator removals this node signed.</summary>
+        private static string RemovalLogKey => BaseBridgeService.ContractAddress + "#remove";
+
+        /// <summary>Whether a removal this node signed this epoch went through (the admin nonce has moved since).</summary>
+        private static bool RemovalDone(long epoch, string adminNonce) =>
+            BaseSignerSignLog.Get(RemovalLogKey) is { } log && log.Epoch == epoch && log.AdminNonce != adminNonce;
 
         /// <summary>Seconds one read of the contract answers every signing request for (one read in flight at a time).</summary>
         internal const int SignerViewSeconds = 10;
@@ -272,6 +282,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
             if (plan.Removes.Count > 0)
             {
+                if (RemovalDone(epoch, nonce)) return;                           // the rest leave at the next boundary
                 var removes = plan.Removes.ToArray();
                 var sigs = await CollectAsync("REMOVE", removes, epoch, nonce, members, ipOf, myBase, view,
                     VbtcbTypedData.RemoveValidatorsDigest(removes, epoch, view.AdminNonce, BaseBridgeService.BaseChainId, BaseBridgeService.ContractAddress));
