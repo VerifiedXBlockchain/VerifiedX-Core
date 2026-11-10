@@ -52,5 +52,17 @@ namespace VerifiedXCore.Tests
             Assert.NotEqual(baseline, VbtcbTypedData.MintDigest("0xD140DfAB7F08B5ce8E54A8b364E447b49E6EEda6", 400_000, "l", 1, 84532, Proxy));
             Assert.NotEqual(baseline, VbtcbTypedData.MintDigest("0xD140DfAB7F08B5ce8E54A8b364E447b49E6EEda6", 400_000, "l", 1, 8453, "0x1154DDB476A38c01A389E1324121E15Df6703D19"));
         }
+
+        [Fact]
+        public void TheContractAbi_IsV4_AndHoldsWhatCoreAndTheWalletCall()
+        {
+            var abi = new Nethereum.ABI.ABIDeserialisation.ABIJsonDeserialiser().DeserialiseContract(BaseBridgeService.CONTRACT_ABI);
+            var functions = abi.Functions.Select(f => f.Name).ToHashSet();
+            foreach (var name in new[] { "mintWithProof", "isLockIdUsed", "requiredMintSignatures", "balanceOf", "burnForVfxExit", "burnForBTCExit",
+                         "MESSAGE_VERSION", "getValidators", "getCasters", "requiredCasterSignatures", "updateCasters", "cancelPending", "proposeRemoval" })
+                Assert.Contains(name, functions);
+            Assert.DoesNotContain("upgradeWithValidatorApproval", functions);
+            Assert.Equal(4, abi.Functions.Single(f => f.Name == "addValidatorBatch").InputParameters.Length);
+        }
     }
 }
