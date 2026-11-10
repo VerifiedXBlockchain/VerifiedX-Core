@@ -726,22 +726,11 @@ namespace VerifiedXCore.Bitcoin
 
                                 var scState = SmartContractStateTrei.GetSmartContractState(address.SmartContractUID);
                                 var postAuditTknz = await TokenizedBitcoin.GetTokenizedBitcoin(address.SmartContractUID);
-                                if(scState != null && postAuditTknz != null)
+                                if(scState != null && postAuditTknz?.DepositAddress != null)
                                 {
-                                    if (scState.SCStateTreiTokenizationTXes != null && scState.SCStateTreiTokenizationTXes.Any())
-                                    {
-                                        var balanceList = scState.SCStateTreiTokenizationTXes.ToList();
-                                        if (balanceList.Any())
-                                        {
-                                            var stateBalance = balanceList.Sum(x => x.Amount);
-                                            var totalBalance = postAuditTknz.Balance;
-                                            if (stateBalance > totalBalance)
-                                            {
-                                                if(postAuditTknz.DepositAddress != null)
-                                                    await TokenizedBitcoin.FlagInsolvent(postAuditTknz.DepositAddress);
-                                            }
-                                        }
-                                    }
+                                    // Re-judged every pass, so a vault that is topped up again reads as solvent again.
+                                    var stateBalance = scState.SCStateTreiTokenizationTXes?.Sum(x => x.Amount) ?? 0M;
+                                    await TokenizedBitcoin.SetInsolvent(postAuditTknz.DepositAddress, stateBalance > postAuditTknz.Balance);
                                 }
 
                                 await Task.Delay(1500);

@@ -72,15 +72,16 @@ namespace VerifiedXCore.Bitcoin.Models
             }
         }
 
-        public static async Task FlagInsolvent(string address)
+        /// <summary>Records whether the vault at this deposit address is insolvent (its vBTC in state exceeds its Bitcoin).</summary>
+        public static async Task SetInsolvent(string address, bool insolvent)
         {
             var scs = GetDb();
             if (scs != null)
             {
                 var sc = scs.FindOne(x => x.DepositAddress == address);
-                if (sc != null)
+                if (sc != null && sc.TokenHasBecomeInsolvent != insolvent)
                 {
-                    sc.TokenHasBecomeInsolvent = !sc.TokenHasBecomeInsolvent;
+                    sc.TokenHasBecomeInsolvent = insolvent;
                     scs.UpdateSafe(sc);
                 }
             }
