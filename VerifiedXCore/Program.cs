@@ -923,6 +923,7 @@ namespace VerifiedXCore
             _ = SeedNodeService.CallToSeed();
             _ = FortisPoolService.PopulateFortisPoolCache();
             _ = MempoolBroadcastService.Run();
+            _ = ValidatorMembershipPull.RunLoop();
 
             //_ = ValidatorService.ValidatingMonitorService();
 

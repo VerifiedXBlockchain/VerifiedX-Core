@@ -163,6 +163,39 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        /// <summary>
+        /// A wallet node (no validator key) knows no casters and only the peers it syncs from; it pulls from them, and a
+        /// bridge exit's votes are then counted against the committee they name, not the seeds (testnet block 129,878).
+        /// </summary>
+        [Fact]
+        public async Task ANodeThatDoesNotValidate_PullsFromItsConnectedPeers_AndExitVotesCountAgainstTheRecord()
+        {
+            var successor = Successor();
+            var (listener, stop, asked) = Caster(successor);
+            var priorNodes = Globals.Nodes;
+            try
+            {
+                Globals.ValidatorAddress = "";
+                Globals.BlockCasters = new System.Collections.Concurrent.ConcurrentBag<Peers>();
+                Globals.Nodes = new System.Collections.Concurrent.ConcurrentDictionary<string, NodeInfo>();
+                Globals.Nodes["127.0.0.1"] = new NodeInfo { NodeIP = "127.0.0.1" };
+                Assert.Contains("127.0.0.1", ValidatorMembershipPull.PeerIps());
+
+                Assert.True(await ValidatorMembershipPull.PullIfDueAsync());
+
+                Assert.Equal(1, asked());
+                Assert.Equal(successor.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+                Assert.Equal(successor.Casters.Select(c => c.Address).OrderBy(a => a, StringComparer.Ordinal),
+                    VerifiedXCore.Bitcoin.Services.BridgeCasterConsensus.GetCommitteeForHeight(Globals.LastBlock.Height + 1).OrderBy(a => a, StringComparer.Ordinal));
+            }
+            finally
+            {
+                Globals.Nodes = priorNodes;
+                stop.Cancel();
+                listener.Stop();
+            }
+        }
+
         [Fact]
         public async Task ACaster_DoesNotPullHere_ItsRoundLoopDoes()
         {
