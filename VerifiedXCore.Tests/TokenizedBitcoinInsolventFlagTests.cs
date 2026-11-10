@@ -1,0 +1,55 @@
+using System;
+using System.IO;
+using VerifiedXCore.Bitcoin.Models;
+using VerifiedXCore.Data;
+using Xunit;
+
+namespace VerifiedXCore.Tests
+{
+    /// <summary>
+    /// AccountCheck calls FlagInsolvent on every pass that finds a vault's state balance above its Bitcoin balance. The flag
+    /// must stay set across passes; it used to toggle, so a vault still insolvent on the next pass read as solvent again.
+    /// </summary>
+    [Collection("DbContextSequential")]
+    public class TokenizedBitcoinInsolventFlagTests : IDisposable
+    {
+        private const string Deposit = "tb1qinsolventflagtestdepositaddress";
+        private readonly string _tempRoot;
+        private readonly string? _priorCustomPath = Globals.CustomPath;
+
+        public TokenizedBitcoinInsolventFlagTests()
+        {
+            _tempRoot = Path.Combine(Path.GetTempPath(), $"tknz_insolvent_{Guid.NewGuid():N}") + Path.DirectorySeparatorChar;
+            Directory.CreateDirectory(_tempRoot);
+            Globals.CustomPath = _tempRoot;
+            DbContext.Initialize();
+            TokenizedBitcoin.GetDb().Insert(new TokenizedBitcoin
+            {
+                SmartContractUID = "sc-insolvent-flag-test",
+                RBXAddress = "xInsolventFlagTestOwner",
+                DepositAddress = Deposit,
+                TokenName = "vBTC",
+                TokenDescription = "",
+            });
+        }
+
+        public void Dispose()
+        {
+            try { DbContext.CloseDB(); } catch { }
+            Globals.CustomPath = _priorCustomPath;
+            try { Directory.Delete(_tempRoot, recursive: true); } catch { }
+        }
+
+        private static bool Flagged() => TokenizedBitcoin.GetDb().FindOne(x => x.DepositAddress == Deposit).TokenHasBecomeInsolvent;
+
+        [Fact]
+        public async System.Threading.Tasks.Task RepeatedInsolventPassesKeepTheFlagSet()
+        {
+            Assert.False(Flagged());
+            await TokenizedBitcoin.FlagInsolvent(Deposit);
+            Assert.True(Flagged());
+            await TokenizedBitcoin.FlagInsolvent(Deposit);
+            Assert.True(Flagged());
+        }
+    }
+}

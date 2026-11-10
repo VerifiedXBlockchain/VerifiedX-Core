@@ -80,7 +80,7 @@ namespace VerifiedXCore.Bitcoin.Models
                 var sc = scs.FindOne(x => x.DepositAddress == address);
                 if (sc != null)
                 {
-                    sc.TokenHasBecomeInsolvent = !sc.TokenHasBecomeInsolvent;
+                    sc.TokenHasBecomeInsolvent = true; // set, not toggled: a vault found insolvent on every pass stays flagged
                     scs.UpdateSafe(sc);
                 }
             }
