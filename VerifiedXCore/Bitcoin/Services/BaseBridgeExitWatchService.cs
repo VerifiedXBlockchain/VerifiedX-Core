@@ -26,6 +26,17 @@ namespace VerifiedXCore.Bitcoin.Services
         private static int _singleBlockFailures;
         private const int SingleBlockFailuresBeforeSkip = 20;
 
+        // The widest span read without error and the narrowest one refused above it (a provider's range cap: 200 blocks
+        // on sepolia.base.org). The span settles between them: doubled into the cap and cut to a quarter on every refusal,
+        // it averaged about 95 blocks a 12-second poll, and with Base at 200 ms blocks a caster behind by an outage gained
+        // under one block a second on the chain, so every burn waited that long (10 November 2026).
+        private static int _goodSpan;
+        private static int _refusedSpan = int.MaxValue;
+        private static bool _behind;
+
+        /// <summary>Reads at most this many spans in one poll while the cursor is behind Base, one after another.</summary>
+        internal const int CatchUpReadsPerPoll = 50;
+
         /// <summary>Base blocks read again after a restart: about two hours (round 23).</summary>
         internal const long RestartRewindBlocks = 3_600;
         private static bool _started;
@@ -87,13 +98,64 @@ namespace VerifiedXCore.Bitcoin.Services
                 try
                 {
                     if (IsConfigured)
-                        await PollOnceInternal();
+                        await ReadUntilCaughtUpAsync();
                 }
                 catch (Exception ex)
                 {
                     LogUtility.Log($"[BaseBridgeExit] Poll error: {ex.Message}", "BaseBridgeExitWatchService.BridgeExitScanLoop");
                 }
             }, 12_000, "BaseBridgeExitWatchService.BridgeExitScanLoop");
+        }
+
+        /// <summary>
+        /// One poll of the loop: reads span after span while the cursor is behind Base (up to <see cref="CatchUpReadsPerPoll"/>),
+        /// and stops at the head or at a read that fails, which the next poll takes up again.
+        /// </summary>
+        internal static async Task ReadUntilCaughtUpAsync()
+        {
+            for (var i = 0; i < CatchUpReadsPerPoll; i++)
+            {
+                await PollOnceInternal();
+                if (!_behind) return;
+                await Task.Delay(200);
+            }
+        }
+
+        /// <summary>The span the next read asks for.</summary>
+        internal static int CurrentSpan => _span;
+
+        /// <summary>Test seam: start the span over as at startup.</summary>
+        internal static void ResetSpanForTests()
+        {
+            _span = MaxBlockSpan;
+            _goodSpan = 0;
+            _refusedSpan = int.MaxValue;
+            _singleBlockFailures = 0;
+            _behind = false;
+        }
+
+        /// <summary>The span after a read of <paramref name="span"/> blocks succeeded: back up to the widest that worked, then halfway to the narrowest refused.</summary>
+        internal static int SpanAfterSuccess(int span)
+        {
+            if (span > _goodSpan) _goodSpan = span;
+            if (span < _goodSpan) return Math.Min(span * 2, _goodSpan);
+            if (_refusedSpan == int.MaxValue) return Math.Min(MaxBlockSpan, span * 2);
+            return Math.Max(span, (span + _refusedSpan) / 2);
+        }
+
+        /// <summary>
+        /// The span after a read of <paramref name="span"/> blocks failed. Wider than any that worked, it is the provider's
+        /// cap and the span goes back to the widest that worked; otherwise (a range dense with logs, or the provider
+        /// failing) it shrinks to a quarter, as before.
+        /// </summary>
+        internal static int SpanAfterFailure(int span)
+        {
+            if (span > _goodSpan)
+            {
+                _refusedSpan = Math.Min(_refusedSpan, span);
+                if (_goodSpan > 0) return _goodSpan;
+            }
+            return Math.Max(1, span / 4);
         }
 
         /// <summary>Reset the scan cursor to rescan from a specific block. Next poll will start from fromBlock.</summary>
@@ -221,6 +283,7 @@ namespace VerifiedXCore.Bitcoin.Services
             var web3 = new Web3(BaseBridgeService.BaseRpcUrl);
             var latestHex = await web3.Eth.Blocks.GetBlockNumber.SendRequestAsync();
             var latest = (long)latestHex.Value;
+            _behind = false;
 
             var state = BridgeExitSyncState.GetOrCreate();
 
@@ -402,7 +465,7 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 if (_span > 1)
                 {
-                    _span = Math.Max(1, _span / 4);
+                    _span = SpanAfterFailure(_span);
                     return (processed, state.LastScannedBlock, $"Base log query failed; the range is read again next poll, {_span} block(s) at a time");
                 }
                 if (++_singleBlockFailures < SingleBlockFailuresBeforeSkip)
@@ -419,12 +482,13 @@ namespace VerifiedXCore.Bitcoin.Services
             }
             else
             {
-                _span = Math.Min(MaxBlockSpan, _span * 2);
+                _span = SpanAfterSuccess(_span);
             }
             _singleBlockFailures = 0;
 
             state.LastScannedBlock = to;
             BridgeExitSyncState.Save(state);
+            _behind = to < latest;
 
             return (processed, to, processed > 0 ? $"Processed {processed} exit burn(s)" : "OK");
         }
