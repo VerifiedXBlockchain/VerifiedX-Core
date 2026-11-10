@@ -10,6 +10,11 @@
       "address": "0x1154DDB476A38c01A389E1324121E15Df6703D19",
       "txHash": "0xdeec4084587fcaf273deabc048650ee16a6bf912541f1960edd84918f58126e3",
       "kind": "uups"
+    },
+    {
+      "address": "0x3669EE313f9Aa14b9eBb787DfdB0E97Ca67A0510",
+      "txHash": "0x92b2a466344a71378fbfae68ef975fb1540aacf894b453d09b8cab1027217c88",
+      "kind": "uups"
     }
   ],
   "impls": {
@@ -429,6 +434,341 @@
           "t_array(t_uint256)50_storage": {
             "label": "uint256[50]",
             "numberOfBytes": "1600"
+          },
+          "t_bytes32": {
+            "label": "bytes32",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_address,t_bool)": {
+            "label": "mapping(address => bool)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_bytes32,t_bool)": {
+            "label": "mapping(bytes32 => bool)",
+            "numberOfBytes": "32"
+          }
+        },
+        "namespaces": {
+          "erc7201:openzeppelin.storage.ERC20": [
+            {
+              "contract": "ERC20Upgradeable",
+              "label": "_balances",
+              "type": "t_mapping(t_address,t_uint256)",
+              "src": "@openzeppelin\\contracts-upgradeable\\token\\ERC20\\ERC20Upgradeable.sol:33",
+              "offset": 0,
+              "slot": "0"
+            },
+            {
+              "contract": "ERC20Upgradeable",
+              "label": "_allowances",
+              "type": "t_mapping(t_address,t_mapping(t_address,t_uint256))",
+              "src": "@openzeppelin\\contracts-upgradeable\\token\\ERC20\\ERC20Upgradeable.sol:35",
+              "offset": 0,
+              "slot": "1"
+            },
+            {
+              "contract": "ERC20Upgradeable",
+              "label": "_totalSupply",
+              "type": "t_uint256",
+              "src": "@openzeppelin\\contracts-upgradeable\\token\\ERC20\\ERC20Upgradeable.sol:37",
+              "offset": 0,
+              "slot": "2"
+            },
+            {
+              "contract": "ERC20Upgradeable",
+              "label": "_name",
+              "type": "t_string_storage",
+              "src": "@openzeppelin\\contracts-upgradeable\\token\\ERC20\\ERC20Upgradeable.sol:39",
+              "offset": 0,
+              "slot": "3"
+            },
+            {
+              "contract": "ERC20Upgradeable",
+              "label": "_symbol",
+              "type": "t_string_storage",
+              "src": "@openzeppelin\\contracts-upgradeable\\token\\ERC20\\ERC20Upgradeable.sol:40",
+              "offset": 0,
+              "slot": "4"
+            }
+          ],
+          "erc7201:openzeppelin.storage.Initializable": [
+            {
+              "contract": "Initializable",
+              "label": "_initialized",
+              "type": "t_uint64",
+              "src": "@openzeppelin\\contracts\\proxy\\utils\\Initializable.sol:69",
+              "offset": 0,
+              "slot": "0"
+            },
+            {
+              "contract": "Initializable",
+              "label": "_initializing",
+              "type": "t_bool",
+              "src": "@openzeppelin\\contracts\\proxy\\utils\\Initializable.sol:73",
+              "offset": 8,
+              "slot": "0"
+            }
+          ]
+        }
+      }
+    },
+    "234a3e491f6251d15747d5e6b0649102056a0f4f3441dea86554eef55ae8051f": {
+      "address": "0xa06e3B68B495e474B41595435675f94CF8e7C711",
+      "txHash": "0x9131d1315d31d2d7967363956520beebee3267bc19b9fe8720dd7ac0af25b8d2",
+      "layout": {
+        "solcVersion": "0.8.28",
+        "storage": [
+          {
+            "label": "isValidator",
+            "offset": 0,
+            "slot": "0",
+            "type": "t_mapping(t_address,t_bool)",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:47"
+          },
+          {
+            "label": "validators",
+            "offset": 0,
+            "slot": "1",
+            "type": "t_array(t_address)dyn_storage",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:48"
+          },
+          {
+            "label": "validatorCount",
+            "offset": 0,
+            "slot": "2",
+            "type": "t_uint256",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:49"
+          },
+          {
+            "label": "requiredMintSignatures",
+            "offset": 0,
+            "slot": "3",
+            "type": "t_uint256",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:50"
+          },
+          {
+            "label": "requiredRemoveSignatures",
+            "offset": 0,
+            "slot": "4",
+            "type": "t_uint256",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:51"
+          },
+          {
+            "label": "usedLockIds",
+            "offset": 0,
+            "slot": "5",
+            "type": "t_mapping(t_bytes32,t_bool)",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:87"
+          },
+          {
+            "label": "adminNonce",
+            "offset": 0,
+            "slot": "6",
+            "type": "t_uint256",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:88"
+          },
+          {
+            "label": "_upgradeAuthorized",
+            "offset": 0,
+            "slot": "7",
+            "type": "t_bool",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:103"
+          },
+          {
+            "label": "pendingImplementation",
+            "offset": 1,
+            "slot": "7",
+            "type": "t_address",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:106"
+          },
+          {
+            "label": "pendingUpgradeEta",
+            "offset": 0,
+            "slot": "8",
+            "type": "t_uint256",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:107"
+          },
+          {
+            "label": "_upgradeDelay",
+            "offset": 0,
+            "slot": "9",
+            "type": "t_uint256",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:108"
+          },
+          {
+            "label": "pendingUpgradeDelay",
+            "offset": 0,
+            "slot": "10",
+            "type": "t_uint256",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:109"
+          },
+          {
+            "label": "pendingUpgradeDelayEta",
+            "offset": 0,
+            "slot": "11",
+            "type": "t_uint256",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:110"
+          },
+          {
+            "label": "_pendingRemovals",
+            "offset": 0,
+            "slot": "12",
+            "type": "t_array(t_address)dyn_storage",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:111"
+          },
+          {
+            "label": "pendingRemovalHeight",
+            "offset": 0,
+            "slot": "13",
+            "type": "t_uint256",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:112"
+          },
+          {
+            "label": "pendingRemovalEta",
+            "offset": 0,
+            "slot": "14",
+            "type": "t_uint256",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:113"
+          },
+          {
+            "label": "isCaster",
+            "offset": 0,
+            "slot": "15",
+            "type": "t_mapping(t_address,t_bool)",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:114"
+          },
+          {
+            "label": "_casters",
+            "offset": 0,
+            "slot": "16",
+            "type": "t_array(t_address)dyn_storage",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:115"
+          },
+          {
+            "label": "_pendingCasterRemovals",
+            "offset": 0,
+            "slot": "17",
+            "type": "t_array(t_address)dyn_storage",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:116"
+          },
+          {
+            "label": "__gap",
+            "offset": 0,
+            "slot": "18",
+            "type": "t_array(t_uint256)40_storage",
+            "contract": "vBTCb",
+            "src": "contracts\\vBTCb.sol:609"
+          }
+        ],
+        "types": {
+          "t_address": {
+            "label": "address",
+            "numberOfBytes": "20"
+          },
+          "t_bool": {
+            "label": "bool",
+            "numberOfBytes": "1"
+          },
+          "t_mapping(t_address,t_mapping(t_address,t_uint256))": {
+            "label": "mapping(address => mapping(address => uint256))",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_address,t_uint256)": {
+            "label": "mapping(address => uint256)",
+            "numberOfBytes": "32"
+          },
+          "t_string_storage": {
+            "label": "string",
+            "numberOfBytes": "32"
+          },
+          "t_struct(ERC20Storage)43_storage": {
+            "label": "struct ERC20Upgradeable.ERC20Storage",
+            "members": [
+              {
+                "label": "_balances",
+                "type": "t_mapping(t_address,t_uint256)",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "_allowances",
+                "type": "t_mapping(t_address,t_mapping(t_address,t_uint256))",
+                "offset": 0,
+                "slot": "1"
+              },
+              {
+                "label": "_totalSupply",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "2"
+              },
+              {
+                "label": "_name",
+                "type": "t_string_storage",
+                "offset": 0,
+                "slot": "3"
+              },
+              {
+                "label": "_symbol",
+                "type": "t_string_storage",
+                "offset": 0,
+                "slot": "4"
+              }
+            ],
+            "numberOfBytes": "160"
+          },
+          "t_struct(InitializableStorage)394_storage": {
+            "label": "struct Initializable.InitializableStorage",
+            "members": [
+              {
+                "label": "_initialized",
+                "type": "t_uint64",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "_initializing",
+                "type": "t_bool",
+                "offset": 8,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_uint256": {
+            "label": "uint256",
+            "numberOfBytes": "32"
+          },
+          "t_uint64": {
+            "label": "uint64",
+            "numberOfBytes": "8"
+          },
+          "t_array(t_address)dyn_storage": {
+            "label": "address[]",
+            "numberOfBytes": "32"
+          },
+          "t_array(t_uint256)40_storage": {
+            "label": "uint256[40]",
+            "numberOfBytes": "1280"
           },
           "t_bytes32": {
             "label": "bytes32",

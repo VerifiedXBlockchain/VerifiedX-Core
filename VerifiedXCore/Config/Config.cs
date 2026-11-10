@@ -678,7 +678,7 @@ namespace VerifiedXCore.Config
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
                     // Base Bridge V2 defaults (devnet — Base Sepolia)
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://sepolia.base.org");
-                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x1154DDB476A38c01A389E1324121E15Df6703D19");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x3669EE313f9Aa14b9eBb787DfdB0E97Ca67A0510");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=84532");
                 }
                 else //testnet
@@ -691,7 +691,7 @@ namespace VerifiedXCore.Config
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BitcoinAddressFormat=1");
                     // Base Bridge V2 defaults (testnet — Base Sepolia)
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeRpcUrl=https://sepolia.base.org");
-                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x1154DDB476A38c01A389E1324121E15Df6703D19");
+                    File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeContract=0x3669EE313f9Aa14b9eBb787DfdB0E97Ca67A0510");
                     File.AppendAllText(path + "config.txt", Environment.NewLine + "BaseBridgeChainId=84532");
                 }
 				
