@@ -7,8 +7,8 @@ using Xunit;
 namespace VerifiedXCore.Tests
 {
     /// <summary>
-    /// AccountCheck calls FlagInsolvent on every pass that finds a vault's state balance above its Bitcoin balance. The flag
-    /// must stay set across passes; it used to toggle, so a vault still insolvent on the next pass read as solvent again.
+    /// AccountCheck re-judges every vault on each pass and records the result with SetInsolvent. A vault still insolvent on
+    /// the next pass stays flagged (the old FlagInsolvent toggled it back), and one topped up again reads as solvent.
     /// </summary>
     [Collection("DbContextSequential")]
     public class TokenizedBitcoinInsolventFlagTests : IDisposable
@@ -46,10 +46,19 @@ namespace VerifiedXCore.Tests
         public async System.Threading.Tasks.Task RepeatedInsolventPassesKeepTheFlagSet()
         {
             Assert.False(Flagged());
-            await TokenizedBitcoin.FlagInsolvent(Deposit);
+            await TokenizedBitcoin.SetInsolvent(Deposit, true);
             Assert.True(Flagged());
-            await TokenizedBitcoin.FlagInsolvent(Deposit);
+            await TokenizedBitcoin.SetInsolvent(Deposit, true);
             Assert.True(Flagged());
+        }
+
+        [Fact]
+        public async System.Threading.Tasks.Task AVaultToppedUpAgainReadsAsSolvent()
+        {
+            await TokenizedBitcoin.SetInsolvent(Deposit, true);
+            Assert.True(Flagged());
+            await TokenizedBitcoin.SetInsolvent(Deposit, false);
+            Assert.False(Flagged());
         }
     }
 }
