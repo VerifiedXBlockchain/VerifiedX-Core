@@ -922,4 +922,13 @@ describe("vBTCb V4", function () {
             for (const s of added) expect(BigInt(s.slot) < BigInt(newGap.slot), s.label).to.equal(true);
         });
     });
+
+    it("Core's CONTRACT_ABI (BaseBridgeService.cs) is this contract's ABI", async function () {
+        const src = fs.readFileSync(path.join(__dirname, "..", "..", "VerifiedXCore", "Bitcoin", "Services", "BaseBridgeService.cs"), "utf8");
+        const literal = src.match(/CONTRACT_ABI = @"((?:[^"]|"")*)"/);
+        expect(literal, "CONTRACT_ABI not found").to.not.equal(null);
+        const core = JSON.parse(literal[1].replace(/""/g, '"'));
+        const { abi } = await artifacts.readArtifact("contracts/vBTCb.sol:vBTCb");
+        expect(core).to.deep.equal(abi);
+    });
 });
