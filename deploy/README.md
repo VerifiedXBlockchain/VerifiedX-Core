@@ -11,6 +11,7 @@
 | `scripts/prepare-upgrade.js`, `submit-upgrade.js`, `execute-upgrade.js` | Upgrade an **existing** proxy (Base mainnet). |
 | `scripts/mint.js` | Manual `mintWithProof` with signatures you already have. |
 | `.openzeppelin/<network>.json` | Records each deployed implementation's storage layout. Upgrades are checked against it. Keep it committed. |
+| `VBTCbV4.flattened.sol` | `contracts/vBTCb.sol` with its imports inlined (`npx hardhat flatten contracts/vBTCb.sol`), for verifying the V4 implementation on BaseScan: solc 0.8.28, optimizer on with 200 runs, EVM cancun. `VBTCbV2`, `VBTCbV3` and `vBTCb.flattened.sol` (V3) are the earlier versions. |
 
 ### Deployed addresses
 
