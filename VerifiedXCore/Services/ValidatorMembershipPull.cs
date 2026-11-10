@@ -15,6 +15,11 @@ namespace VerifiedXCore.Services
     /// testnet its committee was then the three seeds, so it refused every block whose certificate carried fewer
     /// than two seed signatures (about one block in eight), fell behind, could not serve the block it had won, and
     /// the casters took the round: 54% of blocks to casters before the restart, 73% after it.
+    ///
+    /// A node that does not validate at all pulls too (<see cref="RunLoop"/>): block validation counts a bridge exit's
+    /// caster votes against the record (BridgeCasterConsensus.VerifyBoundVotes), and on testnet, 10 November 2026, a
+    /// wallet node without one judged them by the three seeds, refused the first pool unlock the committee voted
+    /// (block 129,878) and stopped there for good.
     /// </summary>
     public static class ValidatorMembershipPull
     {
@@ -56,13 +61,19 @@ namespace VerifiedXCore.Services
             }
         }
 
-        /// <summary>The peers asked: known casters, the head record's members and the bootstrap seeds, never this node.</summary>
+        /// <summary>
+        /// The peers asked: known casters, the head record's members, the bootstrap seeds and the peers this node is
+        /// connected to, never this node. A node that does not validate knows no casters and, before its first record,
+        /// no members; its connected peers are the validators it syncs from. Whatever they answer is verified back to
+        /// the genesis record before it is adopted.
+        /// </summary>
         public static List<string> PeerIps()
         {
             var head = CasterMembershipStore.GetCurrent();
             return Globals.BlockCasters.ToList().Select(c => c.PeerIP)
                 .Concat((head?.Casters ?? new List<CasterInfo>()).Select(c => c.PeerIP))
                 .Concat(SeedNodeService.GetBootstrapSeedPeers().Select(p => p.PeerIP))
+                .Concat(Globals.Nodes.Values.Select(n => n.NodeIP))
                 .Where(ip => !string.IsNullOrEmpty(ip))
                 .Select(ip => ip!.Replace("::ffff:", ""))
                 .Where(ip => ip != Globals.ReportedIP)
@@ -71,13 +82,27 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
-        /// Called on every caster-monitor tick. Pulls when this node validates but does not cast and the last pull is
-        /// <see cref="PullSeconds"/> or more ago. Returns true when a pull ran. A changed head reconciles the caster
-        /// list to the record (so the node connects to every current caster); an unchanged head leaves it alone.
+        /// Started once for every node. It is not paused while startup sync stops the timers: a node held at a block for
+        /// want of the record is the one that needs it.
+        /// </summary>
+        public static async Task RunLoop()
+        {
+            while (true)
+            {
+                try { await PullIfDueAsync(); }
+                catch { }
+                await Task.Delay(5_000);
+            }
+        }
+
+        /// <summary>
+        /// Called by <see cref="RunLoop"/> and on every caster-monitor tick. Pulls when this node does not cast and the
+        /// last pull is <see cref="PullSeconds"/> or more ago. Returns true when a pull ran. A changed head reconciles the
+        /// caster list to the record (so the node connects to every current caster); an unchanged head leaves it alone.
         /// </summary>
         public static async Task<bool> PullIfDueAsync()
         {
-            if (Globals.IsBlockCaster || string.IsNullOrEmpty(Globals.ValidatorAddress))
+            if (Globals.IsBlockCaster)
                 return false;
             if (SecondsUntilDue() > 0)
                 return false;
