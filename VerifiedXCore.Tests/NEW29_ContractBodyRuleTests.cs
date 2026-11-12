@@ -146,6 +146,30 @@ namespace VerifiedXCore.Tests
             Assert.Null(LedgerIntegrityRules.ContractBodyAllowed(Tx("Mint()", Plain()))); // the real parser reads it
         }
 
+        /// <summary>
+        /// Every node parses a carried body during VerifyTX, so the body must be one every node can finish parsing: a body
+        /// nested past Trillium's depth limit, or larger than the token cap, is refused at admission and in a block instead
+        /// of running the node out of stack or time.
+        /// </summary>
+        [Theory]
+        [InlineData("parentheses", "Contract code is nested too deeply.")]
+        [InlineData("blocks", "Contract code is nested too deeply.")]
+        [InlineData("tokens", "Contract code is too large: ")]
+        public async Task ABodyNoNodeCanFinishParsing_IsRefused_AtAdmissionAndInABlock(string shape, string expected)
+        {
+            var source = shape switch
+            {
+                "parentheses" => "var a = " + new string('(', 20_000),
+                "blocks" => new string('{', 20_000),
+                _ => string.Concat(Enumerable.Repeat("var a = 1\n", 20_000)),
+            };
+            var mint = Tx("Mint()", NEW29_ContractCodeTests.Body(source));
+            var reason = LedgerIntegrityRules.ContractBodyAllowed(mint);
+            Assert.StartsWith(expected, reason);
+            Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint));
+            Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint, false, true, false, null, false, 1001));
+        }
+
         [Fact]
         public void OrdinaryBodies_AndDateProc_AreAllowed()
         {

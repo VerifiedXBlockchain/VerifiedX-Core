@@ -1017,6 +1017,8 @@ namespace VerifiedXCore.Services
         internal static Func<string, global::Trillium.Syntax.SyntaxTree> ParseContractBody =
             text => global::Trillium.Syntax.SyntaxTree.Parse(text, preventLoopsAndRecursion: true);
 
+        public const int MaxContractBodyTokens = 65_536;
+
         public static string? ContractBodyAllowed(Transaction tx, long height = 0)
         {
             var alsoRefused = height >= Globals.PathAuditRulesHeight ? ProcessBoundBuiltins : Array.Empty<string>();
@@ -1029,7 +1031,16 @@ namespace VerifiedXCore.Services
                 // already made a block carrying it invalid, so validity is unchanged).
                 try
                 {
+                    // Parse work grows with the body: a bounded body keeps every node's read of it short. The largest
+                    // body on mainnet or testnet is under 2,000 tokens.
+                    var tokens = global::Trillium.Syntax.SyntaxTree.ParseTokens(text).Length;
+                    if (tokens > MaxContractBodyTokens)
+                        return $"Contract code is too large: {tokens} tokens, at most {MaxContractBodyTokens}.";
                     var tree = ParseContractBody(text); // as the node parses it
+                    // Trillium stops reading code nested past its depth limit; such a body is refused rather than skipped
+                    // as a parse error, so no later reader of it is the first to meet it.
+                    if (tree.Diagnostics.Any(d => d.Message == global::Trillium.Syntax.SyntaxTree.NestingTooDeepMessage))
+                        return "Contract code is nested too deeply.";
                     if (tree.Diagnostics.Length > 0) continue;
                     var pending = new Stack<global::Trillium.Syntax.SyntaxNode>();
                     pending.Push(tree.Root);
