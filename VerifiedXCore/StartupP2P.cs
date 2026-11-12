@@ -46,6 +46,7 @@ namespace VerifiedXCore
                 context.Response.StatusCode = 500;
                 return Task.CompletedTask;
             }));
+            app.UseQuietCutOffBodies();
 
             //app.UseHttpsRedirection();
 
