@@ -1020,6 +1020,12 @@ namespace VerifiedXCore.Services
         public const int MaxContractBodyTokens = 65_536;
 
         /// <summary>
+        /// A body compresses about a thousandfold, so a 30 KB transaction can carry tens of millions of characters, and
+        /// reading 10 million of them takes about 800 MB. The largest body on mainnet or testnet is 72,241 characters.
+        /// </summary>
+        public const int MaxContractBodyChars = 1 << 20;
+
+        /// <summary>
         /// Limits on <see cref="ContractCallCost"/>. Depth 512 is about 100 plainly chained calls, where a 1 MB stack holds
         /// over 1,500; 100,000 calls run in about 15 ms. The deepest body on mainnet or testnet scores 22 and makes 3 calls.
         /// </summary>
@@ -1040,6 +1046,9 @@ namespace VerifiedXCore.Services
                 {
                     // Parse work grows with the body: a bounded body keeps every node's read of it short. The largest
                     // body on mainnet or testnet is under 2,000 tokens.
+                    // Counting the tokens reads the whole body: its length is bounded first.
+                    if (text.Length > MaxContractBodyChars)
+                        return $"Contract code is too large: {text.Length} characters, at most {MaxContractBodyChars}.";
                     var tokens = global::Trillium.Syntax.SyntaxTree.ParseTokens(text).Length;
                     if (tokens > MaxContractBodyTokens)
                         return $"Contract code is too large: {tokens} tokens, at most {MaxContractBodyTokens}.";

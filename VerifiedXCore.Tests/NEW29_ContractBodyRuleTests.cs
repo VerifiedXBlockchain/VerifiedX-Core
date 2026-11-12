@@ -170,6 +170,20 @@ namespace VerifiedXCore.Tests
             Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint, false, true, false, null, false, 1001));
         }
 
+        /// <summary>A body that unpacks to more characters than any node should read is refused before it is read.</summary>
+        [Fact]
+        public async Task ABodyThatUnpacksTooLarge_IsRefused_AtAdmissionAndInABlock()
+        {
+            var limit = LedgerIntegrityRules.MaxContractBodyChars;
+            var reason = $"Contract code is too large: {limit + 1} characters, at most {limit}.";
+            var mint = Tx("Mint()", NEW29_ContractCodeTests.Body(new string(' ', limit - 9) + "var a = 1\n"));
+            Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint));
+            Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint, false, true, false, null, false, 1001));
+
+            // A long body of few tokens (a large description, a vault's validator list) stays allowed.
+            Assert.Null(LedgerIntegrityRules.ContractBodyAllowed(Tx("Mint()", With($"let Note = \"{new string('a', 900_000)}\""))));
+        }
+
         private static string Name(int i) { var s = ""; do { s = (char)('a' + i % 26) + s; i /= 26; } while (i > 0); return s; }
 
         /// <summary>
