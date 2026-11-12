@@ -170,6 +170,67 @@ namespace VerifiedXCore.Tests
             Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint, false, true, false, null, false, 1001));
         }
 
+        private static string Name(int i) { var s = ""; do { s = (char)('a' + i % 26) + s; i /= 26; } while (i > 0); return s; }
+
+        /// <summary>
+        /// Fa calls Fb calls ... n deep, each call under <paramref name="unary"/> unary operators (more stack per level);
+        /// GetNFTId(), which the node runs at admission, starts the chain.
+        /// </summary>
+        private static string CallChain(int n, int unary = 0) =>
+            "function GetNFTId() : string { var v = Fa() return \"x\" }\n"
+            + string.Concat(Enumerable.Range(0, n).Select(i => $"function F{Name(i)}() : int {{ return {string.Concat(Enumerable.Repeat("- ", unary))}F{Name(i + 1)}() }}\n"))
+            + $"function F{Name(n)}() : int {{ return 1 }}\n";
+
+        /// <summary>Each level calls the next twice: 2^d calls from a body of a few hundred tokens.</summary>
+        private static string CallFan(int d) =>
+            "function GetNFTId() : string { var n = Fa() return \"x\" }\n"
+            + string.Concat(Enumerable.Range(0, d).Select(i => $"function F{Name(i)}() : int {{ return F{Name(i + 1)}() + F{Name(i + 1)}() }}\n"))
+            + $"function F{Name(d)}() : int {{ return 1 }}\n";
+
+        /// <summary>
+        /// Without loops or recursion, a long chain of calls still overflows the evaluator's stack (ending the node) and a
+        /// fan of them runs for days. Both are refused at admission and in a block, before anything runs the body.
+        /// </summary>
+        [Theory]
+        [InlineData("chain", "Contract code nests calls too deeply.")]
+        [InlineData("fan", "Contract code makes too many calls.")]
+        public async Task ABodyWhoseCallsNoNodeCanFinish_IsRefused_AtAdmissionAndInABlock(string shape, string reason)
+        {
+            var mint = Tx("Mint()", NEW29_ContractCodeTests.Body(shape == "chain" ? CallChain(150, unary: 200) : CallFan(40)));
+            // From VbtcV1RetirementHeight the validator runs a minted body's GetNFTId() to ask whether it is a V1 contract.
+            Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint, false, true, false, null, false, Globals.VbtcV1RetirementHeight));
+            Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint, false, true, false, null, false, 1001));
+            Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint));
+            Assert.Equal(reason, LedgerIntegrityRules.ContractBodyAllowed(mint));
+        }
+
+        /// <summary>The deepest and the widest call shapes the rule lets through run to the end on a 1 MB stack.</summary>
+        [Fact]
+        public void TheLargestCallShapesAllowed_RunOnAnOrdinaryStack()
+        {
+            static global::Trillium.Syntax.SyntaxTree Parse(string s) => global::Trillium.Syntax.SyntaxTree.Parse(s, preventLoopsAndRecursion: true);
+            string Largest(Func<int, string> shape, Func<(int Depth, long Calls), bool> allowed) =>
+                Enumerable.Range(1, 1_000).Select(shape).TakeWhile(s => allowed(LedgerIntegrityRules.ContractCallCost(Parse(s).Root))).Last();
+            var deepest = Largest(n => CallChain(n), c => c.Depth <= LedgerIntegrityRules.MaxContractCallDepth);
+            var deepestUnary = Largest(n => CallChain(n, unary: 100), c => c.Depth <= LedgerIntegrityRules.MaxContractCallDepth);
+            var widest = Largest(CallFan, c => c.Calls <= LedgerIntegrityRules.MaxContractCalls);
+            foreach (var source in new[] { deepest, deepestUnary, widest })
+            {
+                Assert.Null(LedgerIntegrityRules.ContractBodyAllowed(Tx("Mint()", NEW29_ContractCodeTests.Body(source))));
+                object? value = null;
+                var thread = new System.Threading.Thread(() =>
+                {
+                    var vars = new Dictionary<global::Trillium.Symbols.VariableSymbol, object>();
+                    var body = global::Trillium.CodeAnalysis.Compilation.CreateScript(null, Parse(source));
+                    body.Evaluate(vars);
+                    value = global::Trillium.CodeAnalysis.Compilation.CreateScript(body, Parse("GetNFTId()")).Evaluate(vars).Value;
+                }, 1024 * 1024);
+                thread.Start();
+                Assert.True(thread.Join(TimeSpan.FromSeconds(10)));
+                Assert.Equal("x", value);
+            }
+        }
+
         [Fact]
         public void OrdinaryBodies_AndDateProc_AreAllowed()
         {
