@@ -45,13 +45,26 @@ namespace VerifiedXCore.Tests
 
         private static int Errors(Capture capture) => capture.Levels.Count(l => l >= LogLevel.Error);
 
+        /// <summary>Runs ahead of the node's own pipeline: every request appears to come from this address.</summary>
+        private sealed class FromAddress : IStartupFilter
+        {
+            private readonly IPAddress _address;
+            public FromAddress(IPAddress address) => _address = address;
+            public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) => app =>
+            {
+                app.Use((context, rest) => { context.Connection.RemoteIpAddress = _address; return rest(); });
+                next(app);
+            };
+        }
+
         /// <summary>The validator API as the node starts it (its Kestrel settings and startup), on a free port.</summary>
-        private static async Task<(IHost Host, int Port)> StartValidatorApi(Capture capture)
+        private static async Task<(IHost Host, int Port)> StartValidatorApi(Capture capture, IPAddress? from = null)
         {
             var host = Host.CreateDefaultBuilder()
                 .ConfigureWebHostDefaults(web => web
                     .UseKestrel(o => ValidatorService.CasterApiKestrel(o, 0))
                     .UseStartup<StartupP2PCaster>()
+                    .ConfigureServices(services => { if (from != null) services.AddSingleton<IStartupFilter>(new FromAddress(from)); })
                     .ConfigureLogging(l => { l.ClearProviders(); l.AddProvider(capture); }))
                 .Build();
             await host.StartAsync();
@@ -126,6 +139,69 @@ namespace VerifiedXCore.Tests
             {
                 await host.StopAsync();
                 host.Dispose();
+                Globals.ValidatorAddress = priorValidator;
+            }
+        }
+
+        [Fact]
+        public async Task AnAddressThatKeepsCuttingOffBodies_IsBanned_AndThenDroppedUnread()
+        {
+            var priorValidator = Globals.ValidatorAddress;
+            var priorPath = Globals.CustomPath;
+            var tempRoot = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"cutoff_{Guid.NewGuid():N}") + System.IO.Path.DirectorySeparatorChar;
+            System.IO.Directory.CreateDirectory(tempRoot);
+            Globals.CustomPath = tempRoot;
+            var priorBanned = Globals.BannedIPs;
+            StartupService.StartupDatabase(); // as the node starts: opens the databases and loads the ban list
+            Globals.ValidatorAddress = "xTestValidator";
+            const string Sender = "203.0.113.7";
+            var (host, port) = await StartValidatorApi(new Capture(), IPAddress.Parse(Sender));
+            try
+            {
+                const string Valid = "{\"Pad\":\"a\"}";
+                Assert.Contains("Invalid alert", await Post(port, Valid.Length, Valid, stopSending: false));
+
+                for (var i = 0; i < CutOffBodyQuieting.BanAfter; i++)
+                    await Post(port, 100_000, "{\"a\":");
+                var deadline = DateTime.UtcNow.AddSeconds(10);
+                while (!Globals.BannedIPs.ContainsKey(Sender) && DateTime.UtcNow < deadline) await Task.Delay(20);
+                Assert.True(Globals.BannedIPs.ContainsKey(Sender));
+
+                // Banned: the same valid request no longer reaches the route.
+                Assert.DoesNotContain("Invalid alert", await Post(port, Valid.Length, Valid, stopSending: false));
+            }
+            finally
+            {
+                await host.StopAsync();
+                host.Dispose();
+                Globals.BannedIPs = priorBanned;
+                Globals.ValidatorAddress = priorValidator;
+                try { VerifiedXCore.Data.DbContext.CloseDB(); } catch { }
+                Globals.CustomPath = priorPath;
+                try { System.IO.Directory.Delete(tempRoot, recursive: true); } catch { }
+            }
+        }
+
+        [Fact]
+        public async Task ThisMachine_IsNeverBannedForCutOffBodies()
+        {
+            var priorValidator = Globals.ValidatorAddress;
+            var priorBanned = Globals.BannedIPs;
+            Globals.ValidatorAddress = "xTestValidator";
+            Globals.BannedIPs = new ConcurrentDictionary<string, VerifiedXCore.Models.Peers>();
+            var (host, port) = await StartValidatorApi(new Capture());
+            try
+            {
+                for (var i = 0; i < CutOffBodyQuieting.BanAfter + 2; i++)
+                    await Post(port, 100_000, "{\"a\":");
+                await host.StopAsync();
+                Assert.Empty(Globals.BannedIPs);
+            }
+            finally
+            {
+                await host.StopAsync();
+                host.Dispose();
+                Globals.BannedIPs = priorBanned;
                 Globals.ValidatorAddress = priorValidator;
             }
         }
