@@ -84,6 +84,16 @@ namespace VerifiedXCore.Services
             }
         }
 
+        /// <summary>
+        /// The validator API listens on every interface. A block is built from at most 1 MB of transactions and no other
+        /// request to it comes near that, so a body over 5 MB is refused before it is read.
+        /// </summary>
+        internal static void CasterApiKestrel(Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServerOptions options, int port)
+        {
+            options.ListenAnyIP(port);
+            options.Limits.MaxRequestBodySize = 5 * 1024 * 1024;
+        }
+
         public static async Task StartCasterAPIServer()
         {
             try
@@ -95,12 +105,7 @@ namespace VerifiedXCore.Services
                     var builder = Host.CreateDefaultBuilder()
                     .ConfigureWebHostDefaults(webBuilder =>
                     {
-                        webBuilder.UseKestrel(options =>
-                        {
-                            // Listen settings
-                            options.ListenAnyIP(Globals.ValAPIPort);
-                            //options.ListenLocalhost(Globals.ValAPIPort);
-                        })
+                        webBuilder.UseKestrel(options => CasterApiKestrel(options, Globals.ValAPIPort))
                         .UseStartup<StartupP2PCaster>()
                         .UseUrls(url)
                         .ConfigureLogging(loggingBuilder =>
