@@ -1221,6 +1221,10 @@ namespace VerifiedXCore.Services
                                                     return (txResult, "You are attempting to devolve/evolve a Smart contract you don't own.");
                                                 }
                                             }
+                                            else if (blockHeight == null || blockHeight >= Globals.EvolveSpecificNeedsContractHeight)
+                                            {
+                                                return (txResult, "SC does not exist."); // no stored contract, no owner to check
+                                            }
                                             //Run the Trillium REPL To ensure new state is valid again.
                                             break;
                                         }

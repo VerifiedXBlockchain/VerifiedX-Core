@@ -381,6 +381,15 @@ namespace VerifiedXCore
         public const long ContractBodyLimitsTestnetHeight = 148_800L;
 
         /// <summary>
+        /// From this height a block may not carry ChangeEvolveStateSpecific() on a contract that is not in the state, as
+        /// Evolve() and Devolve() may not from SaleCompleteContractRulesHeight; mempool admission refuses it at every
+        /// height. With no stored contract there was no owner to check, so anyone's change in the block that mints a
+        /// contract overwrote it. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long EvolveSpecificNeedsContractHeight = 7_850_000L;
+        public const long EvolveSpecificNeedsContractTestnetHeight = 148_900L;
+
+        /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
         /// a row whose Data was not an array of objects made the recovery throw part-way, so every later row, the balance
         /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Active from LedgerRulesBatchHeight.

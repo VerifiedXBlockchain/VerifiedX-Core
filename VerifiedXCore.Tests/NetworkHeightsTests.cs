@@ -60,6 +60,7 @@ namespace VerifiedXCore.Tests
             // Above the testnet blocks older builds mined with bodies past the contract-body limits (140762, 146639).
             Assert.Equal(Globals.ContractBodyLimitsTestnetHeight, Globals.ContractBodyLimitsHeight);
             Assert.True(Globals.ContractBodyLimitsHeight > 146_639);
+            Assert.Equal(Globals.EvolveSpecificNeedsContractTestnetHeight, Globals.EvolveSpecificNeedsContractHeight);
         }
 
         [Fact]
