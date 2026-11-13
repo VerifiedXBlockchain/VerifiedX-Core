@@ -155,19 +155,24 @@ namespace VerifiedXCore.Tests
         [InlineData("parentheses", "Contract code is nested too deeply.")]
         [InlineData("blocks", "Contract code is nested too deeply.")]
         [InlineData("tokens", "Contract code is too large: ")]
+        [InlineData("operator chain", "Contract code is nested too deeply.")]
+        [InlineData("operator chain with a syntax error after it", "Contract code is nested too deeply.")]
         public async Task ABodyNoNodeCanFinishParsing_IsRefused_AtAdmissionAndInABlock(string shape, string expected)
         {
+            var chain = "function GetNFTId() : string { var v = 1" + string.Concat(Enumerable.Repeat("+1", 32_000)) + " return \"x\" }";
             var source = shape switch
             {
                 "parentheses" => "var a = " + new string('(', 20_000),
                 "blocks" => new string('{', 20_000),
+                "operator chain" => chain,
+                "operator chain with a syntax error after it" => chain + "@",
                 _ => string.Concat(Enumerable.Repeat("var a = 1\n", 20_000)),
             };
             var mint = Tx("Mint()", NEW29_ContractCodeTests.Body(source));
             var reason = LedgerIntegrityRules.ContractBodyAllowed(mint);
             Assert.StartsWith(expected, reason);
             Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint));
-            await AssertRefusedInBlocksFromTheLimitsHeight(mint, reason);
+            await AssertRefusedInBlocksFromTheLimitsHeight(mint, reason!);
         }
 
         /// <summary>
