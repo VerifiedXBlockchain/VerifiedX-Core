@@ -311,6 +311,33 @@ namespace VerifiedXCore.Tests
             Assert.Contains("MinterAddress does not match", message);
         }
 
+        private static string Packed(string text) =>
+            Convert.ToBase64String(SmartContractUtility.Compress(System.Text.Encoding.Unicode.GetBytes(text)));
+
+        /// <summary>
+        /// The fallback searched each line start with a pattern whose leading whitespace also matched line breaks, so a
+        /// body of only line breaks cost the square of its length (100,000 of them took a validator minutes). A block
+        /// before ContractBodyLimitsHeight still reaches the fallback with such a body; it is judged at once.
+        /// </summary>
+        [Fact]
+        public async Task VX02_Mint_BodyOfLineBreaks_IsJudgedAtOnce()
+        {
+            var body = Packed(new string('\n', 100_000));
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            Assert.Equal((null, null), SmartContractDeployBinding.ReadDeclaredIdentity(body));
+            await TransactionValidatorService.VerifyTX(MintTx("Mint()", FreshUidN, body, _attackerB, TransactionType.NFT_MINT),
+                false, true, false, null, false, Globals.ContractBodyLimitsHeight - 1);
+            watch.Stop();
+            Assert.True(watch.Elapsed < TimeSpan.FromSeconds(5), $"took {watch.Elapsed}");
+        }
+
+        [Fact]
+        public void VX02_DeclaredIdentity_IsFoundAfterBlankLinesIndentationAndCarriageReturns()
+        {
+            var text = $"\r\n\r\n  \t let SmartContractUID = \"{FreshUidN}\"\r\n\n\tlet  MinterAddress =  \"{_attackerB.Address}\"\r\n";
+            Assert.Equal((FreshUidN, _attackerB.Address), SmartContractDeployBinding.ReadDeclaredIdentity(Packed(text)));
+        }
+
         [Fact]
         public async Task VX02_TokenDeploy_UndecompilableBody_StillRejected()
         {

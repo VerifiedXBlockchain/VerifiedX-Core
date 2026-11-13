@@ -60,10 +60,13 @@ namespace VerifiedXCore.Services
             return (null, null, null, null);
         }
 
+        // A line's leading whitespace stops at a line break ([^\S\n], not \s): with \s every line start of a body of blank
+        // lines scanned the rest of the body, the square of its length. Each declaration is found at its own line start
+        // either way, so what the search finds is unchanged.
         private static readonly System.Text.RegularExpressions.Regex DeclaredUidLine =
-            new(@"^\s*let\s+SmartContractUID\s*=\s*""([^""]*)""", System.Text.RegularExpressions.RegexOptions.Multiline);
+            new(@"^[^\S\n]*let\s+SmartContractUID\s*=\s*""([^""]*)""", System.Text.RegularExpressions.RegexOptions.Multiline);
         private static readonly System.Text.RegularExpressions.Regex DeclaredMinterLine =
-            new(@"^\s*let\s+MinterAddress\s*=\s*""([^""]*)""", System.Text.RegularExpressions.RegexOptions.Multiline);
+            new(@"^[^\S\n]*let\s+MinterAddress\s*=\s*""([^""]*)""", System.Text.RegularExpressions.RegexOptions.Multiline);
 
         /// <summary>
         /// Reads the FIRST <c>let SmartContractUID</c> / <c>let MinterAddress</c> declarations from a body's
