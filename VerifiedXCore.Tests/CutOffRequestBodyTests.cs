@@ -26,7 +26,7 @@ namespace VerifiedXCore.Tests
     [Collection("DbContextSequential")]
     public class CutOffRequestBodyTests
     {
-        private sealed class Capture : ILoggerProvider
+        internal sealed class Capture : ILoggerProvider
         {
             public readonly ConcurrentQueue<LogLevel> Levels = new();
             public ILogger CreateLogger(string categoryName) => new Logger(Levels);
@@ -58,7 +58,7 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>The validator API as the node starts it (its Kestrel settings and startup), on a free port.</summary>
-        private static async Task<(IHost Host, int Port)> StartValidatorApi(Capture capture, IPAddress? from = null)
+        internal static async Task<(IHost Host, int Port)> StartValidatorApi(Capture capture, IPAddress? from = null)
         {
             var host = Host.CreateDefaultBuilder()
                 .ConfigureWebHostDefaults(web => web
@@ -74,12 +74,12 @@ namespace VerifiedXCore.Tests
 
         /// <summary>Sends a POST head with this Content-Length and body, stops sending unless told not to, and reads the reply
         /// until the node closes.</summary>
-        private static async Task<string> Post(int port, long contentLength, string body, bool stopSending = true)
+        internal static async Task<string> Post(int port, long contentLength, string body, bool stopSending = true, string route = "BurnAlert")
         {
             using var client = new TcpClient();
             await client.ConnectAsync(IPAddress.Loopback, port);
             var stream = client.GetStream();
-            var head = "POST /valapi/Validator/BurnAlert HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n" +
+            var head = $"POST /valapi/Validator/{route} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n" +
                        $"Content-Length: {contentLength}\r\nConnection: close\r\n\r\n";
             await stream.WriteAsync(Encoding.ASCII.GetBytes(head + body));
             if (stopSending) client.Client.Shutdown(SocketShutdown.Send);
