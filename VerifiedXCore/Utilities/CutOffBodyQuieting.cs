@@ -19,6 +19,9 @@ namespace VerifiedXCore
     {
         public const int BanAfter = 10;
 
+        /// <summary>The window bad requests are counted in; tests shorten it.</summary>
+        internal static long WindowMilliseconds = 60_000;
+
         private static long _count;
         private static long _windowStart = Environment.TickCount64;
         private static readonly ConcurrentDictionary<string, int> _byAddress = new();
@@ -43,17 +46,18 @@ namespace VerifiedXCore
             catch (BadHttpRequestException e) when (!context.Response.HasStarted)
             {
                 context.Response.StatusCode = e.StatusCode;
-                Interlocked.Increment(ref _count);
-                if (address != null && _byAddress.AddOrUpdate(address, 1, (_, n) => n + 1) == BanAfter)
-                    BanService.BanPeer(address, $"{BanAfter} requests with bad or cut-off bodies within a minute.", "CutOffBodyQuieting");
-
+                // A window that has run out is closed before this request is counted, so only bad requests within one
+                // window add up to a ban.
                 var start = Interlocked.Read(ref _windowStart);
                 var now = Environment.TickCount64;
-                if (now - start >= 60_000 && Interlocked.CompareExchange(ref _windowStart, now, start) == start)
+                if (now - start >= WindowMilliseconds && Interlocked.CompareExchange(ref _windowStart, now, start) == start)
                 {
                     _byAddress.Clear();
                     ConsoleWriterService.Output($"{Interlocked.Exchange(ref _count, 0)} requests with bad or cut-off bodies in the last minute.");
                 }
+                Interlocked.Increment(ref _count);
+                if (address != null && _byAddress.AddOrUpdate(address, 1, (_, n) => n + 1) == BanAfter)
+                    BanService.BanPeer(address, $"{BanAfter} requests with bad or cut-off bodies within a minute.", "CutOffBodyQuieting");
             }
         });
     }

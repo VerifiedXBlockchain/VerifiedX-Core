@@ -182,6 +182,51 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        /// <summary>Only bad requests within one window add up: an expired window is closed before the next one counts.</summary>
+        [Fact]
+        public async Task BadRequestsInAnExpiredWindow_DoNotCountTowardABan()
+        {
+            var priorValidator = Globals.ValidatorAddress;
+            var priorPath = Globals.CustomPath;
+            var priorWindow = CutOffBodyQuieting.WindowMilliseconds;
+            var tempRoot = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"cutoff_{Guid.NewGuid():N}") + System.IO.Path.DirectorySeparatorChar;
+            System.IO.Directory.CreateDirectory(tempRoot);
+            Globals.CustomPath = tempRoot;
+            var priorBanned = Globals.BannedIPs;
+            StartupService.StartupDatabase();
+            Globals.ValidatorAddress = "xTestValidator";
+            CutOffBodyQuieting.WindowMilliseconds = 2_000;
+            const string Sender = "203.0.113.8";
+            var (host, port) = await StartValidatorApi(new Capture(), IPAddress.Parse(Sender));
+            try
+            {
+                for (var i = 0; i < CutOffBodyQuieting.BanAfter - 1; i++)
+                    await Post(port, 100_000, "{\"a\":");
+                await Task.Delay(2_500);                                                   // the window runs out
+                await Post(port, 100_000, "{\"a\":");
+                await Task.Delay(500);
+                Assert.False(Globals.BannedIPs.ContainsKey(Sender));
+
+                // The one after the pause counted in the new window: nine more make ten in it.
+                for (var i = 0; i < CutOffBodyQuieting.BanAfter - 1; i++)
+                    await Post(port, 100_000, "{\"a\":");
+                var deadline = DateTime.UtcNow.AddSeconds(10);
+                while (!Globals.BannedIPs.ContainsKey(Sender) && DateTime.UtcNow < deadline) await Task.Delay(20);
+                Assert.True(Globals.BannedIPs.ContainsKey(Sender));
+            }
+            finally
+            {
+                CutOffBodyQuieting.WindowMilliseconds = priorWindow;
+                await host.StopAsync();
+                host.Dispose();
+                Globals.BannedIPs = priorBanned;
+                Globals.ValidatorAddress = priorValidator;
+                try { VerifiedXCore.Data.DbContext.CloseDB(); } catch { }
+                Globals.CustomPath = priorPath;
+                try { System.IO.Directory.Delete(tempRoot, recursive: true); } catch { }
+            }
+        }
+
         [Fact]
         public async Task ThisMachine_IsNeverBannedForCutOffBodies()
         {
