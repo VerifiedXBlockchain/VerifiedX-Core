@@ -190,13 +190,30 @@ namespace VerifiedXCore.Tests
         public async Task ABodyThatUnpacksTooLarge_IsRefused_AtAdmissionAndInABlock()
         {
             var limit = LedgerIntegrityRules.MaxContractBodyChars;
-            var reason = $"Contract code is too large: {limit + 1} characters, at most {limit}.";
+            var reason = $"Contract code is too large: more than {limit} characters.";
             var mint = Tx("Mint()", NEW29_ContractCodeTests.Body(new string(' ', limit - 9) + "var a = 1\n"));
             Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint));
             await AssertRefusedInBlocksFromTheLimitsHeight(mint, reason);
 
-            // A long body of few tokens (a large description, a vault's validator list) stays allowed.
+            // A long body of few tokens (a large description, a vault's validator list) stays allowed, up to the limit.
             Assert.Null(LedgerIntegrityRules.ContractBodyAllowed(Tx("Mint()", With($"let Note = \"{new string('a', 900_000)}\""))));
+            Assert.Null(LedgerIntegrityRules.ContractBodyAllowed(Tx("Mint()", NEW29_ContractCodeTests.Body(new string(' ', limit - 10) + "var a = 1\n"))));
+        }
+
+        /// <summary>
+        /// The fee is on the packed transaction, so the work of reading a body must not grow past the limit with what it
+        /// unpacks to: a small transaction that unpacks to 60 MB is refused having unpacked about the limit, no more.
+        /// </summary>
+        [Fact]
+        public void ABodyThatUnpacksFarPastTheLimit_IsRefusedWithoutUnpackingIt()
+        {
+            var mint = Tx("Mint()", NEW29_ContractCodeTests.Body(new string(' ', 30 * 1024 * 1024)));
+            Assert.True(mint.Data.Length < 60L * 1024 * 1024 / 100, $"the transaction carries {mint.Data.Length} characters"); // under 1% of what it unpacks to
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            var reason = LedgerIntegrityRules.ContractBodyAllowed(mint);
+            var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            Assert.StartsWith("Contract code is too large:", reason);
+            Assert.True(allocated < 16L * 1024 * 1024, $"reading it allocated {allocated:N0} bytes");
         }
 
         private static string Name(int i) { var s = ""; do { s = (char)('a' + i % 26) + s; i /= 26; } while (i > 0); return s; }

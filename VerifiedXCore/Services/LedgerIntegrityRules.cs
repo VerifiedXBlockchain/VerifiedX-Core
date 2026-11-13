@@ -1040,8 +1040,14 @@ namespace VerifiedXCore.Services
             foreach (var body in CarriedContractBodies(tx?.Data))
             {
                 string text;
-                try { text = System.Text.Encoding.Unicode.GetString(SmartContractUtility.Decompress(Convert.FromBase64String(body))); }
+                byte[]? unpacked;
+                // The fee is on the packed body: under the limits it is unpacked no further than the most characters it
+                // may have (two bytes each), so a small transaction cannot make every node unpack and read megabytes.
+                try { unpacked = limits ? SmartContractUtility.DecompressAtMost(Convert.FromBase64String(body), 2 * MaxContractBodyChars) : SmartContractUtility.Decompress(Convert.FromBase64String(body)); }
                 catch { continue; } // not a contract body: nothing ever runs it
+                if (unpacked == null)
+                    return $"Contract code is too large: more than {MaxContractBodyChars} characters.";
+                text = System.Text.Encoding.Unicode.GetString(unpacked);
                 // A parser fault is a refusal, as in NotTimelessBecause: thrown, it left VerifyTX as an exception (which
                 // already made a block carrying it invalid, so validity is unchanged).
                 try
