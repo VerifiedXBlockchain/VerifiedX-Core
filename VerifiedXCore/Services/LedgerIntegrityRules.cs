@@ -1032,9 +1032,11 @@ namespace VerifiedXCore.Services
         public const int MaxContractCallDepth = 512;
         public const long MaxContractCalls = 100_000;
 
-        public static string? ContractBodyAllowed(Transaction tx, long height = 0)
+        public static string? ContractBodyAllowed(Transaction tx, long height = 0, bool inBlock = false)
         {
             var alsoRefused = height >= Globals.PathAuditRulesHeight ? ProcessBoundBuiltins : Array.Empty<string>();
+            // The size, nesting and call limits: always at admission, in a block from ContractBodyLimitsHeight.
+            var limits = !inBlock || height >= Globals.ContractBodyLimitsHeight;
             foreach (var body in CarriedContractBodies(tx?.Data))
             {
                 string text;
@@ -1047,20 +1049,20 @@ namespace VerifiedXCore.Services
                     // Parse work grows with the body: a bounded body keeps every node's read of it short. The largest
                     // body on mainnet or testnet is under 2,000 tokens.
                     // Counting the tokens reads the whole body: its length is bounded first.
-                    if (text.Length > MaxContractBodyChars)
+                    if (limits && text.Length > MaxContractBodyChars)
                         return $"Contract code is too large: {text.Length} characters, at most {MaxContractBodyChars}.";
-                    var tokens = global::Trillium.Syntax.SyntaxTree.ParseTokens(text).Length;
+                    var tokens = limits ? global::Trillium.Syntax.SyntaxTree.ParseTokens(text).Length : 0;
                     if (tokens > MaxContractBodyTokens)
                         return $"Contract code is too large: {tokens} tokens, at most {MaxContractBodyTokens}.";
                     var tree = ParseContractBody(text); // as the node parses it
                     // Trillium stops reading code nested past its depth limit; such a body is refused rather than skipped
                     // as a parse error, so no later reader of it is the first to meet it.
-                    if (tree.Diagnostics.Any(d => d.Message == global::Trillium.Syntax.SyntaxTree.NestingTooDeepMessage))
+                    if (limits && tree.Diagnostics.Any(d => d.Message == global::Trillium.Syntax.SyntaxTree.NestingTooDeepMessage))
                         return "Contract code is nested too deeply.";
                     if (tree.Diagnostics.Length > 0) continue;
                     // Without loops or recursion, a chain of calls is what deepens the evaluator's stack and a fan of them
                     // what lengthens its run: both are bounded before any node runs the code.
-                    var (callDepth, calls) = ContractCallCost(tree.Root);
+                    var (callDepth, calls) = limits ? ContractCallCost(tree.Root) : (0, 0L);
                     if (callDepth > MaxContractCallDepth)
                         return "Contract code nests calls too deeply.";
                     if (calls > MaxContractCalls)

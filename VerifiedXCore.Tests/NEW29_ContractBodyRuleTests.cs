@@ -167,7 +167,17 @@ namespace VerifiedXCore.Tests
             var reason = LedgerIntegrityRules.ContractBodyAllowed(mint);
             Assert.StartsWith(expected, reason);
             Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint));
-            Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint, false, true, false, null, false, 1001));
+            await AssertRefusedInBlocksFromTheLimitsHeight(mint, reason);
+        }
+
+        /// <summary>
+        /// Mempool admission applies the limits at every height; a block is judged by them from ContractBodyLimitsHeight,
+        /// so a block older builds mined before it (testnet carries some) stays valid.
+        /// </summary>
+        private static async Task AssertRefusedInBlocksFromTheLimitsHeight(Transaction mint, string reason)
+        {
+            Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint, false, true, false, null, false, Globals.ContractBodyLimitsHeight));
+            Assert.NotEqual(reason, (await TransactionValidatorService.VerifyTX(mint, false, true, false, null, false, Globals.ContractBodyLimitsHeight - 1)).Item2);
         }
 
         /// <summary>A body that unpacks to more characters than any node should read is refused before it is read.</summary>
@@ -178,7 +188,7 @@ namespace VerifiedXCore.Tests
             var reason = $"Contract code is too large: {limit + 1} characters, at most {limit}.";
             var mint = Tx("Mint()", NEW29_ContractCodeTests.Body(new string(' ', limit - 9) + "var a = 1\n"));
             Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint));
-            Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint, false, true, false, null, false, 1001));
+            await AssertRefusedInBlocksFromTheLimitsHeight(mint, reason);
 
             // A long body of few tokens (a large description, a vault's validator list) stays allowed.
             Assert.Null(LedgerIntegrityRules.ContractBodyAllowed(Tx("Mint()", With($"let Note = \"{new string('a', 900_000)}\""))));
@@ -211,9 +221,10 @@ namespace VerifiedXCore.Tests
         public async Task ABodyWhoseCallsNoNodeCanFinish_IsRefused_AtAdmissionAndInABlock(string shape, string reason)
         {
             var mint = Tx("Mint()", NEW29_ContractCodeTests.Body(shape == "chain" ? CallChain(150, unary: 200) : CallFan(40)));
-            // From VbtcV1RetirementHeight the validator runs a minted body's GetNFTId() to ask whether it is a V1 contract.
-            Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint, false, true, false, null, false, Globals.VbtcV1RetirementHeight));
-            Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint, false, true, false, null, false, 1001));
+            // From VbtcV1RetirementHeight (below the limits height) the validator runs a minted body's GetNFTId() to ask
+            // whether it is a V1 contract; before the limits height Trillium's own evaluation limits stop such a run.
+            Assert.True(Globals.VbtcV1RetirementHeight < Globals.ContractBodyLimitsHeight);
+            await AssertRefusedInBlocksFromTheLimitsHeight(mint, reason);
             Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint));
             Assert.Equal(reason, LedgerIntegrityRules.ContractBodyAllowed(mint));
         }

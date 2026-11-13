@@ -372,6 +372,15 @@ namespace VerifiedXCore
         public static long PathAuditRulesHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// From this height a block may not carry a contract body past the size, nesting and call limits of
+        /// LedgerIntegrityRules.ContractBodyAllowed; mempool admission applies them at every height. Older builds mined
+        /// such bodies on testnet (blocks 140762 and 146639), so the limits judge only blocks from here on. Above the tip
+        /// when every validator runs this build. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long ContractBodyLimitsHeight = 7_850_000L;
+        public const long ContractBodyLimitsTestnetHeight = 148_800L;
+
+        /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
         /// a row whose Data was not an array of objects made the recovery throw part-way, so every later row, the balance
         /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Active from LedgerRulesBatchHeight.

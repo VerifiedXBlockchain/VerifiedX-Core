@@ -545,7 +545,7 @@ namespace VerifiedXCore.Services
 
             // NEW-29: a carried contract body must be deterministic and terminate - checked on its syntax tree, before any
             // rule below runs the code.
-            var contractBodyError = LedgerIntegrityRules.ContractBodyAllowed(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            var contractBodyError = LedgerIntegrityRules.ContractBodyAllowed(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1), inBlock: blockHeight != null);
             if (contractBodyError != null)
                 return (txResult, contractBodyError);
 
