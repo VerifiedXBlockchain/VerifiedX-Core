@@ -424,6 +424,23 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// Otherwise the part's locks are restored and taken out of use and the exit is marked failed, so that it can be
         /// made again from other locks; a part fixed again earlier is given up with it.
         /// </summary>
+        /// <summary>
+        /// A voided part's lock: from Globals.BridgeVoidKeepsLocksHeight given back for use (the void proves the exit
+        /// unpaid) with its vault kept out of exit plans for a day; before it, blacklisted as older builds did.
+        /// </summary>
+        private static void GiveBackVoided(PoolUnlockAllocation allocation, long vfxHeight, string why)
+        {
+            if (vfxHeight < Globals.BridgeVoidKeepsLocksHeight)
+            {
+                VBTCBridgeLockState.BlacklistLock(allocation.LockId, allocation.UnlockAmount, SatsOf(allocation.UnlockAmount), $"exit voided: {why}");
+                return;
+            }
+            VBTCBridgeLockState.RestoreUnlock(allocation.LockId, allocation.UnlockAmount, SatsOf(allocation.UnlockAmount));
+            var vault = VaultOfLock(allocation);
+            if (!string.IsNullOrEmpty(vault))
+                VerifiedXCore.Bitcoin.Services.FrostContractBlacklist.Blacklist(vault, $"an exit part on it was voided: {why}");
+        }
+
         private static void VoidExitPart(VaultWithdrawalRow row, long vfxHeight, LiteDatabase? db, string why)
         {
             var exit = VBTCBridgeBtcExitState.GetByBurnHash(row.ExitBurnHash ?? "");
@@ -444,7 +461,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
 
             foreach (var allocation in AllocationsOf(exit).Where(a => VaultOfLock(a) == row.SmartContractUID))
-                VBTCBridgeLockState.BlacklistLock(allocation.LockId, allocation.UnlockAmount, SatsOf(allocation.UnlockAmount), $"exit voided: {why}");
+                GiveBackVoided(allocation, vfxHeight, why);
             var anyOpen = parts.Any(p => p.State == VaultWithdrawalState.Pinned);
             var anyPaid = parts.Any(p => p.State == VaultWithdrawalState.Settled);
             if (!anyOpen && !anyPaid && !exit.IsComplete)
@@ -457,13 +474,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     refixed.WaitingReason = $"the exit failed: {why}";
                     BtcAttestStore.SaveWithdrawal(refixed, db);
                     foreach (var allocation in AllocationsOf(exit).Where(a => VaultOfLock(a) == refixed.SmartContractUID))
-                        VBTCBridgeLockState.BlacklistLock(allocation.LockId, allocation.UnlockAmount, SatsOf(allocation.UnlockAmount), $"exit voided: {why}");
+                        GiveBackVoided(allocation, vfxHeight, why);
                 }
                 exit.IsComplete = true;
                 exit.BtcTxHash = $"{VBTCBridgeBtcExitState.FailedMarkerPrefix}void@{vfxHeight}";
                 VBTCBridgeBtcExitState.Update(exit);
             }
-            ErrorLogUtility.LogError($"Bridge exit for burn {exit.BaseBurnTxHash}: the part on vault {row.SmartContractUID} was voided ({why}). Its locks were restored and taken out of use."
+            ErrorLogUtility.LogError($"Bridge exit for burn {exit.BaseBurnTxHash}: the part on vault {row.SmartContractUID} was voided ({why}). Its locks were restored" + (vfxHeight < Globals.BridgeVoidKeepsLocksHeight ? " and taken out of use." : "; its vault is left out of exit plans for a day.")
                 + (anyOpen || anyPaid ? " Other parts of this exit are paid or will be." : " The exit was marked failed and can be made again."),
                 "BtcWithdrawals.VoidExitPart()");
         }

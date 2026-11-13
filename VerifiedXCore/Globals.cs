@@ -390,6 +390,16 @@ namespace VerifiedXCore
         public const long EvolveSpecificNeedsContractTestnetHeight = 148_900L;
 
         /// <summary>
+        /// From this height a voided part of a bridge exit gives its locks back for use, as an expired exit does, instead
+        /// of blacklisting them: a void is proven on Bitcoin (every pinned transaction's coins spent elsewhere or never
+        /// to exist), so the exit was not paid and the locks' value is intact, and a blacklisted lock left its owner, and
+        /// any minter whose backing it was, with nothing to redeem against. The vault is kept out of exit plans for a day
+        /// instead (FrostContractBlacklist). Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long BridgeVoidKeepsLocksHeight = 7_850_000L;
+        public const long BridgeVoidKeepsLocksTestnetHeight = 149_000L;
+
+        /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
         /// a row whose Data was not an array of objects made the recovery throw part-way, so every later row, the balance
         /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Active from LedgerRulesBatchHeight.

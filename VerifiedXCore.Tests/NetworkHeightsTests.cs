@@ -61,6 +61,7 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Globals.ContractBodyLimitsTestnetHeight, Globals.ContractBodyLimitsHeight);
             Assert.True(Globals.ContractBodyLimitsHeight > 146_639);
             Assert.Equal(Globals.EvolveSpecificNeedsContractTestnetHeight, Globals.EvolveSpecificNeedsContractHeight);
+            Assert.Equal(Globals.BridgeVoidKeepsLocksTestnetHeight, Globals.BridgeVoidKeepsLocksHeight);
         }
 
         [Fact]

@@ -1455,6 +1455,83 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// From BridgeVoidKeepsLocksHeight a voided part's lock is given back for use, not blacklisted: the void proves the
+        /// exit unpaid, and a blacklisted lock left the minter it backed with nothing to redeem against (every later plan
+        /// passed it over). Its vault is kept out of exit plans for a day instead; the burn is paid from another lock, and
+        /// the given-back lock backs a later exit.
+        /// </summary>
+        [Fact]
+        public async Task FromTheHeight_AVoidedPartsLock_IsGivenBack_AndStillBacksALaterExit()
+        {
+            var priorHeight = Globals.BridgeVoidKeepsLocksHeight;
+            Globals.BridgeVoidKeepsLocksHeight = 1;
+            string? vaultUid = null;
+            try
+            {
+                await Start();
+                var vault = await CreateVault(H1 + 1);
+                vaultUid = vault.Uid;
+                var other = await CreateVault(H1 + 2);
+                var deposit = await Deposit(vault.Script, 1_000_000);
+                await Deposit(other.Script, 1_000_000);
+                var lockId = await Lock(vault.Uid, 0.004M);
+                var otherLock = await Lock(other.Uid, 0.004M);
+                var burn = NewBurn();
+                await Mine(Exit(burn, BtcDest, (lockId, vault.Uid, 0.004M)));
+                Assert.Equal(VaultWithdrawalState.Pinned, Part(burn, vault.Uid).State);
+
+                await Report(_btc.Mine(Pay(new[] { new OutPoint(deposit, 0) }, (Elsewhere(), 20_000), (vault.Script, 979_000))));
+
+                Assert.StartsWith("FAILED:void@", Record(burn).BtcTxHash);
+                var restored = VBTCBridgeLockState.GetByLockId(lockId)!;
+                Assert.Equal(0M, restored.UnlockedAmount);
+                Assert.False(restored.IsBlacklisted);
+                Assert.True(VerifiedXCore.Bitcoin.Services.FrostContractBlacklist.IsBlacklisted(vault.Uid));
+
+                // The burn is paid from the other vault's lock.
+                await Mine(Exit(burn, BtcDest, (otherLock, other.Uid, 0.004M)));
+                await SignAndConfirm(Part(burn, other.Uid).Pins[0]);
+                Assert.True(Record(burn).IsComplete);
+
+                // The given-back lock is what backs the next exit (the minter it backed can redeem).
+                Assert.Equal(lockId, Assert.Single(BridgePoolUnlockService.ComputeExitAllocationPlan(0.004M, null, Tip + 1)!).LockId);
+            }
+            finally
+            {
+                Globals.BridgeVoidKeepsLocksHeight = priorHeight;
+                if (vaultUid != null) VerifiedXCore.Bitcoin.Services.FrostContractBlacklist.Remove(vaultUid);
+            }
+        }
+
+        /// <summary>A lock a void blacklisted before BridgeVoidKeepsLocksHeight is given back for use when that block starts.</summary>
+        [Fact]
+        public async Task ALockAVoidBlacklistedBeforeTheHeight_IsGivenBackAtIt()
+        {
+            var priorHeight = Globals.BridgeVoidKeepsLocksHeight;
+            Globals.BridgeVoidKeepsLocksHeight = long.MaxValue;                       // the void comes before the height
+            try
+            {
+                await Start();
+                var vault = await CreateVault(H1 + 1);
+                var deposit = await Deposit(vault.Script, 1_000_000);
+                var lockId = await Lock(vault.Uid, 0.004M);
+                var burn = NewBurn();
+                await Mine(Exit(burn, BtcDest, (lockId, vault.Uid, 0.004M)));
+                await Report(_btc.Mine(Pay(new[] { new OutPoint(deposit, 0) }, (Elsewhere(), 20_000), (vault.Script, 979_000))));
+                Assert.True(VBTCBridgeLockState.GetByLockId(lockId)!.IsBlacklisted);
+                Assert.Null(BridgePoolUnlockService.ComputeExitAllocationPlan(0.004M, null, Tip + 1));
+
+                var height = Globals.LastBlock.Height + 1;
+                Globals.BridgeVoidKeepsLocksHeight = height;
+                BtcAttestApply.OnBlockStart(height);
+
+                Assert.False(VBTCBridgeLockState.GetByLockId(lockId)!.IsBlacklisted);
+                Assert.Equal(lockId, Assert.Single(BridgePoolUnlockService.ComputeExitAllocationPlan(0.004M, null, Tip + 1)!).LockId);
+            }
+            finally { Globals.BridgeVoidKeepsLocksHeight = priorHeight; }
+        }
+
+        /// <summary>
         /// C-179: an exit drawn on two vaults, one part paid (the burn used), the other voided - its coin spent by
         /// another transaction. The voided part's locks were taken out of use and the exit left open, neither failed nor
         /// complete, so the burner's vBTC was burned on Base and that part never paid. It is now fixed again on its own
