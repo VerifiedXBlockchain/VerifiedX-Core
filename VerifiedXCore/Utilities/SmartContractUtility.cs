@@ -33,6 +33,25 @@ namespace VerifiedXCore.Utilities
 			}
 		}
 
+		/// <summary>
+		/// Decompresses no more than <paramref name="maxBytes"/>: null as soon as the data unpacks to more, without reading
+		/// the rest. Data that is not GZip throws, as with <see cref="Decompress"/>.
+		/// </summary>
+		public static byte[]? DecompressAtMost(byte[] bytes, int maxBytes)
+		{
+			using var input = new MemoryStream(bytes);
+			using var gzip = new GZipStream(input, CompressionMode.Decompress);
+			using var output = new MemoryStream();
+			var buffer = new byte[81920];
+			int read;
+			while ((read = gzip.Read(buffer, 0, buffer.Length)) > 0)
+			{
+				if (output.Length + read > maxBytes) return null;
+				output.Write(buffer, 0, read);
+			}
+			return output.ToArray();
+		}
+
 		public static IEnumerable<string> Split(string str, int chunkSize)
 		{
 			return Enumerable.Range(0, str.Length / chunkSize)

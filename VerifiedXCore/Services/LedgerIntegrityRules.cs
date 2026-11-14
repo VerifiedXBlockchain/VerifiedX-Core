@@ -1017,20 +1017,62 @@ namespace VerifiedXCore.Services
         internal static Func<string, global::Trillium.Syntax.SyntaxTree> ParseContractBody =
             text => global::Trillium.Syntax.SyntaxTree.Parse(text, preventLoopsAndRecursion: true);
 
-        public static string? ContractBodyAllowed(Transaction tx, long height = 0)
+        public const int MaxContractBodyTokens = 65_536;
+
+        /// <summary>
+        /// A body compresses about a thousandfold, so a 30 KB transaction can carry tens of millions of characters, and
+        /// reading 10 million of them takes about 800 MB. The largest body on mainnet or testnet is 72,241 characters.
+        /// </summary>
+        public const int MaxContractBodyChars = 1 << 20;
+
+        /// <summary>
+        /// Limits on <see cref="ContractCallCost"/>. Depth 512 is about 100 plainly chained calls, where a 1 MB stack holds
+        /// over 1,500; 100,000 calls run in about 15 ms. The deepest body on mainnet or testnet scores 22 and makes 3 calls.
+        /// </summary>
+        public const int MaxContractCallDepth = 512;
+        public const long MaxContractCalls = 100_000;
+
+        public static string? ContractBodyAllowed(Transaction tx, long height = 0, bool inBlock = false)
         {
             var alsoRefused = height >= Globals.PathAuditRulesHeight ? ProcessBoundBuiltins : Array.Empty<string>();
+            // The size, nesting and call limits: always at admission, in a block from ContractBodyLimitsHeight.
+            var limits = !inBlock || height >= Globals.ContractBodyLimitsHeight;
             foreach (var body in CarriedContractBodies(tx?.Data))
             {
                 string text;
-                try { text = System.Text.Encoding.Unicode.GetString(SmartContractUtility.Decompress(Convert.FromBase64String(body))); }
+                byte[]? unpacked;
+                // The fee is on the packed body: under the limits it is unpacked no further than the most characters it
+                // may have (two bytes each), so a small transaction cannot make every node unpack and read megabytes.
+                try { unpacked = limits ? SmartContractUtility.DecompressAtMost(Convert.FromBase64String(body), 2 * MaxContractBodyChars) : SmartContractUtility.Decompress(Convert.FromBase64String(body)); }
                 catch { continue; } // not a contract body: nothing ever runs it
+                if (unpacked == null)
+                    return $"Contract code is too large: more than {MaxContractBodyChars} characters.";
+                text = System.Text.Encoding.Unicode.GetString(unpacked);
                 // A parser fault is a refusal, as in NotTimelessBecause: thrown, it left VerifyTX as an exception (which
                 // already made a block carrying it invalid, so validity is unchanged).
                 try
                 {
+                    // Parse work grows with the body: a bounded body keeps every node's read of it short. The largest
+                    // body on mainnet or testnet is under 2,000 tokens.
+                    // Counting the tokens reads the whole body: its length is bounded first.
+                    if (limits && text.Length > MaxContractBodyChars)
+                        return $"Contract code is too large: {text.Length} characters, at most {MaxContractBodyChars}.";
+                    var tokens = limits ? global::Trillium.Syntax.SyntaxTree.ParseTokens(text).Length : 0;
+                    if (tokens > MaxContractBodyTokens)
+                        return $"Contract code is too large: {tokens} tokens, at most {MaxContractBodyTokens}.";
                     var tree = ParseContractBody(text); // as the node parses it
+                    // Trillium stops reading code nested past its depth limit; such a body is refused rather than skipped
+                    // as a parse error, so no later reader of it is the first to meet it.
+                    if (limits && tree.Diagnostics.Any(d => d.Message == global::Trillium.Syntax.SyntaxTree.NestingTooDeepMessage))
+                        return "Contract code is nested too deeply.";
                     if (tree.Diagnostics.Length > 0) continue;
+                    // Without loops or recursion, a chain of calls is what deepens the evaluator's stack and a fan of them
+                    // what lengthens its run: both are bounded before any node runs the code.
+                    var (callDepth, calls) = limits ? ContractCallCost(tree.Root) : (0, 0L);
+                    if (callDepth > MaxContractCallDepth)
+                        return "Contract code nests calls too deeply.";
+                    if (calls > MaxContractCalls)
+                        return "Contract code makes too many calls.";
                     var pending = new Stack<global::Trillium.Syntax.SyntaxNode>();
                     pending.Push(tree.Root);
                     while (pending.Count > 0)
@@ -1052,6 +1094,69 @@ namespace VerifiedXCore.Services
                 }
             }
             return null;
+        }
+
+        /// <summary>
+        /// The most a run of the code can cost the evaluator, read from the syntax tree, so every node gets the same answer
+        /// without running anything. Depth: the syntax depth of each function along the deepest call chain, added up (the
+        /// evaluator's stack grows with it). Calls: the most function calls one run makes, every branch taken (its time
+        /// grows with it). The parser refuses call cycles; any that remain count as unbounded.
+        /// </summary>
+        internal static (int Depth, long Calls) ContractCallCost(global::Trillium.Syntax.CompilationUnitSyntax root)
+        {
+            const long Saturated = 1L << 50; // a sum of two never overflows a long
+            var members = root.Members;
+            var n = members.Length;
+            var index = new Dictionary<(string, int), int>();
+            for (var i = 0; i < n; i++)
+                if (members[i] is global::Trillium.Syntax.FunctionDeclarationSyntax f)
+                    index.TryAdd((f.Identifier.Text, f.Parameters.Count), i);
+
+            var ownDepth = new int[n];
+            var callers = new List<int>[n]; // one entry per call site
+            var waiting = new int[n];       // call sites in the member whose callee is not yet costed
+            for (var i = 0; i < n; i++) callers[i] = new List<int>();
+            for (var i = 0; i < n; i++)
+            {
+                var pending = new Stack<(global::Trillium.Syntax.SyntaxNode Node, int Depth)>();
+                pending.Push((members[i], 1));
+                while (pending.Count > 0)
+                {
+                    var (node, d) = pending.Pop();
+                    ownDepth[i] = Math.Max(ownDepth[i], d);
+                    if (node is global::Trillium.Syntax.CallExpressionSyntax call
+                        && index.TryGetValue((call.Identifier.Text, call.Arguments.Count), out var callee))
+                    {
+                        callers[callee].Add(i);
+                        waiting[i]++;
+                    }
+                    foreach (var child in node.GetChildren())
+                        pending.Push((child, d + 1));
+                }
+            }
+
+            // Callees before callers.
+            var depth = (int[])ownDepth.Clone();
+            var calls = new long[n];
+            var ready = new Queue<int>(Enumerable.Range(0, n).Where(i => waiting[i] == 0));
+            var costed = 0;
+            while (ready.Count > 0)
+            {
+                var i = ready.Dequeue();
+                costed++;
+                foreach (var caller in callers[i])
+                {
+                    depth[caller] = Math.Max(depth[caller], ownDepth[caller] + depth[i]);
+                    calls[caller] = Math.Min(Saturated, calls[caller] + 1 + calls[i]);
+                    if (--waiting[caller] == 0) ready.Enqueue(caller);
+                }
+            }
+            if (costed < n) return (int.MaxValue, long.MaxValue);
+
+            // The body's own statements run together in one evaluation; each function is also an entry point.
+            var globals = Enumerable.Range(0, n).Where(i => members[i] is global::Trillium.Syntax.GlobalStatementSyntax)
+                .Aggregate(0L, (sum, i) => Math.Min(Saturated, sum + calls[i]));
+            return (n == 0 ? 0 : depth.Max(), Math.Max(globals, n == 0 ? 0 : calls.Max()));
         }
 
         /// <summary>Every string "Data" value in the payload (array or object shape) - the contract bodies a transaction carries.</summary>

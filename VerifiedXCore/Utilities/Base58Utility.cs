@@ -28,10 +28,20 @@ namespace VerifiedXCore.Utilities
 			return retString;
 		}
 
+		/// <summary>The most significant digits a 64-byte value can have: ceil(64 * 8 / log2(58)).</summary>
+		public const int MaxSignificantDigits = 88;
+
 		public static byte[] Base58Decode(string s)
 		{
 			const string ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-			// Decode Base58 string to BigInteger 
+			// The loop below costs the square of the input's length. Every caller reads a 64-byte public key: leading '1's
+			// add nothing to the value, and past 88 more digits it is at least 58^88 > 2^512, more than 64 bytes, which
+			// every caller refuses anyway. Such input is refused here, before the loop.
+			var leadingOnes = 0;
+			while (leadingOnes < s.Length && s[leadingOnes] == ALPHABET[0]) leadingOnes++;
+			if (s.Length - leadingOnes > MaxSignificantDigits)
+				throw new FormatException($"Base58 input has more than {MaxSignificantDigits} significant digits.");
+			// Decode Base58 string to BigInteger
 			BigInteger intData = 0;
 			for (int i = 0; i < s.Length; i++)
 			{

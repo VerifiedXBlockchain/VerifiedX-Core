@@ -146,6 +146,138 @@ namespace VerifiedXCore.Tests
             Assert.Null(LedgerIntegrityRules.ContractBodyAllowed(Tx("Mint()", Plain()))); // the real parser reads it
         }
 
+        /// <summary>
+        /// Every node parses a carried body during VerifyTX, so the body must be one every node can finish parsing: a body
+        /// nested past Trillium's depth limit, or larger than the token cap, is refused at admission and in a block instead
+        /// of running the node out of stack or time.
+        /// </summary>
+        [Theory]
+        [InlineData("parentheses", "Contract code is nested too deeply.")]
+        [InlineData("blocks", "Contract code is nested too deeply.")]
+        [InlineData("tokens", "Contract code is too large: ")]
+        [InlineData("operator chain", "Contract code is nested too deeply.")]
+        [InlineData("operator chain with a syntax error after it", "Contract code is nested too deeply.")]
+        public async Task ABodyNoNodeCanFinishParsing_IsRefused_AtAdmissionAndInABlock(string shape, string expected)
+        {
+            var chain = "function GetNFTId() : string { var v = 1" + string.Concat(Enumerable.Repeat("+1", 32_000)) + " return \"x\" }";
+            var source = shape switch
+            {
+                "parentheses" => "var a = " + new string('(', 20_000),
+                "blocks" => new string('{', 20_000),
+                "operator chain" => chain,
+                "operator chain with a syntax error after it" => chain + "@",
+                _ => string.Concat(Enumerable.Repeat("var a = 1\n", 20_000)),
+            };
+            var mint = Tx("Mint()", NEW29_ContractCodeTests.Body(source));
+            var reason = LedgerIntegrityRules.ContractBodyAllowed(mint);
+            Assert.StartsWith(expected, reason);
+            Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint));
+            await AssertRefusedInBlocksFromTheLimitsHeight(mint, reason!);
+        }
+
+        /// <summary>
+        /// Mempool admission applies the limits at every height; a block is judged by them from ContractBodyLimitsHeight,
+        /// so a block older builds mined before it (testnet carries some) stays valid.
+        /// </summary>
+        private static async Task AssertRefusedInBlocksFromTheLimitsHeight(Transaction mint, string reason)
+        {
+            Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint, false, true, false, null, false, Globals.ContractBodyLimitsHeight));
+            Assert.NotEqual(reason, (await TransactionValidatorService.VerifyTX(mint, false, true, false, null, false, Globals.ContractBodyLimitsHeight - 1)).Item2);
+        }
+
+        /// <summary>A body that unpacks to more characters than any node should read is refused before it is read.</summary>
+        [Fact]
+        public async Task ABodyThatUnpacksTooLarge_IsRefused_AtAdmissionAndInABlock()
+        {
+            var limit = LedgerIntegrityRules.MaxContractBodyChars;
+            var reason = $"Contract code is too large: more than {limit} characters.";
+            var mint = Tx("Mint()", NEW29_ContractCodeTests.Body(new string(' ', limit - 9) + "var a = 1\n"));
+            Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint));
+            await AssertRefusedInBlocksFromTheLimitsHeight(mint, reason);
+
+            // A long body of few tokens (a large description, a vault's validator list) stays allowed, up to the limit.
+            Assert.Null(LedgerIntegrityRules.ContractBodyAllowed(Tx("Mint()", With($"let Note = \"{new string('a', 900_000)}\""))));
+            Assert.Null(LedgerIntegrityRules.ContractBodyAllowed(Tx("Mint()", NEW29_ContractCodeTests.Body(new string(' ', limit - 10) + "var a = 1\n"))));
+        }
+
+        /// <summary>
+        /// The fee is on the packed transaction, so the work of reading a body must not grow past the limit with what it
+        /// unpacks to: a small transaction that unpacks to 60 MB is refused having unpacked about the limit, no more.
+        /// </summary>
+        [Fact]
+        public void ABodyThatUnpacksFarPastTheLimit_IsRefusedWithoutUnpackingIt()
+        {
+            var mint = Tx("Mint()", NEW29_ContractCodeTests.Body(new string(' ', 30 * 1024 * 1024)));
+            Assert.True(mint.Data.Length < 60L * 1024 * 1024 / 100, $"the transaction carries {mint.Data.Length} characters"); // under 1% of what it unpacks to
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            var reason = LedgerIntegrityRules.ContractBodyAllowed(mint);
+            var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            Assert.StartsWith("Contract code is too large:", reason);
+            Assert.True(allocated < 16L * 1024 * 1024, $"reading it allocated {allocated:N0} bytes");
+        }
+
+        private static string Name(int i) { var s = ""; do { s = (char)('a' + i % 26) + s; i /= 26; } while (i > 0); return s; }
+
+        /// <summary>
+        /// Fa calls Fb calls ... n deep, each call under <paramref name="unary"/> unary operators (more stack per level);
+        /// GetNFTId(), which the node runs at admission, starts the chain.
+        /// </summary>
+        private static string CallChain(int n, int unary = 0) =>
+            "function GetNFTId() : string { var v = Fa() return \"x\" }\n"
+            + string.Concat(Enumerable.Range(0, n).Select(i => $"function F{Name(i)}() : int {{ return {string.Concat(Enumerable.Repeat("- ", unary))}F{Name(i + 1)}() }}\n"))
+            + $"function F{Name(n)}() : int {{ return 1 }}\n";
+
+        /// <summary>Each level calls the next twice: 2^d calls from a body of a few hundred tokens.</summary>
+        private static string CallFan(int d) =>
+            "function GetNFTId() : string { var n = Fa() return \"x\" }\n"
+            + string.Concat(Enumerable.Range(0, d).Select(i => $"function F{Name(i)}() : int {{ return F{Name(i + 1)}() + F{Name(i + 1)}() }}\n"))
+            + $"function F{Name(d)}() : int {{ return 1 }}\n";
+
+        /// <summary>
+        /// Without loops or recursion, a long chain of calls still overflows the evaluator's stack (ending the node) and a
+        /// fan of them runs for days. Both are refused at admission and in a block, before anything runs the body.
+        /// </summary>
+        [Theory]
+        [InlineData("chain", "Contract code nests calls too deeply.")]
+        [InlineData("fan", "Contract code makes too many calls.")]
+        public async Task ABodyWhoseCallsNoNodeCanFinish_IsRefused_AtAdmissionAndInABlock(string shape, string reason)
+        {
+            var mint = Tx("Mint()", NEW29_ContractCodeTests.Body(shape == "chain" ? CallChain(150, unary: 200) : CallFan(40)));
+            // From VbtcV1RetirementHeight (below the limits height) the validator runs a minted body's GetNFTId() to ask
+            // whether it is a V1 contract; before the limits height Trillium's own evaluation limits stop such a run.
+            Assert.True(Globals.VbtcV1RetirementHeight < Globals.ContractBodyLimitsHeight);
+            await AssertRefusedInBlocksFromTheLimitsHeight(mint, reason);
+            Assert.Equal((false, reason), await TransactionValidatorService.VerifyTX(mint));
+            Assert.Equal(reason, LedgerIntegrityRules.ContractBodyAllowed(mint));
+        }
+
+        /// <summary>The deepest and the widest call shapes the rule lets through run to the end on a 1 MB stack.</summary>
+        [Fact]
+        public void TheLargestCallShapesAllowed_RunOnAnOrdinaryStack()
+        {
+            static global::Trillium.Syntax.SyntaxTree Parse(string s) => global::Trillium.Syntax.SyntaxTree.Parse(s, preventLoopsAndRecursion: true);
+            string Largest(Func<int, string> shape, Func<(int Depth, long Calls), bool> allowed) =>
+                Enumerable.Range(1, 1_000).Select(shape).TakeWhile(s => allowed(LedgerIntegrityRules.ContractCallCost(Parse(s).Root))).Last();
+            var deepest = Largest(n => CallChain(n), c => c.Depth <= LedgerIntegrityRules.MaxContractCallDepth);
+            var deepestUnary = Largest(n => CallChain(n, unary: 100), c => c.Depth <= LedgerIntegrityRules.MaxContractCallDepth);
+            var widest = Largest(CallFan, c => c.Calls <= LedgerIntegrityRules.MaxContractCalls);
+            foreach (var source in new[] { deepest, deepestUnary, widest })
+            {
+                Assert.Null(LedgerIntegrityRules.ContractBodyAllowed(Tx("Mint()", NEW29_ContractCodeTests.Body(source))));
+                object? value = null;
+                var thread = new System.Threading.Thread(() =>
+                {
+                    var vars = new Dictionary<global::Trillium.Symbols.VariableSymbol, object>();
+                    var body = global::Trillium.CodeAnalysis.Compilation.CreateScript(null, Parse(source));
+                    body.Evaluate(vars);
+                    value = global::Trillium.CodeAnalysis.Compilation.CreateScript(body, Parse("GetNFTId()")).Evaluate(vars).Value;
+                }, 1024 * 1024);
+                thread.Start();
+                Assert.True(thread.Join(TimeSpan.FromSeconds(10)));
+                Assert.Equal("x", value);
+            }
+        }
+
         [Fact]
         public void OrdinaryBodies_AndDateProc_AreAllowed()
         {

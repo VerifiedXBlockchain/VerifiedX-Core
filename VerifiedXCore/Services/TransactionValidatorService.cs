@@ -545,7 +545,7 @@ namespace VerifiedXCore.Services
 
             // NEW-29: a carried contract body must be deterministic and terminate - checked on its syntax tree, before any
             // rule below runs the code.
-            var contractBodyError = LedgerIntegrityRules.ContractBodyAllowed(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+            var contractBodyError = LedgerIntegrityRules.ContractBodyAllowed(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1), inBlock: blockHeight != null);
             if (contractBodyError != null)
                 return (txResult, contractBodyError);
 
@@ -1220,6 +1220,10 @@ namespace VerifiedXCore.Services
                                                 {
                                                     return (txResult, "You are attempting to devolve/evolve a Smart contract you don't own.");
                                                 }
+                                            }
+                                            else if (blockHeight == null || blockHeight >= Globals.EvolveSpecificNeedsContractHeight)
+                                            {
+                                                return (txResult, "SC does not exist."); // no stored contract, no owner to check
                                             }
                                             //Run the Trillium REPL To ensure new state is valid again.
                                             break;

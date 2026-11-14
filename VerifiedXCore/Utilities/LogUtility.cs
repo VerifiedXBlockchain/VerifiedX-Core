@@ -11,18 +11,37 @@ namespace VerifiedXCore.Utilities
     public class LogUtility
     {
         private static ConcurrentQueue<(string Message, string Location, string FileName, DateTime Time)> FileQueue = new ConcurrentQueue<(string, string, string, DateTime)>();
+
+        /// <summary>
+        /// Log lines quote what callers sent (a lock id, an address), and the queue drains only as fast as the disk takes
+        /// it: a flood of requests with megabyte fields grew memory until the process ended. A line keeps its first
+        /// <see cref="MaxMessageChars"/> characters, and past <see cref="MaxQueued"/> waiting lines new ones are dropped.
+        /// </summary>
+        public const int MaxMessageChars = 4096;
+        public const int MaxQueued = 20_000;
+
+        private static void Enqueue(string message, string location, string fileName)
+        {
+            if (FileQueue.Count >= MaxQueued) return;
+            if (message != null && message.Length > MaxMessageChars)
+                message = message.Substring(0, MaxMessageChars) + $"... [{message.Length - MaxMessageChars} more characters]";
+            if (location != null && location.Length > MaxMessageChars)
+                location = location.Substring(0, MaxMessageChars);
+            FileQueue.Enqueue((message, location, fileName, DateTime.Now));
+        }
+
         public static void LogQueue(string message, string location, string fileName, bool log)
         {
             if(!log)
                 return; // this disables the log queue
-            FileQueue.Enqueue((message, location, fileName, DateTime.Now));
+            Enqueue(message, location, fileName);
         }
 
         private static async Task LogEnqueue(string message, string location, string fileName, bool log)
         {
             if (!log)
                 return; // this disables the log queue
-            FileQueue.Enqueue((message, location, fileName, DateTime.Now));
+            Enqueue(message, location, fileName);
         }
 
         public static async Task LogLoop()

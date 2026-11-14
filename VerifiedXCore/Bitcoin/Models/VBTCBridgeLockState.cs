@@ -114,6 +114,23 @@ namespace VerifiedXCore.Bitcoin.Models
         }
 
         /// <summary>
+        /// Once, at Globals.BridgeVoidKeepsLocksHeight: the locks a voided exit part blacklisted before it (their amounts
+        /// were restored then) are given back for use, as a void from that height gives them back.
+        /// </summary>
+        public static int GiveBackVoidBlacklisted()
+        {
+            var col = GetCollection();
+            var voided = col.Find(x => x.IsBlacklisted).Where(x => x.BlacklistReason != null && x.BlacklistReason.StartsWith("exit voided:", StringComparison.Ordinal)).ToList();
+            foreach (var rec in voided)
+            {
+                rec.IsBlacklisted = false;
+                rec.BlacklistReason += $" (given back at {Globals.BridgeVoidKeepsLocksHeight})";
+                col.Update(rec);
+            }
+            return voided.Count;
+        }
+
+        /// <summary>
         /// Gives back what an exit reserved on a lock when that exit is failed by rule before anything was signed for
         /// it. The lock stays in use: nothing is wrong with it.
         /// </summary>
