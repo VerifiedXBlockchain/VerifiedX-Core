@@ -43,6 +43,8 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 // an epoch, and a key must be found due while its old holders can still sign.
                 if (vfxHeight % BtcVaultKeys.HealthCheckBlocks == 0 || BtcAttestRules.IsEpochStart(vfxHeight))
                     BtcVaultKeys.CheckHealth(vfxHeight, db);
+                if (vfxHeight == Globals.BridgeVoidKeepsLocksHeight)
+                    VerifiedXCore.Bitcoin.Models.VBTCBridgeLockState.GiveBackVoidBlacklisted(); // locks blacklisted by voids before it
                 BtcWithdrawals.OnBlockStart(vfxHeight, db); // requests never pinned and past their window: closed, refunded
             }
             catch (Exception ex)
