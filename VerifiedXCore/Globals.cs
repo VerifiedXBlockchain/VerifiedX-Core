@@ -378,7 +378,7 @@ namespace VerifiedXCore
         /// when every validator runs this build. Testnet value in GlobalsNetworkHeights.
         /// </summary>
         public static long ContractBodyLimitsHeight = 7_850_000L;
-        public const long ContractBodyLimitsTestnetHeight = 148_800L;
+        public const long ContractBodyLimitsTestnetHeight = 152_000L;
 
         /// <summary>
         /// From this height a block may not carry ChangeEvolveStateSpecific() on a contract that is not in the state, as
@@ -387,7 +387,7 @@ namespace VerifiedXCore
         /// contract overwrote it. Testnet value in GlobalsNetworkHeights.
         /// </summary>
         public static long EvolveSpecificNeedsContractHeight = 7_850_000L;
-        public const long EvolveSpecificNeedsContractTestnetHeight = 148_900L;
+        public const long EvolveSpecificNeedsContractTestnetHeight = 152_000L;
 
         /// <summary>
         /// From this height a voided part of a bridge exit gives its locks back for use, as an expired exit does, instead
@@ -397,7 +397,7 @@ namespace VerifiedXCore
         /// instead (FrostContractBlacklist). Testnet value in GlobalsNetworkHeights.
         /// </summary>
         public static long BridgeVoidKeepsLocksHeight = 7_850_000L;
-        public const long BridgeVoidKeepsLocksTestnetHeight = 149_000L;
+        public const long BridgeVoidKeepsLocksTestnetHeight = 152_000L;
 
         /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
