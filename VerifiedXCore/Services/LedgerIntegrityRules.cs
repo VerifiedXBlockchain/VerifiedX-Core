@@ -1586,12 +1586,30 @@ namespace VerifiedXCore.Services
 
         /// <summary>
         /// What a producer may put after its coinbase in a block at <paramref name="height"/>: below the cap height
-        /// everything, from it no more than the cap leaves room for, in the order given.
+        /// everything, from it no more than the cap leaves room for, in the order given. The priority lane
+        /// (MempoolSizeUtility.InPriorityLane) is counted first, so the cap does not cut it by where its sender sorts. A
+        /// sender with a transaction cut has its later ones cut too, so no sender is left with a gap.
         /// </summary>
-        public static List<Transaction> WithinTransactionCap(List<Transaction> afterCoinbase, int alreadyInBlock, long height) =>
-            height >= Globals.BlockTransactionCapHeight
-                ? afterCoinbase.Take(Math.Max(0, Globals.MaxTransactionsPerBlock - alreadyInBlock)).ToList()
-                : afterCoinbase;
+        public static List<Transaction> WithinTransactionCap(List<Transaction> afterCoinbase, int alreadyInBlock, long height)
+        {
+            var room = Math.Max(0, Globals.MaxTransactionsPerBlock - alreadyInBlock);
+            if (height < Globals.BlockTransactionCapHeight || afterCoinbase.Count <= room)
+                return afterCoinbase;
+            var laneLeft = Math.Min(room, afterCoinbase.Count(MempoolSizeUtility.InPriorityLane));
+            var othersLeft = room - laneLeft;
+            var cutSenders = new HashSet<string>(StringComparer.Ordinal);
+            var kept = new List<Transaction>();
+            foreach (var tx in afterCoinbase)
+            {
+                // The Bitcoin attestation's transactions share one sender name and carry no nonce.
+                var sender = VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(tx.TransactionType) ? null : tx.FromAddress ?? "";
+                var take = (sender == null || !cutSenders.Contains(sender))
+                    && (MempoolSizeUtility.InPriorityLane(tx) ? laneLeft-- > 0 : othersLeft-- > 0);
+                if (take) kept.Add(tx);
+                else if (sender != null) cutSenders.Add(sender);
+            }
+            return kept;
+        }
 
         public const string TokenMintedTwiceInBlock = "A block carries one TokenMint() per token contract";
 
