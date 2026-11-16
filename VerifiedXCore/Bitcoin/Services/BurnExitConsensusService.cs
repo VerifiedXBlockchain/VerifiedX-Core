@@ -1,4 +1,4 @@
-using Newtonsoft.Json;
+﻿using Newtonsoft.Json;
 using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Data;
 using VerifiedXCore.Models;
@@ -762,7 +762,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 var distinctContracts = allAvailableLocks.Select(l => l.SmartContractUID).Distinct();
                 foreach (var scUID in distinctContracts)
                 {
-                    if (FrostContractBlacklist.IsBlacklisted(scUID))
+                    if (FrostContractBlacklist.IsBlacklisted(scUID)
+                        || VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.PausedByVoidedExit(scUID, VBTCService.NextBlockHeight))
                     {
                         excludedContracts.Add(scUID);
                         LogUtility.Log($"[BurnExitConsensus] Pre-excluding blacklisted contract {scUID} for BTC exit {record.BaseBurnTxHash}",

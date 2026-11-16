@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -1457,7 +1457,7 @@ namespace VerifiedXCore.Tests
         /// <summary>
         /// From BridgeVoidKeepsLocksHeight a voided part's lock is given back for use, not blacklisted: the void proves the
         /// exit unpaid, and a blacklisted lock left the minter it backed with nothing to redeem against (every later plan
-        /// passed it over). Its vault is kept out of exit plans for a day instead; the burn is paid from another lock, and
+        /// passed it over). Its vault is kept out of exit plans for a while instead; the burn is paid from another lock, and
         /// the given-back lock backs a later exit.
         /// </summary>
         [Fact]
@@ -1465,12 +1465,10 @@ namespace VerifiedXCore.Tests
         {
             var priorHeight = Globals.BridgeVoidKeepsLocksHeight;
             Globals.BridgeVoidKeepsLocksHeight = 1;
-            string? vaultUid = null;
             try
             {
                 await Start();
                 var vault = await CreateVault(H1 + 1);
-                vaultUid = vault.Uid;
                 var other = await CreateVault(H1 + 2);
                 var deposit = await Deposit(vault.Script, 1_000_000);
                 await Deposit(other.Script, 1_000_000);
@@ -1486,7 +1484,13 @@ namespace VerifiedXCore.Tests
                 var restored = VBTCBridgeLockState.GetByLockId(lockId)!;
                 Assert.Equal(0M, restored.UnlockedAmount);
                 Assert.False(restored.IsBlacklisted);
-                Assert.True(VerifiedXCore.Bitcoin.Services.FrostContractBlacklist.IsBlacklisted(vault.Uid));
+
+                // The vault's pause is read from the chain's rows, not kept in memory: a restart does not lift it, and it
+                // ends after VoidPauseBlocks.
+                Assert.False(VerifiedXCore.Bitcoin.Services.FrostContractBlacklist.IsBlacklisted(vault.Uid));
+                Assert.True(BtcWithdrawals.PausedByVoidedExit(vault.Uid, Tip + 1));
+                Assert.False(BtcWithdrawals.PausedByVoidedExit(other.Uid, Tip + 1));
+                Assert.False(BtcWithdrawals.PausedByVoidedExit(vault.Uid, Tip + 1 + BtcWithdrawals.VoidPauseBlocks));
 
                 // The burn is paid from the other vault's lock.
                 await Mine(Exit(burn, BtcDest, (otherLock, other.Uid, 0.004M)));
@@ -1499,7 +1503,6 @@ namespace VerifiedXCore.Tests
             finally
             {
                 Globals.BridgeVoidKeepsLocksHeight = priorHeight;
-                if (vaultUid != null) VerifiedXCore.Bitcoin.Services.FrostContractBlacklist.Remove(vaultUid);
             }
         }
 
