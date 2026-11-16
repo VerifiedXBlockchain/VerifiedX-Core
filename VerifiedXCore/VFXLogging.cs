@@ -51,7 +51,7 @@ namespace VerifiedXCore
                 ApplicationName = "VFX Core CLI",
                 Message = loc
             };
-            error.MessageLog.Add(new ElmahLogMessageEntry { Level = LogLevel.None, Message = message, Collapsed = true, TimeStamp = DateTime.Now });
+            error.MessageLog.Add(new ElmahLogMessageEntry { Level = LogLevel.None, Message = LogUtility.Shorten(message), Collapsed = true, TimeStamp = DateTime.Now });
             _errorLog.Log(error);
         }
 
@@ -70,7 +70,7 @@ namespace VerifiedXCore
                 Message = loc
 
             };
-            error.MessageLog.Add(new ElmahLogMessageEntry { Level = LogLevel.Error, Message = message, Collapsed = true, TimeStamp = DateTime.Now });
+            error.MessageLog.Add(new ElmahLogMessageEntry { Level = LogLevel.Error, Message = LogUtility.Shorten(message), Collapsed = true, TimeStamp = DateTime.Now });
             _errorLog.Log(error);
         }
     }

@@ -20,11 +20,16 @@ namespace VerifiedXCore.Utilities
         public const int MaxMessageChars = 4096;
         public const int MaxQueued = 20_000;
 
+        /// <summary>A message cut to its first <see cref="MaxMessageChars"/> characters, for every log destination.</summary>
+        public static string Shorten(string message) =>
+            message != null && message.Length > MaxMessageChars
+                ? message.Substring(0, MaxMessageChars) + $"... [{message.Length - MaxMessageChars} more characters]"
+                : message;
+
         private static void Enqueue(string message, string location, string fileName)
         {
             if (FileQueue.Count >= MaxQueued) return;
-            if (message != null && message.Length > MaxMessageChars)
-                message = message.Substring(0, MaxMessageChars) + $"... [{message.Length - MaxMessageChars} more characters]";
+            message = Shorten(message);
             if (location != null && location.Length > MaxMessageChars)
                 location = location.Substring(0, MaxMessageChars);
             FileQueue.Enqueue((message, location, fileName, DateTime.Now));

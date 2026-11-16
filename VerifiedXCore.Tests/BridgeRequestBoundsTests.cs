@@ -65,6 +65,32 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        /// <summary>With Elmah on (it is off by default), what it stores is cut the same way as the file log.</summary>
+        [Fact]
+        public void WithElmahOn_AHugeMessageReachesItShortened()
+        {
+            var field = typeof(VerifiedXCore.VFXLogging).GetField("_errorLog", BindingFlags.NonPublic | BindingFlags.Static)!;
+            var prior = field.GetValue(null);
+            var elmah = new ElmahCore.MemoryErrorLog();
+            VerifiedXCore.VFXLogging.Initialize(elmah);
+            try
+            {
+                var huge = new string('A', 4 * 1024 * 1024);
+                VerifiedXCore.VFXLogging.LogInfo(huge, "BridgeRequestBoundsTests");
+                VerifiedXCore.VFXLogging.LogError(huge, "BridgeRequestBoundsTests");
+
+                var entries = new List<ElmahCore.ErrorLogEntry>();
+                elmah.GetErrors(0, 10, entries);
+                Assert.Equal(2, entries.Count);
+                Assert.All(entries.SelectMany(e => e.Error.MessageLog), m =>
+                    Assert.True(m.Message.Length <= LogUtility.MaxMessageChars + 64, $"Elmah holds {m.Message.Length} characters"));
+            }
+            finally
+            {
+                field.SetValue(null, prior);
+            }
+        }
+
         [Fact]
         public void ABurnAlertSignedWithAHugeKeyPart_IsRefusedAtOnce()
         {
