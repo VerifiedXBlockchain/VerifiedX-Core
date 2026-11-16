@@ -10,8 +10,17 @@ namespace VerifiedXCore.Utilities
             var txList = new List<Transaction>();
             long sizeCount = 0;
 
-            //Sorts the mempool by rating and then by date received
-            var mempoolSorted = mempoolTxs.Where(x =>x .TransactionRating != null && x.TransactionRating != TransactionRating.F).OrderBy(x => x.TransactionRating).ThenBy(x => x.Timestamp);
+            var eligible = mempoolTxs.Where(x => x.TransactionRating != null && x.TransactionRating != TransactionRating.F).ToList();
+
+            // Each sender's earliest validator heartbeat goes first: free transfers share its rating and may be dated up to
+            // the age limit back, so sorted by time alone a flood of them kept heartbeats out until validators left the
+            // active set. One per sender, and a heartbeat needs a funded validator address, so this cannot fill a block.
+            var heartbeats = eligible.Where(x => x.TransactionType == TransactionType.VBTC_V2_VALIDATOR_HEARTBEAT)
+                .GroupBy(x => x.FromAddress).Select(g => g.OrderBy(x => x.Timestamp).First()).ToList();
+            var first = new HashSet<Transaction>(heartbeats, ReferenceEqualityComparer.Instance);
+
+            //Sorts the rest of the mempool by rating and then by date received
+            var mempoolSorted = heartbeats.Concat(eligible.Where(x => !first.Contains(x)).OrderBy(x => x.TransactionRating).ThenBy(x => x.Timestamp));
 
             foreach (var mempoolTx in mempoolSorted)
             {
