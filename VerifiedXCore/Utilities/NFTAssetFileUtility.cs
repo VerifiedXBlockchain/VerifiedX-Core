@@ -738,11 +738,12 @@ namespace VerifiedXCore.Utilities
                         var height = pageReader.GetPageHeight();
 
                         // specify that we are reading a byte array of colors in R-G-B-A order.
-                        PixelReadSettings pixelReadSettings = new PixelReadSettings(width, height, StorageType.Char, PixelMapping.RGBA);
-                        using (MagickImage imgPdfOverlay = new MagickImage(rawBytes, pixelReadSettings))
+                        PixelReadSettings pixelReadSettings = new PixelReadSettings((uint)width, (uint)height, StorageType.Char, PixelMapping.RGBA);
+                        using (MagickImage imgPdfOverlay = new MagickImage())
                         {
+                            imgPdfOverlay.ReadPixels(rawBytes, pixelReadSettings);
                             // turn transparent pixels into backdrop color using composite
-                            imgBackdrop = new MagickImage(backdropColor, width, height);
+                            imgBackdrop = new MagickImage(backdropColor, (uint)width, (uint)height);
                             imgBackdrop.Composite(imgPdfOverlay, CompositeOperator.Over);
                         }
                     }

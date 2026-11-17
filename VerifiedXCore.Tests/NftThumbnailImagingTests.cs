@@ -48,6 +48,23 @@ namespace VerifiedXCore.Tests
             Assert.True(File.Exists(ThumbOf("art.png")));
         }
 
+        [Theory]
+        [InlineData("art.png", MagickFormat.Png)]
+        [InlineData("art.jpg", MagickFormat.Jpeg)]
+        [InlineData("art.jpeg", MagickFormat.Jpeg)]
+        [InlineData("art.jp2", MagickFormat.Jp2)]
+        [InlineData("art.gif", MagickFormat.Gif)]
+        [InlineData("art.tif", MagickFormat.Tiff)]
+        [InlineData("art.tiff", MagickFormat.Tiff)]
+        [InlineData("art.webp", MagickFormat.WebP)]
+        [InlineData("art.bmp", MagickFormat.Bmp)]
+        public void EveryThumbnailFormat_GetsItsThumbnail(string name, MagickFormat format)
+        {
+            var file = Image(name, format);
+            NFTAssetFileUtility.CreateNFTAssetThumbnail(file, Path.Combine(_dir, "thumb-" + name));
+            Assert.True(File.Exists(ThumbOf(name)), $"no thumbnail for {name} (ImageMagick {MagickNET.ImageMagickVersion})");
+        }
+
         [Fact]
         public void APdf_StillGetsItsThumbnail_UnderThePolicy()
         {
