@@ -115,6 +115,33 @@ namespace VerifiedXCore.Bitcoin.Models
                 .ToList();
         }
 
+        /// <summary>
+        /// The contract UID of a Completed row (up to 200 characters), null for every other row. The owner's add-back
+        /// reads only Completed rows, while a vault's requested and cancelled rows are never deleted.
+        /// </summary>
+        internal const string CompletedShortUidIndexExpression = "IIF($.IsCompleted = true AND $.Status = 'Completed' AND LENGTH($.SmartContractUID) <= 200, $.SmartContractUID, null)";
+        internal const string CompletedShortUidIndexName = "CompletedSmartContractUIDShort";
+
+        /// <summary>
+        /// The Completed rows of <paramref name="scUID"/>, exactly the rows <see cref="RowsOfContract"/> returns that are
+        /// Completed, in the same order, without reading the vault's other rows: those the Completed index finds under
+        /// the UID, and those indexed as null by the contract index (long UIDs) checked one by one.
+        /// </summary>
+        public static List<VBTCWithdrawalRequest> CompletedRowsOfContract(LiteDB.ILiteCollection<VBTCWithdrawalRequest> col, string? scUID)
+        {
+            if (scUID == null) return new List<VBTCWithdrawalRequest>();
+            var collation = DbContext.DB_VBTCWithdrawalRequests.Collation;
+            var candidates = scUID.Length <= 200
+                ? col.Find(LiteDB.Query.EQ(CompletedShortUidIndexExpression, scUID)).Concat(col.Find(LiteDB.Query.EQ(ShortUidIndexExpression, LiteDB.BsonValue.Null)))
+                : col.FindAll();
+            return candidates
+                .Where(x => x.SmartContractUID != null && collation.Compare(x.SmartContractUID, scUID) == 0)
+                .Where(x => x.IsCompleted && x.Status == VBTCWithdrawalStatus.Completed)
+                .GroupBy(x => x.Id).Select(g => g.First())
+                .OrderBy(x => x.Id)
+                .ToList();
+        }
+
         #region Get DB
         public static LiteDB.ILiteCollection<VBTCWithdrawalRequest>? GetVBTCWithdrawalRequestDb()
         {
@@ -454,9 +481,7 @@ namespace VerifiedXCore.Bitcoin.Models
             // (StateData.VoteOnVBTCV2Cancellation), Cancel(), and the cleanup janitor all set
             // IsCompleted=true WITHOUT writing the offsetting burn row this add-back exists to
             // cancel out. Counting those would credit the owner vBTC that no BTC backs.
-            var completedWithdrawals = RowsOfContract(vwrDb, scUID)
-                .Where(x => x.IsCompleted && x.Status == VBTCWithdrawalStatus.Completed)
-                .ToList();
+            var completedWithdrawals = CompletedRowsOfContract(vwrDb, scUID);
 
             var fixActive = currentHeight >= Globals.V2WithdrawalOwnerAddBackFixHeight;
             if (!fixActive)
