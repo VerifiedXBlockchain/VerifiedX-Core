@@ -148,6 +148,27 @@ namespace VerifiedXCore.Services
             return (function, uid);
         }
 
+        /// <summary>
+        /// Whether a transaction's Data, read as JSON, carries a comment. The rules here read Data with JToken.Parse,
+        /// which returns a leading comment as the root, while the code that runs a call skips it: such Data reads as no
+        /// call to the rules and as a call to the dispatcher. No wallet writes a comment. Data that is not JSON is left
+        /// to the other rules. Reads the text once, never throws.
+        /// </summary>
+        public static bool DataHasJsonComment(string? data)
+        {
+            if (string.IsNullOrEmpty(data) || (data.IndexOf("/*", StringComparison.Ordinal) < 0 && data.IndexOf("//", StringComparison.Ordinal) < 0))
+                return false;
+            try
+            {
+                using var reader = new Newtonsoft.Json.JsonTextReader(new System.IO.StringReader(data)) { SupportMultipleContent = true, MaxDepth = null };
+                while (reader.Read())
+                    if (reader.TokenType == Newtonsoft.Json.JsonToken.Comment)
+                        return true;
+            }
+            catch { } // not JSON past this point
+            return false;
+        }
+
         /// <summary>The first element of a contract call (array shape) or the call itself (object shape); null when it is neither.</summary>
         private static JObject? CallObject(string txData)
         {
