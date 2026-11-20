@@ -1853,6 +1853,11 @@ namespace VerifiedXCore.Services
                                         if(scStateTreiRec.PurchaseKeys.Contains(keySign))
                                             return (txResult, "This purchase key has already been used for a previous purchase and may not be used again.");
                                     }
+
+                                    // A sale with no recorded key that was cancelled is not listed to its buyer again.
+                                    if ((blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.SaleListingKeyHeight
+                                        && scStateTreiRec.CancelledSaleBuyers != null && scStateTreiRec.CancelledSaleBuyers.Contains(toAddress))
+                                        return (txResult, "An earlier sale of this contract to this buyer was cancelled; it cannot be listed for sale to the same buyer again.");
                                     
                                     var signatureVerify = Bid.VerifyBidSignature(keySign, amountSoldFor.Value, toAddress, bidSignature);
 

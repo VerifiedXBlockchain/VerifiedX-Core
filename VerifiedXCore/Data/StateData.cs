@@ -3320,6 +3320,7 @@ namespace VerifiedXCore.Data
             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
             if (scStateTreiRec != null)
             {
+                var cancelledBuyer = scStateTreiRec.NextOwner;
                 scStateTreiRec.NextOwner = null;
                 scStateTreiRec.IsLocked = false;
                 scStateTreiRec.Nonce += 1;
@@ -3331,6 +3332,14 @@ namespace VerifiedXCore.Data
                     scStateTreiRec.PurchaseKeys ??= new List<string>();
                     if (!scStateTreiRec.PurchaseKeys.Contains(scStateTreiRec.SaleKey))
                         scStateTreiRec.PurchaseKeys.Add(scStateTreiRec.SaleKey);
+                }
+                // A listing with no recorded key has no key to retire: its buyer is recorded instead, and the
+                // contract is not listed to that buyer again.
+                else if (block.Height >= Globals.SaleListingKeyHeight && cancelledBuyer != null)
+                {
+                    scStateTreiRec.CancelledSaleBuyers ??= new List<string>();
+                    if (!scStateTreiRec.CancelledSaleBuyers.Contains(cancelledBuyer))
+                        scStateTreiRec.CancelledSaleBuyers.Add(cancelledBuyer);
                 }
                 scStateTreiRec.SaleKey = null;
 

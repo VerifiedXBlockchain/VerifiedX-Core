@@ -199,5 +199,50 @@ namespace VerifiedXCore.Tests
             Assert.False(State().IsLocked);
             Assert.True(State().PurchaseKeys == null || State().PurchaseKeys!.Count == 0);
         }
+
+        [Fact]
+        public async Task SaleStartedBelowTheHeight_CancelledAboveIt_IsNotListedToThatBuyerAgain()
+        {
+            Globals.LastBlock = new Block { Height = Gate - 2 };
+            await Mine(Start("key-one"), Gate - 1);
+            await Mine(Cancel("key-one"), Gate);
+            Assert.Equal(new List<string> { _buyer.Address }, State().CancelledSaleBuyers);
+
+            // The same buyer: refused in a block and at admission, under the old key or a new one.
+            Assert.False((await Verify(Start("key-one"), Gate + 1)).Item1);
+            Assert.False((await TransactionValidatorService.VerifyTX(Start("key-one"))).Item1);
+            var (ok, message) = await Verify(Start("key-two"), Gate + 1);
+            Assert.False(ok);
+            Assert.Contains("cannot be listed for sale to the same buyer again", message);
+
+            // Another buyer: listed, with its key recorded.
+            (PrivateKey Key, string Pub, string Address) other = NewKey();
+            var toOther = Signed(_seller, other.Address,
+                new { Function = "M_Sale_Start()", ContractUID = Nft, NextOwner = other.Address, SoldFor = Price, KeySign = "key-three", BidSignature = "manual" });
+            await Mine(toOther, Gate + 1);
+            Assert.Equal("key-three", State().SaleKey);
+        }
+
+        [Fact]
+        public async Task KeyedSaleCancelled_RecordsNoBuyer_AndTheBuyerCanBeListedAgainUnderANewKey()
+        {
+            Globals.LastBlock = new Block { Height = Gate - 1 };
+            await Mine(Start("key-one"), Gate);
+            await Mine(Cancel("key-one"), Gate + 1);
+            Assert.Null(State().CancelledSaleBuyers);
+
+            await Mine(Start("key-two"), Gate + 2);
+            await Mine(Complete("key-two"), Gate + 3);
+            Assert.Equal(_buyer.Address, State().OwnerAddress);
+        }
+
+        [Fact]
+        public async Task BelowTheHeight_ACancelRecordsNoBuyer()
+        {
+            Globals.LastBlock = new Block { Height = Gate - 100 };
+            await Mine(Start("key-one"), Gate - 99);
+            await Mine(Cancel("key-one"), Gate - 98);
+            Assert.Null(State().CancelledSaleBuyers);
+        }
     }
 }
