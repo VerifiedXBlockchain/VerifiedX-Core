@@ -19,10 +19,7 @@ namespace VerifiedXCore.Bitcoin.Services
     /// </summary>
     public class FrostMPCService
     {
-        private static HttpClient _httpClient = new HttpClient
-        {
-            Timeout = TimeSpan.FromSeconds(30)
-        };
+        private static HttpClient _httpClient = FrostPeerHttp.ForCeremonies(TimeSpan.FromSeconds(30));
 
         /// <summary>Tests only: the client the signing ceremony's requests go through.</summary>
         internal static HttpClient SigningHttpForTests { get => _httpClient; set => _httpClient = value; }
@@ -32,13 +29,11 @@ namespace VerifiedXCore.Bitcoin.Services
         /// FROST crypto with 85+ participants involves generating 84 secret shares per validator,
         /// which can take significant time. 90-second timeout accommodates this.
         /// </summary>
-        private static readonly HttpClient _ceremonyHttpClient = new HttpClient
-        {
-            Timeout = TimeSpan.FromSeconds(90),
+        private static readonly HttpClient _ceremonyHttpClient = FrostPeerHttp.ForCeremonies(
+            TimeSpan.FromSeconds(90),
             // An honest Round 2 output is a few hundred bytes per participant; a larger answer fails its sender, not its
             // recipients (fifth review, round 13).
-            MaxResponseContentBufferSize = 64L * 1024 * 1024,
-        };
+            maxResponseBytes: 64L * 1024 * 1024);
 
         #region Validator Reachability
 
@@ -46,10 +41,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Dedicated short-timeout HttpClient for health check probes.
         /// Uses a 5-second timeout so we don't wait 30 seconds per offline validator.
         /// </summary>
-        private static readonly HttpClient _probeHttpClient = new HttpClient
-        {
-            Timeout = TimeSpan.FromSeconds(5)
-        };
+        private static readonly HttpClient _probeHttpClient = FrostPeerHttp.ForShortRequests(TimeSpan.FromSeconds(5));
 
         /// <summary>
         /// Probe all validators to find which ones are actually reachable on the FROST port.
