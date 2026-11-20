@@ -4192,6 +4192,24 @@ namespace VerifiedXCore.Services
                     if (unlockGateHeight >= Globals.PathAuditRulesHeight && VBTCBridgeLockState.GetByLockId(lockId) is { } named
                         && !string.Equals(lockId, named.LockId, StringComparison.Ordinal))
                         return (txResult, $"Bridge unlock must name the lock by its own id ({named.LockId}).");
+                    // The lock the unlock names, before its votes: these read one record, and an unlock that fails any of
+                    // them is refused whatever its votes say, so no signature is checked for it.
+                    var rec = VBTCBridgeLockState.GetByLockId(lockId);
+                    if (rec == null)
+                        return (txResult, "Unknown bridge LockId (no prior lock on-chain).");
+
+                    if (rec.IsUnlocked)
+                        return (txResult, "Bridge lock already unlocked.");
+
+                    if (rec.OwnerAddress != txRequest.FromAddress)
+                        return (txResult, "Bridge unlock signer must match original lock owner.");
+
+                    if (rec.SmartContractUID != scUID)
+                        return (txResult, "ContractUID does not match the locked bridge record.");
+
+                    if (rec.AmountSats != amountSats.Value)
+                        return (txResult, "AmountSats does not match the locked bridge record.");
+
                     var unlockStrict = unlockGateHeight >= Globals.BridgeBurnBindingHeight;
                     if (unlockStrict)
                     {
@@ -4201,7 +4219,8 @@ namespace VerifiedXCore.Services
                         if (votesTok == null || votesTok.Type != JTokenType.Array)
                             return (txResult, "Bridge unlock requires CasterConsensusVotes array.");
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
-                        var (votesOk, votesReason) = BridgeCasterConsensus.TryVerifyVotesFromCommittee(votes, exitBurnTxHash!.Trim(), "EXIT", unlockGateHeight);
+                        var (votesOk, votesReason) = BridgeCasterConsensus.TryVerifyVotesFromCommittee(votes, exitBurnTxHash!.Trim(), "EXIT", unlockGateHeight,
+                            eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || unlockGateHeight >= Globals.BridgeVoteOncePerCasterHeight);
                         if (!votesOk)
                             return (txResult, $"Caster consensus votes rejected for VBTCb unlock: {votesReason}");
                         if (VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(exitBurnTxHash))
@@ -4229,22 +4248,6 @@ namespace VerifiedXCore.Services
                         if (!burnOk)
                             return (txResult, "Exit burn transaction could not be verified on Base.");
                     }
-
-                    var rec = VBTCBridgeLockState.GetByLockId(lockId);
-                    if (rec == null)
-                        return (txResult, "Unknown bridge LockId (no prior lock on-chain).");
-
-                    if (rec.IsUnlocked)
-                        return (txResult, "Bridge lock already unlocked.");
-
-                    if (rec.OwnerAddress != txRequest.FromAddress)
-                        return (txResult, "Bridge unlock signer must match original lock owner.");
-
-                    if (rec.SmartContractUID != scUID)
-                        return (txResult, "ContractUID does not match the locked bridge record.");
-
-                    if (rec.AmountSats != amountSats.Value)
-                        return (txResult, "AmountSats does not match the locked bridge record.");
                 }
                 catch (Exception ex)
                 {
@@ -4314,7 +4317,8 @@ namespace VerifiedXCore.Services
                         if (votesTok == null || votesTok.Type != JTokenType.Array)
                             return (txResult, "Bridge pool unlock requires CasterConsensusVotes array.");
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
-                        var (votesOk, votesReason) = BridgeCasterConsensus.VerifyBoundVotes(votes, poolBurnHash, "POOL_EXIT", totalAmountSats.Value, vfxDestAddr, poolGateHeight);
+                        var (votesOk, votesReason) = BridgeCasterConsensus.VerifyBoundVotes(votes, poolBurnHash, "POOL_EXIT", totalAmountSats.Value, vfxDestAddr, poolGateHeight,
+                            eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || poolGateHeight >= Globals.BridgeVoteOncePerCasterHeight);
                         if (!votesOk)
                             return (txResult, $"Caster consensus votes rejected for pool unlock: {votesReason}");
 
@@ -4431,7 +4435,8 @@ namespace VerifiedXCore.Services
                         if (votesTok == null || votesTok.Type != JTokenType.Array)
                             return (txResult, "VBTCb exit to BTC requires CasterConsensusVotes array.");
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
-                        var (votesOk, votesReason) = BridgeCasterConsensus.VerifyBoundVotes(votes, exitBurnHash, "BTC_EXIT", exitTotalSats, btcDestination, exitGateHeight);
+                        var (votesOk, votesReason) = BridgeCasterConsensus.VerifyBoundVotes(votes, exitBurnHash, "BTC_EXIT", exitTotalSats, btcDestination, exitGateHeight,
+                            eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || exitGateHeight >= Globals.BridgeVoteOncePerCasterHeight);
                         if (!votesOk)
                             return (txResult, $"Caster consensus votes rejected for exit to BTC: {votesReason}");
 

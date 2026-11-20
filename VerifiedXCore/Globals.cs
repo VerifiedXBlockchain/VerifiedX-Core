@@ -652,6 +652,17 @@ namespace VerifiedXCore
         public const decimal SalePaymentShareTolerance = 0.000001M;
 
         /// <summary>
+        /// From this height a bridge transaction's vote list (unlock, pool unlock, exit to Bitcoin) is refused in a block
+        /// when a committee caster has more than one vote to check in it, as it already is at admission. A list then
+        /// costs at most one signature check a committee member. The lists casters build hold one vote a caster.
+        /// A tightening rule: a node without it accepts every block a node with it does.
+        /// Unset (long.MaxValue) on both networks until the release that activates it.
+        /// </summary>
+        public static long BridgeVoteOncePerCasterHeight = long.MaxValue;
+        /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
+        public const long BridgeVoteOncePerCasterTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// Item 6: a vBTC withdrawal REQUEST may not reuse a (requester, UniqueId, contract) key under which a request was
         /// already mined. The holder chooses UniqueId, nothing in consensus read it, and the row store's save matched on
         /// that key and kept the old row's Amount and destination: a dust request with an old UniqueId reopened a
