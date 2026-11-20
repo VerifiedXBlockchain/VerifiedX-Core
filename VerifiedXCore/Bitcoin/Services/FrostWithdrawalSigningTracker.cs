@@ -332,7 +332,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 record.LastActivity = TimeUtil.GetTime();
 
                 if (record.PinnedSighashes == null && allInputSighashes != null && allInputSighashes.Count > 0)
-                    record.PinnedSighashes = allInputSighashes.Select(s => s.ToLowerInvariant()).ToList();
+                    record.PinnedSighashes = allInputSighashes.Select(s => (s ?? "").Trim().ToLowerInvariant()).ToList(); // as the transaction computes them (FrostSigningAuthorization held each to that)
                 if (string.IsNullOrEmpty(record.BtcTxId) && !string.IsNullOrWhiteSpace(btcTxId))
                     record.BtcTxId = btcTxId.Trim().ToLowerInvariant();
 
