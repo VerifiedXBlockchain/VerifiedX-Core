@@ -20,17 +20,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                     var builder = Host.CreateDefaultBuilder()
                     .ConfigureWebHostDefaults(webBuilder =>
                     {
-                        webBuilder.UseKestrel(options =>
-                        {
-                            // Every route reads its body before it can tell who sent it: with Kestrel's defaults (30 MB a
-                            // body, no connection limit) a few hundred trickled bodies held gigabytes of a validator's
-                            // memory (fifth review, round 17). The largest honest body, a Round 2 commitment set at the
-                            // 200-participant cap, is about 2 MB (6.4 MB at the commitment size limit).
-                            options.Limits.MaxRequestBodySize = 8 * 1024 * 1024;
-                            options.Limits.MaxConcurrentConnections = 256;
-                            options.ListenAnyIP(Globals.FrostValidatorPort + 1, listenOption => { listenOption.UseHttps(GetSelfSignedCertificate()); });
-                            options.ListenAnyIP(Globals.FrostValidatorPort);
-                        })
+                        webBuilder.UseKestrel(options => ConfigureKestrel(options, Globals.FrostValidatorPort, FrostConnectionLimits.Server))
                         .UseStartup<FrostStartup>()
                         .ConfigureLogging(loggingBuilder => loggingBuilder.ClearProviders());
                     });
@@ -63,6 +53,29 @@ namespace VerifiedXCore.Bitcoin.FROST
             {
                 Console.WriteLine($"FROST Server Error: {ex}");
             }
+        }
+
+        /// <summary>
+        /// The server's listeners and limits: plain HTTP on <paramref name="port"/>, HTTPS on the port after it, and on
+        /// both a connection is admitted by <paramref name="connectionLimits"/> before anything is read from it.
+        /// </summary>
+        internal static void ConfigureKestrel(Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServerOptions options, int port, FrostConnectionLimits connectionLimits)
+        {
+            // Every route reads its body before it can tell who sent it: with Kestrel's defaults (30 MB a
+            // body, no connection limit) a few hundred trickled bodies held gigabytes of a validator's
+            // memory (fifth review, round 17). The largest honest body, a Round 2 commitment set at the
+            // 200-participant cap, is about 2 MB (6.4 MB at the commitment size limit).
+            options.Limits.MaxRequestBodySize = 8 * 1024 * 1024;
+            // A connection is kept while it is serving a request (FrostConnectionLimits), so a request has to arrive at
+            // a real pace to count as one: the largest honest body takes under seven minutes at this rate, and
+            // validators send it in seconds.
+            options.Limits.MinRequestBodyDataRate = new Microsoft.AspNetCore.Server.Kestrel.Core.MinDataRate(
+                bytesPerSecond: FrostConnectionLimits.MinRequestBodyBytesPerSecond, gracePeriod: TimeSpan.FromSeconds(FrostConnectionLimits.IdleSecondsBeforeMakingRoom));
+            // Who may hold how many connections is FrostConnectionLimits' decision, over both listeners together.
+            // Kestrel's own ceiling is set above those limits, so it never decides before them.
+            options.Limits.MaxConcurrentConnections = FrostConnectionLimits.ServerTotal;
+            options.ListenAnyIP(port + 1, listenOption => { listenOption.Use(connectionLimits.Guard); listenOption.UseHttps(GetSelfSignedCertificate()); });
+            options.ListenAnyIP(port, listenOption => listenOption.Use(connectionLimits.Guard));
         }
 
         /// <summary>

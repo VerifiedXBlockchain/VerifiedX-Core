@@ -152,7 +152,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
     {
         private const int LoopSeconds = 6;
         private static readonly BtcReportPlanner Planner = new();
-        private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(6) };
+        private static readonly HttpClient Http = VerifiedXCore.Bitcoin.FROST.FrostPeerHttp.ForShortRequests(TimeSpan.FromSeconds(6));
         private static readonly ConcurrentDictionary<string, DateTime> FirstReady = new(StringComparer.Ordinal);
         private static readonly ConcurrentDictionary<string, DateTime> Submitted = new(StringComparer.Ordinal);
         private static readonly ConcurrentDictionary<string, DateTime> LastAsked = new(StringComparer.Ordinal);

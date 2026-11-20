@@ -24,10 +24,7 @@ namespace VerifiedXCore.Bitcoin.Services
     /// </summary>
     public static class FrostKeyBackupService
     {
-        private static readonly HttpClient _backupHttpClient = new HttpClient
-        {
-            Timeout = TimeSpan.FromSeconds(15)
-        };
+        private static readonly HttpClient _backupHttpClient = VerifiedXCore.Bitcoin.FROST.FrostPeerHttp.ForShortRequests(TimeSpan.FromSeconds(15));
 
         /// <summary>Maximum encrypted blob size (16 KB — generous for ~1-2 KB actual data)</summary>
         private const int MAX_BLOB_SIZE = 16 * 1024;
