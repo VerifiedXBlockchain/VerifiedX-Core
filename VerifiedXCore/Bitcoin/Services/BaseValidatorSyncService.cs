@@ -46,6 +46,47 @@ namespace VerifiedXCore.Bitcoin.Services
             public long VfxBlockHeight { get; set; }
             /// <summary>The contract's admin nonce the signature is for.</summary>
             public string AdminNonce { get; set; } = "";
+            /// <summary>
+            /// The requesting validator's VFX public key and its signature over <see cref="RequestMessage"/>. The epoch's
+            /// additions in full are signed for anyone; a part of them only at the request of a validator or caster on the
+            /// contract, as the member collecting signatures sends it.
+            /// </summary>
+            public string RequesterPublicKey { get; set; } = "";
+            public string RequesterSignature { get; set; } = "";
+        }
+
+        /// <summary>What a requester signs: the request's every field but its own signature.</summary>
+        internal static string RequestMessage(ValidatorUpdateSignRequest r) => string.Join("|", "VBTCB-SIGNER-UPDATE",
+            (r.Action ?? "").Trim().ToUpperInvariant(), string.Join(",", r.TargetAddresses ?? Array.Empty<string>()),
+            string.Join(",", r.RemoveAddresses ?? Array.Empty<string>()), r.VfxBlockHeight.ToString(), r.AdminNonce ?? "", r.RequesterPublicKey ?? "");
+
+        /// <summary>A request as this node sends it, signed with its validator key.</summary>
+        internal static ValidatorUpdateSignRequest SignedRequest(string action, string[] targets, string[]? removes, long epoch, string nonce)
+        {
+            var req = new ValidatorUpdateSignRequest { Action = action, TargetAddresses = targets, RemoveAddresses = removes ?? Array.Empty<string>(), VfxBlockHeight = epoch, AdminNonce = nonce };
+            var account = AccountData.GetSingleAccount(Globals.ValidatorAddress);
+            if (account?.GetPrivKey != null && !string.IsNullOrEmpty(account.PublicKey))
+            {
+                req.RequesterPublicKey = account.PublicKey;
+                req.RequesterSignature = VerifiedXCore.Services.SignatureService.CreateSignature(RequestMessage(req), account.GetPrivKey, account.PublicKey);
+            }
+            return req;
+        }
+
+        internal const string PartOfTheAdditionsReason =
+            "A part of the epoch's additions is signed only at the request of a validator or caster on the contract.";
+
+        /// <summary>Whether the request is signed by a validator or caster on the contract.</summary>
+        private static bool RequestedByMember(ValidatorUpdateSignRequest req, BaseBridgeService.SignerView view)
+        {
+            var pub = req.RequesterPublicKey;
+            if (string.IsNullOrEmpty(pub) || string.IsNullOrEmpty(req.RequesterSignature)) return false;
+            string address;
+            try { address = AccountData.GetHumanAddress(pub); } catch { return false; }
+            if (string.IsNullOrEmpty(address) || !VerifiedXCore.Services.SignatureService.VerifySignature(address, RequestMessage(req), req.RequesterSignature)) return false;
+            var baseAddress = BaseSignerSetPolicy.BaseAddressOf(pub);
+            return baseAddress.Length > 0
+                && (view.Validators.Contains(baseAddress, StringComparer.OrdinalIgnoreCase) || view.CasterList.Contains(baseAddress, StringComparer.OrdinalIgnoreCase));
         }
 
         internal const string AdminChangesNotSignedReason =
@@ -117,6 +158,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 // that does not answer waits for the next epoch rather than holding the others back).
                 if (casterPlan.Empty || !InPlanOrder(targets, casterPlan.Add) || !removing.SequenceEqual(casterPlan.Remove, StringComparer.OrdinalIgnoreCase))
                     return (null, "Not the caster change this node computes for the epoch");
+                // A caster left out of the additions waits an epoch: only a member collecting signatures leaves one out.
+                if (targets.Length < casterPlan.Add.Count && !RequestedByMember(req, view)) return (null, PartOfTheAdditionsReason);
                 var castersAfter = view.CasterList.Count - removing.Length + targets.Length;
                 if (castersAfter < BaseSignerSetPolicy.MinCasters || castersAfter > BaseSignerSetPolicy.MaxCasters)
                     return (null, "The caster change would leave the contract outside 3 to 10 casters");
@@ -143,6 +186,8 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 if (plan.Removes.Count > 0) return (null, "This epoch's removals come first");
                 if (!InPlanOrder(targets, plan.Adds)) return (null, "Not an addition this node computes for the epoch");
+                // A validator left out of the additions waits an epoch: only a member collecting signatures leaves one out.
+                if (targets.Length < plan.Adds.Count && !RequestedByMember(req, view)) return (null, PartOfTheAdditionsReason);
                 if (!asMember && !targets.Contains(myBase, StringComparer.OrdinalIgnoreCase))
                     return (null, "Only a validator or caster on the contract, or one being added, signs an addition");
                 if (asMember && BaseSignerSignLog.WentThrough(BaseBridgeService.ContractAddress, epoch, view.Validators, view.Validators))
@@ -474,7 +519,7 @@ namespace VerifiedXCore.Bitcoin.Services
             Func<IEnumerable<string>, bool>? done = null)
         {
             var sigs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            var (mine, _) = await SignValidatorUpdateAsync(new ValidatorUpdateSignRequest { Action = action, TargetAddresses = targets, RemoveAddresses = removes ?? Array.Empty<string>(), VfxBlockHeight = epoch, AdminNonce = nonce });
+            var (mine, _) = await SignValidatorUpdateAsync(SignedRequest(action, targets, removes, epoch, nonce));
             if (mine != null) sigs[myBase] = mine;
             foreach (var m in members)
             {
@@ -495,7 +540,7 @@ namespace VerifiedXCore.Bitcoin.Services
             {
                 var client = Globals.HttpClientFactory?.CreateClient() ?? new HttpClient();
                 client.Timeout = TimeSpan.FromSeconds(10);
-                var body = Newtonsoft.Json.JsonConvert.SerializeObject(new ValidatorUpdateSignRequest { Action = action, TargetAddresses = targets, RemoveAddresses = removes ?? Array.Empty<string>(), VfxBlockHeight = epoch, AdminNonce = nonce });
+                var body = Newtonsoft.Json.JsonConvert.SerializeObject(SignedRequest(action, targets, removes, epoch, nonce));
                 using var content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
                 var resp = await client.PostAsync($"http://{ip.Replace("::ffff:", "")}:{Globals.ValAPIPort}/valapi/Validator/SignValidatorUpdate", content);
                 if (!resp.IsSuccessStatusCode) return null;
