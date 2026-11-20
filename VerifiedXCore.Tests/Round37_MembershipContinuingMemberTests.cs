@@ -142,6 +142,63 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// Anyone can post a record, or serve one in catch-up, and its signatures are checked under the lock every read of
+        /// the committee waits for: a record listing one member thousands of times, each entry a junk signature, cost a
+        /// verify per entry. A record listing a signer more than twice is refused before any is verified, so a record costs
+        /// at most two verifies per signer. A signer still counts when one of its entries is valid.
+        /// </summary>
+        [Fact]
+        public void ARecordListingASignerMoreThanTwice_IsRefusedUnread_AndOneValidEntryStillCounts()
+        {
+            var flood = PromoteD(Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"));
+            var junk = SignatureOf(_a, _head).Signature;                                      // a real signature, over another record
+            flood.Signatures.AddRange(Enumerable.Range(0, 20_000).Select(_ => new RecordSignature { SignerAddress = _a.Address, Signature = junk }));
+            flood.Signatures.Add(SignatureOf(_a, flood));
+            flood.Signatures.Add(SignatureOf(_b, flood));
+
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            Assert.False(CasterMembershipStore.TryAppend(flood, out var why));
+            timer.Stop();
+            Assert.Contains("more than 2 times", why);
+            Assert.True(timer.ElapsedMilliseconds < 1_000, $"refusing it took {timer.ElapsedMilliseconds} ms");
+
+            // A signer's bad entry ahead of its valid one: it counts, as it always did.
+            var mixed = PromoteD(Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"));
+            mixed.Signatures.Add(new RecordSignature { SignerAddress = _a.Address, Signature = junk });
+            mixed.Signatures.Add(SignatureOf(_a, mixed));
+            mixed.Signatures.Add(SignatureOf(_b, mixed));
+            Assert.True(CasterMembershipStore.ValidateSuccessor(_head, mixed, out why), why);
+        }
+
+        /// <summary>
+        /// The same holds for a record a peer serves in catch-up, with many different signatures naming one member: it is
+        /// refused before any is verified, and reads of the committee are not held up meanwhile.
+        /// </summary>
+        [Fact]
+        public async Task ARecordServedInCatchUp_ListingASignerManyTimes_DoesNotHoldUpTheCommittee()
+        {
+            var served = PromoteD(Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"));
+            served.Signatures.AddRange(Enumerable.Range(0, 3_000).Select(i => new RecordSignature
+            {
+                SignerAddress = _a.Address, Signature = SignatureService.CreateSignature($"not this record {i}", _a.GetPrivKey, _a.PublicKey),
+            }));
+            served.Signatures.Add(SignatureOf(_a, served));
+            served.Signatures.Add(SignatureOf(_b, served));
+            SeeD("10.0.0.4");
+
+            var judging = Task.Run(() => CasterMembershipStore.TryAppendChain(new List<CasterMembershipRecord> { served }, out var refusal) == 0 ? refusal : null);
+            await Task.Delay(20);
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            CasterMembershipStore.InvalidateCache();
+            Assert.NotNull(CasterMembershipStore.GetCurrent());                            // a read of the committee
+            timer.Stop();
+            Assert.True(timer.ElapsedMilliseconds < 500, $"reading the committee waited {timer.ElapsedMilliseconds} ms");
+            Assert.Contains("more than 2 times", await judging);
+            CasterMembershipStore.InvalidateCache();
+            Assert.Equal(_head.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+        }
+
+        /// <summary>
         /// C-012 (encoding): the signed payload joins fields with '|'. A record that folds the first member's fields into
         /// its ChangedAddress and lists one member fewer has the same bytes, so the signatures on the honest record were
         /// valid on it too, and it could install a committee nobody signed. A field holding '|' is refused at validation

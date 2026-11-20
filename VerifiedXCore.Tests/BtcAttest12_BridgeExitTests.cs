@@ -224,6 +224,56 @@ namespace VerifiedXCore.Tests
         /// paid in full anyway. A lock is named by its own id exactly, and asked for no more than it holds (fourth review,
         /// round 11).
         /// </summary>
+        /// <summary>
+        /// Whether a burn was already used reads the locks an exit drew and the exit records; the bridge's other locks are
+        /// not read, so locks that stay after redemption, a holder's one-satoshi ones included, do not make every exit's
+        /// check longer. A burn is found under any spelling as before. And an exit is checked against them only once its
+        /// sender has signed it.
+        /// </summary>
+        [Fact]
+        public async Task WhetherABurnWasUsed_ReadsOnlyTheLocksAnExitDrew_AndOnlyForASignedExit()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.004M);
+            var locks = VBTCBridgeLockState.GetCollection();
+            locks.InsertBulk(Enumerable.Range(0, 20_000).Select(i => new VBTCBridgeLockState
+            {
+                LockId = $"dust-{i}-{Guid.NewGuid():N}", SmartContractUID = vault.Uid, OwnerAddress = Minter.Address, Amount = 0.00000001M, AmountSats = 1, EvmDestination = "0x" + new string('a', 40),
+            }));
+            // Locks drawn by exits, their burns written as the transactions spelled them.
+            var bare = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            var positioned = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            locks.Insert(new VBTCBridgeLockState { LockId = "drawn-1", SmartContractUID = vault.Uid, OwnerAddress = Minter.Address, ExitBurnTxHash = " 0x" + bare.ToUpperInvariant() });
+            locks.Insert(new VBTCBridgeLockState { LockId = "drawn-2", SmartContractUID = vault.Uid, OwnerAddress = Minter.Address, ExitBurnTxHash = positioned + ":2" });
+
+            Assert.True(VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(bare));
+            Assert.True(VBTCBridgeConsumedBurn.IsBurnUsedAnywhere("0x" + bare + ":0"));
+            Assert.True(VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(positioned));
+            Assert.True(VBTCBridgeConsumedBurn.IsBurnUsedAnywhere("0X" + positioned.ToUpperInvariant() + ":2"));
+            Assert.False(VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(positioned + ":3"));
+
+            var unknown = NewBurn();
+            VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(unknown); // warm
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            for (var i = 0; i < 20; i++) Assert.False(VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(unknown));
+            timer.Stop();
+            Assert.True(timer.ElapsedMilliseconds < 500, $"20 checks took {timer.ElapsedMilliseconds} ms");
+
+            // An exit naming the watched vault that its sender did not sign is refused before any lock is read.
+            var unsigned = Exit(NewBurn(), BtcDest, (lockId, vault.Uid, 0.004M));
+            unsigned.Signature = null;
+            timer.Restart();
+            for (var i = 0; i < 20; i++)
+                Assert.Equal((false, "Signature cannot be null."), await VerifiedXCore.Services.TransactionValidatorService.VerifyTX(unsigned));
+            timer.Stop();
+            Assert.True(timer.ElapsedMilliseconds < 500, $"20 unsigned exits took {timer.ElapsedMilliseconds} ms");
+            var (ok, why) = await Verify(unsigned, Tip + 1);
+            Assert.False(ok);
+            Assert.Equal("Signature cannot be null.", why);
+        }
+
         [Fact]
         public async Task AnExit_NamesEachLockByItsOwnId_AndAsksNoMoreThanItHolds()
         {

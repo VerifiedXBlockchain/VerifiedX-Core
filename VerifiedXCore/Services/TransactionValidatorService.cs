@@ -199,6 +199,8 @@ namespace VerifiedXCore.Services
         /// positive amounts, paid by the buyer (NextOwner), as separate transactions,
         /// to the seller (current owner) and - only when the contract has a royalty feature - to its royalty payee; the
         /// data's Royalty flag must match the contract, and together they cover the price (existing 1 VFX tolerance).
+        /// From Globals.SalePaymentSharesHeight each payment also covers its own share of the price and the completion
+        /// carries no other entry.
         /// </summary>
         internal static string? SalePaymentError(Transaction txRequest, bool? royaltyFlag, SmartContractStateTrei sc, SmartContractMain scMain, long? height = null)
         {
@@ -240,6 +242,25 @@ namespace VerifiedXCore.Services
                 return "The seller and royalty payments must be separate transactions.";
             if (paid.Sum(x => x.Tx.Amount) < sc.PurchaseAmount - 1.0M)
                 return "Sale payments do not cover the price.";
+
+            // Each payment covers its own share of the listed price, and nothing else is carried: the shares are
+            // taken from the price the listing recorded, never from the entries the completion brings.
+            if ((height ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.SalePaymentSharesHeight)
+            {
+                if ((JObject.Parse(txRequest.Data)["Transactions"] as JArray)?.Count != paid.Count)
+                    return "A sale completion may carry only the payments it makes.";
+                var price = sc.PurchaseAmount!.Value;
+                var royaltyRate = contractRoyalty ? ((RoyaltyFeature)royaltyFeat!.FeatureFeatures).RoyaltyAmount : 0M;
+                if (royaltyRate < 0M || royaltyRate >= 1M)
+                    return "The contract's royalty must be at least 0% and below 100%.";
+                var royaltyDue = price * royaltyRate;
+                foreach (var (p, toPayee) in paid)
+                {
+                    var due = toPayee ? royaltyDue : price - royaltyDue;
+                    if (p.Amount < due - Globals.SalePaymentShareTolerance)
+                        return $"Sale payment to {p.ToAddress} is {p.Amount}, below its share of the price ({due}).";
+                }
+            }
             return null;
         }
 
@@ -257,6 +278,24 @@ namespace VerifiedXCore.Services
             // hash commits to (the carried Hash alone used to skip every check).
             if (LedgerIntegrityRules.IsHonoredWhitelistEntry(txRequest, blockHeight))
                 return (true, "");
+
+            // The size cap, before any rule reads the transaction's data: the rules below parse it and look up what it
+            // names, so their work is bounded by the cap. The same check as the one further down, which every
+            // transaction that gets there must pass, so only the order of refusals changes. Private and attestation
+            // transactions have their own caps in their own validators.
+            if (!PrivateTransactionTypes.IsPrivateTransaction(txRequest.TransactionType)
+                && !VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(txRequest.TransactionType))
+            {
+                var atAdmission = blockHeight == null && !blockVerify && !blockDownloads;
+                var measured = atAdmission ? AsCarriedInABlock(txRequest) : txRequest;
+                // The largest cap any transaction has, first: choosing a transaction's own cap can read its data.
+                var largestTxSize = Math.Max(LedgerIntegrityRules.DefaultMaxTxSizeBytes, Globals.MaxVbtcVaultTxSizeBytes);
+                if (!VerifyTXSize(measured, largestTxSize))
+                    return (false, $"This transactions is too large. Max size allowed is {largestTxSize / 1024} kb.");
+                var earlyMaxTxSize = LedgerIntegrityRules.MaxTxSizeBytes(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+                if (!VerifyTXSize(measured, earlyMaxTxSize))
+                    return (false, $"This transactions is too large. Max size allowed is {earlyMaxTxSize / 1024} kb.");
+            }
 
             // Data with a JSON comment reads as no call to the rules below and as a call to the code that runs it, so it is
             // refused before any rule or contract code reads it: at admission always, in a block from JsonCommentDataRuleHeight.
@@ -354,6 +393,16 @@ namespace VerifiedXCore.Services
             if (txRequest.TransactionType == TransactionType.VBTC_V2_COIN_PIN
                 && !VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)))
                 return (false, "A withdrawal's fee is raised only from the Bitcoin attestation's recording height.");
+
+            // A bridge exit is checked against the bridge's locks and exits below only once its sender signed it: the same
+            // hash and signature checks every transaction passes further down, so only the order of refusals changes.
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC)
+            {
+                if (!StandardHashMatches(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)))
+                    return (txResult, "This transactions hash is not equal to the original hash.");
+                if (SignatureError(txRequest) is { } exitSignatureError)
+                    return (txResult, exitSignatureError);
+            }
 
             // Only from the recording height (no vault is watched before it): both read the transaction's data first and
             // refuse what they cannot read, which older builds did not do for historical blocks (fourth review, round 4).
@@ -1863,6 +1912,11 @@ namespace VerifiedXCore.Services
                                         if(scStateTreiRec.PurchaseKeys.Contains(keySign))
                                             return (txResult, "This purchase key has already been used for a previous purchase and may not be used again.");
                                     }
+
+                                    // A sale with no recorded key that was cancelled is not listed to its buyer again.
+                                    if ((blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.SaleListingKeyHeight
+                                        && scStateTreiRec.CancelledSaleBuyers != null && scStateTreiRec.CancelledSaleBuyers.Contains(toAddress))
+                                        return (txResult, "An earlier sale of this contract to this buyer was cancelled; it cannot be listed for sale to the same buyer again.");
                                     
                                     var signatureVerify = Bid.VerifyBidSignature(keySign, amountSoldFor.Value, toAddress, bidSignature);
 
@@ -1971,6 +2025,12 @@ namespace VerifiedXCore.Services
 
                                     if (txRequest.FromAddress != scStateTreiRec.NextOwner)
                                         return (txResult, "You are attempting to purchase a smart contract that does is not locked for you.");
+
+                                    // A completion settles the listing it was written for: it carries the purchase
+                                    // key that listing recorded (a sale started below the height recorded none).
+                                    if (saleRulesHeight >= Globals.SaleListingKeyHeight && scStateTreiRec.SaleKey != null
+                                        && !string.Equals(keySign, scStateTreiRec.SaleKey, StringComparison.Ordinal))
+                                        return (txResult, "This completion's purchase key is not the key of the sale in progress.");
 
                                     if ((txRequest.Amount + txRequest.Fee + transactions.Select(x => x.Amount + x.Fee).Sum()) > from.Balance)  // not sure about this... double check.
                                         return (txResult, "Amount exceeds balance.");
@@ -4132,6 +4192,24 @@ namespace VerifiedXCore.Services
                     if (unlockGateHeight >= Globals.PathAuditRulesHeight && VBTCBridgeLockState.GetByLockId(lockId) is { } named
                         && !string.Equals(lockId, named.LockId, StringComparison.Ordinal))
                         return (txResult, $"Bridge unlock must name the lock by its own id ({named.LockId}).");
+                    // The lock the unlock names, before its votes: these read one record, and an unlock that fails any of
+                    // them is refused whatever its votes say, so no signature is checked for it.
+                    var rec = VBTCBridgeLockState.GetByLockId(lockId);
+                    if (rec == null)
+                        return (txResult, "Unknown bridge LockId (no prior lock on-chain).");
+
+                    if (rec.IsUnlocked)
+                        return (txResult, "Bridge lock already unlocked.");
+
+                    if (rec.OwnerAddress != txRequest.FromAddress)
+                        return (txResult, "Bridge unlock signer must match original lock owner.");
+
+                    if (rec.SmartContractUID != scUID)
+                        return (txResult, "ContractUID does not match the locked bridge record.");
+
+                    if (rec.AmountSats != amountSats.Value)
+                        return (txResult, "AmountSats does not match the locked bridge record.");
+
                     var unlockStrict = unlockGateHeight >= Globals.BridgeBurnBindingHeight;
                     if (unlockStrict)
                     {
@@ -4141,7 +4219,8 @@ namespace VerifiedXCore.Services
                         if (votesTok == null || votesTok.Type != JTokenType.Array)
                             return (txResult, "Bridge unlock requires CasterConsensusVotes array.");
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
-                        var (votesOk, votesReason) = BridgeCasterConsensus.TryVerifyVotesFromCommittee(votes, exitBurnTxHash!.Trim(), "EXIT", unlockGateHeight);
+                        var (votesOk, votesReason) = BridgeCasterConsensus.TryVerifyVotesFromCommittee(votes, exitBurnTxHash!.Trim(), "EXIT", unlockGateHeight,
+                            eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || unlockGateHeight >= Globals.BridgeVoteOncePerCasterHeight);
                         if (!votesOk)
                             return (txResult, $"Caster consensus votes rejected for VBTCb unlock: {votesReason}");
                         if (VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(exitBurnTxHash))
@@ -4169,22 +4248,6 @@ namespace VerifiedXCore.Services
                         if (!burnOk)
                             return (txResult, "Exit burn transaction could not be verified on Base.");
                     }
-
-                    var rec = VBTCBridgeLockState.GetByLockId(lockId);
-                    if (rec == null)
-                        return (txResult, "Unknown bridge LockId (no prior lock on-chain).");
-
-                    if (rec.IsUnlocked)
-                        return (txResult, "Bridge lock already unlocked.");
-
-                    if (rec.OwnerAddress != txRequest.FromAddress)
-                        return (txResult, "Bridge unlock signer must match original lock owner.");
-
-                    if (rec.SmartContractUID != scUID)
-                        return (txResult, "ContractUID does not match the locked bridge record.");
-
-                    if (rec.AmountSats != amountSats.Value)
-                        return (txResult, "AmountSats does not match the locked bridge record.");
                 }
                 catch (Exception ex)
                 {
@@ -4254,7 +4317,8 @@ namespace VerifiedXCore.Services
                         if (votesTok == null || votesTok.Type != JTokenType.Array)
                             return (txResult, "Bridge pool unlock requires CasterConsensusVotes array.");
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
-                        var (votesOk, votesReason) = BridgeCasterConsensus.VerifyBoundVotes(votes, poolBurnHash, "POOL_EXIT", totalAmountSats.Value, vfxDestAddr, poolGateHeight);
+                        var (votesOk, votesReason) = BridgeCasterConsensus.VerifyBoundVotes(votes, poolBurnHash, "POOL_EXIT", totalAmountSats.Value, vfxDestAddr, poolGateHeight,
+                            eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || poolGateHeight >= Globals.BridgeVoteOncePerCasterHeight);
                         if (!votesOk)
                             return (txResult, $"Caster consensus votes rejected for pool unlock: {votesReason}");
 
@@ -4371,7 +4435,8 @@ namespace VerifiedXCore.Services
                         if (votesTok == null || votesTok.Type != JTokenType.Array)
                             return (txResult, "VBTCb exit to BTC requires CasterConsensusVotes array.");
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
-                        var (votesOk, votesReason) = BridgeCasterConsensus.VerifyBoundVotes(votes, exitBurnHash, "BTC_EXIT", exitTotalSats, btcDestination, exitGateHeight);
+                        var (votesOk, votesReason) = BridgeCasterConsensus.VerifyBoundVotes(votes, exitBurnHash, "BTC_EXIT", exitTotalSats, btcDestination, exitGateHeight,
+                            eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || exitGateHeight >= Globals.BridgeVoteOncePerCasterHeight);
                         if (!votesOk)
                             return (txResult, $"Caster consensus votes rejected for exit to BTC: {votesReason}");
 

@@ -160,7 +160,10 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// <summary>The longest sale key a watched vault's sale carries (a wallet's is 10 letters).</summary>
         public const int MaxSaleKeyLength = 64;
 
-        /// <summary>The most purchase keys a watched vault keeps (each sale adds one, never removed).</summary>
+        /// <summary>
+        /// The most purchase keys a watched vault keeps (each completed sale adds one, and from
+        /// Globals.SaleListingKeyHeight each cancelled one; never removed).
+        /// </summary>
         public const int MaxPurchaseKeys = 1_000;
 
         /// <summary>

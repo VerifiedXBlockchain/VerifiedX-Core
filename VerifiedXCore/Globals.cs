@@ -332,6 +332,21 @@ namespace VerifiedXCore
         public static long SaleCompleteContractRulesHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// From this height a sale is tied to its listing. Sale_Start records its purchase key on the contract's state
+        /// (SmartContractStateTrei.SaleKey); a completion must carry that key, and Sale_Cancel retires it with the keys
+        /// already used, so neither the cancelled listing's key nor a completion written for it settles a later
+        /// listing. A sale started below the height has no recorded key and completes or cancels as before, except
+        /// that when it is cancelled at or above the height its buyer is recorded
+        /// (SmartContractStateTrei.CancelledSaleBuyers) and the contract is not listed for sale to that buyer again.
+        /// A node without the rule accepts every block a node with it does, but its state lacks the keys the rule
+        /// records, so every node upgrades before the height. Unset (long.MaxValue) on both networks until the
+        /// release that activates it.
+        /// </summary>
+        public static long SaleListingKeyHeight = long.MaxValue;
+        /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
+        public const long SaleListingKeyTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// Item 3: a reserve Recover() must carry RecoveryAddress, RecoverySigScript and SignatureTime (every recovery
         /// check sat under "if both strings are non-empty", and a missing SignatureTime threw into an empty catch, so the
         /// vault key alone swept a reserve at once to any address named in the transaction), a malformed RESERVE
@@ -618,6 +633,34 @@ namespace VerifiedXCore
         /// mainnet carries "manual" (history scan 2026-10-08).
         /// </summary>
         public static long SaleStartBidRulesHeight = FundLossAuditHeight;
+
+        /// <summary>
+        /// From this height each payment of an NFT sale completion covers its own share of the listed price: the seller
+        /// is paid at least the price less the contract's royalty, the royalty payee at least the royalty, and the
+        /// completion carries no entry beyond those payments. The royalty is the contract's RoyaltyAmount read as a
+        /// rate of the price, as validation has always read it, whatever its RoyaltyType.
+        /// A tightening rule: a node without it accepts every block a node with it does.
+        /// Unset (long.MaxValue) on both networks until the release that activates it.
+        /// </summary>
+        public static long SalePaymentSharesHeight = long.MaxValue;
+        /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
+        public const long SalePaymentSharesTestnetHeight = long.MaxValue;
+        /// <summary>
+        /// How far below its share a sale payment may fall under SalePaymentSharesHeight. Wallets that compute the
+        /// royalty split in binary floating point are off by far less than this.
+        /// </summary>
+        public const decimal SalePaymentShareTolerance = 0.000001M;
+
+        /// <summary>
+        /// From this height a bridge transaction's vote list (unlock, pool unlock, exit to Bitcoin) is refused in a block
+        /// when a committee caster has more than one vote to check in it, as it already is at admission. A list then
+        /// costs at most one signature check a committee member. The lists casters build hold one vote a caster.
+        /// A tightening rule: a node without it accepts every block a node with it does.
+        /// Unset (long.MaxValue) on both networks until the release that activates it.
+        /// </summary>
+        public static long BridgeVoteOncePerCasterHeight = long.MaxValue;
+        /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
+        public const long BridgeVoteOncePerCasterTestnetHeight = long.MaxValue;
 
         /// <summary>
         /// Item 6: a vBTC withdrawal REQUEST may not reuse a (requester, UniqueId, contract) key under which a request was

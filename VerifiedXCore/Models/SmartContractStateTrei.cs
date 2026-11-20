@@ -21,6 +21,16 @@ namespace VerifiedXCore.Models
         public bool? MinterManaged { get; set; }
         public decimal? PurchaseAmount { get; set; } //Royalty is included in this.
         public List<string>? PurchaseKeys { get; set; }
+        /// <summary>
+        /// The purchase key of the sale in progress, recorded by Sale_Start from Globals.SaleListingKeyHeight and
+        /// cleared when the sale completes or is cancelled. Null outside a sale and for a sale started below the height.
+        /// </summary>
+        public string? SaleKey { get; set; }
+        /// <summary>
+        /// Buyers of sales that had no recorded key (started below Globals.SaleListingKeyHeight) and were cancelled at
+        /// or above it. The contract is not listed for sale to them again. Null when there are none.
+        /// </summary>
+        public List<string>? CancelledSaleBuyers { get; set; }
         public TokenDetails? TokenDetails { get; set; }
         public List<SmartContractStateTreiTokenizationTX>? SCStateTreiTokenizationTXes { get; set; }
 
