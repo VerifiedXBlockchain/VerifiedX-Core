@@ -1231,6 +1231,30 @@ namespace VerifiedXCore.Tests
             Assert.False(await BlockValidatorService.ValidateBlock(other, false));
             Assert.False(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(other.Height, other.Hash, _electors[10].Address, triedAtTip: true));
             Assert.NotEqual("refused-block-at-height", ProofUtility.ProducerIneligibility(_electors[10].Address, other.Height));
+            // Another block refused for a transaction meanwhile (another producer's, at the same height) does not replace
+            // the first one's refusal: each is answered for its own hash.
+            var reward2 = new Transaction
+            {
+                FromAddress = "Coinbase_BlkRwd", ToAddress = _electors[10].Address, TransactionType = TransactionType.TX, Timestamp = TimeUtil.GetTime(),
+                Amount = BlockVersionUtility.GetBlockVersion(height) < 4 ? BlockchainData.GetBlockReward() : 0.0M,
+            };
+            reward2.Build();
+            var unsigned2 = new Transaction
+            {
+                FromAddress = _electors[10].Address, ToAddress = producer.Address, TransactionType = TransactionType.TX, Timestamp = TimeUtil.GetTime(), Amount = 1M, Fee = 0.00001M,
+            };
+            unsigned2.Build();
+            var second = ProducedBlock(_electors[10], Members(record).Take(3), record, transactions: new List<Transaction> { reward2, unsigned2 });
+            since = DateTime.UtcNow;
+            Assert.False(await BlockValidatorService.ValidateBlock(second, false));
+            Assert.Equal("BlockValidatorService.ValidateBlock()-13", StepsSince(since).LastOrDefault());
+            Assert.True(BlockValidatorService.WasRefusedForATransaction(second.Height, second.Hash));
+            Assert.True(BlockValidatorService.WasRefusedForATransaction(block.Height, block.Hash));
+
+            // A caster restarted at the height still leaves the producer out: the exclusion is read back from disk.
+            ProofUtility.ForgetRefusedBlockProducersInMemory();
+            Assert.Equal("refused-block-at-height", ProofUtility.ProducerIneligibility(producer.Address, block.Height));
+            Assert.NotEqual("refused-block-at-height", ProofUtility.ProducerIneligibility(producer.Address, block.Height + 1));
         }
 
         [Fact]

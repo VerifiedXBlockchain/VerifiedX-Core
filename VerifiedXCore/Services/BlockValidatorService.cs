@@ -578,18 +578,25 @@ namespace VerifiedXCore.Services
             }
         }
 
-        /// <summary>The last block this node refused because a transaction in it failed validation: (height, hash).</summary>
-        private static Tuple<long, string>? _lastRefusedForATransaction;
+        /// <summary>Blocks this node refused because a transaction in them failed validation: hash → height. Recent heights only.</summary>
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _refusedForATransaction = new(StringComparer.Ordinal);
+        private const long RefusedForATransactionKeptBlocks = 100;
 
-        private static void NoteRefusedForATransaction(long height, string? hash) =>
-            Volatile.Write(ref _lastRefusedForATransaction, Tuple.Create(height, hash ?? ""));
+        private static void NoteRefusedForATransaction(long height, string? hash)
+        {
+            if (string.IsNullOrEmpty(hash)) return;
+            _refusedForATransaction[hash] = height;
+            foreach (var stale in _refusedForATransaction.Where(kv => kv.Value < height - RefusedForATransactionKeptBlocks).Select(kv => kv.Key).ToList())
+                _refusedForATransaction.TryRemove(stale, out _);
+        }
 
         /// <summary>
-        /// Whether the block at <paramref name="height"/> with <paramref name="hash"/> was the last one this node refused for a
-        /// transaction in it: a fault of the block's contents, which every node holding the same tip finds the same way.
+        /// Whether this node refused the block at <paramref name="height"/> with <paramref name="hash"/> for a transaction in
+        /// it: a fault of the block's contents, which every node holding the same tip finds the same way. Other blocks
+        /// checked meanwhile do not replace the answer.
         /// </summary>
         public static bool WasRefusedForATransaction(long height, string? hash) =>
-            Volatile.Read(ref _lastRefusedForATransaction) is { } last && last.Item1 == height && !string.IsNullOrEmpty(hash) && last.Item2 == hash;
+            !string.IsNullOrEmpty(hash) && _refusedForATransaction.TryGetValue(hash, out var at) && at == height;
 
         public static async Task<bool> ValidateBlock(Block block, bool ignoreAdjSignatures, bool blockDownloads = false, bool validateOnly = false, bool updateCLI = false, bool skipCasterCheck = false, string? source = null)
         {

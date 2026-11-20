@@ -643,6 +643,67 @@ namespace VerifiedXCore.Utilities
             return true;
         }
 
+        /// <summary>Producers whose block at a height was refused for a transaction in it: address → that height.</summary>
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _refusedBlockProducers = new(StringComparer.Ordinal);
+        private static int _refusedBlockProducersLoaded;
+
+        /// <summary>Where the exclusions are kept, so a caster restarted at the height still holds them.</summary>
+        public const string RefusedBlockProducersCollection = "rsrv_refused_block_producers";
+
+        public sealed class RefusedBlockProducerRow
+        {
+            [LiteDB.BsonId] public string Address { get; set; } = "";
+            public long Height { get; set; }
+        }
+
+        /// <summary>
+        /// The producer of a block refused at <paramref name="height"/> for a transaction in it gets no proof at that height:
+        /// left in, it is elected again every round there with the same block, and the chain does not advance. Its
+        /// proofs at other heights are unaffected. Kept on disk too: a caster restarted at that height that let the
+        /// producer back in would send a winning proof the other casters refuse.
+        /// </summary>
+        public static void ExcludeProducerAtHeight(string address, long height)
+        {
+            LoadRefusedBlockProducers();
+            foreach (var stale in _refusedBlockProducers.Where(kv => kv.Value < height).Select(kv => kv.Key).ToList())
+                _refusedBlockProducers.TryRemove(stale, out _);
+            _refusedBlockProducers[address] = height;
+            try
+            {
+                var col = DbContext.DB_Config.GetCollection<RefusedBlockProducerRow>(RefusedBlockProducersCollection);
+                col.DeleteMany(x => x.Height < height);
+                col.Upsert(new RefusedBlockProducerRow { Address = address, Height = height });
+            }
+            catch (Exception ex) { ErrorLogUtility.LogError($"Could not keep the refused-block exclusion of {address}: {ex.Message}", "ProofUtility.ExcludeProducerAtHeight"); }
+            ClearProofGenerationCache();
+        }
+
+        /// <summary>The exclusions kept on disk, read once after a start.</summary>
+        private static void LoadRefusedBlockProducers()
+        {
+            if (Interlocked.CompareExchange(ref _refusedBlockProducersLoaded, 1, 0) != 0) return;
+            try
+            {
+                foreach (var row in DbContext.DB_Config.GetCollection<RefusedBlockProducerRow>(RefusedBlockProducersCollection).FindAll())
+                    _refusedBlockProducers.TryAdd(row.Address, row.Height);
+            }
+            catch (Exception) { Interlocked.Exchange(ref _refusedBlockProducersLoaded, 0); }
+        }
+
+        /// <summary>Test hook: forget the in-memory exclusions, as a restart does.</summary>
+        internal static void ForgetRefusedBlockProducersInMemory()
+        {
+            _refusedBlockProducers.Clear();
+            Interlocked.Exchange(ref _refusedBlockProducersLoaded, 0);
+        }
+
+        internal static bool ProducedARefusedBlockAt(string? address, long height)
+        {
+            if (string.IsNullOrEmpty(address)) return false;
+            LoadRefusedBlockProducers();
+            return _refusedBlockProducers.TryGetValue(address, out var h) && h == height;
+        }
+
         /// <summary>
         /// VX-05 (follow-up): the one eligibility rule for a block producer's proof - not on the ABL, and holding the
         /// validator balance in committed state. Proofs this node generates (snapshot path) and proofs it receives must use
@@ -651,25 +712,6 @@ namespace VerifiedXCore.Utilities
         /// From VrfSeedHeight a producer at <paramref name="height"/> must also be registered before its epoch's anchor
         /// (<see cref="VrfSeed.Ineligibility"/>). Returns null when eligible, else the reason ("abl", "not-eligible" or "vrf-epoch").
         /// </summary>
-        /// <summary>Producers whose block at a height was refused for a transaction in it: address → that height.</summary>
-        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _refusedBlockProducers = new(StringComparer.Ordinal);
-
-        /// <summary>
-        /// The producer of a block refused at <paramref name="height"/> for a transaction in it gets no proof at that height:
-        /// left in, it is elected again every round there with the same block, and the chain does not advance. Its
-        /// proofs at other heights are unaffected.
-        /// </summary>
-        public static void ExcludeProducerAtHeight(string address, long height)
-        {
-            foreach (var stale in _refusedBlockProducers.Where(kv => kv.Value < height).Select(kv => kv.Key).ToList())
-                _refusedBlockProducers.TryRemove(stale, out _);
-            _refusedBlockProducers[address] = height;
-            ClearProofGenerationCache();
-        }
-
-        internal static bool ProducedARefusedBlockAt(string? address, long height) =>
-            !string.IsNullOrEmpty(address) && _refusedBlockProducers.TryGetValue(address, out var h) && h == height;
-
         public static string? ProducerIneligibility(string? address, long? height = null)
         {
             if (string.IsNullOrEmpty(address)) return "not-eligible";
