@@ -1143,6 +1143,9 @@ namespace VerifiedXCore.Bitcoin.Services
 
                 // Phase 3: Signing Round 2 - Signature shares
                 var round2Shares = await CollectSigningRound2Shares(sessionId, validators, round1Nonces, leaderAddress, startTimestamp, startSignature);
+                // Only the holders in the commitment set sign this session: a share from one whose commitment was not
+                // taken has nothing to aggregate against, and is not counted.
+                round2Shares = round2Shares?.Where(kv => round1Nonces.ContainsKey(kv.Key)).ToDictionary(kv => kv.Key, kv => kv.Value);
 
                 // Every share is made over the whole commitment set, so a holder that committed in Round 1 and gave no
                 // share makes the set impossible to aggregate, attempt after attempt. Named, a new session leaves it out.

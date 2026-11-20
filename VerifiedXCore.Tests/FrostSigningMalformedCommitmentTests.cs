@@ -99,6 +99,8 @@ namespace VerifiedXCore.Tests
                 Assert.False(outcome.FailureCode == FrostCeremonyFailureCode.Round2SharesWithheld, outcome.Describe());
                 Assert.DoesNotContain("xA", outcome.Withholders ?? new List<string>());
                 Assert.DoesNotContain("xC", outcome.Withholders ?? new List<string>());
+                // xB's share, sent with no commitment in the set, is not counted: the aggregate is over xA's and xC's.
+                Assert.True(outcome.Responded == 2, outcome.Describe());
             }
             finally
             {
