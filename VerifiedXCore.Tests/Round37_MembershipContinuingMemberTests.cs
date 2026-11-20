@@ -101,8 +101,45 @@ namespace VerifiedXCore.Tests
             Record(_head.RecordSeq + 1, _head.EffectiveFromHeight + 100, _head.RecordHash, "Promotion", _d.Address,
                 continuing.Append(Member(_d, "10.0.0.4")).ToArray());
 
-        private static Task<RecordSignature?> Sign(CasterMembershipRecord candidate) =>
+        /// <summary>Asks this node (A) to sign, as a proposer does: member B has signed the candidate first.</summary>
+        private Task<RecordSignature?> Sign(CasterMembershipRecord candidate)
+        {
+            if (candidate.Signatures.Count == 0)
+                candidate.Signatures.Add(SignatureOf(_b, candidate));
+            return SignAsIs(candidate);
+        }
+
+        private static Task<RecordSignature?> SignAsIs(CasterMembershipRecord candidate) =>
             CasterMembershipService.HandleSignRequestAsync(new MembershipSignRequest { Candidate = candidate, ProposerAddress = "xProposer" });
+
+        private static RecordSignature SignatureOf(Account signer, CasterMembershipRecord candidate) => new()
+        {
+            SignerAddress = signer.Address,
+            Signature = SignatureService.CreateSignature(CasterMembershipStore.CanonicalPayload(candidate), signer.GetPrivKey, signer.PublicKey),
+        };
+
+        /// <summary>
+        /// A sign request is unauthenticated. A promotion is signed only when a member of the committee proposed it, that
+        /// is, the record already carries a member's signature, as every proposer signs its record first: an outside
+        /// validator asking for its own promotion took the seat ahead of the seat proposer's own candidate.
+        /// </summary>
+        [Fact]
+        public async Task APromotionNoMemberProposed_IsNotSigned()
+        {
+            SeeD("10.0.0.4");
+            var continuing = new[] { Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3") };
+            // Asked for by the candidate itself: no signature, or only its own.
+            Assert.Null(await SignAsIs(PromoteD(continuing)));
+            var selfSigned = PromoteD(continuing);
+            selfSigned.Signatures.Add(SignatureOf(_d, selfSigned));
+            Assert.Null(await SignAsIs(selfSigned));
+            // A member's signature that is not over this record does not count.
+            var copied = PromoteD(continuing);
+            copied.Signatures.Add(new RecordSignature { SignerAddress = _b.Address, Signature = SignatureOf(_b, _head).Signature });
+            Assert.Null(await SignAsIs(copied));
+            // Proposed by member B, who signed it first: signed.
+            Assert.NotNull(await Sign(PromoteD(continuing)));
+        }
 
         /// <summary>
         /// C-012 (encoding): the signed payload joins fields with '|'. A record that folds the first member's fields into

@@ -456,6 +456,16 @@ namespace VerifiedXCore.Services
                     CasterLogUtility.Log($"MEMBERSHIP: REFUSED to sign Promotion of {candidate.ChangedAddress} at seq {candidate.RecordSeq} — {refusal}. Proposer={request.ProposerAddress}", "MEMBERSHIP");
                     return null;
                 }
+                // ... and only one a member proposed: every proposer signs its record before asking the others
+                // (ProposeRotationAsync), so an honest request carries a member's signature over this record. Without one,
+                // any eligible validator could ask for its own promotion and take the seat ahead of the seat proposer's.
+                var proposedPayload = CasterMembershipStore.CanonicalPayload(candidate);
+                if (candidate.Signatures?.Any(s => s != null && headSet.Contains(s.SignerAddress ?? "")
+                        && SignatureService.VerifySignature(s.SignerAddress, proposedPayload, s.Signature)) != true)
+                {
+                    CasterLogUtility.Log($"MEMBERSHIP: REFUSED to sign Promotion of {candidate.ChangedAddress} at seq {candidate.RecordSeq} — no member of the committee proposed it. Proposer={request.ProposerAddress}", "MEMBERSHIP");
+                    return null;
+                }
             }
 
             // Every continuing member keeps its entry exactly: a rotation adds or removes one member and changes no one
