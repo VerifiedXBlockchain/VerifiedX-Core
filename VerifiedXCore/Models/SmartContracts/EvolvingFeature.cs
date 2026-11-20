@@ -247,7 +247,15 @@ namespace VerifiedXCore.Models.SmartContracts
 
         #region EvolveNFT
 
+        // Run as fire and forget from a block's incoming transactions: a fault in a call it cannot read is logged, never
+        // left to end the process.
         public static async void EvolveNFT(Transaction tx)
+        {
+            try { await EvolveNFTCore(tx); }
+            catch (Exception ex) { ErrorLogUtility.LogError(ex.ToString(), "EvolvingFeature.EvolveNFT()"); }
+        }
+
+        private static async Task EvolveNFTCore(Transaction tx)
         {
             if (!string.IsNullOrWhiteSpace(tx.Data))
             {
@@ -316,6 +324,12 @@ namespace VerifiedXCore.Models.SmartContracts
 
         #region DevolveNFT
         public static async void DevolveNFT(Transaction tx)
+        {
+            try { await DevolveNFTCore(tx); }
+            catch (Exception ex) { ErrorLogUtility.LogError(ex.ToString(), "EvolvingFeature.DevolveNFT()"); }
+        }
+
+        private static async Task DevolveNFTCore(Transaction tx)
         {
             if (!string.IsNullOrWhiteSpace(tx.Data))
             {
@@ -386,6 +400,12 @@ namespace VerifiedXCore.Models.SmartContracts
 
         #region EvolveToSpecificStateNFT
         public static async void EvolveToSpecificStateNFT(Transaction tx)
+        {
+            try { await EvolveToSpecificStateNFTCore(tx); }
+            catch (Exception ex) { ErrorLogUtility.LogError(ex.ToString(), "EvolvingFeature.EvolveToSpecificStateNFT()"); }
+        }
+
+        private static async Task EvolveToSpecificStateNFTCore(Transaction tx)
         {
             if (!string.IsNullOrWhiteSpace(tx.Data))
             {
