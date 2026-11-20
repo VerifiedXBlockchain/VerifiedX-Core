@@ -166,3 +166,50 @@ namespace VerifiedXCore.Tests
         }
     }
 }
+
+namespace VerifiedXCore.Tests
+{
+    /// <summary>
+    /// The height an exit's turn waits for is moved only by a block whose state was applied in full: after a failed apply
+    /// the locks have not changed, and the next exit must not read them as if they had.
+    /// </summary>
+    [Collection("DbContextSequential")]
+    public class StateAppliedThroughTests : IDisposable
+    {
+        private readonly string _tempRoot;
+        private readonly string? _priorCustomPath = Globals.CustomPath;
+
+        public StateAppliedThroughTests()
+        {
+            _tempRoot = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"applied_{Guid.NewGuid():N}") + System.IO.Path.DirectorySeparatorChar;
+            System.IO.Directory.CreateDirectory(_tempRoot);
+            Globals.CustomPath = _tempRoot;
+            VerifiedXCore.Data.DbContext.Initialize();
+        }
+
+        public void Dispose()
+        {
+            VerifiedXCore.Data.StateData.ApplyStepForTests = null;
+            try { VerifiedXCore.Data.DbContext.CloseDB(); } catch { }
+            Globals.CustomPath = _priorCustomPath;
+            try { System.IO.Directory.Delete(_tempRoot, recursive: true); } catch { }
+        }
+
+        [Fact]
+        public async Task OnlyABlockAppliedInFull_MovesTheAppliedHeight()
+        {
+            VerifiedXCore.Models.Block At(long h) => new() { Height = h, Hash = $"b{h}-{Guid.NewGuid():N}", Timestamp = VerifiedXCore.Utilities.TimeUtil.GetTime(), Transactions = new System.Collections.Generic.List<VerifiedXCore.Models.Transaction>() };
+
+            Assert.True(await VerifiedXCore.Data.StateData.UpdateTreis(At(5_000)));
+            Assert.Equal(5_000, VerifiedXCore.Data.StateData.StateAppliedThrough);
+
+            VerifiedXCore.Data.StateData.ApplyStepForTests = _ => throw new System.IO.IOException("this node's storage failed");
+            try { await VerifiedXCore.Data.StateData.UpdateTreis(At(5_001)); } catch (System.IO.IOException) { }
+            Assert.Equal(5_000, VerifiedXCore.Data.StateData.StateAppliedThrough);   // not applied: not counted
+            VerifiedXCore.Data.StateData.ApplyStepForTests = null;
+
+            Assert.True(await VerifiedXCore.Data.StateData.UpdateTreis(At(5_001)));
+            Assert.Equal(5_001, VerifiedXCore.Data.StateData.StateAppliedThrough);
+        }
+    }
+}

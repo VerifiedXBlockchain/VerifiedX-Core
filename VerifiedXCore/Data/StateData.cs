@@ -251,7 +251,7 @@ namespace VerifiedXCore.Data
             return names.ToArray();
         }
 
-        /// <summary>The height of the last block whose state apply finished (its writes made), or -1. Read without a lock.</summary>
+        /// <summary>The height of the last block whose state was applied in full (an incomplete or failed apply does not count), or -1. Read without a lock.</summary>
         public static long StateAppliedThrough => Volatile.Read(ref _stateAppliedThrough);
         private static long _stateAppliedThrough = -1;
 
@@ -296,13 +296,13 @@ namespace VerifiedXCore.Data
                     ErrorLogUtility.LogError($"Block {block.Height}: {stateWrites.Count} write(s) to the state failed on this node's storage; the block's apply is incomplete.", "StateData.UpdateTreis()");
                     return false;
                 }
+                if (applied) Volatile.Write(ref _stateAppliedThrough, block.Height); // only a block applied in full
                 return applied;
             }
             finally
             {
                 // AddBlock waits while this is set, so a throw anywhere in the apply must still clear it.
                 StateWriteContext.Clear();
-                Volatile.Write(ref _stateAppliedThrough, block.Height);
                 Globals.TreisUpdating = false;
             }
         }
