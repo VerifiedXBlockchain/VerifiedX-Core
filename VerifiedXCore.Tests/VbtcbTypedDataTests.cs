@@ -28,6 +28,40 @@ namespace VerifiedXCore.Tests
             Assert.Equal(Signer, ValidatorEthKeyService.RecoverSigner(digest, ValidatorEthKeyService.SignDigestHex(digest, Key), personalMessage: false), StringComparer.OrdinalIgnoreCase);
         }
 
+        /// <summary>
+        /// A signature recovers only in the form the contract counts (ECDSA.tryRecover): 65 bytes, v of 27 or 28, r and s in
+        /// range with s in the lower half, written as hex with nothing around it. The 0x prefix and the hex's case are free.
+        /// </summary>
+        [Fact]
+        public void ASignatureRecovers_OnlyInTheFormTheContractCounts()
+        {
+            var digest = VbtcbTypedData.MintDigest("0xD140DfAB7F08B5ce8E54A8b364E447b49E6EEda6", 400_000, "5425a291-lock", 7_600_123, 8453, Proxy);
+            const string sig = "0x06930ed88caed7170477ef941c6259ee39fb389479896a80ed5fccc1f4d2988f0f944b79d399afd432030755a88b4216757a445962a6f2c7a7899b119ebfa3ed1c";
+            string? Recover(string? signature) => ValidatorEthKeyService.RecoverSigner(digest, signature, personalMessage: false);
+            string With(Action<byte[]> change)
+            {
+                var bytes = Hex(sig);
+                change(bytes);
+                return "0x" + Convert.ToHexString(bytes);
+            }
+
+            foreach (var counted in new[] { sig, sig[2..], "0X" + sig[2..].ToUpperInvariant() })
+                Assert.Equal(Signer, Recover(counted), StringComparer.OrdinalIgnoreCase);
+
+            foreach (var form in VbtcbSignatureForms.NotCounted)
+                Assert.Null(Recover(VbtcbSignatureForms.Reencode(sig, (string)form[0])));
+            foreach (var v in new byte[] { 0, 1, 29, 30, 35 })
+                Assert.Null(Recover(With(b => b[64] = v)));
+            Assert.Null(Recover(With(b => Array.Clear(b, 0, 32))));               // r of zero
+            Assert.Null(Recover(With(b => Array.Fill(b, (byte)0xff, 0, 32))));    // r above the curve order
+            Assert.Null(Recover(With(b => Array.Clear(b, 32, 32))));              // s of zero
+            Assert.Null(Recover(sig[..^2]));                                      // 64 bytes
+            Assert.Null(Recover(sig + "00"));                                     // 66 bytes
+            Assert.Null(Recover(sig[..^1]));                                      // half a byte
+            Assert.Null(Recover(""));
+            Assert.Null(Recover(null));
+        }
+
         [Fact]
         public void TheValidatorSetDigests_MatchEthers()
         {
