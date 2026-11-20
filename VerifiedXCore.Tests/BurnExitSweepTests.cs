@@ -159,6 +159,61 @@ namespace VerifiedXCore.Tests
             Assert.False(BurnExitConsensusService.SentTransactionIsInABlock(new BurnExitConsensusService.ProcessedBurnRecord())); // nothing sent
         }
 
+        private static BurnExitConsensusService.ProcessedBurnRecord Due(string burn, string burner, long seenAt, decimal amount = 0.01M,
+            BurnExitConsensusService.BurnExitType type = BurnExitConsensusService.BurnExitType.VfxPoolUnlock, string alertedBy = "") => new()
+        {
+            BaseBurnTxHash = burn, BurnerAddress = burner, DetectedAtBlock = seenAt, Amount = amount, ExitType = type, AlertedBy = alertedBy,
+            Status = BurnExitConsensusService.BurnExitStatus.Pending,
+        };
+
+        /// <summary>
+        /// A holder's flood of tiny burns does not hold back another holder's exit: a sweep takes each burner's first burns
+        /// before anyone's later ones and at most two per burner, first come within that (a later burn cannot be put ahead
+        /// of an earlier one), unverified alerts last, and at most two waves in all, so the sweep ends and the stuck-exit
+        /// check runs on time.
+        /// </summary>
+        [Fact]
+        public void ASweep_IsFairAndFirstCome_AndBounded()
+        {
+            var flood = Enumerable.Range(0, 500).Select(i => Due($"flood-{i:D3}", "0xFlooder", seenAt: 100 + i)).ToList();
+            var victim = Due("victim", "0xHolder", seenAt: 900);                          // burned after the whole flood
+            var early = Due("early", "0xOther", seenAt: 50);
+            var alerted = Due("alerted", "0xAlerted", seenAt: 10, alertedBy: "xPeerCaster");
+
+            var sweep = BurnExitConsensusService.SweepOrder(flood.Append(victim).Append(early).Append(alerted));
+
+            Assert.True(sweep.Count <= BurnExitConsensusService.MaxRoundsPerSweep);
+            Assert.Equal(BurnExitConsensusService.MaxRoundsPerBurnerPerSweep, sweep.Count(r => r.BurnerAddress == "0xFlooder"));
+            Assert.Equal(new[] { "early", "flood-000", "victim" }, sweep.Take(3).Select(r => r.BaseBurnTxHash));   // each burner's first, first come
+            Assert.True(sweep.IndexOf(victim) < BurnExitConsensusService.MaxConcurrentRounds, "the holder's exit is not in the first wave");
+            Assert.Equal("alerted", sweep.Last().BaseBurnTxHash);                         // what this node cannot verify goes last
+            Assert.Equal(new[] { "flood-000", "flood-001" }, sweep.Where(r => r.BurnerAddress == "0xFlooder").Select(r => r.BaseBurnTxHash));
+            // The same burns in any order give the same sweep.
+            var shuffled = BurnExitConsensusService.SweepOrder(flood.AsEnumerable().Reverse().Append(alerted).Append(early).Append(victim));
+            Assert.Equal(sweep.Select(r => r.BaseBurnTxHash), shuffled.Select(r => r.BaseBurnTxHash));
+        }
+
+        /// <summary>
+        /// A Bitcoin exit below the least a vault's part of an exit must be cannot be paid and is refused after its round:
+        /// it is given up before it takes a slot, but only on an amount this node saw itself or read on Base, never on a
+        /// peer's alert (which could understate a real burn to have it given up).
+        /// </summary>
+        [Fact]
+        public void ABitcoinExitTooSmallToPay_IsGivenUpBeforeItsRound_OnlyOnAVerifiedAmount()
+        {
+            var min = VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.MinExitPartSats;
+            decimal Btc(long sats) => sats / 100_000_000M;
+            var btc = BurnExitConsensusService.BurnExitType.BtcExit;
+            Assert.True(BurnExitConsensusService.IsUnpayableBtcExit(Due("dust", "0xA", 1, Btc(1), btc)));
+            Assert.True(BurnExitConsensusService.IsUnpayableBtcExit(Due("under", "0xA", 1, Btc(min - 1), btc)));
+            Assert.False(BurnExitConsensusService.IsUnpayableBtcExit(Due("enough", "0xA", 1, Btc(min), btc)));
+            Assert.False(BurnExitConsensusService.IsUnpayableBtcExit(Due("vfx", "0xA", 1, Btc(1))));               // a VFX unlock has no Bitcoin payout
+            var claimed = Due("claimed", "0xA", 1, Btc(1), btc, alertedBy: "xPeerCaster");
+            Assert.False(BurnExitConsensusService.IsUnpayableBtcExit(claimed));                                   // an alert's claim
+            claimed.FoundOnBase = true;
+            Assert.True(BurnExitConsensusService.IsUnpayableBtcExit(claimed));                                    // read on Base
+        }
+
         private static void InterlockedMax(ref int target, int value)
         {
             int current;

@@ -290,11 +290,15 @@ namespace VerifiedXCore.Bitcoin.Services
             }
 
             var now = TimeUtil.GetTime();
-            // Burns this node saw itself or has found on Base go first, so that alerts it cannot verify never hold them up
-            // (RunRounds starts rounds in this order).
-            var pendingBurns = Globals.IsBlockCaster
-                ? DueForARound(_processedBurns.Values, now).OrderBy(r => r.IsUnverifiedAlert).ToList()
-                : new List<ProcessedBurnRecord>();
+            if (!Globals.IsBlockCaster) return;
+            // A Bitcoin exit too small to be paid fails after its round anyway: it is given up before it takes a slot.
+            foreach (var unpayable in DueForARound(_processedBurns.Values, now).Where(IsUnpayableBtcExit))
+            {
+                unpayable.Status = BurnExitStatus.Failed;
+                LogUtility.Log($"[BurnExitConsensus] {unpayable.BaseBurnTxHash}: a Bitcoin exit of {unpayable.Amount} BTC is below the {BtcWithdrawalsMinExitPartSats} sats a vault's part of an exit must be; not put to a round.", "BurnExitConsensusService");
+            }
+            // Fair and first come: see SweepOrder. RunRounds starts rounds in this order.
+            var pendingBurns = SweepOrder(DueForARound(_processedBurns.Values, now));
 
             await RunRounds(pendingBurns.Select(b => b.BaseBurnTxHash).ToList(), RunConsensusRound, MaxConcurrentRounds);
         }
@@ -370,6 +374,40 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>The burns the sweep takes now: pending, and past their retry time.</summary>
         internal static List<ProcessedBurnRecord> DueForARound(IEnumerable<ProcessedBurnRecord> records, long now) =>
             records.Where(r => r.Status == BurnExitStatus.Pending && r.NextAttemptAt <= now).ToList();
+
+        /// <summary>How many burns one sweep takes (two waves of rounds): the rest wait for the next sweep, so a sweep ends and the stuck-exit check runs.</summary>
+        internal const int MaxRoundsPerSweep = 2 * MaxConcurrentRounds;
+        /// <summary>How many of one burner's burns one sweep takes.</summary>
+        internal const int MaxRoundsPerBurnerPerSweep = 2;
+
+        private static long BtcWithdrawalsMinExitPartSats => Attestation.BtcWithdrawals.MinExitPartSats;
+
+        /// <summary>
+        /// A Bitcoin exit below the least a vault's part of an exit must be (its fee and an output above dust): it cannot be
+        /// paid, and its exit is refused after the round. Judged only on an amount this node saw itself or read on Base,
+        /// never on what a peer's alert claims.
+        /// </summary>
+        internal static bool IsUnpayableBtcExit(ProcessedBurnRecord r) =>
+            r.ExitType == BurnExitType.BtcExit && !r.IsUnverifiedAlert && (long)(r.Amount * 100_000_000M) < BtcWithdrawalsMinExitPartSats;
+
+        /// <summary>
+        /// The burns a sweep takes, in the order their rounds start: burns this node saw itself or found on Base before
+        /// alerts it cannot verify; then each burner's first burns before anyone's later ones, so one burner's flood does
+        /// not hold back a holder's single exit; then first come (the block this node first saw the burn at, then its hash),
+        /// so a later burn cannot be put ahead of an earlier one. At most <see cref="MaxRoundsPerBurnerPerSweep"/> per burner
+        /// and <see cref="MaxRoundsPerSweep"/> in all.
+        /// </summary>
+        internal static List<ProcessedBurnRecord> SweepOrder(IEnumerable<ProcessedBurnRecord> due) =>
+            due.GroupBy(r => string.IsNullOrEmpty(r.BurnerAddress) ? "burn:" + r.BaseBurnTxHash : r.BurnerAddress.Trim().ToLowerInvariant())
+                .SelectMany(g => g.OrderBy(r => r.DetectedAtBlock).ThenBy(r => r.BaseBurnTxHash, StringComparer.Ordinal).Select((r, i) => (Record: r, Turn: i)))
+                .Where(x => x.Turn < MaxRoundsPerBurnerPerSweep)
+                .OrderBy(x => x.Record.IsUnverifiedAlert)
+                .ThenBy(x => x.Turn)
+                .ThenBy(x => x.Record.DetectedAtBlock)
+                .ThenBy(x => x.Record.BaseBurnTxHash, StringComparer.Ordinal)
+                .Take(MaxRoundsPerSweep)
+                .Select(x => x.Record)
+                .ToList();
 
         /// <summary>Whether the round's votes still meet the threshold of <paramref name="committee"/>, the one the exit is judged by.</summary>
         internal static bool VotesCarry(IEnumerable<CasterConsensusVote>? votes, HashSet<string> committee, int required) =>
