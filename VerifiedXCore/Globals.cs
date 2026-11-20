@@ -432,6 +432,16 @@ namespace VerifiedXCore
         public const long BridgeVoidKeepsLocksTestnetHeight = 152_000L;
 
         /// <summary>
+        /// From this height a failed bridge exit on an older vault (VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL) gives back what it
+        /// reserved on its locks and leaves them in use, instead of blacklisting them: a blacklisted lock still backed
+        /// vBTC.b on Base, which then had nothing to redeem against. The caster that failed it keeps the vault out of its
+        /// own exit plans for a while (FrostContractBlacklist). At this exact block the locks earlier failures blacklisted
+        /// are given back once. Set to the tip at release. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long BridgeFailKeepsLocksHeight = long.MaxValue;
+        public const long BridgeFailKeepsLocksTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
         /// a row whose Data was not an array of objects made the recovery throw part-way, so every later row, the balance
         /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Active from LedgerRulesBatchHeight.

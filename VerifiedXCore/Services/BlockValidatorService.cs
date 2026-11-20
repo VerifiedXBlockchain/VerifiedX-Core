@@ -144,6 +144,8 @@ namespace VerifiedXCore.Services
                 return false;
             if (reason.StartsWith(Bitcoin.Services.BridgeIntraBlockGuard.ExitAlreadyFailedPrefix, StringComparison.Ordinal))
                 return false;
+            if (reason.StartsWith(Bitcoin.Services.BridgeIntraBlockGuard.ExitAlreadyClosedPrefix, StringComparison.Ordinal))
+                return false;
             if (reason.StartsWith(LedgerIntegrityRules.NftMoveAndSaleInBlock, StringComparison.Ordinal))
                 return false;
             if (reason.StartsWith(LedgerIntegrityRules.NftMovedTwiceInBlock, StringComparison.Ordinal))

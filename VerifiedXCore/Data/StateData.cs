@@ -336,6 +336,16 @@ namespace VerifiedXCore.Data
             // fails on this node is counted like a transaction that failed to apply: the block's state is reported as
             // incomplete, so the node is flagged, not left quietly holding other state than its peers.
             var blockStartFailed = false;
+            if (block.Height == Globals.BridgeFailKeepsLocksHeight)
+            {
+                try { VBTCBridgeLockState.GiveBackFailBlacklisted(); } // locks blacklisted by failed exits before it
+                catch (Exception ex)
+                {
+                    if (IsNodeLocalFault(ex)) blockStartFailed = true;
+                    NoteApplyStepFailed(block.Height, ex);
+                    ErrorLogUtility.LogError($"Block {block.Height}: giving back locks blacklisted by failed exits failed: {ex}", "StateData.UpdateTreis() - block start");
+                }
+            }
             try
             {
                 VerifiedXCore.Bitcoin.Attestation.BtcAttestApply.OnBlockStart(block.Height); // Bitcoin attestation: the checkpoint at the recording height, the signer set at each epoch
@@ -890,7 +900,7 @@ namespace VerifiedXCore.Data
 
                         if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL)
                         {
-                            ApplyVBTCBridgeExitToBTCFail(tx);
+                            ApplyVBTCBridgeExitToBTCFail(tx, block.Height);
                         }
 
                         if(tx.TransactionType == TransactionType.RESERVE)
@@ -4370,7 +4380,7 @@ namespace VerifiedXCore.Data
         /// Handle VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL: reverse partial unlocks for failed locks,
         /// blacklist them, and mark the BTC exit state as failed so a retry can occur.
         /// </summary>
-        private static void ApplyVBTCBridgeExitToBTCFail(Transaction tx)
+        private static void ApplyVBTCBridgeExitToBTCFail(Transaction tx, long blockHeight)
         {
             try
             {
@@ -4399,10 +4409,24 @@ namespace VerifiedXCore.Data
                 if (VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.ExitRefusal(tx) != null)
                     return;
 
-                // For each failed allocation: restore the partial unlock and blacklist the lock
+                // For each failed allocation: restore the partial unlock and blacklist the lock. From
+                // Globals.BridgeFailKeepsLocksHeight the lock stays in use: a blacklisted lock still backed vBTC.b on Base.
+                // Then only for an exit still open: one already completed was paid on Bitcoin, and its locks are spent.
+                if (blockHeight >= Globals.BridgeFailKeepsLocksHeight
+                    && VBTCBridgeBtcExitState.GetByBurnTxHash(baseBurnTxHash.Trim()) is not { IsComplete: false })
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTCFail: the exit for burn {baseBurnTxHash} is not open; nothing is given back.", "StateData.ApplyVBTCBridgeExitToBTCFail()");
+                    return;
+                }
                 foreach (var alloc in failedAllocations)
                 {
                     long allocSats = (long)(alloc.UnlockAmount * 100_000_000M);
+                    if (blockHeight >= Globals.BridgeFailKeepsLocksHeight)
+                    {
+                        if (!VBTCBridgeLockState.RestoreUnlock(alloc.LockId, alloc.UnlockAmount, allocSats))
+                            ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTCFail: failed to restore lock {alloc.LockId}", "StateData.ApplyVBTCBridgeExitToBTCFail()");
+                        continue;
+                    }
 
                     var blacklisted = VBTCBridgeLockState.BlacklistLock(
                         alloc.LockId,

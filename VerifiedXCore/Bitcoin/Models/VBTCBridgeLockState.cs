@@ -132,6 +132,23 @@ namespace VerifiedXCore.Bitcoin.Models
         }
 
         /// <summary>
+        /// Once, at Globals.BridgeFailKeepsLocksHeight: the locks a failed older-vault exit blacklisted before it (their
+        /// amounts were restored then) are given back for use, as a failure from that height gives them back.
+        /// </summary>
+        public static int GiveBackFailBlacklisted()
+        {
+            var col = GetCollection();
+            var failed = col.Find(x => x.IsBlacklisted).Where(x => x.BlacklistReason != null && x.BlacklistReason.StartsWith("FROST fail:", StringComparison.Ordinal)).ToList();
+            foreach (var rec in failed)
+            {
+                rec.IsBlacklisted = false;
+                rec.BlacklistReason += $" (given back at {Globals.BridgeFailKeepsLocksHeight})";
+                col.Update(rec);
+            }
+            return failed.Count;
+        }
+
+        /// <summary>
         /// Gives back what an exit reserved on a lock when that exit is failed by rule before anything was signed for
         /// it. The lock stays in use: nothing is wrong with it.
         /// </summary>
