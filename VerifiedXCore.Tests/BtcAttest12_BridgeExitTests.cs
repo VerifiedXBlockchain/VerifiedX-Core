@@ -1944,6 +1944,53 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A failed older-vault exit blacklisted every lock it drew on: the lock's whole remaining balance left the pool for
+        /// good while the vBTC.b it backed stayed on Base, with nothing to redeem against. From the height the failure gives
+        /// back what it reserved and the lock stays in use; at that block the locks earlier failures blacklisted come back.
+        /// </summary>
+        [Fact]
+        public async Task AFailedOlderExit_LeavesItsLocksInUse_AndEarlierFailuresAreGivenBackAtTheHeight()
+        {
+            var gate = Globals.BridgeFailKeepsLocksHeight;
+            Globals.BridgeFailKeepsLocksHeight = long.MaxValue;
+            try
+            {
+                var older = await CreateVault(H1 - 50);
+                await Start();
+                var before = await Lock(older.Uid, 0.002M);
+                var after = await Lock(older.Uid, 0.002M);
+
+                // Below the height: blacklisted, the lock's other 0.0015 out of every exit and unlock.
+                var burn = NewBurn();
+                var exit = await Mine(Exit(burn, BtcDest, (before, older.Uid, 0.0005M)));
+                await Mine(ExitFail(burn, exit, (before, older.Uid, 0.0005M)));
+                Assert.True(VBTCBridgeLockState.GetByLockId(before)!.IsBlacklisted);
+                Assert.DoesNotContain(VBTCBridgeLockState.GetAvailableLocksFIFO(), l => l.LockId == before); // what exits and unlocks draw on
+
+                // At the height: the earlier failure's lock is given back.
+                Globals.BridgeFailKeepsLocksHeight = Tip + 1;
+                await Apply(Tip + 1);
+                var givenBack = VBTCBridgeLockState.GetByLockId(before)!;
+                Assert.False(givenBack.IsBlacklisted);
+                Assert.Equal(0.002M, givenBack.RemainingAmount);
+                Assert.Contains(VBTCBridgeLockState.GetAvailableLocksFIFO(), l => l.LockId == before);
+
+                // From the height: a failure gives back what it reserved, and the lock stays in use.
+                var second = NewBurn();
+                var secondExit = await Mine(Exit(second, BtcDest, (after, older.Uid, 0.0005M)));
+                Assert.Equal(0.0015M, VBTCBridgeLockState.GetByLockId(after)!.RemainingAmount);
+                await Mine(ExitFail(second, secondExit, (after, older.Uid, 0.0005M)));
+                var kept = VBTCBridgeLockState.GetByLockId(after)!;
+                Assert.False(kept.IsBlacklisted);
+                Assert.Equal(0.002M, kept.RemainingAmount);
+                Assert.True(Record(second).IsFailedRecord);
+                Assert.Contains(VBTCBridgeLockState.GetAvailableLocksFIFO(), l => l.LockId == after);
+                Assert.Equal(0.004M, VBTCBridgeLockState.GetTotalAvailableAmount());
+            }
+            finally { Globals.BridgeFailKeepsLocksHeight = gate; }
+        }
+
+        /// <summary>
         /// C-059: before the path-audit height an exit on an older vault may name one lock twice, the second time by an
         /// alias ("L1 "): both pass, the first draws the lock, the second draws nothing, and the plan records both. The
         /// signer's payout cap summed the plan, twice what the lock gave up. Each part is now the lock as its own record
