@@ -31,6 +31,8 @@ namespace VerifiedXCore.Tests
         private readonly string? _priorCustomPath = Globals.CustomPath;
         private readonly string? _priorValidator = Globals.ValidatorAddress;
         private readonly bool _priorLibrary = Globals.FrostFFIAvailable;
+        private readonly bool _priorEncrypted = Globals.IsWalletEncrypted;
+        private readonly SecureString _priorPassword = Globals.EncryptPassword;
         private readonly long _now = TimeUtil.GetTime();
         private readonly Account _me;
 
@@ -55,6 +57,8 @@ namespace VerifiedXCore.Tests
             try { DbContext.CloseDB(); } catch { }
             Globals.ValidatorAddress = _priorValidator;
             Globals.FrostFFIAvailable = _priorLibrary;
+            Globals.IsWalletEncrypted = _priorEncrypted;
+            Globals.EncryptPassword = _priorPassword;
             Globals.CustomPath = _priorCustomPath;
             try { Directory.Delete(_tempRoot, recursive: true); } catch { }
         }
@@ -72,19 +76,27 @@ namespace VerifiedXCore.Tests
                 ParticipantAddresses = new List<string> { _me.Address, "xV2", "xV3" }, RequiredThreshold = 67, MyParticipantIndex = 1, Round2Secret = "secret",
             };
             var myId = FrostStartup.BuildAddressToIdentifierMap(session.ParticipantAddresses)[_me.Address];
-            // A participant's share that will not open, and names that are not participants.
-            var shares = new JObject { ["xV2"] = new JObject { [myId] = FrostShareCrypto.Prefix + "AAAA" }.ToString(Formatting.None) };
-            for (var i = 0; i < 2_000; i++) shares["xNotAParticipant" + i] = "{}";
+            var forMe = new JObject { [myId] = FrostShareCrypto.Prefix + "AAAA" }.ToString(Formatting.None);
+            Task<HttpResponseMessage> Post(JObject shares) => server.CreateClient().PostAsync($"/frost/dkg/shares/{session.SessionId}", new StringContent(JsonConvert.SerializeObject(new
+            {
+                LeaderAddress = leaderAddress, Timestamp = _now,
+                LeaderSignature = VerifiedXCore.Services.SignatureService.CreateSignature($"{session.SessionId}.{leaderAddress}.{_now}", leader, pub),
+                AllGeneratedShares = shares,
+            }), Encoding.UTF8, "application/json"));
             Assert.True(FrostSessionStorage.DKGSessions.TryAdd(session.SessionId, session));
             try
             {
-                var body = JsonConvert.SerializeObject(new
-                {
-                    LeaderAddress = leaderAddress, Timestamp = _now,
-                    LeaderSignature = VerifiedXCore.Services.SignatureService.CreateSignature($"{session.SessionId}.{leaderAddress}.{_now}", leader, pub),
-                    AllGeneratedShares = shares,
-                });
-                var response = await server.CreateClient().PostAsync($"/frost/dkg/shares/{session.SessionId}", new StringContent(body, Encoding.UTF8, "application/json"));
+                // A share for this validator only under a name that is not a participant: the batch carries none for it.
+                var outsiderOnly = await Post(new JObject { ["xNotAParticipant"] = forMe });
+                Assert.Equal(HttpStatusCode.Conflict, outsiderOnly.StatusCode);
+                Assert.Contains("not addressed to this validator", await outsiderOnly.Content.ReadAsStringAsync());
+                Assert.False(session.Reported);
+
+                // Names that are not participants, ahead of a participant's share that will not open.
+                var shares = new JObject();
+                for (var i = 0; i < 2_000; i++) shares["xNotAParticipant" + i] = i == 0 ? forMe : "{}";
+                shares["xV2"] = forMe;
+                var response = await Post(shares);
                 Assert.Equal(HttpStatusCode.OK, response.StatusCode);
                 var answer = JObject.Parse(await response.Content.ReadAsStringAsync());
 
