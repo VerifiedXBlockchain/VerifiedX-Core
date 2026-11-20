@@ -80,6 +80,39 @@ namespace VerifiedXCore.Tests
             Assert.Empty(BurnExitConsensusService.ConfirmationsOfThisRound(held.Values, "xW", t + 900 + 3 * BridgeCasterConsensus.PROPOSAL_MAX_SKEW_SECONDS));
         }
 
+        /// <summary>
+        /// A confirmation can be taken before this node read the burn on Base, against the record a peer's alert made. Once
+        /// the record is corrected from Base, one for the alert's amount is not counted: counted, it made up the threshold,
+        /// the exit was refused before broadcast and the handler gave the burn up.
+        /// </summary>
+        [Fact]
+        public void Confirmations_CountOnlyVotesForTheBurnAsTheRecordNowHoldsIt()
+        {
+            var handler = new Caster(); var liar = new Caster(); var honest = new Caster();
+            var committee = Committee(handler, liar, honest);
+            const long t = 1_700_000_000;
+            const string dest = "bc1qexampledestination";
+            BurnExitConsensusService.BurnExitConfirmation Vote(Caster c, decimal amount) => new()
+            {
+                BaseBurnTxHash = Burn, ConfirmingCasterAddress = c.Address, AgreedHandlerAddress = handler.Address, Timestamp = t,
+                Signature = c.Sign(BridgeCasterConsensus.BuildBoundVoteMessage(Burn, "BTC_EXIT", (long)(amount * 100_000_000M), dest, t)),
+            };
+            // The alert said 0.02; Base says 0.01.
+            var record = new BurnExitConsensusService.ProcessedBurnRecord { BaseBurnTxHash = Burn, ExitType = BurnExitConsensusService.BurnExitType.BtcExit, Amount = 0.02M, BtcDestination = dest };
+            var held = new[] { Vote(liar, 0.02M), Vote(handler, 0.01M) };
+            Assert.Equal(new[] { liar.Address }, BurnExitConsensusService.CountableConfirmations(record, held, handler.Address, t, committee).Select(c => c.ConfirmingCasterAddress));
+
+            record.Amount = 0.01M; // corrected from Base
+            Assert.Equal(2, BurnExitConsensusService.ConfirmationsOfThisRound(held, handler.Address, t).Count);   // what was counted
+            Assert.Equal(new[] { handler.Address }, BurnExitConsensusService.CountableConfirmations(record, held, handler.Address, t, committee).Select(c => c.ConfirmingCasterAddress));
+            // The honest caster's vote for the burn as it is makes the threshold.
+            var withHonest = held.Append(Vote(honest, 0.01M));
+            Assert.Equal(2, BurnExitConsensusService.CountableConfirmations(record, withHonest, handler.Address, t, committee).Count);
+            // A vote from outside the committee is not counted either.
+            var outsider = new Caster();
+            Assert.Single(BurnExitConsensusService.CountableConfirmations(record, held.Append(Vote(outsider, 0.01M)), handler.Address, t, committee));
+        }
+
         [Fact]
         public void Proposal_ForAnotherWindow_Refused()
         {
