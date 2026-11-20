@@ -5,7 +5,10 @@ namespace VerifiedXCore.Utilities
 {
     public class MempoolSizeUtility
     {
-        /// <summary>Block space for the priority lane, taken before and outside the pool's 1 MB.</summary>
+        /// <summary>
+        /// Block space the priority lane may take. It is taken first, out of the same 1 MB as the rest of the pool, so a
+        /// block stays within the size peers take a broadcast block at.
+        /// </summary>
         public const long PriorityLaneBytes = 1024 * 1024;
 
         /// <summary>
@@ -39,7 +42,7 @@ namespace VerifiedXCore.Utilities
 
             var eligible = mempoolTxs.Where(x => x.TransactionRating != null && x.TransactionRating != TransactionRating.F).ToList();
 
-            // The priority lane first, in its own space: within a rating the pool is taken oldest first, and a sender
+            // The priority lane first, from the same space: within a rating the pool is taken oldest first, and a sender
             // chooses its timestamp, so these could otherwise be kept out of blocks. One per sender (the Bitcoin
             // attestation's sender-less transactions are bounded by their one-per-block rules and validator signatures);
             // what the lane has no room for joins the rest of the pool.
@@ -57,6 +60,7 @@ namespace VerifiedXCore.Utilities
                 laneBytes += size;
             }
             var inLane = new HashSet<Transaction>(lane, ReferenceEqualityComparer.Instance);
+            sizeCount = laneBytes; // the rest of the pool fills what the lane left of the 1 MB
 
             //Sorts the rest of the mempool by rating and then by date received
             var mempoolSorted = eligible.Where(x => !inLane.Contains(x)).OrderBy(x => x.TransactionRating).ThenBy(x => x.Timestamp);

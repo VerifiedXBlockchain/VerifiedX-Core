@@ -97,7 +97,7 @@ namespace VerifiedXCore.Tests
         };
 
         [Fact]
-        public void TheLane_IsTakenFirst_InItsOwnSpace_InItsOrder()
+        public void TheLane_IsTakenFirst_InItsOrder_AndTheBlockStaysWithinWhatPeersTake()
         {
             // 1.2 MB of transfers dated earlier than everything in the lane, so by time alone they come first.
             var pool = Enumerable.Range(0, 30).Select(i => Tx($"transfer-{i}", $"xT{i}", 10 + i, TransactionType.VBTC_V2_TRANSFER, 40_000)).ToList();
@@ -110,9 +110,10 @@ namespace VerifiedXCore.Tests
             var sized = MempoolSizeUtility.SizeMempoolDown(pool);
 
             Assert.Equal(new[] { "report", "rekey", "heartbeat", "recover" }, sized.Take(4).Select(t => t.Hash));
-            // The rest still fills the pool's own 1 MB; a reserve CallBack() is not in the lane.
-            var rest = sized.Skip(4).ToList();
-            Assert.InRange(rest.Sum(t => JsonConvert.SerializeObject(t).Length), 1_000_000, 1_053_818);
+            // The rest fills what the lane left of the same 1 MB, so the block is within the size a peer takes a broadcast
+            // block at (1,179,648 characters, P2PClient and NodeDataProcessor); a reserve CallBack() is not in the lane.
+            Assert.InRange(sized.Sum(t => JsonConvert.SerializeObject(t).Length), 1_000_000, 1_053_818);
+            Assert.True(sized.Skip(4).Any());
             Assert.False(MempoolSizeUtility.InPriorityLane(pool.Single(t => t.Hash == "callback")));
         }
 
