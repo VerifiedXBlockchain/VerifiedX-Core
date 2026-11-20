@@ -33,6 +33,7 @@ namespace VerifiedXCore
             Globals.PrivateTxSupplyRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PrivateTxSupplyRulesHeight;
             Globals.AddressFreezeHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.AddressFreezeHeight;
             Globals.SaleCompleteContractRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.SaleCompleteContractRulesHeight;
+            Globals.SaleListingKeyHeight = Globals.IsTestNet ? Globals.SaleListingKeyTestnetHeight : Globals.SaleListingKeyHeight;
             Globals.ReserveRecoverRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ReserveRecoverRulesHeight;
             Globals.VaultRewriteRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.VaultRewriteRulesHeight;
             Globals.VaultBurnRuleHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.VaultBurnRuleHeight;
@@ -67,6 +68,7 @@ namespace VerifiedXCore
             Globals.ValidatorBondHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight - 1 : Globals.ValidatorBondHeight;
             Globals.ValidatorBondGrandfatherHeight = Globals.IsTestNet ? Globals.BitcoinAttestationObserveTestnetHeight : Globals.ValidatorBondGrandfatherHeight;
             Globals.SaleStartBidRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.SaleStartBidRulesHeight;
+            Globals.SalePaymentSharesHeight = Globals.IsTestNet ? Globals.SalePaymentSharesTestnetHeight : Globals.SalePaymentSharesHeight;
             Globals.BridgeVoteOncePerCasterHeight = Globals.IsTestNet ? Globals.BridgeVoteOncePerCasterTestnetHeight : Globals.BridgeVoteOncePerCasterHeight;
             Globals.WithdrawalUniqueIdRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.WithdrawalUniqueIdRulesHeight;
             Globals.RoyaltyRewriteRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.RoyaltyRewriteRulesHeight;

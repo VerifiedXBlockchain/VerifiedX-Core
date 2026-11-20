@@ -310,6 +310,76 @@ namespace VerifiedXCore.Tests
             Assert.Contains("already signed an addition", Refusal(await Ask("ADD", new[] { second.Base }, Epoch, 9)));
         }
 
+        /// <summary>The route, asked with a request signed by <paramref name="requester"/> (or by nobody).</summary>
+        private static async Task<(HttpStatusCode Code, JObject Body)> AskSigned(V? requester, string action, string[] targets, long epoch, int nonce)
+        {
+            var req = new BaseValidatorSyncService.ValidatorUpdateSignRequest { Action = action, TargetAddresses = targets, VfxBlockHeight = epoch, AdminNonce = nonce.ToString() };
+            if (requester != null)
+            {
+                req.RequesterPublicKey = requester.Pub;
+                req.RequesterSignature = VerifiedXCore.Services.SignatureService.CreateSignature(BaseValidatorSyncService.RequestMessage(req), requester.Key, requester.Pub);
+            }
+            using var server = new TestServer(new WebHostBuilder().UseStartup<StartupP2PCaster>());
+            var ctx = await server.SendAsync(c =>
+            {
+                c.Request.Method = "POST";
+                c.Request.Path = "/valapi/validator/SignValidatorUpdate";
+                c.Request.ContentType = "application/json";
+                c.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(req)));
+                c.Connection.RemoteIpAddress = IPAddress.Parse("203.0.113.7");
+            });
+            using var reader = new StreamReader(ctx.Response.Body);
+            var text = await reader.ReadToEndAsync();
+            var json = text.Trim().StartsWith("\"") ? JsonConvert.DeserializeObject<string>(text)! : text;
+            return ((HttpStatusCode)ctx.Response.StatusCode, JObject.Parse(json));
+        }
+
+        /// <summary>
+        /// The route is open to anyone. The epoch's additions in full are signed for anyone, since they cannot be chosen;
+        /// a part of them (the member collecting signatures leaves out a newcomer that did not sign its own seat) only
+        /// when a validator or caster on the contract signed the request: an outside caller asking for a part had honest
+        /// nodes sign a list that favoured its own candidates.
+        /// </summary>
+        [Fact]
+        public async Task APartOfTheEpochsAdditions_IsSignedOnlyAtAMembersRequest()
+        {
+            // Five incumbents: two seats this epoch, for the two funded newcomers.
+            V seed4 = NewKey(), seed5 = NewKey();
+            foreach (var v in new[] { seed4, seed5 })
+            {
+                AccountData.GetAccounts().InsertSafe(new Account { Address = v.Address, PublicKey = v.Pub, PrivateKey = "0" + v.Key.secret.ToString("x") });
+                StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = v.Address, Balance = 5_000M, Nonce = 0 });
+            }
+            BlockchainData.GetBlocks().InsertSafe(new Block
+            {
+                Height = Epoch - 99, Hash = $"more-registrations-{Guid.NewGuid():N}",
+                Transactions = new[] { seed4, seed5 }.Select((v, i) => new Transaction
+                {
+                    TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = v.Address, ToAddress = v.Address, Hash = "rr" + i,
+                    Data = JsonConvert.SerializeObject(new { ValidatorAddress = v.Address, IPAddress = $"10.0.1.{i + 1}", FrostPublicKey = v.Pub, IsS3C = false }),
+                }).ToList(),
+            });
+            VBTCValidatorRegistry.InvalidateCache();
+            Contract(8, _me, _seed2, _seed3, seed4, seed5);
+            var adds = BaseSignerSetPolicy.ForEpoch(Epoch, new[] { _me.Base, _seed2.Base, _seed3.Base, seed4.Base, seed5.Base })!.Adds.ToArray();
+            Assert.Equal(2, adds.Length);
+
+            // In full: signed, whoever asks.
+            SignedBy(_me, await AskSigned(null, "ADD", adds, Epoch, 8), VbtcbTypedData.AddValidatorsDigest(adds, Epoch, 8, 8453, Proxy));
+            // A part: not for nobody, not for a validator off the contract, not under a signature over another request.
+            var part = new[] { adds[1] };
+            Assert.Equal(BaseValidatorSyncService.PartOfTheAdditionsReason, Refusal(await AskSigned(null, "ADD", part, Epoch, 8)));
+            Assert.Equal(BaseValidatorSyncService.PartOfTheAdditionsReason, Refusal(await AskSigned(_unfunded, "ADD", part, Epoch, 8)));
+            var copied = new BaseValidatorSyncService.ValidatorUpdateSignRequest { Action = "ADD", TargetAddresses = adds, VfxBlockHeight = Epoch, AdminNonce = "8", RequesterPublicKey = _seed2.Pub };
+            var overTheFullList = VerifiedXCore.Services.SignatureService.CreateSignature(BaseValidatorSyncService.RequestMessage(copied), _seed2.Key, _seed2.Pub);
+            copied.TargetAddresses = part;
+            copied.RequesterSignature = overTheFullList;
+            Assert.Equal(BaseValidatorSyncService.PartOfTheAdditionsReason, Refusal(await BaseValidatorSyncService.AuthorizeAsync(copied) is var (a, r) && a == null
+                ? (HttpStatusCode.Forbidden, new JObject { ["Message"] = r }) : (HttpStatusCode.OK, new JObject())));
+            // ... at a member's request: signed.
+            SignedBy(_me, await AskSigned(_seed2, "ADD", part, Epoch, 8), VbtcbTypedData.AddValidatorsDigest(part, Epoch, 8, 8453, Proxy));
+        }
+
         [Fact]
         public async Task ANewcomerSignsOnlyItsOwnAddition_AndNothingIsSignedBeforeTheBoundaryIsSettledOrTheHeight()
         {

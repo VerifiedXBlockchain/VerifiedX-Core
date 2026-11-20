@@ -67,6 +67,7 @@ namespace VerifiedXCore.Bitcoin.Models
         {
             var c = DbContext.DB_VBTCWithdrawalRequests.GetCollection<VBTCBridgeLockState>(CollectionName);
             c.EnsureIndex(x => x.OwnerAddress, false);
+            c.EnsureIndex(x => x.ExitBurnTxHash, false); // the locks an exit drew: whether a burn was used reads only these
             return c;
         }
 
