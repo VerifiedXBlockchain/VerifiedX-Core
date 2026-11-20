@@ -448,7 +448,7 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>One whole HTTP answer from the connection, or "" when the server closed it without one.</summary>
-        private static async Task<string> ReadAsync(TcpClient client)
+        internal static async Task<string> ReadAsync(TcpClient client)
         {
             var answer = new StringBuilder();
             try
@@ -481,7 +481,7 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>A port free together with the one after it (the server listens on both).</summary>
-        private static int FreePortPair()
+        internal static int FreePortPair()
         {
             for (var attempt = 0; attempt < 50; attempt++)
             {
