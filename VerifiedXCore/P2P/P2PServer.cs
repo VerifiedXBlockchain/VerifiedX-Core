@@ -135,7 +135,7 @@ namespace VerifiedXCore.P2P
             }
             else
             {
-                var newLock = new MessageLock { BufferCost = sizeCost, LastRequestTime = now, DelayLevel = 0, ConnectionCount = 0 };
+                var newLock = new MessageLock { BufferCost = 0, LastRequestTime = now, DelayLevel = 0, ConnectionCount = 0 };
                 if (Globals.MessageLocks.TryAdd(ipAddress, newLock))
                     return await SignalRQueue(newLock, sizeCost, messageType, func);
                 else
@@ -161,6 +161,45 @@ namespace VerifiedXCore.P2P
             return await SignalRQueue(context, sizeCost, SignalRMessageType.Query, func);
         }
 
+        /// <summary>
+        /// Queue cost of a received transaction: every text field the hub decoded, not only Data, so the cost
+        /// follows the memory the request holds while it waits.
+        /// </summary>
+        public static int TransactionQueueCost(Transaction? tx)
+        {
+            if (tx == null)
+                return 1024;
+            long size = 1024L + (tx.Data?.Length ?? 0) + (tx.Hash?.Length ?? 0) + (tx.ToAddress?.Length ?? 0)
+                + (tx.FromAddress?.Length ?? 0) + (tx.Signature?.Length ?? 0);
+            return (int)Math.Min(int.MaxValue, size);
+        }
+
+        /// <summary>
+        /// Atomically adds a request's cost to its peer's budget and to the global budget, or throws without
+        /// charging either when one of them would be exceeded. The caller releases the cost when the request ends.
+        /// </summary>
+        private static void ReserveBufferCost(MessageLock Lock, int sizeCost)
+        {
+            if (sizeCost < 0)
+                throw new HubException("Too much buffer usage.  Message was dropped.");
+
+            int current;
+            do
+            {
+                current = Volatile.Read(ref Lock.BufferCost);
+                if (sizeCost > Globals.MaxBufferCostPerIP - current)
+                    throw new HubException("Too much buffer usage.  Message was dropped.");
+            }
+            while (Interlocked.CompareExchange(ref Lock.BufferCost, current + sizeCost, current) != current);
+
+            if (Interlocked.Add(ref Globals.GlobalBufferCost, sizeCost) > Globals.MaxGlobalBufferCost)
+            {
+                Interlocked.Add(ref Globals.GlobalBufferCost, -sizeCost);
+                Interlocked.Add(ref Lock.BufferCost, -sizeCost);
+                throw new HubException("Server at maximum capacity. Too much global buffer usage.");
+            }
+        }
+
         private static async Task<T> SignalRQueue<T>(MessageLock Lock, int sizeCost, SignalRMessageType messageType, Func<Task<T>> func)
         {
             // HAL-16 Fix: Select appropriate semaphore based on message type
@@ -173,16 +212,18 @@ namespace VerifiedXCore.P2P
                 _ => Lock.QuerySemaphore
             };
 
+            // The cost is charged before the request waits for its slot: a waiting request already holds its
+            // decoded payload, so it counts against the per-peer and global budgets like a running one.
+            ReserveBufferCost(Lock, sizeCost);
+
             T Result = default;
             try
             {
                 await semaphore.WaitAsync();
                 Interlocked.Increment(ref Lock.ConnectionCount);
-                Interlocked.Add(ref Lock.BufferCost, sizeCost);
                 
                 // HAL-054 Fix: Track global resources
                 Interlocked.Increment(ref Globals.GlobalConnectionCount);
-                Interlocked.Add(ref Globals.GlobalBufferCost, sizeCost);
 
                 var task = func();
                 if (Lock.DelayLevel == 0)
@@ -449,7 +490,7 @@ namespace VerifiedXCore.P2P
             try
             {
                 // HAL-16 Fix: Use Transaction semaphore (allows 3 concurrent TXs, never blocks blocks)
-                return await SignalRQueue(Context, (txReceived.Data?.Length ?? 0) + 1024, SignalRMessageType.Transaction, async () =>
+                return await SignalRQueue(Context, TransactionQueueCost(txReceived), SignalRMessageType.Transaction, async () =>
                 {
                     // A peer's transaction: only validators check vBTC owner deposits against Electrum.
                     using var electrumScope = VerifiedXCore.Bitcoin.Services.ElectrumCheckScope.Enter(VerifiedXCore.Bitcoin.Services.ElectrumCheckMode.PeerAdmission);
