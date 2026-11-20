@@ -17,6 +17,9 @@ namespace VerifiedXCore.Bitcoin.FROST
     /// where there is no room for more. A request that announces a length there is no room for now is answered
     /// "busy" before any of it is read.</item>
     /// </list>
+    /// A request whose body is not read to its end for either reason is answered here, whatever its route does with
+    /// the ended read: 413 for a body longer than the route takes, 503 ("busy") where there was no room, which a
+    /// caller may ask again.
     /// With one request at a time on a connection (both listeners speak HTTP/1.1 only), the bodies held for one kind
     /// of caller are at most its connections times <see cref="SmallBodyBytes"/>, plus <see cref="CountedPerKindBytes"/>.
     /// </summary>
@@ -95,8 +98,14 @@ namespace VerifiedXCore.Bitcoin.FROST
                 await Refuse(context, StatusCodes.Status503ServiceUnavailable, Busy);
                 return;
             }
-            context.Request.Body = new CountedAsRead(context.Request.Body, max, counted);
+            var body = new CountedAsRead(context, max, counted);
+            context.Request.Body = body;
             try { await next(); }
+            catch (Exception) when (body.Answered)
+            {
+                // The request was answered where its body ended; what its route then made of the ended read (an
+                // answer of its own, which cannot follow the one given) is not the request's outcome.
+            }
             finally { counted.Uncount(); }
         }
 
@@ -187,26 +196,43 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// <summary>
         /// A request body as its route reads it: reading ends past the route's size, and once more than
         /// <see cref="SmallBodyBytes"/> has been read, all that has been read is counted, and reading ends where
-        /// there is no room.
+        /// there is no room. Where reading ends so, the request is answered before the route's read fails.
         /// </summary>
         private sealed class CountedAsRead : Stream
         {
+            private readonly HttpContext _context;
             private readonly Stream _body;
             private readonly long _max;
             private readonly CountedBody _counted;
             private long _read;
 
-            public CountedAsRead(Stream body, long max, CountedBody counted)
+            /// <summary>Whether the request was answered here, its body not read to the end.</summary>
+            public bool Answered { get; private set; }
+
+            public CountedAsRead(HttpContext context, long max, CountedBody counted)
             {
-                _body = body;
+                _context = context;
+                _body = context.Request.Body;
                 _max = max;
                 _counted = counted;
             }
 
             public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
             {
-                var read = await _body.ReadAsync(buffer, cancellationToken);
-                Count(read);
+                int read;
+                try { read = await _body.ReadAsync(buffer, cancellationToken); }
+                catch (BadHttpRequestException tooLong) when (tooLong.StatusCode == StatusCodes.Status413PayloadTooLarge)
+                {
+                    // The server's own limit for this request (the route's size, set in Bound) ended the read.
+                    await AnswerAsync(tooLong);
+                    throw;
+                }
+                var refusal = Count(read);
+                if (refusal != null)
+                {
+                    await AnswerAsync(refusal);
+                    throw refusal;
+                }
                 return read;
             }
 
@@ -216,17 +242,23 @@ namespace VerifiedXCore.Bitcoin.FROST
             public override int Read(byte[] buffer, int offset, int count)
             {
                 var read = _body.Read(buffer, offset, count);
-                Count(read);
-                return read;
+                return Count(read) is { } refusal ? throw refusal : read;
             }
 
-            private void Count(int read)
+            /// <summary>Counts what was read; the refusal when reading ends here, null when it goes on.</summary>
+            private BadHttpRequestException? Count(int read)
             {
                 _read += read;
-                if (_read > _max) throw new BadHttpRequestException(TooLong, StatusCodes.Status413PayloadTooLarge);
-                if (_read <= SmallBodyBytes) return;
-                if (!_counted.TryCount(_read - _counted.Bytes))
-                    throw new BadHttpRequestException(Busy, StatusCodes.Status503ServiceUnavailable);
+                if (_read > _max) return new BadHttpRequestException(TooLong, StatusCodes.Status413PayloadTooLarge);
+                if (_read <= SmallBodyBytes) return null;
+                return _counted.TryCount(_read - _counted.Bytes) ? null : new BadHttpRequestException(Busy, StatusCodes.Status503ServiceUnavailable);
+            }
+
+            private async Task AnswerAsync(BadHttpRequestException refusal)
+            {
+                if (_context.Response.HasStarted) return;
+                Answered = true;
+                await Refuse(_context, refusal.StatusCode, refusal.StatusCode == StatusCodes.Status503ServiceUnavailable ? Busy : TooLong);
             }
 
             public override bool CanRead => true;

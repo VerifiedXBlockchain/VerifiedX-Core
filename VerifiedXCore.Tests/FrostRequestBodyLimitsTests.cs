@@ -144,10 +144,16 @@ namespace VerifiedXCore.Tests
                 Assert.True(answer.StartsWith("HTTP/1.1 400", StringComparison.Ordinal), FirstLine(answer));
                 Assert.Contains("Missing required fields", answer);
 
-                // Longer, it is not: the route never comes to judge it.
+                // Longer, it is not: the route never comes to judge it, and the caller is told why.
                 answer = await PostInPiecesAsync(port, "/frost/backup/store", Json(Small + 16 * 1024), lengthHeader);
-                Assert.True(answer.StartsWith("HTTP/1.1 500", StringComparison.Ordinal), FirstLine(answer));
+                Assert.True(answer.StartsWith("HTTP/1.1 413", StringComparison.Ordinal), FirstLine(answer));
+                Assert.Contains("longer than this route takes", answer);
                 Assert.DoesNotContain("Missing required fields", answer);
+
+                // The same on a route that takes more, past its own size.
+                answer = await PostInPiecesAsync(port, "/frost/sign/start", Json(FrostRequestBodyLimits.SigningBodyBytes + 16 * 1024), lengthHeader);
+                Assert.True(answer.StartsWith("HTTP/1.1 413", StringComparison.Ordinal), FirstLine(answer));
+                Assert.Contains("longer than this route takes", answer);
             }
             finally { await host.StopAsync(TimeSpan.FromSeconds(2)); }
         }
@@ -295,11 +301,22 @@ namespace VerifiedXCore.Tests
                 held.Add(await BeginAsync(port, Headers(_round2, second) + new string(' ', second - 1)));
                 Assert.True(SpinWait.SpinUntil(() => limits.Bodies.Counted() == PerSource - 2, TimeSpan.FromSeconds(10)));
 
-                // More of the body in pieces is not read: its request is answered there, unfinished, and what was
-                // counted for it is given back.
+                // More of the body in pieces is not read: its request is answered there, unfinished, as one to ask
+                // again, and what was counted for it is given back.
                 await growing.GetStream().WriteAsync(Encoding.ASCII.GetBytes(Piece(new string(' ', Small))));
                 var cutOff = await FrostConnectionLimitsTests.ReadAsync(growing);
-                Assert.True(cutOff.StartsWith("HTTP/1.1 500", StringComparison.Ordinal), FirstLine(cutOff));
+                Assert.True(cutOff.StartsWith("HTTP/1.1 503", StringComparison.Ordinal), FirstLine(cutOff));
+                Assert.Contains("ask again", cutOff);
+                Assert.True(SpinWait.SpinUntil(() => limits.Bodies.Counted() == PerSource - 2 - begun, TimeSpan.FromSeconds(5)));
+
+                // This node's own client, sending a body in pieces that the source has no room for, gets that answer
+                // (the one its retries wait for), not a failure of the route.
+                using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) })
+                using (var busy = await http.PostAsJsonAsync($"http://127.0.0.1:{port}/frost/sign/start", new { Padding = new string('a', 512 * 1024) }))
+                {
+                    Assert.Equal(HttpStatusCode.ServiceUnavailable, busy.StatusCode);
+                    Assert.Contains("ask again", await busy.Content.ReadAsStringAsync());
+                }
                 Assert.True(SpinWait.SpinUntil(() => limits.Bodies.Counted() == PerSource - 2 - begun, TimeSpan.FromSeconds(5)));
 
                 // A short signing start in pieces, as this node's own client sends one, is still read and judged.
