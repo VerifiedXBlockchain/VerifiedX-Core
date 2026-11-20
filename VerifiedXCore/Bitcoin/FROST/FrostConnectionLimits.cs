@@ -83,13 +83,14 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// <summary>
         /// The addresses of the registered vBTC validators that hold the validator balance now, as this node sees them;
         /// null while it is not synced, when the registry says nothing either way. Holding the balance is what makes an
-        /// address cost something: a registration alone does not.
+        /// address cost something: a registration alone does not. Throws when the registry cannot be read: the scan
+        /// used is the one that reports a failed read instead of answering "nobody".
         /// </summary>
         internal static IReadOnlyCollection<string>? FundedValidatorAddresses()
         {
-            if (!Globals.IsChainSynced) return null;
+            if (!Globals.IsChainSynced || Globals.LastBlock == null) return null;
             var addresses = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var validator in VBTCValidatorRegistry.FundedOnly(VBTCValidatorRegistry.GetActiveValidators()))
+            foreach (var validator in VBTCValidatorRegistry.FundedOnly(VBTCValidatorRegistry.GetActiveValidatorsAt(Globals.LastBlock.Height)))
             {
                 if (IPAddress.TryParse(validator.IPAddress, out var ip))
                     addresses.Add(RemoteIp.Text(ip)!);

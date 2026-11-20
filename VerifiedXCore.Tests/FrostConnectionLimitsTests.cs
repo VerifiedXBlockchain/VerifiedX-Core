@@ -176,7 +176,11 @@ namespace VerifiedXCore.Tests
         [Fact]
         public void A_validators_room_follows_the_registry_and_is_kept_only_while_the_registry_cannot_be_read()
         {
-            var limits = ServerLimits();
+            var registryFails = false;
+            var limits = new FrostConnectionLimits(
+                () => registryFails ? throw new InvalidOperationException("the registry cannot be read") : FrostConnectionLimits.FundedValidatorAddresses(),
+                () => Interlocked.Read(ref _clockMs));
+            limits.ReadValidators();
             // The validator's network is full of connections from a neighbour that is not a validator.
             Assert.Equal(FrostConnectionLimits.PerOtherSource, ConnectMany(limits, Enumerable.Repeat("198.51.100.8", 40)).Count);
             Assert.True(Connect(limits, ValidatorIp).Admitted);
@@ -185,6 +189,13 @@ namespace VerifiedXCore.Tests
             Globals.IsChainSynced = false;
             limits.ReadValidators();
             Assert.True(Connect(limits, ValidatorIp).Admitted);
+
+            // So do they when the read fails.
+            Globals.IsChainSynced = true;
+            registryFails = true;
+            limits.ReadValidators();
+            Assert.True(Connect(limits, ValidatorIp).Admitted);
+            registryFails = false;
 
             // Synced again, and the validator no longer holds the validator balance: nobody has a validator's room now.
             Globals.IsChainSynced = true;
