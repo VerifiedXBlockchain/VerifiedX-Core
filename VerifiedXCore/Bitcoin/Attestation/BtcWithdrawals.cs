@@ -474,7 +474,7 @@ namespace VerifiedXCore.Bitcoin.Attestation
                         // so that it can take that one's coins without having to be requested again.
                         if (!pinnedByVault.TryGetValue(row.SmartContractUID, out var pinned))
                             pinnedByVault[row.SmartContractUID] = pinned = BtcAttestStore.WithdrawalsOf(row.SmartContractUID, VaultWithdrawalState.Pinned, db);
-                        if (vfxHeight <= KeptForTakeoverUntil(row, pinned)) continue;
+                        if (vfxHeight <= KeptForTakeoverUntil(row, pinned, vfxHeight)) continue;
                         Close(row, VaultWithdrawalState.Expired, vfxHeight, db, $"it could not be pinned within {VBTCWithdrawalRequest.EXPIRY_BLOCKS} blocks ({row.WaitingReason})");
                     }
                     else if (exits.Add($"{row.RequestHash}@{row.RequestVfxHeight}"))

@@ -596,16 +596,19 @@ namespace VerifiedXCore.Tests
                 Assert.Contains("is an address of vault", row.WaitingReason);
                 Assert.Equal(VaultCoinStatus.Unspent, BtcAttestStore.Coin(moved)!.Status);
 
-                // Its window runs out: closed, and the requester has the amount back.
-                var before = await Spendable(vault, Minter);
-                await AdvanceTo(row.RequestVfxHeight + VBTCWithdrawalRequest.EXPIRY_BLOCKS + 1);
-                Assert.Equal(VaultWithdrawalState.Expired, Row(request, vault).State);
-                Assert.Equal(before + 0.0002M, await Spendable(vault, Minter));
-
-                // A withdrawal to anybody else is fixed on the free coin as before.
-                var next = await Mine(Request(vault, 0.0001M));
+                // A withdrawal to anybody else is fixed on the free coin as before, at a lower fee rate than the blocked
+                // one. The blocked one is not kept past its window to take that coin later: it would be refused it too.
+                var next = await Mine(Request(vault, 0.0001M, feeRate: 5));
                 Assert.Equal(VaultWithdrawalState.Pinned, Row(next, vault).State);
                 Assert.Equal(new[] { moved }, Row(next, vault).Pins[0].Inputs);
+                var expiresAt = row.RequestVfxHeight + VBTCWithdrawalRequest.EXPIRY_BLOCKS + 1;
+                Assert.Equal(expiresAt, BtcWithdrawals.ExpiresAtVfxHeight(Row(request, vault)));
+
+                // Its window runs out: closed, and the requester has the amount back.
+                var before = await Spendable(vault, Minter);
+                await AdvanceTo(expiresAt);
+                Assert.Equal(VaultWithdrawalState.Expired, Row(request, vault).State);
+                Assert.Equal(before + 0.0002M, await Spendable(vault, Minter));
             }
             finally { Globals.WithdrawalDestinationRecheckHeight = prior; }
         }
