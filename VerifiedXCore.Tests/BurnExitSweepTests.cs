@@ -163,6 +163,7 @@ namespace VerifiedXCore.Tests
             BurnExitConsensusService.BurnExitType type = BurnExitConsensusService.BurnExitType.VfxPoolUnlock, string alertedBy = "") => new()
         {
             BaseBurnTxHash = burn, BurnerAddress = burner, DetectedAtBlock = seenAt, Amount = amount, ExitType = type, AlertedBy = alertedBy,
+            FieldsFromBase = alertedBy.Length == 0,                                  // this node read it on Base, or a peer alerted it
             Status = BurnExitConsensusService.BurnExitStatus.Pending,
         };
 
@@ -195,11 +196,12 @@ namespace VerifiedXCore.Tests
 
         /// <summary>
         /// A Bitcoin exit below the least a vault's part of an exit must be cannot be paid and is refused after its round:
-        /// it is given up before it takes a slot, but only on an amount this node saw itself or read on Base, never on a
-        /// peer's alert (which could understate a real burn to have it given up).
+        /// it is given up before it takes a slot, but only on fields taken from Base, never on a peer's alert (which could
+        /// understate a real burn to have it given up). Found on Base by this node's watch, an alert's record takes the
+        /// event's exit type, amount, destination and burner.
         /// </summary>
         [Fact]
-        public void ABitcoinExitTooSmallToPay_IsGivenUpBeforeItsRound_OnlyOnAVerifiedAmount()
+        public void ABitcoinExitTooSmallToPay_IsGivenUpBeforeItsRound_OnlyOnFieldsFromBase()
         {
             var min = VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.MinExitPartSats;
             decimal Btc(long sats) => sats / 100_000_000M;
@@ -208,10 +210,53 @@ namespace VerifiedXCore.Tests
             Assert.True(BurnExitConsensusService.IsUnpayableBtcExit(Due("under", "0xA", 1, Btc(min - 1), btc)));
             Assert.False(BurnExitConsensusService.IsUnpayableBtcExit(Due("enough", "0xA", 1, Btc(min), btc)));
             Assert.False(BurnExitConsensusService.IsUnpayableBtcExit(Due("vfx", "0xA", 1, Btc(1))));               // a VFX unlock has no Bitcoin payout
-            var claimed = Due("claimed", "0xA", 1, Btc(1), btc, alertedBy: "xPeerCaster");
-            Assert.False(BurnExitConsensusService.IsUnpayableBtcExit(claimed));                                   // an alert's claim
-            claimed.FoundOnBase = true;
-            Assert.True(BurnExitConsensusService.IsUnpayableBtcExit(claimed));                                    // read on Base
+
+            var held = (System.Collections.Concurrent.ConcurrentDictionary<string, BurnExitConsensusService.ProcessedBurnRecord>)typeof(BurnExitConsensusService)
+                .GetField("_processedBurns", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
+            // A peer's alert understates a real burn and names another burner.
+            var claimed = Due("claimed-" + Guid.NewGuid().ToString("N"), "0xInvented", 1, Btc(1), btc, alertedBy: "xPeerCaster");
+            held[claimed.BaseBurnTxHash] = claimed;
+            try
+            {
+                Assert.False(BurnExitConsensusService.IsUnpayableBtcExit(claimed));                               // the alert's claim
+                claimed.FoundOnBase = true;                                                                       // found, not corrected
+                Assert.False(BurnExitConsensusService.IsUnpayableBtcExit(claimed));
+                Assert.Equal("alert:xPeerCaster", BurnExitConsensusService.BurnerKey(claimed));
+
+                // This node's watch reads the event: the record takes what Base holds.
+                Assert.True(BurnExitConsensusService.IsAlreadyProcessed(claimed.BaseBurnTxHash, btc, Btc(min * 4), "0xRealBurner", "bc1qrealdestination", ""));
+                Assert.True(claimed.FieldsFromBase);
+                Assert.Equal(Btc(min * 4), claimed.Amount);
+                Assert.Equal("bc1qrealdestination", claimed.BtcDestination);
+                Assert.False(BurnExitConsensusService.IsUnpayableBtcExit(claimed));                               // payable: left to its round
+                Assert.Equal("burner:0xrealburner", BurnExitConsensusService.BurnerKey(claimed));
+
+                // Corrected once: a later read does not change it.
+                Assert.True(BurnExitConsensusService.IsAlreadyProcessed(claimed.BaseBurnTxHash, btc, Btc(1), "0xOther", "bc1qother", ""));
+                Assert.Equal(Btc(min * 4), claimed.Amount);
+            }
+            finally { held.TryRemove(claimed.BaseBurnTxHash, out _); }
+        }
+
+        /// <summary>
+        /// The burner a peer's alert names is not signed: the sweep counts an alert's burns against the caster that sent it,
+        /// so one caster announcing burns under many invented burners still gets one burner's turns.
+        /// </summary>
+        [Fact]
+        public void AnAlertsBurns_CountAgainstItsCaster_NotTheBurnersItNames()
+        {
+            var invented = Enumerable.Range(0, 50).Select(i =>
+            {
+                var r = Due($"inv-{i:D2}", $"0xInvented{i}", seenAt: 10 + i, alertedBy: "xLyingCaster");
+                r.FoundOnBase = true;                                                    // real burns the watch found, uncorrected
+                return r;
+            }).ToList();
+            var holder = Due("holder", "0xHolder", seenAt: 900);
+
+            var sweep = BurnExitConsensusService.SweepOrder(invented.Append(holder));
+
+            Assert.Equal(BurnExitConsensusService.MaxRoundsPerBurnerPerSweep, sweep.Count(r => r.AlertedBy == "xLyingCaster"));
+            Assert.Contains(holder, sweep.Take(BurnExitConsensusService.MaxConcurrentRounds));
         }
 
         private static void InterlockedMax(ref int target, int value)

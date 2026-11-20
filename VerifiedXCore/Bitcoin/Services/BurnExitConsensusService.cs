@@ -77,6 +77,12 @@ namespace VerifiedXCore.Bitcoin.Services
             /// up, or looked up and not there. Each counts against the caster until the record is dropped.
             /// </summary>
             internal bool IsUnverifiedAlert => AlertedBy.Length > 0 && !FoundOnBase;
+
+            /// <summary>
+            /// Whether the exit type, amount, destination and burner are what Base holds (this node read the event, or
+            /// corrected the record from it), not what a peer's alert claimed: only then are they judged on.
+            /// </summary>
+            public bool FieldsFromBase { get; set; }
         }
 
         /// <summary>Backoff after the burn could not be verified on Base (RPC unreachable).</summary>
@@ -384,11 +390,11 @@ namespace VerifiedXCore.Bitcoin.Services
 
         /// <summary>
         /// A Bitcoin exit below the least a vault's part of an exit must be (its fee and an output above dust): it cannot be
-        /// paid, and its exit is refused after the round. Judged only on an amount this node saw itself or read on Base,
-        /// never on what a peer's alert claims.
+        /// paid, and its exit is refused after the round. Judged only on fields taken from Base (FieldsFromBase), never on
+        /// what a peer's alert claims.
         /// </summary>
         internal static bool IsUnpayableBtcExit(ProcessedBurnRecord r) =>
-            r.ExitType == BurnExitType.BtcExit && !r.IsUnverifiedAlert && (long)(r.Amount * 100_000_000M) < BtcWithdrawalsMinExitPartSats;
+            r.ExitType == BurnExitType.BtcExit && r.FieldsFromBase && (long)(r.Amount * 100_000_000M) < BtcWithdrawalsMinExitPartSats;
 
         /// <summary>
         /// The burns a sweep takes, in the order their rounds start: burns this node saw itself or found on Base before
@@ -397,8 +403,17 @@ namespace VerifiedXCore.Bitcoin.Services
         /// so a later burn cannot be put ahead of an earlier one. At most <see cref="MaxRoundsPerBurnerPerSweep"/> per burner
         /// and <see cref="MaxRoundsPerSweep"/> in all.
         /// </summary>
+        /// <summary>
+        /// Who a burn counts against in a sweep: its burner when the record's fields came from Base; otherwise the caster
+        /// whose alert made it (the burner an alert names is not signed), so one caster's alerts share one burner's turns.
+        /// </summary>
+        internal static string BurnerKey(ProcessedBurnRecord r) =>
+            r.FieldsFromBase && !string.IsNullOrWhiteSpace(r.BurnerAddress) ? "burner:" + r.BurnerAddress.Trim().ToLowerInvariant()
+            : r.AlertedBy.Length > 0 ? "alert:" + r.AlertedBy
+            : "burn:" + r.BaseBurnTxHash;
+
         internal static List<ProcessedBurnRecord> SweepOrder(IEnumerable<ProcessedBurnRecord> due) =>
-            due.GroupBy(r => string.IsNullOrEmpty(r.BurnerAddress) ? "burn:" + r.BaseBurnTxHash : r.BurnerAddress.Trim().ToLowerInvariant())
+            due.GroupBy(BurnerKey)
                 .SelectMany(g => g.OrderBy(r => r.DetectedAtBlock).ThenBy(r => r.BaseBurnTxHash, StringComparer.Ordinal).Select((r, i) => (Record: r, Turn: i)))
                 .Where(x => x.Turn < MaxRoundsPerBurnerPerSweep)
                 .OrderBy(x => x.Record.IsUnverifiedAlert)
@@ -450,7 +465,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 Amount = amount,
                 BurnerAddress = burnerAddress,
                 DetectedAtBlock = Globals.LastBlock?.Height ?? 0,
-                Status = BurnExitStatus.Pending
+                Status = BurnExitStatus.Pending,
+                FieldsFromBase = true, // built from the event this node read on Base
             };
 
             if (!_processedBurns.TryAdd(baseBurnTxHash, record))
@@ -575,6 +591,9 @@ namespace VerifiedXCore.Bitcoin.Services
                 }
             }
             record.FoundOnBase = true;
+            // The event matched the record or corrected it (it was read for this exit type): the record's fields are Base's now.
+            if (evidence != null && !string.IsNullOrEmpty(evidence.Burner)) record.BurnerAddress = evidence.Burner;
+            record.FieldsFromBase = true;
 
             // Step 1: Generate deterministic proposal hash and sign the proposal
             var proposalTimestamp = TimeUtil.GetTime();
@@ -1638,10 +1657,26 @@ namespace VerifiedXCore.Bitcoin.Services
         /// Whether a burn this node's watch of Base has just read is already tracked. A record a caster's alert made
         /// is from then on a burn this node found on Base itself: it is kept and no longer counts against that caster.
         /// </summary>
-        public static bool IsAlreadyProcessed(string baseBurnTxHash)
+        public static bool IsAlreadyProcessed(string baseBurnTxHash) => IsAlreadyProcessed(baseBurnTxHash, null, 0M, "", "", "");
+
+        /// <summary>
+        /// Whether the burn this node's watch of Base just read is tracked already; when it is, the record is marked found
+        /// on Base, and one a peer's alert made and still pending takes the event's exit type, amount, destination and
+        /// burner, which the alert claimed and nobody signed.
+        /// </summary>
+        public static bool IsAlreadyProcessed(string baseBurnTxHash, BurnExitType? exitType, decimal amount, string burner, string btcDestination, string vfxDestination)
         {
             if (!_processedBurns.TryGetValue(baseBurnTxHash, out var record))
                 return false;
+            if (exitType is { } type && !record.FieldsFromBase && record.Status == BurnExitStatus.Pending)
+            {
+                record.ExitType = type;
+                record.Amount = amount;
+                record.BurnerAddress = burner ?? "";
+                record.BtcDestination = type == BurnExitType.BtcExit ? btcDestination ?? "" : "";
+                record.VfxDestinationAddress = type == BurnExitType.VfxPoolUnlock ? vfxDestination ?? "" : "";
+                record.FieldsFromBase = true;
+            }
             record.FoundOnBase = true;
             return true;
         }
@@ -1665,6 +1700,7 @@ namespace VerifiedXCore.Bitcoin.Services
             record.Amount = (decimal)evidence.AmountSats / 100_000_000M;
             if (record.ExitType == BurnExitType.VfxPoolUnlock) record.VfxDestinationAddress = evidence.Destination ?? "";
             else record.BtcDestination = evidence.Destination ?? "";
+            if (!string.IsNullOrEmpty(evidence.Burner)) record.BurnerAddress = evidence.Burner;
         }
 
         internal static async Task<(bool Ok, bool Transient, string Reason, BaseBridgeService.BurnEventInfo? Evidence)> VerifyBurnEvidenceAsync(ProcessedBurnRecord record)
