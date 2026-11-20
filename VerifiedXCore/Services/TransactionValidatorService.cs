@@ -199,6 +199,8 @@ namespace VerifiedXCore.Services
         /// positive amounts, paid by the buyer (NextOwner), as separate transactions,
         /// to the seller (current owner) and - only when the contract has a royalty feature - to its royalty payee; the
         /// data's Royalty flag must match the contract, and together they cover the price (existing 1 VFX tolerance).
+        /// From Globals.SalePaymentSharesHeight each payment also covers its own share of the price and the completion
+        /// carries no other entry.
         /// </summary>
         internal static string? SalePaymentError(Transaction txRequest, bool? royaltyFlag, SmartContractStateTrei sc, SmartContractMain scMain, long? height = null)
         {
@@ -240,6 +242,25 @@ namespace VerifiedXCore.Services
                 return "The seller and royalty payments must be separate transactions.";
             if (paid.Sum(x => x.Tx.Amount) < sc.PurchaseAmount - 1.0M)
                 return "Sale payments do not cover the price.";
+
+            // Each payment covers its own share of the listed price, and nothing else is carried: the shares are
+            // taken from the price the listing recorded, never from the entries the completion brings.
+            if ((height ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.SalePaymentSharesHeight)
+            {
+                if ((JObject.Parse(txRequest.Data)["Transactions"] as JArray)?.Count != paid.Count)
+                    return "A sale completion may carry only the payments it makes.";
+                var price = sc.PurchaseAmount!.Value;
+                var royaltyRate = contractRoyalty ? ((RoyaltyFeature)royaltyFeat!.FeatureFeatures).RoyaltyAmount : 0M;
+                if (royaltyRate < 0M || royaltyRate >= 1M)
+                    return "The contract's royalty must be at least 0% and below 100%.";
+                var royaltyDue = price * royaltyRate;
+                foreach (var (p, toPayee) in paid)
+                {
+                    var due = toPayee ? royaltyDue : price - royaltyDue;
+                    if (p.Amount < due - Globals.SalePaymentShareTolerance)
+                        return $"Sale payment to {p.ToAddress} is {p.Amount}, below its share of the price ({due}).";
+                }
+            }
             return null;
         }
 
