@@ -1894,6 +1894,11 @@ namespace VerifiedXCore.Services
                                         if(scStateTreiRec.PurchaseKeys.Contains(keySign))
                                             return (txResult, "This purchase key has already been used for a previous purchase and may not be used again.");
                                     }
+
+                                    // A sale with no recorded key that was cancelled is not listed to its buyer again.
+                                    if ((blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)) >= Globals.SaleListingKeyHeight
+                                        && scStateTreiRec.CancelledSaleBuyers != null && scStateTreiRec.CancelledSaleBuyers.Contains(toAddress))
+                                        return (txResult, "An earlier sale of this contract to this buyer was cancelled; it cannot be listed for sale to the same buyer again.");
                                     
                                     var signatureVerify = Bid.VerifyBidSignature(keySign, amountSoldFor.Value, toAddress, bidSignature);
 
@@ -2002,6 +2007,12 @@ namespace VerifiedXCore.Services
 
                                     if (txRequest.FromAddress != scStateTreiRec.NextOwner)
                                         return (txResult, "You are attempting to purchase a smart contract that does is not locked for you.");
+
+                                    // A completion settles the listing it was written for: it carries the purchase
+                                    // key that listing recorded (a sale started below the height recorded none).
+                                    if (saleRulesHeight >= Globals.SaleListingKeyHeight && scStateTreiRec.SaleKey != null
+                                        && !string.Equals(keySign, scStateTreiRec.SaleKey, StringComparison.Ordinal))
+                                        return (txResult, "This completion's purchase key is not the key of the sale in progress.");
 
                                     if ((txRequest.Amount + txRequest.Fee + transactions.Select(x => x.Amount + x.Fee).Sum()) > from.Balance)  // not sure about this... double check.
                                         return (txResult, "Amount exceeds balance.");
