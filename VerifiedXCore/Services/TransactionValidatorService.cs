@@ -355,6 +355,16 @@ namespace VerifiedXCore.Services
                 && !VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)))
                 return (false, "A withdrawal's fee is raised only from the Bitcoin attestation's recording height.");
 
+            // A bridge exit is checked against the bridge's locks and exits below only once its sender signed it: the same
+            // hash and signature checks every transaction passes further down, so only the order of refusals changes.
+            if (txRequest.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC)
+            {
+                if (!StandardHashMatches(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1)))
+                    return (txResult, "This transactions hash is not equal to the original hash.");
+                if (SignatureError(txRequest) is { } exitSignatureError)
+                    return (txResult, exitSignatureError);
+            }
+
             // Only from the recording height (no vault is watched before it): both read the transaction's data first and
             // refuse what they cannot read, which older builds did not do for historical blocks (fourth review, round 4).
             var watchedWithdrawalRefusal = VerifiedXCore.Bitcoin.Attestation.BtcAttestRules.Recording(blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
