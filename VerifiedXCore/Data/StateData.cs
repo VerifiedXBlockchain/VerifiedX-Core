@@ -4411,6 +4411,13 @@ namespace VerifiedXCore.Data
 
                 // For each failed allocation: restore the partial unlock and blacklist the lock. From
                 // Globals.BridgeFailKeepsLocksHeight the lock stays in use: a blacklisted lock still backed vBTC.b on Base.
+                // Then only for an exit still open: one already completed was paid on Bitcoin, and its locks are spent.
+                if (blockHeight >= Globals.BridgeFailKeepsLocksHeight
+                    && VBTCBridgeBtcExitState.GetByBurnTxHash(baseBurnTxHash.Trim()) is not { IsComplete: false })
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTCFail: the exit for burn {baseBurnTxHash} is not open; nothing is given back.", "StateData.ApplyVBTCBridgeExitToBTCFail()");
+                    return;
+                }
                 foreach (var alloc in failedAllocations)
                 {
                     long allocSats = (long)(alloc.UnlockAmount * 100_000_000M);
