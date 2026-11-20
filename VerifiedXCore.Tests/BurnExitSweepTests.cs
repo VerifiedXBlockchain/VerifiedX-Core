@@ -139,6 +139,18 @@ namespace VerifiedXCore.Tests
             Assert.True(BurnExitConsensusService.MostAnExitHoldsTheTurn <= TimeSpan.FromSeconds(60));
         }
 
+        /// <summary>The wait reads one lookup a second: whether the exit's own transaction is in a committed block.</summary>
+        [Fact]
+        public void AnExitIsOnChain_WhenTheTransactionItSentIsInACommittedBlock()
+        {
+            var record = new BurnExitConsensusService.ProcessedBurnRecord { CompletionVfxTxHash = "sent-" + Guid.NewGuid().ToString("N") };
+            Assert.False(BurnExitConsensusService.SentTransactionIsInABlock(record));
+            Globals.MemBlocks[record.CompletionVfxTxHash] = 1_000;                   // as TxHashGuard.Add records a committed block's transactions
+            try { Assert.True(BurnExitConsensusService.SentTransactionIsInABlock(record)); }
+            finally { Globals.MemBlocks.TryRemove(record.CompletionVfxTxHash, out _); }
+            Assert.False(BurnExitConsensusService.SentTransactionIsInABlock(new BurnExitConsensusService.ProcessedBurnRecord())); // nothing sent
+        }
+
         private static void InterlockedMax(ref int target, int value)
         {
             int current;

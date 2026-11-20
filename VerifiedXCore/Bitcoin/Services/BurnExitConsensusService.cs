@@ -309,10 +309,17 @@ namespace VerifiedXCore.Bitcoin.Services
         private static readonly SemaphoreSlim ExecutionGate = new(1, 1);
 
         /// <summary>
-        /// How long an exit's turn lasts at most after it is sent, waiting for it to be on chain (its burn recorded as used,
-        /// which is when its locks are drawn): about five blocks. An exit not mined by then is left to RetryUnminedPoolUnlocks.
+        /// How long an exit's turn lasts at most after it is sent, waiting for its transaction to be in a block (which is
+        /// when its locks are drawn): about five blocks. An exit not mined by then is left to RetryUnminedPoolUnlocks.
         /// </summary>
         internal static readonly TimeSpan MostAnExitHoldsTheTurn = TimeSpan.FromSeconds(60);
+
+        /// <summary>
+        /// Whether the transaction this caster sent for the exit is in a block: one lookup in the recent blocks' transaction
+        /// hashes (Globals.MemBlocks), read every second of the wait. The lock and exit records were read whole each time.
+        /// </summary>
+        internal static bool SentTransactionIsInABlock(ProcessedBurnRecord record) =>
+            !string.IsNullOrEmpty(record.CompletionVfxTxHash) && Globals.MemBlocks.ContainsKey(record.CompletionVfxTxHash);
 
         /// <summary>
         /// Whether the exit just run left a transaction to be mined: a Bitcoin exit sent as a VFX transaction or on to its
@@ -602,7 +609,7 @@ namespace VerifiedXCore.Bitcoin.Services
                         // one: planned at once, both drew on the same locks and one waited out RetryUnminedPoolUnlocks.
                         // Only after an exit was sent: one that failed or that the chain already held drew no lock.
                         if (SentAnExit(record, tipBefore)
-                            && !await WaitUntilOnChain(() => ChainHasTheBurn(record.BaseBurnTxHash), MostAnExitHoldsTheTurn, TimeSpan.FromSeconds(1)))
+                            && !await WaitUntilOnChain(() => SentTransactionIsInABlock(record), MostAnExitHoldsTheTurn, TimeSpan.FromSeconds(1)))
                             LogUtility.Log($"[BurnExitConsensus] The exit for {baseBurnTxHash} was not on chain within {MostAnExitHoldsTheTurn.TotalSeconds}s; the next exit goes ahead.", "BurnExitConsensusService");
                     }
                 }
