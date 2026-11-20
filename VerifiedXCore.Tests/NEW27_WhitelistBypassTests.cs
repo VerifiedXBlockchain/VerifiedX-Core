@@ -97,7 +97,7 @@ namespace VerifiedXCore.Tests
         public async Task NEW27_OperatorEntry_HonouredOnlyInBlockValidation_ForItsOwnContent()
         {
             // An operator whitelists a transaction that fails validation (here: unsigned) to move past a stuck block.
-            var stuck = new Transaction { Timestamp = TimeUtil.GetTime(), FromAddress = _victim.Address, ToAddress = _attacker.Address, Amount = 1M, Fee = 0.00001M, Nonce = 0, TransactionType = TransactionType.TX };
+            var stuck = new Transaction { Timestamp = TimeUtil.GetTime(), FromAddress = _victim.Address, ToAddress = _attacker.Address, Amount = 1.0M, Fee = 0.00001M, Nonce = 0, TransactionType = TransactionType.TX };
             stuck.Build();
             stuck.Signature = "bad";
             Assert.False((await TransactionValidatorService.VerifyTX(stuck, false, true, false, null, false, 100)).Item1); // precondition

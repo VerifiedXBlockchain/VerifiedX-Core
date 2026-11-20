@@ -56,7 +56,7 @@ namespace VerifiedXCore.Tests
         {
             var tx = new Transaction
             {
-                Timestamp = TimeUtil.GetTime(), FromAddress = _owner.Address, ToAddress = NewKey().Address, Amount = 1M, Fee = 0, Nonce = 0,
+                Timestamp = TimeUtil.GetTime(), FromAddress = _owner.Address, ToAddress = NewKey().Address, Amount = 1.0M, Fee = 0, Nonce = 0,
                 TransactionType = TransactionType.TX,
             };
             tx.Fee = FeeCalcService.CalculateTXFee(tx);

@@ -411,6 +411,44 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task ACopyOfAReportWithAZeroSpelledAsNoBlockCarriesIt_IsNotAdmitted_AndTheHeldCopyStays()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            var at = _btc.Mine(Pay(vault.Script, 50_000));
+            _btc.MineEmpty(3);
+            var held = Signed(Forward(at));
+            held.TransactionRating = await TransactionRatingService.GetTransactionRating(held);
+            var pool = TransactionData.GetPool();
+            pool.InsertSafe(held);
+
+            // The same signed report a second earlier with one zero written "0": a block's JSON writes it "0.0", and
+            // the hash covers the spelling.
+            foreach (var respell in new Action<VfxTx>[] { t => t.Amount = 0M, t => t.Fee = 0M })
+            {
+                var copy = Signed(Forward(at));
+                copy.Timestamp = held.Timestamp - 1;
+                respell(copy);
+                copy.Build();
+                var inABlock = JsonConvert.DeserializeObject<VfxTx>(JsonConvert.SerializeObject(copy))!;
+                Assert.NotEqual(inABlock.Hash, inABlock.GetHash()); // as a block carries it, the hash is another
+
+                var (admitted, why) = await TransactionValidatorService.VerifyTX(copy);
+
+                Assert.False(admitted);
+                Assert.Contains("hash is not the hash of its content", why);
+                Assert.NotNull(pool.FindOne(x => x.Hash == held.Hash));
+            }
+
+            // The earlier copy spelled as a block carries it is still the one the mempool keeps.
+            var earlier = Signed(Forward(at));
+            earlier.Timestamp = held.Timestamp - 1;
+            earlier.Build();
+            Assert.True((await TransactionValidatorService.VerifyTX(earlier)).Item1);
+            Assert.Null(pool.FindOne(x => x.Hash == held.Hash));
+        }
+
+        [Fact]
         public async Task TheMempool_KeepsOneCopyOfAReport_AndTheBlockBuilderTakesIt()
         {
             await Start();

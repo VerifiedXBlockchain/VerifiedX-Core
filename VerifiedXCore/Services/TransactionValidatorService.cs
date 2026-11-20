@@ -268,6 +268,11 @@ namespace VerifiedXCore.Services
             if (preimageError != null)
                 return (false, preimageError);
 
+            // At admission a transaction is judged, and kept, with its Amount and Fee spelled as a block carries them
+            // (the hash covers the spelling). Block validation reads a block's transactions as they are.
+            if (blockHeight == null && !blockVerify && !blockDownloads)
+                LedgerIntegrityRules.SpellAsABlockCarriesIt(txRequest);
+
             // NEW-10: contract UIDs are exact (creation format; references equal the stored record's UID).
             var contractUidError = LedgerIntegrityRules.ContractUids(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
             if (contractUidError != null)

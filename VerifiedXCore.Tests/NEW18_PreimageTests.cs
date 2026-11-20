@@ -106,9 +106,10 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
-        public async Task NEW23_Control_WholeNumberAmountAsSigned_Accepted()
+        public async Task NEW23_Control_WholeNumberAmountAsWalletsSignIt_Accepted()
         {
-            var (ok, message) = await TransactionValidatorService.VerifyTX(SignedWhole(10M));
+            // A whole amount with one decimal place ("10.0"), the spelling wallets hash and a block carries.
+            var (ok, message) = await TransactionValidatorService.VerifyTX(SignedWhole(10.0M));
             Assert.True(ok, message);
         }
     }
