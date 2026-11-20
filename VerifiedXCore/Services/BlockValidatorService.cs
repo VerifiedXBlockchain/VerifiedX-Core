@@ -578,6 +578,19 @@ namespace VerifiedXCore.Services
             }
         }
 
+        /// <summary>The last block this node refused because a transaction in it failed validation: (height, hash).</summary>
+        private static Tuple<long, string>? _lastRefusedForATransaction;
+
+        private static void NoteRefusedForATransaction(long height, string? hash) =>
+            Volatile.Write(ref _lastRefusedForATransaction, Tuple.Create(height, hash ?? ""));
+
+        /// <summary>
+        /// Whether the block at <paramref name="height"/> with <paramref name="hash"/> was the last one this node refused for a
+        /// transaction in it: a fault of the block's contents, which every node holding the same tip finds the same way.
+        /// </summary>
+        public static bool WasRefusedForATransaction(long height, string? hash) =>
+            Volatile.Read(ref _lastRefusedForATransaction) is { } last && last.Item1 == height && !string.IsNullOrEmpty(hash) && last.Item2 == hash;
+
         public static async Task<bool> ValidateBlock(Block block, bool ignoreAdjSignatures, bool blockDownloads = false, bool validateOnly = false, bool updateCLI = false, bool skipCasterCheck = false, string? source = null)
         {
             // ═══════════════════════════════════════════════════════════════
@@ -1695,6 +1708,7 @@ namespace VerifiedXCore.Services
                                 }
                             }
 
+                            NoteRefusedForATransaction(block.Height, block.Hash);
                             DbContext.Rollback("BlockValidatorService.ValidateBlock()-13", $"Bad TX: {rejectBlockTxHash} | Reason: {rejectBlockReason}");
                             return result;//block rejected due to bad transaction(s)
                         }

@@ -1163,15 +1163,15 @@ namespace VerifiedXCore.Tests
 
         // ── Through ValidateBlock ────────────────────────────────────────────────────────────────
 
-        private Block ProducedBlock(Member producer, IEnumerable<Member> attestors, CasterMembershipRecord? carried, string? merkleRoot = null)
+        private Block ProducedBlock(Member producer, IEnumerable<Member> attestors, CasterMembershipRecord? carried, string? merkleRoot = null, List<Transaction>? transactions = null)
         {
             var height = Globals.LastBlock.Height + 1;
             var prev = Globals.LastBlock.Hash;
             var block = new Block
             {
-                Height = height, Version = BlockVersionUtility.GetBlockVersion(height), PrevHash = prev, Timestamp = TimeUtil.GetTime(), NumOfTx = 0,
+                Height = height, Version = BlockVersionUtility.GetBlockVersion(height), PrevHash = prev, Timestamp = TimeUtil.GetTime(), NumOfTx = transactions?.Count ?? 0,
                 Validator = producer.Address, ValidatorAnswer = ProofUtility.ComputeVrf(producer.Pub, height, VrfSeed.ThirdInput(height, prev)!).ProofHash,
-                ChainRefId = "test-chain", Transactions = new List<Transaction>(), MembershipRecord = carried,
+                ChainRefId = "test-chain", Transactions = transactions ?? new List<Transaction>(), MembershipRecord = carried,
             };
             block.MerkleRoot = merkleRoot ?? block.MerkleRootOf();
             block.Hash = block.GetBlockHash();
@@ -1187,6 +1187,51 @@ namespace VerifiedXCore.Tests
 
         private static List<string> StepsSince(DateTime since) =>
             BlockDiagnostics.RollbackSnapshot().Where(r => r.TimeUtc >= since).Select(r => r.Location).ToList();
+
+        /// <summary>
+        /// A block refused for a transaction in it is noted for its height and hash, and a caster that tried it at its tip
+        /// leaves its producer out of that height's election only: elected again, the producer served the same block every
+        /// round and the chain stayed at the height. A block refused for anything else leaves its producer in.
+        /// </summary>
+        [Fact]
+        public async Task ABlockRefusedForATransaction_LeavesItsProducerOutOfThatHeightsElection()
+        {
+            var record = Ratified(0);
+            var producer = _electors[11];
+            var height = Globals.LastBlock.Height + 1;
+            var reward = new Transaction
+            {
+                FromAddress = "Coinbase_BlkRwd", ToAddress = producer.Address, TransactionType = TransactionType.TX, Timestamp = TimeUtil.GetTime(),
+                Amount = BlockVersionUtility.GetBlockVersion(height) < 4 ? BlockchainData.GetBlockReward() : 0.0M,
+            };
+            reward.Build();
+            var unsigned = new Transaction
+            {
+                FromAddress = producer.Address, ToAddress = _electors[10].Address, TransactionType = TransactionType.TX, Timestamp = TimeUtil.GetTime(), Amount = 1M, Fee = 0.00001M,
+            };
+            unsigned.Build();
+            var block = ProducedBlock(producer, Members(record).Take(3), record, transactions: new List<Transaction> { reward, unsigned });
+            var since = DateTime.UtcNow;
+
+            Assert.False(await BlockValidatorService.ValidateBlock(block, false));
+            Assert.Equal("BlockValidatorService.ValidateBlock()-13", StepsSince(since).LastOrDefault());
+            Assert.True(BlockValidatorService.WasRefusedForATransaction(block.Height, block.Hash));
+
+            // Tried at the tip: the producer gets no proof at that height, and does at the next.
+            Assert.False(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(block.Height, block.Hash, producer.Address, triedAtTip: false));
+            Assert.False(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(block.Height, "another-hash", producer.Address, triedAtTip: true));
+            Assert.NotEqual("refused-block-at-height", ProofUtility.ProducerIneligibility(producer.Address, block.Height));
+            Assert.True(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(block.Height, block.Hash, producer.Address, triedAtTip: true));
+            Assert.Equal("refused-block-at-height", ProofUtility.ProducerIneligibility(producer.Address, block.Height));
+            Assert.NotEqual("refused-block-at-height", ProofUtility.ProducerIneligibility(producer.Address, block.Height + 1));
+            Assert.NotEqual("refused-block-at-height", ProofUtility.ProducerIneligibility(_electors[10].Address, block.Height));
+
+            // A block refused for another reason (here its merkle root) is not taken for one refused for a transaction.
+            var other = ProducedBlock(_electors[10], Members(record).Take(3), record, merkleRoot: "not-the-merkle-root");
+            Assert.False(await BlockValidatorService.ValidateBlock(other, false));
+            Assert.False(VerifiedXCore.Nodes.BlockcasterNode.ExcludeProducerOfRefusedBlock(other.Height, other.Hash, _electors[10].Address, triedAtTip: true));
+            Assert.NotEqual("refused-block-at-height", ProofUtility.ProducerIneligibility(_electors[10].Address, other.Height));
+        }
 
         [Fact]
         public async Task ValidateBlock_AdoptsTheCarriedRecord_OnAValidatorThatMissedTheGossip()

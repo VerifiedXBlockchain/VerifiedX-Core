@@ -4499,6 +4499,22 @@ namespace VerifiedXCore.Nodes
         }
 
         /// <summary>
+        /// After an agreed block was validated at our tip and refused for a transaction in it, its producer gets no proof at
+        /// that height: elected again, it served the same block every round and the chain stayed at the height. Every caster
+        /// that tried the block at the same tip refuses it for the same transaction, so they leave out the same producer and
+        /// the next round elects the next one. A refusal for any other reason (a certificate, our own tip) leaves the
+        /// producer in; the exclusion ends with the height.
+        /// </summary>
+        internal static bool ExcludeProducerOfRefusedBlock(long height, string? hash, string? producer, bool triedAtTip)
+        {
+            if (!triedAtTip || string.IsNullOrEmpty(producer) || !BlockValidatorService.WasRefusedForATransaction(height, hash))
+                return false;
+            ProofUtility.ExcludeProducerAtHeight(producer, height);
+            CasterLogUtility.Log($"COMMIT-FAILED: h={height} producer {producer} left out of this height's election: its block was refused for a transaction in it.", "ROUND");
+            return true;
+        }
+
+        /// <summary>
         /// MAJORITY-ADOPT decision (pure, tested): a block returned by a peer caster for the round's
         /// height that was produced by someone OTHER than the agreed winner is adoptable only when it
         /// extends our tip and carries a valid quorum certificate. Same-producer blocks are the
@@ -4701,6 +4717,7 @@ namespace VerifiedXCore.Nodes
                     "ROUND");
                 ProofUtility.TrackRoundFailure(currentHeight);
                 ReleaseRefusedCommitPin(currentHeight, block.Hash, triedAtTip: nextHeight == currentHeight);
+                ExcludeProducerOfRefusedBlock(currentHeight, block.Hash, block.Validator, triedAtTip: nextHeight == currentHeight);
                 return;
             }
 

@@ -288,7 +288,7 @@ namespace VerifiedXCore.Utilities
                     skippedDuplicate++;
                     continue;
                 }
-                if (IsProducerExcluded(val.Address) || VrfSeed.Ineligibility(val.Address, blockHeight) != null)
+                if (IsProducerExcluded(val.Address) || ProducedARefusedBlockAt(val.Address, blockHeight) || VrfSeed.Ineligibility(val.Address, blockHeight) != null)
                 {
                     skippedExcluded++;
                     continue;
@@ -651,10 +651,30 @@ namespace VerifiedXCore.Utilities
         /// From VrfSeedHeight a producer at <paramref name="height"/> must also be registered before its epoch's anchor
         /// (<see cref="VrfSeed.Ineligibility"/>). Returns null when eligible, else the reason ("abl", "not-eligible" or "vrf-epoch").
         /// </summary>
+        /// <summary>Producers whose block at a height was refused for a transaction in it: address → that height.</summary>
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _refusedBlockProducers = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// The producer of a block refused at <paramref name="height"/> for a transaction in it gets no proof at that height:
+        /// left in, it is elected again every round there with the same block, and the chain does not advance. Its
+        /// proofs at other heights are unaffected.
+        /// </summary>
+        public static void ExcludeProducerAtHeight(string address, long height)
+        {
+            foreach (var stale in _refusedBlockProducers.Where(kv => kv.Value < height).Select(kv => kv.Key).ToList())
+                _refusedBlockProducers.TryRemove(stale, out _);
+            _refusedBlockProducers[address] = height;
+            ClearProofGenerationCache();
+        }
+
+        internal static bool ProducedARefusedBlockAt(string? address, long height) =>
+            !string.IsNullOrEmpty(address) && _refusedBlockProducers.TryGetValue(address, out var h) && h == height;
+
         public static string? ProducerIneligibility(string? address, long? height = null)
         {
             if (string.IsNullOrEmpty(address)) return "not-eligible";
             if (Globals.ABL.Exists(x => x == address)) return "abl";
+            if (height is { } at && ProducedARefusedBlockAt(address, at)) return "refused-block-at-height";
             var state = StateData.GetSpecificAccountStateTrei(address);
             if (state == null || state.Balance < ValidatorService.ValidatorRequiredAmount()) return "not-eligible";
             return height is { } h ? VrfSeed.Ineligibility(address, h) : null;
