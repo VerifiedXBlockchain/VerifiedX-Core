@@ -105,15 +105,18 @@ namespace VerifiedXCore.Tests
         /// brought back the one-at-a-time delay.
         /// </summary>
         [Theory]
-        [InlineData(BurnExitConsensusService.BurnExitStatus.VfxTxCreated, true)]
-        [InlineData(BurnExitConsensusService.BurnExitStatus.FrostInProgress, true)]
-        [InlineData(BurnExitConsensusService.BurnExitStatus.Failed, false)]
-        [InlineData(BurnExitConsensusService.BurnExitStatus.Complete, false)]
-        [InlineData(BurnExitConsensusService.BurnExitStatus.ConsensusReached, false)]
-        [InlineData(BurnExitConsensusService.BurnExitStatus.Pending, false)]
-        public void TheNextExitWaits_OnlyAfterOneWasSent(BurnExitConsensusService.BurnExitStatus after, bool waits)
+        [InlineData(BurnExitConsensusService.BurnExitStatus.VfxTxCreated, 0L, true)]          // a Bitcoin exit sent
+        [InlineData(BurnExitConsensusService.BurnExitStatus.FrostInProgress, 0L, true)]
+        [InlineData(BurnExitConsensusService.BurnExitStatus.Complete, 100L, true)]            // a VFX pool unlock broadcast at this turn
+        [InlineData(BurnExitConsensusService.BurnExitStatus.Complete, 99L, false)]            // broadcast at an earlier turn
+        [InlineData(BurnExitConsensusService.BurnExitStatus.Complete, 0L, false)]             // the chain already had it
+        [InlineData(BurnExitConsensusService.BurnExitStatus.Failed, 0L, false)]               // nothing eligible: nothing sent
+        [InlineData(BurnExitConsensusService.BurnExitStatus.ConsensusReached, 0L, false)]
+        [InlineData(BurnExitConsensusService.BurnExitStatus.Pending, 0L, false)]
+        public void TheNextExitWaits_OnlyAfterOneWasSent(BurnExitConsensusService.BurnExitStatus after, long broadcastAt, bool waits)
         {
-            Assert.Equal(waits, BurnExitConsensusService.SentAnExit(after));
+            var record = new BurnExitConsensusService.ProcessedBurnRecord { Status = after, CompletionBroadcastAtBlock = broadcastAt };
+            Assert.Equal(waits, BurnExitConsensusService.SentAnExit(record, tipBefore: 100));
         }
 
         private static void InterlockedMax(ref int target, int value)
