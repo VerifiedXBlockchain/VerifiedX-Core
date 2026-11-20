@@ -238,6 +238,60 @@ namespace VerifiedXCore.Tests
             finally { FrostSessionStorage.SigningSessions.TryRemove(held.SessionId, out _); }
         }
 
+        /// <summary>The start's sighashes recomputed from the coin values it reports.</summary>
+        private static void Resign(FrostSigningStartRequest start, BtcTx tx)
+        {
+            var spent = start.Prevouts.Select(p => new TxOut(Money.Satoshis((long)p.ValueSats), NBitcoin.Script.FromHex(p.ScriptPubKeyHex))).ToArray();
+            var precomputed = tx.PrecomputeTransactionData(spent);
+            start.AllInputSighashes = Enumerable.Range(0, tx.Inputs.Count)
+                .Select(i => Convert.ToHexString(tx.GetSignatureHashTaproot(precomputed, new TaprootExecutionData(i) { SigHash = TaprootSigHash.Default }).ToBytes()).ToLowerInvariant())
+                .ToList();
+            start.MessageHash = start.AllInputSighashes[start.InputIndex];
+        }
+
+        /// <summary>
+        /// The first start for a pinned transaction fixes the sighashes every later start is held to. A start is
+        /// authorized only with the coin values the chain holds, and the sighashes kept are the ones recomputed from
+        /// the transaction, so whoever starts first, the honest starts after it are taken.
+        /// </summary>
+        [Fact]
+        public async Task TheSighashesKeptForAPinnedTransaction_AreTheTransactionsOwn_WhoeverStartsFirst()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Report(_btc.Mine(Pay(vault.Script, 150_000), Pay(vault.Script, 120_000)));
+            var request = await Request(vault.Uid, 0.002M);
+            var pinned = BtcTx.Parse(Assert.Single(BtcAttestStore.Withdrawal(BtcWithdrawals.RefOf(request.Hash, vault.Uid))!.Pins).TxHex, Network.Main);
+            Assert.Equal(2, pinned.Inputs.Count);
+
+            // A coin reported a satoshi short, its sighashes computed to match: not the coins of the pinned transaction.
+            var short1 = Announce(vault.Uid, vault.Script, request.Hash, pinned, Signers[2].Address);
+            short1.Prevouts[1].ValueSats -= 1;
+            Resign(short1, pinned);
+            var (ok, why) = FrostSigningAuthorization.Authorize(short1);
+            Assert.False(ok, "a start with a wrong coin value would fix sighashes no honest start matches");
+            Assert.Contains("value the chain holds", why);
+
+            // Another input's sighash written with a space: authorized, and kept as the transaction's own.
+            var padded = Announce(vault.Uid, vault.Script, request.Hash, pinned, Signers[2].Address);
+            padded.AllInputSighashes[1] += " ";
+            (ok, why) = FrostSigningAuthorization.Authorize(padded);
+            Assert.True(ok, why);
+            var scope = FrostSigningAuthorization.SigningScope(vault.Uid, padded.BtcTxId);
+            Assert.False(VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.TryBeginSigning(vault.Uid, request.Hash, padded.SessionId, padded.InputIndex,
+                padded.MessageHash, padded.AllInputSighashes, padded.TxInputOutpoints, transactionScope: scope, leaderAddress: padded.LeaderAddress, btcTxId: padded.BtcTxId).Blocked);
+
+            // The honest start for the other input, after it, is taken.
+            var honest = Announce(vault.Uid, vault.Script, request.Hash, pinned, Signers[0].Address);
+            honest.InputIndex = 1;
+            honest.MessageHash = honest.AllInputSighashes[1];
+            (ok, why) = FrostSigningAuthorization.Authorize(honest);
+            Assert.True(ok, why);
+            var (blocked, reason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.CheckWithdrawalSigning(vault.Uid, request.Hash,
+                honest.InputIndex, honest.MessageHash, honest.AllInputSighashes, honest.TxInputOutpoints, transactionScope: FrostSigningAuthorization.SigningScope(vault.Uid, honest.BtcTxId));
+            Assert.False(blocked, reason);
+        }
+
         [Fact]
         public async Task ASigner_SignsThePinnedTransaction_AndNoOther()
         {

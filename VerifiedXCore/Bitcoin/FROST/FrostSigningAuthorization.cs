@@ -79,6 +79,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                     var sighash = Convert.ToHexString(tx.GetSignatureHashTaproot(precomputed, execData).ToBytes()).ToLowerInvariant();
                     if (!string.Equals(sighash, request.AllInputSighashes[i]?.Trim(), StringComparison.OrdinalIgnoreCase))
                         return (false, $"AllInputSighashes[{i}] does not match the transaction");
+                    // Kept as computed: the signing record holds every later start to this list.
+                    request.AllInputSighashes[i] = sighash;
                 }
 
                 if (!string.Equals(request.AllInputSighashes[request.InputIndex], request.MessageHash.Trim(), StringComparison.OrdinalIgnoreCase))
@@ -119,6 +121,19 @@ namespace VerifiedXCore.Bitcoin.FROST
                 {
                     if (spentOutputs[i].ScriptPubKey != depositScript)
                         return (false, $"Input {i} does not spend the contract deposit address");
+                }
+
+                // A vault the chain watches: each coin's value is the one state holds. The sighashes commit to it, and
+                // the first start's sighashes are the ones every later start is held to.
+                if (watchedKey != null)
+                {
+                    for (int i = 0; i < inputCount; i++)
+                    {
+                        var prev = tx.Inputs[i].PrevOut;
+                        var coin = Attestation.BtcAttestStore.Coin(Attestation.BtcAttestStore.OutpointKey(prev.Hash.ToString(), prev.N));
+                        if (coin == null || coin.SmartContractUID != vaultUid || coin.ValueSats != spentOutputs[i].Value.Satoshi)
+                            return (false, $"Prevout {i} is not the value the chain holds for this vault's coin");
+                    }
                 }
 
                 // ── 3. Resolve the authorized spend intent from consensus state ────────────────
