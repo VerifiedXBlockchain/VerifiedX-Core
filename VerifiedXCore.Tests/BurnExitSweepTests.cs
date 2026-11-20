@@ -239,6 +239,29 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// Once a round has started on a record, the watch of Base does not change its fields under it: the round's evidence
+        /// check reads the exit type it started with (a type changed mid-check failed a real burn). Only "found" is noted.
+        /// </summary>
+        [Fact]
+        public void ARecordInARound_IsNotCorrectedUnderIt()
+        {
+            var held = (System.Collections.Concurrent.ConcurrentDictionary<string, BurnExitConsensusService.ProcessedBurnRecord>)typeof(BurnExitConsensusService)
+                .GetField("_processedBurns", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
+            var inRound = Due("in-round-" + Guid.NewGuid().ToString("N"), "0xClaimed", 1, 0.01M, BurnExitConsensusService.BurnExitType.BtcExit, alertedBy: "xPeerCaster");
+            inRound.Status = BurnExitConsensusService.BurnExitStatus.InConsensus;
+            held[inRound.BaseBurnTxHash] = inRound;
+            try
+            {
+                Assert.True(BurnExitConsensusService.IsAlreadyProcessed(inRound.BaseBurnTxHash, BurnExitConsensusService.BurnExitType.VfxPoolUnlock, 0.02M, "0xReal", "", "xVfxDest"));
+                Assert.Equal(BurnExitConsensusService.BurnExitType.BtcExit, inRound.ExitType);
+                Assert.Equal(0.01M, inRound.Amount);
+                Assert.False(inRound.FieldsFromBase);
+                Assert.True(inRound.FoundOnBase);
+            }
+            finally { held.TryRemove(inRound.BaseBurnTxHash, out _); }
+        }
+
+        /// <summary>
         /// The burner a peer's alert names is not signed: the sweep counts an alert's burns against the caster that sent it,
         /// so one caster announcing burns under many invented burners still gets one burner's turns.
         /// </summary>

@@ -83,6 +83,10 @@ namespace VerifiedXCore.Bitcoin.Services
             /// corrected the record from it), not what a peer's alert claimed: only then are they judged on.
             /// </summary>
             public bool FieldsFromBase { get; set; }
+
+            /// <summary>Taken to start a round (Pending to InConsensus) and to correct the record from the watch of Base, so a
+            /// round never reads fields being changed: the type its evidence check reads is the one it started with.</summary>
+            [Newtonsoft.Json.JsonIgnore] internal object Sync { get; } = new();
         }
 
         /// <summary>Backoff after the burn could not be verified on Base (RPC unreachable).</summary>
@@ -563,10 +567,12 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             if (!_processedBurns.TryGetValue(baseBurnTxHash, out var record))
                 return;
-            if (record.Status != BurnExitStatus.Pending)
-                return;
-
-            record.Status = BurnExitStatus.InConsensus;
+            lock (record.Sync)
+            {
+                if (record.Status != BurnExitStatus.Pending)
+                    return;
+                record.Status = BurnExitStatus.InConsensus;
+            }
 
             // Step 0: SECURITY / LIVENESS — verify the burn on Base ourselves BEFORE proposing or voting.
             // The alert is peer-supplied; our vote must commit only to what the chain actually burned,
@@ -1668,16 +1674,20 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             if (!_processedBurns.TryGetValue(baseBurnTxHash, out var record))
                 return false;
-            if (exitType is { } type && !record.FieldsFromBase && record.Status == BurnExitStatus.Pending)
+            lock (record.Sync)
             {
-                record.ExitType = type;
-                record.Amount = amount;
-                record.BurnerAddress = burner ?? "";
-                record.BtcDestination = type == BurnExitType.BtcExit ? btcDestination ?? "" : "";
-                record.VfxDestinationAddress = type == BurnExitType.VfxPoolUnlock ? vfxDestination ?? "" : "";
-                record.FieldsFromBase = true;
+                // Only while no round has started: a round reads the record's fields from its start (see Sync).
+                if (exitType is { } type && !record.FieldsFromBase && record.Status == BurnExitStatus.Pending)
+                {
+                    record.ExitType = type;
+                    record.Amount = amount;
+                    record.BurnerAddress = burner ?? "";
+                    record.BtcDestination = type == BurnExitType.BtcExit ? btcDestination ?? "" : "";
+                    record.VfxDestinationAddress = type == BurnExitType.VfxPoolUnlock ? vfxDestination ?? "" : "";
+                    record.FieldsFromBase = true;
+                }
+                record.FoundOnBase = true;
             }
-            record.FoundOnBase = true;
             return true;
         }
 
