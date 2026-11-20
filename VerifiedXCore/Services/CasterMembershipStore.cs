@@ -492,13 +492,14 @@ namespace VerifiedXCore.Services
 
                 var gPayload = CanonicalPayload(candidate);
                 var seedSigners = new HashSet<string>(StringComparer.Ordinal);
+                if (RepeatedSignerRefusal(candidate) is { } repeatedSeed) { reason = repeatedSeed; return false; }
                 var triedSeeds = new HashSet<(string, string)>(); // an entry repeated, or a signer already counted, changes nothing: not verified again
                 foreach (var sig in candidate.Signatures ?? new List<RecordSignature>())
                 {
                     if (string.IsNullOrEmpty(sig.SignerAddress) || string.IsNullOrEmpty(sig.Signature)) continue;
                     if (!Globals.BootstrapCasterAddresses.Contains(sig.SignerAddress)) continue;
                     if (seedSigners.Contains(sig.SignerAddress) || !triedSeeds.Add((sig.SignerAddress, sig.Signature))) continue;
-                    if (!SignatureHolds(candidate, gPayload, sig.SignerAddress, sig.Signature)) continue;
+                    if (!SignatureService.VerifySignature(sig.SignerAddress, gPayload, sig.Signature)) continue;
                     seedSigners.Add(sig.SignerAddress);
                 }
                 if (seedSigners.Count < GenesisMinSeedSignatures)
@@ -541,13 +542,14 @@ namespace VerifiedXCore.Services
             var need = prevSet.Count / 2 + 1;
             var payload = CanonicalPayload(candidate);
             var validSigners = new HashSet<string>(StringComparer.Ordinal);
+            if (RepeatedSignerRefusal(candidate) is { } repeated) { reason = repeated; return false; }
             var triedSigners = new HashSet<(string, string)>(); // an entry repeated, or a signer already counted, changes nothing: not verified again
             foreach (var sig in candidate.Signatures ?? new List<RecordSignature>())
             {
                 if (string.IsNullOrEmpty(sig.SignerAddress) || string.IsNullOrEmpty(sig.Signature)) continue;
                 if (!prevSet.Contains(sig.SignerAddress)) continue;
                 if (validSigners.Contains(sig.SignerAddress) || !triedSigners.Add((sig.SignerAddress, sig.Signature))) continue;
-                if (!SignatureHolds(candidate, payload, sig.SignerAddress, sig.Signature)) continue;
+                if (!SignatureService.VerifySignature(sig.SignerAddress, payload, sig.Signature)) continue;
                 validSigners.Add(sig.SignerAddress);
             }
             if (validSigners.Count < need)
@@ -556,62 +558,25 @@ namespace VerifiedXCore.Services
             return true;
         }
 
-        /// <summary>The checks of a record's signatures already made: by record, (payload, signer, signature) → valid.</summary>
-        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<CasterMembershipRecord, System.Collections.Concurrent.ConcurrentDictionary<(string, string, string), bool>> _signatureChecks = new();
-
-        /// <summary>Whether <paramref name="signer"/>'s <paramref name="signature"/> on <paramref name="record"/> is valid, checked once.</summary>
-        private static bool SignatureHolds(CasterMembershipRecord record, string payload, string signer, string signature) =>
-            _signatureChecks.GetValue(record, _ => new()).GetOrAdd((payload, signer, signature), k => SignatureService.VerifySignature(k.Item2, k.Item1, k.Item3));
+        /// <summary>The most entries one signer may have on a record. A proposer puts each signer on once.</summary>
+        public const int MaxEntriesPerSigner = 2;
 
         /// <summary>
-        /// Checks the signatures of records about to be judged, before the lock every read of the committee waits for is
-        /// taken: whether a signature is valid depends on the record alone, so the judging under the lock reads the
-        /// answers instead of verifying (records a peer serves in catch-up can carry many). The same signers are checked
-        /// as the judging checks: members of the record before (in <paramref name="batch"/> or stored), or seeds.
-        /// Election records bound their own signatures before verifying and are left to that.
+        /// Why a record's signatures are not read at all: it lists a signer more than <see cref="MaxEntriesPerSigner"/>
+        /// times. Signatures are checked under the lock every read of the committee waits for, and anyone can post a
+        /// record or serve one in catch-up: one listing a member thousands of times, each entry a different invalid
+        /// signature, cost a verify per entry. With the cap a record costs at most two verifies per signer. A signer still
+        /// counts when one of its entries is valid.
         /// </summary>
-        internal static void CheckSignaturesAhead(IEnumerable<CasterMembershipRecord> batch)
+        internal static string? RepeatedSignerRefusal(CasterMembershipRecord candidate)
         {
-            try
+            var entries = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var sig in candidate.Signatures ?? new List<RecordSignature>())
             {
-                var bySeq = batch.Where(r => r != null).GroupBy(r => r.RecordSeq).ToDictionary(g => g.Key, g => g.First());
-                foreach (var r in bySeq.Values)
-                {
-                    if (VreeElection.IsElectionRecord(r)) continue;
-                    HashSet<string>? signers;
-                    if (r.RecordSeq == 0 || string.Equals(r.ChangeType, BootstrapResetChangeType, StringComparison.Ordinal))
-                        signers = new HashSet<string>(Globals.BootstrapCasterAddresses, StringComparer.Ordinal);
-                    else
-                    {
-                        var prev = bySeq.TryGetValue(r.RecordSeq - 1, out var inBatch) ? inBatch : GetBySeq(r.RecordSeq - 1);
-                        signers = prev?.Casters?.Select(c => c.Address).ToHashSet(StringComparer.Ordinal);
-                    }
-                    if (signers == null || FieldHoldingTheSeparator(r) != null) continue;
-                    var payload = CanonicalPayload(r);
-                    var counted = new HashSet<string>(StringComparer.Ordinal);
-                    foreach (var sig in r.Signatures ?? new List<RecordSignature>())
-                    {
-                        if (string.IsNullOrEmpty(sig?.SignerAddress) || string.IsNullOrEmpty(sig.Signature) || !signers.Contains(sig.SignerAddress)) continue;
-                        if (counted.Contains(sig.SignerAddress)) continue;
-                        if (SignatureHolds(r, payload, sig.SignerAddress, sig.Signature)) counted.Add(sig.SignerAddress);
-                    }
-                }
+                var signer = sig?.SignerAddress ?? "";
+                entries[signer] = entries.TryGetValue(signer, out var n) ? n + 1 : 1;
+                if (entries[signer] > MaxEntriesPerSigner) return $"the record lists signer {signer} more than {MaxEntriesPerSigner} times";
             }
-            catch (Exception) { } // only an early start on work the judging does anyway
-        }
-
-        /// <summary>
-        /// Why a record posted to this node by anyone (AnnounceMembershipRecord) is refused before it is judged: one that
-        /// names a signer twice. No proposer, collector or seed puts a signer on a record twice, and a record listing one
-        /// member thousands of times was judged under the lock every read of the committee waits for. Records a node pulls
-        /// in catch-up or takes from a block are judged as before.
-        /// </summary>
-        public static string? AnnouncedRecordRefusal(CasterMembershipRecord? record)
-        {
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var sig in record?.Signatures ?? new List<RecordSignature>())
-                if (!seen.Add(sig?.SignerAddress ?? ""))
-                    return $"the record names signer {sig?.SignerAddress} twice";
             return null;
         }
 
@@ -681,13 +646,14 @@ namespace VerifiedXCore.Services
 
             var payload = CanonicalPayload(candidate);
             var seedSigners = new HashSet<string>(StringComparer.Ordinal);
+            if (RepeatedSignerRefusal(candidate) is { } repeated) { reason = repeated; return false; }
             var triedSigners = new HashSet<(string, string)>(); // an entry repeated, or a signer already counted, changes nothing: not verified again
             foreach (var sig in candidate.Signatures ?? new List<RecordSignature>())
             {
                 if (string.IsNullOrEmpty(sig.SignerAddress) || string.IsNullOrEmpty(sig.Signature)) continue;
                 if (!Globals.BootstrapCasterAddresses.Contains(sig.SignerAddress)) continue;
                 if (seedSigners.Contains(sig.SignerAddress) || !triedSigners.Add((sig.SignerAddress, sig.Signature))) continue;
-                if (!SignatureHolds(candidate, payload, sig.SignerAddress, sig.Signature)) continue;
+                if (!SignatureService.VerifySignature(sig.SignerAddress, payload, sig.Signature)) continue;
                 seedSigners.Add(sig.SignerAddress);
             }
             if (seedSigners.Count < GenesisMinSeedSignatures)
@@ -715,7 +681,6 @@ namespace VerifiedXCore.Services
         /// term, validated as the candidate's successor (see <see cref="ValidateSuccessor"/>).</param>
         public static bool TryAppend(CasterMembershipRecord candidate, out string reason, bool fromSync = false, int genesisHolders = 1, bool termEnded = false)
         {
-            if (candidate != null) CheckSignaturesAhead(new[] { candidate });
             lock (Mut)
             {
                 var head = GetCurrent();
@@ -908,7 +873,6 @@ namespace VerifiedXCore.Services
             firstRefusal = null;
             var applied = 0;
             var ordered = records.Where(x => x != null).OrderBy(x => x.RecordSeq).ToList();
-            CheckSignaturesAhead(ordered);
             lock (Mut)
             {
                 // A committee's mid-term records are taken inside its term's handover window only together with the election

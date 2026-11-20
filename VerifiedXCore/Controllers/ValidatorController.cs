@@ -1469,8 +1469,6 @@ namespace VerifiedXCore.Controllers
         {
             if (record == null)
                 return BadRequest();
-            if (CasterMembershipStore.AnnouncedRecordRefusal(record) is { } refused)
-                return BadRequest(refused);
 
             // Wave 6: a valid seed-signed GENESIS is accepted even when the local store is empty —
             // this is how adopting the record arms a node's era. TryAppend validates everything.
