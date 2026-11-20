@@ -121,7 +121,7 @@ namespace VerifiedXCore.Services
         /// <summary>True when the peer answers /Health without the <c>Casting</c> field (a build before the resume protocol).</summary>
         internal static async Task<bool> IsLegacyBuildAsync(string? peerIp)
         {
-            if (string.IsNullOrEmpty(peerIp)) return false;
+            if (!InputValidationHelper.IsPeerIPAddress(peerIp)) return false;
             try
             {
                 using var client = Globals.HttpClientFactory.CreateClient();
@@ -138,7 +138,7 @@ namespace VerifiedXCore.Services
         /// <summary>Present = reachable and reporting that it casts (<c>Casting</c>; older builds: <c>IsBlockCaster</c>).</summary>
         internal static async Task<bool> IsCastingAsync(string? peerIp)
         {
-            if (string.IsNullOrEmpty(peerIp)) return false;
+            if (!InputValidationHelper.IsPeerIPAddress(peerIp)) return false;
             try
             {
                 using var client = Globals.HttpClientFactory.CreateClient();
@@ -535,7 +535,7 @@ namespace VerifiedXCore.Services
             if (!Globals.IsChainSynced) return "chain not synced";
             if (!head.Casters.Any(c => c.Address == self)) return $"not in record seq {head.RecordSeq}";
 
-            var others = head.Casters.Where(c => c.Address != self && !string.IsNullOrEmpty(c.PeerIP)).ToList();
+            var others = head.Casters.Where(c => c.Address != self && InputValidationHelper.IsPeerIPAddress(c.PeerIP)).ToList();
 
             // Rolling upgrade: members on older builds can never approve a resume (they have no endpoint, and their /Health
             // has no Casting field). While too few could approve, resume the way those builds do — straight back to the
@@ -629,7 +629,7 @@ namespace VerifiedXCore.Services
             if (sig == "ERROR") return "Signing failed.";
             var json = JsonConvert.SerializeObject(new CasterMaintenanceNotice { Address = self, Timestamp = ts, Signature = sig });
 
-            var others = head.Casters.Where(c => c.Address != self && !string.IsNullOrEmpty(c.PeerIP)).ToList();
+            var others = head.Casters.Where(c => c.Address != self && InputValidationHelper.IsPeerIPAddress(c.PeerIP)).ToList();
             var acks = (await Task.WhenAll(others.Select(async m =>
             {
                 try

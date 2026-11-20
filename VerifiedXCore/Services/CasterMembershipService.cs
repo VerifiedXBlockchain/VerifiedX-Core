@@ -100,7 +100,7 @@ namespace VerifiedXCore.Services
                 foreach (var member in head.Casters)
                 {
                     if (candidate.Signatures.Count >= need) break;
-                    if (member.Address == Globals.ValidatorAddress || string.IsNullOrEmpty(member.PeerIP)) continue;
+                    if (member.Address == Globals.ValidatorAddress || !InputValidationHelper.IsPeerIPAddress(member.PeerIP)) continue;
                     try
                     {
                         using var client = Globals.HttpClientFactory.CreateClient();
@@ -156,7 +156,7 @@ namespace VerifiedXCore.Services
             var json = JsonConvert.SerializeObject(record);
             var targets = record.Casters.Select(c => c.PeerIP)
                 .Concat(Globals.ValidatorNodes.Values.Select(n => n.NodeIP))
-                .Where(ip => !string.IsNullOrEmpty(ip))
+                .Where(ip => InputValidationHelper.IsPeerIPAddress(ip))
                 .Select(ip => ip!.Replace("::ffff:", ""))
                 .Distinct()
                 .Take(20)
@@ -375,6 +375,7 @@ namespace VerifiedXCore.Services
         {
             var entry = candidate.Casters?.FirstOrDefault(c => string.Equals(c.Address, candidate.ChangedAddress, StringComparison.Ordinal));
             if (entry == null) return "the promoted member has no entry";
+            if (!InputValidationHelper.IsPeerIPAddress(entry.PeerIP)) return "the promoted member's PeerIP is not an IP address";
             if (!Globals.NetworkValidators.TryGetValue(entry.Address, out var seen) || seen == null)
                 return $"this node does not know validator {entry.Address}";
             var seenIp = (seen.IPAddress ?? "").Replace("::ffff:", "");

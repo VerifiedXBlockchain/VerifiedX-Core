@@ -73,6 +73,7 @@ namespace VerifiedXCore.Services
         /// <summary>GET a path of the validator API at an address; null when it did not answer. Test seam.</summary>
         internal static Func<string, string, Task<string?>> HttpGet = async (ip, path) =>
         {
+            if (!InputValidationHelper.IsPeerIPAddress(ip)) return null;
             try
             {
                 using var client = Globals.HttpClientFactory.CreateClient();
@@ -86,6 +87,7 @@ namespace VerifiedXCore.Services
         /// <summary>POST JSON to a path of the validator API at an address; null when it did not answer. Test seam.</summary>
         internal static Func<string, string, string, Task<string?>> HttpPost = async (ip, path, json) =>
         {
+            if (!InputValidationHelper.IsPeerIPAddress(ip)) return null;
             try
             {
                 using var client = Globals.HttpClientFactory.CreateClient();

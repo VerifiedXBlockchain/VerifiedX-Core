@@ -318,7 +318,7 @@ namespace VerifiedXCore.Bitcoin.Services
             void Add(string? publicKey, string? ip, string vfxAddress)
             {
                 var baseAddress = BaseSignerSetPolicy.BaseAddressOf(publicKey);
-                if (baseAddress.Length == 0 || string.IsNullOrEmpty(ip) || found.ContainsKey(baseAddress)) return;
+                if (baseAddress.Length == 0 || !InputValidationHelper.IsPeerIPAddress(ip) || found.ContainsKey(baseAddress)) return;
                 if (onValidators.Contains(baseAddress) || onCasters.Contains(baseAddress))
                     found[baseAddress] = new ContractSigner(baseAddress, ip, vfxAddress, onValidators.Contains(baseAddress), onCasters.Contains(baseAddress));
             }

@@ -97,6 +97,7 @@ namespace VerifiedXCore.Services
             reason = "";
             if (e == null || string.IsNullOrEmpty(e.Address) || string.IsNullOrEmpty(e.IPAddress) || string.IsNullOrEmpty(e.PublicKey))
             { reason = "incomplete entry"; return false; }
+            if (!InputValidationHelper.IsPeerIPAddress(e.IPAddress)) { reason = "the address is not an IP address"; return false; }
             if (e.Address == Globals.ValidatorAddress) { reason = "self"; return false; }
             if (!ConsensusRequestAuth.PublicKeyMatchesAddress(e.PublicKey, e.Address)) { reason = "public key does not derive the address"; return false; }
             decimal balance;

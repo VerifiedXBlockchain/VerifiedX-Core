@@ -55,12 +55,11 @@ namespace VerifiedXCore.Services
                 var json = JsonConvert.SerializeObject(body);
                 foreach (var peer in Globals.BlockCasters.ToList())
                 {
-                    if (string.IsNullOrEmpty(peer.PeerIP))
+                    if (!VerifiedXCore.Utilities.InputValidationHelper.TryGetPeerIP(peer.PeerIP, out var ip))
                         continue;
                     try
                     {
                         using var client = Globals.HttpClientFactory.CreateClient();
-                        var ip = peer.PeerIP.Replace("::ffff:", "");
                         var uri = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/SubmitAttestation";
                         using var content = new StringContent(json, Encoding.UTF8, "application/json");
                         using var _ = await client.PostAsync(uri, content).WaitAsync(TimeSpan.FromSeconds(4));

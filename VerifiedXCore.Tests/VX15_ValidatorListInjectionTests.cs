@@ -273,7 +273,7 @@ namespace VerifiedXCore.Tests
         public async Task VX15_ConflictingIPsFromTwoCasters_DoNotCombine()
         {
             await Controller().ExchangeValidatorList(SignedBy(_casterX, Entry("127.0.0.1")));
-            await Controller().ExchangeValidatorList(SignedBy(_casterY, Entry("localhost")));
+            await Controller().ExchangeValidatorList(SignedBy(_casterY, Entry("127.0.0.2")));
             Assert.False(Registered(_validator.Address));
         }
 
