@@ -58,6 +58,47 @@ namespace VerifiedXCore.Tests
             Assert.True(BurnExitConsensusService.RetryDelaySeconds(500) < BridgeCasterConsensus.ELECTION_WINDOW_SECONDS);
         }
 
+        /// <summary>
+        /// A round short of the threshold puts its burn back with a retry time; the sweep leaves it until then, and a round
+        /// that reaches consensus starts the count again.
+        /// </summary>
+        [Fact]
+        public void AShortRound_KeepsItsBurnOutOfTheSweepUntilItsRetryTime()
+        {
+            const long t = 1_700_000_000;
+            BurnExitConsensusService.ProcessedBurnRecord Burn(string id) => new() { BaseBurnTxHash = id, Status = BurnExitConsensusService.BurnExitStatus.Pending };
+            var shortOne = Burn("short");
+            var other = Burn("other");
+            shortOne.Status = BurnExitConsensusService.BurnExitStatus.InConsensus;   // as RunConsensusRound has it then
+
+            Assert.Equal(30, BurnExitConsensusService.NoteShortRound(shortOne, t));
+            Assert.Equal(BurnExitConsensusService.BurnExitStatus.Pending, shortOne.Status);
+            Assert.Equal(1, shortOne.FailedRounds);
+            Assert.Equal(t + 30, shortOne.NextAttemptAt);
+            Assert.Equal(new[] { "other" }, BurnExitConsensusService.DueForARound(new[] { shortOne, other }, t + 29).Select(b => b.BaseBurnTxHash));
+            Assert.Equal(new[] { "short", "other" }, BurnExitConsensusService.DueForARound(new[] { shortOne, other }, t + 30).Select(b => b.BaseBurnTxHash));
+
+            Assert.Equal(60, BurnExitConsensusService.NoteShortRound(shortOne, t + 30));   // short again: longer
+            Assert.Empty(BurnExitConsensusService.DueForARound(new[] { shortOne }, t + 89));
+            // A burn in consensus or done is not taken whatever its time.
+            other.Status = BurnExitConsensusService.BurnExitStatus.ConsensusReached;
+            Assert.Empty(BurnExitConsensusService.DueForARound(new[] { other }, t + 10_000));
+        }
+
+        /// <summary>
+        /// An exit waiting its turn keeps the votes its round collected. If the committee changed meanwhile, they are checked
+        /// against the new one before the exit is sent; short of its threshold the burn goes back for a fresh round.
+        /// </summary>
+        [Fact]
+        public void AQueuedExitsVotes_AreCheckedAgainstTheCommitteeAtItsTurn()
+        {
+            var votes = new[] { "xA", "xB", "xC" }.Select(a => new VerifiedXCore.Bitcoin.Models.CasterConsensusVote { CasterAddress = a }).ToList();
+            Assert.True(BurnExitConsensusService.VotesCarry(votes, new System.Collections.Generic.HashSet<string> { "xA", "xB", "xC", "xD" }, 3));
+            Assert.False(BurnExitConsensusService.VotesCarry(votes, new System.Collections.Generic.HashSet<string> { "xA", "xD", "xE", "xF" }, 3));
+            votes.Add(new VerifiedXCore.Bitcoin.Models.CasterConsensusVote { CasterAddress = "xA" });             // one caster twice counts once
+            Assert.False(BurnExitConsensusService.VotesCarry(votes, new System.Collections.Generic.HashSet<string> { "xA", "xB", "xD" }, 3));
+        }
+
         private static void InterlockedMax(ref int target, int value)
         {
             int current;

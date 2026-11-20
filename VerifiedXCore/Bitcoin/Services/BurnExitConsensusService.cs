@@ -270,9 +270,7 @@ namespace VerifiedXCore.Bitcoin.Services
             }
 
             var now = TimeUtil.GetTime();
-            var pendingBurns = _processedBurns.Values
-                .Where(r => r.Status == BurnExitStatus.Pending && Globals.IsBlockCaster && r.NextAttemptAt <= now)
-                .ToList();
+            var pendingBurns = Globals.IsBlockCaster ? DueForARound(_processedBurns.Values, now) : new List<ProcessedBurnRecord>();
 
             await RunRounds(pendingBurns.Select(b => b.BaseBurnTxHash).ToList(), RunConsensusRound, MaxConcurrentRounds);
         }
@@ -309,6 +307,35 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>One exit is built and sent at a time, as the sweep did when rounds ran one by one: two handlers' plans
         /// drawn from the same locks at once would conflict.</summary>
         private static readonly SemaphoreSlim ExecutionGate = new(1, 1);
+
+        /// <summary>Blocks an exit's turn lasts after it is sent, so the next plan reads the locks it drew.</summary>
+        internal const int BlocksBetweenExits = 2;
+
+        /// <summary>A round short of the threshold: the burn waits (<see cref="RetryDelaySeconds"/>) before it is tried again.</summary>
+        internal static long NoteShortRound(ProcessedBurnRecord record, long now)
+        {
+            record.FailedRounds++;
+            var wait = RetryDelaySeconds(record.FailedRounds);
+            record.NextAttemptAt = now + wait;
+            record.Status = BurnExitStatus.Pending;
+            return wait;
+        }
+
+        /// <summary>The burns the sweep takes now: pending, and past their retry time.</summary>
+        internal static List<ProcessedBurnRecord> DueForARound(IEnumerable<ProcessedBurnRecord> records, long now) =>
+            records.Where(r => r.Status == BurnExitStatus.Pending && r.NextAttemptAt <= now).ToList();
+
+        /// <summary>Whether the round's votes still meet the threshold of <paramref name="committee"/>, the one the exit is judged by.</summary>
+        internal static bool VotesCarry(IEnumerable<CasterConsensusVote>? votes, HashSet<string> committee, int required) =>
+            (votes ?? Enumerable.Empty<CasterConsensusVote>()).Select(v => v.CasterAddress).Where(committee.Contains).Distinct(StringComparer.Ordinal).Count() >= required;
+
+        /// <summary>Until the tip is <paramref name="blocks"/> past <paramref name="from"/>, or <paramref name="atMost"/> passed.</summary>
+        private static async Task WaitForBlocks(long from, int blocks, TimeSpan atMost)
+        {
+            var until = DateTime.UtcNow + atMost;
+            while ((Globals.LastBlock?.Height ?? 0) < from + blocks && DateTime.UtcNow < until)
+                await Task.Delay(1_000);
+        }
 
         /// <summary>
         /// Called by BaseBridgeExitWatchService when a burn event is detected on Base.
@@ -517,10 +544,8 @@ namespace VerifiedXCore.Bitcoin.Services
 
             if (confirmations.Count < RequiredCasterSignatures)
             {
-                record.FailedRounds++;
-                record.NextAttemptAt = TimeUtil.GetTime() + RetryDelaySeconds(record.FailedRounds);
-                LogUtility.Log($"[BurnExitConsensus] Insufficient confirmations for {baseBurnTxHash}: {confirmations.Count}/{RequiredCasterSignatures}; retry in {RetryDelaySeconds(record.FailedRounds)}s", "BurnExitConsensusService");
-                record.Status = BurnExitStatus.Pending; // Retry later
+                var wait = NoteShortRound(record, TimeUtil.GetTime());
+                LogUtility.Log($"[BurnExitConsensus] Insufficient confirmations for {baseBurnTxHash}: {confirmations.Count}/{RequiredCasterSignatures}; retry in {wait}s", "BurnExitConsensusService");
                 return;
             }
             record.FailedRounds = 0;
@@ -542,7 +567,27 @@ namespace VerifiedXCore.Bitcoin.Services
             if (winner.ProposerCasterAddress == Globals.ValidatorAddress && Globals.IsBlockCaster)
             {
                 await ExecutionGate.WaitAsync();
-                try { await ExecuteExitTransaction(record); }
+                try
+                {
+                    // Waiting its turn, the round's votes may no longer carry the committee that judges the exit: then the
+                    // burn goes back for a fresh round rather than sending an exit that is refused and given up.
+                    if (!VotesCarry(record.ConsensusVotes, ExitCommittee(), RequiredCasterSignatures))
+                    {
+                        LogUtility.Log($"[BurnExitConsensus] The committee changed while {baseBurnTxHash} waited its turn; a new round will be held.", "BurnExitConsensusService");
+                        record.ConsensusVotes.Clear();
+                        record.HandlerCasterAddress = "";
+                        record.Status = BurnExitStatus.Pending;
+                        record.NextAttemptAt = 0;
+                    }
+                    else
+                    {
+                        var tipBefore = Globals.LastBlock?.Height ?? 0;
+                        await ExecuteExitTransaction(record);
+                        // The next exit's plan reads the locks after this one is on chain, as it did when rounds ran one by
+                        // one: planned at once, both drew on the same locks and one waited out RetryUnminedPoolUnlocks.
+                        await WaitForBlocks(tipBefore, BlocksBetweenExits, TimeSpan.FromSeconds(30));
+                    }
+                }
                 finally { ExecutionGate.Release(); }
             }
 
