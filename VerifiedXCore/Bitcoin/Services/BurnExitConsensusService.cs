@@ -27,7 +27,7 @@ namespace VerifiedXCore.Bitcoin.Services
         public const int MaxAlertFieldLength = 128;
         /// <summary>
         /// The most burns one caster's alerts may hold here that this node has not found on Base, whether still to be
-        /// looked up or looked up and not there. A burn found on Base no longer counts, so a caster reporting real
+        /// looked up, being looked up, or looked up and not there. A burn found on Base no longer counts, so a caster reporting real
         /// burns is never held back by it.
         /// </summary>
         public const int MaxUnverifiedAlertsPerCaster = 32;
@@ -71,11 +71,10 @@ namespace VerifiedXCore.Bitcoin.Services
             public bool FoundOnBase { get; set; }
 
             /// <summary>
-            /// Known only from a caster's alert and not found on Base by this node: waiting to be looked up, or looked
-            /// up and not there. Both count against the caster until the record is dropped.
+            /// Known only from a caster's alert and not found on Base by this node: waiting to be looked up, being looked
+            /// up, or looked up and not there. Each counts against the caster until the record is dropped.
             /// </summary>
-            internal bool IsUnverifiedAlert => AlertedBy.Length > 0 && !FoundOnBase
-                && (Status == BurnExitStatus.Pending || Status == BurnExitStatus.Failed);
+            internal bool IsUnverifiedAlert => AlertedBy.Length > 0 && !FoundOnBase;
         }
 
         /// <summary>Backoff after the burn could not be verified on Base (RPC unreachable).</summary>
@@ -1436,7 +1435,9 @@ namespace VerifiedXCore.Bitcoin.Services
                     (kvp.Value.Status == BurnExitStatus.Complete && (now - kvp.Value.DetectedAt).TotalHours > COMPLETED_TTL_HOURS) ||
                     (kvp.Value.Status == BurnExitStatus.Failed && (now - kvp.Value.DetectedAt).TotalHours > FAILED_TTL_HOURS) ||
                     // An alerted burn this node never found on Base: dropped, and taken again if it is alerted or seen later.
-                    (kvp.Value.IsUnverifiedAlert && (now - kvp.Value.DetectedAt).TotalMinutes > UNVERIFIED_ALERT_TTL_MINUTES))
+                    // One being looked up right now is left to its round.
+                    (kvp.Value.IsUnverifiedAlert && kvp.Value.Status != BurnExitStatus.InConsensus
+                        && (now - kvp.Value.DetectedAt).TotalMinutes > UNVERIFIED_ALERT_TTL_MINUTES))
                 .Select(kvp => kvp.Key).ToList();
 
             foreach (var key in toRemove)

@@ -149,6 +149,23 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public async Task ABurnBeingLookedUp_StillCountsAgainstItsCaster()
+        {
+            for (var i = 0; i < MaxUnverifiedAlertsPerCaster; i++)
+                await HandleBurnAlert(Alert(_caster, i));
+            ProcessedBurnForTests(_sent[0])!.Status = BurnExitStatus.InConsensus; // as a round holds it while Base is asked
+
+            await HandleBurnAlert(Alert(_caster, 4000));
+
+            Assert.Equal(MaxUnverifiedAlertsPerCaster, Kept());
+
+            // And it is not dropped from under its round, however old.
+            ProcessedBurnForTests(_sent[0])!.DetectedAt = DateTime.UtcNow.AddMinutes(-(UNVERIFIED_ALERT_TTL_MINUTES + 1));
+            PruneExpiredRecords();
+            Assert.NotNull(ProcessedBurnForTests(_sent[0]));
+        }
+
+        [Fact]
         public async Task AnAlertedBurnThisNodesWatchReadsFromBase_IsKeptPastTheTime_AndFreesItsCaster()
         {
             for (var i = 0; i < MaxUnverifiedAlertsPerCaster; i++)
