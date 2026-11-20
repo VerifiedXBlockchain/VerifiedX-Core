@@ -531,6 +531,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 NoteWaiting(row, cannotSign, db);
                 return false;
             }
+            if (OwnVaultDestination(row, vfxHeight, db) is { } ownVault)
+            {
+                NoteWaiting(row, ownVault, db);
+                return false;
+            }
             row.ShortfallShareSats = ShortfallShare(row.SmartContractUID, row.AmountSats, db);
             var tx = BtcCanonicalWithdrawal.Build(row.SmartContractUID, row.DestinationScriptHex, PayableSats(row), row.FeeRate, out var reason, db);
             if (tx == null)
@@ -547,6 +552,21 @@ namespace VerifiedXCore.Bitcoin.Attestation
             }
             Pin(row, tx, vfxHeight, db);
             return true;
+        }
+
+        /// <summary>
+        /// Why a withdrawal or exit part is not fixed on coins now: its destination is an address of the vault that pays
+        /// it. Mining checked the vault's addresses as they stood then; a re-key adds one later. Fixed, its payment and its
+        /// change would go to the same address, which the vault's signers cannot tell apart, so they would never sign it
+        /// and its coins would stay held. Waiting, it holds nothing and is cancelled or expires and is refunded. Null when
+        /// it may be fixed, and before <see cref="Globals.WithdrawalDestinationRecheckHeight"/>.
+        /// </summary>
+        private static string? OwnVaultDestination(VaultWithdrawalRow row, long vfxHeight, LiteDatabase? db)
+        {
+            if (vfxHeight < Globals.WithdrawalDestinationRecheckHeight || string.IsNullOrEmpty(row.DestinationScriptHex)) return null;
+            return BtcAttestStore.ScriptRowsForVault(row.SmartContractUID, db).Any(k => k.ScriptHex == row.DestinationScriptHex)
+                ? $"its Bitcoin destination is an address of vault {row.SmartContractUID}, which pays it; a payment there cannot be told from the vault's change"
+                : null;
         }
 
         /// <summary>What a withdrawal's or exit part's Bitcoin transaction pays out of the vault: its amount less its share of a sweep shortfall.</summary>

@@ -413,6 +413,15 @@ namespace VerifiedXCore
         public const long JsonCommentDataRuleTestnetHeight = long.MaxValue;
 
         /// <summary>
+        /// From this height a withdrawal or bridge-exit part is not fixed on coins while its Bitcoin destination is an
+        /// address of the vault that pays it, checked each time it would be fixed (a re-key can give the vault that address
+        /// after the request was mined). It waits instead, and is cancelled or expires and is refunded. Set to the tip at
+        /// release. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long WithdrawalDestinationRecheckHeight = long.MaxValue;
+        public const long WithdrawalDestinationRecheckTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a voided part of a bridge exit gives its locks back for use, as an expired exit does, instead
         /// of blacklisting them: a void is proven on Bitcoin (every pinned transaction's coins spent elsewhere or never
         /// to exist), so the exit was not paid and the locks' value is intact, and a blacklisted lock left its owner, and

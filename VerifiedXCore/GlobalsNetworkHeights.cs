@@ -40,6 +40,7 @@ namespace VerifiedXCore
             Globals.PathAuditRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PathAuditRulesHeight;
             Globals.ContractBodyLimitsHeight = Globals.IsTestNet ? Globals.ContractBodyLimitsTestnetHeight : Globals.ContractBodyLimitsHeight;
             Globals.JsonCommentDataRuleHeight = Globals.IsTestNet ? Globals.JsonCommentDataRuleTestnetHeight : Globals.JsonCommentDataRuleHeight;
+            Globals.WithdrawalDestinationRecheckHeight = Globals.IsTestNet ? Globals.WithdrawalDestinationRecheckTestnetHeight : Globals.WithdrawalDestinationRecheckHeight;
             Globals.EvolveSpecificNeedsContractHeight = Globals.IsTestNet ?Globals.EvolveSpecificNeedsContractTestnetHeight : Globals.EvolveSpecificNeedsContractHeight;
             Globals.BridgeVoidKeepsLocksHeight = Globals.IsTestNet ? Globals.BridgeVoidKeepsLocksTestnetHeight : Globals.BridgeVoidKeepsLocksHeight;
             Globals.ReserveRecoverReadsEveryRowHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.ReserveRecoverReadsEveryRowHeight;

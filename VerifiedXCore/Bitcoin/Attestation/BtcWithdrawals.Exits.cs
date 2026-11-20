@@ -285,8 +285,11 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 // restored), and leaving its share of a sweep shortfall in the vault.
                 var cannotSign = BtcVaultKeys.CannotSignRefusal(part.SmartContractUID, db);
                 if (cannotSign != null) reason = cannotSign;
+                // Nor to an address of the vault itself (a re-key can give it one after the exit was recorded).
+                var ownVault = cannotSign == null ? OwnVaultDestination(part, vfxHeight, db) : null;
+                if (ownVault != null) reason = ownVault;
                 part.ShortfallShareSats = ShortfallShare(part.SmartContractUID, part.AmountSats, db);
-                var tx = string.IsNullOrEmpty(part.DestinationScriptHex) || cannotSign != null
+                var tx = string.IsNullOrEmpty(part.DestinationScriptHex) || cannotSign != null || ownVault != null
                     ? null
                     : BtcCanonicalWithdrawal.Build(part.SmartContractUID, part.DestinationScriptHex, PayableSats(part), part.FeeRate, out reason, db);
                 // MinExitPartSats is sized for one coin. A part is first pinned only if it bears the rule's doublings on the
