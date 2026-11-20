@@ -306,6 +306,7 @@ namespace VerifiedXCore.Tests
             Globals.BlockCasters = new ConcurrentBag<Peers>();
 
             Assert.False(CasterDiscoveryService.AddBlockCasterIfRoomAndUnique(new Peers { ValidatorAddress = _c.Address, PeerIP = NotAnAddress }));
+            Assert.False(CasterDiscoveryService.AddBlockCasterIfRoomAndUnique(new Peers { ValidatorAddress = _c.Address, PeerIP = "10.0.::ffff:0.3" }));
             Assert.Empty(Globals.BlockCasters);
 
             Assert.True(CasterDiscoveryService.AddBlockCasterIfRoomAndUnique(new Peers { ValidatorAddress = _c.Address, PeerIP = "::ffff:10.0.0.3" }));
@@ -520,7 +521,10 @@ namespace VerifiedXCore.Tests
             Assert.False(await CasterSeatService.IsLegacyBuildAsync(NotAnAddress));
             Assert.Null(await VreeService.HttpGet(NotAnAddress, "Health"));
             Assert.Null(await VreeService.HttpPost(NotAnAddress, "ProbeTip", "{}"));
-            Assert.DoesNotContain(NetworkStallSurvey.AssembleKnownSet(record), n => n.Ip == NotAnAddress);
+            // The stall survey still counts the member as one of the committee, and as one that did not answer.
+            var unanswering = NetworkStallSurvey.AssembleKnownSet(record).Where(n => n.Ip == NotAnAddress).ToList();
+            Assert.True(Assert.Single(unanswering).IsCommittee);
+            Assert.Equal(-1, Assert.Single(await NetworkStallSurvey.CollectAsync(unanswering)).Height);
             var view = new VerifiedXCore.Bitcoin.Services.BaseBridgeService.SignerView(Array.Empty<string>(), 4, 1, 0,
                 new[] { VerifiedXCore.Bitcoin.Services.BaseSignerSetPolicy.BaseAddressOf(_b.PublicKey), VerifiedXCore.Bitcoin.Services.BaseSignerSetPolicy.BaseAddressOf(_me.PublicKey) }, 1);
             Assert.Equal(_me.Address, Assert.Single(VerifiedXCore.Bitcoin.Services.UserBridgeMintService.ContractSigners(view)).VfxAddress);

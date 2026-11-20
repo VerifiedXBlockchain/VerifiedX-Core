@@ -101,10 +101,9 @@ namespace VerifiedXCore.Services
                 // 6/5-OVERFLOW FIX: normalize the IP before storing/comparing. Entries arrive in
                 // both "::ffff:x.x.x.x" and clean forms depending on origin, so a raw string
                 // compare lets the same caster in twice under two IP spellings.
-                newCaster.PeerIP = (newCaster.PeerIP ?? "").Replace("::ffff:", "");
-
-                // Every entry of the live list is dialed at its PeerIP: one that carries an address carries an IP address,
-                // kept in dotted form.
+                // Every entry of the live list is dialed at its PeerIP, so one that carries an address carries an IP
+                // address: it is read from the text as given and kept in dotted form.
+                newCaster.PeerIP ??= "";
                 if (newCaster.PeerIP.Length > 0)
                 {
                     if (!InputValidationHelper.TryGetPeerIP(newCaster.PeerIP, out var peerIp))
@@ -1635,7 +1634,7 @@ namespace VerifiedXCore.Services
             try
             {
                 var cleanIp = ip?.Replace("::ffff:", "") ?? "";
-                if (!InputValidationHelper.IsPeerIPAddress(cleanIp) || string.IsNullOrEmpty(address))
+                if (!InputValidationHelper.IsPeerIPAddress(ip) || string.IsNullOrEmpty(address))
                 {
                     CasterLogUtility.Log($"ValidateInboundCaster REJECT — empty ip or address. ip='{ip}' addr='{address}'", "CasterFlow");
                     return false;
@@ -2003,7 +2002,7 @@ namespace VerifiedXCore.Services
                     return "accepted: already known";
                 }
 
-                if (!InputValidationHelper.IsPeerIPAddress(promotedIp))
+                if (!InputValidationHelper.IsPeerIPAddress(announce.PromotedIP))
                 {
                     CasterLogUtility.Log(
                         $"[CONSENSUS-V2] HandlePromoteAnnounce REJECT — no IP for {announce.PromotedAddress}",

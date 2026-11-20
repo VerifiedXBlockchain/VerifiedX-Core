@@ -535,7 +535,7 @@ namespace VerifiedXCore.Services
             if (!Globals.IsChainSynced) return "chain not synced";
             if (!head.Casters.Any(c => c.Address == self)) return $"not in record seq {head.RecordSeq}";
 
-            var others = head.Casters.Where(c => c.Address != self && InputValidationHelper.IsPeerIPAddress(c.PeerIP)).ToList();
+            var others = head.Casters.Where(c => c.Address != self && !string.IsNullOrEmpty(c.PeerIP)).ToList();
 
             // Rolling upgrade: members on older builds can never approve a resume (they have no endpoint, and their /Health
             // has no Casting field). While too few could approve, resume the way those builds do — straight back to the
@@ -566,6 +566,7 @@ namespace VerifiedXCore.Services
             {
                 try
                 {
+                    if (!InputValidationHelper.IsPeerIPAddress(m.PeerIP)) return null;
                     using var client = Globals.HttpClientFactory.CreateClient();
                     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
                     using var content = new StringContent(json, Encoding.UTF8, "application/json");
@@ -602,6 +603,7 @@ namespace VerifiedXCore.Services
             {
                 try
                 {
+                    if (!InputValidationHelper.IsPeerIPAddress(m.PeerIP)) return;
                     using var client = Globals.HttpClientFactory.CreateClient();
                     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
                     using var content = new StringContent(notice, Encoding.UTF8, "application/json");
@@ -629,11 +631,12 @@ namespace VerifiedXCore.Services
             if (sig == "ERROR") return "Signing failed.";
             var json = JsonConvert.SerializeObject(new CasterMaintenanceNotice { Address = self, Timestamp = ts, Signature = sig });
 
-            var others = head.Casters.Where(c => c.Address != self && InputValidationHelper.IsPeerIPAddress(c.PeerIP)).ToList();
+            var others = head.Casters.Where(c => c.Address != self && !string.IsNullOrEmpty(c.PeerIP)).ToList();
             var acks = (await Task.WhenAll(others.Select(async m =>
             {
                 try
                 {
+                    if (!InputValidationHelper.IsPeerIPAddress(m.PeerIP)) return false;
                     using var client = Globals.HttpClientFactory.CreateClient();
                     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
                     using var content = new StringContent(json, Encoding.UTF8, "application/json");

@@ -149,7 +149,7 @@ namespace VerifiedXCore.Services
             void Add(string? ip, string? addr)
             {
                 var n = RecoverySourcePolicy.Normalize(ip);
-                if (n.Length == 0 || !InputValidationHelper.IsPeerIPAddress(n)) return;
+                if (n.Length == 0) return;
                 var a = addr ?? "";
                 var isCommittee = a.Length > 0 && committeeAddrs.Contains(a);
                 if (nodes.TryGetValue(n, out var existing))
@@ -184,6 +184,7 @@ namespace VerifiedXCore.Services
             {
                 try
                 {
+                    if (!InputValidationHelper.IsPeerIPAddress(n.Ip)) return new Reply { Ip = n.Ip };
                     using var client = Globals.HttpClientFactory.CreateClient();
                     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
                     var uri = $"http://{n.Ip}:{Globals.ValAPIPort}/valapi/validator/Health";
