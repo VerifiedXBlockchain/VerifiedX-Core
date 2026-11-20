@@ -1799,6 +1799,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                             {
                                 var senderAddr = kvp.Key;
                                 if (senderAddr == myAddress) continue; // Skip our own shares
+                                // Only participants deal shares: any other name is neither read nor reported (each report is signed).
+                                if (!session.ParticipantAddresses.Contains(senderAddr)) continue;
 
                                 var senderSharesStr = kvp.Value?.ToString();
                                 if (string.IsNullOrEmpty(senderSharesStr))
