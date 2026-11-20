@@ -114,6 +114,23 @@ namespace VerifiedXCore.Tests
             }
         }
 
+        [Fact]
+        public async Task AnAddressThatCannotBeReached_DoesNotStopTheNextBeingTried()
+        {
+            var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            try
+            {
+                var accept = listener.AcceptSocketAsync();
+                // Nothing listens at the first address on that port; the second takes the connection.
+                await using var stream = await BeaconClient.ConnectInTurn(new[] { IPAddress.Parse("127.0.0.2"), IPAddress.Loopback }, port, CancellationToken.None);
+                using var accepted = await accept.WaitAsync(TimeSpan.FromSeconds(10));
+                Assert.True(accepted.Connected);
+            }
+            finally { listener.Stop(); }
+        }
+
         [Theory]
         [InlineData("127.0.0.1", true)]
         [InlineData("127.8.9.10", true)]
