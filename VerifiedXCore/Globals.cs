@@ -390,6 +390,14 @@ namespace VerifiedXCore
         public const long EvolveSpecificNeedsContractTestnetHeight = 152_000L;
 
         /// <summary>
+        /// From this height a block may not carry a transaction whose Data holds a JSON comment; mempool admission refuses
+        /// it at every height. The rules that read Data see a comment as no call, while the code that runs the call skips
+        /// it. Set to the tip at release. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long JsonCommentDataRuleHeight = long.MaxValue;
+        public const long JsonCommentDataRuleTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a voided part of a bridge exit gives its locks back for use, as an expired exit does, instead
         /// of blacklisting them: a void is proven on Bitcoin (every pinned transaction's coins spent elsewhere or never
         /// to exist), so the exit was not paid and the locks' value is intact, and a blacklisted lock left its owner, and

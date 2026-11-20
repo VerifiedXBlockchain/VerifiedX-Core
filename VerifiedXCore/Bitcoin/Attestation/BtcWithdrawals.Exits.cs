@@ -1,4 +1,4 @@
-using LiteDB;
+﻿using LiteDB;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using VerifiedXCore.Bitcoin.Models;
@@ -424,9 +424,22 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// Otherwise the part's locks are restored and taken out of use and the exit is marked failed, so that it can be
         /// made again from other locks; a part fixed again earlier is given up with it.
         /// </summary>
+        /// <summary>Blocks a vault stays out of exit plans after an exit part on it is voided: about a day at 12 s a block.</summary>
+        public const long VoidPauseBlocks = 7_200;
+
+        /// <summary>
+        /// Whether an exit part on this vault was voided within the last <see cref="VoidPauseBlocks"/> blocks before
+        /// <paramref name="height"/>. Read from the chain's withdrawal rows, so the pause survives a restart, a rebuild and a
+        /// snapshot restore, and every caster pauses the same vaults.
+        /// </summary>
+        public static bool PausedByVoidedExit(string scUID, long height, LiteDatabase? db = null) =>
+            BtcAttestStore.WithdrawalsOf(scUID, VaultWithdrawalState.Void, db)
+                .Any(r => r.IsBridgeExit && r.ClosedAtVfxHeight > 0 && height - r.ClosedAtVfxHeight < VoidPauseBlocks);
+
         /// <summary>
         /// A voided part's lock: from Globals.BridgeVoidKeepsLocksHeight given back for use (the void proves the exit
-        /// unpaid) with its vault kept out of exit plans for a day; before it, blacklisted as older builds did.
+        /// unpaid), its vault kept out of exit plans for a while (<see cref="PausedByVoidedExit"/>); before it, blacklisted
+        /// as older builds did.
         /// </summary>
         private static void GiveBackVoided(PoolUnlockAllocation allocation, long vfxHeight, string why)
         {
@@ -436,9 +449,6 @@ namespace VerifiedXCore.Bitcoin.Attestation
                 return;
             }
             VBTCBridgeLockState.RestoreUnlock(allocation.LockId, allocation.UnlockAmount, SatsOf(allocation.UnlockAmount));
-            var vault = VaultOfLock(allocation);
-            if (!string.IsNullOrEmpty(vault))
-                VerifiedXCore.Bitcoin.Services.FrostContractBlacklist.Blacklist(vault, $"an exit part on it was voided: {why}");
         }
 
         private static void VoidExitPart(VaultWithdrawalRow row, long vfxHeight, LiteDatabase? db, string why)

@@ -258,6 +258,11 @@ namespace VerifiedXCore.Services
             if (LedgerIntegrityRules.IsHonoredWhitelistEntry(txRequest, blockHeight))
                 return (true, "");
 
+            // Data with a JSON comment reads as no call to the rules below and as a call to the code that runs it, so it is
+            // refused before any rule or contract code reads it: at admission always, in a block from JsonCommentDataRuleHeight.
+            if ((blockHeight == null || blockHeight >= Globals.JsonCommentDataRuleHeight) && LedgerIntegrityRules.DataHasJsonComment(txRequest.Data))
+                return (false, "A transaction's Data may not carry a JSON comment.");
+
             // NEW-18: one reading of the hash preimage (Data and UnlockTime are joined without a separator).
             var preimageError = LedgerIntegrityRules.CanonicalPreimage(txRequest);
             if (preimageError != null)

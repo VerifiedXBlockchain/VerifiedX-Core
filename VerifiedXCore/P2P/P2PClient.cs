@@ -1116,6 +1116,8 @@ namespace VerifiedXCore.P2P
                     options.Headers.Add("walver", Globals.CLIVersion);
                     options.Headers.Add("uplReq", uplReq);
                     options.Headers.Add("dwnlReq", dwnlReq);
+                    // The beacon is named by whoever sent the NFT: no redirect, and never this machine (BeaconClient.NewBeaconHandler).
+                    options.HttpMessageHandlerFactory = _ => VerifiedXCore.Beacon.BeaconClient.NewBeaconHandler();
                 })
                 .WithAutomaticReconnect()
                 .Build();
@@ -1218,6 +1220,8 @@ namespace VerifiedXCore.P2P
                     options.Headers.Add("walver", Globals.CLIVersion);
                     options.Headers.Add("uplReq", uplReq);
                     options.Headers.Add("dwnlReq", dwnlReq);
+                    // The beacon is named by whoever sent the NFT: no redirect, and never this machine (BeaconClient.NewBeaconHandler).
+                    options.HttpMessageHandlerFactory = _ => VerifiedXCore.Beacon.BeaconClient.NewBeaconHandler();
                 })
                 .WithAutomaticReconnect()
                 .Build();

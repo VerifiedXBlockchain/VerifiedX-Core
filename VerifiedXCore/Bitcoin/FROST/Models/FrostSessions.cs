@@ -197,7 +197,38 @@ namespace VerifiedXCore.Bitcoin.FROST.Models
             }
             catch { return false; }
         }
-        
+
+        /// <summary>The longest one holder's Round 1 commitment may be in a posted set (a real one is about 230 characters).</summary>
+        public const int MaxCommitmentChars = 1024;
+
+        private HashSet<string> KnownSigners()
+        {
+            var known = new HashSet<string>(SignerAddresses ?? new List<string>(), StringComparer.Ordinal);
+            if (StoredParticipantOrder != null) known.UnionWith(StoredParticipantOrder);
+            return known;
+        }
+
+        /// <summary>The longest a Round 2 body of this session can honestly be: one bounded entry per signer.</summary>
+        public long MaxRound2BodyChars => (long)Math.Max(1, KnownSigners().Count) * (MaxCommitmentChars + 128) + 1024;
+
+        /// <summary>
+        /// Why a posted Round 2 nonce set is refused before any of its entries is parsed: more entries than the session
+        /// has signers, an entry for an address that is not one, or an entry longer than a commitment. Null when it has
+        /// the shape a leader can honestly send (its content is checked after).
+        /// </summary>
+        public string? PostedNoncesShapeRefusal(IDictionary<string, string>? postedNonces)
+        {
+            if (postedNonces == null) return null;
+            var known = KnownSigners();
+            if (postedNonces.Count > known.Count) return $"Posted nonce set has {postedNonces.Count} entries for {known.Count} signers";
+            foreach (var entry in postedNonces)
+            {
+                if (!known.Contains(entry.Key)) return "Posted nonce set names an address that is not a signer of this session";
+                if (entry.Value != null && entry.Value.Length > MaxCommitmentChars) return $"Posted nonce set has an entry longer than {MaxCommitmentChars} characters";
+            }
+            return null;
+        }
+
         /// <summary>
         /// Stored participant order from DKG key store. If populated, this is used instead of
         /// recomputing from SignerAddresses, ensuring signing uses the exact same identifier
