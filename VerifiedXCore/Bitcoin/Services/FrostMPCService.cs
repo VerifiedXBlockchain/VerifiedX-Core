@@ -1381,6 +1381,32 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>
         /// Collect Round 1 nonce commitments from validators
         /// </summary>
+        /// <summary>
+        /// A Round 1 signing commitment in the form the FROST library writes one: its header for this ciphersuite and
+        /// nothing else besides "hiding" and "binding", each a compressed secp256k1 point in lowercase hex.
+        /// </summary>
+        internal static bool IsSigningCommitment(string? json)
+        {
+            if (string.IsNullOrEmpty(json) || json.Length > VerifiedXCore.Bitcoin.FROST.Models.SigningSession.MaxCommitmentChars) return false;
+            try
+            {
+                if (JToken.Parse(json) is not JObject o || o.Count != 3) return false;
+                if (o["header"] is not JObject h || h.Count != 2
+                    || h["version"]?.Type != JTokenType.Integer || (long)h["version"]! != 0
+                    || h["ciphersuite"]?.Type != JTokenType.String || (string?)h["ciphersuite"] != "FROST-secp256k1-SHA256-TR-v1")
+                    return false;
+                foreach (var name in new[] { "hiding", "binding" })
+                {
+                    if (o[name]?.Type != JTokenType.String) return false;
+                    var hex = (string)o[name]!;
+                    if (hex.Length != 66 || hex.Any(c => !(c is >= '0' and <= '9' or >= 'a' and <= 'f'))) return false;
+                    if (!NBitcoin.PubKey.TryCreatePubKey(Convert.FromHexString(hex), out var point) || !point.IsCompressed) return false;
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+
         private static async Task<Dictionary<string, string>?> CollectSigningRound1Nonces(
             string sessionId,
             List<VBTCValidator> validators)
@@ -1414,8 +1440,10 @@ namespace VerifiedXCore.Bitcoin.Services
                                 // entry could put a commitment that holder never made into the set, so that holder
                                 // refuses Round 2 and is taken for one that withheld its share.
                                 var data = noncesObj[validator.ValidatorAddress]?.Value<string>();
-                                if (!string.IsNullOrEmpty(data))
-                                    nonces.TryAdd(validator.ValidatorAddress, data);
+                                // One the library cannot read is no commitment: sent on, every other holder had to
+                                // refuse the set and was named for withholding its share.
+                                if (IsSigningCommitment(data))
+                                    nonces.TryAdd(validator.ValidatorAddress, data!);
                             }
                         }
                     }

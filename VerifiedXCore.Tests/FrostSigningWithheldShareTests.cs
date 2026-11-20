@@ -30,6 +30,9 @@ namespace VerifiedXCore.Tests
         {
             public readonly Dictionary<string, string> AddressOf = new() { ["10.0.0.1"] = "xA", ["10.0.0.2"] = "xW", ["10.0.0.3"] = "xC" };
             public readonly List<string> Round2Bodies = new();
+            // Commitments in the library's form (a coordinator takes no other).
+            public readonly Dictionary<string, string> Own = new() { ["xA"] = FrostSigningMalformedCommitmentTests.Commitment(), ["xW"] = FrostSigningMalformedCommitmentTests.Commitment(), ["xC"] = FrostSigningMalformedCommitmentTests.Commitment() };
+            public readonly string Forged = FrostSigningMalformedCommitmentTests.Commitment();
 
             protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
             {
@@ -39,8 +42,8 @@ namespace VerifiedXCore.Tests
                 object body = new { Success = true };
                 if (path.StartsWith("/frost/sign/round1/"))
                 {
-                    var nonces = new Dictionary<string, string> { [me] = "nonce-" + me };
-                    if (me == "xW") nonces["xA"] = "forged-by-xW";
+                    var nonces = new Dictionary<string, string> { [me] = Own[me] };
+                    if (me == "xW") nonces["xA"] = Forged;
                     body = new { Success = true, SessionId = session, Nonces = nonces };
                 }
                 else if (path.StartsWith("/frost/sign/round2/"))
@@ -79,8 +82,8 @@ namespace VerifiedXCore.Tests
 
                 // Round 2 carried each holder's own commitment: the one sent under xA's name by xW was not taken.
                 var sent = JsonConvert.DeserializeObject<Dictionary<string, string>>(handler.Round2Bodies.First())!;
-                Assert.Equal("nonce-xA", sent["xA"]);
-                Assert.Equal("nonce-xW", sent["xW"]);
+                Assert.Equal(handler.Own["xA"], sent["xA"]);
+                Assert.Equal(handler.Own["xW"], sent["xW"]);
             }
             finally
             {
