@@ -1677,7 +1677,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                             var addressedTo = addressed["Recipient"]?.ToString();
                             var myBatchId = !string.IsNullOrEmpty(Globals.ValidatorAddress) && BuildAddressToIdentifierMap(session.ParticipantAddresses).TryGetValue(Globals.ValidatorAddress, out var mine) ? mine : null;
                             if ((!string.IsNullOrEmpty(addressedTo) && addressedTo != Globals.ValidatorAddress)
-                                || (myBatchId != null && addressed["AllGeneratedShares"] is Newtonsoft.Json.Linq.JObject batchShares && !BatchCarriesShareFor(batchShares, myBatchId)))
+                                || (myBatchId != null && addressed["AllGeneratedShares"] is Newtonsoft.Json.Linq.JObject batchShares && !BatchCarriesShareFor(batchShares, myBatchId, session.ParticipantAddresses)))
                             {
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This share batch is not addressed to this validator." }));
@@ -1777,7 +1777,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This share batch is addressed to another validator." }));
                                 return;
                             }
-                            if (!string.IsNullOrEmpty(myFrostIdentifier) && !BatchCarriesShareFor(allSharesToken, myFrostIdentifier))
+                            if (!string.IsNullOrEmpty(myFrostIdentifier) && !BatchCarriesShareFor(allSharesToken, myFrostIdentifier, session.ParticipantAddresses))
                             {
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "No share in this batch is addressed to this validator." }));
@@ -1799,6 +1799,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                             {
                                 var senderAddr = kvp.Key;
                                 if (senderAddr == myAddress) continue; // Skip our own shares
+                                // Only participants deal shares: any other name is neither read nor reported (each report is signed).
+                                if (!session.ParticipantAddresses.Contains(senderAddr)) continue;
 
                                 var senderSharesStr = kvp.Value?.ToString();
                                 if (string.IsNullOrEmpty(senderSharesStr))
@@ -4318,10 +4320,13 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// the validator list grows, shrinks, or the dictionary iteration order changes.
         /// </summary>
         /// <summary>Whether any sender's entry in a share batch holds a share under <paramref name="identifier"/>.</summary>
-        internal static bool BatchCarriesShareFor(Newtonsoft.Json.Linq.JObject batch, string identifier)
+        internal static bool BatchCarriesShareFor(Newtonsoft.Json.Linq.JObject batch, string identifier, ICollection<string> participants)
         {
             foreach (var entry in batch.Properties())
             {
+                // Only participants deal shares, and an entry is read only within the size a dealer's can be.
+                if (!participants.Contains(entry.Name)) continue;
+                if ((entry.Value?.ToString()?.Length ?? 0) > FrostDkgBlame.MaxDealerEntryLength) continue;
                 try
                 {
                     if (Newtonsoft.Json.Linq.JObject.Parse(entry.Value?.ToString() ?? "")[identifier] != null) return true;
