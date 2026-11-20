@@ -612,6 +612,23 @@ namespace VerifiedXCore
         public static long SaleStartBidRulesHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// From this height each payment of an NFT sale completion covers its own share of the listed price: the seller
+        /// is paid at least the price less the contract's royalty, the royalty payee at least the royalty, and the
+        /// completion carries no entry beyond those payments. The royalty is the contract's RoyaltyAmount read as a
+        /// rate of the price, as validation has always read it, whatever its RoyaltyType.
+        /// A tightening rule: a node without it accepts every block a node with it does.
+        /// Unset (long.MaxValue) on both networks until the release that activates it.
+        /// </summary>
+        public static long SalePaymentSharesHeight = long.MaxValue;
+        /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
+        public const long SalePaymentSharesTestnetHeight = long.MaxValue;
+        /// <summary>
+        /// How far below its share a sale payment may fall under SalePaymentSharesHeight. Wallets that compute the
+        /// royalty split in binary floating point are off by far less than this.
+        /// </summary>
+        public const decimal SalePaymentShareTolerance = 0.000001M;
+
+        /// <summary>
         /// Item 6: a vBTC withdrawal REQUEST may not reuse a (requester, UniqueId, contract) key under which a request was
         /// already mined. The holder chooses UniqueId, nothing in consensus read it, and the row store's save matched on
         /// that key and kept the old row's Amount and destination: a dust request with an old UniqueId reopened a
