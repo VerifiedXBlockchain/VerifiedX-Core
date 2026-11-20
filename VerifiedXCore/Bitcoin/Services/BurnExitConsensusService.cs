@@ -479,7 +479,7 @@ namespace VerifiedXCore.Bitcoin.Services
             // Step 6: Wait for confirmations
             await Task.Delay(CONFIRMATION_WAIT_MS);
 
-            var confirmations = ConfirmationsOfThisRound(confirmDict.Values, winner.ProposerCasterAddress, proposalTimestamp);
+            var confirmations = CountableConfirmations(record, confirmDict.Values, winner.ProposerCasterAddress, proposalTimestamp, ExitCommittee());
 
             if (confirmations.Count < RequiredCasterSignatures)
             {
@@ -533,6 +533,25 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>The confirmations for this round's winner made in this round (from its proposal on, within the proposal skew).</summary>
         internal static List<BurnExitConfirmation> ConfirmationsOfThisRound(IEnumerable<BurnExitConfirmation> held, string winner, long roundStartedAt) =>
             held.Where(c => c.AgreedHandlerAddress == winner && c.Timestamp >= roundStartedAt - BridgeCasterConsensus.PROPOSAL_MAX_SKEW_SECONDS).ToList();
+
+        /// <summary>
+        /// This round's confirmations whose vote is for the burn as <paramref name="record"/> now holds it. A confirmation
+        /// can arrive before this node read the burn on Base, and is checked then against the record a peer's alert made;
+        /// once the record is corrected from Base, one for the alert's amount or destination is not a vote for this burn
+        /// and is not counted. Counted, it made up the threshold, the exit was refused before broadcast, and the handler
+        /// gave the burn up.
+        /// </summary>
+        internal static List<BurnExitConfirmation> CountableConfirmations(ProcessedBurnRecord record, IEnumerable<BurnExitConfirmation> held, string winner,
+            long roundStartedAt, HashSet<string> committee)
+        {
+            var burnType = BurnTypeString(record.ExitType);
+            var amountSats = (long)(record.Amount * 100_000_000M);
+            var destination = record.ExitType == BurnExitType.VfxPoolUnlock ? record.VfxDestinationAddress : record.BtcDestination;
+            return ConfirmationsOfThisRound(held, winner, roundStartedAt)
+                .Where(c => BridgeCasterConsensus.VerifyConfirmation(c.ConfirmingCasterAddress, record.BaseBurnTxHash, burnType, amountSats, destination,
+                    c.Timestamp, c.Signature, committee).Ok)
+                .ToList();
+        }
 
         /// <summary>Handle proposal from another caster.</summary>
         public static void HandleBurnExitProposal(BurnExitProposal proposal)
