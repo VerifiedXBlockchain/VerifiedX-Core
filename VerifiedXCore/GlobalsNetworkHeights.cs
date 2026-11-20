@@ -38,7 +38,8 @@ namespace VerifiedXCore
             Globals.VaultBurnRuleHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.VaultBurnRuleHeight;
             Globals.PathAuditRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.PathAuditRulesHeight;
             Globals.ContractBodyLimitsHeight = Globals.IsTestNet ? Globals.ContractBodyLimitsTestnetHeight : Globals.ContractBodyLimitsHeight;
-            Globals.EvolveSpecificNeedsContractHeight = Globals.IsTestNet ? Globals.EvolveSpecificNeedsContractTestnetHeight : Globals.EvolveSpecificNeedsContractHeight;
+            Globals.JsonCommentDataRuleHeight = Globals.IsTestNet ? Globals.JsonCommentDataRuleTestnetHeight : Globals.JsonCommentDataRuleHeight;
+            Globals.EvolveSpecificNeedsContractHeight = Globals.IsTestNet ?Globals.EvolveSpecificNeedsContractTestnetHeight : Globals.EvolveSpecificNeedsContractHeight;
             Globals.BridgeVoidKeepsLocksHeight = Globals.IsTestNet ? Globals.BridgeVoidKeepsLocksTestnetHeight : Globals.BridgeVoidKeepsLocksHeight;
             Globals.ReserveRecoverReadsEveryRowHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.ReserveRecoverReadsEveryRowHeight;
             Globals.VbtcEnvelopeRulesHeight = Globals.IsTestNet ? Globals.LedgerRulesBatchTestnetHeight : Globals.VbtcEnvelopeRulesHeight;
