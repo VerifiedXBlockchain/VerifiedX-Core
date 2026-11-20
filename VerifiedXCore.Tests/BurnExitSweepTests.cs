@@ -144,10 +144,18 @@ namespace VerifiedXCore.Tests
         public void AnExitIsOnChain_WhenTheTransactionItSentIsInACommittedBlock()
         {
             var record = new BurnExitConsensusService.ProcessedBurnRecord { CompletionVfxTxHash = "sent-" + Guid.NewGuid().ToString("N") };
+            var applied = typeof(VerifiedXCore.Data.StateData).GetField("_stateAppliedThrough", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+            var priorApplied = (long)applied.GetValue(null)!;
             Assert.False(BurnExitConsensusService.SentTransactionIsInABlock(record));
             Globals.MemBlocks[record.CompletionVfxTxHash] = 1_000;                   // as TxHashGuard.Add records a committed block's transactions
-            try { Assert.True(BurnExitConsensusService.SentTransactionIsInABlock(record)); }
-            finally { Globals.MemBlocks.TryRemove(record.CompletionVfxTxHash, out _); }
+            try
+            {
+                applied.SetValue(null, 999L);                                         // committed, its state not applied yet
+                Assert.False(BurnExitConsensusService.SentTransactionIsInABlock(record));
+                applied.SetValue(null, 1_000L);                                       // UpdateTreis finished the block
+                Assert.True(BurnExitConsensusService.SentTransactionIsInABlock(record));
+            }
+            finally { Globals.MemBlocks.TryRemove(record.CompletionVfxTxHash, out _); applied.SetValue(null, priorApplied); }
             Assert.False(BurnExitConsensusService.SentTransactionIsInABlock(new BurnExitConsensusService.ProcessedBurnRecord())); // nothing sent
         }
 

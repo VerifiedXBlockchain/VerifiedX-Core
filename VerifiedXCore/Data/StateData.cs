@@ -251,6 +251,10 @@ namespace VerifiedXCore.Data
             return names.ToArray();
         }
 
+        /// <summary>The height of the last block whose state apply finished (its writes made), or -1. Read without a lock.</summary>
+        public static long StateAppliedThrough => Volatile.Read(ref _stateAppliedThrough);
+        private static long _stateAppliedThrough = -1;
+
         public static async Task<bool> UpdateTreis(Block block)
         {
             Globals.TreisUpdating = true;
@@ -298,6 +302,7 @@ namespace VerifiedXCore.Data
             {
                 // AddBlock waits while this is set, so a throw anywhere in the apply must still clear it.
                 StateWriteContext.Clear();
+                Volatile.Write(ref _stateAppliedThrough, block.Height);
                 Globals.TreisUpdating = false;
             }
         }

@@ -315,11 +315,15 @@ namespace VerifiedXCore.Bitcoin.Services
         internal static readonly TimeSpan MostAnExitHoldsTheTurn = TimeSpan.FromSeconds(60);
 
         /// <summary>
-        /// Whether the transaction this caster sent for the exit is in a block: one lookup in the recent blocks' transaction
-        /// hashes (Globals.MemBlocks), read every second of the wait. The lock and exit records were read whole each time.
+        /// Whether the transaction this caster sent for the exit is in a committed block whose state is applied, so the locks
+        /// it drew read as drawn: one lookup in the recent blocks' transaction hashes (Globals.MemBlocks, filled as a block is
+        /// committed, before its state is applied) and the height the state is applied through. The lock and exit records
+        /// were read whole each second of the wait.
         /// </summary>
         internal static bool SentTransactionIsInABlock(ProcessedBurnRecord record) =>
-            !string.IsNullOrEmpty(record.CompletionVfxTxHash) && Globals.MemBlocks.ContainsKey(record.CompletionVfxTxHash);
+            !string.IsNullOrEmpty(record.CompletionVfxTxHash)
+            && Globals.MemBlocks.TryGetValue(record.CompletionVfxTxHash, out var minedAt)
+            && StateData.StateAppliedThrough >= minedAt;
 
         /// <summary>
         /// Whether the exit just run left a transaction to be mined: a Bitcoin exit sent as a VFX transaction or on to its
