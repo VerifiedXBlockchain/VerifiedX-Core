@@ -62,7 +62,7 @@ namespace VerifiedXCore.Bitcoin.FROST
             public Budget(int total) { Total = total; }
         }
 
-        private readonly Func<IReadOnlyCollection<string>> _readValidators;
+        private readonly Func<IReadOnlyCollection<string>?> _readValidators;
         private readonly Func<long> _nowMs;
         private readonly object _gate = new();
         private readonly Dictionary<string, List<Place>> _bySource = new(StringComparer.Ordinal);
@@ -72,21 +72,22 @@ namespace VerifiedXCore.Bitcoin.FROST
         private long? _validatorsReadAt;
         private long? _readingValidatorsSince;
 
-        /// <param name="readValidators">The addresses (<see cref="RemoteIp.Text"/> form) that have a validator's room.</param>
+        /// <param name="readValidators">The addresses (<see cref="RemoteIp.Text"/> form) that have a validator's room; null when they cannot be known now.</param>
         /// <param name="nowMs">Tests only: the clock, in milliseconds.</param>
-        internal FrostConnectionLimits(Func<IReadOnlyCollection<string>> readValidators, Func<long>? nowMs = null)
+        internal FrostConnectionLimits(Func<IReadOnlyCollection<string>?> readValidators, Func<long>? nowMs = null)
         {
             _readValidators = readValidators;
             _nowMs = nowMs ?? (() => Environment.TickCount64);
         }
 
         /// <summary>
-        /// The addresses of the registered vBTC validators that hold the validator balance now, as this node sees them
-        /// (none until it is synced). Holding the balance is what makes an address cost something: a registration alone
-        /// does not.
+        /// The addresses of the registered vBTC validators that hold the validator balance now, as this node sees them;
+        /// null while it is not synced, when the registry says nothing either way. Holding the balance is what makes an
+        /// address cost something: a registration alone does not.
         /// </summary>
-        internal static IReadOnlyCollection<string> FundedValidatorAddresses()
+        internal static IReadOnlyCollection<string>? FundedValidatorAddresses()
         {
+            if (!Globals.IsChainSynced) return null;
             var addresses = new HashSet<string>(StringComparer.Ordinal);
             foreach (var validator in VBTCValidatorRegistry.FundedOnly(VBTCValidatorRegistry.GetActiveValidators()))
             {
@@ -207,8 +208,8 @@ namespace VerifiedXCore.Bitcoin.FROST
             }
             lock (_gate)
             {
-                // An empty answer is a node that is not synced yet, not a network without validators: keep what is held.
-                if (read != null && read.Count > 0) _validators = read;
+                // No answer (not synced, or the read failed) keeps what is held; an answer is applied, an empty one too.
+                if (read != null) _validators = read;
                 _validatorsReadAt = _nowMs();
                 _readingValidatorsSince = null;
             }

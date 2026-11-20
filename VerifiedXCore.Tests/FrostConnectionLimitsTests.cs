@@ -174,6 +174,28 @@ namespace VerifiedXCore.Tests
         }
 
         [Fact]
+        public void A_validators_room_follows_the_registry_and_is_kept_only_while_the_registry_cannot_be_read()
+        {
+            var limits = ServerLimits();
+            // The validator's network is full of connections from a neighbour that is not a validator.
+            Assert.Equal(FrostConnectionLimits.PerOtherSource, ConnectMany(limits, Enumerable.Repeat("198.51.100.8", 40)).Count);
+            Assert.True(Connect(limits, ValidatorIp).Admitted);
+
+            // A node that has fallen out of sync cannot say who the validators are: the ones it knew keep their room.
+            Globals.IsChainSynced = false;
+            limits.ReadValidators();
+            Assert.True(Connect(limits, ValidatorIp).Admitted);
+
+            // Synced again, and the validator no longer holds the validator balance: nobody has a validator's room now.
+            Globals.IsChainSynced = true;
+            var account = StateData.GetSpecificAccountStateTrei("xConnValidator");
+            account.Balance = 4_999M;
+            StateData.GetAccountStateTrei().UpdateSafe(account);
+            limits.ReadValidators();
+            Assert.False(Connect(limits, ValidatorIp).Admitted);
+        }
+
+        [Fact]
         public void A_closed_connection_gives_its_place_back()
         {
             var limits = ServerLimits();
