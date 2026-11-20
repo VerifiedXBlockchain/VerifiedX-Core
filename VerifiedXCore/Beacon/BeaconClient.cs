@@ -47,21 +47,42 @@ namespace VerifiedXCore.Beacon
                 var addresses = System.Net.IPAddress.TryParse(host, out var literal)
                     ? new[] { literal }
                     : await System.Net.Dns.GetHostAddressesAsync(host, cancel);
-                var target = addresses.FirstOrDefault(a => !IsLocalOnly(a))
-                    ?? throw new HttpRequestException($"A beacon is not reached at a local-only address ({host}).");
+                var targets = addresses.Where(a => !IsLocalOnly(a)).ToList();
+                if (targets.Count == 0)
+                    throw new HttpRequestException($"A beacon is not reached at a local-only address ({host}).");
+                return await ConnectInTurn(targets, context.DnsEndPoint.Port, cancel);
+            },
+        };
+
+        /// <summary>
+        /// A connection to the first of <paramref name="targets"/> that takes one, tried in turn as a connection by name
+        /// would be: one the node cannot reach (an IPv6 address on a machine without IPv6) does not stop the rest.
+        /// </summary>
+        internal static async ValueTask<Stream> ConnectInTurn(IReadOnlyList<System.Net.IPAddress> targets, int port, CancellationToken cancel)
+        {
+            Exception? last = null;
+            foreach (var target in targets)
+            {
+                cancel.ThrowIfCancellationRequested();
                 var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
                 try
                 {
-                    await socket.ConnectAsync(new System.Net.IPEndPoint(target, context.DnsEndPoint.Port), cancel);
+                    await socket.ConnectAsync(new System.Net.IPEndPoint(target, port), cancel);
                     return new NetworkStream(socket, ownsSocket: true);
+                }
+                catch (Exception ex) when (!cancel.IsCancellationRequested)
+                {
+                    socket.Dispose();
+                    last = ex;
                 }
                 catch
                 {
                     socket.Dispose();
                     throw;
                 }
-            },
-        };
+            }
+            throw last ?? new HttpRequestException("No address to connect to.");
+        }
 
         /// <summary>The client asset downloads use (<see cref="NewBeaconHandler"/>).</summary>
         internal static readonly HttpClient AssetDownloadClient = new(NewBeaconHandler());
