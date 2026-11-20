@@ -55,6 +55,8 @@ namespace VerifiedXCore.Bitcoin.Services
             public string AllocationsJson { get; set; } = "";
             /// <summary>Unix seconds before which no new consensus round is attempted (backoff after a transient failure).</summary>
             public long NextAttemptAt { get; set; }
+            /// <summary>Rounds in a row that did not reach the threshold: how long the next retry waits (RetryDelaySeconds).</summary>
+            public int FailedRounds { get; set; }
         }
 
         /// <summary>Backoff after the burn could not be verified on Base (RPC unreachable).</summary>
@@ -272,9 +274,41 @@ namespace VerifiedXCore.Bitcoin.Services
                 .Where(r => r.Status == BurnExitStatus.Pending && Globals.IsBlockCaster && r.NextAttemptAt <= now)
                 .ToList();
 
-            foreach (var burn in pendingBurns)
-                await RunConsensusRound(burn.BaseBurnTxHash);
+            await RunRounds(pendingBurns.Select(b => b.BaseBurnTxHash).ToList(), RunConsensusRound, MaxConcurrentRounds);
         }
+
+        /// <summary>
+        /// How many burns' rounds run at once. A round mostly waits (for proposals, then confirmations), and one at a time
+        /// a holder's many one-satoshi burns kept every other exit waiting behind them in the sweep.
+        /// </summary>
+        internal const int MaxConcurrentRounds = 16;
+
+        /// <summary>Runs each burn's round, at most <paramref name="maxConcurrent"/> at once.</summary>
+        internal static async Task RunRounds(IReadOnlyList<string> burns, Func<string, Task> round, int maxConcurrent)
+        {
+            using var gate = new SemaphoreSlim(Math.Max(1, maxConcurrent));
+            await Task.WhenAll(burns.Select(async burn =>
+            {
+                await gate.WaitAsync();
+                try { await round(burn); }
+                catch (Exception ex) { ErrorLogUtility.LogError($"[BurnExitConsensus] Round for {burn} failed: {ex.Message}", "BurnExitConsensusService.RunRounds()"); }
+                finally { gate.Release(); }
+            }));
+        }
+
+        private const long RetryBackoffBaseSeconds = 30;
+        private const long RetryBackoffMaxSeconds = 300;
+
+        /// <summary>
+        /// The wait before a burn whose round did not reach the threshold is tried again: 30 s, doubling with each such
+        /// round, at most 5 minutes (within one election window). It went straight back into every sweep.
+        /// </summary>
+        internal static long RetryDelaySeconds(int failedRounds) =>
+            Math.Min(RetryBackoffMaxSeconds, RetryBackoffBaseSeconds << Math.Clamp(failedRounds - 1, 0, 10));
+
+        /// <summary>One exit is built and sent at a time, as the sweep did when rounds ran one by one: two handlers' plans
+        /// drawn from the same locks at once would conflict.</summary>
+        private static readonly SemaphoreSlim ExecutionGate = new(1, 1);
 
         /// <summary>
         /// Called by BaseBridgeExitWatchService when a burn event is detected on Base.
@@ -483,10 +517,13 @@ namespace VerifiedXCore.Bitcoin.Services
 
             if (confirmations.Count < RequiredCasterSignatures)
             {
-                LogUtility.Log($"[BurnExitConsensus] Insufficient confirmations for {baseBurnTxHash}: {confirmations.Count}/{RequiredCasterSignatures}", "BurnExitConsensusService");
+                record.FailedRounds++;
+                record.NextAttemptAt = TimeUtil.GetTime() + RetryDelaySeconds(record.FailedRounds);
+                LogUtility.Log($"[BurnExitConsensus] Insufficient confirmations for {baseBurnTxHash}: {confirmations.Count}/{RequiredCasterSignatures}; retry in {RetryDelaySeconds(record.FailedRounds)}s", "BurnExitConsensusService");
                 record.Status = BurnExitStatus.Pending; // Retry later
                 return;
             }
+            record.FailedRounds = 0;
 
             record.Status = BurnExitStatus.ConsensusReached;
             var voteBurnType = BurnTypeString(record.ExitType);
@@ -503,7 +540,11 @@ namespace VerifiedXCore.Bitcoin.Services
 
             // Step 7: If this caster is the handler, execute
             if (winner.ProposerCasterAddress == Globals.ValidatorAddress && Globals.IsBlockCaster)
-                await ExecuteExitTransaction(record);
+            {
+                await ExecutionGate.WaitAsync();
+                try { await ExecuteExitTransaction(record); }
+                finally { ExecutionGate.Release(); }
+            }
 
             _proposals.TryRemove(baseBurnTxHash, out _);
             _confirmations.TryRemove(baseBurnTxHash, out _);
