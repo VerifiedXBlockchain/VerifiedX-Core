@@ -180,6 +180,37 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A record a peer serves in catch-up is judged by the old rule, and may carry many different signatures naming one
+        /// member. They are checked before the lock every read of the committee waits for is taken, so those reads are not
+        /// held up while they are; the record is still taken when its valid signatures meet the quorum.
+        /// </summary>
+        [Fact]
+        public async Task ARecordServedInCatchUp_HasItsSignaturesCheckedOutsideTheCommitteeLock()
+        {
+            var served = PromoteD(Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"));
+            served.Signatures.AddRange(Enumerable.Range(0, 3_000).Select(i => new RecordSignature
+            {
+                SignerAddress = _a.Address, Signature = SignatureService.CreateSignature($"not this record {i}", _a.GetPrivKey, _a.PublicKey),
+            }));
+            served.Signatures.Add(SignatureOf(_a, served));
+            served.Signatures.Add(SignatureOf(_b, served));
+            SeeD("10.0.0.4");
+
+            var judging = Task.Run(() => CasterMembershipStore.TryAppendChain(new List<CasterMembershipRecord> { served }, out _));
+            await Task.Delay(100);                                                          // judging has started
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            CasterMembershipStore.InvalidateCache();
+            var head = CasterMembershipStore.GetCurrent();                                 // a read of the committee
+            timer.Stop();
+            var applied = await judging;
+            Assert.True(timer.ElapsedMilliseconds < 500, $"reading the committee waited {timer.ElapsedMilliseconds} ms");
+            Assert.NotNull(head);
+            Assert.Equal(1, applied);                                                       // its valid signatures carry it, as before
+            CasterMembershipStore.InvalidateCache();
+            Assert.Equal(served.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+        }
+
+        /// <summary>
         /// C-012 (encoding): the signed payload joins fields with '|'. A record that folds the first member's fields into
         /// its ChangedAddress and lists one member fewer has the same bytes, so the signatures on the honest record were
         /// valid on it too, and it could install a committee nobody signed. A field holding '|' is refused at validation
