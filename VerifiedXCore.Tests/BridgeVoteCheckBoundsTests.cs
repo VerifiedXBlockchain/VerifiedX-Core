@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using VerifiedXCore;
@@ -36,6 +37,7 @@ namespace VerifiedXCore.Tests
         private readonly bool _priorIsTestNet;
         private readonly Block _priorLastBlock;
         private readonly long _priorBindingHeight;
+        private readonly long _priorOncePerCasterHeight;
         private readonly List<(PrivateKey Key, string Pub, string Address)> _casters = new();
 
         public BridgeVoteCheckBoundsTests()
@@ -48,6 +50,7 @@ namespace VerifiedXCore.Tests
             Globals.IsTestNet = false; // the keys made here have mainnet addresses, and the fallback committee is this network's
             _priorLastBlock = Globals.LastBlock;
             _priorBindingHeight = Globals.BridgeBurnBindingHeight;
+            _priorOncePerCasterHeight = Globals.BridgeVoteOncePerCasterHeight;
             DbContext.Initialize();
             Globals.LastBlock = new Block { Height = Height - 1 };
             for (var i = 0; i < Casters; i++)
@@ -63,6 +66,7 @@ namespace VerifiedXCore.Tests
             foreach (var caster in _casters) Globals.BootstrapCasterAddresses.Remove(caster.Address);
             try { DbContext.CloseDB(); } catch { }
             Globals.BridgeBurnBindingHeight = _priorBindingHeight;
+            Globals.BridgeVoteOncePerCasterHeight = _priorOncePerCasterHeight;
             Globals.LastBlock = _priorLastBlock;
             Globals.IsTestNet = _priorIsTestNet;
             Globals.CustomPath = _priorCustomPath;
@@ -189,6 +193,68 @@ namespace VerifiedXCore.Tests
 
             var (inBlock, blockReason) = await TransactionValidatorService.VerifyTX(tx, false, true, false, null, false, Height);
             Assert.True(inBlock, blockReason);
+        }
+
+        [Fact]
+        public async Task InABlock_AListWithACasterTwice_IsAcceptedBelowTheHeight_AndRefusedFromIt()
+        {
+            Globals.BridgeVoteOncePerCasterHeight = Height + 10;
+            var votes = Enumerable.Repeat(0, 3).Select(_ => LegacyVote(0, valid: false)).Concat(Enumerable.Range(0, Casters).Select(i => LegacyVote(i))).ToList();
+            var tx = UnlockOfAHeldLock(votes);
+
+            var below = await TransactionValidatorService.VerifyTX(tx, false, true, false, null, false, Height + 9);
+            Assert.True(below.Item1, below.Item2);
+
+            foreach (var height in new[] { Height + 10, Height + 500 })
+            {
+                var (ok, reason) = await TransactionValidatorService.VerifyTX(tx, false, true, false, null, false, height);
+                Assert.False(ok);
+                Assert.Contains(BridgeCasterConsensus.VoteListedTwiceReason, reason);
+            }
+        }
+
+        [Fact]
+        public async Task InABlock_OneVoteACaster_IsAcceptedOnBothSidesOfTheHeight()
+        {
+            Globals.BridgeVoteOncePerCasterHeight = Height + 10;
+            var tx = UnlockOfAHeldLock(Enumerable.Range(0, Casters).Select(i => LegacyVote(i)).ToList());
+
+            foreach (var height in new[] { Height + 9, Height + 10 })
+            {
+                var (ok, reason) = await TransactionValidatorService.VerifyTX(tx, false, true, false, null, false, height);
+                Assert.True(ok, reason);
+            }
+        }
+
+        private static long ChecksDuring(Action act)
+        {
+            var before = Interlocked.Read(ref BridgeCasterConsensus.VoteSignatureChecksForTests);
+            act();
+            return Interlocked.Read(ref BridgeCasterConsensus.VoteSignatureChecksForTests) - before;
+        }
+
+        [Fact]
+        public void NoSignatureIsChecked_ForACasterAlreadyCounted_OrOnceEnoughAreCounted()
+        {
+            var required = BridgeCasterConsensus.RequiredVotesFor(BridgeCasterConsensus.GetCommitteeForHeight(Height));
+
+            // Each caster's vote five times over: one check a caster, and none after the list is decided.
+            var boundRepeats = Enumerable.Range(0, Casters).SelectMany(i => Enumerable.Repeat(i, 5).Select(c => BoundVote(c))).ToList();
+            var legacyRepeats = Enumerable.Range(0, Casters).SelectMany(i => Enumerable.Repeat(i, 5).Select(c => LegacyVote(c))).ToList();
+            Assert.Equal(required, ChecksDuring(() => Assert.True(Bound(boundRepeats, admission: false).Ok)));
+            Assert.Equal(required, ChecksDuring(() => Assert.True(Legacy(legacyRepeats, admission: false).Ok)));
+
+            // Every caster once, then fifty more entries: the fifty are never checked.
+            var boundTail = Enumerable.Range(0, Casters).Select(i => BoundVote(i)).Concat(Enumerable.Repeat(0, 50).Select(_ => BoundVote(0, valid: false))).ToList();
+            var legacyTail = Enumerable.Range(0, Casters).Select(i => LegacyVote(i)).Concat(Enumerable.Repeat(0, 50).Select(_ => LegacyVote(0, valid: false))).ToList();
+            Assert.Equal(required, ChecksDuring(() => Assert.True(Bound(boundTail, admission: false).Ok)));
+            Assert.Equal(required, ChecksDuring(() => Assert.True(Legacy(legacyTail, admission: false).Ok)));
+
+            // Where each caster is taken once, a list of repeats that do not verify costs one check.
+            var boundFailing = Enumerable.Repeat(0, 50).Select(_ => BoundVote(0, valid: false)).ToList();
+            var legacyFailing = Enumerable.Repeat(0, 50).Select(_ => LegacyVote(0, valid: false)).ToList();
+            Assert.Equal(1, ChecksDuring(() => Assert.False(Bound(boundFailing, admission: true).Ok)));
+            Assert.Equal(1, ChecksDuring(() => Assert.False(Legacy(legacyFailing, admission: true).Ok)));
         }
 
         [Fact]

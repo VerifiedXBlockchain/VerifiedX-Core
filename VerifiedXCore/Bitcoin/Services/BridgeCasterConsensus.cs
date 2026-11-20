@@ -186,6 +186,9 @@ namespace VerifiedXCore.Bitcoin.Services
 
         public const string VoteListedTwiceReason = "a caster's vote is listed more than once";
 
+        /// <summary>Tests only: how many vote signatures the two committee vote checks have verified.</summary>
+        internal static long VoteSignatureChecksForTests;
+
         /// <summary>Legacy (pre-gate) verification: any VFX address with a valid signature counts.</summary>
         public static bool TryVerifyVotes(IEnumerable<CasterConsensusVote>? votes, string baseBurnTxHash, string burnType)
         {
@@ -213,8 +216,9 @@ namespace VerifiedXCore.Bitcoin.Services
         /// and the threshold is derived from the committee size. Used for the legacy single-lock
         /// VBTC_V2_BRIDGE_UNLOCK path (no producer emits bound votes for it).
         /// A signature is checked only while it can still change the count: not for a caster already counted, and not
-        /// once enough are. <paramref name="eachCasterOnce"/> (admission) also refuses a list in which a caster has more
-        /// than one vote to check, so a list costs at most one signature check a committee member.
+        /// once enough are. <paramref name="eachCasterOnce"/> (admission, and blocks from
+        /// Globals.BridgeVoteOncePerCasterHeight) also refuses a list in which a caster has more than one vote to check,
+        /// so a list costs at most one signature check a committee member.
         /// </summary>
         public static (bool Ok, string Reason) TryVerifyVotesFromCommittee(IEnumerable<CasterConsensusVote>? votes, string baseBurnTxHash, string burnType, long height, bool eachCasterOnce = false)
         {
@@ -235,6 +239,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (listed != null && !listed.Add(v.CasterAddress)) return (false, VoteListedTwiceReason);
                 if (ok.Contains(v.CasterAddress)) continue;
                 var msg = BuildVoteMessage(v.BaseBurnTxHash, v.BurnType, v.Timestamp);
+                Interlocked.Increment(ref VoteSignatureChecksForTests);
                 if (!VerifiedXCore.Services.SignatureService.VerifySignature(v.CasterAddress, msg, v.Signature)) continue;
                 ok.Add(v.CasterAddress);
             }
@@ -246,7 +251,7 @@ namespace VerifiedXCore.Bitcoin.Services
         /// signature must cover the burn hash, burn type, burned amount (sats) and payout destination
         /// exactly as carried by the transaction being validated.
         /// A signature is checked only while it can still change the count, and <paramref name="eachCasterOnce"/>
-        /// (admission) refuses a list in which a caster has more than one vote to check
+        /// (admission, and blocks from the height) refuses a list in which a caster has more than one vote to check
         /// (see <see cref="TryVerifyVotesFromCommittee"/>).
         /// </summary>
         public static (bool Ok, string Reason) VerifyBoundVotes(IEnumerable<CasterConsensusVote>? votes, string baseBurnTxHash, string burnType,
@@ -272,6 +277,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 if (listed != null && !listed.Add(v.CasterAddress)) return (false, VoteListedTwiceReason);
                 if (ok.Contains(v.CasterAddress)) continue;
                 var msg = BuildBoundVoteMessage(v.BaseBurnTxHash, v.BurnType, amountSats, destination, v.Timestamp);
+                Interlocked.Increment(ref VoteSignatureChecksForTests);
                 if (!VerifiedXCore.Services.SignatureService.VerifySignature(v.CasterAddress, msg, v.Signature)) continue;
                 ok.Add(v.CasterAddress);
             }

@@ -4160,7 +4160,7 @@ namespace VerifiedXCore.Services
                             return (txResult, "Bridge unlock requires CasterConsensusVotes array.");
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
                         var (votesOk, votesReason) = BridgeCasterConsensus.TryVerifyVotesFromCommittee(votes, exitBurnTxHash!.Trim(), "EXIT", unlockGateHeight,
-                            eachCasterOnce: blockHeight == null && !blockVerify && !blockDownloads);
+                            eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || unlockGateHeight >= Globals.BridgeVoteOncePerCasterHeight);
                         if (!votesOk)
                             return (txResult, $"Caster consensus votes rejected for VBTCb unlock: {votesReason}");
                         if (VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(exitBurnTxHash))
@@ -4258,7 +4258,7 @@ namespace VerifiedXCore.Services
                             return (txResult, "Bridge pool unlock requires CasterConsensusVotes array.");
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
                         var (votesOk, votesReason) = BridgeCasterConsensus.VerifyBoundVotes(votes, poolBurnHash, "POOL_EXIT", totalAmountSats.Value, vfxDestAddr, poolGateHeight,
-                            eachCasterOnce: blockHeight == null && !blockVerify && !blockDownloads);
+                            eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || poolGateHeight >= Globals.BridgeVoteOncePerCasterHeight);
                         if (!votesOk)
                             return (txResult, $"Caster consensus votes rejected for pool unlock: {votesReason}");
 
@@ -4376,7 +4376,7 @@ namespace VerifiedXCore.Services
                             return (txResult, "VBTCb exit to BTC requires CasterConsensusVotes array.");
                         var votes = votesTok.ToObject<List<CasterConsensusVote>>();
                         var (votesOk, votesReason) = BridgeCasterConsensus.VerifyBoundVotes(votes, exitBurnHash, "BTC_EXIT", exitTotalSats, btcDestination, exitGateHeight,
-                            eachCasterOnce: blockHeight == null && !blockVerify && !blockDownloads);
+                            eachCasterOnce: (blockHeight == null && !blockVerify && !blockDownloads) || exitGateHeight >= Globals.BridgeVoteOncePerCasterHeight);
                         if (!votesOk)
                             return (txResult, $"Caster consensus votes rejected for exit to BTC: {votesReason}");
 
