@@ -678,23 +678,36 @@ namespace VerifiedXCore.Utilities
             ClearProofGenerationCache();
         }
 
-        /// <summary>The exclusions kept on disk, read once after a start.</summary>
+        private static readonly object RefusedBlockProducersLoadLock = new();
+
+        /// <summary>
+        /// The exclusions kept on disk, read once after a start. A caller that arrives while they are being read waits
+        /// for them, so no eligibility answer is given from a half-read set.
+        /// </summary>
         private static void LoadRefusedBlockProducers()
         {
-            if (Interlocked.CompareExchange(ref _refusedBlockProducersLoaded, 1, 0) != 0) return;
-            try
+            if (Volatile.Read(ref _refusedBlockProducersLoaded) == 1) return;
+            lock (RefusedBlockProducersLoadLock)
             {
-                foreach (var row in DbContext.DB_Config.GetCollection<RefusedBlockProducerRow>(RefusedBlockProducersCollection).FindAll())
-                    _refusedBlockProducers.TryAdd(row.Address, row.Height);
+                if (_refusedBlockProducersLoaded == 1) return;
+                try
+                {
+                    foreach (var row in DbContext.DB_Config.GetCollection<RefusedBlockProducerRow>(RefusedBlockProducersCollection).FindAll())
+                        _refusedBlockProducers.TryAdd(row.Address, row.Height);
+                    Volatile.Write(ref _refusedBlockProducersLoaded, 1); // only once they are all in
+                }
+                catch (Exception) { } // read again on the next call
             }
-            catch (Exception) { Interlocked.Exchange(ref _refusedBlockProducersLoaded, 0); }
         }
 
         /// <summary>Test hook: forget the in-memory exclusions, as a restart does.</summary>
         internal static void ForgetRefusedBlockProducersInMemory()
         {
-            _refusedBlockProducers.Clear();
-            Interlocked.Exchange(ref _refusedBlockProducersLoaded, 0);
+            lock (RefusedBlockProducersLoadLock)
+            {
+                _refusedBlockProducers.Clear();
+                Volatile.Write(ref _refusedBlockProducersLoaded, 0);
+            }
         }
 
         internal static bool ProducedARefusedBlockAt(string? address, long height)

@@ -1255,6 +1255,10 @@ namespace VerifiedXCore.Tests
             ProofUtility.ForgetRefusedBlockProducersInMemory();
             Assert.Equal("refused-block-at-height", ProofUtility.ProducerIneligibility(producer.Address, block.Height));
             Assert.NotEqual("refused-block-at-height", ProofUtility.ProducerIneligibility(producer.Address, block.Height + 1));
+            // ... also for callers that arrive together while it is read back: each waits for the read.
+            ProofUtility.ForgetRefusedBlockProducersInMemory();
+            var together = await Task.WhenAll(Enumerable.Range(0, 32).Select(_ => Task.Run(() => ProofUtility.ProducerIneligibility(producer.Address, block.Height))));
+            Assert.All(together, why => Assert.Equal("refused-block-at-height", why));
         }
 
         [Fact]
