@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Security;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Hosting;
 using VerifiedXCore;
 using VerifiedXCore.Data;
 using VerifiedXCore.Extensions;
@@ -142,13 +143,14 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
-        /// Anyone can post a record to a node, and its signatures are checked while the lock every read of the committee
-        /// needs is held. A record listing one member's address thousands of times, each with a junk signature, cost a
-        /// verify per copy. Each signer's signature is now verified once, so a record costs at most one verify per member
-        /// of the previous set; an honest record is judged as before.
+        /// Anyone can post a record to a node, and its signatures were checked while the lock every read of the committee
+        /// needs is held: a record listing one member's address thousands of times, each with a junk signature, cost a
+        /// verify per copy. An entry repeated, or a signer already counted, is not verified again; a signer still counts
+        /// when any of its entries is valid, as before. And the route anyone can post to refuses a record that names a
+        /// signer twice, which no proposer makes, before it is judged.
         /// </summary>
         [Fact]
-        public void ARecordRepeatingOneSigner_CostsOneVerifyForIt()
+        public async Task ARecordRepeatingOneSigner_IsNotVerifiedPerCopy_AndAnyValidEntryStillCounts()
         {
             var flood = PromoteD(Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"));
             var junk = SignatureOf(_a, _head).Signature;                                      // a real signature, over another record
@@ -160,12 +162,21 @@ namespace VerifiedXCore.Tests
             Assert.Contains("signatures 0/2", why);
             Assert.True(timer.ElapsedMilliseconds < 1_000, $"refusing it took {timer.ElapsedMilliseconds} ms");
 
-            // An honest record behind a member's junk copies: the two valid signatures still carry it.
-            var honest = PromoteD(Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"));
-            honest.Signatures.AddRange(Enumerable.Range(0, 50).Select(_ => new RecordSignature { SignerAddress = _c.Address, Signature = junk }));
-            honest.Signatures.Add(SignatureOf(_a, honest));
-            honest.Signatures.Add(SignatureOf(_b, honest));
-            Assert.True(CasterMembershipStore.ValidateSuccessor(_head, honest, out why), why);
+            // A signer's bad entry ahead of its valid one: it counts, as it always did (the signatures are not in the hash,
+            // so a node on the previous build may hold this very record).
+            var mixed = PromoteD(Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"));
+            mixed.Signatures.Add(new RecordSignature { SignerAddress = _a.Address, Signature = junk });
+            mixed.Signatures.Add(SignatureOf(_a, mixed));
+            mixed.Signatures.Add(SignatureOf(_b, mixed));
+            Assert.True(CasterMembershipStore.ValidateSuccessor(_head, mixed, out why), why);
+
+            // Posted to the node by anyone: a record naming a signer twice is refused before it is judged.
+            using var server = new Microsoft.AspNetCore.TestHost.TestServer(new Microsoft.AspNetCore.Hosting.WebHostBuilder().UseStartup<VerifiedXCore.StartupP2PCaster>());
+            var response = await server.CreateClient().PostAsync("/valapi/validator/AnnounceMembershipRecord",
+                new System.Net.Http.StringContent(Newtonsoft.Json.JsonConvert.SerializeObject(flood), System.Text.Encoding.UTF8, "application/json"));
+            Assert.Equal(System.Net.HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Contains("twice", await response.Content.ReadAsStringAsync());
+            Assert.Null(CasterMembershipStore.AnnouncedRecordRefusal(PromoteD(Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"))));
         }
 
         /// <summary>

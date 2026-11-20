@@ -492,12 +492,12 @@ namespace VerifiedXCore.Services
 
                 var gPayload = CanonicalPayload(candidate);
                 var seedSigners = new HashSet<string>(StringComparer.Ordinal);
-                var triedSeeds = new HashSet<string>(StringComparer.Ordinal); // each signer verified once: a record may repeat one
+                var triedSeeds = new HashSet<(string, string)>(); // an entry repeated, or a signer already counted, changes nothing: not verified again
                 foreach (var sig in candidate.Signatures ?? new List<RecordSignature>())
                 {
                     if (string.IsNullOrEmpty(sig.SignerAddress) || string.IsNullOrEmpty(sig.Signature)) continue;
                     if (!Globals.BootstrapCasterAddresses.Contains(sig.SignerAddress)) continue;
-                    if (!triedSeeds.Add(sig.SignerAddress)) continue;
+                    if (seedSigners.Contains(sig.SignerAddress) || !triedSeeds.Add((sig.SignerAddress, sig.Signature))) continue;
                     if (!SignatureService.VerifySignature(sig.SignerAddress, gPayload, sig.Signature)) continue;
                     seedSigners.Add(sig.SignerAddress);
                 }
@@ -541,12 +541,12 @@ namespace VerifiedXCore.Services
             var need = prevSet.Count / 2 + 1;
             var payload = CanonicalPayload(candidate);
             var validSigners = new HashSet<string>(StringComparer.Ordinal);
-            var triedSigners = new HashSet<string>(StringComparer.Ordinal); // each signer verified once: a record may repeat one
+            var triedSigners = new HashSet<(string, string)>(); // an entry repeated, or a signer already counted, changes nothing: not verified again
             foreach (var sig in candidate.Signatures ?? new List<RecordSignature>())
             {
                 if (string.IsNullOrEmpty(sig.SignerAddress) || string.IsNullOrEmpty(sig.Signature)) continue;
                 if (!prevSet.Contains(sig.SignerAddress)) continue;
-                if (!triedSigners.Add(sig.SignerAddress)) continue;
+                if (validSigners.Contains(sig.SignerAddress) || !triedSigners.Add((sig.SignerAddress, sig.Signature))) continue;
                 if (!SignatureService.VerifySignature(sig.SignerAddress, payload, sig.Signature)) continue;
                 validSigners.Add(sig.SignerAddress);
             }
@@ -554,6 +554,21 @@ namespace VerifiedXCore.Services
             { reason = $"signatures {validSigners.Count}/{need} from previous set"; return false; }
 
             return true;
+        }
+
+        /// <summary>
+        /// Why a record posted to this node by anyone (AnnounceMembershipRecord) is refused before it is judged: one that
+        /// names a signer twice. No proposer, collector or seed puts a signer on a record twice, and a record listing one
+        /// member thousands of times was judged under the lock every read of the committee waits for. Records a node pulls
+        /// in catch-up or takes from a block are judged as before.
+        /// </summary>
+        public static string? AnnouncedRecordRefusal(CasterMembershipRecord? record)
+        {
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var sig in record?.Signatures ?? new List<RecordSignature>())
+                if (!seen.Add(sig?.SignerAddress ?? ""))
+                    return $"the record names signer {sig?.SignerAddress} twice";
+            return null;
         }
 
         /// <summary>
@@ -622,12 +637,12 @@ namespace VerifiedXCore.Services
 
             var payload = CanonicalPayload(candidate);
             var seedSigners = new HashSet<string>(StringComparer.Ordinal);
-            var triedSigners = new HashSet<string>(StringComparer.Ordinal); // each signer verified once: a record may repeat one
+            var triedSigners = new HashSet<(string, string)>(); // an entry repeated, or a signer already counted, changes nothing: not verified again
             foreach (var sig in candidate.Signatures ?? new List<RecordSignature>())
             {
                 if (string.IsNullOrEmpty(sig.SignerAddress) || string.IsNullOrEmpty(sig.Signature)) continue;
                 if (!Globals.BootstrapCasterAddresses.Contains(sig.SignerAddress)) continue;
-                if (!triedSigners.Add(sig.SignerAddress)) continue;
+                if (seedSigners.Contains(sig.SignerAddress) || !triedSigners.Add((sig.SignerAddress, sig.Signature))) continue;
                 if (!SignatureService.VerifySignature(sig.SignerAddress, payload, sig.Signature)) continue;
                 seedSigners.Add(sig.SignerAddress);
             }
