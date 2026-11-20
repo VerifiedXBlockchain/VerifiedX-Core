@@ -89,7 +89,10 @@ namespace VerifiedXCore.Bitcoin.Models
             catch { }
             try
             {
-                if (VBTCBridgeLockState.GetCollection().FindAll().Any(x => !string.IsNullOrEmpty(x.ExitBurnTxHash) && Overlaps(Normalize(x.ExitBurnTxHash), n)))
+                // Only the locks an exit drew (a non-empty ExitBurnTxHash, read from its index): a lock never drawn, a holder's
+                // one-satoshi ones included, cannot match, and reading them all made every exit's check grow with the bridge.
+                if (VBTCBridgeLockState.GetCollection().Find(LiteDB.Query.GT(nameof(VBTCBridgeLockState.ExitBurnTxHash), ""))
+                        .Any(x => !string.IsNullOrEmpty(x.ExitBurnTxHash) && Overlaps(Normalize(x.ExitBurnTxHash), n)))
                     return true;
             }
             catch { }
