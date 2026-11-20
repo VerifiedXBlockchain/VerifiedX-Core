@@ -99,6 +99,23 @@ namespace VerifiedXCore.Tests
             Assert.False(BurnExitConsensusService.VotesCarry(votes, new System.Collections.Generic.HashSet<string> { "xA", "xB", "xD" }, 3));
         }
 
+        /// <summary>
+        /// The next exit waits for the one before to be mined only when that one sent something: an exit that failed (a
+        /// small burn with no eligible lock) or that the chain already held drew no lock, and holding the turn for it
+        /// brought back the one-at-a-time delay.
+        /// </summary>
+        [Theory]
+        [InlineData(BurnExitConsensusService.BurnExitStatus.VfxTxCreated, true)]
+        [InlineData(BurnExitConsensusService.BurnExitStatus.FrostInProgress, true)]
+        [InlineData(BurnExitConsensusService.BurnExitStatus.Failed, false)]
+        [InlineData(BurnExitConsensusService.BurnExitStatus.Complete, false)]
+        [InlineData(BurnExitConsensusService.BurnExitStatus.ConsensusReached, false)]
+        [InlineData(BurnExitConsensusService.BurnExitStatus.Pending, false)]
+        public void TheNextExitWaits_OnlyAfterOneWasSent(BurnExitConsensusService.BurnExitStatus after, bool waits)
+        {
+            Assert.Equal(waits, BurnExitConsensusService.SentAnExit(after));
+        }
+
         private static void InterlockedMax(ref int target, int value)
         {
             int current;

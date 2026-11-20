@@ -311,6 +311,9 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>Blocks an exit's turn lasts after it is sent, so the next plan reads the locks it drew.</summary>
         internal const int BlocksBetweenExits = 2;
 
+        /// <summary>Whether an exit left a transaction to be mined: sent as a VFX transaction, or on to its FROST signing.</summary>
+        internal static bool SentAnExit(BurnExitStatus status) => status is BurnExitStatus.VfxTxCreated or BurnExitStatus.FrostInProgress;
+
         /// <summary>A round short of the threshold: the burn waits (<see cref="RetryDelaySeconds"/>) before it is tried again.</summary>
         internal static long NoteShortRound(ProcessedBurnRecord record, long now)
         {
@@ -585,7 +588,9 @@ namespace VerifiedXCore.Bitcoin.Services
                         await ExecuteExitTransaction(record);
                         // The next exit's plan reads the locks after this one is on chain, as it did when rounds ran one by
                         // one: planned at once, both drew on the same locks and one waited out RetryUnminedPoolUnlocks.
-                        await WaitForBlocks(tipBefore, BlocksBetweenExits, TimeSpan.FromSeconds(30));
+                        // Only after an exit was sent: one that failed or that the chain already held drew no lock.
+                        if (SentAnExit(record.Status))
+                            await WaitForBlocks(tipBefore, BlocksBetweenExits, TimeSpan.FromSeconds(30));
                     }
                 }
                 finally { ExecutionGate.Release(); }
