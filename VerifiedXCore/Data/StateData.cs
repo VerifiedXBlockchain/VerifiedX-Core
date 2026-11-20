@@ -648,10 +648,10 @@ namespace VerifiedXCore.Data
                                     switch (function)
                                     {
                                         case "Sale_Start()":
-                                            StartSaleSmartContract(tx);
+                                            StartSaleSmartContract(tx, block);
                                             break;
                                         case "M_Sale_Start()":
-                                            StartSaleSmartContract(tx);
+                                            StartSaleSmartContract(tx, block);
                                             break;
                                         case "Sale_Complete()":
                                             await CompleteSaleSmartContract(tx, block); // NEW-12: awaited (ran concurrently with the rest of the block)
@@ -660,7 +660,7 @@ namespace VerifiedXCore.Data
                                             await CompleteSaleSmartContract(tx, block); // NEW-12: awaited (ran concurrently with the rest of the block)
                                             break;
                                         case "Sale_Cancel()":
-                                            CancelSaleSmartContract(tx);
+                                            CancelSaleSmartContract(tx, block);
                                             break;
                                         default:
                                             break;
@@ -3070,7 +3070,7 @@ namespace VerifiedXCore.Data
 
 
 
-        private static void StartSaleSmartContract(Transaction tx)
+        private static void StartSaleSmartContract(Transaction tx, Block block)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
             var txData = tx.Data;
@@ -3092,6 +3092,9 @@ namespace VerifiedXCore.Data
                 scStateTreiRec.Nonce += 1;
                 scStateTreiRec.PurchaseAmount = amountSoldFor;
                 scStateTreiRec.Locators = !string.IsNullOrWhiteSpace(locator) ? locator : scStateTreiRec.Locators;
+                // The listing's purchase key: its completion must carry it, and its cancellation retires it.
+                if (block.Height >= Globals.SaleListingKeyHeight)
+                    scStateTreiRec.SaleKey = jobj["KeySign"]?.ToObject<string?>();
 
                 SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
             }
@@ -3127,6 +3130,7 @@ namespace VerifiedXCore.Data
                 scStateTreiRec.NextOwner = null;
                 scStateTreiRec.IsLocked = false;
                 scStateTreiRec.PurchaseAmount = null;
+                scStateTreiRec.SaleKey = null;
                 CarryOwnerPosition(scStateTreiRec, tx.FromAddress);
                 scStateTreiRec.OwnerAddress = tx.FromAddress;
                 if (scStateTreiRec.PurchaseKeys != null)
@@ -3303,7 +3307,7 @@ namespace VerifiedXCore.Data
             }
         }
 
-        private static void CancelSaleSmartContract(Transaction tx)
+        private static void CancelSaleSmartContract(Transaction tx, Block block)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
             var txData = tx.Data;
@@ -3320,6 +3324,15 @@ namespace VerifiedXCore.Data
                 scStateTreiRec.IsLocked = false;
                 scStateTreiRec.Nonce += 1;
                 scStateTreiRec.PurchaseAmount = null;
+                // A cancelled listing's key is retired like a used one: the same key (and the bid signed over it)
+                // cannot start another sale, and a completion written for this listing cannot settle a later one.
+                if (block.Height >= Globals.SaleListingKeyHeight && scStateTreiRec.SaleKey != null)
+                {
+                    scStateTreiRec.PurchaseKeys ??= new List<string>();
+                    if (!scStateTreiRec.PurchaseKeys.Contains(scStateTreiRec.SaleKey))
+                        scStateTreiRec.PurchaseKeys.Add(scStateTreiRec.SaleKey);
+                }
+                scStateTreiRec.SaleKey = null;
 
                 SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
             }

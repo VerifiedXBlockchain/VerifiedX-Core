@@ -332,6 +332,19 @@ namespace VerifiedXCore
         public static long SaleCompleteContractRulesHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// From this height a sale is tied to its listing. Sale_Start records its purchase key on the contract's state
+        /// (SmartContractStateTrei.SaleKey); a completion must carry that key, and Sale_Cancel retires it with the keys
+        /// already used, so neither the cancelled listing's key nor a completion written for it settles a later
+        /// listing. A sale started below the height has no recorded key and completes or cancels as before.
+        /// A node without the rule accepts every block a node with it does, but its state lacks the keys the rule
+        /// records, so every node upgrades before the height. Unset (long.MaxValue) on both networks until the
+        /// release that activates it.
+        /// </summary>
+        public static long SaleListingKeyHeight = long.MaxValue;
+        /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
+        public const long SaleListingKeyTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// Item 3: a reserve Recover() must carry RecoveryAddress, RecoverySigScript and SignatureTime (every recovery
         /// check sat under "if both strings are non-empty", and a missing SignatureTime threw into an empty catch, so the
         /// vault key alone swept a reserve at once to any address named in the transaction), a malformed RESERVE
