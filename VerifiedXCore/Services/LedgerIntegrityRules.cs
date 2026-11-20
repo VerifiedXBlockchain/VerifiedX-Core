@@ -1262,6 +1262,23 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
+        /// Gives a transaction's Amount and Fee the spelling a block carries them in. A transaction's hash covers how
+        /// the two are written, and Newtonsoft JSON, which carries blocks between nodes, writes a decimal that has no
+        /// decimal places with one ("1" as "1.0", "0" as "0.0") and every other decimal as it is. The spelling it gives
+        /// reads back the same from every serializer and store the node uses, so a transaction judged in it at
+        /// admission hashes the same wherever a block takes it. The value does not change.
+        /// </summary>
+        internal static void SpellAsABlockCarriesIt(Transaction tx)
+        {
+            tx.Amount = AsWrittenInABlock(tx.Amount);
+            tx.Fee = AsWrittenInABlock(tx.Fee);
+        }
+
+        /// <summary>A decimal as it reads after Newtonsoft JSON has written and read it.</summary>
+        internal static decimal AsWrittenInABlock(decimal value) =>
+            Newtonsoft.Json.JsonConvert.DeserializeObject<decimal>(Newtonsoft.Json.JsonConvert.SerializeObject(value));
+
+        /// <summary>
         /// From Globals.FeeBelowOneVfxHeight a transaction's fee is below 1 VFX. Amount and Fee are joined in the hash with
         /// no separator, so trailing amount digits can move into the fee's whole part ("1.2345" + "0.00000602" hashes like
         /// "1.2" + "3450.00000602"): same hash and signature, and the sender's balance burned as fee. Every such variant

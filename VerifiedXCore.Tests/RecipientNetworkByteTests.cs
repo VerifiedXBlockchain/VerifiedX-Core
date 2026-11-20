@@ -71,7 +71,7 @@ namespace VerifiedXCore.Tests
 
         private Transaction SendTo(string to)
         {
-            var tx = new Transaction { Timestamp = TimeUtil.GetTime(), FromAddress = _sender.Address, ToAddress = to, Amount = 1M, Fee = 0, Nonce = 0, TransactionType = TransactionType.TX };
+            var tx = new Transaction { Timestamp = TimeUtil.GetTime(), FromAddress = _sender.Address, ToAddress = to, Amount = 1.0M, Fee = 0, Nonce = 0, TransactionType = TransactionType.TX };
             tx.Fee = FeeCalcService.CalculateTXFee(tx);
             tx.Build();
             tx.Signature = SignatureService.CreateSignature(tx.Hash, _sender.Key, _sender.Pub);

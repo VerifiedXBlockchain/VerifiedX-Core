@@ -67,7 +67,7 @@ namespace VerifiedXCore.Tests
         {
             var tx = new Transaction
             {
-                FromAddress = _validator.Address, ToAddress = _validator.Address, Amount = 0M, Fee = 0M, Nonce = 0,
+                FromAddress = _validator.Address, ToAddress = _validator.Address, Amount = 0.0M, Fee = 0.0M, Nonce = 0,
                 Timestamp = TimeUtil.GetTime(), TransactionType = type,
                 Data = includeKey
                     ? JsonConvert.SerializeObject(new { ValidatorAddress = _validator.Address, IPAddress = "203.0.113.10", FrostPublicKey = _validator.PublicKey, BaseAddress = baseAddress, IsS3C = false })
