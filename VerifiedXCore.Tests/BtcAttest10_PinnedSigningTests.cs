@@ -277,6 +277,28 @@ namespace VerifiedXCore.Tests
             padded.AllInputSighashes[1] += " ";
             (ok, why) = FrostSigningAuthorization.Authorize(padded);
             Assert.True(ok, why);
+            Assert.EndsWith(" ", padded.AllInputSighashes[1]);                     // the start is left as its leader signed it
+
+            // Signed in full with its list written so (one in capitals, one padded), a start still passes the signature
+            // check at the route: the list it was signed over is the one checked.
+            var leader = Signers[2];
+            var spelled = Announce(vault.Uid, vault.Script, request.Hash, pinned, leader.Address);
+            spelled.AllInputSighashes[0] = spelled.AllInputSighashes[0].ToUpperInvariant();
+            spelled.MessageHash = spelled.AllInputSighashes[0];
+            spelled.AllInputSighashes[1] += " ";
+            spelled.SignerAddresses = Signers.Select(s => s.Address).ToList();
+            spelled.RequiredThreshold = 51;
+            spelled.LeaderSignature = VerifiedXCore.Services.SignatureService.CreateSignature($"{spelled.SessionId}.{leader.Address}.{spelled.Timestamp}", leader.Key, leader.Pub);
+            spelled.ContentSignature = VerifiedXCore.Services.SignatureService.CreateSignature(FrostDkgLeaderAuth.SigningStartMessage(spelled), leader.Key, leader.Pub);
+            using (var server = new TestServer(new WebHostBuilder().UseStartup<FrostStartup>()))
+            {
+                var r = await server.CreateClient().PostAsync("/frost/sign/start", new System.Net.Http.StringContent(JsonConvert.SerializeObject(spelled), System.Text.Encoding.UTF8, "application/json"));
+                var answer = await r.Content.ReadAsStringAsync();
+                Assert.DoesNotContain("signed in full", answer);
+                Assert.DoesNotContain("unauthorized", answer, StringComparison.OrdinalIgnoreCase);
+            }
+            FrostSessionStorage.SigningSessions.TryRemove(spelled.SessionId, out _);
+            VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.ClearContractPin(vault.Uid, "test");
             var scope = FrostSigningAuthorization.SigningScope(vault.Uid, padded.BtcTxId);
             Assert.False(VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.TryBeginSigning(vault.Uid, request.Hash, padded.SessionId, padded.InputIndex,
                 padded.MessageHash, padded.AllInputSighashes, padded.TxInputOutpoints, transactionScope: scope, leaderAddress: padded.LeaderAddress, btcTxId: padded.BtcTxId).Blocked);

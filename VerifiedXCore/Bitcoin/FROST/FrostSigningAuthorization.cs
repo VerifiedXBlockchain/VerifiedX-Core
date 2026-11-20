@@ -79,8 +79,6 @@ namespace VerifiedXCore.Bitcoin.FROST
                     var sighash = Convert.ToHexString(tx.GetSignatureHashTaproot(precomputed, execData).ToBytes()).ToLowerInvariant();
                     if (!string.Equals(sighash, request.AllInputSighashes[i]?.Trim(), StringComparison.OrdinalIgnoreCase))
                         return (false, $"AllInputSighashes[{i}] does not match the transaction");
-                    // Kept as computed: the signing record holds every later start to this list.
-                    request.AllInputSighashes[i] = sighash;
                 }
 
                 if (!string.Equals(request.AllInputSighashes[request.InputIndex], request.MessageHash.Trim(), StringComparison.OrdinalIgnoreCase))
