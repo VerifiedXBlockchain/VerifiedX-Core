@@ -79,6 +79,31 @@ namespace VerifiedXCore.Tests
             Assert.Contains("too large", blockReason);
         }
 
+        [Theory]
+        [InlineData(TransactionType.NFT_TX)]
+        [InlineData(TransactionType.TKNZ_TX)]
+        public async Task OversizedContractTransfer_IsRefusedForItsSize_BeforeItsDataIsRead(TransactionType type)
+        {
+            // Past the largest cap any transaction has: refused without choosing this one's cap, which would read the data.
+            var body = new string('a', Globals.MaxVbtcVaultTxSizeBytes + 1024);
+            var tx = new Transaction
+            {
+                Timestamp = TimeUtil.GetTime(), FromAddress = "xNobodyHoldsThisAddress0000000000000", ToAddress = "xNobodyHoldsThisAddress0000000000000",
+                Amount = 0M, Fee = 0M, Nonce = 0, TransactionType = type,
+                Data = JsonConvert.SerializeObject(new[] { new { Function = "Transfer()", ContractUID = "0123456789abcdef0123456789abcdef:1790600000", Data = body } }),
+            };
+            tx.Build();
+            tx.Signature = "unsigned";
+
+            var (admitted, admissionReason) = await TransactionValidatorService.VerifyTX(tx);
+            Assert.False(admitted);
+            Assert.Contains($"Max size allowed is {Globals.MaxVbtcVaultTxSizeBytes / 1024} kb", admissionReason);
+
+            var (inBlock, blockReason) = await TransactionValidatorService.VerifyTX(tx, false, true, false, null, false, 5001);
+            Assert.False(inBlock);
+            Assert.Contains("too large", blockReason);
+        }
+
         [Fact]
         public async Task BridgeTransactionWithinTheCap_IsJudgedByTheRulesThatFollow()
         {

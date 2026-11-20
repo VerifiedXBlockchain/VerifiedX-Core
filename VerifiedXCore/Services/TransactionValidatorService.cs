@@ -265,9 +265,14 @@ namespace VerifiedXCore.Services
             if (!PrivateTransactionTypes.IsPrivateTransaction(txRequest.TransactionType)
                 && !VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(txRequest.TransactionType))
             {
-                var earlyMaxTxSize = LedgerIntegrityRules.MaxTxSizeBytes(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
                 var atAdmission = blockHeight == null && !blockVerify && !blockDownloads;
-                if (!VerifyTXSize(atAdmission ? AsCarriedInABlock(txRequest) : txRequest, earlyMaxTxSize))
+                var measured = atAdmission ? AsCarriedInABlock(txRequest) : txRequest;
+                // The largest cap any transaction has, first: choosing a transaction's own cap can read its data.
+                var largestTxSize = Math.Max(LedgerIntegrityRules.DefaultMaxTxSizeBytes, Globals.MaxVbtcVaultTxSizeBytes);
+                if (!VerifyTXSize(measured, largestTxSize))
+                    return (false, $"This transactions is too large. Max size allowed is {largestTxSize / 1024} kb.");
+                var earlyMaxTxSize = LedgerIntegrityRules.MaxTxSizeBytes(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+                if (!VerifyTXSize(measured, earlyMaxTxSize))
                     return (false, $"This transactions is too large. Max size allowed is {earlyMaxTxSize / 1024} kb.");
             }
 
