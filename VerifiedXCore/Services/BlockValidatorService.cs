@@ -578,6 +578,26 @@ namespace VerifiedXCore.Services
             }
         }
 
+        /// <summary>Blocks this node refused because a transaction in them failed validation: hash → height. Recent heights only.</summary>
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _refusedForATransaction = new(StringComparer.Ordinal);
+        private const long RefusedForATransactionKeptBlocks = 100;
+
+        private static void NoteRefusedForATransaction(long height, string? hash)
+        {
+            if (string.IsNullOrEmpty(hash)) return;
+            _refusedForATransaction[hash] = height;
+            foreach (var stale in _refusedForATransaction.Where(kv => kv.Value < height - RefusedForATransactionKeptBlocks).Select(kv => kv.Key).ToList())
+                _refusedForATransaction.TryRemove(stale, out _);
+        }
+
+        /// <summary>
+        /// Whether this node refused the block at <paramref name="height"/> with <paramref name="hash"/> for a transaction in
+        /// it: a fault of the block's contents, which every node holding the same tip finds the same way. Other blocks
+        /// checked meanwhile do not replace the answer.
+        /// </summary>
+        public static bool WasRefusedForATransaction(long height, string? hash) =>
+            !string.IsNullOrEmpty(hash) && _refusedForATransaction.TryGetValue(hash, out var at) && at == height;
+
         public static async Task<bool> ValidateBlock(Block block, bool ignoreAdjSignatures, bool blockDownloads = false, bool validateOnly = false, bool updateCLI = false, bool skipCasterCheck = false, string? source = null)
         {
             // ═══════════════════════════════════════════════════════════════
@@ -1695,6 +1715,7 @@ namespace VerifiedXCore.Services
                                 }
                             }
 
+                            NoteRefusedForATransaction(block.Height, block.Hash);
                             DbContext.Rollback("BlockValidatorService.ValidateBlock()-13", $"Bad TX: {rejectBlockTxHash} | Reason: {rejectBlockReason}");
                             return result;//block rejected due to bad transaction(s)
                         }
