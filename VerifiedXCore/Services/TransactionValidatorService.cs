@@ -279,6 +279,24 @@ namespace VerifiedXCore.Services
             if (LedgerIntegrityRules.IsHonoredWhitelistEntry(txRequest, blockHeight))
                 return (true, "");
 
+            // The size cap, before any rule reads the transaction's data: the rules below parse it and look up what it
+            // names, so their work is bounded by the cap. The same check as the one further down, which every
+            // transaction that gets there must pass, so only the order of refusals changes. Private and attestation
+            // transactions have their own caps in their own validators.
+            if (!PrivateTransactionTypes.IsPrivateTransaction(txRequest.TransactionType)
+                && !VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(txRequest.TransactionType))
+            {
+                var atAdmission = blockHeight == null && !blockVerify && !blockDownloads;
+                var measured = atAdmission ? AsCarriedInABlock(txRequest) : txRequest;
+                // The largest cap any transaction has, first: choosing a transaction's own cap can read its data.
+                var largestTxSize = Math.Max(LedgerIntegrityRules.DefaultMaxTxSizeBytes, Globals.MaxVbtcVaultTxSizeBytes);
+                if (!VerifyTXSize(measured, largestTxSize))
+                    return (false, $"This transactions is too large. Max size allowed is {largestTxSize / 1024} kb.");
+                var earlyMaxTxSize = LedgerIntegrityRules.MaxTxSizeBytes(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1));
+                if (!VerifyTXSize(measured, earlyMaxTxSize))
+                    return (false, $"This transactions is too large. Max size allowed is {earlyMaxTxSize / 1024} kb.");
+            }
+
             // Data with a JSON comment reads as no call to the rules below and as a call to the code that runs it, so it is
             // refused before any rule or contract code reads it: at admission always, in a block from JsonCommentDataRuleHeight.
             if ((blockHeight == null || blockHeight >= Globals.JsonCommentDataRuleHeight) && LedgerIntegrityRules.DataHasJsonComment(txRequest.Data))
