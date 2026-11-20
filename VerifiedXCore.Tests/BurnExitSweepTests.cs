@@ -119,6 +119,26 @@ namespace VerifiedXCore.Tests
             Assert.Equal(waits, BurnExitConsensusService.SentAnExit(record, tipBefore: 100));
         }
 
+        /// <summary>
+        /// After an exit is sent, the next one waits until it is on chain (its burn recorded as used, which is when its locks
+        /// are drawn), not a fixed number of blocks: no sooner, and at most the cap, after which the unmined retry takes it.
+        /// </summary>
+        [Fact]
+        public async Task AnExitsTurn_LastsUntilItIsOnChain_OrTheCap()
+        {
+            var minedAt = DateTime.UtcNow + TimeSpan.FromMilliseconds(400);
+            var timer = Stopwatch.StartNew();
+            Assert.True(await BurnExitConsensusService.WaitUntilOnChain(() => DateTime.UtcNow >= minedAt, TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(50)));
+            timer.Stop();
+            Assert.InRange(timer.ElapsedMilliseconds, 350, 3_000);                     // until it was mined, not the cap
+
+            timer.Restart();
+            Assert.False(await BurnExitConsensusService.WaitUntilOnChain(() => false, TimeSpan.FromMilliseconds(300), TimeSpan.FromMilliseconds(50)));
+            Assert.InRange(timer.ElapsedMilliseconds, 250, 3_000);                     // never mined: the cap
+            Assert.True(await BurnExitConsensusService.WaitUntilOnChain(() => true, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(1))); // already on chain: no wait
+            Assert.True(BurnExitConsensusService.MostAnExitHoldsTheTurn <= TimeSpan.FromSeconds(60));
+        }
+
         private static void InterlockedMax(ref int target, int value)
         {
             int current;

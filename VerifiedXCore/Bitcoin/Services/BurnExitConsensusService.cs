@@ -308,8 +308,11 @@ namespace VerifiedXCore.Bitcoin.Services
         /// drawn from the same locks at once would conflict.</summary>
         private static readonly SemaphoreSlim ExecutionGate = new(1, 1);
 
-        /// <summary>Blocks an exit's turn lasts after it is sent, so the next plan reads the locks it drew.</summary>
-        internal const int BlocksBetweenExits = 2;
+        /// <summary>
+        /// How long an exit's turn lasts at most after it is sent, waiting for it to be on chain (its burn recorded as used,
+        /// which is when its locks are drawn): about five blocks. An exit not mined by then is left to RetryUnminedPoolUnlocks.
+        /// </summary>
+        internal static readonly TimeSpan MostAnExitHoldsTheTurn = TimeSpan.FromSeconds(60);
 
         /// <summary>
         /// Whether the exit just run left a transaction to be mined: a Bitcoin exit sent as a VFX transaction or on to its
@@ -337,12 +340,16 @@ namespace VerifiedXCore.Bitcoin.Services
         internal static bool VotesCarry(IEnumerable<CasterConsensusVote>? votes, HashSet<string> committee, int required) =>
             (votes ?? Enumerable.Empty<CasterConsensusVote>()).Select(v => v.CasterAddress).Where(committee.Contains).Distinct(StringComparer.Ordinal).Count() >= required;
 
-        /// <summary>Until the tip is <paramref name="blocks"/> past <paramref name="from"/>, or <paramref name="atMost"/> passed.</summary>
-        private static async Task WaitForBlocks(long from, int blocks, TimeSpan atMost)
+        /// <summary>Until <paramref name="onChain"/> holds, checked every <paramref name="poll"/>, or <paramref name="atMost"/> passed; whether it held.</summary>
+        internal static async Task<bool> WaitUntilOnChain(Func<bool> onChain, TimeSpan atMost, TimeSpan poll)
         {
             var until = DateTime.UtcNow + atMost;
-            while ((Globals.LastBlock?.Height ?? 0) < from + blocks && DateTime.UtcNow < until)
-                await Task.Delay(1_000);
+            while (true)
+            {
+                try { if (onChain()) return true; } catch { }
+                if (DateTime.UtcNow >= until) return false;
+                await Task.Delay(poll);
+            }
         }
 
         /// <summary>
@@ -594,8 +601,9 @@ namespace VerifiedXCore.Bitcoin.Services
                         // The next exit's plan reads the locks after this one is on chain, as it did when rounds ran one by
                         // one: planned at once, both drew on the same locks and one waited out RetryUnminedPoolUnlocks.
                         // Only after an exit was sent: one that failed or that the chain already held drew no lock.
-                        if (SentAnExit(record, tipBefore))
-                            await WaitForBlocks(tipBefore, BlocksBetweenExits, TimeSpan.FromSeconds(30));
+                        if (SentAnExit(record, tipBefore)
+                            && !await WaitUntilOnChain(() => ChainHasTheBurn(record.BaseBurnTxHash), MostAnExitHoldsTheTurn, TimeSpan.FromSeconds(1)))
+                            LogUtility.Log($"[BurnExitConsensus] The exit for {baseBurnTxHash} was not on chain within {MostAnExitHoldsTheTurn.TotalSeconds}s; the next exit goes ahead.", "BurnExitConsensusService");
                     }
                 }
                 finally { ExecutionGate.Release(); }
