@@ -492,10 +492,12 @@ namespace VerifiedXCore.Services
 
                 var gPayload = CanonicalPayload(candidate);
                 var seedSigners = new HashSet<string>(StringComparer.Ordinal);
+                var triedSeeds = new HashSet<string>(StringComparer.Ordinal); // each signer verified once: a record may repeat one
                 foreach (var sig in candidate.Signatures ?? new List<RecordSignature>())
                 {
                     if (string.IsNullOrEmpty(sig.SignerAddress) || string.IsNullOrEmpty(sig.Signature)) continue;
                     if (!Globals.BootstrapCasterAddresses.Contains(sig.SignerAddress)) continue;
+                    if (!triedSeeds.Add(sig.SignerAddress)) continue;
                     if (!SignatureService.VerifySignature(sig.SignerAddress, gPayload, sig.Signature)) continue;
                     seedSigners.Add(sig.SignerAddress);
                 }
@@ -539,10 +541,12 @@ namespace VerifiedXCore.Services
             var need = prevSet.Count / 2 + 1;
             var payload = CanonicalPayload(candidate);
             var validSigners = new HashSet<string>(StringComparer.Ordinal);
+            var triedSigners = new HashSet<string>(StringComparer.Ordinal); // each signer verified once: a record may repeat one
             foreach (var sig in candidate.Signatures ?? new List<RecordSignature>())
             {
                 if (string.IsNullOrEmpty(sig.SignerAddress) || string.IsNullOrEmpty(sig.Signature)) continue;
                 if (!prevSet.Contains(sig.SignerAddress)) continue;
+                if (!triedSigners.Add(sig.SignerAddress)) continue;
                 if (!SignatureService.VerifySignature(sig.SignerAddress, payload, sig.Signature)) continue;
                 validSigners.Add(sig.SignerAddress);
             }
@@ -618,10 +622,12 @@ namespace VerifiedXCore.Services
 
             var payload = CanonicalPayload(candidate);
             var seedSigners = new HashSet<string>(StringComparer.Ordinal);
+            var triedSigners = new HashSet<string>(StringComparer.Ordinal); // each signer verified once: a record may repeat one
             foreach (var sig in candidate.Signatures ?? new List<RecordSignature>())
             {
                 if (string.IsNullOrEmpty(sig.SignerAddress) || string.IsNullOrEmpty(sig.Signature)) continue;
                 if (!Globals.BootstrapCasterAddresses.Contains(sig.SignerAddress)) continue;
+                if (!triedSigners.Add(sig.SignerAddress)) continue;
                 if (!SignatureService.VerifySignature(sig.SignerAddress, payload, sig.Signature)) continue;
                 seedSigners.Add(sig.SignerAddress);
             }
