@@ -755,7 +755,8 @@ namespace VerifiedXCore
         /// <summary>
         /// From this height a private transaction's proofs are judged under the PLONK library's current rules
         /// (<c>plonk_verify2</c>), the ones its provers follow; below it under the original rules (<c>plonk_verify</c>), as
-        /// they were judged when mined. Until the height this node admits no private transaction carrying a proof: its
+        /// they were judged when mined. The current rules also use the circuits whose hashes fix their capacity element
+        /// (keys compiled from the pinned params at load). Until the height this node admits no private transaction carrying a proof: its
         /// wallet's proofs pass only the current rules, which blocks below the height do not apply. Set to the tip at
         /// release. Testnet value in GlobalsNetworkHeights.
         /// </summary>
