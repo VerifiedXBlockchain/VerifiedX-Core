@@ -190,6 +190,55 @@ namespace VerifiedXCore.Bitcoin.Attestation
             return null;
         }
 
+        /// <summary>
+        /// Why an unlock from the bridge pool may not credit <paramref name="share"/> of watched vault
+        /// <paramref name="scUID"/> to <paramref name="destination"/>: it would leave the destination, not the vault's
+        /// owner, with less than <see cref="MinPositionBtc"/> there. An unlock's amount is what a burner burned on Base, so
+        /// it cannot be held to a transfer's rule: a one-satoshi burn to each of 100,000 new addresses filled the holder
+        /// limit. Such a burn is not paid from a watched vault (as a Bitcoin exit too small to pay is not). Used by
+        /// validation and by the casters' plan alike. Null otherwise, and before Globals.VaultMinimumPositionHeight.
+        /// </summary>
+        public static string? UnlockShareRefusal(string? scUID, string? destination, decimal share, long height)
+        {
+            if (height < Globals.VaultMinimumPositionHeight || share <= 0M || string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(destination)
+                || !BtcAttestBalance.IsAttestedVault(scUID))
+                return null;
+            var held = SameBlockDebitGuard.CommittedBalance(new SameBlockDebitGuard.DebitKey(SameBlockDebitGuard.LedgerKind.VbtcV2, scUID, destination));
+            if (held == null) return null; // the owner
+            return held.Value + share < MinPositionBtc
+                ? $"{SameBlockDebitGuard.MinimumPositionPrefix}: an unlock of {share} on vault {scUID} leaves {destination} with {held.Value + share}, less than the {MinPositionBtc} vBTC a holder keeps."
+                : null;
+        }
+
+        /// <summary>
+        /// <see cref="UnlockShareRefusal"/> for each watched vault a pool unlock draws on (its allocations on one vault
+        /// added up). Null for every other transaction.
+        /// </summary>
+        public static string? PoolUnlockPositionRefusal(Transaction tx, long height)
+        {
+            if (tx?.Data == null || tx.TransactionType != TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK || height < Globals.VaultMinimumPositionHeight) return null;
+            try
+            {
+                var data = JObject.Parse(tx.Data);
+                // Read as HolderLimitRefusal reads them, as validation and apply do.
+                var destination = data["VfxDestinationAddress"]?.ToObject<string?>();
+                var shares = new Dictionary<string, decimal>(StringComparer.Ordinal);
+                foreach (var allocation in data["Allocations"]?.ToObject<List<VerifiedXCore.Bitcoin.Models.PoolUnlockAllocation>>() ?? new())
+                {
+                    if (string.IsNullOrWhiteSpace(allocation?.LockId) || allocation.UnlockAmount <= 0M) continue;
+                    var uid = VBTCBridgeLockState.GetByLockId(allocation.LockId)?.SmartContractUID;
+                    if (string.IsNullOrEmpty(uid)) continue;
+                    shares[uid] = (shares.TryGetValue(uid, out var s) ? s : 0M) + allocation.UnlockAmount;
+                }
+                foreach (var (uid, share) in shares)
+                    if (UnlockShareRefusal(uid, destination, share, height) is { } refusal)
+                        return refusal;
+                return null;
+            }
+            catch (Exception ex) when (ex is Newtonsoft.Json.JsonException or ArgumentException or FormatException or InvalidCastException)
+            { return null; } // unreadable data is refused by the transaction's own rules
+        }
+
         /// <summary>The longest sale key a watched vault's sale carries (a wallet's is 10 letters).</summary>
         public const int MaxSaleKeyLength = 64;
 

@@ -137,7 +137,10 @@ namespace VerifiedXCore.Bitcoin.Services
         /// The allocation plan for an unlock back to VFX. From the enforcement height it leaves out the locks of frozen
         /// vaults: consensus refuses them, and vBTC handed out on a frozen vault could never be moved. It also leaves out
         /// a watched vault whose ledger is full and does not name the destination: consensus refuses that credit
-        /// (BtcVaultLedger.CreditRefusal, fourth review round 6).
+        /// (BtcVaultLedger.CreditRefusal, fourth review round 6). From Globals.VaultMinimumPositionHeight a watched vault
+        /// whose share would leave the destination less than the vault's smallest position is left out too, and the plan
+        /// made again without it (BtcVaultLedger.UnlockShareRefusal): consensus refuses that share. Null when no plan
+        /// is left: a burn too small to give its destination a position is not paid from a watched vault.
         /// </summary>
         public static List<PoolUnlockAllocation>? ComputeUnlockAllocationPlan(decimal amountBtc, long height, string? destination = null)
         {
@@ -147,7 +150,16 @@ namespace VerifiedXCore.Bitcoin.Services
                 .Where(c => Attestation.BtcLegacyFreeze.Active(height) && Attestation.BtcLegacyFreeze.IsLegacyVault(c)
                     || destination != null && Attestation.BtcVaultLedger.CreditRefusal(SmartContractStateTrei.GetSmartContractState(c), destination) != null)
                 .ToHashSet(StringComparer.Ordinal);
-            return leftOut.Count == 0 ? ComputeAllocationPlan(amountBtc) : ComputeAllocationPlan(amountBtc, leftOut);
+            while (true)
+            {
+                var plan = leftOut.Count == 0 ? ComputeAllocationPlan(amountBtc) : ComputeAllocationPlan(amountBtc, leftOut);
+                if (plan == null || destination == null || height < Globals.VaultMinimumPositionHeight) return plan;
+                var tooSmall = plan.GroupBy(a => a.SmartContractUID, StringComparer.Ordinal)
+                    .Where(g => Attestation.BtcVaultLedger.UnlockShareRefusal(g.Key, destination, g.Sum(a => a.UnlockAmount), height) != null)
+                    .Select(g => g.Key).ToList();
+                if (tooSmall.Count == 0) return plan;
+                foreach (var vault in tooSmall) leftOut.Add(vault); // each pass leaves out at least one more vault
+            }
         }
 
         /// <summary>
