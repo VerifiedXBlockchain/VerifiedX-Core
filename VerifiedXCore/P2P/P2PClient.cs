@@ -440,7 +440,7 @@ namespace VerifiedXCore.P2P
                 hubConnection = new HubConnectionBuilder()
                        .WithUrl(url, options =>
                        {
-
+                           options.StayAtItsHost();
                        })                       
                        .Build();
 
@@ -653,7 +653,7 @@ namespace VerifiedXCore.P2P
             try
             {
                 var url = "http://" + peerIP + ":" + Globals.Port + "/blockchain";
-                var connection = new HubConnectionBuilder().WithUrl(url).Build();
+                var connection = new HubConnectionBuilder().WithUrl(url, options => options.StayAtItsHost()).Build();
                 string response = "";
                 await connection.StartAsync();
                 response = await connection.InvokeAsync<string>("PingBackPeer");
@@ -1117,7 +1117,7 @@ namespace VerifiedXCore.P2P
                     options.Headers.Add("uplReq", uplReq);
                     options.Headers.Add("dwnlReq", dwnlReq);
                     // The beacon is named by whoever sent the NFT: no redirect, and never this machine (BeaconClient.NewBeaconHandler).
-                    options.HttpMessageHandlerFactory = _ => VerifiedXCore.Beacon.BeaconClient.NewBeaconHandler();
+                    options.StayAtItsHost(refuseLocalOnly: true);
                 })
                 .WithAutomaticReconnect()
                 .Build();
@@ -1221,7 +1221,7 @@ namespace VerifiedXCore.P2P
                     options.Headers.Add("uplReq", uplReq);
                     options.Headers.Add("dwnlReq", dwnlReq);
                     // The beacon is named by whoever sent the NFT: no redirect, and never this machine (BeaconClient.NewBeaconHandler).
-                    options.HttpMessageHandlerFactory = _ => VerifiedXCore.Beacon.BeaconClient.NewBeaconHandler();
+                    options.StayAtItsHost(refuseLocalOnly: true);
                 })
                 .WithAutomaticReconnect()
                 .Build();

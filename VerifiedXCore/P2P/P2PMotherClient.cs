@@ -27,6 +27,7 @@ namespace VerifiedXCore.P2P
                     .WithUrl(url, options => {
                         options.Headers.Add("password", password);
                         options.Headers.Add("walver", Globals.CLIVersion);
+                        options.StayAtItsHost();
                     })
                     .WithAutomaticReconnect()
                     .Build();

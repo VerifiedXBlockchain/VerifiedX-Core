@@ -210,7 +210,7 @@ namespace VerifiedXCore.Services
                 {
                     try
                     {
-                        using (var client = Globals.HttpClientFactory.CreateClient())
+                        using (var client = Globals.HttpClientFactory.CreateClient(VerifiedXCore.Utilities.NodeHttp.OutsideService))
                         {
 
                             string endpoint = node.NodeUrl + @"/api/V1";
@@ -314,7 +314,7 @@ namespace VerifiedXCore.Services
             {
                 try
                 {
-                    using (var client = Globals.HttpClientFactory.CreateClient())
+                    using (var client = Globals.HttpClientFactory.CreateClient(VerifiedXCore.Utilities.NodeHttp.OutsideService))
                     {
                         string endpoint = url + "/api/V1/GetPeers";
                         using (var Response = await client.GetAsync(endpoint))
@@ -511,7 +511,7 @@ namespace VerifiedXCore.Services
                         int count = 0;
                         foreach (var seedNode in seedNodes)
                         {
-                            using (var client = Globals.HttpClientFactory.CreateClient())
+                            using (var client = Globals.HttpClientFactory.CreateClient(VerifiedXCore.Utilities.NodeHttp.OutsideService))
                             {
                                 string endpoint = string.IsNullOrEmpty(Globals.ValidatorAddress) ? seedNode.NodeUrl + "/api/V1/GetCallToNode" :
                                     seedNode.NodeUrl + "/api/V1/GetCallToNode/true";

@@ -538,7 +538,7 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             try
             {
-                var client = Globals.HttpClientFactory?.CreateClient() ?? new HttpClient();
+                var client = Globals.HttpClientFactory?.CreateClient() ?? VerifiedXCore.Utilities.NodeHttp.NewClient();
                 client.Timeout = TimeSpan.FromSeconds(10);
                 var body = Newtonsoft.Json.JsonConvert.SerializeObject(SignedRequest(action, targets, removes, epoch, nonce));
                 using var content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");

@@ -352,7 +352,7 @@ namespace VerifiedXCore.Services
 
                         try
                         {
-                            using (var client = Globals.HttpClientFactory.CreateClient())
+                            using (var client = Globals.HttpClientFactory.CreateClient(VerifiedXCore.Utilities.NodeHttp.OutsideService))
                             {
                                 string endpoint = Globals.IsTestNet ? "https://data-testnet.verifiedx.io/api/masternodes/send/" : "https://data.verifiedx.io/api/masternodes/send/";
                                 var httpContent = new StringContent(fortisPoolStr, Encoding.UTF8, "application/json");

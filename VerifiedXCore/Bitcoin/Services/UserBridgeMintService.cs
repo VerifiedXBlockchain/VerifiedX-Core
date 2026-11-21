@@ -229,7 +229,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 return signatures;
             }
 
-            var client = Globals.HttpClientFactory?.CreateClient() ?? new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+            var client = Globals.HttpClientFactory?.CreateClient() ?? new HttpClient(VerifiedXCore.Utilities.NodeHttp.NewHandler()) { Timeout = TimeSpan.FromSeconds(30) };
 
             // Retry up to 3 rounds with delay between rounds
             for (int attempt = 0; attempt < 3 && !Enough(view, requiredSigs, signatures.Keys); attempt++)

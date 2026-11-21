@@ -575,7 +575,7 @@ namespace VerifiedXCore.Models
 
             LogUtility.Log($"POST-SYNC LIVENESS SWEEP: Starting. Checking {validators.Length} validators at synced height {syncedHeight}", "NetworkValidator.RunPostSyncLivenessSweep");
 
-            using var client = new HttpClient();
+            using var client = VerifiedXCore.Utilities.NodeHttp.NewClient();
             client.Timeout = TimeSpan.FromSeconds(3);
 
             foreach (var kvp in validators)
@@ -652,7 +652,7 @@ namespace VerifiedXCore.Models
 
             try
             {
-                using var client = new HttpClient();
+                using var client = VerifiedXCore.Utilities.NodeHttp.NewClient();
                 client.Timeout = TimeSpan.FromSeconds(3);
                 using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(1500));
                 var uri = $"http://{ip}:{Globals.ValAPIPort}/valapi/validator/GetWalletVersion";

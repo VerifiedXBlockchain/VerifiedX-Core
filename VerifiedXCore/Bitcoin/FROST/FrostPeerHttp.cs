@@ -16,8 +16,8 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// <summary>Connections to one validator that short requests share.</summary>
         public const int ShortConnectionsPerValidator = 4;
 
-        private static readonly SocketsHttpHandler Ceremonies = new() { MaxConnectionsPerServer = CeremonyConnectionsPerValidator };
-        private static readonly SocketsHttpHandler Short = new() { MaxConnectionsPerServer = ShortConnectionsPerValidator };
+        private static readonly SocketsHttpHandler Ceremonies = new() { MaxConnectionsPerServer = CeremonyConnectionsPerValidator, AllowAutoRedirect = false };
+        private static readonly SocketsHttpHandler Short = new() { MaxConnectionsPerServer = ShortConnectionsPerValidator, AllowAutoRedirect = false };
 
         /// <summary>A client for ceremony requests. Its timeout covers the wait for a free connection.</summary>
         public static HttpClient ForCeremonies(TimeSpan timeout, long? maxResponseBytes = null)
