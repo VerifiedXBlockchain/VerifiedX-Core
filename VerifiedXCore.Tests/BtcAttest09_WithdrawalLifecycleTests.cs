@@ -457,8 +457,10 @@ namespace VerifiedXCore.Tests
             await RefusedInBlock(Request(vault.Uid, 0.001M, destination: BtcDest + "\n"), "spaces around it");
 
             // Longer than any Bitcoin address: refused without decoding it, whose cost grows with the square of the length.
+            // 20,000 characters is the longest that still fits a transaction; a longer one is refused for its size first.
             var started = System.Diagnostics.Stopwatch.StartNew();
-            await RefusedInBlock(Request(vault.Uid, 0.001M, destination: "1" + new string('z', 200_000)), "not an address on this network");
+            await RefusedInBlock(Request(vault.Uid, 0.001M, destination: "1" + new string('z', 20_000)), "not an address on this network");
+            await RefusedInBlock(Request(vault.Uid, 0.001M, destination: "1" + new string('z', 200_000)), "too large");
             Assert.True(started.Elapsed < TimeSpan.FromSeconds(2), $"took {started.Elapsed}");
             var (admitted, _) = await VerifiedXCore.Services.TransactionValidatorService.VerifyTX(Request(vault.Uid, 0.001M, destination: new string('z', 200_000)));
             Assert.False(admitted);
