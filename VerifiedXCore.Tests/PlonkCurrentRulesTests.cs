@@ -193,11 +193,14 @@ namespace VerifiedXCore.Tests
         public void AProofThisLibraryMakes_PassesTheCurrentRulesOnly()
         {
             var path = Environment.GetEnvironmentVariable("VFX_PLONK_PARAMS");
-            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path) || !PLONKSetup.TryLoadParamsFile(path) || !PrivateTxProverV1.CanProve)
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
             {
-                Console.WriteLine("PlonkCurrentRulesTests: no VXPLNK06 params with prover keys (VFX_PLONK_PARAMS); skipped.");
+                Console.WriteLine("PlonkCurrentRulesTests: no VXPLNK06 params file (VFX_PLONK_PARAMS); skipped.");
                 return;
             }
+            // A file was supplied: it must load and enable proving, or a library that cannot prove would pass here.
+            Assert.True(PLONKSetup.TryLoadParamsFile(path), "the supplied params file must load");
+            Assert.True(PrivateTxProverV1.CanProve, "the supplied params must carry prover keys");
             PlonkProofVerifier.NativeVerify = _priorNative;
             PlonkProofVerifier.CurrentRulesAvailable = _priorCurrentAvailable;
             Assert.True(PlonkProofVerifier.CurrentRulesAvailable());
