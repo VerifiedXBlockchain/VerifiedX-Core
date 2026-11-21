@@ -95,6 +95,37 @@ namespace VerifiedXCore.Tests
             Assert.Empty(global::Trillium.Syntax.SyntaxTree.Parse(Source(Plain()), preventLoopsAndRecursion: true).Diagnostics);
         }
 
+        /// <summary>
+        /// getMethods() is a timeless built-in, so a vault's body may call it, and the vault check runs the body's own
+        /// GetNFTFeatures(). It listed the functions in the order of their symbols' hashes, fresh in every run: a body that
+        /// names its features only for one order was a vault on some runs (and nodes) and not on others. The list is now in
+        /// one order, and the body gets the same answer on every run.
+        /// </summary>
+        [Fact]
+        public void AVaultWhoseFeaturesDependOnItsMethodList_IsJudgedTheSameOnEveryRun()
+        {
+            const string Placeholder = "@@METHODS@@";
+            var gated = System.Text.RegularExpressions.Regex.Replace(Source(VbtcTestContracts.VbtcV2ContractData),
+                @"function GetNFTFeatures\(\) : string\s*\{\s*return Features\s*\}",
+                "function GetNFTFeatures() : string\n{\n   if getMethods() == \"" + Placeholder + "\" { return Features }\n   return \"\"\n}");
+            Assert.Contains(Placeholder, gated);
+
+            // The list the language gives for this body (the gate's literal is inside a function, not in its name).
+            var tree = global::Trillium.Syntax.SyntaxTree.Parse(gated, preventLoopsAndRecursion: true);
+            Assert.Empty(tree.Diagnostics);
+            var variables = new System.Collections.Generic.Dictionary<global::Trillium.Symbols.VariableSymbol, object>();
+            var declared = global::Trillium.CodeAnalysis.Compilation.CreateScript(null, tree);
+            declared.Evaluate(variables);
+            var methods = (string)global::Trillium.CodeAnalysis.Compilation.CreateScript(declared,
+                global::Trillium.Syntax.SyntaxTree.Parse("getMethods()", preventLoopsAndRecursion: true)).Evaluate(variables).Value;
+            Assert.True(methods.Split(',').Length >= 5, methods);
+            var body = Body(gated.Replace(Placeholder, methods));
+
+            // Each run under its own UID decompiles afresh (new symbols, new hashes): every one is a vault.
+            for (var run = 0; run < 12; run++)
+                Assert.True(VBTCService.IsVbtcV2Contract(new SmartContractStateTrei { SmartContractUID = $"methods{run}:1790900000", ContractData = body }), $"run {run}");
+        }
+
         [Theory]
         [InlineData(EndlessWhile)]
         [InlineData(SelfCall)]
