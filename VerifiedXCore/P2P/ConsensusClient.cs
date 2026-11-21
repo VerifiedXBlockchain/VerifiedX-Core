@@ -136,6 +136,7 @@ namespace VerifiedXCore.P2P
                     options.Headers.Add("uName", uName);
                     options.Headers.Add("signature", signature);
                     options.Headers.Add("walver", Globals.CLIVersion);
+                    options.StayAtItsHost();
                 })                
                 .Build();                
                 

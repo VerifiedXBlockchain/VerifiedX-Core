@@ -30,6 +30,54 @@ namespace VerifiedXCore.Utilities
         };
 
         private const int ImageSize = 400;
+
+        /// <summary>
+        /// The thumbnail formats, each read with the decoder its extension names: ImageMagick otherwise chooses the decoder
+        /// from the file's contents, so a received file named .png could be read by any coder it has.
+        /// </summary>
+        private static readonly Dictionary<string, MagickFormat> ThumbnailFormats = new(StringComparer.OrdinalIgnoreCase)
+        {
+            [".png"] = MagickFormat.Png, [".jpg"] = MagickFormat.Jpeg, [".jpeg"] = MagickFormat.Jpeg, [".jp2"] = MagickFormat.Jp2,
+            [".gif"] = MagickFormat.Gif, [".tif"] = MagickFormat.Tiff, [".tiff"] = MagickFormat.Tiff, [".webp"] = MagickFormat.WebP,
+            [".bmp"] = MagickFormat.Bmp,
+        };
+
+        /// <summary>
+        /// ImageMagick's policy for this node: no delegates (external programs), only the coders thumbnails use (XC and RGBA
+        /// are the PDF path's blank canvas and raw pixels), no indirect file reads, and bounds on size, frames, memory and time.
+        /// </summary>
+        internal const string ImagingPolicy = @"<policymap>
+  <policy domain=""delegate"" rights=""none"" pattern=""*"" />
+  <policy domain=""coder"" rights=""none"" pattern=""*"" />
+  <policy domain=""coder"" rights=""read|write"" pattern=""{PNG,JPEG,JPG,JP2,GIF,TIFF,TIF,WEBP,BMP,XC,RGBA}"" />
+  <policy domain=""path"" rights=""none"" pattern=""@*"" />
+  <policy domain=""resource"" name=""width"" value=""16KP"" />
+  <policy domain=""resource"" name=""height"" value=""16KP"" />
+  <policy domain=""resource"" name=""area"" value=""128MP"" />
+  <policy domain=""resource"" name=""list-length"" value=""64"" />
+  <policy domain=""resource"" name=""memory"" value=""256MiB"" />
+  <policy domain=""resource"" name=""disk"" value=""1GiB"" />
+  <policy domain=""resource"" name=""time"" value=""30"" />
+</policymap>";
+
+        private static readonly object ImagingPolicyLock = new();
+        private static bool _imagingPolicyApplied;
+
+        /// <summary>Loads <see cref="ImagingPolicy"/> into ImageMagick once, before this node's first image is read.</summary>
+        internal static void EnsureImagingPolicy()
+        {
+            lock (ImagingPolicyLock)
+            {
+                if (_imagingPolicyApplied) return;
+                var files = ImageMagick.Configuration.ConfigurationFiles.Default;
+                files.Policy.Data = ImagingPolicy;
+                MagickNET.Initialize(files);
+                _imagingPolicyApplied = true;
+            }
+        }
+
+        /// <summary>Validators and casters make no thumbnails: a received file must not be able to stop a block producer.</summary>
+        internal static bool MakesThumbnails => string.IsNullOrEmpty(Globals.ValidatorAddress);
         public static string GetvBTCDefaultLogoLocation()
         {
             var assetLocation = Globals.IsTestNet != true ? "Logos" : "LogosTestNet";
@@ -248,8 +296,11 @@ namespace VerifiedXCore.Utilities
         }
         public static void CreateNFTAssetThumbnail(string originPath, string newPath)
         {
+            if (!MakesThumbnails)
+                return;
             try
             {
+                EnsureImagingPolicy();
                 var fileExist = File.Exists(originPath);
                 if (fileExist)
                 {
@@ -271,7 +322,9 @@ namespace VerifiedXCore.Utilities
                     }
                     else
                     {
-                        using (var image = new MagickImage(originPath))
+                        if (!ThumbnailFormats.TryGetValue(fileExt, out var format))
+                            return;
+                        using (var image = new MagickImage(originPath, new MagickReadSettings { Format = format }))
                         {
                             if (image.Height > ImageSize || image.Width > ImageSize)
                             {
@@ -685,11 +738,12 @@ namespace VerifiedXCore.Utilities
                         var height = pageReader.GetPageHeight();
 
                         // specify that we are reading a byte array of colors in R-G-B-A order.
-                        PixelReadSettings pixelReadSettings = new PixelReadSettings(width, height, StorageType.Char, PixelMapping.RGBA);
-                        using (MagickImage imgPdfOverlay = new MagickImage(rawBytes, pixelReadSettings))
+                        PixelReadSettings pixelReadSettings = new PixelReadSettings((uint)width, (uint)height, StorageType.Char, PixelMapping.RGBA);
+                        using (MagickImage imgPdfOverlay = new MagickImage())
                         {
+                            imgPdfOverlay.ReadPixels(rawBytes, pixelReadSettings);
                             // turn transparent pixels into backdrop color using composite
-                            imgBackdrop = new MagickImage(backdropColor, width, height);
+                            imgBackdrop = new MagickImage(backdropColor, (uint)width, (uint)height);
                             imgBackdrop.Composite(imgPdfOverlay, CompositeOperator.Over);
                         }
                     }

@@ -662,6 +662,30 @@ namespace VerifiedXCore.Utilities
         }
 
         /// <summary>
+        /// Reads the address another node gave for a caster or validator: true, with <paramref name="ip"/> in dotted
+        /// form, when the text is an IPv4 address and nothing else once a leading "::ffff:" is dropped. The address is
+        /// written between "http://" and the port of the requests this node sends that peer, so a host name, a port, a
+        /// path or any other text is not one this node stores or dials. An address read from a connection reads as itself.
+        /// </summary>
+        public static bool TryGetPeerIP(string? peerIP, out string ip)
+        {
+            ip = peerIP ?? "";
+            if (ip.StartsWith("::ffff:", StringComparison.Ordinal))
+                ip = ip.Substring("::ffff:".Length);
+            if (ip.Length > MAX_IP_ADDRESS_LENGTH || !System.Net.IPAddress.TryParse(ip, out var parsed)
+                || parsed.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+            {
+                ip = "";
+                return false;
+            }
+            ip = parsed.ToString();
+            return true;
+        }
+
+        /// <summary>Whether <see cref="TryGetPeerIP"/> reads the text as an address.</summary>
+        public static bool IsPeerIPAddress(string? peerIP) => TryGetPeerIP(peerIP, out _);
+
+        /// <summary>
         /// Sanitizes a string by removing potentially dangerous characters
         /// </summary>
         public static string SanitizeString(string input, int maxLength)

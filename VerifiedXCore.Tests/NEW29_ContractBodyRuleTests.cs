@@ -91,6 +91,52 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A JSON comment in Data hides the call from the rules (JToken.Parse returns the comment) while the dispatcher
+        /// skips it and runs the call. Such Data is refused before any rule or contract code reads it: at admission, and in a
+        /// block from JsonCommentDataRuleHeight.
+        /// </summary>
+        [Theory]
+        [InlineData(DoWhile, "/**/{0}")]
+        [InlineData(CallsRand, "/**/{0}")]
+        [InlineData(CallsRand, "// note\n{0}")]
+        [InlineData(DoWhile, "[/**/{1}]")]
+        public async Task DataWithAJsonComment_IsRefusedAtAdmissionAndInABlock_BeforeItsBodyIsRead(string code, string shape)
+        {
+            var call = JsonConvert.SerializeObject(new { Function = "Mint()", ContractUID = Uid, Data = With(code) });
+            var tx = new Transaction
+            {
+                Timestamp = TimeUtil.GetTime(), FromAddress = _owner.Address, ToAddress = _owner.Address, Amount = 0.0M, Fee = 0, Nonce = 0,
+                TransactionType = TransactionType.NFT_MINT, Data = string.Format(shape, "[" + call + "]", call),
+            };
+            tx.Fee = VerifiedXCore.Services.FeeCalcService.CalculateTXFee(tx);
+            tx.Build();
+            tx.Signature = VerifiedXCore.Services.SignatureService.CreateSignature(tx.Hash, _owner.Key, _owner.Pub);
+
+            const string refused = "A transaction's Data may not carry a JSON comment.";
+            var admission = Task.Run(() => TransactionValidatorService.VerifyTX(tx));
+            Assert.True(admission.Wait(TimeSpan.FromSeconds(20)), "admission must answer before anything runs the body");
+            Assert.Equal((false, refused), await admission);
+            // Comment marks inside strings are text, not comments.
+            var url = Tx("Mint()", With("let Url = \"https://x.io/a//b/* c */\""));
+            var (_, why) = await TransactionValidatorService.VerifyTX(url);
+            Assert.NotEqual(refused, why);
+
+            // A block is judged the same way from JsonCommentDataRuleHeight, and as before below it.
+            var prior = Globals.JsonCommentDataRuleHeight;
+            Globals.JsonCommentDataRuleHeight = 2_000;
+            try
+            {
+                var inBlock = Task.Run(() => TransactionValidatorService.VerifyTX(tx, false, true, false, null, false, 2_000));
+                Assert.True(inBlock.Wait(TimeSpan.FromSeconds(20)), "block validation must answer before anything runs the body");
+                Assert.Equal((false, refused), await inBlock);
+                Assert.NotEqual(refused, (await TransactionValidatorService.VerifyTX(url, false, true, false, null, false, 2_000)).Item2);
+                if (code == CallsRand)
+                    Assert.NotEqual(refused, (await TransactionValidatorService.VerifyTX(tx, false, true, false, null, false, 1_999)).Item2);
+            }
+            finally { Globals.JsonCommentDataRuleHeight = prior; }
+        }
+
+        /// <summary>
         /// A transaction nobody signed is refused before any rule parses or runs the code it carries (round 36): the
         /// signature is checked first, so only its owner's own transactions reach the parser.
         /// </summary>

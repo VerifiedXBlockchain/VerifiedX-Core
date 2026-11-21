@@ -332,6 +332,21 @@ namespace VerifiedXCore
         public static long SaleCompleteContractRulesHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// From this height a sale is tied to its listing. Sale_Start records its purchase key on the contract's state
+        /// (SmartContractStateTrei.SaleKey); a completion must carry that key, and Sale_Cancel retires it with the keys
+        /// already used, so neither the cancelled listing's key nor a completion written for it settles a later
+        /// listing. A sale started below the height has no recorded key and completes or cancels as before, except
+        /// that when it is cancelled at or above the height its buyer is recorded
+        /// (SmartContractStateTrei.CancelledSaleBuyers) and the contract is not listed for sale to that buyer again.
+        /// A node without the rule accepts every block a node with it does, but its state lacks the keys the rule
+        /// records, so every node upgrades before the height. Unset (long.MaxValue) on both networks until the
+        /// release that activates it.
+        /// </summary>
+        public static long SaleListingKeyHeight = long.MaxValue;
+        /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
+        public const long SaleListingKeyTestnetHeight = 205_615L;
+
+        /// <summary>
         /// Item 3: a reserve Recover() must carry RecoveryAddress, RecoverySigScript and SignatureTime (every recovery
         /// check sat under "if both strings are non-empty", and a missing SignatureTime threw into an empty catch, so the
         /// vault key alone swept a reserve at once to any address named in the transaction), a malformed RESERVE
@@ -390,6 +405,23 @@ namespace VerifiedXCore
         public const long EvolveSpecificNeedsContractTestnetHeight = 152_000L;
 
         /// <summary>
+        /// From this height a block may not carry a transaction whose Data holds a JSON comment; mempool admission refuses
+        /// it at every height. The rules that read Data see a comment as no call, while the code that runs the call skips
+        /// it. Set to the tip at release. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long JsonCommentDataRuleHeight = long.MaxValue;
+        public const long JsonCommentDataRuleTestnetHeight = 205_615L;
+
+        /// <summary>
+        /// From this height a withdrawal or bridge-exit part is not fixed on coins while its Bitcoin destination is an
+        /// address of the vault that pays it, checked each time it would be fixed (a re-key can give the vault that address
+        /// after the request was mined). It waits instead, and is cancelled or expires and is refunded. Set to the tip at
+        /// release. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long WithdrawalDestinationRecheckHeight = long.MaxValue;
+        public const long WithdrawalDestinationRecheckTestnetHeight = 205_615L;
+
+        /// <summary>
         /// From this height a voided part of a bridge exit gives its locks back for use, as an expired exit does, instead
         /// of blacklisting them: a void is proven on Bitcoin (every pinned transaction's coins spent elsewhere or never
         /// to exist), so the exit was not paid and the locks' value is intact, and a blacklisted lock left its owner, and
@@ -398,6 +430,25 @@ namespace VerifiedXCore
         /// </summary>
         public static long BridgeVoidKeepsLocksHeight = 7_850_000L;
         public const long BridgeVoidKeepsLocksTestnetHeight = 152_000L;
+
+        /// <summary>
+        /// From this height a failed bridge exit on an older vault (VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL) gives back what it
+        /// reserved on its locks and leaves them in use, instead of blacklisting them: a blacklisted lock still backed
+        /// vBTC.b on Base, which then had nothing to redeem against. The caster that failed it keeps the vault out of its
+        /// own exit plans for a while (FrostContractBlacklist). At this exact block the locks earlier failures blacklisted
+        /// are given back once. Set to the tip at release. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long BridgeFailKeepsLocksHeight = long.MaxValue;
+        public const long BridgeFailKeepsLocksTestnetHeight = 205_615L;
+
+        /// <summary>
+        /// From this height a holder's balance on a watched vault is nothing or at least BtcVaultLedger.MinPositionBtc:
+        /// a debit moves at least that much or the whole balance and leaves nothing or at least that much, and an owner's
+        /// transfer moves at least that much. One-satoshi positions filled the vault's holder limit for the price of
+        /// fees. Set to the tip at release. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long VaultMinimumPositionHeight = long.MaxValue;
+        public const long VaultMinimumPositionTestnetHeight = 205_615L;
 
         /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
@@ -612,6 +663,45 @@ namespace VerifiedXCore
         public static long SaleStartBidRulesHeight = FundLossAuditHeight;
 
         /// <summary>
+        /// From this height each payment of an NFT sale completion covers its own share of the listed price: the seller
+        /// is paid at least the price less the contract's royalty, the royalty payee at least the royalty, and the
+        /// completion carries no entry beyond those payments. The royalty is the contract's RoyaltyAmount read as a
+        /// rate of the price, as validation has always read it, whatever its RoyaltyType.
+        /// A tightening rule: a node without it accepts every block a node with it does.
+        /// Unset (long.MaxValue) on both networks until the release that activates it.
+        /// </summary>
+        public static long SalePaymentSharesHeight = long.MaxValue;
+        /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
+        public const long SalePaymentSharesTestnetHeight = 205_615L;
+        /// <summary>
+        /// How far below its share a sale payment may fall under SalePaymentSharesHeight. Wallets that compute the
+        /// royalty split in binary floating point are off by far less than this.
+        /// </summary>
+        public const decimal SalePaymentShareTolerance = 0.000001M;
+
+        /// <summary>
+        /// From this height a bridge transaction's vote list (unlock, pool unlock, exit to Bitcoin) is refused in a block
+        /// when a committee caster has more than one vote to check in it, as it already is at admission. A list then
+        /// costs at most one signature check a committee member. The lists casters build hold one vote a caster.
+        /// A tightening rule: a node without it accepts every block a node with it does.
+        /// Unset (long.MaxValue) on both networks until the release that activates it.
+        /// </summary>
+        public static long BridgeVoteOncePerCasterHeight = long.MaxValue;
+        /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
+        public const long BridgeVoteOncePerCasterTestnetHeight = 205_615L;
+
+        /// <summary>
+        /// From this height a bridge exit to Bitcoin (VBTC_V2_BRIDGE_EXIT_TO_BTC) that carries allocations is refused in
+        /// a block unless it also carries TotalAmount and TotalAmountSats, as it already is at admission: the exit's record
+        /// and its locks' draws are written from those two alone, so an exit that is accepted is one that is recorded. The
+        /// exits casters build carry both. A tightening rule: a node without it accepts every block a node with it does.
+        /// Unset (long.MaxValue) on both networks until the release that activates it.
+        /// </summary>
+        public static long BridgeExitCarriesTotalsHeight = long.MaxValue;
+        /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
+        public const long BridgeExitCarriesTotalsTestnetHeight = 205_615L;
+
+        /// <summary>
         /// Item 6: a vBTC withdrawal REQUEST may not reuse a (requester, UniqueId, contract) key under which a request was
         /// already mined. The holder chooses UniqueId, nothing in consensus read it, and the row store's save matched on
         /// that key and kept the old row's Amount and destination: a dust request with an old UniqueId reopened a
@@ -661,6 +751,17 @@ namespace VerifiedXCore
         /// activation height, and nodes keep the prior params to judge blocks below it.
         /// </summary>
         public static long PrivateTxProofRulesHeight = LedgerRulesBatchHeight;
+
+        /// <summary>
+        /// From this height a private transaction's proofs are judged under the PLONK library's current rules
+        /// (<c>plonk_verify2</c>), the ones its provers follow; below it under the original rules (<c>plonk_verify</c>), as
+        /// they were judged when mined. The current rules also use the circuits whose hashes fix their capacity element
+        /// (keys compiled from the pinned params at load). Until the height this node admits no private transaction carrying a proof: its
+        /// wallet's proofs pass only the current rules, which blocks below the height do not apply. Set to the tip at
+        /// release. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long PlonkCurrentRulesHeight = long.MaxValue;
+        public const long PlonkCurrentRulesTestnetHeight = 205_615L;
         public static Dictionary<string, decimal> ForgedVfxBurns = new(StringComparer.Ordinal)
         {
             ["RB3eeBH258arkuePCJf5NMVMSaUyhyy9g6"] = 100_033.000012M,
@@ -838,7 +939,7 @@ namespace VerifiedXCore
         public static int APIPortSSL = 7777;
         public static int MajorVer = 9;
         public static int MinorVer = 1;
-        public static int RevisionVer = 1;
+        public static int RevisionVer = 2;
         public static int BuildVer = 0;
         public static int SCVersion = 1;
         public static int ValidatorIssueCount = 0;
@@ -1092,7 +1193,9 @@ namespace VerifiedXCore
         /// loaded, so until then it is not ready to produce or cast. Always true below the height.
         /// </summary>
         public static bool ProofVerifierReady =>
-            !Privacy.PrivacyEpoch.ProofRulesActive((LastBlock?.Height ?? 0) + 1) || Privacy.PlonkProofVerifier.VerifierAvailable();
+            !Privacy.PrivacyEpoch.ProofRulesActive((LastBlock?.Height ?? 0) + 1)
+            || Privacy.PlonkProofVerifier.VerifierAvailable()
+                && (!Privacy.PlonkProofVerifier.UsesCurrentRules((LastBlock?.Height ?? 0) + 1) || Privacy.PlonkProofVerifier.CurrentRulesAvailable());
 
         /// <summary>Legacy proofs, GET block fallback, optional cert skip, and seed peer injection apply only for seed casters when the tip looks stopped. Other nodes always use normal snapshot/signed paths and discovery.
         /// Phase E: additionally requires a signed ≥2-of-3 seed agreement (<see cref="Services.BootstrapCoordinationService.AgreementActive"/>) — bootstrap is never entered unilaterally.</summary>

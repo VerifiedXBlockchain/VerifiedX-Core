@@ -238,6 +238,82 @@ namespace VerifiedXCore.Tests
             finally { FrostSessionStorage.SigningSessions.TryRemove(held.SessionId, out _); }
         }
 
+        /// <summary>The start's sighashes recomputed from the coin values it reports.</summary>
+        private static void Resign(FrostSigningStartRequest start, BtcTx tx)
+        {
+            var spent = start.Prevouts.Select(p => new TxOut(Money.Satoshis((long)p.ValueSats), NBitcoin.Script.FromHex(p.ScriptPubKeyHex))).ToArray();
+            var precomputed = tx.PrecomputeTransactionData(spent);
+            start.AllInputSighashes = Enumerable.Range(0, tx.Inputs.Count)
+                .Select(i => Convert.ToHexString(tx.GetSignatureHashTaproot(precomputed, new TaprootExecutionData(i) { SigHash = TaprootSigHash.Default }).ToBytes()).ToLowerInvariant())
+                .ToList();
+            start.MessageHash = start.AllInputSighashes[start.InputIndex];
+        }
+
+        /// <summary>
+        /// The first start for a pinned transaction fixes the sighashes every later start is held to. A start is
+        /// authorized only with the coin values the chain holds, and the sighashes kept are the ones recomputed from
+        /// the transaction, so whoever starts first, the honest starts after it are taken.
+        /// </summary>
+        [Fact]
+        public async Task TheSighashesKeptForAPinnedTransaction_AreTheTransactionsOwn_WhoeverStartsFirst()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Report(_btc.Mine(Pay(vault.Script, 150_000), Pay(vault.Script, 120_000)));
+            var request = await Request(vault.Uid, 0.002M);
+            var pinned = BtcTx.Parse(Assert.Single(BtcAttestStore.Withdrawal(BtcWithdrawals.RefOf(request.Hash, vault.Uid))!.Pins).TxHex, Network.Main);
+            Assert.Equal(2, pinned.Inputs.Count);
+
+            // A coin reported a satoshi short, its sighashes computed to match: not the coins of the pinned transaction.
+            var short1 = Announce(vault.Uid, vault.Script, request.Hash, pinned, Signers[2].Address);
+            short1.Prevouts[1].ValueSats -= 1;
+            Resign(short1, pinned);
+            var (ok, why) = FrostSigningAuthorization.Authorize(short1);
+            Assert.False(ok, "a start with a wrong coin value would fix sighashes no honest start matches");
+            Assert.Contains("value the chain holds", why);
+
+            // Another input's sighash written with a space: authorized, and kept as the transaction's own.
+            var padded = Announce(vault.Uid, vault.Script, request.Hash, pinned, Signers[2].Address);
+            padded.AllInputSighashes[1] += " ";
+            (ok, why) = FrostSigningAuthorization.Authorize(padded);
+            Assert.True(ok, why);
+            Assert.EndsWith(" ", padded.AllInputSighashes[1]);                     // the start is left as its leader signed it
+
+            // Signed in full with its list written so (one in capitals, one padded), a start still passes the signature
+            // check at the route: the list it was signed over is the one checked.
+            var leader = Signers[2];
+            var spelled = Announce(vault.Uid, vault.Script, request.Hash, pinned, leader.Address);
+            spelled.AllInputSighashes[0] = spelled.AllInputSighashes[0].ToUpperInvariant();
+            spelled.MessageHash = spelled.AllInputSighashes[0];
+            spelled.AllInputSighashes[1] += " ";
+            spelled.SignerAddresses = Signers.Select(s => s.Address).ToList();
+            spelled.RequiredThreshold = 51;
+            spelled.LeaderSignature = VerifiedXCore.Services.SignatureService.CreateSignature($"{spelled.SessionId}.{leader.Address}.{spelled.Timestamp}", leader.Key, leader.Pub);
+            spelled.ContentSignature = VerifiedXCore.Services.SignatureService.CreateSignature(FrostDkgLeaderAuth.SigningStartMessage(spelled), leader.Key, leader.Pub);
+            using (var server = new TestServer(new WebHostBuilder().UseStartup<FrostStartup>()))
+            {
+                var r = await server.CreateClient().PostAsync("/frost/sign/start", new System.Net.Http.StringContent(JsonConvert.SerializeObject(spelled), System.Text.Encoding.UTF8, "application/json"));
+                var answer = await r.Content.ReadAsStringAsync();
+                Assert.DoesNotContain("signed in full", answer);
+                Assert.DoesNotContain("unauthorized", answer, StringComparison.OrdinalIgnoreCase);
+            }
+            FrostSessionStorage.SigningSessions.TryRemove(spelled.SessionId, out _);
+            VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.ClearContractPin(vault.Uid, "test");
+            var scope = FrostSigningAuthorization.SigningScope(vault.Uid, padded.BtcTxId);
+            Assert.False(VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.TryBeginSigning(vault.Uid, request.Hash, padded.SessionId, padded.InputIndex,
+                padded.MessageHash, padded.AllInputSighashes, padded.TxInputOutpoints, transactionScope: scope, leaderAddress: padded.LeaderAddress, btcTxId: padded.BtcTxId).Blocked);
+
+            // The honest start for the other input, after it, is taken.
+            var honest = Announce(vault.Uid, vault.Script, request.Hash, pinned, Signers[0].Address);
+            honest.InputIndex = 1;
+            honest.MessageHash = honest.AllInputSighashes[1];
+            (ok, why) = FrostSigningAuthorization.Authorize(honest);
+            Assert.True(ok, why);
+            var (blocked, reason) = VerifiedXCore.Bitcoin.Services.FrostWithdrawalSigningTracker.CheckWithdrawalSigning(vault.Uid, request.Hash,
+                honest.InputIndex, honest.MessageHash, honest.AllInputSighashes, honest.TxInputOutpoints, transactionScope: FrostSigningAuthorization.SigningScope(vault.Uid, honest.BtcTxId));
+            Assert.False(blocked, reason);
+        }
+
         [Fact]
         public async Task ASigner_SignsThePinnedTransaction_AndNoOther()
         {
@@ -664,6 +740,56 @@ namespace VerifiedXCore.Tests
                 Assert.Contains(me, asked[1]);
                 await Tick();
                 Assert.Equal(addresses.OrderBy(a => a, StringComparer.Ordinal), asked[2]);         // two left out would go below the threshold
+            }
+            finally
+            {
+                Globals.ValidatorAddress = priorValidator;
+                Globals.IsChainSynced = priorSynced;
+                foreach (var s in Signers) Globals.NetworkValidators.TryRemove(s.Address, out _);
+            }
+        }
+
+        /// <summary>
+        /// A holder whose Round 2 share does not verify also makes every ceremony fail. Named by the aggregation, it is left
+        /// out of the next ceremonies for the transaction, as a withholder is, while the rest still meet the threshold.
+        /// </summary>
+        [Fact]
+        public async Task AHolderWhoseShareDoesNotVerify_IsLeftOutOfTheNextCeremony_WhileTheRestMeetTheThreshold()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1, keyHolders: Signers);
+            await Report(_btc.Mine(Pay(vault.Script, 150_000)));
+            var request = await Request(vault.Uid, 0.001M);
+            var pin = BtcAttestStore.Withdrawal(BtcWithdrawals.RefOf(request.Hash, vault.Uid))!.Pins[0];
+            var addresses = Signers.Select(s => s.Address).ToList();
+            var order = addresses.OrderBy(a => BtcWithdrawalSigner.Turn(pin.Txid, a, addresses)).ToList();
+            var me = order[0];
+            var cheaters = new Queue<string[]>(new[] { new[] { order[1] }, Array.Empty<string>() });
+            var asked = new List<string[]>();
+            var priorValidator = Globals.ValidatorAddress;
+            var priorSynced = Globals.IsChainSynced;
+            Globals.ValidatorAddress = me;
+            Globals.IsChainSynced = true;
+            BtcWithdrawalSigner.SignAndBroadcast = _realSign;
+            BtcWithdrawalSigner.KnownOnBitcoin = _ => Task.FromResult<bool?>(null);
+            BtcWithdrawalSigner.Reachable = list => Task.FromResult(list);
+            foreach (var s in Signers)
+                Globals.NetworkValidators[s.Address] = new NetworkValidator { Address = s.Address, IPAddress = "10.0.0.1", PublicKey = s.Pub };
+            BtcWithdrawalSigner.CeremonyForTests = (signers, threshold) =>
+            {
+                asked.Add(signers.Select(v => v.ValidatorAddress).OrderBy(a => a, StringComparer.Ordinal).ToArray());
+                var outcome = FrostCeremonyOutcome.Fail(FrostCeremonyFailureCode.Round2InvalidShares, "s", "invalid share");
+                outcome.InvalidShareHolders = cheaters.Dequeue().ToList();
+                return Task.FromResult((false, "", "", "invalid share", (FrostCeremonyOutcome?)outcome));
+            };
+            try
+            {
+                async Task Tick() { BtcWithdrawalSigner.ForgetAttempts(); await BtcWithdrawalSigner.TickAsync(me, pin.PinnedAtVfxHeight); }
+                await Tick();
+                Assert.Equal(addresses.OrderBy(a => a, StringComparer.Ordinal), asked[0]);         // every holder, the first time
+                await Tick();
+                Assert.DoesNotContain(order[1], asked[1]);                                        // the one whose share failed is left out
+                Assert.Contains(me, asked[1]);
             }
             finally
             {

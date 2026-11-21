@@ -136,10 +136,13 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// A waiting request lives 360 blocks and a withdrawal stops moving after
         /// <see cref="BtcAttestRules.StuckPinBlocks"/>: without this a request made early ran out of its window first
         /// and had to be made again at the right moment. Its requester can still cancel it at any time.
+        /// Not kept for a destination that is an address of its own vault (<see cref="OwnVaultDestination"/>, judged at
+        /// <paramref name="atHeight"/>, the next block when not given): it is refused those coins too, and only waits for its refund.
         /// </summary>
-        internal static long KeptForTakeoverUntil(VaultWithdrawalRow waiting, IEnumerable<VaultWithdrawalRow> pinnedOnItsVault)
+        internal static long KeptForTakeoverUntil(VaultWithdrawalRow waiting, IEnumerable<VaultWithdrawalRow> pinnedOnItsVault, long? atHeight = null)
         {
             if (waiting.IsBridgeExit || waiting.State != VaultWithdrawalState.Waiting || string.IsNullOrEmpty(waiting.DestinationScriptHex)) return 0;
+            if (OwnVaultDestination(waiting, atHeight ?? (Globals.LastBlock?.Height ?? 0) + 1, null) != null) return 0;
             long until = 0;
             var pinnedRows = pinnedOnItsVault.ToList();
             var current = BtcAttestStore.ScriptRowForVault(waiting.SmartContractUID);

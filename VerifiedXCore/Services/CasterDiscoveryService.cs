@@ -101,7 +101,20 @@ namespace VerifiedXCore.Services
                 // 6/5-OVERFLOW FIX: normalize the IP before storing/comparing. Entries arrive in
                 // both "::ffff:x.x.x.x" and clean forms depending on origin, so a raw string
                 // compare lets the same caster in twice under two IP spellings.
-                newCaster.PeerIP = (newCaster.PeerIP ?? "").Replace("::ffff:", "");
+                // Every entry of the live list is dialed at its PeerIP, so one that carries an address carries an IP
+                // address: it is read from the text as given and kept in dotted form.
+                newCaster.PeerIP ??= "";
+                if (newCaster.PeerIP.Length > 0)
+                {
+                    if (!InputValidationHelper.TryGetPeerIP(newCaster.PeerIP, out var peerIp))
+                    {
+                        CasterLogUtility.Log(
+                            $"AddBlockCasterIfRoomAndUnique REJECT — the address given for {newCaster.ValidatorAddress} is not an IP address.",
+                            "CasterFlow");
+                        return false;
+                    }
+                    newCaster.PeerIP = peerIp;
+                }
 
                 if (Globals.BlockCasters.Count >= MaxCasters)
                 {
@@ -701,6 +714,8 @@ namespace VerifiedXCore.Services
         /// </summary>
         internal static async Task<bool> CheckCandidateHealth(string ip, string address)
         {
+            if (!InputValidationHelper.IsPeerIPAddress(ip))
+                return false;
             // Clock skew check: query the candidate's block height and compare timestamps
             try
             {
@@ -766,6 +781,8 @@ namespace VerifiedXCore.Services
         /// </summary>
         internal static async Task<VersionCheckInfo> CheckCandidateVersionDetailed(string ip, string address)
         {
+            if (!InputValidationHelper.IsPeerIPAddress(ip))
+                return new VersionCheckInfo(VersionCheckResult.Unreachable, "");
             try
             {
                 using var client = Globals.HttpClientFactory.CreateClient();
@@ -1420,6 +1437,17 @@ namespace VerifiedXCore.Services
             }
             CasterLogUtility.Log("HandlePromotion: signature verified OK", "CasterFlow");
 
+            // The list becomes this node's live caster list and every entry is dialed at its PeerIP: an entry that
+            // carries an address carries an IP address.
+            if (promotion.CasterList.Any(c => !string.IsNullOrEmpty(c.PeerIP) && !InputValidationHelper.IsPeerIPAddress(c.PeerIP)))
+            {
+                CasterLogUtility.Log(
+                    $"HandlePromotion REJECT: the signed CasterList=[{listSummary}] holds an address that is not an IP address",
+                    "CasterFlow");
+                ErrorLogUtility.LogError($"Promotion from {promotion.PromoterAddress} — a caster list address is not an IP address", "CasterDiscoveryService");
+                return Task.FromResult("rejected: caster list address is not an IP address");
+            }
+
             // Self-health check: reject promotion if our NetworkValidators pool is too small.
             // Without validators we can't generate proofs, which inflates the quorum and halts consensus.
             var validatorCount = Globals.NetworkValidators.Count;
@@ -1467,7 +1495,7 @@ namespace VerifiedXCore.Services
 
                 newBag.Add(new Peers
                 {
-                    PeerIP = ci.PeerIP,
+                    PeerIP = InputValidationHelper.TryGetPeerIP(ci.PeerIP, out var peerIp) ? peerIp : "",
                     IsValidator = true,
                     ValidatorAddress = ci.Address,
                     ValidatorPublicKey = ci.PublicKey,
@@ -1606,7 +1634,7 @@ namespace VerifiedXCore.Services
             try
             {
                 var cleanIp = ip?.Replace("::ffff:", "") ?? "";
-                if (string.IsNullOrEmpty(cleanIp) || string.IsNullOrEmpty(address))
+                if (!InputValidationHelper.IsPeerIPAddress(ip) || string.IsNullOrEmpty(address))
                 {
                     CasterLogUtility.Log($"ValidateInboundCaster REJECT — empty ip or address. ip='{ip}' addr='{address}'", "CasterFlow");
                     return false;
@@ -1795,7 +1823,11 @@ namespace VerifiedXCore.Services
                 }
 
                 // Port check
-                var cleanIp = (proposal.CandidateIP ?? "").Replace("::ffff:", "");
+                if (!InputValidationHelper.TryGetPeerIP(proposal.CandidateIP, out var cleanIp))
+                {
+                    response.Reason = "Candidate IP is not an IP address";
+                    return response;
+                }
                 if (!PortUtility.IsPortOpen(cleanIp, Globals.ValAPIPort))
                 {
                     response.Reason = $"Port closed {cleanIp}:{Globals.ValAPIPort}";
@@ -1970,7 +2002,7 @@ namespace VerifiedXCore.Services
                     return "accepted: already known";
                 }
 
-                if (string.IsNullOrEmpty(promotedIp))
+                if (!InputValidationHelper.IsPeerIPAddress(announce.PromotedIP))
                 {
                     CasterLogUtility.Log(
                         $"[CONSENSUS-V2] HandlePromoteAnnounce REJECT — no IP for {announce.PromotedAddress}",
@@ -2523,14 +2555,15 @@ namespace VerifiedXCore.Services
                     $"Standing down to regular validator. Will wait for re-promotion if needed.");
 
                 // Replace our BlockCasters with the live list from peers if available
-                if (liveCasterList != null && liveCasterList.Count > 0)
+                if (liveCasterList != null && liveCasterList.Count > 0
+                    && liveCasterList.All(ci => string.IsNullOrEmpty(ci.PeerIP) || InputValidationHelper.IsPeerIPAddress(ci.PeerIP)))
                 {
                     var nBag = new System.Collections.Concurrent.ConcurrentBag<Peers>();
                     foreach (var ci in liveCasterList)
                     {
                         nBag.Add(new Peers
                         {
-                            PeerIP = ci.PeerIP,
+                            PeerIP = InputValidationHelper.TryGetPeerIP(ci.PeerIP, out var peerIp) ? peerIp : "",
                             IsValidator = true,
                             ValidatorAddress = ci.Address,
                             ValidatorPublicKey = ci.PublicKey,

@@ -310,6 +310,76 @@ namespace VerifiedXCore.Tests
             Assert.Contains("already signed an addition", Refusal(await Ask("ADD", new[] { second.Base }, Epoch, 9)));
         }
 
+        /// <summary>The route, asked with a request signed by <paramref name="requester"/> (or by nobody).</summary>
+        private static async Task<(HttpStatusCode Code, JObject Body)> AskSigned(V? requester, string action, string[] targets, long epoch, int nonce)
+        {
+            var req = new BaseValidatorSyncService.ValidatorUpdateSignRequest { Action = action, TargetAddresses = targets, VfxBlockHeight = epoch, AdminNonce = nonce.ToString() };
+            if (requester != null)
+            {
+                req.RequesterPublicKey = requester.Pub;
+                req.RequesterSignature = VerifiedXCore.Services.SignatureService.CreateSignature(BaseValidatorSyncService.RequestMessage(req), requester.Key, requester.Pub);
+            }
+            using var server = new TestServer(new WebHostBuilder().UseStartup<StartupP2PCaster>());
+            var ctx = await server.SendAsync(c =>
+            {
+                c.Request.Method = "POST";
+                c.Request.Path = "/valapi/validator/SignValidatorUpdate";
+                c.Request.ContentType = "application/json";
+                c.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(req)));
+                c.Connection.RemoteIpAddress = IPAddress.Parse("203.0.113.7");
+            });
+            using var reader = new StreamReader(ctx.Response.Body);
+            var text = await reader.ReadToEndAsync();
+            var json = text.Trim().StartsWith("\"") ? JsonConvert.DeserializeObject<string>(text)! : text;
+            return ((HttpStatusCode)ctx.Response.StatusCode, JObject.Parse(json));
+        }
+
+        /// <summary>
+        /// The route is open to anyone. The epoch's additions in full are signed for anyone, since they cannot be chosen;
+        /// a part of them (the member collecting signatures leaves out a newcomer that did not sign its own seat) only
+        /// when a validator or caster on the contract signed the request: an outside caller asking for a part had honest
+        /// nodes sign a list that favoured its own candidates.
+        /// </summary>
+        [Fact]
+        public async Task APartOfTheEpochsAdditions_IsSignedOnlyAtAMembersRequest()
+        {
+            // Five incumbents: two seats this epoch, for the two funded newcomers.
+            V seed4 = NewKey(), seed5 = NewKey();
+            foreach (var v in new[] { seed4, seed5 })
+            {
+                AccountData.GetAccounts().InsertSafe(new Account { Address = v.Address, PublicKey = v.Pub, PrivateKey = "0" + v.Key.secret.ToString("x") });
+                StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = v.Address, Balance = 5_000M, Nonce = 0 });
+            }
+            BlockchainData.GetBlocks().InsertSafe(new Block
+            {
+                Height = Epoch - 99, Hash = $"more-registrations-{Guid.NewGuid():N}",
+                Transactions = new[] { seed4, seed5 }.Select((v, i) => new Transaction
+                {
+                    TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = v.Address, ToAddress = v.Address, Hash = "rr" + i,
+                    Data = JsonConvert.SerializeObject(new { ValidatorAddress = v.Address, IPAddress = $"10.0.1.{i + 1}", FrostPublicKey = v.Pub, IsS3C = false }),
+                }).ToList(),
+            });
+            VBTCValidatorRegistry.InvalidateCache();
+            Contract(8, _me, _seed2, _seed3, seed4, seed5);
+            var adds = BaseSignerSetPolicy.ForEpoch(Epoch, new[] { _me.Base, _seed2.Base, _seed3.Base, seed4.Base, seed5.Base })!.Adds.ToArray();
+            Assert.Equal(2, adds.Length);
+
+            // In full: signed, whoever asks.
+            SignedBy(_me, await AskSigned(null, "ADD", adds, Epoch, 8), VbtcbTypedData.AddValidatorsDigest(adds, Epoch, 8, 8453, Proxy));
+            // A part: not for nobody, not for a validator off the contract, not under a signature over another request.
+            var part = new[] { adds[1] };
+            Assert.Equal(BaseValidatorSyncService.PartOfTheAdditionsReason, Refusal(await AskSigned(null, "ADD", part, Epoch, 8)));
+            Assert.Equal(BaseValidatorSyncService.PartOfTheAdditionsReason, Refusal(await AskSigned(_unfunded, "ADD", part, Epoch, 8)));
+            var copied = new BaseValidatorSyncService.ValidatorUpdateSignRequest { Action = "ADD", TargetAddresses = adds, VfxBlockHeight = Epoch, AdminNonce = "8", RequesterPublicKey = _seed2.Pub };
+            var overTheFullList = VerifiedXCore.Services.SignatureService.CreateSignature(BaseValidatorSyncService.RequestMessage(copied), _seed2.Key, _seed2.Pub);
+            copied.TargetAddresses = part;
+            copied.RequesterSignature = overTheFullList;
+            Assert.Equal(BaseValidatorSyncService.PartOfTheAdditionsReason, Refusal(await BaseValidatorSyncService.AuthorizeAsync(copied) is var (a, r) && a == null
+                ? (HttpStatusCode.Forbidden, new JObject { ["Message"] = r }) : (HttpStatusCode.OK, new JObject())));
+            // ... at a member's request: signed.
+            SignedBy(_me, await AskSigned(_seed2, "ADD", part, Epoch, 8), VbtcbTypedData.AddValidatorsDigest(part, Epoch, 8, 8453, Proxy));
+        }
+
         [Fact]
         public async Task ANewcomerSignsOnlyItsOwnAddition_AndNothingIsSignedBeforeTheBoundaryIsSettledOrTheHeight()
         {
@@ -376,6 +446,8 @@ namespace VerifiedXCore.Tests
             private readonly TestServer _server = new(new WebHostBuilder().UseStartup<StartupP2PCaster>());
             private readonly Dictionary<string, V> _at;
             public readonly HashSet<string> Down = new();
+            /// <summary>By IP: the form (VbtcbSignatureForms) the node there hands its signatures back in.</summary>
+            public readonly Dictionary<string, string> Reencode = new();
             public ValidatorNetwork(Dictionary<string, V> at) => _at = at;
             public System.Net.Http.HttpClient CreateClient(string name) => new(new Router(this));
             private sealed class Router : System.Net.Http.HttpMessageHandler
@@ -400,7 +472,17 @@ namespace VerifiedXCore.Tests
                             c.Connection.RemoteIpAddress = IPAddress.Parse("203.0.113.7");
                         });
                         using var reader = new StreamReader(ctx.Response.Body);
-                        return new System.Net.Http.HttpResponseMessage((HttpStatusCode)ctx.Response.StatusCode) { Content = new System.Net.Http.StringContent(await reader.ReadToEndAsync()) };
+                        var text = await reader.ReadToEndAsync();
+                        if (_net.Reencode.TryGetValue(ip, out var form))
+                        {
+                            var answer = JObject.Parse(text.TrimStart().StartsWith("\"") ? JsonConvert.DeserializeObject<string>(text)! : text);
+                            if (answer.Value<string>("Signature") is { } signature)
+                            {
+                                answer["Signature"] = VbtcbSignatureForms.Reencode(signature, form);
+                                text = answer.ToString(Formatting.None);
+                            }
+                        }
+                        return new System.Net.Http.HttpResponseMessage((HttpStatusCode)ctx.Response.StatusCode) { Content = new System.Net.Http.StringContent(text) };
                     }
                     finally { Globals.ValidatorAddress = caller; }
                 }
@@ -720,6 +802,147 @@ namespace VerifiedXCore.Tests
                 Assert.Equal("updateCasters", fn);
                 Assert.Empty((List<string>)args[0]);
                 Assert.Equal(new[] { c[3].Base }, (List<string>)args[1]);
+            }
+            finally
+            {
+                foreach (var r in records) DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Delete(r.RecordSeq);
+                VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
+                BaseValidatorSyncService.SubmitForTests = null;
+                Globals.HttpClientFactory = priorFactory;
+            }
+        }
+
+        /// <summary>
+        /// A signature is kept only in the form the contract counts and the node sends as it stands (65 bytes of hex, v of 27
+        /// or 28, s in the lower half). A validator due to join, or a member, that answers in any other form is treated as
+        /// one that did not answer: the other newcomer gets its seat this epoch, signed for by the other members.
+        /// </summary>
+        [Theory]
+        [MemberData(nameof(VbtcbSignatureForms.NotCounted), MemberType = typeof(VbtcbSignatureForms))]
+        public async Task ASignatureInAFormTheContractDoesNotCount_IsNotKept_AndTheAdditionGoesOutWithTheOthers(string form)
+        {
+            var (seed4, seed5) = (NewKey(), NewKey());                           // five on the contract: room for two newcomers
+            foreach (var v in new[] { seed4, seed5 })
+            {
+                AccountData.GetAccounts().InsertSafe(new Account { Address = v.Address, PublicKey = v.Pub, PrivateKey = "0" + v.Key.secret.ToString("x") });
+                StateData.GetAccountStateTrei().InsertSafe(new AccountStateTrei { Key = v.Address, Balance = 5_000M, Nonce = 0 });
+            }
+            BlockchainData.GetBlocks().InsertSafe(new Block
+            {
+                Height = Epoch - 50, Hash = $"more-{Guid.NewGuid():N}",
+                Transactions = new[] { seed4, seed5 }.Select((v, i) => new Transaction
+                {
+                    TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = v.Address, ToAddress = v.Address, Hash = "rm" + i,
+                    Data = JsonConvert.SerializeObject(new { ValidatorAddress = v.Address, IPAddress = $"10.0.0.{i + 7}", FrostPublicKey = v.Pub, IsS3C = false }),
+                }).ToList(),
+            });
+            VBTCValidatorRegistry.InvalidateCache();
+
+            var seated = new[] { _me, _seed2, _seed3, seed4, seed5 };
+            var at = new[] { _me, _seed2, _seed3, _new1, _new2, _unfunded, seed4, seed5 }.Select((v, i) => (v, i)).ToDictionary(x => $"10.0.0.{x.i + 1}", x => x.v);
+            var network = new ValidatorNetwork(at);
+            var sent = new List<(string Function, object[] Args)>();
+            var priorFactory = Globals.HttpClientFactory;
+            Globals.HttpClientFactory = network;
+            BaseValidatorSyncService.SubmitForTests = (f, a) => { sent.Add((f, a)); return Task.FromResult<string?>("0xtx"); };
+            Globals.LastBlock = new Block { Height = Epoch + BaseSignerSetPolicy.SettleBlocks + 8 * BaseValidatorSyncService.SubmitTurnBlocks, Timestamp = TimeUtil.GetTime() };
+            try
+            {
+                Contract(8, seated);
+                var adds = BaseSignerSetPolicy.ForEpoch(Epoch, seated.Select(v => v.Base))!.Adds;
+                Assert.Equal(new[] { _new1.Base, _new2.Base }.OrderBy(a => a), adds.OrderBy(a => a));
+                var (other, joining) = adds[0] == _new1.Base ? (_new1, _new2) : (_new2, _new1);
+                network.Reencode[at.Single(x => x.Value == other).Key] = form;    // the first newcomer in the plan's order
+                network.Reencode[at.Single(x => x.Value == _seed2).Key] = form;   // and a member asked before the threshold is met
+
+                await BaseValidatorSyncService.SyncOnceAsync();
+
+                var (fn, args) = Assert.Single(sent);
+                Assert.Equal("addValidatorBatch", fn);
+                Assert.Equal(new[] { joining.Base }, (List<string>)args[0]);
+                var digest = VbtcbTypedData.AddValidatorsDigest(new[] { joining.Base }, Epoch, 8, 8453, Proxy);
+                string SignerOf(byte[] signature)
+                {
+                    Assert.True(VbtcbSignatureForms.Counted(signature));
+                    return ValidatorEthKeyService.RecoverSigner(digest, "0x" + Convert.ToHexString(signature), personalMessage: false)!.ToLowerInvariant();
+                }
+                var members = ((List<byte[]>)args[2]).Select(SignerOf).ToList();
+                Assert.Equal(new[] { _me, _seed3, seed4, seed5 }.Select(v => v.Base).OrderBy(a => a), members.OrderBy(a => a));   // 4 of 5, as the contract requires
+                Assert.Equal(joining.Base, SignerOf(Assert.Single((List<byte[]>)args[3])));
+
+                // In the form the contract counts, the same two are kept: both newcomers join in one batch.
+                sent.Clear();
+                network.Reencode.Clear();
+                await BaseValidatorSyncService.SyncOnceAsync();
+                (fn, args) = Assert.Single(sent);
+                Assert.Equal("addValidatorBatch", fn);
+                Assert.Equal(adds, (List<string>)args[0]);
+            }
+            finally
+            {
+                BaseValidatorSyncService.SubmitForTests = null;
+                Globals.HttpClientFactory = priorFactory;
+            }
+        }
+
+        /// <summary>
+        /// A caster due to join that signs its seat in a form the contract does not count is left out like one that does
+        /// not answer: it holds back neither the validators' change nor the removal of a caster that left the committee.
+        /// </summary>
+        [Theory]
+        [MemberData(nameof(VbtcbSignatureForms.NotCounted), MemberType = typeof(VbtcbSignatureForms))]
+        public async Task ACasterWhoseSeatSignatureTheContractDoesNotCount_IsLeftOut_AndHoldsNothingBack(string form)
+        {
+            const long boundary = 4 * BaseSignerSetPolicy.EpochBlocks;
+            var c = Enumerable.Range(0, 5).Select(_ => NewKey()).ToArray();               // c[3] left the committee, c[4] joined
+            foreach (var k in c)
+                AccountData.GetAccounts().InsertSafe(new Account { Address = k.Address, PublicKey = k.Pub, PrivateKey = "0" + k.Key.secret.ToString("x") });
+            CasterMembershipRecord Record(long seq, long from, params int[] members) => new()
+            {
+                RecordSeq = seq, EffectiveFromHeight = from,
+                Casters = members.Select(i => new CasterInfo { Address = c[i].Address, PeerIP = $"10.0.4.{i + 1}", PublicKey = c[i].Pub }).ToList(),
+            };
+            var records = new[] { Record(1, 0, 0, 1, 2, 3), Record(2, boundary - 2 * BaseSignerSetPolicy.EpochBlocks - 10, 0, 1, 2, 4) };
+            foreach (var r in records) DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Upsert(r.RecordSeq, r);
+            VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
+            BlockchainData.GetBlocks().InsertSafe(new Block { Height = boundary, Hash = $"b{boundary}-{Guid.NewGuid():N}", Transactions = new List<Transaction>() });
+            var validators = new[] { _me, _seed2, _seed3 };
+            BlockchainData.GetBlocks().InsertSafe(new Block
+            {
+                Height = boundary - 100, Hash = $"r{boundary}-{Guid.NewGuid():N}",
+                Transactions = validators.Select((v, i) => new Transaction
+                {
+                    TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = v.Address, ToAddress = v.Address, Hash = $"rf{i}",
+                    Data = JsonConvert.SerializeObject(new { ValidatorAddress = v.Address, IPAddress = $"10.0.0.{i + 1}", FrostPublicKey = v.Pub, IsS3C = false }),
+                }).ToList(),
+            });
+
+            var at = validators.Select((v, i) => (v, ip: $"10.0.0.{i + 1}")).Concat(c.Select((k, i) => (v: k, ip: $"10.0.4.{i + 1}"))).ToDictionary(x => x.ip, x => x.v);
+            var network = new ValidatorNetwork(at);
+            network.Reencode["10.0.4.5"] = form;                                  // c[4] answers, in a form the contract does not count
+            var priorFactory = Globals.HttpClientFactory;
+            Globals.HttpClientFactory = network;
+            var sent = new List<(string Function, object[] Args)>();
+            BaseValidatorSyncService.SubmitForTests = (f, a) => { sent.Add((f, a)); return Task.FromResult<string?>("0xtx"); };
+            Globals.LastBlock = new Block { Height = boundary + BaseSignerSetPolicy.SettleBlocks + 8 * BaseValidatorSyncService.SubmitTurnBlocks, Timestamp = TimeUtil.GetTime() };
+            try
+            {
+                // Only c[4] is due to join: the validator that left VFX is removed all the same.
+                Contract(9, validators.Append(_gone).ToArray(), c.Take(3).ToArray());
+                await BaseValidatorSyncService.SyncOnceAsync();
+                var (fn, args) = Assert.Single(sent);
+                Assert.Equal("removeValidatorBatch", fn);
+                Assert.Equal(new[] { _gone.Base }, (List<string>)args[0]);
+
+                // A swap whose newcomer is left out still removes the caster that left the committee.
+                sent.Clear();
+                Contract(10, validators, c.Take(4).ToArray());
+                await BaseValidatorSyncService.SyncOnceAsync();
+                (fn, args) = Assert.Single(sent);
+                Assert.Equal("updateCasters", fn);
+                Assert.Empty((List<string>)args[0]);
+                Assert.Equal(new[] { c[3].Base }, (List<string>)args[1]);
+                Assert.All((List<byte[]>)args[3], signature => Assert.True(VbtcbSignatureForms.Counted(signature)));
             }
             finally
             {

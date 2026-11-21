@@ -121,7 +121,7 @@ namespace VerifiedXCore.Services
         /// <summary>True when the peer answers /Health without the <c>Casting</c> field (a build before the resume protocol).</summary>
         internal static async Task<bool> IsLegacyBuildAsync(string? peerIp)
         {
-            if (string.IsNullOrEmpty(peerIp)) return false;
+            if (!InputValidationHelper.IsPeerIPAddress(peerIp)) return false;
             try
             {
                 using var client = Globals.HttpClientFactory.CreateClient();
@@ -138,7 +138,7 @@ namespace VerifiedXCore.Services
         /// <summary>Present = reachable and reporting that it casts (<c>Casting</c>; older builds: <c>IsBlockCaster</c>).</summary>
         internal static async Task<bool> IsCastingAsync(string? peerIp)
         {
-            if (string.IsNullOrEmpty(peerIp)) return false;
+            if (!InputValidationHelper.IsPeerIPAddress(peerIp)) return false;
             try
             {
                 using var client = Globals.HttpClientFactory.CreateClient();
@@ -566,6 +566,7 @@ namespace VerifiedXCore.Services
             {
                 try
                 {
+                    if (!InputValidationHelper.IsPeerIPAddress(m.PeerIP)) return null;
                     using var client = Globals.HttpClientFactory.CreateClient();
                     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
                     using var content = new StringContent(json, Encoding.UTF8, "application/json");
@@ -602,6 +603,7 @@ namespace VerifiedXCore.Services
             {
                 try
                 {
+                    if (!InputValidationHelper.IsPeerIPAddress(m.PeerIP)) return;
                     using var client = Globals.HttpClientFactory.CreateClient();
                     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
                     using var content = new StringContent(notice, Encoding.UTF8, "application/json");
@@ -634,6 +636,7 @@ namespace VerifiedXCore.Services
             {
                 try
                 {
+                    if (!InputValidationHelper.IsPeerIPAddress(m.PeerIP)) return false;
                     using var client = Globals.HttpClientFactory.CreateClient();
                     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
                     using var content = new StringContent(json, Encoding.UTF8, "application/json");

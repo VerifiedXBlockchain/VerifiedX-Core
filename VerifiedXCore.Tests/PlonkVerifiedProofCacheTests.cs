@@ -10,7 +10,7 @@ namespace VerifiedXCore.Tests
     [Collection("PrivacySequential")]
     public class PlonkVerifiedProofCacheTests : IDisposable
     {
-        private readonly Func<byte, byte[], byte[], int> _priorNative = PlonkProofVerifier.NativeVerify;
+        private readonly Func<byte, byte[], byte[], bool, int> _priorNative = PlonkProofVerifier.NativeVerify;
         private int _calls;
 
         public PlonkVerifiedProofCacheTests() => PlonkProofVerifier.ClearVerifiedProofCache();
@@ -22,7 +22,7 @@ namespace VerifiedXCore.Tests
         }
 
         private void NativeReturns(Func<byte[], byte[], int> verdict) =>
-            PlonkProofVerifier.NativeVerify = (_, p, pi) => { _calls++; return verdict(p, pi); };
+            PlonkProofVerifier.NativeVerify = (_, p, pi, _) => { _calls++; return verdict(p, pi); };
 
         [Fact]
         public void AcceptedProof_IsNotReverifiedForTheSameCircuitAndInputs()
@@ -31,8 +31,8 @@ namespace VerifiedXCore.Tests
             var proof = new byte[] { 1, 2, 3 };
             var pi = new byte[] { 9, 9 };
 
-            Assert.Equal(PlonkVerifyResult.Valid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Transfer, proof, pi));
-            Assert.Equal(PlonkVerifyResult.Valid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Transfer, proof, pi));
+            Assert.Equal(PlonkVerifyResult.Valid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Transfer, proof, pi, currentRules: true));
+            Assert.Equal(PlonkVerifyResult.Valid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Transfer, proof, pi, currentRules: true));
             Assert.Equal(1, _calls);
         }
 
@@ -42,14 +42,14 @@ namespace VerifiedXCore.Tests
             var proof = new byte[] { 1, 2, 3 };
             var good = new byte[] { 9, 9 };
             NativeReturns((_, pi) => pi.SequenceEqual(good) ? 1 : 0);
-            Assert.Equal(PlonkVerifyResult.Valid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Transfer, proof, good));
+            Assert.Equal(PlonkVerifyResult.Valid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Transfer, proof, good, currentRules: true));
 
-            Assert.Equal(PlonkVerifyResult.Invalid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Transfer, proof, new byte[] { 9, 8 }));
+            Assert.Equal(PlonkVerifyResult.Invalid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Transfer, proof, new byte[] { 9, 8 }, currentRules: true));
             // Same bytes moved across the proof/input boundary must not collide.
-            Assert.Equal(PlonkVerifyResult.Invalid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Transfer, new byte[] { 1, 2 }, new byte[] { 3, 9, 9 }));
+            Assert.Equal(PlonkVerifyResult.Invalid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Transfer, new byte[] { 1, 2 }, new byte[] { 3, 9, 9 }, currentRules: true));
 
             NativeReturns((_, _) => 0);
-            Assert.Equal(PlonkVerifyResult.Invalid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Unshield, proof, good));
+            Assert.Equal(PlonkVerifyResult.Invalid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Unshield, proof, good, currentRules: true));
         }
 
         [Fact]
@@ -58,11 +58,11 @@ namespace VerifiedXCore.Tests
             var proof = new byte[] { 4 };
             var pi = new byte[] { 5 };
             NativeReturns((_, _) => 0);
-            Assert.Equal(PlonkVerifyResult.Invalid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, proof, pi));
+            Assert.Equal(PlonkVerifyResult.Invalid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, proof, pi, currentRules: true));
             NativeReturns((_, _) => -1);
-            Assert.Equal(PlonkVerifyResult.NativeError, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, proof, pi));
+            Assert.Equal(PlonkVerifyResult.NativeError, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, proof, pi, currentRules: true));
             NativeReturns((_, _) => 0);
-            Assert.Equal(PlonkVerifyResult.Invalid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, proof, pi));
+            Assert.Equal(PlonkVerifyResult.Invalid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, proof, pi, currentRules: true));
             Assert.Equal(3, _calls);
         }
     }

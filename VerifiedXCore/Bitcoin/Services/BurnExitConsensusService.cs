@@ -1,4 +1,4 @@
-using Newtonsoft.Json;
+﻿using Newtonsoft.Json;
 using VerifiedXCore.Bitcoin.Models;
 using VerifiedXCore.Data;
 using VerifiedXCore.Models;
@@ -23,6 +23,16 @@ namespace VerifiedXCore.Bitcoin.Services
         private const int STUCK_EXIT_BLOCK_THRESHOLD = 50;
         private const int COMPLETED_TTL_HOURS = 24;
         private const int FAILED_TTL_HOURS = 1;
+        /// <summary>The longest text field a burn alert may carry (a burn id, a lock id, an address).</summary>
+        public const int MaxAlertFieldLength = 128;
+        /// <summary>
+        /// The most burns one caster's alerts may hold here that this node has not found on Base, whether still to be
+        /// looked up, being looked up, or looked up and not there. A burn found on Base no longer counts, so a caster reporting real
+        /// burns is never held back by it.
+        /// </summary>
+        public const int MaxUnverifiedAlertsPerCaster = 32;
+        /// <summary>Minutes an alerted burn that has not been found on Base is kept before it is dropped.</summary>
+        public const int UNVERIFIED_ALERT_TTL_MINUTES = 60;
         private const int CONSENSUS_CHECK_INTERVAL_MS = 15_000;
         private const int PROPOSAL_WAIT_MS = 8_000;
         private const int CONFIRMATION_WAIT_MS = 8_000;
@@ -55,6 +65,28 @@ namespace VerifiedXCore.Bitcoin.Services
             public string AllocationsJson { get; set; } = "";
             /// <summary>Unix seconds before which no new consensus round is attempted (backoff after a transient failure).</summary>
             public long NextAttemptAt { get; set; }
+            /// <summary>Rounds in a row that did not reach the threshold: how long the next retry waits (RetryDelaySeconds).</summary>
+            public int FailedRounds { get; set; }
+            /// <summary>The caster whose alert created this record; empty when this node saw the burn itself.</summary>
+            public string AlertedBy { get; set; } = "";
+            /// <summary>Whether this node has found the burn on Base.</summary>
+            public bool FoundOnBase { get; set; }
+
+            /// <summary>
+            /// Known only from a caster's alert and not found on Base by this node: waiting to be looked up, being looked
+            /// up, or looked up and not there. Each counts against the caster until the record is dropped.
+            /// </summary>
+            internal bool IsUnverifiedAlert => AlertedBy.Length > 0 && !FoundOnBase;
+
+            /// <summary>
+            /// Whether the exit type, amount, destination and burner are what Base holds (this node read the event, or
+            /// corrected the record from it), not what a peer's alert claimed: only then are they judged on.
+            /// </summary>
+            public bool FieldsFromBase { get; set; }
+
+            /// <summary>Taken to start a round (Pending to InConsensus) and to correct the record from the watch of Base, so a
+            /// round never reads fields being changed: the type its evidence check reads is the one it started with.</summary>
+            [Newtonsoft.Json.JsonIgnore] internal object Sync { get; } = new();
         }
 
         /// <summary>Backoff after the burn could not be verified on Base (RPC unreachable).</summary>
@@ -268,12 +300,148 @@ namespace VerifiedXCore.Bitcoin.Services
             }
 
             var now = TimeUtil.GetTime();
-            var pendingBurns = _processedBurns.Values
-                .Where(r => r.Status == BurnExitStatus.Pending && Globals.IsBlockCaster && r.NextAttemptAt <= now)
+            if (!Globals.IsBlockCaster) return;
+            // A Bitcoin exit too small to be paid fails after its round anyway: it is given up before it takes a slot.
+            foreach (var unpayable in DueForARound(_processedBurns.Values, now).Where(IsUnpayableBtcExit))
+            {
+                unpayable.Status = BurnExitStatus.Failed;
+                LogUtility.Log($"[BurnExitConsensus] {unpayable.BaseBurnTxHash}: a Bitcoin exit of {unpayable.Amount} BTC is below the {BtcWithdrawalsMinExitPartSats} sats a vault's part of an exit must be; not put to a round.", "BurnExitConsensusService");
+            }
+            // Fair and first come: see SweepOrder. RunRounds starts rounds in this order.
+            var pendingBurns = SweepOrder(DueForARound(_processedBurns.Values, now));
+
+            await RunRounds(pendingBurns.Select(b => b.BaseBurnTxHash).ToList(), RunConsensusRound, MaxConcurrentRounds);
+        }
+
+        /// <summary>
+        /// How many burns' rounds run at once. A round mostly waits (for proposals, then confirmations), and one at a time
+        /// a holder's many one-satoshi burns kept every other exit waiting behind them in the sweep.
+        /// </summary>
+        internal const int MaxConcurrentRounds = 16;
+
+        /// <summary>Runs each burn's round, at most <paramref name="maxConcurrent"/> at once.</summary>
+        internal static async Task RunRounds(IReadOnlyList<string> burns, Func<string, Task> round, int maxConcurrent)
+        {
+            using var gate = new SemaphoreSlim(Math.Max(1, maxConcurrent));
+            await Task.WhenAll(burns.Select(async burn =>
+            {
+                await gate.WaitAsync();
+                try { await round(burn); }
+                catch (Exception ex) { ErrorLogUtility.LogError($"[BurnExitConsensus] Round for {burn} failed: {ex.Message}", "BurnExitConsensusService.RunRounds()"); }
+                finally { gate.Release(); }
+            }));
+        }
+
+        private const long RetryBackoffBaseSeconds = 30;
+        private const long RetryBackoffMaxSeconds = 300;
+
+        /// <summary>
+        /// The wait before a burn whose round did not reach the threshold is tried again: 30 s, doubling with each such
+        /// round, at most 5 minutes (within one election window). It went straight back into every sweep.
+        /// </summary>
+        internal static long RetryDelaySeconds(int failedRounds) =>
+            Math.Min(RetryBackoffMaxSeconds, RetryBackoffBaseSeconds << Math.Clamp(failedRounds - 1, 0, 10));
+
+        /// <summary>One exit is built and sent at a time, as the sweep did when rounds ran one by one: two handlers' plans
+        /// drawn from the same locks at once would conflict.</summary>
+        private static readonly SemaphoreSlim ExecutionGate = new(1, 1);
+
+        /// <summary>
+        /// How long an exit's turn lasts at most after it is sent, waiting for its transaction to be in a block (which is
+        /// when its locks are drawn): about five blocks. An exit not mined by then is left to RetryUnminedPoolUnlocks.
+        /// </summary>
+        internal static readonly TimeSpan MostAnExitHoldsTheTurn = TimeSpan.FromSeconds(60);
+
+        /// <summary>
+        /// Whether the transaction this caster sent for the exit is in a committed block whose state is applied, so the locks
+        /// it drew read as drawn: one lookup in the recent blocks' transaction hashes (Globals.MemBlocks, filled as a block is
+        /// committed, before its state is applied) and the height the state is applied through. The lock and exit records
+        /// were read whole each second of the wait.
+        /// </summary>
+        internal static bool SentTransactionIsInABlock(ProcessedBurnRecord record) =>
+            !string.IsNullOrEmpty(record.CompletionVfxTxHash)
+            && Globals.MemBlocks.TryGetValue(record.CompletionVfxTxHash, out var minedAt)
+            && StateData.StateAppliedThrough >= minedAt;
+
+        /// <summary>
+        /// Whether the exit just run left a transaction to be mined: a Bitcoin exit sent as a VFX transaction or on to its
+        /// FROST signing, or a VFX pool unlock broadcast (complete for this caster, its locks drawn only once it is mined).
+        /// </summary>
+        internal static bool SentAnExit(ProcessedBurnRecord record, long tipBefore) =>
+            record.Status is BurnExitStatus.VfxTxCreated or BurnExitStatus.FrostInProgress
+            || (record.Status == BurnExitStatus.Complete && record.CompletionBroadcastAtBlock > 0 && record.CompletionBroadcastAtBlock >= tipBefore);
+
+        /// <summary>A round short of the threshold: the burn waits (<see cref="RetryDelaySeconds"/>) before it is tried again.</summary>
+        internal static long NoteShortRound(ProcessedBurnRecord record, long now)
+        {
+            record.FailedRounds++;
+            var wait = RetryDelaySeconds(record.FailedRounds);
+            record.NextAttemptAt = now + wait;
+            record.Status = BurnExitStatus.Pending;
+            return wait;
+        }
+
+        /// <summary>The burns the sweep takes now: pending, and past their retry time.</summary>
+        internal static List<ProcessedBurnRecord> DueForARound(IEnumerable<ProcessedBurnRecord> records, long now) =>
+            records.Where(r => r.Status == BurnExitStatus.Pending && r.NextAttemptAt <= now).ToList();
+
+        /// <summary>How many burns one sweep takes (two waves of rounds): the rest wait for the next sweep, so a sweep ends and the stuck-exit check runs.</summary>
+        internal const int MaxRoundsPerSweep = 2 * MaxConcurrentRounds;
+        /// <summary>How many of one burner's burns one sweep takes.</summary>
+        internal const int MaxRoundsPerBurnerPerSweep = 2;
+
+        private static long BtcWithdrawalsMinExitPartSats => Attestation.BtcWithdrawals.MinExitPartSats;
+
+        /// <summary>
+        /// A Bitcoin exit below the least a vault's part of an exit must be (its fee and an output above dust): it cannot be
+        /// paid, and its exit is refused after the round. Judged only on fields taken from Base (FieldsFromBase), never on
+        /// what a peer's alert claims.
+        /// </summary>
+        internal static bool IsUnpayableBtcExit(ProcessedBurnRecord r) =>
+            r.ExitType == BurnExitType.BtcExit && r.FieldsFromBase && (long)(r.Amount * 100_000_000M) < BtcWithdrawalsMinExitPartSats;
+
+        /// <summary>
+        /// The burns a sweep takes, in the order their rounds start: burns this node saw itself or found on Base before
+        /// alerts it cannot verify; then each burner's first burns before anyone's later ones, so one burner's flood does
+        /// not hold back a holder's single exit; then first come (the block this node first saw the burn at, then its hash),
+        /// so a later burn cannot be put ahead of an earlier one. At most <see cref="MaxRoundsPerBurnerPerSweep"/> per burner
+        /// and <see cref="MaxRoundsPerSweep"/> in all.
+        /// </summary>
+        /// <summary>
+        /// Who a burn counts against in a sweep: its burner when the record's fields came from Base; otherwise the caster
+        /// whose alert made it (the burner an alert names is not signed), so one caster's alerts share one burner's turns.
+        /// </summary>
+        internal static string BurnerKey(ProcessedBurnRecord r) =>
+            r.FieldsFromBase && !string.IsNullOrWhiteSpace(r.BurnerAddress) ? "burner:" + r.BurnerAddress.Trim().ToLowerInvariant()
+            : r.AlertedBy.Length > 0 ? "alert:" + r.AlertedBy
+            : "burn:" + r.BaseBurnTxHash;
+
+        internal static List<ProcessedBurnRecord> SweepOrder(IEnumerable<ProcessedBurnRecord> due) =>
+            due.GroupBy(BurnerKey)
+                .SelectMany(g => g.OrderBy(r => r.DetectedAtBlock).ThenBy(r => r.BaseBurnTxHash, StringComparer.Ordinal).Select((r, i) => (Record: r, Turn: i)))
+                .Where(x => x.Turn < MaxRoundsPerBurnerPerSweep)
+                .OrderBy(x => x.Record.IsUnverifiedAlert)
+                .ThenBy(x => x.Turn)
+                .ThenBy(x => x.Record.DetectedAtBlock)
+                .ThenBy(x => x.Record.BaseBurnTxHash, StringComparer.Ordinal)
+                .Take(MaxRoundsPerSweep)
+                .Select(x => x.Record)
                 .ToList();
 
-            foreach (var burn in pendingBurns)
-                await RunConsensusRound(burn.BaseBurnTxHash);
+        /// <summary>Whether the round's votes still meet the threshold of <paramref name="committee"/>, the one the exit is judged by.</summary>
+        internal static bool VotesCarry(IEnumerable<CasterConsensusVote>? votes, HashSet<string> committee, int required) =>
+            (votes ?? Enumerable.Empty<CasterConsensusVote>()).Select(v => v.CasterAddress).Where(committee.Contains).Distinct(StringComparer.Ordinal).Count() >= required;
+
+        /// <summary>Until <paramref name="onChain"/> holds, checked every <paramref name="poll"/>, or <paramref name="atMost"/> passed; whether it held.</summary>
+        internal static async Task<bool> WaitUntilOnChain(Func<bool> onChain, TimeSpan atMost, TimeSpan poll)
+        {
+            var until = DateTime.UtcNow + atMost;
+            while (true)
+            {
+                try { if (onChain()) return true; } catch { }
+                if (DateTime.UtcNow >= until) return false;
+                await Task.Delay(poll);
+            }
         }
 
         /// <summary>
@@ -301,7 +469,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 Amount = amount,
                 BurnerAddress = burnerAddress,
                 DetectedAtBlock = Globals.LastBlock?.Height ?? 0,
-                Status = BurnExitStatus.Pending
+                Status = BurnExitStatus.Pending,
+                FieldsFromBase = true, // built from the event this node read on Base
             };
 
             if (!_processedBurns.TryAdd(baseBurnTxHash, record))
@@ -336,6 +505,9 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             if (alert == null || string.IsNullOrEmpty(alert.BaseBurnTxHash) || _processedBurns.ContainsKey(alert.BaseBurnTxHash))
                 return;
+            // Every text field is kept with the record, signed or not: none is longer than a real one can be.
+            if (AlertFieldTooLong(alert))
+                return;
 
             // SECURITY: only a committee caster's signed, fresh alert enters the consensus queue.
             var alertDest = alert.ExitType == BurnExitType.VfxPoolUnlock ? alert.VfxDestinationAddress : alert.BtcDestination;
@@ -352,23 +524,41 @@ namespace VerifiedXCore.Bitcoin.Services
             // collection reads (round 25).
             if (ChainHasTheBurn(alert.BaseBurnTxHash))
                 return;
-
-            _processedBurns.TryAdd(alert.BaseBurnTxHash, new ProcessedBurnRecord
+            // A caster's alerts hold a bounded number of burns this node has not found on Base. Past it the alert is
+            // dropped: a real burn still arrives from this node's own watch of Base and from the other casters.
+            lock (_alertAdmissionLock)
             {
-                BaseBurnTxHash = alert.BaseBurnTxHash,
-                ExitType = alert.ExitType,
-                VfxLockId = alert.VfxLockId,
-                BtcDestination = alert.BtcDestination,
-                VfxDestinationAddress = alert.VfxDestinationAddress,
-                Amount = alert.Amount,
-                BurnerAddress = alert.BurnerAddress,
-                DetectedAtBlock = Globals.LastBlock?.Height ?? 0,
-                Status = BurnExitStatus.Pending
-            });
+                if (_processedBurns.Values.Count(r => r.IsUnverifiedAlert && r.AlertedBy == alert.SenderCasterAddress) >= MaxUnverifiedAlertsPerCaster)
+                {
+                    LogUtility.Log($"[BurnExitConsensus] Dropped BurnAlert from {alert.SenderCasterAddress}: it already holds {MaxUnverifiedAlertsPerCaster} burns not found on Base.", "BurnExitConsensusService");
+                    return;
+                }
+
+                _processedBurns.TryAdd(alert.BaseBurnTxHash, new ProcessedBurnRecord
+                {
+                    BaseBurnTxHash = alert.BaseBurnTxHash,
+                    ExitType = alert.ExitType,
+                    VfxLockId = alert.VfxLockId ?? "",
+                    BtcDestination = alert.BtcDestination ?? "",
+                    VfxDestinationAddress = alert.VfxDestinationAddress ?? "",
+                    Amount = alert.Amount,
+                    BurnerAddress = alert.BurnerAddress ?? "",
+                    DetectedAtBlock = Globals.LastBlock?.Height ?? 0,
+                    Status = BurnExitStatus.Pending,
+                    AlertedBy = alert.SenderCasterAddress
+                });
+            }
 
             LogUtility.Log($"[BurnExitConsensus] Received BurnAlert from {alert.SenderCasterAddress}: {alert.BaseBurnTxHash}", "BurnExitConsensusService");
             await Task.CompletedTask;
         }
+
+        private static readonly object _alertAdmissionLock = new();
+
+        private static bool AlertFieldTooLong(BurnAlert alert) =>
+            (alert.BaseBurnTxHash?.Length ?? 0) > MaxAlertFieldLength || (alert.VfxLockId?.Length ?? 0) > MaxAlertFieldLength
+            || (alert.BtcDestination?.Length ?? 0) > MaxAlertFieldLength || (alert.VfxDestinationAddress?.Length ?? 0) > MaxAlertFieldLength
+            || (alert.BurnerAddress?.Length ?? 0) > MaxAlertFieldLength || (alert.SenderCasterAddress?.Length ?? 0) > MaxAlertFieldLength;
 
         /// <summary>
         /// Runs a consensus round using lowest-hash-wins tiebreaking.
@@ -377,10 +567,12 @@ namespace VerifiedXCore.Bitcoin.Services
         {
             if (!_processedBurns.TryGetValue(baseBurnTxHash, out var record))
                 return;
-            if (record.Status != BurnExitStatus.Pending)
-                return;
-
-            record.Status = BurnExitStatus.InConsensus;
+            lock (record.Sync)
+            {
+                if (record.Status != BurnExitStatus.Pending)
+                    return;
+                record.Status = BurnExitStatus.InConsensus;
+            }
 
             // Step 0: SECURITY / LIVENESS — verify the burn on Base ourselves BEFORE proposing or voting.
             // The alert is peer-supplied; our vote must commit only to what the chain actually burned,
@@ -404,6 +596,10 @@ namespace VerifiedXCore.Bitcoin.Services
                     return;
                 }
             }
+            record.FoundOnBase = true;
+            // The event matched the record or corrected it (it was read for this exit type): the record's fields are Base's now.
+            if (evidence != null && !string.IsNullOrEmpty(evidence.Burner)) record.BurnerAddress = evidence.Burner;
+            record.FieldsFromBase = true;
 
             // Step 1: Generate deterministic proposal hash and sign the proposal
             var proposalTimestamp = TimeUtil.GetTime();
@@ -479,14 +675,15 @@ namespace VerifiedXCore.Bitcoin.Services
             // Step 6: Wait for confirmations
             await Task.Delay(CONFIRMATION_WAIT_MS);
 
-            var confirmations = ConfirmationsOfThisRound(confirmDict.Values, winner.ProposerCasterAddress, proposalTimestamp);
+            var confirmations = CountableConfirmations(record, confirmDict.Values, winner.ProposerCasterAddress, proposalTimestamp, ExitCommittee());
 
             if (confirmations.Count < RequiredCasterSignatures)
             {
-                LogUtility.Log($"[BurnExitConsensus] Insufficient confirmations for {baseBurnTxHash}: {confirmations.Count}/{RequiredCasterSignatures}", "BurnExitConsensusService");
-                record.Status = BurnExitStatus.Pending; // Retry later
+                var wait = NoteShortRound(record, TimeUtil.GetTime());
+                LogUtility.Log($"[BurnExitConsensus] Insufficient confirmations for {baseBurnTxHash}: {confirmations.Count}/{RequiredCasterSignatures}; retry in {wait}s", "BurnExitConsensusService");
                 return;
             }
+            record.FailedRounds = 0;
 
             record.Status = BurnExitStatus.ConsensusReached;
             var voteBurnType = BurnTypeString(record.ExitType);
@@ -503,7 +700,34 @@ namespace VerifiedXCore.Bitcoin.Services
 
             // Step 7: If this caster is the handler, execute
             if (winner.ProposerCasterAddress == Globals.ValidatorAddress && Globals.IsBlockCaster)
-                await ExecuteExitTransaction(record);
+            {
+                await ExecutionGate.WaitAsync();
+                try
+                {
+                    // Waiting its turn, the round's votes may no longer carry the committee that judges the exit: then the
+                    // burn goes back for a fresh round rather than sending an exit that is refused and given up.
+                    if (!VotesCarry(record.ConsensusVotes, ExitCommittee(), RequiredCasterSignatures))
+                    {
+                        LogUtility.Log($"[BurnExitConsensus] The committee changed while {baseBurnTxHash} waited its turn; a new round will be held.", "BurnExitConsensusService");
+                        record.ConsensusVotes.Clear();
+                        record.HandlerCasterAddress = "";
+                        record.Status = BurnExitStatus.Pending;
+                        record.NextAttemptAt = 0;
+                    }
+                    else
+                    {
+                        var tipBefore = Globals.LastBlock?.Height ?? 0;
+                        await ExecuteExitTransaction(record);
+                        // The next exit's plan reads the locks after this one is on chain, as it did when rounds ran one by
+                        // one: planned at once, both drew on the same locks and one waited out RetryUnminedPoolUnlocks.
+                        // Only after an exit was sent: one that failed or that the chain already held drew no lock.
+                        if (SentAnExit(record, tipBefore)
+                            && !await WaitUntilOnChain(() => SentTransactionIsInABlock(record), MostAnExitHoldsTheTurn, TimeSpan.FromSeconds(1)))
+                            LogUtility.Log($"[BurnExitConsensus] The exit for {baseBurnTxHash} was not on chain within {MostAnExitHoldsTheTurn.TotalSeconds}s; the next exit goes ahead.", "BurnExitConsensusService");
+                    }
+                }
+                finally { ExecutionGate.Release(); }
+            }
 
             _proposals.TryRemove(baseBurnTxHash, out _);
             _confirmations.TryRemove(baseBurnTxHash, out _);
@@ -533,6 +757,25 @@ namespace VerifiedXCore.Bitcoin.Services
         /// <summary>The confirmations for this round's winner made in this round (from its proposal on, within the proposal skew).</summary>
         internal static List<BurnExitConfirmation> ConfirmationsOfThisRound(IEnumerable<BurnExitConfirmation> held, string winner, long roundStartedAt) =>
             held.Where(c => c.AgreedHandlerAddress == winner && c.Timestamp >= roundStartedAt - BridgeCasterConsensus.PROPOSAL_MAX_SKEW_SECONDS).ToList();
+
+        /// <summary>
+        /// This round's confirmations whose vote is for the burn as <paramref name="record"/> now holds it. A confirmation
+        /// can arrive before this node read the burn on Base, and is checked then against the record a peer's alert made;
+        /// once the record is corrected from Base, one for the alert's amount or destination is not a vote for this burn
+        /// and is not counted. Counted, it made up the threshold, the exit was refused before broadcast, and the handler
+        /// gave the burn up.
+        /// </summary>
+        internal static List<BurnExitConfirmation> CountableConfirmations(ProcessedBurnRecord record, IEnumerable<BurnExitConfirmation> held, string winner,
+            long roundStartedAt, HashSet<string> committee)
+        {
+            var burnType = BurnTypeString(record.ExitType);
+            var amountSats = (long)(record.Amount * 100_000_000M);
+            var destination = record.ExitType == BurnExitType.VfxPoolUnlock ? record.VfxDestinationAddress : record.BtcDestination;
+            return ConfirmationsOfThisRound(held, winner, roundStartedAt)
+                .Where(c => BridgeCasterConsensus.VerifyConfirmation(c.ConfirmingCasterAddress, record.BaseBurnTxHash, burnType, amountSats, destination,
+                    c.Timestamp, c.Signature, committee).Ok)
+                .ToList();
+        }
 
         /// <summary>Handle proposal from another caster.</summary>
         public static void HandleBurnExitProposal(BurnExitProposal proposal)
@@ -762,7 +1005,8 @@ namespace VerifiedXCore.Bitcoin.Services
                 var distinctContracts = allAvailableLocks.Select(l => l.SmartContractUID).Distinct();
                 foreach (var scUID in distinctContracts)
                 {
-                    if (FrostContractBlacklist.IsBlacklisted(scUID))
+                    if (FrostContractBlacklist.IsBlacklisted(scUID)
+                        || VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.PausedByVoidedExit(scUID, VBTCService.NextBlockHeight))
                     {
                         excludedContracts.Add(scUID);
                         LogUtility.Log($"[BurnExitConsensus] Pre-excluding blacklisted contract {scUID} for BTC exit {record.BaseBurnTxHash}",
@@ -1382,13 +1626,17 @@ namespace VerifiedXCore.Bitcoin.Services
             }
         }
 
-        private static void PruneExpiredRecords()
+        internal static void PruneExpiredRecords()
         {
             var now = DateTime.UtcNow;
             var toRemove = _processedBurns
                 .Where(kvp =>
                     (kvp.Value.Status == BurnExitStatus.Complete && (now - kvp.Value.DetectedAt).TotalHours > COMPLETED_TTL_HOURS) ||
-                    (kvp.Value.Status == BurnExitStatus.Failed && (now - kvp.Value.DetectedAt).TotalHours > FAILED_TTL_HOURS))
+                    (kvp.Value.Status == BurnExitStatus.Failed && (now - kvp.Value.DetectedAt).TotalHours > FAILED_TTL_HOURS) ||
+                    // An alerted burn this node never found on Base: dropped, and taken again if it is alerted or seen later.
+                    // One being looked up right now is left to its round.
+                    (kvp.Value.IsUnverifiedAlert && kvp.Value.Status != BurnExitStatus.InConsensus
+                        && (now - kvp.Value.DetectedAt).TotalMinutes > UNVERIFIED_ALERT_TTL_MINUTES))
                 .Select(kvp => kvp.Key).ToList();
 
             foreach (var key in toRemove)
@@ -1411,8 +1659,37 @@ namespace VerifiedXCore.Bitcoin.Services
             ["Failed"] = _processedBurns.Values.Count(r => r.Status == BurnExitStatus.Failed)
         };
 
-        public static bool IsAlreadyProcessed(string baseBurnTxHash) =>
-            _processedBurns.ContainsKey(baseBurnTxHash);
+        /// <summary>
+        /// Whether a burn this node's watch of Base has just read is already tracked. A record a caster's alert made
+        /// is from then on a burn this node found on Base itself: it is kept and no longer counts against that caster.
+        /// </summary>
+        public static bool IsAlreadyProcessed(string baseBurnTxHash) => IsAlreadyProcessed(baseBurnTxHash, null, 0M, "", "", "");
+
+        /// <summary>
+        /// Whether the burn this node's watch of Base just read is tracked already; when it is, the record is marked found
+        /// on Base, and one a peer's alert made and still pending takes the event's exit type, amount, destination and
+        /// burner, which the alert claimed and nobody signed.
+        /// </summary>
+        public static bool IsAlreadyProcessed(string baseBurnTxHash, BurnExitType? exitType, decimal amount, string burner, string btcDestination, string vfxDestination)
+        {
+            if (!_processedBurns.TryGetValue(baseBurnTxHash, out var record))
+                return false;
+            lock (record.Sync)
+            {
+                // Only while no round has started: a round reads the record's fields from its start (see Sync).
+                if (exitType is { } type && !record.FieldsFromBase && record.Status == BurnExitStatus.Pending)
+                {
+                    record.ExitType = type;
+                    record.Amount = amount;
+                    record.BurnerAddress = burner ?? "";
+                    record.BtcDestination = type == BurnExitType.BtcExit ? btcDestination ?? "" : "";
+                    record.VfxDestinationAddress = type == BurnExitType.VfxPoolUnlock ? vfxDestination ?? "" : "";
+                    record.FieldsFromBase = true;
+                }
+                record.FoundOnBase = true;
+            }
+            return true;
+        }
 
         /// <summary>Map internal BurnExitType enum to the string burn type used by BridgeCasterConsensus vote verification.</summary>
         private static string BurnTypeString(BurnExitType t) => t == BurnExitType.BtcExit ? "BTC_EXIT" : "POOL_EXIT";
@@ -1433,6 +1710,7 @@ namespace VerifiedXCore.Bitcoin.Services
             record.Amount = (decimal)evidence.AmountSats / 100_000_000M;
             if (record.ExitType == BurnExitType.VfxPoolUnlock) record.VfxDestinationAddress = evidence.Destination ?? "";
             else record.BtcDestination = evidence.Destination ?? "";
+            if (!string.IsNullOrEmpty(evidence.Burner)) record.BurnerAddress = evidence.Burner;
         }
 
         internal static async Task<(bool Ok, bool Transient, string Reason, BaseBridgeService.BurnEventInfo? Evidence)> VerifyBurnEvidenceAsync(ProcessedBurnRecord record)

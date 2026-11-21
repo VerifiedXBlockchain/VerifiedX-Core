@@ -35,6 +35,7 @@ namespace VerifiedXCore.Tests
         private readonly string? _priorCustomPath;
         private readonly Block _priorLastBlock;
         private readonly long _priorHeight, _priorSupplyGate;
+        private readonly long _priorCurrentRulesHeight = Globals.PlonkCurrentRulesHeight;
         private readonly Dictionary<string, decimal> _priorCorrections;
         private readonly ShieldedKeyMaterial _alice;
         private readonly ShieldedKeyMaterial _bob;
@@ -52,6 +53,7 @@ namespace VerifiedXCore.Tests
             _priorCorrections = new(Globals.ShieldedSupplyCorrections, StringComparer.Ordinal);
             Globals.ShieldedSupplyCorrections.Clear();
             Globals.PrivateTxProofRulesHeight = Height;
+            Globals.PlonkCurrentRulesHeight = Height; // the epoch's proofs are the current library's
             Globals.PrivateTxSupplyRulesHeight = 1;
             Globals.LastBlock = new Block { Height = Height, Timestamp = 1_700_000_000 };
             Globals.MempoolNullifiers.Clear();
@@ -71,6 +73,7 @@ namespace VerifiedXCore.Tests
             PrivateRawTxService.ClearPending();
             Globals.LastBlock = _priorLastBlock;
             Globals.PrivateTxProofRulesHeight = _priorHeight;
+            Globals.PlonkCurrentRulesHeight = _priorCurrentRulesHeight;
             Globals.PrivateTxSupplyRulesHeight = _priorSupplyGate;
             Globals.ShieldedSupplyCorrections.Clear();
             foreach (var (k, v) in _priorCorrections) Globals.ShieldedSupplyCorrections[k] = v;

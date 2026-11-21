@@ -14,6 +14,80 @@ namespace VerifiedXCore.Beacon
         public static int ProgressValue;
 
         /// <summary>
+        /// Whether an address reaches only this machine or its link: loopback, unspecified, link-local or multicast. An
+        /// NFT's beacon is named by whoever sent the NFT, so an asset download never connects to one of these: this
+        /// node's own APIs listen there.
+        /// </summary>
+        internal static bool IsLocalOnly(System.Net.IPAddress address)
+        {
+            if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+            if (System.Net.IPAddress.IsLoopback(address) || address.Equals(System.Net.IPAddress.Any) || address.Equals(System.Net.IPAddress.IPv6Any)
+                || address.Equals(System.Net.IPAddress.None) || address.IsIPv6LinkLocal || address.IsIPv6Multicast)
+                return true;
+            if (address.AddressFamily == AddressFamily.InterNetwork)
+            {
+                var b = address.GetAddressBytes();
+                return b[0] == 0 || b[0] == 127 || (b[0] == 169 && b[1] == 254) || b[0] >= 224;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// A handler for connections to a beacon an NFT names (its asset download and its hub): no redirects, no proxy, and
+        /// every connection (each address a name resolves to included) refused when it would reach a local-only address
+        /// (<see cref="IsLocalOnly"/>).
+        /// </summary>
+        internal static SocketsHttpHandler NewBeaconHandler() => new()
+        {
+            AllowAutoRedirect = false,
+            UseProxy = false,
+            ConnectCallback = async (context, cancel) =>
+            {
+                var host = context.DnsEndPoint.Host;
+                var addresses = System.Net.IPAddress.TryParse(host, out var literal)
+                    ? new[] { literal }
+                    : await System.Net.Dns.GetHostAddressesAsync(host, cancel);
+                var targets = addresses.Where(a => !IsLocalOnly(a)).ToList();
+                if (targets.Count == 0)
+                    throw new HttpRequestException($"A beacon is not reached at a local-only address ({host}).");
+                return await ConnectInTurn(targets, context.DnsEndPoint.Port, cancel);
+            },
+        };
+
+        /// <summary>
+        /// A connection to the first of <paramref name="targets"/> that takes one, tried in turn as a connection by name
+        /// would be: one the node cannot reach (an IPv6 address on a machine without IPv6) does not stop the rest.
+        /// </summary>
+        internal static async ValueTask<Stream> ConnectInTurn(IReadOnlyList<System.Net.IPAddress> targets, int port, CancellationToken cancel)
+        {
+            Exception? last = null;
+            foreach (var target in targets)
+            {
+                cancel.ThrowIfCancellationRequested();
+                var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+                try
+                {
+                    await socket.ConnectAsync(new System.Net.IPEndPoint(target, port), cancel);
+                    return new NetworkStream(socket, ownsSocket: true);
+                }
+                catch (Exception ex) when (!cancel.IsCancellationRequested)
+                {
+                    socket.Dispose();
+                    last = ex;
+                }
+                catch
+                {
+                    socket.Dispose();
+                    throw;
+                }
+            }
+            throw last ?? new HttpRequestException("No address to connect to.");
+        }
+
+        /// <summary>The client asset downloads use (<see cref="NewBeaconHandler"/>).</summary>
+        internal static readonly HttpClient AssetDownloadClient = new(NewBeaconHandler());
+
+        /// <summary>
         /// Receive the asset that is tied to the NFT
         /// </summary>
         /// <param name="fileName">Asset you are calling out for</param>
@@ -312,7 +386,7 @@ namespace VerifiedXCore.Beacon
             var saveArea = NFTAssetFileUtility.CreateNFTAssetPath(fileName, scUID);
             var scuidFolder = scUID.Replace(":", "");
 
-            using (var client = Globals.HttpClientFactory.CreateClient())
+            var client = AssetDownloadClient;
             {
                 try
                 {

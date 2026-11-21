@@ -121,6 +121,19 @@ namespace VerifiedXCore.Bitcoin.FROST
                         return (false, $"Input {i} does not spend the contract deposit address");
                 }
 
+                // A vault the chain watches: each coin's value is the one state holds. The sighashes commit to it, and
+                // the first start's sighashes are the ones every later start is held to.
+                if (watchedKey != null)
+                {
+                    for (int i = 0; i < inputCount; i++)
+                    {
+                        var prev = tx.Inputs[i].PrevOut;
+                        var coin = Attestation.BtcAttestStore.Coin(Attestation.BtcAttestStore.OutpointKey(prev.Hash.ToString(), prev.N));
+                        if (coin == null || coin.SmartContractUID != vaultUid || coin.ValueSats != spentOutputs[i].Value.Satoshi)
+                            return (false, $"Prevout {i} is not the value the chain holds for this vault's coin");
+                    }
+                }
+
                 // ── 3. Resolve the authorized spend intent from consensus state ────────────────
                 string destination;
                 long maxDestinationSats;

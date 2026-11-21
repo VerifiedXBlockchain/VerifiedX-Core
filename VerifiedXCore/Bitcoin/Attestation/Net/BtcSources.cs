@@ -197,7 +197,7 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
         public const int MaxLocatorHashes = 64;
         /// <summary>The most bytes of an answer read: a full answer of hex headers and its JSON. Nothing past this is read.</summary>
         public const int MaxAnswerBytes = MaxHeadersPerAnswer * BtcHeader.Size * 2 + 4096;
-        private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(8) };
+        private static readonly HttpClient Http = VerifiedXCore.Bitcoin.FROST.FrostPeerHttp.ForShortRequests(TimeSpan.FromSeconds(8));
         private readonly string _url;
 
         public string Name { get; }
@@ -268,7 +268,7 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
     /// </summary>
     public sealed class BtcEsploraSource : IBtcSource
     {
-        private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(45) };
+        private static readonly HttpClient Http = new(VerifiedXCore.Utilities.NodeHttp.NewOutsideServiceHandler()) { Timeout = TimeSpan.FromSeconds(45) };
         private readonly string _baseUrl;
         private readonly Network _network;
 

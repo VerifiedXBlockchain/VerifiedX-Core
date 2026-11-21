@@ -148,6 +148,27 @@ namespace VerifiedXCore.Services
             return (function, uid);
         }
 
+        /// <summary>
+        /// Whether a transaction's Data, read as JSON, carries a comment. The rules here read Data with JToken.Parse,
+        /// which returns a leading comment as the root, while the code that runs a call skips it: such Data reads as no
+        /// call to the rules and as a call to the dispatcher. No wallet writes a comment. Data that is not JSON is left
+        /// to the other rules. Reads the text once, never throws.
+        /// </summary>
+        public static bool DataHasJsonComment(string? data)
+        {
+            if (string.IsNullOrEmpty(data) || (data.IndexOf("/*", StringComparison.Ordinal) < 0 && data.IndexOf("//", StringComparison.Ordinal) < 0))
+                return false;
+            try
+            {
+                using var reader = new Newtonsoft.Json.JsonTextReader(new System.IO.StringReader(data)) { SupportMultipleContent = true, MaxDepth = null };
+                while (reader.Read())
+                    if (reader.TokenType == Newtonsoft.Json.JsonToken.Comment)
+                        return true;
+            }
+            catch { } // not JSON past this point
+            return false;
+        }
+
         /// <summary>The first element of a contract call (array shape) or the call itself (object shape); null when it is neither.</summary>
         private static JObject? CallObject(string txData)
         {
@@ -1241,6 +1262,23 @@ namespace VerifiedXCore.Services
         }
 
         /// <summary>
+        /// Gives a transaction's Amount and Fee the spelling a block carries them in. A transaction's hash covers how
+        /// the two are written, and Newtonsoft JSON, which carries blocks between nodes, writes a decimal that has no
+        /// decimal places with one ("1" as "1.0", "0" as "0.0") and every other decimal as it is. The spelling it gives
+        /// reads back the same from every serializer and store the node uses, so a transaction judged in it at
+        /// admission hashes the same wherever a block takes it. The value does not change.
+        /// </summary>
+        internal static void SpellAsABlockCarriesIt(Transaction tx)
+        {
+            tx.Amount = AsWrittenInABlock(tx.Amount);
+            tx.Fee = AsWrittenInABlock(tx.Fee);
+        }
+
+        /// <summary>A decimal as it reads after Newtonsoft JSON has written and read it.</summary>
+        internal static decimal AsWrittenInABlock(decimal value) =>
+            Newtonsoft.Json.JsonConvert.DeserializeObject<decimal>(Newtonsoft.Json.JsonConvert.SerializeObject(value));
+
+        /// <summary>
         /// From Globals.FeeBelowOneVfxHeight a transaction's fee is below 1 VFX. Amount and Fee are joined in the hash with
         /// no separator, so trailing amount digits can move into the fee's whole part ("1.2345" + "0.00000602" hashes like
         /// "1.2" + "3450.00000602"): same hash and signature, and the sender's balance burned as fee. Every such variant
@@ -1586,12 +1624,30 @@ namespace VerifiedXCore.Services
 
         /// <summary>
         /// What a producer may put after its coinbase in a block at <paramref name="height"/>: below the cap height
-        /// everything, from it no more than the cap leaves room for, in the order given.
+        /// everything, from it no more than the cap leaves room for, in the order given. The priority lane
+        /// (MempoolSizeUtility.InPriorityLane) is counted first, so the cap does not cut it by where its sender sorts. A
+        /// sender with a transaction cut has its later ones cut too, so no sender is left with a gap.
         /// </summary>
-        public static List<Transaction> WithinTransactionCap(List<Transaction> afterCoinbase, int alreadyInBlock, long height) =>
-            height >= Globals.BlockTransactionCapHeight
-                ? afterCoinbase.Take(Math.Max(0, Globals.MaxTransactionsPerBlock - alreadyInBlock)).ToList()
-                : afterCoinbase;
+        public static List<Transaction> WithinTransactionCap(List<Transaction> afterCoinbase, int alreadyInBlock, long height)
+        {
+            var room = Math.Max(0, Globals.MaxTransactionsPerBlock - alreadyInBlock);
+            if (height < Globals.BlockTransactionCapHeight || afterCoinbase.Count <= room)
+                return afterCoinbase;
+            var laneLeft = Math.Min(room, afterCoinbase.Count(MempoolSizeUtility.InPriorityLane));
+            var othersLeft = room - laneLeft;
+            var cutSenders = new HashSet<string>(StringComparer.Ordinal);
+            var kept = new List<Transaction>();
+            foreach (var tx in afterCoinbase)
+            {
+                // The Bitcoin attestation's transactions share one sender name and carry no nonce.
+                var sender = VerifiedXCore.Bitcoin.Attestation.BtcAttestTx.IsAttestationType(tx.TransactionType) ? null : tx.FromAddress ?? "";
+                var take = (sender == null || !cutSenders.Contains(sender))
+                    && (MempoolSizeUtility.InPriorityLane(tx) ? laneLeft-- > 0 : othersLeft-- > 0);
+                if (take) kept.Add(tx);
+                else if (sender != null) cutSenders.Add(sender);
+            }
+            return kept;
+        }
 
         public const string TokenMintedTwiceInBlock = "A block carries one TokenMint() per token contract";
 

@@ -849,7 +849,7 @@ namespace VerifiedXCore.P2P
             try
             {
                 // HAL-16 Fix: Use Transaction semaphore (allows 3 concurrent TXs, never blocks blocks)
-                return await SignalRQueue(Context, (txReceived.Data?.Length ?? 0) + 1024, SignalRMessageType.Transaction, async () =>
+                return await SignalRQueue(Context, TransactionQueueCost(txReceived), SignalRMessageType.Transaction, async () =>
                 {
                     // A peer's transaction: only validators check vBTC owner deposits against Electrum.
                     using var electrumScope = VerifiedXCore.Bitcoin.Services.ElectrumCheckScope.Enter(VerifiedXCore.Bitcoin.Services.ElectrumCheckMode.PeerAdmission);

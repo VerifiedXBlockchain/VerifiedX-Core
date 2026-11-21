@@ -32,7 +32,10 @@ namespace VerifiedXCore.Tests
     public class VBTCWithdrawalConcurrencyTests : IDisposable
     {
         private const long TestHeight = 1000;
-        private const string Requestor = "RAjtW2uDSEDW9mPVkKp2K2AAu4uJD9Zrn7";
+        // A real key: VerifyTX checks the signature before the rules these tests judge.
+        private static readonly EllipticCurve.PrivateKey RequestorKey = new EllipticCurve.PrivateKey("secp256k1");
+        private static readonly string RequestorPub = "04" + Convert.ToHexString(RequestorKey.publicKey().toString()).ToLowerInvariant();
+        private static readonly string Requestor = AccountData.GetHumanAddress(RequestorPub);
         private const string OtherHolder = "RSomeoneElse000000000000000000000001";
         private const string BtcDestination = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx";
 
@@ -124,6 +127,7 @@ namespace VerifiedXCore.Tests
                 }),
             };
             tx.Build();
+            tx.Signature = VerifiedXCore.Services.SignatureService.CreateSignature(tx.Hash, RequestorKey, RequestorPub);
             return tx;
         }
 
@@ -149,6 +153,7 @@ namespace VerifiedXCore.Tests
                 }),
             };
             tx.Build();
+            tx.Signature = VerifiedXCore.Services.SignatureService.CreateSignature(tx.Hash, RequestorKey, RequestorPub);
             return tx;
         }
 
@@ -210,8 +215,7 @@ namespace VerifiedXCore.Tests
 
             var (ok, message) = await TransactionValidatorService.VerifyTX(SingleRequest("conc:legacydust", 0.00000100M, 30));
 
-            Assert.False(ok);
-            Assert.Equal("Signature cannot be null.", message); // cleared every vBTC rule
+            Assert.True(ok, message); // cleared every vBTC rule
         }
 
         [Fact]
@@ -224,8 +228,7 @@ namespace VerifiedXCore.Tests
 
             var (ok, message) = await TransactionValidatorService.VerifyTX(SingleRequest("conc:shared", 0.0008M, 30));
 
-            Assert.False(ok);
-            Assert.Equal("Signature cannot be null.", message);
+            Assert.True(ok, message);
         }
 
         [Fact]
@@ -253,8 +256,7 @@ namespace VerifiedXCore.Tests
 
             var (ok, message) = await TransactionValidatorService.VerifyTX(SingleRequest("conc:self", 0.001M, 10));
 
-            Assert.False(ok);
-            Assert.Equal("Signature cannot be null.", message);
+            Assert.True(ok, message);
         }
 
         // ── Consensus: multi request ────────────────────────────────────────────────────────────
@@ -284,8 +286,7 @@ namespace VerifiedXCore.Tests
 
             var (ok, message) = await TransactionValidatorService.VerifyTX(MultiRequest(new[] { ("conc:ma", 0.001M), ("conc:mb", 0.001M) }, 10));
 
-            Assert.False(ok);
-            Assert.Equal("Signature cannot be null.", message);
+            Assert.True(ok, message);
         }
 
         // ── Coin selection (pure) ───────────────────────────────────────────────────────────────

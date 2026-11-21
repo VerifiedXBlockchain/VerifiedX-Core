@@ -379,9 +379,7 @@ namespace VerifiedXCore.P2P
                         options.SkipNegotiation = false;
                         // Increase timeouts
                         options.CloseTimeout = TimeSpan.FromSeconds(15);
-                        options.WebSocketConfiguration = conf => {
-                            conf.RemoteCertificateValidationCallback = (sender, cert, chain, errors) => true;
-                        };
+                        options.StayAtItsHost();
                     })
                     .Build();
 
@@ -723,9 +721,7 @@ namespace VerifiedXCore.P2P
                         options.Headers.Add("nonce", nonce);
                         options.Transports = HttpTransportType.WebSockets | HttpTransportType.LongPolling;
                         options.SkipNegotiation = false;
-                        options.WebSocketConfiguration = conf => {
-                            conf.RemoteCertificateValidationCallback = (sender, cert, chain, errors) => true;
-                        };
+                        options.StayAtItsHost();
                     })
                     .Build();
 

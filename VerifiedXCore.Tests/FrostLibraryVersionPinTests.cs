@@ -35,16 +35,17 @@ namespace VerifiedXCore.Tests
 
             var result = FrostFFICheckUtility.RunFullCheck();
             Assert.True(result.VersionCheckPassed);
+            Assert.True(result.SignAggregateIdentifyPassed, result.Summary);
             Assert.True(result.AllChecksPassed, result.Summary);
             Assert.Equal(FrostFFICheckUtility.PinnedLibraryVersion, result.LibraryVersion);
         }
 
         [Theory]
-        [InlineData("0.3.0-frost-real")]
+        [InlineData("0.2.0-frost-real")]
         [InlineData("0.1.0-frost-real")]
-        [InlineData("0.2.0-frost-stub")]
-        [InlineData("0.2.0-FROST-REAL")]
-        [InlineData("0.2.0-frost-real ")]
+        [InlineData("0.3.0-frost-stub")]
+        [InlineData("0.3.0-FROST-REAL")]
+        [InlineData("0.3.0-frost-real ")]
         [InlineData("Unknown")]
         [InlineData("")]
         public void ALoadableLibraryOfAnotherVersion_FailsTheCheck(string version)

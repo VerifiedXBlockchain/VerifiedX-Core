@@ -456,6 +456,16 @@ namespace VerifiedXCore.Tests
             await RefusedInBlock(Request(vault.Uid, 0.001M, destination: " " + BtcDest), "spaces around it");
             await RefusedInBlock(Request(vault.Uid, 0.001M, destination: BtcDest + "\n"), "spaces around it");
 
+            // Longer than any Bitcoin address: refused without decoding it, whose cost grows with the square of the length.
+            // 20,000 characters leaves room for the rest of the transaction; the 200,000-character case exceeds its size cap.
+            var started = System.Diagnostics.Stopwatch.StartNew();
+            await RefusedInBlock(Request(vault.Uid, 0.001M, destination: "1" + new string('z', 20_000)), "not an address on this network");
+            await RefusedInBlock(Request(vault.Uid, 0.001M, destination: "1" + new string('z', 200_000)), "too large");
+            Assert.True(started.Elapsed < TimeSpan.FromSeconds(2), $"took {started.Elapsed}");
+            var (admitted, _) = await VerifiedXCore.Services.TransactionValidatorService.VerifyTX(Request(vault.Uid, 0.001M, destination: new string('z', 200_000)));
+            Assert.False(admitted);
+            Assert.True(started.Elapsed < TimeSpan.FromSeconds(4), $"took {started.Elapsed}");
+
             // An amount that leaves 400 sats after the fee. The older rule allows it (330 sats is enough for a Taproot
             // payout), but the transaction the chain fixes pays any kind of address and needs 546: it could never be
             // pinned and would only hold its requester's vBTC until its window ran out. It is refused when it is made.

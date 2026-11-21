@@ -251,6 +251,10 @@ namespace VerifiedXCore.Data
             return names.ToArray();
         }
 
+        /// <summary>The height of the last block whose state was applied in full (an incomplete or failed apply does not count), or -1. Read without a lock.</summary>
+        public static long StateAppliedThrough => Volatile.Read(ref _stateAppliedThrough);
+        private static long _stateAppliedThrough = -1;
+
         public static async Task<bool> UpdateTreis(Block block)
         {
             Globals.TreisUpdating = true;
@@ -292,6 +296,7 @@ namespace VerifiedXCore.Data
                     ErrorLogUtility.LogError($"Block {block.Height}: {stateWrites.Count} write(s) to the state failed on this node's storage; the block's apply is incomplete.", "StateData.UpdateTreis()");
                     return false;
                 }
+                if (applied) Volatile.Write(ref _stateAppliedThrough, block.Height); // only a block applied in full
                 return applied;
             }
             finally
@@ -331,6 +336,16 @@ namespace VerifiedXCore.Data
             // fails on this node is counted like a transaction that failed to apply: the block's state is reported as
             // incomplete, so the node is flagged, not left quietly holding other state than its peers.
             var blockStartFailed = false;
+            if (block.Height == Globals.BridgeFailKeepsLocksHeight)
+            {
+                try { VBTCBridgeLockState.GiveBackFailBlacklisted(); } // locks blacklisted by failed exits before it
+                catch (Exception ex)
+                {
+                    if (IsNodeLocalFault(ex)) blockStartFailed = true;
+                    NoteApplyStepFailed(block.Height, ex);
+                    ErrorLogUtility.LogError($"Block {block.Height}: giving back locks blacklisted by failed exits failed: {ex}", "StateData.UpdateTreis() - block start");
+                }
+            }
             try
             {
                 VerifiedXCore.Bitcoin.Attestation.BtcAttestApply.OnBlockStart(block.Height); // Bitcoin attestation: the checkpoint at the recording height, the signer set at each epoch
@@ -648,10 +663,10 @@ namespace VerifiedXCore.Data
                                     switch (function)
                                     {
                                         case "Sale_Start()":
-                                            StartSaleSmartContract(tx);
+                                            StartSaleSmartContract(tx, block);
                                             break;
                                         case "M_Sale_Start()":
-                                            StartSaleSmartContract(tx);
+                                            StartSaleSmartContract(tx, block);
                                             break;
                                         case "Sale_Complete()":
                                             await CompleteSaleSmartContract(tx, block); // NEW-12: awaited (ran concurrently with the rest of the block)
@@ -660,7 +675,7 @@ namespace VerifiedXCore.Data
                                             await CompleteSaleSmartContract(tx, block); // NEW-12: awaited (ran concurrently with the rest of the block)
                                             break;
                                         case "Sale_Cancel()":
-                                            CancelSaleSmartContract(tx);
+                                            CancelSaleSmartContract(tx, block);
                                             break;
                                         default:
                                             break;
@@ -885,7 +900,7 @@ namespace VerifiedXCore.Data
 
                         if (tx.TransactionType == TransactionType.VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL)
                         {
-                            ApplyVBTCBridgeExitToBTCFail(tx);
+                            ApplyVBTCBridgeExitToBTCFail(tx, block.Height);
                         }
 
                         if(tx.TransactionType == TransactionType.RESERVE)
@@ -3070,7 +3085,7 @@ namespace VerifiedXCore.Data
 
 
 
-        private static void StartSaleSmartContract(Transaction tx)
+        private static void StartSaleSmartContract(Transaction tx, Block block)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
             var txData = tx.Data;
@@ -3092,6 +3107,9 @@ namespace VerifiedXCore.Data
                 scStateTreiRec.Nonce += 1;
                 scStateTreiRec.PurchaseAmount = amountSoldFor;
                 scStateTreiRec.Locators = !string.IsNullOrWhiteSpace(locator) ? locator : scStateTreiRec.Locators;
+                // The listing's purchase key: its completion must carry it, and its cancellation retires it.
+                if (block.Height >= Globals.SaleListingKeyHeight)
+                    scStateTreiRec.SaleKey = jobj["KeySign"]?.ToObject<string?>();
 
                 SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
             }
@@ -3127,6 +3145,7 @@ namespace VerifiedXCore.Data
                 scStateTreiRec.NextOwner = null;
                 scStateTreiRec.IsLocked = false;
                 scStateTreiRec.PurchaseAmount = null;
+                scStateTreiRec.SaleKey = null;
                 CarryOwnerPosition(scStateTreiRec, tx.FromAddress);
                 scStateTreiRec.OwnerAddress = tx.FromAddress;
                 if (scStateTreiRec.PurchaseKeys != null)
@@ -3303,7 +3322,7 @@ namespace VerifiedXCore.Data
             }
         }
 
-        private static void CancelSaleSmartContract(Transaction tx)
+        private static void CancelSaleSmartContract(Transaction tx, Block block)
         {
             SmartContractStateTrei scST = new SmartContractStateTrei();
             var txData = tx.Data;
@@ -3316,10 +3335,28 @@ namespace VerifiedXCore.Data
             var scStateTreiRec = SmartContractStateTrei.GetSmartContractState(scUID);
             if (scStateTreiRec != null)
             {
+                var cancelledBuyer = scStateTreiRec.NextOwner;
                 scStateTreiRec.NextOwner = null;
                 scStateTreiRec.IsLocked = false;
                 scStateTreiRec.Nonce += 1;
                 scStateTreiRec.PurchaseAmount = null;
+                // A cancelled listing's key is retired like a used one: the same key (and the bid signed over it)
+                // cannot start another sale, and a completion written for this listing cannot settle a later one.
+                if (block.Height >= Globals.SaleListingKeyHeight && scStateTreiRec.SaleKey != null)
+                {
+                    scStateTreiRec.PurchaseKeys ??= new List<string>();
+                    if (!scStateTreiRec.PurchaseKeys.Contains(scStateTreiRec.SaleKey))
+                        scStateTreiRec.PurchaseKeys.Add(scStateTreiRec.SaleKey);
+                }
+                // A listing with no recorded key has no key to retire: its buyer is recorded instead, and the
+                // contract is not listed to that buyer again.
+                else if (block.Height >= Globals.SaleListingKeyHeight && cancelledBuyer != null)
+                {
+                    scStateTreiRec.CancelledSaleBuyers ??= new List<string>();
+                    if (!scStateTreiRec.CancelledSaleBuyers.Contains(cancelledBuyer))
+                        scStateTreiRec.CancelledSaleBuyers.Add(cancelledBuyer);
+                }
+                scStateTreiRec.SaleKey = null;
 
                 SmartContractStateTrei.UpdateSmartContract(scStateTreiRec);
             }
@@ -4343,7 +4380,7 @@ namespace VerifiedXCore.Data
         /// Handle VBTC_V2_BRIDGE_EXIT_TO_BTC_FAIL: reverse partial unlocks for failed locks,
         /// blacklist them, and mark the BTC exit state as failed so a retry can occur.
         /// </summary>
-        private static void ApplyVBTCBridgeExitToBTCFail(Transaction tx)
+        private static void ApplyVBTCBridgeExitToBTCFail(Transaction tx, long blockHeight)
         {
             try
             {
@@ -4372,10 +4409,24 @@ namespace VerifiedXCore.Data
                 if (VerifiedXCore.Bitcoin.Attestation.BtcWithdrawals.ExitRefusal(tx) != null)
                     return;
 
-                // For each failed allocation: restore the partial unlock and blacklist the lock
+                // For each failed allocation: restore the partial unlock and blacklist the lock. From
+                // Globals.BridgeFailKeepsLocksHeight the lock stays in use: a blacklisted lock still backed vBTC.b on Base.
+                // Then only for an exit still open: one already completed was paid on Bitcoin, and its locks are spent.
+                if (blockHeight >= Globals.BridgeFailKeepsLocksHeight
+                    && VBTCBridgeBtcExitState.GetByBurnTxHash(baseBurnTxHash.Trim()) is not { IsComplete: false })
+                {
+                    ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTCFail: the exit for burn {baseBurnTxHash} is not open; nothing is given back.", "StateData.ApplyVBTCBridgeExitToBTCFail()");
+                    return;
+                }
                 foreach (var alloc in failedAllocations)
                 {
                     long allocSats = (long)(alloc.UnlockAmount * 100_000_000M);
+                    if (blockHeight >= Globals.BridgeFailKeepsLocksHeight)
+                    {
+                        if (!VBTCBridgeLockState.RestoreUnlock(alloc.LockId, alloc.UnlockAmount, allocSats))
+                            ErrorLogUtility.LogError($"ApplyVBTCBridgeExitToBTCFail: failed to restore lock {alloc.LockId}", "StateData.ApplyVBTCBridgeExitToBTCFail()");
+                        continue;
+                    }
 
                     var blacklisted = VBTCBridgeLockState.BlacklistLock(
                         alloc.LockId,

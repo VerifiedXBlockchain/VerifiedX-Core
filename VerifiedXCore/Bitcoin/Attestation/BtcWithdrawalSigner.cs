@@ -259,6 +259,9 @@ namespace VerifiedXCore.Bitcoin.Attestation
                     pinnedUnsignedTxHex: pin.TxHex, pinnedCoins: coins);
             if (result.Ceremony?.FailureCode == FrostCeremonyFailureCode.Round2SharesWithheld)
                 NoteWithheld(pin.Txid, result.Ceremony.Withholders, signers);
+            // A holder whose share does not verify stalls every attempt the same way: it is left out the same way.
+            if (result.Ceremony?.FailureCode == FrostCeremonyFailureCode.Round2InvalidShares)
+                NoteWithheld(pin.Txid, result.Ceremony.InvalidShareHolders, signers);
             if (result.Success) Withheld.TryRemove(pin.Txid, out _);
             if (!result.Success) return (false, result.ErrorMessage);
             return string.Equals(result.TxHash, pin.Txid, StringComparison.OrdinalIgnoreCase)

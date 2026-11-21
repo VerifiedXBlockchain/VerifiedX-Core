@@ -30,6 +30,16 @@ namespace VerifiedXCore.Privacy
             return PLONKSetup.IsCircuitVersionPinned && PLONKSetup.IsV1CircuitsLoaded && PLONKSetup.IsVfxPi2VerifyAvailable && PLONKSetup.IsV2CircuitsAvailable;
         };
 
+        /// <summary>Whether proofs mined at <paramref name="height"/> are judged under the library's current rules (Globals.PlonkCurrentRulesHeight).</summary>
+        public static bool UsesCurrentRules(long height) => height >= Globals.PlonkCurrentRulesHeight;
+
+        /// <summary>Replaceable for tests: whether this node's library judges proofs under its current rules.</summary>
+        internal static Func<bool> CurrentRulesAvailable = () =>
+        {
+            PLONKSetup.RefreshVerificationCapability();
+            return PLONKSetup.IsVerify2Available && PLONKSetup.IsBoundHashCapacityAvailable;
+        };
+
         /// <summary>
         /// Verifies PLONK payloads for all private txs in a block (single pass at chain tip). Historical sync passes <paramref name="blockDownloads"/> true so proofs are skipped.
         /// </summary>
@@ -57,12 +67,13 @@ namespace VerifiedXCore.Privacy
             return (true, "");
         }
 
-        /// <summary>Replaceable for tests: the native verifier call.</summary>
-        internal static Func<byte, byte[], byte[], int> NativeVerify = (circuit, p, pi) =>
-            PlonkNative.plonk_verify(circuit, p, (nuint)p.Length, pi, (nuint)pi.Length);
+        /// <summary>Replaceable for tests: the native verifier call, under the current rules or the original ones.</summary>
+        internal static Func<byte, byte[], byte[], bool, int> NativeVerify = (circuit, p, pi, currentRules) => currentRules
+            ? PlonkNative.plonk_verify2(circuit, p, (nuint)p.Length, pi, (nuint)pi.Length)
+            : PlonkNative.plonk_verify(circuit, p, (nuint)p.Length, pi, (nuint)pi.Length);
 
         /// <summary>
-        /// Keys of (circuit, proof, public inputs) triples the native verifier has accepted. Verification is a pure function
+        /// Keys of (rules, circuit, proof, public inputs) the native verifier has accepted. Verification is a pure function
         /// of that triple, so a hit returns exactly what the verifier would; it spares re-verifying the same proof at every
         /// relay hop, every proposal pass over the mempool and block validation. Only Valid results are cached.
         /// </summary>
@@ -71,28 +82,33 @@ namespace VerifiedXCore.Privacy
 
         internal static void ClearVerifiedProofCache() => VerifiedProofs.Clear();
 
-        private static string VerifiedProofKey(byte circuit, byte[] proof, byte[] publicInputs)
+        private static string VerifiedProofKey(byte circuit, byte[] proof, byte[] publicInputs, bool currentRules)
         {
             using var sha = SHA256.Create();
-            var header = new byte[9];
+            var header = new byte[10];
             header[0] = circuit;
             BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(1), proof.Length);
             BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(5), publicInputs.Length);
+            header[9] = currentRules ? (byte)1 : (byte)0; // a proof accepted under one set of rules says nothing of the other
             sha.TransformBlock(header, 0, header.Length, null, 0);
             sha.TransformBlock(proof, 0, proof.Length, null, 0);
             sha.TransformFinalBlock(publicInputs, 0, publicInputs.Length);
             return Convert.ToHexString(sha.Hash!);
         }
 
-        public static PlonkVerifyResult VerifyRaw(PlonkCircuitType circuitType, ReadOnlySpan<byte> proof, ReadOnlySpan<byte> publicInputs)
+        /// <summary>
+        /// Verifies a proof natively, under the library's current rules (<paramref name="currentRules"/>, what its provers
+        /// make) or the original ones (proofs mined below Globals.PlonkCurrentRulesHeight).
+        /// </summary>
+        public static PlonkVerifyResult VerifyRaw(PlonkCircuitType circuitType, ReadOnlySpan<byte> proof, ReadOnlySpan<byte> publicInputs, bool currentRules)
         {
             var p = proof.ToArray();
             var pi = publicInputs.ToArray();
-            var key = VerifiedProofKey((byte)circuitType, p, pi);
+            var key = VerifiedProofKey((byte)circuitType, p, pi, currentRules);
             if (VerifiedProofs.ContainsKey(key))
                 return PlonkVerifyResult.Valid;
 
-            int code = NativeVerify((byte)circuitType, p, pi);
+            int code = NativeVerify((byte)circuitType, p, pi, currentRules);
             if (code == PlonkNative.ErrNotImplemented)
                 return PlonkVerifyResult.NotImplemented;
             if (code == 1)
@@ -127,14 +143,14 @@ namespace VerifiedXCore.Privacy
 
             var h = height ?? ((Globals.LastBlock?.Height ?? 0) + 1);
             if (PrivacyEpoch.ProofRulesActive(h))
-                return RequireAndVerifyV2(tx, payload);
+                return RequireAndVerifyV2(tx, payload, UsesCurrentRules(h));
 
             return LegacyOptionalProofs(tx, payload);
         }
 
         // ── Proof-rules epoch ─────────────────────────────────────────────────────────────────────────────────
 
-        private static (bool ok, string message) RequireAndVerifyV2(Transaction tx, PrivateTxPayload payload)
+        private static (bool ok, string message) RequireAndVerifyV2(Transaction tx, PrivateTxPayload payload, bool currentRules)
         {
             var isZk = PrivateTransactionTypes.IsZkAuthorizedPrivate(tx.TransactionType);
             var isShield = tx.TransactionType == TransactionType.VFX_SHIELD || tx.TransactionType == TransactionType.VBTC_V2_SHIELD;
@@ -146,7 +162,7 @@ namespace VerifiedXCore.Privacy
             if (PlonkCircuitHelper.UsesFeeProof(tx.TransactionType) && string.IsNullOrWhiteSpace(payload.FeeProofB64))
                 return (false, "A vBTC private transaction must carry its VFX fee-leg proof (fee_proof_b64).");
 
-            if (!VerifierAvailable())
+            if (!VerifierAvailable() || currentRules && !CurrentRulesAvailable())
                 return (false, VerifierUnavailableReason);
 
             if (!TryDecodeProof(payload.ProofB64!, out var proofBytes))
@@ -154,7 +170,7 @@ namespace VerifiedXCore.Privacy
             if (!PlonkPublicInputsV2.TryBuild(tx, payload, out var publicInputs, out var piErr))
                 return (false, piErr ?? "Could not build the public inputs.");
             var circuit = PlonkCircuitHelper.GetPrimaryCircuit(tx.TransactionType);
-            var result = VerifyRaw(circuit, proofBytes, publicInputs);
+            var result = VerifyRaw(circuit, proofBytes, publicInputs, currentRules);
             if (result != PlonkVerifyResult.Valid)
                 return (false, Describe(result, "primary circuit"));
 
@@ -164,7 +180,7 @@ namespace VerifiedXCore.Privacy
                     return (false, "fee_proof_b64 is not valid Base64.");
                 if (!PlonkPublicInputsV2.TryBuildFeeCircuit(tx, payload, out var feePi, out var feeErr))
                     return (false, feeErr ?? "Could not build the fee circuit public inputs.");
-                var feeResult = VerifyRaw(PlonkCircuitType.Fee, feeProof, feePi);
+                var feeResult = VerifyRaw(PlonkCircuitType.Fee, feeProof, feePi, currentRules);
                 if (feeResult != PlonkVerifyResult.Valid)
                     return (false, Describe(feeResult, "fee circuit"));
             }

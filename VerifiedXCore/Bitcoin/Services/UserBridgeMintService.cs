@@ -229,7 +229,7 @@ namespace VerifiedXCore.Bitcoin.Services
                 return signatures;
             }
 
-            var client = Globals.HttpClientFactory?.CreateClient() ?? new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+            var client = Globals.HttpClientFactory?.CreateClient() ?? new HttpClient(VerifiedXCore.Utilities.NodeHttp.NewHandler()) { Timeout = TimeSpan.FromSeconds(30) };
 
             // Retry up to 3 rounds with delay between rounds
             for (int attempt = 0; attempt < 3 && !Enough(view, requiredSigs, signatures.Keys); attempt++)
@@ -273,7 +273,7 @@ namespace VerifiedXCore.Bitcoin.Services
                         var signer = ValidatorEthKeyService.RecoverSigner(hash, sig, personalMessage: !typed);
                         if (!string.Equals(signer, baseAddress, StringComparison.OrdinalIgnoreCase))
                         {
-                            LogUtility.Log($"[UserBridgeMint] Validator {v.VfxAddress} returned a signature that is not its own for lock {record.LockId}; ignored.", "UserBridgeMintService");
+                            LogUtility.Log($"[UserBridgeMint] Validator {v.VfxAddress} returned a signature the contract would not count as its own for lock {record.LockId}; ignored.", "UserBridgeMintService");
                             continue;
                         }
                         signatures[baseAddress] = sig;
@@ -318,7 +318,7 @@ namespace VerifiedXCore.Bitcoin.Services
             void Add(string? publicKey, string? ip, string vfxAddress)
             {
                 var baseAddress = BaseSignerSetPolicy.BaseAddressOf(publicKey);
-                if (baseAddress.Length == 0 || string.IsNullOrEmpty(ip) || found.ContainsKey(baseAddress)) return;
+                if (baseAddress.Length == 0 || !InputValidationHelper.IsPeerIPAddress(ip) || found.ContainsKey(baseAddress)) return;
                 if (onValidators.Contains(baseAddress) || onCasters.Contains(baseAddress))
                     found[baseAddress] = new ContractSigner(baseAddress, ip, vfxAddress, onValidators.Contains(baseAddress), onCasters.Contains(baseAddress));
             }

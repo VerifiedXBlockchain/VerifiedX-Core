@@ -368,7 +368,8 @@ namespace VerifiedXCore.Data
 
                     if (existingExitTxs.Any())
                     {
-                        var newBurnHash = ExtractBaseBurnTxHashFromExitTx(transaction);
+                        // A burn is one burn under any spelling of its id, as the block's guard reads it (BridgeIntraBlockGuard).
+                        var newBurnHash = VBTCBridgeConsumedBurn.Normalize(ExtractBaseBurnTxHashFromExitTx(transaction));
                         var newLockIds = ExtractLockIdsFromExitTx(transaction);
 
                         foreach (var existing in existingExitTxs)
@@ -376,8 +377,8 @@ namespace VerifiedXCore.Data
                             // Reject if same BaseBurnTxHash (duplicate burn handling)
                             if (!string.IsNullOrEmpty(newBurnHash))
                             {
-                                var existingBurnHash = ExtractBaseBurnTxHashFromExitTx(existing);
-                                if (newBurnHash == existingBurnHash)
+                                var existingBurnHash = VBTCBridgeConsumedBurn.Normalize(ExtractBaseBurnTxHashFromExitTx(existing));
+                                if (VBTCBridgeConsumedBurn.Overlaps(newBurnHash, existingBurnHash))
                                 {
                                     LogUtility.Log($"[Mempool] Rejecting EXIT_TO_BTC {transaction.Hash}: duplicate BaseBurnTxHash {newBurnHash} already in mempool ({existing.Hash})",
                                         "TransactionData.AddToPool()");

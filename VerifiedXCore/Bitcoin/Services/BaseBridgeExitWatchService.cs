@@ -376,7 +376,7 @@ namespace VerifiedXCore.Bitcoin.Services
                         if (string.IsNullOrEmpty(log.TransactionHash)) continue;
                         var txHash = burnIds[BurnLogKey(log)]; // the burn's id: its transaction's hash, with its position when that holds several
 
-                        if (BurnExitConsensusService.IsAlreadyProcessed(txHash))
+                        if (BurnExitConsensusService.IsAlreadyProcessed(txHash, BurnExitConsensusService.BurnExitType.VfxPoolUnlock, (decimal)amount / 100_000_000M, burner, "", vfxDest))
                             continue;
 
                         var amountDecimal = (decimal)amount / 100_000_000M;
@@ -425,7 +425,7 @@ namespace VerifiedXCore.Bitcoin.Services
                     if (string.IsNullOrEmpty(log.TransactionHash)) continue;
                     var txHash = burnIds[BurnLogKey(log)]; // the burn's id: its transaction's hash, with its position when that holds several
 
-                    if (BurnExitConsensusService.IsAlreadyProcessed(txHash))
+                    if (BurnExitConsensusService.IsAlreadyProcessed(txHash, BurnExitConsensusService.BurnExitType.BtcExit, (decimal)amount / 100_000_000M, burner, btcDest, ""))
                         continue;
 
                     var amountDecimal = (decimal)amount / 100_000_000M;

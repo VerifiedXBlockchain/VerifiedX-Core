@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -224,6 +224,56 @@ namespace VerifiedXCore.Tests
         /// paid in full anyway. A lock is named by its own id exactly, and asked for no more than it holds (fourth review,
         /// round 11).
         /// </summary>
+        /// <summary>
+        /// Whether a burn was already used reads the locks an exit drew and the exit records; the bridge's other locks are
+        /// not read, so locks that stay after redemption, a holder's one-satoshi ones included, do not make every exit's
+        /// check longer. A burn is found under any spelling as before. And an exit is checked against them only once its
+        /// sender has signed it.
+        /// </summary>
+        [Fact]
+        public async Task WhetherABurnWasUsed_ReadsOnlyTheLocksAnExitDrew_AndOnlyForASignedExit()
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.004M);
+            var locks = VBTCBridgeLockState.GetCollection();
+            locks.InsertBulk(Enumerable.Range(0, 20_000).Select(i => new VBTCBridgeLockState
+            {
+                LockId = $"dust-{i}-{Guid.NewGuid():N}", SmartContractUID = vault.Uid, OwnerAddress = Minter.Address, Amount = 0.00000001M, AmountSats = 1, EvmDestination = "0x" + new string('a', 40),
+            }));
+            // Locks drawn by exits, their burns written as the transactions spelled them.
+            var bare = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            var positioned = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            locks.Insert(new VBTCBridgeLockState { LockId = "drawn-1", SmartContractUID = vault.Uid, OwnerAddress = Minter.Address, ExitBurnTxHash = " 0x" + bare.ToUpperInvariant() });
+            locks.Insert(new VBTCBridgeLockState { LockId = "drawn-2", SmartContractUID = vault.Uid, OwnerAddress = Minter.Address, ExitBurnTxHash = positioned + ":2" });
+
+            Assert.True(VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(bare));
+            Assert.True(VBTCBridgeConsumedBurn.IsBurnUsedAnywhere("0x" + bare + ":0"));
+            Assert.True(VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(positioned));
+            Assert.True(VBTCBridgeConsumedBurn.IsBurnUsedAnywhere("0X" + positioned.ToUpperInvariant() + ":2"));
+            Assert.False(VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(positioned + ":3"));
+
+            var unknown = NewBurn();
+            VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(unknown); // warm
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            for (var i = 0; i < 20; i++) Assert.False(VBTCBridgeConsumedBurn.IsBurnUsedAnywhere(unknown));
+            timer.Stop();
+            Assert.True(timer.ElapsedMilliseconds < 500, $"20 checks took {timer.ElapsedMilliseconds} ms");
+
+            // An exit naming the watched vault that its sender did not sign is refused before any lock is read.
+            var unsigned = Exit(NewBurn(), BtcDest, (lockId, vault.Uid, 0.004M));
+            unsigned.Signature = null;
+            timer.Restart();
+            for (var i = 0; i < 20; i++)
+                Assert.Equal((false, "Signature cannot be null."), await VerifiedXCore.Services.TransactionValidatorService.VerifyTX(unsigned));
+            timer.Stop();
+            Assert.True(timer.ElapsedMilliseconds < 500, $"20 unsigned exits took {timer.ElapsedMilliseconds} ms");
+            var (ok, why) = await Verify(unsigned, Tip + 1);
+            Assert.False(ok);
+            Assert.Equal("Signature cannot be null.", why);
+        }
+
         [Fact]
         public async Task AnExit_NamesEachLockByItsOwnId_AndAsksNoMoreThanItHolds()
         {
@@ -858,6 +908,128 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// Both collectors keep a mint signature only in the form the contract counts and the node sends as it stands (65
+        /// bytes of hex, v of 27 or 28, s in the lower half). A validator or caster that answers in any other form is
+        /// passed over like one that did not answer, and the set handed over meets both thresholds with the others'.
+        /// </summary>
+        [Theory]
+        [MemberData(nameof(VbtcbSignatureForms.NotCounted), MemberType = typeof(VbtcbSignatureForms))]
+        public async Task BothCollectors_KeepOnlySignaturesTheContractCounts_AndMeetTheThresholdsWithTheOthers(string form)
+        {
+            await Start();
+            var vault = await CreateVault(H1 + 1);
+            await Deposit(vault.Script, 1_000_000);
+            var lockId = await Lock(vault.Uid, 0.004M);
+            for (var i = 0; i < BaseBridgeAttestationService.MintAttestationDepth; i++) await Apply(Tip + 1);
+
+            // Four validators (three must sign) and three casters (two must sign); the first of each answers in the form.
+            var validators = Enumerable.Range(0, 4).Select(_ => NewKey()).ToList();
+            var casters = Enumerable.Range(0, 3).Select(_ => NewKey()).ToList();
+            var ipOf = new Dictionary<string, V>();
+            for (var i = 0; i < validators.Count; i++)
+            {
+                var v = validators[i];
+                ipOf[$"10.0.3.{i + 1}"] = v;
+                BlockchainData.GetBlocks().InsertSafe(new VerifiedXCore.Models.Block
+                {
+                    Height = 60 + i, Hash = $"h{60 + i}-{Guid.NewGuid():N}",
+                    Transactions = new List<VfxTx> { new VfxTx
+                    {
+                        TransactionType = TransactionType.VBTC_V2_VALIDATOR_REGISTER, FromAddress = v.Address, ToAddress = v.Address, Hash = "rn" + i,
+                        Data = JsonConvert.SerializeObject(new { ValidatorAddress = v.Address, IPAddress = $"10.0.3.{i + 1}", FrostPublicKey = v.Pub, IsS3C = false }),
+                    } },
+                });
+            }
+            for (var i = 0; i < casters.Count; i++) ipOf[$"10.0.2.{i + 1}"] = casters[i];
+            foreach (var k in validators.Concat(casters))
+                AccountData.GetAccounts().InsertSafe(new Account { Address = k.Address, PublicKey = k.Pub, PrivateKey = "0" + k.Key.secret.ToString("x") });
+            var record = new CasterMembershipRecord
+            {
+                RecordSeq = 1, EffectiveFromHeight = 0,
+                Casters = casters.Select((c, i) => new CasterInfo { Address = c.Address, PeerIP = $"10.0.2.{i + 1}", PublicKey = c.Pub }).ToList(),
+            };
+            DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Upsert(record.RecordSeq, record);
+            VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
+            string BaseOf(V v) => ValidatorEthKeyService.DeriveBaseAddressFromVfxPublicKey(v.Pub);
+            const string configured = "0x09096c6eBf35F0aDAEeC02D06a0dE77E790F132D";
+            var destination = "0x" + new string('a', 40);
+            BridgeLockRecord Recorded() => new()
+            {
+                LockId = lockId, SmartContractUID = vault.Uid, OwnerAddress = Minter.Address, Amount = 0.004M, AmountSats = 400_000,
+                EvmDestination = destination, Status = BridgeLockStatus.Locked, VfxLockConfirmedOnChain = true, VfxLockBlockHeight = Tip,
+            };
+
+            var priorValidator = Globals.ValidatorAddress;
+            var priorCastersOnly = Globals.BaseValidatorSetCastersOnly;
+            var priorSynced = Globals.IsChainSynced;
+            var priorResyncing = Globals.IsResyncing;
+            var priorStopTimers = Globals.StopAllTimers;
+            var priorContract = BaseBridgeService.ContractAddress;
+            var priorFactory = Globals.HttpClientFactory;
+            var inTheForm = new HashSet<string> { "10.0.3.1", "10.0.2.1" };
+            Globals.BaseValidatorSetCastersOnly = false;
+            Globals.IsChainSynced = true;
+            Globals.IsResyncing = false;
+            Globals.StopAllTimers = false;
+            BaseBridgeService.ContractAddress = configured;
+            VBTCValidatorRegistry.InvalidateCache();
+            Globals.HttpClientFactory = new AttesterHttpClientFactory(async (ip, request) =>
+            {
+                Globals.ValidatorAddress = ipOf[ip].Address;                      // the node at that IP answers
+                var answer = await BaseBridgeAttestationService.HandleMintAttestationRequest(request);
+                return answer.Item1 && inTheForm.Contains(ip) ? (true, VbtcbSignatureForms.Reencode(answer.Item2!, form), null) : answer;
+            });
+            try
+            {
+                foreach (var version in new[] { 4, 3 })                           // V3 counts its validators alone
+                {
+                    var onCasters = version == 4 ? casters : new List<V>();
+                    BaseBridgeService.ReadSignerViewForTests = () => Task.FromResult<BaseBridgeService.SignerView?>(new BaseBridgeService.SignerView(
+                        validators.Select(BaseOf).ToArray(), version, 3, 0, onCasters.Select(BaseOf).ToArray(), version == 4 ? 2 : 0));
+                    var hash = version == 4
+                        ? VbtcbTypedData.MintDigest(destination, 400_000, lockId, Tip, Globals.BaseEvmChainId, configured)
+                        : BaseBridgeAttestationService.ConstructMintMessageHash(destination, 400_000, lockId, Tip, Globals.BaseEvmChainId, configured);
+                    void CountedAndEnough(IEnumerable<KeyValuePair<string, string>> sigs)
+                    {
+                        var signers = new List<string>();
+                        foreach (var (signer, sig) in sigs)
+                        {
+                            // As the mint is sent: the kept text, decoded as it stands.
+                            var bytes = VerifiedXCore.Extensions.GenericExtensions.HexToByteArray(sig.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? sig[2..] : sig);
+                            Assert.True(VbtcbSignatureForms.Counted(bytes));
+                            Assert.Equal(signer, ValidatorEthKeyService.RecoverSigner(hash, "0x" + Convert.ToHexString(bytes), personalMessage: version != 4), StringComparer.OrdinalIgnoreCase);
+                            signers.Add(signer);
+                        }
+                        Assert.DoesNotContain(BaseOf(validators[0]), signers, StringComparer.OrdinalIgnoreCase);
+                        Assert.DoesNotContain(BaseOf(casters[0]), signers, StringComparer.OrdinalIgnoreCase);
+                        Assert.Equal(3, signers.Count(s => validators.Skip(1).Select(BaseOf).Contains(s, StringComparer.OrdinalIgnoreCase)));
+                        Assert.Equal(onCasters.Count == 0 ? 0 : 2, signers.Count(s => casters.Skip(1).Select(BaseOf).Contains(s, StringComparer.OrdinalIgnoreCase)));
+                    }
+
+                    CountedAndEnough((await UserBridgeMintService.CollectValidatorSignatures(Recorded(), Tip, Globals.BaseEvmChainId, configured, 3))!);
+                    BridgeLockRecord.Save(Recorded());
+                    await BaseBridgeAttestationService.CollectMintAttestationsForLock(BridgeLockRecord.GetByLockId(lockId)!, 3);
+                    Assert.Equal(BridgeLockStatus.AttestationReady, BridgeLockRecord.GetByLockId(lockId)!.Status);
+                    CountedAndEnough(BridgeLockRecord.GetByLockId(lockId)!.ValidatorSignatures!);
+                }
+            }
+            finally
+            {
+                DbContext.DB_Config!.GetCollection<CasterMembershipRecord>("rsrv_caster_membership").Delete(record.RecordSeq);
+                VerifiedXCore.Services.CasterMembershipStore.InvalidateCache();
+                BaseBridgeService.ReadSignerViewForTests = null;
+                Globals.HttpClientFactory = priorFactory;
+                Globals.ValidatorAddress = priorValidator;
+                Globals.BaseValidatorSetCastersOnly = priorCastersOnly;
+                Globals.IsChainSynced = priorSynced;
+                Globals.IsResyncing = priorResyncing;
+                Globals.StopAllTimers = priorStopTimers;
+                BaseBridgeService.ContractAddress = priorContract;
+                VBTCValidatorRegistry.InvalidateCache();
+            }
+        }
+
+        /// <summary>
         /// A validator signed a mint only while it sat in the caster committee. The contract counts only its own validators
         /// anyway, so the rule added nothing, and an election that rotated two contract validators out of the committee
         /// stopped every mint. Under the released settings (casters-only on), a validator outside the committee signs.
@@ -1457,7 +1629,7 @@ namespace VerifiedXCore.Tests
         /// <summary>
         /// From BridgeVoidKeepsLocksHeight a voided part's lock is given back for use, not blacklisted: the void proves the
         /// exit unpaid, and a blacklisted lock left the minter it backed with nothing to redeem against (every later plan
-        /// passed it over). Its vault is kept out of exit plans for a day instead; the burn is paid from another lock, and
+        /// passed it over). Its vault is kept out of exit plans for a while instead; the burn is paid from another lock, and
         /// the given-back lock backs a later exit.
         /// </summary>
         [Fact]
@@ -1465,12 +1637,10 @@ namespace VerifiedXCore.Tests
         {
             var priorHeight = Globals.BridgeVoidKeepsLocksHeight;
             Globals.BridgeVoidKeepsLocksHeight = 1;
-            string? vaultUid = null;
             try
             {
                 await Start();
                 var vault = await CreateVault(H1 + 1);
-                vaultUid = vault.Uid;
                 var other = await CreateVault(H1 + 2);
                 var deposit = await Deposit(vault.Script, 1_000_000);
                 await Deposit(other.Script, 1_000_000);
@@ -1486,7 +1656,13 @@ namespace VerifiedXCore.Tests
                 var restored = VBTCBridgeLockState.GetByLockId(lockId)!;
                 Assert.Equal(0M, restored.UnlockedAmount);
                 Assert.False(restored.IsBlacklisted);
-                Assert.True(VerifiedXCore.Bitcoin.Services.FrostContractBlacklist.IsBlacklisted(vault.Uid));
+
+                // The vault's pause is read from the chain's rows, not kept in memory: a restart does not lift it, and it
+                // ends after VoidPauseBlocks.
+                Assert.False(VerifiedXCore.Bitcoin.Services.FrostContractBlacklist.IsBlacklisted(vault.Uid));
+                Assert.True(BtcWithdrawals.PausedByVoidedExit(vault.Uid, Tip + 1));
+                Assert.False(BtcWithdrawals.PausedByVoidedExit(other.Uid, Tip + 1));
+                Assert.False(BtcWithdrawals.PausedByVoidedExit(vault.Uid, Tip + 1 + BtcWithdrawals.VoidPauseBlocks));
 
                 // The burn is paid from the other vault's lock.
                 await Mine(Exit(burn, BtcDest, (otherLock, other.Uid, 0.004M)));
@@ -1499,7 +1675,6 @@ namespace VerifiedXCore.Tests
             finally
             {
                 Globals.BridgeVoidKeepsLocksHeight = priorHeight;
-                if (vaultUid != null) VerifiedXCore.Bitcoin.Services.FrostContractBlacklist.Remove(vaultUid);
             }
         }
 
@@ -1891,6 +2066,104 @@ namespace VerifiedXCore.Tests
         }
 
         /// <summary>
+        /// A failed older-vault exit blacklisted every lock it drew on: the lock's whole remaining balance left the pool for
+        /// good while the vBTC.b it backed stayed on Base, with nothing to redeem against. From the height the failure gives
+        /// back what it reserved and the lock stays in use; at that block the locks earlier failures blacklisted come back.
+        /// </summary>
+        [Fact]
+        public async Task AFailedOlderExit_LeavesItsLocksInUse_AndEarlierFailuresAreGivenBackAtTheHeight()
+        {
+            var gate = Globals.BridgeFailKeepsLocksHeight;
+            Globals.BridgeFailKeepsLocksHeight = long.MaxValue;
+            try
+            {
+                var older = await CreateVault(H1 - 50);
+                await Start();
+                var before = await Lock(older.Uid, 0.002M);
+                var after = await Lock(older.Uid, 0.002M);
+
+                // Below the height: blacklisted, the lock's other 0.0015 out of every exit and unlock.
+                var burn = NewBurn();
+                var exit = await Mine(Exit(burn, BtcDest, (before, older.Uid, 0.0005M)));
+                await Mine(ExitFail(burn, exit, (before, older.Uid, 0.0005M)));
+                Assert.True(VBTCBridgeLockState.GetByLockId(before)!.IsBlacklisted);
+                Assert.DoesNotContain(VBTCBridgeLockState.GetAvailableLocksFIFO(), l => l.LockId == before); // what exits and unlocks draw on
+
+                // At the height: the earlier failure's lock is given back.
+                Globals.BridgeFailKeepsLocksHeight = Tip + 1;
+                await Apply(Tip + 1);
+                var givenBack = VBTCBridgeLockState.GetByLockId(before)!;
+                Assert.False(givenBack.IsBlacklisted);
+                Assert.Equal(0.002M, givenBack.RemainingAmount);
+                Assert.Contains(VBTCBridgeLockState.GetAvailableLocksFIFO(), l => l.LockId == before);
+
+                // From the height: a failure gives back what it reserved, and the lock stays in use.
+                var second = NewBurn();
+                var secondExit = await Mine(Exit(second, BtcDest, (after, older.Uid, 0.0005M)));
+                Assert.Equal(0.0015M, VBTCBridgeLockState.GetByLockId(after)!.RemainingAmount);
+                await Mine(ExitFail(second, secondExit, (after, older.Uid, 0.0005M)));
+                var kept = VBTCBridgeLockState.GetByLockId(after)!;
+                Assert.False(kept.IsBlacklisted);
+                Assert.Equal(0.002M, kept.RemainingAmount);
+                Assert.True(Record(second).IsFailedRecord);
+                Assert.Contains(VBTCBridgeLockState.GetAvailableLocksFIFO(), l => l.LockId == after);
+                Assert.Equal(0.004M, VBTCBridgeLockState.GetTotalAvailableAmount());
+            }
+            finally { Globals.BridgeFailKeepsLocksHeight = gate; }
+        }
+
+        /// <summary>
+        /// From the height a failure gives its locks back for use, so a completion and a failure of one exit in one block
+        /// would leave locks paid out on Bitcoin to be drawn again: both are judged on the exit as the block before left it.
+        /// The block's guard takes only the first of the two (the other waits for the next block, where the exit's state
+        /// decides it), and a failure applied to an exit already completed gives nothing back.
+        /// </summary>
+        [Fact]
+        public async Task AnOlderExitCompletedAndFailedInOneBlock_LeavesItsPaidLocksSpent()
+        {
+            var gate = Globals.BridgeFailKeepsLocksHeight;
+            Globals.BridgeFailKeepsLocksHeight = H1;
+            try
+            {
+                var older = await CreateVault(H1 - 50);
+                await Start();
+                var lockId = await Lock(older.Uid, 0.002M);
+                var burn = NewBurn();
+                var exit = await Mine(Exit(burn, BtcDest, (lockId, older.Uid, 0.002M)));
+                var complete = ExitComplete(burn, new string('d', 64));
+                var fail = ExitFail(burn, exit, (lockId, older.Uid, 0.002M));
+                Assert.True((await Verify(complete, Tip + 1)).Ok);
+                Assert.True((await Verify(fail, Tip + 1)).Ok);
+
+                // The guard the producer and block validation share takes the first of the two, in either order.
+                foreach (var (first, second) in new[] { (complete, fail), (fail, complete) })
+                {
+                    var block = new VerifiedXCore.Bitcoin.Services.BridgeIntraBlockGuard.State();
+                    Assert.True(VerifiedXCore.Bitcoin.Services.BridgeIntraBlockGuard.TryRegister(first, block, Tip + 1).Ok);
+                    var (ok, why) = VerifiedXCore.Bitcoin.Services.BridgeIntraBlockGuard.TryRegister(second, block, Tip + 1);
+                    Assert.False(ok);
+                    Assert.StartsWith(VerifiedXCore.Bitcoin.Services.BridgeIntraBlockGuard.ExitAlreadyClosedPrefix, why);
+                }
+                // Below the height the pair is not refused (as before).
+                var below = new VerifiedXCore.Bitcoin.Services.BridgeIntraBlockGuard.State();
+                Globals.BridgeFailKeepsLocksHeight = Tip + 2;
+                Assert.True(VerifiedXCore.Bitcoin.Services.BridgeIntraBlockGuard.TryRegister(complete, below, Tip + 1).Ok);
+                Assert.True(VerifiedXCore.Bitcoin.Services.BridgeIntraBlockGuard.TryRegister(fail, below, Tip + 1).Ok);
+                Globals.BridgeFailKeepsLocksHeight = H1;
+
+                // Applied together anyway: the completion stands, and the failure gives back nothing of the paid lock.
+                await Apply(Tip + 1, complete, fail);
+                var spent = VBTCBridgeLockState.GetByLockId(lockId)!;
+                Assert.Equal(0M, spent.RemainingAmount);
+                Assert.False(spent.IsBlacklisted);
+                Assert.DoesNotContain(VBTCBridgeLockState.GetAvailableLocksFIFO(), l => l.LockId == lockId);
+                Assert.True(Record(burn).IsComplete);
+                Assert.False(Record(burn).IsFailedRecord);
+            }
+            finally { Globals.BridgeFailKeepsLocksHeight = gate; }
+        }
+
+        /// <summary>
         /// C-059: before the path-audit height an exit on an older vault may name one lock twice, the second time by an
         /// alias ("L1 "): both pass, the first draws the lock, the second draws nothing, and the plan records both. The
         /// signer's payout cap summed the plan, twice what the lock gave up. Each part is now the lock as its own record
@@ -2274,6 +2547,90 @@ namespace VerifiedXCore.Tests
             Assert.Contains("has been frozen since block " + h2, BtcLegacyFreeze.Refusal(Unlock((olderLock, older.Uid, 0.001M)), h2));
             Assert.Contains("has been frozen since block " + h2, BtcLegacyFreeze.Refusal(Unlock((watchedLock, watched.Uid, 0.001M), (olderLock, watched.Uid, 0.001M)), h2));
             Assert.Null(BtcLegacyFreeze.Refusal(Unlock((watchedLock, watched.Uid, 0.001M)), h2));
+        }
+
+        /// <summary>
+        /// An unlock from the pool pays what a burner burned on Base to the address the burn names: a one-satoshi burn to
+        /// each of 100,000 new addresses filled a watched vault's holder limit as one-satoshi transfers did. From the
+        /// minimum-position height an unlock's share of a watched vault leaves its destination nothing or at least the
+        /// vault's smallest position, in validation and in the casters' plan alike; a burn too small for that is not paid
+        /// from a watched vault. The owner, and a holder who already has enough, take any share.
+        /// </summary>
+        [Fact]
+        public async Task APoolUnlock_GivesANewHolderAtLeastTheSmallestPosition()
+        {
+            var gate = Globals.VaultMinimumPositionHeight;
+            try
+            {
+                await Start();
+                var vault = await CreateVault(H1 + 1);
+                await Deposit(vault.Script, 1_000_000);
+                var lockId = await Lock(vault.Uid, 0.003M);
+                var fresh = NewKey();
+                VfxTx Unlock(V to, decimal amount) => SignedBy(Caster, Caster.Address, TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK, new
+                {
+                    Function = "VBTCBridgePoolUnlock()", ExitBurnTxHash = NewBurn(), VfxDestinationAddress = to.Address,
+                    TotalAmount = amount, TotalAmountSats = (long)(amount * 100_000_000M),
+                    Allocations = new List<PoolUnlockAllocation> { new() { LockId = lockId, SmartContractUID = vault.Uid, UnlockAmount = amount } },
+                }, free: true);
+
+                // Before the height a satoshi is unlocked to a new address as before.
+                Globals.VaultMinimumPositionHeight = long.MaxValue;
+                Assert.True((await Verify(Unlock(fresh, 0.00000001M), Tip + 1)).Ok);
+                Assert.NotNull(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.00000001M, Tip + 1, fresh.Address));
+
+                Globals.VaultMinimumPositionHeight = H1;
+                await RefusedInBlock(Unlock(fresh, 0.00005M), "less than the 0.0001 vBTC a holder keeps");
+                Assert.Null(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.00005M, Tip + 1, fresh.Address));
+                // At least the minimum: paid, and planned.
+                Assert.True((await Verify(Unlock(fresh, 0.0002M), Tip + 1)).Ok);
+                Assert.Equal(lockId, Assert.Single(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.0002M, Tip + 1, fresh.Address)!).LockId);
+                // The vault's owner takes any share; so does a holder that already keeps the minimum.
+                Assert.True((await Verify(Unlock(Minter, 0.00005M), Tip + 1)).Ok);
+                await Mine(Transfer(vault.Uid, 0.0002M));
+                Assert.True((await Verify(Unlock(_holder, 0.00005M), Tip + 1)).Ok);
+                Assert.NotNull(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.00005M, Tip + 1, _holder.Address));
+            }
+            finally { Globals.VaultMinimumPositionHeight = gate; }
+        }
+
+        /// <summary>
+        /// A burn two vaults can pay between them is planned as a split that gives the new holder the minimum on each,
+        /// not given up: the first plan took one vault's whole lock and too little of the next, and leaving the second
+        /// out left a vault that could not pay it alone.
+        /// </summary>
+        [Fact]
+        public async Task APoolUnlockTwoVaultsCanPay_IsSplitSoEachShareKeepsTheMinimum()
+        {
+            var gate = Globals.VaultMinimumPositionHeight;
+            try
+            {
+                Globals.VaultMinimumPositionHeight = H1;
+                await Start();
+                var first = await CreateVault(H1 + 1);
+                await Deposit(first.Script, 1_000_000);
+                var second = await CreateVault(H1 + 1);
+                await Deposit(second.Script, 1_000_000);
+                await Lock(first.Uid, 0.00015M);
+                await Lock(second.Uid, 0.00015M);
+                var fresh = NewKey();
+
+                var plan = BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.0002M, Tip + 1, fresh.Address);
+                Assert.NotNull(plan);
+                Assert.Equal(0.0002M, plan!.Sum(a => a.UnlockAmount));
+                Assert.All(plan.GroupBy(a => a.SmartContractUID), g => Assert.True(g.Sum(a => a.UnlockAmount) >= BtcVaultLedger.MinPositionBtc, $"{g.Key}: {g.Sum(a => a.UnlockAmount)}"));
+                var unlock = SignedBy(Caster, Caster.Address, TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK, new
+                {
+                    Function = "VBTCBridgePoolUnlock()", ExitBurnTxHash = NewBurn(), VfxDestinationAddress = fresh.Address,
+                    TotalAmount = 0.0002M, TotalAmountSats = 20_000L, Allocations = plan,
+                }, free: true);
+                var (ok, why) = await Verify(unlock, Tip + 1);
+                Assert.True(ok, why);
+                // More than the two hold, or a burn no split can give the minimum, is not planned.
+                Assert.Null(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.00031M, Tip + 1, fresh.Address));
+                Assert.Null(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.00005M, Tip + 1, fresh.Address));
+            }
+            finally { Globals.VaultMinimumPositionHeight = gate; }
         }
 
         // ── Signing ─────────────────────────────────────────────────────────────────────────────────────────

@@ -101,8 +101,102 @@ namespace VerifiedXCore.Tests
             Record(_head.RecordSeq + 1, _head.EffectiveFromHeight + 100, _head.RecordHash, "Promotion", _d.Address,
                 continuing.Append(Member(_d, "10.0.0.4")).ToArray());
 
-        private static Task<RecordSignature?> Sign(CasterMembershipRecord candidate) =>
+        /// <summary>Asks this node (A) to sign, as a proposer does: member B has signed the candidate first.</summary>
+        private Task<RecordSignature?> Sign(CasterMembershipRecord candidate)
+        {
+            if (candidate.Signatures.Count == 0)
+                candidate.Signatures.Add(SignatureOf(_b, candidate));
+            return SignAsIs(candidate);
+        }
+
+        private static Task<RecordSignature?> SignAsIs(CasterMembershipRecord candidate) =>
             CasterMembershipService.HandleSignRequestAsync(new MembershipSignRequest { Candidate = candidate, ProposerAddress = "xProposer" });
+
+        private static RecordSignature SignatureOf(Account signer, CasterMembershipRecord candidate) => new()
+        {
+            SignerAddress = signer.Address,
+            Signature = SignatureService.CreateSignature(CasterMembershipStore.CanonicalPayload(candidate), signer.GetPrivKey, signer.PublicKey),
+        };
+
+        /// <summary>
+        /// A sign request is unauthenticated. A promotion is signed only when a member of the committee proposed it, that
+        /// is, the record already carries a member's signature, as every proposer signs its record first: an outside
+        /// validator asking for its own promotion took the seat ahead of the seat proposer's own candidate.
+        /// </summary>
+        [Fact]
+        public async Task APromotionNoMemberProposed_IsNotSigned()
+        {
+            SeeD("10.0.0.4");
+            var continuing = new[] { Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3") };
+            // Asked for by the candidate itself: no signature, or only its own.
+            Assert.Null(await SignAsIs(PromoteD(continuing)));
+            var selfSigned = PromoteD(continuing);
+            selfSigned.Signatures.Add(SignatureOf(_d, selfSigned));
+            Assert.Null(await SignAsIs(selfSigned));
+            // A member's signature that is not over this record does not count.
+            var copied = PromoteD(continuing);
+            copied.Signatures.Add(new RecordSignature { SignerAddress = _b.Address, Signature = SignatureOf(_b, _head).Signature });
+            Assert.Null(await SignAsIs(copied));
+            // Proposed by member B, who signed it first: signed.
+            Assert.NotNull(await Sign(PromoteD(continuing)));
+        }
+
+        /// <summary>
+        /// Anyone can post a record, or serve one in catch-up, and its signatures are checked under the lock every read of
+        /// the committee waits for: a record listing one member thousands of times, each entry a junk signature, cost a
+        /// verify per entry. A record listing a signer more than twice is refused before any is verified, so a record costs
+        /// at most two verifies per signer. A signer still counts when one of its entries is valid.
+        /// </summary>
+        [Fact]
+        public void ARecordListingASignerMoreThanTwice_IsRefusedUnread_AndOneValidEntryStillCounts()
+        {
+            var flood = PromoteD(Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"));
+            var junk = SignatureOf(_a, _head).Signature;                                      // a real signature, over another record
+            flood.Signatures.AddRange(Enumerable.Range(0, 20_000).Select(_ => new RecordSignature { SignerAddress = _a.Address, Signature = junk }));
+            flood.Signatures.Add(SignatureOf(_a, flood));
+            flood.Signatures.Add(SignatureOf(_b, flood));
+
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            Assert.False(CasterMembershipStore.TryAppend(flood, out var why));
+            timer.Stop();
+            Assert.Contains("more than 2 times", why);
+            Assert.True(timer.ElapsedMilliseconds < 1_000, $"refusing it took {timer.ElapsedMilliseconds} ms");
+
+            // A signer's bad entry ahead of its valid one: it counts, as it always did.
+            var mixed = PromoteD(Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"));
+            mixed.Signatures.Add(new RecordSignature { SignerAddress = _a.Address, Signature = junk });
+            mixed.Signatures.Add(SignatureOf(_a, mixed));
+            mixed.Signatures.Add(SignatureOf(_b, mixed));
+            Assert.True(CasterMembershipStore.ValidateSuccessor(_head, mixed, out why), why);
+        }
+
+        /// <summary>
+        /// The same holds for a record a peer serves in catch-up, with many different signatures naming one member: it is
+        /// refused before any is verified, and reads of the committee are not held up meanwhile.
+        /// </summary>
+        [Fact]
+        public async Task ARecordServedInCatchUp_ListingASignerManyTimes_DoesNotHoldUpTheCommittee()
+        {
+            var served = PromoteD(Member(_a, "10.0.0.1"), Member(_b, "10.0.0.2"), Member(_c, "10.0.0.3"));
+            served.Signatures.AddRange(Enumerable.Range(0, 3_000).Select(i => new RecordSignature
+            {
+                SignerAddress = _a.Address, Signature = SignatureService.CreateSignature($"not this record {i}", _a.GetPrivKey, _a.PublicKey),
+            }));
+            served.Signatures.Add(SignatureOf(_a, served));
+            served.Signatures.Add(SignatureOf(_b, served));
+            SeeD("10.0.0.4");
+
+            var judging = Task.Run(() => CasterMembershipStore.TryAppendChain(new List<CasterMembershipRecord> { served }, out var refusal) == 0 ? refusal : null);
+            await Task.Delay(20);
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            CasterMembershipStore.InvalidateCache();
+            Assert.NotNull(CasterMembershipStore.GetCurrent());                            // a read of the committee
+            timer.Stop();
+            Assert.True(timer.ElapsedMilliseconds < 500, $"reading the committee waited {timer.ElapsedMilliseconds} ms");
+            Assert.Contains("more than 2 times", await judging);
+            CasterMembershipStore.InvalidateCache();
+            Assert.Equal(_head.RecordHash, CasterMembershipStore.GetCurrent()!.RecordHash);
+        }
 
         /// <summary>
         /// C-012 (encoding): the signed payload joins fields with '|'. A record that folds the first member's fields into

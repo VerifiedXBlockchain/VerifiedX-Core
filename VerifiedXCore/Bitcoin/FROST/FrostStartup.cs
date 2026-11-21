@@ -39,6 +39,8 @@ namespace VerifiedXCore.Bitcoin.FROST
 
         public void Configure(IApplicationBuilder app)
         {
+            app.Use(FrostConnectionLimits.TrackRequest);
+            app.Use(FrostRequestBodyLimits.Bound);
             app.UseRouting();
             app.UseEndpoints(endpoints =>
             {
@@ -1677,7 +1679,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                             var addressedTo = addressed["Recipient"]?.ToString();
                             var myBatchId = !string.IsNullOrEmpty(Globals.ValidatorAddress) && BuildAddressToIdentifierMap(session.ParticipantAddresses).TryGetValue(Globals.ValidatorAddress, out var mine) ? mine : null;
                             if ((!string.IsNullOrEmpty(addressedTo) && addressedTo != Globals.ValidatorAddress)
-                                || (myBatchId != null && addressed["AllGeneratedShares"] is Newtonsoft.Json.Linq.JObject batchShares && !BatchCarriesShareFor(batchShares, myBatchId)))
+                                || (myBatchId != null && addressed["AllGeneratedShares"] is Newtonsoft.Json.Linq.JObject batchShares && !BatchCarriesShareFor(batchShares, myBatchId, session.ParticipantAddresses)))
                             {
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This share batch is not addressed to this validator." }));
@@ -1777,7 +1779,7 @@ namespace VerifiedXCore.Bitcoin.FROST
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "This share batch is addressed to another validator." }));
                                 return;
                             }
-                            if (!string.IsNullOrEmpty(myFrostIdentifier) && !BatchCarriesShareFor(allSharesToken, myFrostIdentifier))
+                            if (!string.IsNullOrEmpty(myFrostIdentifier) && !BatchCarriesShareFor(allSharesToken, myFrostIdentifier, session.ParticipantAddresses))
                             {
                                 context.Response.StatusCode = StatusCodes.Status409Conflict;
                                 await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "No share in this batch is addressed to this validator." }));
@@ -1799,6 +1801,8 @@ namespace VerifiedXCore.Bitcoin.FROST
                             {
                                 var senderAddr = kvp.Key;
                                 if (senderAddr == myAddress) continue; // Skip our own shares
+                                // Only participants deal shares: any other name is neither read nor reported (each report is signed).
+                                if (!session.ParticipantAddresses.Contains(senderAddr)) continue;
 
                                 var senderSharesStr = kvp.Value?.ToString();
                                 if (string.IsNullOrEmpty(senderSharesStr))
@@ -3075,8 +3079,24 @@ namespace VerifiedXCore.Bitcoin.FROST
                         // Only the session leader (proven by replaying the start signature) may
                         // trigger share generation — this is the step that commits our key share.
                         // The body is read first: a watched vault's leader signs it (round 18).
+                        // It is read only up to the longest set this session's signers can send.
                         string round2Body;
-                        using (var round2Reader = new StreamReader(context.Request.Body)) round2Body = await round2Reader.ReadToEndAsync();
+                        var round2Limit = session.MaxRound2BodyChars;
+                        using (var round2Reader = new StreamReader(context.Request.Body))
+                        {
+                            var round2Text = new System.Text.StringBuilder();
+                            var round2Chunk = new char[8192];
+                            int round2Read;
+                            while (round2Text.Length <= round2Limit && (round2Read = await round2Reader.ReadAsync(round2Chunk, 0, round2Chunk.Length)) > 0)
+                                round2Text.Append(round2Chunk, 0, round2Read);
+                            round2Body = round2Text.ToString();
+                        }
+                        if (round2Body.Length > round2Limit)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                            await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = "Posted nonce set is larger than this session's signers can send" }));
+                            return;
+                        }
                         if (!FrostSigningAuthorization.VerifyLeaderHeaders(context, session, out var r2AuthReason, round2Body))
                         {
                             context.Response.StatusCode = StatusCodes.Status403Forbidden;
@@ -3170,7 +3190,15 @@ namespace VerifiedXCore.Bitcoin.FROST
                             // The coordinator sends nonces keyed by VFX addresses, but the FROST native library
                             // expects nonce commitments keyed by FROST Identifiers (64-char hex scalars).
                             // Unlike DKG Round 2, signing Round 2 expects ALL participants' nonces (including self).
+                            // A set wider than the session's signers, or an entry longer than a commitment, is refused before
+                            // any entry is parsed (a wide entry parses into a large object graph). The nonce stays unconsumed.
                             var addressNonces = JsonConvert.DeserializeObject<Dictionary<string, string>>(body);
+                            if (session.PostedNoncesShapeRefusal(addressNonces) is { } shapeRefusal)
+                            {
+                                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                                await context.Response.WriteAsync(JsonConvert.SerializeObject(new { Success = false, Message = shapeRefusal }));
+                                return;
+                            }
                             string remappedNoncesJson;
 
                             // The posted nonce set must contain OUR round-1 commitment exactly as we produced it.
@@ -4294,10 +4322,13 @@ namespace VerifiedXCore.Bitcoin.FROST
         /// the validator list grows, shrinks, or the dictionary iteration order changes.
         /// </summary>
         /// <summary>Whether any sender's entry in a share batch holds a share under <paramref name="identifier"/>.</summary>
-        internal static bool BatchCarriesShareFor(Newtonsoft.Json.Linq.JObject batch, string identifier)
+        internal static bool BatchCarriesShareFor(Newtonsoft.Json.Linq.JObject batch, string identifier, ICollection<string> participants)
         {
             foreach (var entry in batch.Properties())
             {
+                // Only participants deal shares, and an entry is read only within the size a dealer's can be.
+                if (!participants.Contains(entry.Name)) continue;
+                if ((entry.Value?.ToString()?.Length ?? 0) > FrostDkgBlame.MaxDealerEntryLength) continue;
                 try
                 {
                     if (Newtonsoft.Json.Linq.JObject.Parse(entry.Value?.ToString() ?? "")[identifier] != null) return true;
