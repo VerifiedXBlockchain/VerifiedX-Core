@@ -344,7 +344,7 @@ namespace VerifiedXCore
         /// </summary>
         public static long SaleListingKeyHeight = long.MaxValue;
         /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
-        public const long SaleListingKeyTestnetHeight = long.MaxValue;
+        public const long SaleListingKeyTestnetHeight = 205_615L;
 
         /// <summary>
         /// Item 3: a reserve Recover() must carry RecoveryAddress, RecoverySigScript and SignatureTime (every recovery
@@ -410,7 +410,7 @@ namespace VerifiedXCore
         /// it. Set to the tip at release. Testnet value in GlobalsNetworkHeights.
         /// </summary>
         public static long JsonCommentDataRuleHeight = long.MaxValue;
-        public const long JsonCommentDataRuleTestnetHeight = long.MaxValue;
+        public const long JsonCommentDataRuleTestnetHeight = 205_615L;
 
         /// <summary>
         /// From this height a withdrawal or bridge-exit part is not fixed on coins while its Bitcoin destination is an
@@ -419,7 +419,7 @@ namespace VerifiedXCore
         /// release. Testnet value in GlobalsNetworkHeights.
         /// </summary>
         public static long WithdrawalDestinationRecheckHeight = long.MaxValue;
-        public const long WithdrawalDestinationRecheckTestnetHeight = long.MaxValue;
+        public const long WithdrawalDestinationRecheckTestnetHeight = 205_615L;
 
         /// <summary>
         /// From this height a voided part of a bridge exit gives its locks back for use, as an expired exit does, instead
@@ -439,7 +439,7 @@ namespace VerifiedXCore
         /// are given back once. Set to the tip at release. Testnet value in GlobalsNetworkHeights.
         /// </summary>
         public static long BridgeFailKeepsLocksHeight = long.MaxValue;
-        public const long BridgeFailKeepsLocksTestnetHeight = long.MaxValue;
+        public const long BridgeFailKeepsLocksTestnetHeight = 205_615L;
 
         /// <summary>
         /// From this height a holder's balance on a watched vault is nothing or at least BtcVaultLedger.MinPositionBtc:
@@ -448,7 +448,7 @@ namespace VerifiedXCore
         /// fees. Set to the tip at release. Testnet value in GlobalsNetworkHeights.
         /// </summary>
         public static long VaultMinimumPositionHeight = long.MaxValue;
-        public const long VaultMinimumPositionTestnetHeight = long.MaxValue;
+        public const long VaultMinimumPositionTestnetHeight = 205_615L;
 
         /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
@@ -672,7 +672,7 @@ namespace VerifiedXCore
         /// </summary>
         public static long SalePaymentSharesHeight = long.MaxValue;
         /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
-        public const long SalePaymentSharesTestnetHeight = long.MaxValue;
+        public const long SalePaymentSharesTestnetHeight = 205_615L;
         /// <summary>
         /// How far below its share a sale payment may fall under SalePaymentSharesHeight. Wallets that compute the
         /// royalty split in binary floating point are off by far less than this.
@@ -688,7 +688,7 @@ namespace VerifiedXCore
         /// </summary>
         public static long BridgeVoteOncePerCasterHeight = long.MaxValue;
         /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
-        public const long BridgeVoteOncePerCasterTestnetHeight = long.MaxValue;
+        public const long BridgeVoteOncePerCasterTestnetHeight = 205_615L;
 
         /// <summary>
         /// From this height a bridge exit to Bitcoin (VBTC_V2_BRIDGE_EXIT_TO_BTC) that carries allocations is refused in
@@ -699,7 +699,7 @@ namespace VerifiedXCore
         /// </summary>
         public static long BridgeExitCarriesTotalsHeight = long.MaxValue;
         /// <summary>The same height on testnet (GlobalsNetworkHeights).</summary>
-        public const long BridgeExitCarriesTotalsTestnetHeight = long.MaxValue;
+        public const long BridgeExitCarriesTotalsTestnetHeight = 205_615L;
 
         /// <summary>
         /// Item 6: a vBTC withdrawal REQUEST may not reuse a (requester, UniqueId, contract) key under which a request was
@@ -761,7 +761,7 @@ namespace VerifiedXCore
         /// release. Testnet value in GlobalsNetworkHeights.
         /// </summary>
         public static long PlonkCurrentRulesHeight = long.MaxValue;
-        public const long PlonkCurrentRulesTestnetHeight = long.MaxValue;
+        public const long PlonkCurrentRulesTestnetHeight = 205_615L;
         public static Dictionary<string, decimal> ForgedVfxBurns = new(StringComparer.Ordinal)
         {
             ["RB3eeBH258arkuePCJf5NMVMSaUyhyy9g6"] = 100_033.000012M,
@@ -939,7 +939,7 @@ namespace VerifiedXCore
         public static int APIPortSSL = 7777;
         public static int MajorVer = 9;
         public static int MinorVer = 1;
-        public static int RevisionVer = 1;
+        public static int RevisionVer = 2;
         public static int BuildVer = 0;
         public static int SCVersion = 1;
         public static int ValidatorIssueCount = 0;
