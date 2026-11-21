@@ -37,7 +37,7 @@ namespace VerifiedXCore.Privacy
         internal static Func<bool> CurrentRulesAvailable = () =>
         {
             PLONKSetup.RefreshVerificationCapability();
-            return PLONKSetup.IsVerify2Available;
+            return PLONKSetup.IsVerify2Available && PLONKSetup.IsBoundHashCapacityAvailable;
         };
 
         /// <summary>

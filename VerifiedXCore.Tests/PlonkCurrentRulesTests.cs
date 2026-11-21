@@ -214,5 +214,45 @@ namespace VerifiedXCore.Tests
             Assert.Equal(PlonkVerifyResult.Valid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, proof, pi, currentRules: true));
             Assert.Equal(PlonkVerifyResult.Invalid, PlonkProofVerifier.VerifyRaw(PlonkCircuitType.Shield, proof, pi, currentRules: false));
         }
+        /// <summary>The data of a shield mined on testnet at block 169,583 (tx 4d03786e…), proven by the library before the circuit update.</summary>
+        private const string MinedShieldData = @"{""v"":1,""kind"":""shield"",""sub_type"":""Shield"",""asset"":""VFX"",""outs"":[{""i"":0,""c"":""Qbjqbe/8zKh3zwfJvV6ShggVL7Ullu7LvEzER+RZwiSZF3vIivPZLzJhSZVcOWMD"",""nh"":""/Cf+5XyqHFjOAQA1tqW1FzaY6KpyFPUj43cMmfmswkY="",""note"":""AQNh/MUiqFyNjUKWvLGDEMKBY/XI0qGg7Jb/mIvhNeR8MON6kLKS9zOc1VYbSG7ROMajbjgDbcZgNccIV5aW/IE09/RtF5kjs6UR7a2pR3t0wWZsCC38Ho1l0hEcKgYzAO6DX+A6V3EtTIT3jsgYKtP59Fd2+u7b+7d6q7uZWrmewzyD17ixLvtpEZ9CbVr+sdnjjKzr7v+UXVFaJO2VPzjiIoQ8""}],""nulls"":[],""spent_tree_positions"":[],""proof_b64"":""uaK8Iyb/moXeq2fgO7/NMZe2UD0agXH/5WnFr2NbJ2rix+eWgNtcY/8dzyuQ8SqXRyRuI4IlQz0Z13ZI7GH8nnDAGEsqDgqnbfvqchDHtDO9bLbH7+TE3k18JtSkzeaSBezMu6TJKXODmK9Tu9X4Rb/pWP+rOSZ0S625jxxA99xV83ljQuRIk7Zja9oGIQqS1Bu8iv2Ni0OvBaXfyxTMZlNi50dfeNiIOVzs72rmqzIjxA0vrfmso287TOGpZKMHqa8O1tes/jNGxgA4A/b4LAveGQCGymq8+yDYjCBYb0G+aLSPHclSlliM2oFt4mEEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAu8Yi2wrwOvvvGnr5P+hVbFisGxc/Ok6hBbl0l0+MaMMPrKlPjGOVJpTXlzGn0/EXgLZK4fsRMagT62L26jaK7RpYjv6CkRelRmKWElqe1QDA5txOPsf4TJIkm3s8WE0Do8IIvDzmfJr/nVEL8EuS/ilww0SlaNpQsckrxwNkac/hsSwLdwT9UTl5vGT7+F4HOvGBIK5Xt1ctyLb04J29/IrshCNBdwnYb0VSKZx0SumoBZHLXTR6YKl/6pf5o94SxR71wpgMeyWwVk4QrANTG4UCIlG6F2oHbvls+mJVbSy00MlU8517RwfNUaM0JDwCJn0jJyjW+bRivvyeOiv639BJuD/2dbAwwjDR/s4MWEu8dtPKantgvai7W84p1s6Stu4kAWPgnFfqkfbj0YPn73rR28iKuPvjwpLWsRl30P1CE0dlGDVrek1un2b+/X2NAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAmgsfBU6gVvnL1qo/obfAgwj1ExkrW6CYF/h2E6naz1kR9Mmg75oxuxFY10mG8PIWAKXMSknjNHBw+NIPjh2JK0Y5N3TVxXwUUE/Iyd1tu9VFDN7tJwyFFpg0+CLp/CLiBQDTKpp0WTPWeBogMCKAQEX9JMdlKzpVc17FusQmRrpuNkR0ibuHVTTFIDSTUoJKY/I6GBIV2xDF115Ecp3iohwN66oYVLsLixH9rOtmNy17VzhbDWHOqM7zb/j1LJsyxkvnbpotCSIx3e+YwT96MEe8uKyE+KJKHRj/ZjUl5FqBMkgqXSZMg9BYtAxll6OPWScpCFXwwNvGBR+MdmYhREEgm60o0r03n3Q/7F5nS7WYoBJRgNVJlAlycc3zpgh2LigIJWd8Onqd7TIwTf5wjIiKREuLqdYTtod4qbopxGdHaGCzAS/QLFcNpMjYidPoFblnnSQdbziaHHw2P046/i09AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoAAAAAAAAADAAAAAAAAABxX2FyaXRoX2V2YWwmTCUJk3Cg8g5Pjkrs/BWxiTiqBfCW0SlFmnaE3AoXPwgAAAAAAAAAcV9jX2V2YWz4AUCuzeP/bfApALL+wdTbKNl3tDB//Pky1Fb1jmTzBAgAAAAAAAAAcV9sX2V2YWyNOPAt0RLdBqqsKmxakE7oq3s/YhPO2ACbwbhfeFQ9BggAAAAAAAAAcV9yX2V2YWyc20jr3D7HJfBwU4lZJR+5Tz/RscrjKpWnJAgY3Dy6XgkAAAAAAAAAcV9obF9ldmFssWFUKF3pM53RMCi0lrWM/YENyP4hfhTAWeOJSFB8jV0JAAAAAAAAAHFfaHJfZXZhbMXCiXFIjH1XJ94D1/VF8JLnjEt6TPbOxPbEWSRgnSU3CQAAAAAAAABxX2g0X2V2YWyEYEFRYckUyG6/BdAq03CtiWieTD5OcOQnRFo/2+m5RgsAAAAAAAAAYV9uZXh0X2V2YWzUwwsdtJYYPW4OevzH4Yt1fsF0EjgoFKDHfhQtXaN8BwsAAAAAAAAAYl9uZXh0X2V2YWy5bcb/2sJ79VdVuOa2zXgeGv1mpaBlpskVdK83lvu7XQsAAAAAAAAAZF9uZXh0X2V2YWwcGIeQYUPr7GEnWJtxkSQ99weUogwpFw5IhZ/Mci1MIA=="",""transparent_input"":""xHVbWw9SckS47otHTXmeRYeQuvpw8562PD"",""transparent_amount"":0.01}";
+
+        /// <summary>
+        /// A proof the library made before its circuit update, mined on testnet, still passes the original rules: a node
+        /// with the updated library judges blocks below PlonkCurrentRulesHeight as they were judged when mined. From the
+        /// height the same proof is refused. Needs the VXPLNK06 params (VFX_PLONK_PARAMS); without the file it returns early.
+        /// </summary>
+        [Fact]
+        public void AProofMinedBeforeTheUpdate_StillPassesTheOriginalRules()
+        {
+            var path = Environment.GetEnvironmentVariable("VFX_PLONK_PARAMS");
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            {
+                Console.WriteLine("PlonkCurrentRulesTests: no VXPLNK06 params file (VFX_PLONK_PARAMS); skipped.");
+                return;
+            }
+            Assert.True(PLONKSetup.TryLoadParamsFile(path), "the supplied params file must load");
+            PlonkProofVerifier.NativeVerify = _priorNative;
+            PlonkProofVerifier.CurrentRulesAvailable = _priorCurrentAvailable;
+            PlonkProofVerifier.VerifierAvailable = _priorAvailable;
+            var tx = new Transaction
+            {
+                Hash = "4d03786e8f373e6d5b0aa6ca44cb21475bb608904ef3615a5e74df8045acd15a",
+                FromAddress = "xHVbWw9SckS47otHTXmeRYeQuvpw8562PD", ToAddress = PrivacyConstants.ShieldedPoolAddress,
+                Amount = 0.01M, Fee = 0.01M, TransactionType = TransactionType.VFX_SHIELD, Data = MinedShieldData,
+            };
+            Assert.True(PrivateTxPayloadCodec.TryDecode(tx.Data, out var payload, out var err), err);
+            Assert.True(PlonkPublicInputsV2.TryBuild(tx, payload!, out var pi, out var piErr), piErr);
+            var proof = Convert.FromBase64String(payload!.ProofB64!);
+            Assert.Equal(1, PlonkNative.plonk_verify(1, proof, (nuint)proof.Length, pi, (nuint)pi.Length));
+            Assert.Equal(0, PlonkNative.plonk_verify2(1, proof, (nuint)proof.Length, pi, (nuint)pi.Length));
+
+            // Through the check block validation runs, on either side of the height.
+            var (below, whyBelow) = PlonkProofVerifier.TryValidatePrivateProofs(tx, payload, false, Gate - 1);
+            Assert.True(below, whyBelow);
+            var (at, whyAt) = PlonkProofVerifier.TryValidatePrivateProofs(tx, payload, false, Gate);
+            Assert.False(at);
+            Assert.Contains(PlonkProofVerifier.FailedProofPrefix, whyAt);
+        }
     }
 }

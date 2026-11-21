@@ -54,6 +54,12 @@ namespace VerifiedXCore.Privacy
         /// <see cref="plonk_verify"/> keeps the original rules for proofs judged under them before.
         /// </summary>
         public const uint CapVerify2 = 128;
+        /// <summary>
+        /// Bit 8: the circuits' hashes fix their capacity element as a gate constant. <see cref="plonk_verify2"/> and the
+        /// provers use the circuits built that way (keys compiled at load); <see cref="plonk_verify"/> keeps the params
+        /// file's keys.
+        /// </summary>
+        public const uint CapBoundHashCapacity = 256;
 
         /// <summary>Tree depth used by the v1 circuits (Merkle path = 32 sibling hashes).</summary>
         public const int TreeDepth = 32;
