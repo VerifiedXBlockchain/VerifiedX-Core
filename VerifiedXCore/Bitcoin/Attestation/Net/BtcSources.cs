@@ -268,7 +268,7 @@ namespace VerifiedXCore.Bitcoin.Attestation.Net
     /// </summary>
     public sealed class BtcEsploraSource : IBtcSource
     {
-        private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(45) };
+        private static readonly HttpClient Http = new(VerifiedXCore.Utilities.NodeHttp.NewOutsideServiceHandler()) { Timeout = TimeSpan.FromSeconds(45) };
         private readonly string _baseUrl;
         private readonly Network _network;
 

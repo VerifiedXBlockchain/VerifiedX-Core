@@ -29,7 +29,7 @@ namespace VerifiedXCore.Tests
             Globals.CustomPath = _tempRoot;
             // As Program.cs sets it at startup.
             var services = new Microsoft.Extensions.DependencyInjection.ServiceCollection();
-            Microsoft.Extensions.DependencyInjection.HttpClientFactoryServiceCollectionExtensions.AddHttpClient(services);
+            NodeHttp.AddNodeHttpClients(services);
             Globals.HttpClientFactory = Microsoft.Extensions.DependencyInjection.ServiceCollectionContainerBuilderExtensions.BuildServiceProvider(services)
                 .GetService(typeof(System.Net.Http.IHttpClientFactory)) as System.Net.Http.IHttpClientFactory;
         }

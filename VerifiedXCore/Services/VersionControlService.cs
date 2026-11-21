@@ -183,7 +183,7 @@ namespace VerifiedXCore.Services
             Globals.GitHubLatestReleaseAssetsDict.TryGetValue(assetName + ".sig", out var sigUrl);
             try
             {
-                using var client = Globals.HttpClientFactory.CreateClient();
+                using var client = Globals.HttpClientFactory.CreateClient(VerifiedXCore.Utilities.NodeHttp.OutsideService);
                 client.Timeout = TimeSpan.FromMinutes(10);
                 var zip = await client.GetByteArrayAsync(url);
                 var signature = string.IsNullOrEmpty(sigUrl) ? null : await client.GetStringAsync(sigUrl);
@@ -361,7 +361,7 @@ namespace VerifiedXCore.Services
                 if(Globals.NewUpdateLastChecked <= DateTime.UtcNow.AddHours(-1)) 
                 {
                     var url = Globals.GitHubApiURL + Globals.GitHubRBXRepoURL;
-                    using (var client = Globals.HttpClientFactory.CreateClient())
+                    using (var client = Globals.HttpClientFactory.CreateClient(VerifiedXCore.Utilities.NodeHttp.OutsideService))
                     {
                         var productValue = new ProductInfoHeaderValue("VFX-Version-Check", "1.0");
                         client.DefaultRequestHeaders.UserAgent.Add(productValue);

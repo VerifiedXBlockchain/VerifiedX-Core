@@ -270,7 +270,7 @@ namespace VerifiedXCore.Bitcoin.Services
 
             // Everyone the contract counts, validators and casters: it needs both groups (UserBridgeMintService.Enough).
             var validators = UserBridgeMintService.ContractSigners(view);
-            var client = Globals.HttpClientFactory?.CreateClient() ?? new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
+            var client = Globals.HttpClientFactory?.CreateClient() ?? new HttpClient(VerifiedXCore.Utilities.NodeHttp.NewHandler()) { Timeout = TimeSpan.FromSeconds(25) };
 
             foreach (var v in validators)
             {

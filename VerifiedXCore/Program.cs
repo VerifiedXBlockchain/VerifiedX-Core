@@ -66,7 +66,7 @@ namespace VerifiedXCore
             var httpClientBuilder = Host.CreateDefaultBuilder(args)
                      .ConfigureServices(services =>
                      {
-                         services.AddHttpClient();
+                         services.AddNodeHttpClients();
                          services.AddTransient<HttpService>();
                      })
                      .Build();

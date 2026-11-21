@@ -35,6 +35,7 @@ The point of this paper is to outline the config file setup and features it has.
 	+ a.	Type string
 	+ b.	Ex: APICallURL=https://mycallbackurl.com
 	+ c.	This URL is used to send incoming transactions to an outside URL. This is something used for like incoming deposits or other notification. services.
+	+ d.	The transaction is sent to this URL as given. A redirect it answers with is not followed, so give the final address.
 
 8.	WalletUnlockTime (default is 15)
 	+ a.	Type int

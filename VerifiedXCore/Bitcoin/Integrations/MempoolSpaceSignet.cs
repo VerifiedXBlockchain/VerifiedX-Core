@@ -14,7 +14,7 @@ namespace VerifiedXCore.Bitcoin.Integrations
 
             try
             {
-                using (var client = Globals.HttpClientFactory.CreateClient())
+                using (var client = Globals.HttpClientFactory.CreateClient(VerifiedXCore.Utilities.NodeHttp.OutsideService))
                 {
                     var httpResponse = await client.GetAsync(uri);
                     if (httpResponse.IsSuccessStatusCode)
@@ -55,7 +55,7 @@ namespace VerifiedXCore.Bitcoin.Integrations
 
             try
             {
-                using (var client = Globals.HttpClientFactory.CreateClient())
+                using (var client = Globals.HttpClientFactory.CreateClient(VerifiedXCore.Utilities.NodeHttp.OutsideService))
                 {
                     var httpResponse = await client.GetAsync(uri);
                     if (httpResponse.IsSuccessStatusCode)

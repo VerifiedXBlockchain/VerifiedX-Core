@@ -70,7 +70,7 @@ namespace VerifiedXCore.Services
             argsList.RemoveAll(x => x.ToLower() == "warden");
             argsList.Add("warden_monitoring");
 
-            _httpClient = new HttpClient
+            _httpClient = new HttpClient(VerifiedXCore.Utilities.NodeHttp.NewHandler())
             {
                 Timeout = TimeSpan.FromSeconds(5)
             };

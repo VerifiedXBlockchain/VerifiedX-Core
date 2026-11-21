@@ -68,7 +68,7 @@ namespace VerifiedXCore.Privacy
 
                 var tempPath = localPath + ".downloading";
 
-                using (var httpClient = new HttpClient())
+                using (var httpClient = VerifiedXCore.Utilities.NodeHttp.NewOutsideServiceClient())
                 {
                     httpClient.Timeout = TimeSpan.FromMinutes(30);
 
