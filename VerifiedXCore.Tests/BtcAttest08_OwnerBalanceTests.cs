@@ -253,6 +253,69 @@ namespace VerifiedXCore.Tests
             Assert.True(SameBlockDebitGuard.TryRegister(BridgeLock(vault.Uid, 0.0005M), within).Ok);
         }
 
+        /// <summary>
+        /// From the height a holder's balance on a watched vault is nothing or at least the vault's smallest position: one
+        /// satoshi to each of 100,000 new addresses filled the holder limit for the price of fees, and no new address could
+        /// be paid on the vault again. A holder moves at least the minimum or all it has and keeps nothing or at least the
+        /// minimum; the owner's transfers move at least the minimum. Judged by the block's debit guard (block validation,
+        /// the producer and admission), on what the block's earlier debits leave.
+        /// </summary>
+        [Fact]
+        public async Task AWatchedVaultsPositions_AreNothingOrAtLeastTheMinimum()
+        {
+            var gate = Globals.VaultMinimumPositionHeight;
+            try
+            {
+                await Start();
+                var vault = await CreateVault(H1 + 1);
+                await Deposit(vault.Script, 150_000);
+                var other = NewKey();
+                (bool Ok, string Why) InBlockGuard(params VfxTx[] txs)
+                {
+                    var block = new SameBlockDebitGuard.State { BlockHeight = Tip + 1 };
+                    (bool, string) last = (true, "");
+                    foreach (var tx in txs) { last = SameBlockDebitGuard.TryRegister(tx, block); if (!last.Item1) break; }
+                    return last;
+                }
+
+                // Before the height a satoshi moves as it did.
+                Globals.VaultMinimumPositionHeight = long.MaxValue;
+                Assert.True(InBlockGuard(Transfer(vault.Uid, 0.00000001M)).Ok);
+
+                Globals.VaultMinimumPositionHeight = H1;
+                // The owner makes positions of at least the minimum, in a block and at admission alike.
+                var dust = Transfer(vault.Uid, 0.00005M);
+                var (ok, why) = InBlockGuard(dust);
+                Assert.False(ok);
+                Assert.StartsWith(SameBlockDebitGuard.MinimumPositionPrefix, why);
+                Assert.False(SameBlockDebitGuard.CheckAgainstPending(dust, Array.Empty<VfxTx>()).Ok);
+                // Its own withdrawals and locks are not held to it: what comes back to the owner makes no new position.
+                Assert.True(InBlockGuard(Withdrawal(vault.Uid, 0.00005M)).Ok);
+                Assert.True(InBlockGuard(BridgeLock(vault.Uid, 0.00005M)).Ok);
+
+                await InBlock(Transfer(vault.Uid, 0.0003M), accepted: true);
+                await Apply(Tip + 1, Transfer(vault.Uid, 0.0003M));
+
+                // A holder of 0.0003: less than the minimum and not all of it, or leaving less than the minimum, is refused,
+                // for a transfer, a withdrawal and a lock alike.
+                Assert.False(InBlockGuard(Transfer(vault.Uid, 0.00005M, from: _holder, to: other)).Ok);
+                Assert.False(InBlockGuard(Transfer(vault.Uid, 0.00025M, from: _holder, to: other)).Ok);
+                Assert.False(InBlockGuard(Withdrawal(vault.Uid, 0.00005M, from: _holder)).Ok);
+                Assert.False(InBlockGuard(BridgeLock(vault.Uid, 0.00025M, from: _holder)).Ok);
+                // Leaving the minimum, or moving everything, is allowed.
+                Assert.True(InBlockGuard(Transfer(vault.Uid, 0.0002M, from: _holder, to: other)).Ok);
+                Assert.True(InBlockGuard(Transfer(vault.Uid, 0.0003M, from: _holder, to: other)).Ok);
+                Assert.True(InBlockGuard(Withdrawal(vault.Uid, 0.0003M, from: _holder)).Ok);
+
+                // Two debits in one block are judged on what the first leaves: 0.00015 then 0.0001 would leave 0.00005.
+                (ok, why) = InBlockGuard(Transfer(vault.Uid, 0.00015M, from: _holder, to: other), Transfer(vault.Uid, 0.0001M, from: _holder, to: other));
+                Assert.False(ok);
+                Assert.Contains("leaves 0.00005", why);
+                Assert.True(InBlockGuard(Transfer(vault.Uid, 0.0001M, from: _holder, to: other), Transfer(vault.Uid, 0.0002M, from: _holder, to: other)).Ok); // leaves 0.0002, then nothing
+            }
+            finally { Globals.VaultMinimumPositionHeight = gate; }
+        }
+
         [Fact]
         public async Task TheWalletFigure_IsTheAttestedOne_WithNoElectrum()
         {

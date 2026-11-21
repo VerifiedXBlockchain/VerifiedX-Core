@@ -35,6 +35,9 @@ namespace VerifiedXCore.Services
 
         public const string ReasonPrefix = "Same-block overspend";
 
+        /// <summary>The reason a vBTC debit is refused for moving or leaving less than a watched vault's smallest position.</summary>
+        public const string MinimumPositionPrefix = "Vault position below its minimum";
+
         /// <summary>Transaction types StateData routes through the smart-contract Function dispatcher.</summary>
         private static bool IsFunctionDispatchType(TransactionType t) =>
             t == TransactionType.NFT_TX || t == TransactionType.NFT_MINT || t == TransactionType.NFT_BURN
@@ -428,6 +431,23 @@ namespace VerifiedXCore.Services
                     return (false, $"{ReasonPrefix}: {key.Holder} debits {spent + sum} of {key.Kind} {key.ContractUid} within block; balance {balance.Value}.");
             }
 
+            // A watched vault's positions are nothing or at least its minimum (from Globals.VaultMinimumPositionHeight),
+            // judged on what the holder has left after the block's earlier debits, so two debits in one block cannot
+            // leave between them what neither may leave alone. Every vBTC debit of every type comes through here.
+            var judgedAt = state.BlockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1);
+            if (judgedAt >= Globals.VaultMinimumPositionHeight)
+            {
+                var isTransfer = IsVbtcTransfer(tx);
+                foreach (var (key, sum, _) in byKey)
+                {
+                    if (key.Kind != LedgerKind.VbtcV2) continue;
+                    state.Spent.TryGetValue(key, out var spent);
+                    var refusal = Bitcoin.Attestation.BtcVaultLedger.PositionRefusal(key.ContractUid, key.Holder, state.BalanceOf(key) - spent, sum, isTransfer, judgedAt);
+                    if (refusal != null)
+                        return (false, $"{MinimumPositionPrefix}: {refusal}");
+                }
+            }
+
             foreach (var (key, sum, n) in byKey)
             {
                 state.Spent.TryGetValue(key, out var spent);
@@ -439,6 +459,15 @@ namespace VerifiedXCore.Services
             if (isSweep) state.Swept.Add(sender);
             if (isRegister) state.Registered.Add(sender);
             return (true, "");
+        }
+
+        /// <summary>Whether a transaction moves vBTC V2 to another holder (single or multi), as GetDebits reads it.</summary>
+        private static bool IsVbtcTransfer(Transaction tx)
+        {
+            if (tx.TransactionType == TransactionType.VBTC_V2_TRANSFER) return true;
+            if (!IsFunctionDispatchType(tx.TransactionType)) return false;
+            var function = LedgerIntegrityRules.DispatchedCall(tx.Data).Function;
+            return function == "TransferVBTCV2()" || function == "TransferVBTCMultiV2()";
         }
 
         /// <summary>The buyer debits StateData.CompleteSaleSmartContract writes beyond the outer transaction.</summary>

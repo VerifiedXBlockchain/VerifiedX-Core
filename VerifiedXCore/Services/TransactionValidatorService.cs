@@ -349,6 +349,8 @@ namespace VerifiedXCore.Services
                 ?? LedgerIntegrityRules.VbtcRecipientCanHoldIt(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                 // A watched vault holds at most so many holders with a balance, so its ledger stays within one document.
                 ?? VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.HolderLimitRefusal(txRequest)
+                // ... and an unlock from the bridge leaves its destination nothing or at least the vault's smallest position.
+                ?? VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.PoolUnlockPositionRefusal(txRequest, blockHeight ?? ((Globals.LastBlock?.Height ?? 0) + 1))
                 // ... and its document does not grow by a sale's key without bound (round 9).
                 ?? VerifiedXCore.Bitcoin.Attestation.BtcVaultLedger.SaleRefusal(txRequest)
                 // Addresses and looked-up identifiers in plain ASCII (round 26); before the private branch, whose

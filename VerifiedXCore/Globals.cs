@@ -442,6 +442,15 @@ namespace VerifiedXCore
         public const long BridgeFailKeepsLocksTestnetHeight = long.MaxValue;
 
         /// <summary>
+        /// From this height a holder's balance on a watched vault is nothing or at least BtcVaultLedger.MinPositionBtc:
+        /// a debit moves at least that much or the whole balance and leaves nothing or at least that much, and an owner's
+        /// transfer moves at least that much. One-satoshi positions filled the vault's holder limit for the price of
+        /// fees. Set to the tip at release. Testnet value in GlobalsNetworkHeights.
+        /// </summary>
+        public static long VaultMinimumPositionHeight = long.MaxValue;
+        public const long VaultMinimumPositionTestnetHeight = long.MaxValue;
+
+        /// <summary>
         /// From this height a reserve's Recover() reads each pending NFT_TX row's call as the dispatchers read it. Below it
         /// a row whose Data was not an array of objects made the recovery throw part-way, so every later row, the balance
         /// sweep, the contract re-own and the vBTC sweep never ran, and the reserve stayed under its vault key. Active from LedgerRulesBatchHeight.
