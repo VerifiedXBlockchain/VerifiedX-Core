@@ -96,18 +96,31 @@ namespace VerifiedXCore.Bitcoin.Services
             return "0x" + Convert.ToHexString(sig).ToLowerInvariant();
         }
 
+        /// <summary>secp256k1's order.</summary>
+        private static readonly BigInteger CurveOrder = BigInteger.Parse("0FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", System.Globalization.NumberStyles.HexNumber);
+        /// <summary>The highest s the vBTC.b contract counts: half the order, as ECDSA.tryRecover has it.</summary>
+        private static readonly BigInteger HighestCountedS = BigInteger.Parse("07FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0", System.Globalization.NumberStyles.HexNumber);
+
         /// <summary>
-        /// The address that made a 65-byte signature over <paramref name="hash32"/>, or null when it is not one: as an
-        /// EIP-712 digest when <paramref name="personalMessage"/> is false, under the EIP-191 32-byte prefix when true.
+        /// The address the vBTC.b contract recovers from a signature over <paramref name="hash32"/>, or null when it would
+        /// not count the signature as it stands: as an EIP-712 digest when <paramref name="personalMessage"/> is false,
+        /// under the EIP-191 32-byte prefix when true. The contract (ECDSA.tryRecover) takes 65 bytes with v of 27 or 28
+        /// and s in the lower half of the curve order, and the text is sent as it is kept, so it must be those 65 bytes in
+        /// hex (0x optional) with nothing around them. Every signature gathered for the contract is kept only on this
+        /// answer, so one it would skip or refuse is never counted towards a threshold.
         /// </summary>
         public static string? RecoverSigner(byte[] hash32, string? signatureHex, bool personalMessage)
         {
             try
             {
-                var hex = (signatureHex ?? "").Trim();
+                var hex = signatureHex ?? "";
                 if (hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) hex = hex[2..];
                 var sig = Convert.FromHexString(hex);
                 if (hash32 == null || hash32.Length != 32 || sig.Length != 65) return null;
+                if (sig[64] is not (27 or 28)) return null;
+                var r = new BigInteger(sig.AsSpan(0, 32), isUnsigned: true, isBigEndian: true);
+                var s = new BigInteger(sig.AsSpan(32, 32), isUnsigned: true, isBigEndian: true);
+                if (r.IsZero || r >= CurveOrder || s.IsZero || s > HighestCountedS) return null;
                 var signed = personalMessage ? ToEthereumSignedMessageHash32(hash32) : hash32;
                 var ecdsa = EthECDSASignatureFactory.FromComponents(sig.AsSpan(0, 32).ToArray(), sig.AsSpan(32, 32).ToArray(), new[] { sig[64] });
                 return EthECKey.RecoverFromSignature(ecdsa, signed).GetPublicAddress();

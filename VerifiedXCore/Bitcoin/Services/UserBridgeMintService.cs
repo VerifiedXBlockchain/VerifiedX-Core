@@ -273,7 +273,7 @@ namespace VerifiedXCore.Bitcoin.Services
                         var signer = ValidatorEthKeyService.RecoverSigner(hash, sig, personalMessage: !typed);
                         if (!string.Equals(signer, baseAddress, StringComparison.OrdinalIgnoreCase))
                         {
-                            LogUtility.Log($"[UserBridgeMint] Validator {v.VfxAddress} returned a signature that is not its own for lock {record.LockId}; ignored.", "UserBridgeMintService");
+                            LogUtility.Log($"[UserBridgeMint] Validator {v.VfxAddress} returned a signature the contract would not count as its own for lock {record.LockId}; ignored.", "UserBridgeMintService");
                             continue;
                         }
                         signatures[baseAddress] = sig;
