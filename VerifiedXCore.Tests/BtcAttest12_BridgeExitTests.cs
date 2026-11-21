@@ -2594,6 +2594,45 @@ namespace VerifiedXCore.Tests
             finally { Globals.VaultMinimumPositionHeight = gate; }
         }
 
+        /// <summary>
+        /// A burn two vaults can pay between them is planned as a split that gives the new holder the minimum on each,
+        /// not given up: the first plan took one vault's whole lock and too little of the next, and leaving the second
+        /// out left a vault that could not pay it alone.
+        /// </summary>
+        [Fact]
+        public async Task APoolUnlockTwoVaultsCanPay_IsSplitSoEachShareKeepsTheMinimum()
+        {
+            var gate = Globals.VaultMinimumPositionHeight;
+            try
+            {
+                Globals.VaultMinimumPositionHeight = H1;
+                await Start();
+                var first = await CreateVault(H1 + 1);
+                await Deposit(first.Script, 1_000_000);
+                var second = await CreateVault(H1 + 1);
+                await Deposit(second.Script, 1_000_000);
+                await Lock(first.Uid, 0.00015M);
+                await Lock(second.Uid, 0.00015M);
+                var fresh = NewKey();
+
+                var plan = BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.0002M, Tip + 1, fresh.Address);
+                Assert.NotNull(plan);
+                Assert.Equal(0.0002M, plan!.Sum(a => a.UnlockAmount));
+                Assert.All(plan.GroupBy(a => a.SmartContractUID), g => Assert.True(g.Sum(a => a.UnlockAmount) >= BtcVaultLedger.MinPositionBtc, $"{g.Key}: {g.Sum(a => a.UnlockAmount)}"));
+                var unlock = SignedBy(Caster, Caster.Address, TransactionType.VBTC_V2_BRIDGE_POOL_UNLOCK, new
+                {
+                    Function = "VBTCBridgePoolUnlock()", ExitBurnTxHash = NewBurn(), VfxDestinationAddress = fresh.Address,
+                    TotalAmount = 0.0002M, TotalAmountSats = 20_000L, Allocations = plan,
+                }, free: true);
+                var (ok, why) = await Verify(unlock, Tip + 1);
+                Assert.True(ok, why);
+                // More than the two hold, or a burn no split can give the minimum, is not planned.
+                Assert.Null(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.00031M, Tip + 1, fresh.Address));
+                Assert.Null(BridgePoolUnlockService.ComputeUnlockAllocationPlan(0.00005M, Tip + 1, fresh.Address));
+            }
+            finally { Globals.VaultMinimumPositionHeight = gate; }
+        }
+
         // ── Signing ─────────────────────────────────────────────────────────────────────────────────────────
 
         /// <summary>

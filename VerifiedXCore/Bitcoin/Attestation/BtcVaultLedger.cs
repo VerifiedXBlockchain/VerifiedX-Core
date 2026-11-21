@@ -200,14 +200,22 @@ namespace VerifiedXCore.Bitcoin.Attestation
         /// </summary>
         public static string? UnlockShareRefusal(string? scUID, string? destination, decimal share, long height)
         {
-            if (height < Globals.VaultMinimumPositionHeight || share <= 0M || string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(destination)
+            if (share <= 0M || share >= UnlockShareMinimum(scUID, destination, height)) return null;
+            return $"{SameBlockDebitGuard.MinimumPositionPrefix}: an unlock of {share} on vault {scUID} leaves {destination} with less than the {MinPositionBtc} vBTC a holder keeps.";
+        }
+
+        /// <summary>
+        /// The smallest share of watched vault <paramref name="scUID"/> an unlock may give <paramref name="destination"/>:
+        /// what it lacks of <see cref="MinPositionBtc"/> there; 0 for the vault's owner, another kind of vault, and before
+        /// Globals.VaultMinimumPositionHeight.
+        /// </summary>
+        public static decimal UnlockShareMinimum(string? scUID, string? destination, long height)
+        {
+            if (height < Globals.VaultMinimumPositionHeight || string.IsNullOrEmpty(scUID) || string.IsNullOrEmpty(destination)
                 || !BtcAttestBalance.IsAttestedVault(scUID))
-                return null;
+                return 0M;
             var held = SameBlockDebitGuard.CommittedBalance(new SameBlockDebitGuard.DebitKey(SameBlockDebitGuard.LedgerKind.VbtcV2, scUID, destination));
-            if (held == null) return null; // the owner
-            return held.Value + share < MinPositionBtc
-                ? $"{SameBlockDebitGuard.MinimumPositionPrefix}: an unlock of {share} on vault {scUID} leaves {destination} with {held.Value + share}, less than the {MinPositionBtc} vBTC a holder keeps."
-                : null;
+            return held == null ? 0M : Math.Max(0M, MinPositionBtc - held.Value); // null: the owner
         }
 
         /// <summary>
