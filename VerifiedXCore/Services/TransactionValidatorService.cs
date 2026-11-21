@@ -4418,6 +4418,14 @@ namespace VerifiedXCore.Services
                     var exitStrict = exitGateHeight >= Globals.BridgeBurnBindingHeight;
                     var exitBurnHash = baseBurnTxHash.Trim();
 
+                    // An exit that carries allocations is recorded, and its locks drawn, from TotalAmount and TotalAmountSats
+                    // alone (StateData.ApplyVBTCBridgeExitToBTC), so it carries both: an exit that is accepted is one that is
+                    // recorded. At admission at once; in a block from Globals.BridgeExitCarriesTotalsHeight.
+                    if (jobj["Allocations"] != null
+                        && ((blockHeight == null && !blockVerify && !blockDownloads) || exitGateHeight >= Globals.BridgeExitCarriesTotalsHeight)
+                        && (jobj["TotalAmount"]?.ToObject<decimal?>() == null || jobj["TotalAmountSats"]?.ToObject<long?>() == null))
+                        return (txResult, "A bridge exit to BTC that carries allocations carries TotalAmount and TotalAmountSats.");
+
                     if (exitStrict)
                     {
                         // Submitter tightening (gated by BridgeIntraBlockGuardHeight): only the handler caster.

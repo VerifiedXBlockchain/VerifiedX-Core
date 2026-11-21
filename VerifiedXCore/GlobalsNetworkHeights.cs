@@ -73,6 +73,7 @@ namespace VerifiedXCore
             Globals.SaleStartBidRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.SaleStartBidRulesHeight;
             Globals.SalePaymentSharesHeight = Globals.IsTestNet ? Globals.SalePaymentSharesTestnetHeight : Globals.SalePaymentSharesHeight;
             Globals.BridgeVoteOncePerCasterHeight = Globals.IsTestNet ? Globals.BridgeVoteOncePerCasterTestnetHeight : Globals.BridgeVoteOncePerCasterHeight;
+            Globals.BridgeExitCarriesTotalsHeight = Globals.IsTestNet ? Globals.BridgeExitCarriesTotalsTestnetHeight : Globals.BridgeExitCarriesTotalsHeight;
             Globals.WithdrawalUniqueIdRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.WithdrawalUniqueIdRulesHeight;
             Globals.RoyaltyRewriteRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.RoyaltyRewriteRulesHeight;
             Globals.ReserveTokenRulesHeight = Globals.IsTestNet ? Globals.FundLossAuditTestnetHeight : Globals.ReserveTokenRulesHeight;
